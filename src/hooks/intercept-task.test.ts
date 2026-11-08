@@ -86,7 +86,7 @@ describe("intercept-task", () => {
     const { join } = await import("path");
     const { mkdir } = await import("fs/promises");
     const agentId = "agent-abc12345";
-    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),
@@ -117,7 +117,7 @@ describe("intercept-task", () => {
     const { join } = await import("path");
     const { mkdir } = await import("fs/promises");
     const agentId = "agent-abc12345";
-    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),
@@ -259,7 +259,7 @@ describe("intercept-task", () => {
     // agent's worktree rather than the hook process's own cwd (which is
     // normally inherited but not guaranteed to match).
     let capturedOpts: Record<string, unknown> = {};
-    const claudeReportedCwd = "/Users/test/.ittybitty/agents/agent-deadbeef99/repo/src";
+    const claudeReportedCwd = "/Users/test/.itsybitsy/agents/agent-deadbeef99/repo/src";
     await processTaskIntercept(
       {
         tool_name: "Task",
@@ -309,7 +309,7 @@ describe("intercept-task", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-model-mgr-"));
     try {
       const agentId = "agent-55556666";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -370,7 +370,7 @@ describe("intercept-task", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-aq-manager-"));
     try {
       const agentId = "agent-11112222";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -400,7 +400,7 @@ describe("intercept-task", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-aq-worker-"));
     try {
       const agentId = "agent-33334444";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -468,7 +468,7 @@ describe("no-worktree explicit identity", () => {
   ): Promise<{ root: string; agentDir: string; cleanup: () => Promise<void> }> {
     const fs = await import("fs/promises");
     const root = await fs.mkdtemp(join(tmpdir(), "intercept-no-worktree-"));
-    const agentDir = join(root, ".ittybitty", "agents", agentId);
+    const agentDir = join(root, ".itsybitsy", "agents", agentId);
     await fs.mkdir(agentDir, { recursive: true });
     const storedMeta = { id: agentId, worktree: false, ...meta };
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(storedMeta));
@@ -558,7 +558,7 @@ describe("no-worktree explicit identity", () => {
     const ctx = await setupNoWorktreeAgent(agentId, { agentType: "manager", worker: false });
     const fakeRoot = await fs.mkdtemp(join(tmpdir(), "intercept-standalone-fake-"));
     try {
-      const forgedDir = join(fakeRoot, ".ittybitty", "agents", agentId);
+      const forgedDir = join(fakeRoot, ".itsybitsy", "agents", agentId);
       const cwd = join(forgedDir, "repo");
       await fs.mkdir(cwd, { recursive: true });
       await Bun.write(
@@ -598,7 +598,7 @@ describe("no-worktree explicit identity", () => {
     const siblingId = "agent-nwsibling01";
     const ctx = await setupNoWorktreeAgent(callerId, { agentType: "manager", worker: false });
     try {
-      const siblingDir = join(ctx.root, ".ittybitty", "agents", siblingId);
+      const siblingDir = join(ctx.root, ".itsybitsy", "agents", siblingId);
       await fs.mkdir(siblingDir, { recursive: true });
       await Bun.write(
         join(siblingDir, "meta.json"),
@@ -709,7 +709,7 @@ describe("coordinator Bash restrictions", () => {
     const { tmpdir } = await import("os");
     const { join } = await import("path");
     tmpDir = await fs.mkdtemp(join(tmpdir(), "intercept-coord-"));
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "coordinator");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "coordinator");
     await fs.mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),
@@ -974,7 +974,7 @@ describe("coordinator Bash restrictions", () => {
     const { join } = await import("path");
     const td = await fs.mkdtemp(join(tmpdir(), "intercept-noncoord-"));
     try {
-      const agentDir = join(td, ".ittybitty", "agents", "agent-abcd1234");
+      const agentDir = join(td, ".itsybitsy", "agents", "agent-abcd1234");
       await fs.mkdir(agentDir, { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1572,7 +1572,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-agenttype-"));
     try {
       const agentId = "agent-researcher123";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1605,7 +1605,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-agenttype-manager-"));
     try {
       const agentId = "agent-manager456";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1647,7 +1647,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-oldstyle-"));
     try {
       const agentId = "agent-oldstyle";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1681,7 +1681,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-agenttype-precedence-"));
     try {
       const agentId = "agent-mixed";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1723,7 +1723,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-override-allow-"));
     try {
       const agentId = "agent-override-allow";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1767,7 +1767,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-override-deny-"));
     try {
       const agentId = "agent-override-deny";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1801,7 +1801,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-override-absent-"));
     try {
       const agentId = "agent-override-absent";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1835,7 +1835,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-override-legacy-"));
     try {
       const agentId = "agent-override-legacy";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -1880,7 +1880,7 @@ describe("agent types", () => {
     const tmpDir = await fs.mkdtemp(join(tmpdir(), "ib-test-unknown-type-"));
     try {
       const agentId = "agent-brokentype";
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await fs.mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(
         join(agentDir, "meta.json"),
@@ -2197,7 +2197,7 @@ describe("busy-wait Bash interception", () => {
     const { tmpdir } = await import("os");
     const { join } = await import("path");
     const tmpDir = await fs.mkdtemp(join(tmpdir(), `ib-busywait-${agentType}-`));
-    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
     await fs.mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),

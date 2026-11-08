@@ -49,7 +49,7 @@ describe("findAgentByIdInRepo", () => {
     const repoB = join(root, "repo-b");
     try {
       for (const [repoPath, marker] of [[repoA, "A"], [repoB, "B"]] as const) {
-        const agentDir = join(repoPath, ".ittybitty", "agents", "agent-duplicate");
+        const agentDir = join(repoPath, ".itsybitsy", "agents", "agent-duplicate");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
           id: "agent-duplicate",
@@ -1066,8 +1066,8 @@ describe("CLI arg parsing", () => {
     const repoA = join(root, "repo-a");
     const repoB = join(root, "repo-b");
     const agentId = "agent-duplicate-pid";
-    const agentDirA = join(repoA, ".ittybitty", "agents", agentId);
-    const agentDirB = join(repoB, ".ittybitty", "agents", agentId);
+    const agentDirA = join(repoA, ".itsybitsy", "agents", agentId);
+    const agentDirB = join(repoB, ".itsybitsy", "agents", agentId);
     const cwdA = worktree ? join(agentDirA, "repo") : repoA;
     const cwdB = worktree ? join(agentDirB, "repo") : repoB;
     await mkdir(cwdA, { recursive: true });
@@ -1355,7 +1355,7 @@ describe("resolveTarget addressing", () => {
       { path: "/repo2", name: "repo2" },
     ];
     // With the default cwd (/tmp), this will fail to find an agent
-    // since readAllAgents will find no agents in empty .ittybitty dirs
+    // since readAllAgents will find no agents in empty .itsybitsy dirs
     const { agent, isSystemCoordinator } = await resolveTarget("agent1", repos, "/tmp");
     // Since no agents exist, it should return null
     expect(agent).toBeNull();
@@ -1366,7 +1366,7 @@ describe("resolveTarget addressing", () => {
     const repos: RepoEntry[] = [
       { path: "/repo1", name: "repo1" },
     ];
-    // This will fail to find agents since repos don't have .ittybitty dirs
+    // This will fail to find agents since repos don't have .itsybitsy dirs
     const { agent, isSystemCoordinator } = await resolveTarget("@repo1/agent1", repos);
     expect(agent).toBeNull();
     expect(isSystemCoordinator).toBe(false);
@@ -1376,7 +1376,7 @@ describe("resolveTarget addressing", () => {
     const repos: RepoEntry[] = [
       { path: "/repo1", name: "repo1" },
     ];
-    // This will fail to find a coordinator since repo has no .ittybitty dir
+    // This will fail to find a coordinator since repo has no .itsybitsy dir
     const { agent, isSystemCoordinator } = await resolveTarget("@repo1", repos);
     expect(agent).toBeNull();
     expect(isSystemCoordinator).toBe(false);
@@ -1429,7 +1429,7 @@ describe("buildSystemCoordinatorAgent", () => {
   });
 
   test("uses the sender's repo root when cwd is inside an agent worktree", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc123/repo/src";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc123/repo/src";
     const a = buildSystemCoordinatorAgent("ib-coordinator", cwd);
     expect(a.repoPath).toBe("/Users/me/project");
   });

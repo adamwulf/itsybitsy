@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * PreToolUse path isolation hook.
  * Ported from ib bash script's check_pretooluse_access().
@@ -191,7 +192,7 @@ export function isWorktreeSettingsFile(filePath: string, worktreePath: string): 
 
 /** Deny reason for mutating an agy agent's own hook/rule boundary files. */
 export const AGY_BOUNDARY_WRITE_DENY_REASON =
-  "Access denied: agents cannot modify their own agy hook/rule files (.agents/hooks.json, .agents/rules/ittybitty-agent.md)";
+  `Access denied: agents cannot modify their own agy hook/rule files (.agents/hooks.json, ${runtimeNames.AGY_RULE_FILE})`;
 
 /**
  * Deny reason for an agent writing its OWN `<agentDir>/meta.json`. The hook
@@ -1048,7 +1049,7 @@ function scanBashCommandPaths(
 
 /**
  * Check a bash command string for references to restricted directories.
- * Catches commands like `cat /repo/.ittybitty/agents/agent-other/...`
+ * Catches commands like `cat /repo/.itsybitsy/agents/agent-other/...`
  * or commands referencing the root repo directly.
  *
  * Only checks paths at word boundaries (preceded by space, quote, =, or start of string)
@@ -1214,7 +1215,7 @@ function checkWorktreeBoundary(
   // `"" + "/"` becomes `/`, which startsWith() matches every absolute path.
   if (agentsDir !== "" && filePath.startsWith(agentsDir + "/")) {
     // A worktree:false agent's worktreePath is the shared repo root, which also
-    // contains `.ittybitty/agents`. Do not let that broad root turn every
+    // contains `.itsybitsy/agents`. Do not let that broad root turn every
     // sibling agent directory into "in worktree". Its only readable lifecycle
     // artifact beyond agent.log is the isolated settings authority; writes to
     // that exact file were already refused by protectedWritePaths in step 6.
@@ -1384,7 +1385,7 @@ function containsIbTelegramOutboundInvocation(command: string): boolean {
 
 /**
  * True when this process is inside the kernel sandbox AND that sandbox hides
- * `<repo>/.ittybitty/archive` from it. A worktree agent's profile does not
+ * `<repo>/.itsybitsy/archive` from it. A worktree agent's profile does not
  * grant the archive; a worktree:false agent (whose worktree IS the repo root)
  * can read it. An archive that is merely absent, or unreadable for an
  * unsandboxed process, is not "hidden".
@@ -1392,7 +1393,7 @@ function containsIbTelegramOutboundInvocation(command: string): boolean {
 async function archiveHiddenBySandbox(repoRoot: string): Promise<boolean> {
   if (!isSandboxedProcess()) return false;
   try {
-    await readdir(join(repoRoot, ".ittybitty", "archive"));
+    await readdir(runtimeNames.archiveDir(repoRoot));
     return false;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
@@ -1710,7 +1711,7 @@ export async function checkManagerCommandAccess(
       // Skip our own repo (already checked above)
       if (resolve(repo.path) === callerRepoRoot) continue;
 
-      const crossMetaPath = join(repo.path, ".ittybitty", "agents", targetId, "meta.json");
+      const crossMetaPath = join(runtimeNames.runtimeDir(repo.path), "agents", targetId, "meta.json");
       const crossMetaFile = Bun.file(crossMetaPath);
       if (await crossMetaFile.exists()) {
         let meta: Record<string, unknown>;
@@ -1886,7 +1887,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       // Name the resolver's cause: a missing record, a cwd outside the
       // worktree, and an unreadable registered repo all land here, and the bare
       // reason alone sends the operator looking at a meta.json that is fine.
-      const fallbackAgentDir = join(cwd, ".ittybitty", "agents", agentId);
+      const fallbackAgentDir = runtimeNames.agentDir(cwd, agentId);
       const cause = error instanceof Error ? error.message : String(error);
       await emitPathDecision(fallbackAgentDir, toolName, toolInput, {
         decision: "deny",
@@ -1915,7 +1916,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
 
     // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
     if (isNoWorktree) {
-      // Derive repo root: agents dir is <repo>/.ittybitty/agents
+      // Derive repo root: agents dir is <repo>/.itsybitsy/agents
       const repoRoot = resolve(agentsDir, "..", "..");
       worktreePath = repoRoot;
     }

@@ -96,7 +96,7 @@ describe("AgentWatcher", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test-"));
-    agentsDir = join(tempDir, ".ittybitty", "agents");
+    agentsDir = join(tempDir, ".itsybitsy", "agents");
     await mkdir(agentsDir, { recursive: true });
     resetMocks();
     // Inject the jest.fn fakes into the watcher's ./agents seam. Done per-test
@@ -719,7 +719,7 @@ describe("AgentWatcher", () => {
 
     test("multiple repos have questions merged", async () => {
       const tempDir2 = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test2-"));
-      await mkdir(join(tempDir2, ".ittybitty", "agents"), { recursive: true });
+      await mkdir(join(tempDir2, ".itsybitsy", "agents"), { recursive: true });
 
       setupDefaultMocks();
       // Return different questions for each call
@@ -940,8 +940,8 @@ describe("AgentWatcher", () => {
       // watchable) proves the archive dir is deliberately not watched and FAILS
       // if anyone re-adds a watch(archiveDir) call. The `.watchers` accessor is
       // the same one the updateRepos tests below already use.
-      await mkdir(join(tempDir, ".ittybitty", "archive"), { recursive: true });
-      await writeFile(join(tempDir, ".ittybitty", "user-questions.json"), "{}");
+      await mkdir(join(tempDir, ".itsybitsy", "archive"), { recursive: true });
+      await writeFile(join(tempDir, ".itsybitsy", "user-questions.json"), "{}");
 
       const watcher = new AgentWatcher(
         [{ path: tempDir, name: "test" }],
@@ -991,7 +991,7 @@ describe("AgentWatcher", () => {
 
       // Create a second temp dir for the new repo
       const tempDir2 = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test2-"));
-      await mkdir(join(tempDir2, ".ittybitty", "agents"), { recursive: true });
+      await mkdir(join(tempDir2, ".itsybitsy", "agents"), { recursive: true });
 
       // Update repos to include both
       const newRepos = [
@@ -1031,7 +1031,7 @@ describe("AgentWatcher", () => {
 
       // Create second temp dir
       const tempDir2 = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test2-"));
-      await mkdir(join(tempDir2, ".ittybitty", "agents"), { recursive: true });
+      await mkdir(join(tempDir2, ".itsybitsy", "agents"), { recursive: true });
 
       watcher.updateRepos([
         { path: tempDir, name: "repo1" },
@@ -1133,7 +1133,7 @@ describe("AgentWatcher", () => {
 
       // Create a second temp dir
       const tempDir2 = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-test2-"));
-      const agentsDir2 = join(tempDir2, ".ittybitty", "agents");
+      const agentsDir2 = join(tempDir2, ".itsybitsy", "agents");
       await mkdir(agentsDir2, { recursive: true });
 
       let updateCount = 0;

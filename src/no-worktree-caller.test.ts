@@ -15,7 +15,7 @@ describe("trusted no-worktree caller attribution", () => {
   });
 
   async function record(root = repo, id = "manager", overrides: Record<string, unknown> = {}) {
-    const dir = join(root, ".ittybitty", "agents", id);
+    const dir = join(root, ".itsybitsy", "agents", id);
     await mkdir(dir, { recursive: true });
     await Bun.write(join(dir, "meta.json"), JSON.stringify({
       id, worktree: false, claude_pid: "300", claude_pid_epoch: 12345,
@@ -174,7 +174,7 @@ describe("trusted no-worktree caller attribution", () => {
     await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), JSON.stringify({
       repos: [{ path: other }, { path: repo }],
     }));
-    const blocked = join(other, ".ittybitty");
+    const blocked = join(other, ".itsybitsy");
     await chmod(blocked, 0o000);
     try {
       expect((await resolveNoWorktreeCaller(repo, deps()))?.meta.id).toBe("manager");

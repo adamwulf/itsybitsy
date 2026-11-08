@@ -1,10 +1,11 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Shared instruction-building helpers for the non-Claude agent CLIs.
  *
  * Codex receives its role context from its SessionStart hook's
  * `additionalContext`, as Claude does; Antigravity (`agy`) reads it from an
  * always-on rule file. Both start from the same Claude `session-start`
- * template, strip the Claude-only `<ittybitty>` XML wrapper, and append a
+ * template, strip the Claude-only `<itsybitsy>` XML wrapper, and append a
  * directory of the read-on-demand skills. Those pieces are CLI-agnostic and
  * live here so hooks/codex-session-start.ts and agy-config.ts share one
  * implementation (no copy-paste).
@@ -23,7 +24,7 @@ import { generateInstructions } from "./hooks/session-start";
 
 /**
  * The role text every non-Claude CLI receives: the Claude session-start
- * instructions (`generateInstructions`) with the `<ittybitty>` wrapper
+ * instructions (`generateInstructions`) with the `<itsybitsy>` wrapper
  * stripped, followed by the skills catalog. The CLI adapters add only their
  * own encoding — the codex SessionStart hook returns it as `additionalContext`
  * (`hookCodexSessionStart`), agy prepends rule-file frontmatter
@@ -43,19 +44,19 @@ export async function buildAgentRoleBody(ctx: SessionContext): Promise<string> {
 }
 
 /**
- * Remove a single outer `<ittybitty>...</ittybitty>` wrapper. If the input
+ * Remove a single outer `<itsybitsy>...</itsybitsy>` wrapper. If the input
  * doesn't start with the open tag (or doesn't have a matching close tag),
  * returns the input unchanged — Claude-side templating may evolve, but a
  * codex/agy agent's instruction file should never embed an XML tag the CLI
  * won't recognize.
  */
 export function stripItsybitsyWrapper(body: string): string {
-  const openTag = "<ittybitty>";
-  const closeTag = "</ittybitty>";
+  const openTag = `<${runtimeNames.PROMPT_TAG}>`;
+  const closeTag = `</${runtimeNames.PROMPT_TAG}>`;
   const openIdx = body.indexOf(openTag);
   if (openIdx === -1) return body;
   // Use lastIndexOf so we drop the outer wrapper even if the body contains
-  // an inner reference to <ittybitty> (templates do mention the tag in some
+  // an inner reference to <itsybitsy> (templates do mention the tag in some
   // commentary).
   const closeIdx = body.lastIndexOf(closeTag);
   if (closeIdx === -1 || closeIdx <= openIdx) return body;

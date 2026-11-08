@@ -8,7 +8,7 @@ This works well for same-repo hierarchies, but breaks down for cross-repo scenar
 
 1. **System coordinator spawns agents in repo A** via `ib new-agent --repo repoA "task"`. The spawned agent's `manager` is null (auto-detect fails because the coordinator's CWD isn't inside repoA's agent tree). The coordinator has no ability to kill/merge the agent it created.
 
-2. **Per-repo coordinator in repo A spawns an agent in repo B** via `ib new-agent --repo repoB "task"`. Same problem — the spawned agent is in a different `.ittybitty/agents/` directory, so `manager` auto-detect fails and the path hook's `checkIbCommandAccess` can't find the target's meta.json in the calling agent's repo.
+2. **Per-repo coordinator in repo A spawns an agent in repo B** via `ib new-agent --repo repoB "task"`. Same problem — the spawned agent is in a different `.itsybitsy/agents/` directory, so `manager` auto-detect fails and the path hook's `checkIbCommandAccess` can't find the target's meta.json in the calling agent's repo.
 
 3. **A manager agent sends `ib new-agent --repo otherRepo "collaborative task"`** to spin up work in another repo. The spawned agent has no record of who asked for it.
 
@@ -45,14 +45,14 @@ interface AgentMeta {
 ### Agent Creation (src/ib-commands.ts:1409-1766)
 - `newAgent(repoPath, prompt, opts)` creates an agent in the given repo
 - `opts.manager` is set explicitly or auto-detected from CWD (lines 1490-1508)
-- Auto-detect only works if CWD is inside the same repo's `.ittybitty/agents/` tree
+- Auto-detect only works if CWD is inside the same repo's `.itsybitsy/agents/` tree
 - meta.json is written at line 1747-1766 with `manager: manager || null`
 
 ### Manager Auto-Detection (src/ib-commands.ts:1494-1508)
 ```ts
 if (!manager && !coordinatorMode) {
   const cwd = opts?._cwd ?? process.cwd();
-  const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+  const agentPattern = /\/.itsybitsy\/agents\/([^/]+)\/repo/;
   const match = cwd.match(agentPattern);
   if (match && (cwd === rootRepoPath || cwd.startsWith(rootRepoPath + "/"))) {
     // Only auto-detect if CWD is in the SAME repo
@@ -174,15 +174,15 @@ let spawnedBy: SpawnedBy | undefined = opts?.spawnedBy;
 if (!spawnedBy) {
   const cwd = opts?._cwd ?? process.cwd();
 
-  // Case 1: Worktree agent — CWD matches /.ittybitty/agents/<id>/repo
-  const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+  // Case 1: Worktree agent — CWD matches /.itsybitsy/agents/<id>/repo
+  const agentPattern = /\/.itsybitsy\/agents\/([^/]+)\/repo/;
   const worktreeMatch = cwd.match(agentPattern);
   if (worktreeMatch) {
-    const spawnerDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+    const spawnerDir = cwd.replace(/(\/.itsybitsy\/agents\/[^/]*)\/repo.*/, "$1");
     try {
       const spawnerMeta = await Bun.file(join(spawnerDir, "meta.json")).json();
       if (spawnerMeta.id) {
-        const spawnerRepoPath = cwd.substring(0, cwd.indexOf("/.ittybitty/agents/"));
+        const spawnerRepoPath = cwd.substring(0, cwd.indexOf("/.itsybitsy/agents/"));
         spawnedBy = {
           agent_id: spawnerMeta.id,
           repo_path: spawnerRepoPath,
@@ -361,7 +361,7 @@ export async function checkIbCommandAccess(
       // Skip our own repo (already checked above)
       if (resolve(repo.path) === callerRepoRoot) continue;
 
-      const crossMetaPath = join(repo.path, ".ittybitty", "agents", targetId, "meta.json");
+      const crossMetaPath = join(repo.path, ".itsybitsy", "agents", targetId, "meta.json");
       const crossMetaFile = Bun.file(crossMetaPath);
       if (await crossMetaFile.exists()) {
         const meta = await crossMetaFile.json();

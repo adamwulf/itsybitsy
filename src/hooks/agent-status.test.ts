@@ -87,7 +87,7 @@ describe("hookStatus cwd identity resolution", () => {
     agentId: string,
     worktree: boolean,
   ): Promise<{ agentDir: string; cwd: string }> {
-    const agentDir = join(root, ".ittybitty", "agents", agentId);
+    const agentDir = join(root, ".itsybitsy", "agents", agentId);
     const cwd = worktree ? join(agentDir, "repo") : root;
     await mkdir(agentDir, { recursive: true });
     await mkdir(cwd, { recursive: true });
@@ -135,7 +135,7 @@ describe("hookStatus cwd identity resolution", () => {
     const ctx = await createAgent(agentId, false);
     const fakeRoot = await mkdtemp(join(tmpdir(), "ib-hook-status-fake-"));
     try {
-      const fakeAgentDir = join(fakeRoot, ".ittybitty", "agents", agentId);
+      const fakeAgentDir = join(fakeRoot, ".itsybitsy", "agents", agentId);
       const fakeCwd = join(fakeAgentDir, "repo");
       await mkdir(fakeCwd, { recursive: true });
       await writeMeta(fakeAgentDir, { id: agentId, worktree: true, state: "running" });
@@ -165,7 +165,7 @@ describe("hookStatus cwd identity resolution", () => {
       return {
         meta: { id: callerId, worktree: false },
         agentDir: caller.agentDir,
-        agentsDir: join(root, ".ittybitty", "agents"),
+        agentsDir: join(root, ".itsybitsy", "agents"),
         repoPath: root,
         worktreePath: root,
       };
@@ -192,7 +192,7 @@ describe("hookStatus cwd identity resolution", () => {
 
     await hookStatus(agentId, JSON.stringify({ last_assistant_message: "WAITING" }));
 
-    expect(await Bun.file(join(root, ".ittybitty", "agents", agentId, "meta.json")).exists()).toBe(false);
+    expect(await Bun.file(join(root, ".itsybitsy", "agents", agentId, "meta.json")).exists()).toBe(false);
   });
 });
 

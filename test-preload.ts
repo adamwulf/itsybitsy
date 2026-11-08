@@ -29,8 +29,8 @@ import type { SpawnFn, SpawnResult } from "./src/types";
 // at import time, so it stays first and the coordinator / tmux-poller imports
 // below are deferred to dynamic import()s after it.
 if (!process.env.IB_WATCH_LOG_PATH) {
-  const base = mkdtempSync(join(tmpdir(), "ib-test-home-"));
-  process.env.IB_WATCH_LOG_PATH = join(base, ".itsybitsy", "watch.log");
+  const fakeHome = mkdtempSync(join(tmpdir(), "ib-test-home-"));
+  process.env.IB_WATCH_LOG_PATH = join(fakeHome, ".itsybitsy", "watch.log");
 }
 
 // ---------------------------------------------------------------------------

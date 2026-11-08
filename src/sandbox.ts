@@ -107,9 +107,9 @@ export interface SandboxProfileParams {
    */
   PARENTCLAUDE: string;
   /**
-   * Optional READ runtime root, spawner-only: `<repo>/.ittybitty/repo-id`, the
+   * Optional READ runtime root, spawner-only: `<repo>/.itsybitsy/repo-id`, the
    * 8-hex id `getRepoId` reads to name a child's tmux session
-   * (`ittybitty-<repoId>-<agent>`) and to key its sealed record. `ib new-agent`
+   * (`itsybitsy-<repoId>-<agent>`) and to key its sealed record. `ib new-agent`
    * (and rehire / `ib sandbox refresh`) read it from inside the spawner's
    * sandbox; without a read grant the file looks missing and the spawn fails.
    * Read-only on purpose: getRepoId never creates the id from a sandbox (an
@@ -885,7 +885,7 @@ function orderedPathEntry(
  * root for a spawner (it writes its child's agent dir) and read-only otherwise.
  * PARENTCLAUDE (`<repo>/.claude`, where a child's settings.local.json is
  * written) is added only for a spawner, as is the read-only REPOID
- * (`<repo>/.ittybitty/repo-id`). This table is extensible: a later root
+ * (`<repo>/.itsybitsy/repo-id`). This table is extensible: a later root
  * (scratchpad, project dir) adds a row rather than a new emission phase.
  * `canonicalize` is canonicalizeSandboxPath except for the in-sandbox hook
  * table (storedPathAccessTable).

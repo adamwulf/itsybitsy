@@ -3,7 +3,7 @@
 ## Goal
 
 Add `ib rehire <agent-id>` so an agent retired by the new `ib retire`
-command can be reconstructed under `.ittybitty/agents/<id>/` and restarted in
+command can be reconstructed under `.itsybitsy/agents/<id>/` and restarted in
 its original CLI session with the same identity, worktree contents, metadata,
 permissions, hierarchy, and runtime role.
 
@@ -13,7 +13,7 @@ This plan assumes the separate `ib kill` → `ib retire` rename has landed.
 
 The existing archive is useful history, but is not a recovery image.
 
-- `.ittybitty/archive/<timestamp>-<id>/` currently receives `output.log`,
+- `.itsybitsy/archive/<timestamp>-<id>/` currently receives `output.log`,
   `agent.log`, `meta.json`, `settings.local.json`, and `debug-logs/`.
 - `meta.json` already contains the Claude session ID or Codex rollout ID,
   model, effort, prompt, agent type, manager/spawner relationship, tmux session
@@ -55,7 +55,7 @@ Before destructive teardown of a worktree agent, `ib retire` creates a
 versioned recovery snapshot:
 
 ```text
-.ittybitty/archive/<timestamp>-<id>/
+.itsybitsy/archive/<timestamp>-<id>/
   retirement.json
   meta.json
   agent.log
@@ -84,7 +84,7 @@ For worktree agents, preparation must finish before the process, worktree, or
 branch is destroyed:
 
 1. Resolve and validate `HEAD`.
-2. Create `refs/ittybitty/retired/<archive-key>/head` at that commit.
+2. Create `refs/itsybitsy/retired/<archive-key>/head` at that commit.
 3. Write `git diff --binary HEAD` to `worktree.patch`. This preserves the
    resulting tracked file contents and modes; staged-versus-unstaged
    classification is not part of the contract.
@@ -123,15 +123,18 @@ rewrite the root worktree.
    that the archive is not rehirable. This covers legacy retirements as well as
    intentionally destructive merge/nuke archives without misidentifying which
    operation produced the archive.
-4. Recreates `.ittybitty/agents/<id>/`, copies archived agent-local files, and
+4. Recreates `.itsybitsy/agents/<id>/`, copies archived agent-local files, and
    writes sanitized metadata. It clears `claude_pid`, `watchdog_pid`, transient
    operation state, and replaces state with `stopped`; it preserves
    `tmux_session`, `session_id`, `codex_session_id`, `model`, `effort`,
    `agentType`, `manager`, `spawned_by`, `nickname`, and `worktree`.
    `tmux_session` must equal the deterministic
-   `ittybitty-<repo-id>-<agent-id>` value for this repository.
+   `itsybitsy-<repo-id>-<agent-id>` value for this repository.
 5. For a worktree agent:
-   - creates `agent/<id>` and its worktree from the manifest's hidden HEAD ref;
+   - resolves `refs/itsybitsy/retired/<archive-key>/head`, falling back to
+     `refs/ittybitty/retired/<archive-key>/head` only when the new ref is absent;
+     the resolved commit must match the manifest, or rehire fails as corrupt;
+   - creates `agent/<id>` and its worktree from that resolved hidden HEAD ref;
    - applies `worktree.patch`;
    - restores untracked paths without allowing path traversal or symlink
      dereference outside the worktree;
@@ -158,7 +161,8 @@ back.
 
 Every retirement uses its timestamped archive folder name as the archive key,
 so retire → rehire → retire creates distinct folders and hidden HEAD refs.
-Earlier archives and `refs/ittybitty/retired/*/head` refs remain immutable.
+Earlier archives and their hidden HEAD refs remain immutable, including legacy
+`refs/ittybitty/retired/*/head` refs. New retirements use `refs/itsybitsy/retired`.
 
 ## Implementation structure
 

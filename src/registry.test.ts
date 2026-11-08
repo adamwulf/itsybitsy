@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes } from "./registry";
 import { join } from "path";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { createTeam } from "./teams";
@@ -41,6 +41,20 @@ describe("registry", () => {
     const repos = await listRepos();
     expect(repos.length).toBe(1);
     expect(repos[0]!.name).toBe("myrepo");
+  });
+
+  test("addRepo refuses HOME and a symlink to HOME, but accepts a subdirectory", async () => {
+    const alias = join(tempDir, "home-alias");
+    await symlink(tempDir, alias);
+    for (const path of [tempDir, alias]) {
+      const result = await addRepo(path, "home");
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("$HOME");
+    }
+    expect(await listRepos()).toEqual([]);
+    const child = join(tempDir, "project");
+    await mkdir(child);
+    expect((await addRepo(child)).ok).toBe(true);
   });
 
   test("addRepo rejects duplicates", async () => {

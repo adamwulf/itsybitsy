@@ -1,5 +1,8 @@
 # itsybitsy — Plan
 
+Runtime names in this historical plan are superseded: use `.itsybitsy/` and
+`itsybitsy-` tmux sessions, as specified in [PLAN-ITSYBITSY-PATHS.md](PLAN-ITSYBITSY-PATHS.md).
+
 A cross-repo agent management dashboard for [ittybitty (`ib`)](https://github.com/anthropics/ittybitty), built with Bun and pi-tui.
 
 ## Problem
@@ -1577,7 +1580,9 @@ Note: `isValidAgentId()` IS imported and used in agent-status.ts (line 384), but
 
 ---
 
-### Phase 25 (future): Rename .ittybitty/ to .ittybitsy/
+### Phase 25 — Superseded
+
+Superseded by [PLAN-ITSYBITSY-PATHS.md](PLAN-ITSYBITSY-PATHS.md), which defines the approved `.itsybitsy/` rename and deployment.
 
 **Status:** Aspirational — blocked on ib compatibility.
 

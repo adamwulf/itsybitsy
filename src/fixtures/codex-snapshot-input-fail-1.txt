@@ -29,7 +29,7 @@ Reason: idle at codex input prompt
   instructions.
 
 • Ran pwd
-  └ /Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/codex-git-commit/repo
+  └ /Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/codex-git-commit/repo
 
 • PreToolUse hook (blocked)
   feedback: Tool not in allow list
@@ -74,7 +74,7 @@ Reason: idle at codex input prompt
   feedback: Tool not in allow list
 
 • Explored
-  └ Search *debug-logs* in .ittybitty
+  └ Search *debug-logs* in .itsybitsy
     List ..
     List debug-logs
     Search *debug-logs* in ..
@@ -95,4 +95,4 @@ Reason: idle at codex input prompt
 
 › Improve documentation in @filename
 
-  gpt-5.5 default · ~/Developer/bun/itsybitsy/.ittybitty/agents/codex-git-commit/repo
+  gpt-5.5 default · ~/Developer/bun/itsybitsy/.itsybitsy/agents/codex-git-commit/repo

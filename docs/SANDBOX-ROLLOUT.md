@@ -225,7 +225,7 @@ owner kill. Those remain covered by unit tests and earlier mocked-stream
 fixtures, not by this fresh kernel run.
 
 Durable host-probe evidence is under
-`/Users/adamwulf/.claude/projects/-Users-adamwulf-Developer-bun-itsybitsy--ittybitty-agents-agent-7ceddb24-repo/evidence-agent-7ceddb24/`
+`/Users/adamwulf/.claude/projects/-Users-adamwulf-Developer-bun-itsybitsy--itsybitsy-agents-agent-7ceddb24-repo/evidence-agent-7ceddb24/`
 with capability, baseline, and collector-crash run directories. The host rebooted
 on 2026-09-06 before these runs and cleared earlier `/private/tmp` evidence
 bundles and test logs referenced by historical notes; those historical paths may

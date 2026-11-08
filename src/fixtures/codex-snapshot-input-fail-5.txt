@@ -58,7 +58,7 @@ Reason: WAITING in last 15 lines (codex)
   narrow the check.
 
 • Ran pwd
-  └ /Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/input-line-parse/repo
+  └ /Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/input-line-parse/repo
 
 • Waited for background terminal · find /Users/adamwulf -name '*tmux*'
 
@@ -83,11 +83,11 @@ Reason: WAITING in last 15 lines (codex)
 
   It saves under the selected agent’s debug logs directory:
 
-  <agent.repoPath>/.ittybitty/agents/<agent-id>/debug-logs/
+  <agent.repoPath>/.itsybitsy/agents/<agent-id>/debug-logs/
 
   For archived agents:
 
-  <agent.repoPath>/.ittybitty/archive/<agent-id>/debug-logs/
+  <agent.repoPath>/.itsybitsy/archive/<agent-id>/debug-logs/
 
   The files are named like:
 
@@ -96,7 +96,7 @@ Reason: WAITING in last 15 lines (codex)
 
   For this agent, that likely means:
 
-  /Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/input-line-parse/debug-logs/
+  /Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/input-line-parse/debug-logs/
 
   WAITING
 

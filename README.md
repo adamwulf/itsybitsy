@@ -2,7 +2,7 @@
 
 itsybitsy is a multi-agent orchestration system built from three ordinary tools: **git**, **tmux**, and the coding CLIs you already use. It compiles to a single binary, `ib`, which spawns, monitors, and merges fleets of Claude Code (and Codex) agents across all of your repositories. A terminal dashboard, `ib watch`, shows every agent in every repo at once.
 
-The binary and the on-disk directory names (`ib`, `.ittybitty/`) come from the bash prototype ("ittybitty") that this project reimplements and replaces. [SPEC.md](./SPEC.md) documents the behavior, including the intentional divergences from that prototype.
+The `ib` binary replaces the bash prototype ("ittybitty"). Per-repo state lives in `.itsybitsy/`. [SPEC.md](./SPEC.md) documents the behavior and intentional divergences from that prototype.
 
 ## Philosophy
 
@@ -11,7 +11,7 @@ Most agent frameworks wrap a model API and invent a new runtime around it. itsyb
 - **Real CLIs, not API wrappers.** An agent is a normal interactive `claude` (or `codex`) session — the same program you run by hand, with the same tools, UI, and hooks. There is no special "agent mode". You can watch any agent's terminal (`ib look <id>`), attach to it (`ib look <id> --follow`), and simply type to it.
 - **tmux is the runtime.** Every agent lives in its own detached tmux session. Agents keep working when the dashboard is closed. There is no daemon: if `tmux ls` shows the session, the agent exists.
 - **git worktrees are the isolation.** Each agent works on its own branch (`agent/<id>`) in its own worktree. Agents cannot trample your checkout or each other. To review an agent, run `ib diff`; to integrate it, run `ib merge`. It is plain git underneath, and the commit history stays intact.
-- **Plain files are the state.** Everything about an agent lives in `.ittybitty/agents/<id>/` inside the repo: `meta.json`, `prompt.txt`, scripts, logs. No database, no server. The dashboard reads these files directly, and so can you.
+- **Plain files are the state.** Everything about an agent lives in `.itsybitsy/agents/<id>/` inside the repo: `meta.json`, `prompt.txt`, scripts, logs. No database, no server. The dashboard reads these files directly, and so can you.
 - **One writer.** Reads come straight from disk and tmux. Every mutation (spawn, send, merge, retire) goes through an `ib` command — and agents use those same commands to manage *their* sub-agents.
 
 The result is an orchestration system where you can always see what an agent is doing, take the controls yourself at any moment, and clean up with normal git and tmux commands if anything goes wrong.
@@ -65,7 +65,7 @@ Every command prints usage with `--help`.
 ### Anatomy of an agent
 
 ```
-<repo>/.ittybitty/agents/<id>/
+<repo>/.itsybitsy/agents/<id>/
 ├── repo/          # git worktree on branch agent/<id>
 ├── meta.json      # type, state, model, manager, PIDs, …
 ├── prompt.txt     # the task
@@ -73,7 +73,7 @@ Every command prints usage with `--help`.
 └── logs, summaries, outbox
 ```
 
-The tmux session is named `ittybitty-<repo-id>-<agent-id>`. A per-agent **watchdog** process monitors the session: it detects the agent's state from the terminal output, nudges agents that stall (capped at 10 reminders per episode), waits out rate limits and resumes the session, and notifies the agent's manager when work completes. Messages to an agent go through a per-agent **outbox** queue, so concurrent senders cannot interleave into one garbled prompt.
+The tmux session is named `itsybitsy-<repo-id>-<agent-id>`. A per-agent **watchdog** process monitors the session: it detects the agent's state from the terminal output, nudges agents that stall (capped at 10 reminders per episode), waits out rate limits and resumes the session, and notifies the agent's manager when work completes. Messages to an agent go through a per-agent **outbox** queue, so concurrent senders cannot interleave into one garbled prompt.
 
 ### Agent types
 

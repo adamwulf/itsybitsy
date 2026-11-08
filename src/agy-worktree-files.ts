@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * The files itsybitsy writes into an agy agent's worktree (SPEC-ANTIGRAVITY-CLI.md
  * §4.2, D3 + D6): the hooks registration and the always-on rule file. Kept in a
@@ -11,5 +12,5 @@
  */
 export const AGY_WORKTREE_FILES = [
   ".agents/hooks.json",
-  ".agents/rules/ittybitty-agent.md",
+  runtimeNames.AGY_RULE_FILE,
 ] as const;

@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Shared agent-context resolution for the codex and agy PreToolUse/state hooks.
  *
@@ -111,19 +112,19 @@ async function registeredRepoRoots(registryHome: string): Promise<string[]> {
 }
 
 /**
- * Canonical paths of `<repoRoot>/.ittybitty/agents/<agentId>`, or null when the
+ * Canonical paths of `<repoRoot>/.itsybitsy/agents/<agentId>`, or null when the
  * registered repo has no such agent dir or this process cannot reach it.
  *
  * realpath runs on the agent dir, not on the repo root. Inside an agent's
  * kernel sandbox the agent dir is a runtime root (readable) but the repo root
  * is not, so realpath(repoRoot) failed with EPERM — a kernel denial for every
  * registered repo on every hook call, and no record for the agent itself, so
- * every tool call was denied. For the layout ib creates (`.ittybitty`,
+ * every tool call was denied. For the layout ib creates (`.itsybitsy`,
  * `agents` and `<id>` are real directories, not symlinks — checked with lstat,
  * which is metadata only — with exactly those names on disk — checked by the
  * suffix), realpath(agent dir) is exactly realpath(repoRoot) +
- * "/.ittybitty/agents/<id>", so this returns the same three paths
- * realpath(repoRoot) gave. Any other layout (a symlinked `.ittybitty` or
+ * "/.itsybitsy/agents/<id>", so this returns the same three paths
+ * realpath(repoRoot) gave. Any other layout (a symlinked `.itsybitsy` or
  * `agents`, an id dir in a different letter case) falls back to
  * realpath(repoRoot), exactly as before.
  */
@@ -131,7 +132,7 @@ async function locateRegisteredAgentDir(
   rawRepoRoot: string,
   agentId: string,
 ): Promise<{ agentDir: string; agentsDir: string; repoPath: string } | null> {
-  const rawAgentDir = join(rawRepoRoot, ".ittybitty", "agents", agentId);
+  const rawAgentDir = runtimeNames.agentDir(rawRepoRoot, agentId);
   let agentDir: string;
   try {
     agentDir = await realpath(rawAgentDir);
@@ -139,7 +140,7 @@ async function locateRegisteredAgentDir(
     if (isUnreachableRepoError(error)) return null;
     throw error;
   }
-  const suffix = `/.ittybitty/agents/${agentId}`;
+  const suffix = runtimeNames.agentDirSuffix(agentId);
   const layoutLinks = await Promise.all(
     [dirname(dirname(rawAgentDir)), dirname(rawAgentDir), rawAgentDir]
       .map(async (path) => (await lstat(path)).isSymbolicLink()),
@@ -155,7 +156,7 @@ async function locateRegisteredAgentDir(
       throw error;
     }
   }
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
   return { agentDir: join(agentsDir, agentId), agentsDir, repoPath };
 }
 
@@ -332,8 +333,8 @@ export async function resolveAgentDir(
   override?: string,
 ): Promise<string> {
   if (override) return override;
-  const m = cwd.match(/(.*\/\.ittybitty\/agents)/);
-  const agentsDir = m ? m[1]! : join(process.cwd(), ".ittybitty", "agents");
+  const m = runtimeNames.matchAgentsPrefix(cwd);
+  const agentsDir = m ? m[1]! : runtimeNames.agentsDir(process.cwd());
   let dir = join(agentsDir, agentId);
   try {
     dir = await realpath(dir);
@@ -373,8 +374,8 @@ export async function resolveAgentContext(
     agentDir = agentDirOverride;
     agentsDir = join(agentDir, "..");
   } else {
-    const cwdMatch = cwd.match(/(.*\/\.ittybitty\/agents)/);
-    agentsDir = cwdMatch ? cwdMatch[1]! : join(process.cwd(), ".ittybitty", "agents");
+    const cwdMatch = runtimeNames.matchAgentsPrefix(cwd);
+    agentsDir = cwdMatch ? cwdMatch[1]! : runtimeNames.agentsDir(process.cwd());
     agentDir = join(agentsDir, agentId);
   }
 

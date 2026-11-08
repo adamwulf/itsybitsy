@@ -194,7 +194,7 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
     "validated worktree:false identity injects from %s",
     async (relativeCwd) => {
       const agentId = "agent-timestamp1";
-      const agentDir = join(root, ".ittybitty", "agents", agentId);
+      const agentDir = join(root, ".itsybitsy", "agents", agentId);
       const cwd = relativeCwd === "." ? root : join(root, relativeCwd);
       await mkdir(agentDir, { recursive: true });
       await mkdir(cwd, { recursive: true });
@@ -218,7 +218,7 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
   );
 
   test("existing worktree context still injects without an explicit id", async () => {
-    const worktree = join(root, ".ittybitty", "agents", "agent-existing1", "repo");
+    const worktree = join(root, ".itsybitsy", "agents", "agent-existing1", "repo");
     await mkdir(worktree, { recursive: true });
     process.chdir(worktree);
 
@@ -228,11 +228,11 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
   test("registered no-worktree timestamp identity survives a standalone fake cwd but rejects a sibling claim", async () => {
     const callerId = "agent-timecaller1";
     const siblingId = "agent-timesibling1";
-    const callerDir = join(root, ".ittybitty", "agents", callerId);
-    const siblingDir = join(root, ".ittybitty", "agents", siblingId);
+    const callerDir = join(root, ".itsybitsy", "agents", callerId);
+    const siblingDir = join(root, ".itsybitsy", "agents", siblingId);
     const fakeRoot = await mkdtemp(join(tmpdir(), "inject-timestamp-fake-"));
     try {
-      const fakeCwd = join(fakeRoot, ".ittybitty", "agents", siblingId, "repo");
+      const fakeCwd = join(fakeRoot, ".itsybitsy", "agents", siblingId, "repo");
       await mkdir(callerDir, { recursive: true });
       await mkdir(siblingDir, { recursive: true });
       await mkdir(fakeCwd, { recursive: true });
@@ -267,7 +267,7 @@ describe("hookInjectTimestamp cwd identity resolution", () => {
 
   test("CLI dispatcher forwards an unauthenticated explicit id to silent handling", async () => {
     const agentId = "agent-timecli01";
-    const agentDir = join(root, ".ittybitty", "agents", agentId);
+    const agentDir = join(root, ".itsybitsy", "agents", agentId);
     const cwd = join(root, "nested");
     const cliHome = join(root, "home");
     await mkdir(agentDir, { recursive: true });

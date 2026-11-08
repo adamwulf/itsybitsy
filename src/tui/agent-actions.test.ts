@@ -329,7 +329,7 @@ describe("handleSnapshot", () => {
       expect(dialogs).toHaveLength(1);
       expect(notices.at(-1)).toContain("Snapshot saved:");
 
-      const debugDir = join(repoDir, ".ittybitty", "agents", "agent-snap", "debug-logs");
+      const debugDir = join(repoDir, ".itsybitsy", "agents", "agent-snap", "debug-logs");
       const debugFiles = await readdir(debugDir);
       const unwrappedName = debugFiles.find((name) => /^snapshot-.*-waiting-unwrapped\.txt$/.test(name));
       const wrappedName = debugFiles.find((name) => /^snapshot-.*-waiting-wrapped\.txt$/.test(name));
@@ -407,7 +407,7 @@ describe("handleSnapshot", () => {
       // A dirent appears at open() time, before the contents are flushed, so
       // requiring the header every snapshot body starts with is what makes
       // this proof against a torn read — not just against an absent file.
-      const debugDir = join(repoDir, ".ittybitty", "agents", "agent-tab", "debug-logs");
+      const debugDir = join(repoDir, ".itsybitsy", "agents", "agent-tab", "debug-logs");
       const { unwrappedName, wrappedName } = await waitForValue(
         async () => {
           let debugFiles: string[];
@@ -1259,7 +1259,7 @@ describe("handleOpenDiffToolVsManager", () => {
     const baseDir = await mkdtemp(join(tmpdir(), "agent-actions-diff-mgr-"));
     try {
       const agent = makeAgent({ id: "agent-1", repoPath: baseDir });
-      await mkdir(join(baseDir, ".ittybitty", "agents", "agent-1", "repo"), { recursive: true });
+      await mkdir(join(baseDir, ".itsybitsy", "agents", "agent-1", "repo"), { recursive: true });
       const { ctx, notices } = makeMockCtx({ agent });
       ctx.diffTool = "some-tool";
       await handleOpenDiffToolVsManager(ctx);
@@ -1275,7 +1275,7 @@ describe("handleOpenDiffToolVsManager", () => {
     try {
       const agent = makeAgent({ id: "agent-1", repoPath: baseDir });
       agent.meta.manager = "mgr-1";
-      const worktree = join(baseDir, ".ittybitty", "agents", "agent-1", "repo");
+      const worktree = join(baseDir, ".itsybitsy", "agents", "agent-1", "repo");
       await mkdir(worktree, { recursive: true });
       await Bun.$`git init -q`.cwd(worktree).quiet();
       const { ctx, notices } = makeMockCtx({ agent });
@@ -1293,7 +1293,7 @@ describe("handleOpenDiffToolVsManager", () => {
     try {
       const agent = makeAgent({ id: "agent-1", repoPath: baseDir });
       agent.meta.manager = "mgr-1";
-      const worktree = join(baseDir, ".ittybitty", "agents", "agent-1", "repo");
+      const worktree = join(baseDir, ".itsybitsy", "agents", "agent-1", "repo");
       await mkdir(worktree, { recursive: true });
       await Bun.$`git init -q`.cwd(worktree).quiet();
       await Bun.$`git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init`.cwd(worktree).quiet();
@@ -1313,7 +1313,7 @@ describe("handleOpenDiffToolVsManager", () => {
     try {
       const agent = makeAgent({ id: "agent-1", repoPath: baseDir });
       agent.meta.manager = "mgr-1";
-      const worktree = join(baseDir, ".ittybitty", "agents", "agent-1", "repo");
+      const worktree = join(baseDir, ".itsybitsy", "agents", "agent-1", "repo");
       await mkdir(worktree, { recursive: true });
       await Bun.$`git init -q`.cwd(worktree).quiet();
       await Bun.write(join(worktree, "a.txt"), "manager\n");
@@ -1379,7 +1379,7 @@ describe("handleOpenDiffToolVsManager", () => {
       const [launchCwd, ...args] = recorded;
       // Compare by suffix: macOS resolves the temp dir through /private, so the
       // tool's $PWD is the physical path while `worktree` is the logical one.
-      expect(launchCwd).toContain(join(".ittybitty", "agents", "agent-1", "repo"));
+      expect(launchCwd).toContain(join(".itsybitsy", "agents", "agent-1", "repo"));
       expect(args).toEqual(["agent/mgr-1"]);
 
       // …and the launch is attributed to the right agent. The tool is blocked
@@ -1428,7 +1428,7 @@ describe("agentSettingsLocalPath", () => {
   test("non-coordinator uses <agentDir>/repo/.claude/settings.local.json", () => {
     const agent = makeAgent({ id: "agent-1", repoPath: "/tmp/myrepo" });
     expect(agentSettingsLocalPath(agent)).toBe(
-      "/tmp/myrepo/.ittybitty/agents/agent-1/repo/.claude/settings.local.json",
+      "/tmp/myrepo/.itsybitsy/agents/agent-1/repo/.claude/settings.local.json",
     );
   });
 
@@ -1439,14 +1439,14 @@ describe("agentSettingsLocalPath", () => {
       meta: { agentType: "coordinator" } as any,
     });
     expect(agentSettingsLocalPath(agent)).toBe(
-      "/tmp/myrepo/.ittybitty/agents/coord-1/.claude/settings.local.json",
+      "/tmp/myrepo/.itsybitsy/agents/coord-1/.claude/settings.local.json",
     );
   });
 
   test("archived non-coordinator uses archive/<id>/repo", () => {
     const agent = makeAgent({ id: "agent-1", repoPath: "/tmp/myrepo", archived: true });
     expect(agentSettingsLocalPath(agent)).toBe(
-      "/tmp/myrepo/.ittybitty/archive/agent-1/repo/.claude/settings.local.json",
+      "/tmp/myrepo/.itsybitsy/archive/agent-1/repo/.claude/settings.local.json",
     );
   });
 });
@@ -1657,9 +1657,9 @@ describe("handleAddPermission spawn toggle re-seals (A4 G3)", () => {
   });
 
   async function setupAgent(id: string, meta: Record<string, unknown>): Promise<string> {
-    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    const agentDir = join(repoDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
-    await Bun.write(join(repoDir, ".ittybitty", "repo-id"), "deadbeef\n");
+    await Bun.write(join(repoDir, ".itsybitsy", "repo-id"), "deadbeef\n");
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: "", ...meta }, null, 2));
     return agentDir;
   }
@@ -1786,12 +1786,12 @@ describe("effectiveSpawnCapability", () => {
 
 describe("handleAddPermission — onToggleSpawn", () => {
   async function readMeta(repoPath: string, id: string): Promise<Record<string, unknown>> {
-    return (await Bun.file(join(repoPath, ".ittybitty", "agents", id, "meta.json")).json()) as Record<string, unknown>;
+    return (await Bun.file(join(repoPath, ".itsybitsy", "agents", id, "meta.json")).json()) as Record<string, unknown>;
   }
 
   test("toggle ON writes canSpawnChildren=true, preserves other fields, notifies agent", async () => {
     const id = "agent-toggle-on";
-    const agentDir = join(sendRepoDir, ".ittybitty", "agents", id);
+    const agentDir = join(sendRepoDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     // A worker agent whose effective spawn = false (worker type).
     const original = {
@@ -1838,7 +1838,7 @@ describe("handleAddPermission — onToggleSpawn", () => {
 
   test("toggle OFF writes canSpawnChildren=false for a spawn-capable agent", async () => {
     const id = "agent-toggle-off";
-    const agentDir = join(sendRepoDir, ".ittybitty", "agents", id);
+    const agentDir = join(sendRepoDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     // A manager agent whose effective spawn = true.
     const original = { id, worker: false, manager: null, agentType: "manager" };
@@ -2098,12 +2098,12 @@ async function readTeamAuditLog(team: string): Promise<string> {
 
 /**
  * Plant a real agent meta.json + a live-watchdog transient under
- * `<repoDir>/.ittybitty/agents/<id>/`. The transient makes sendMessage DEFER
+ * `<repoDir>/.itsybitsy/agents/<id>/`. The transient makes sendMessage DEFER
  * delivery so we don't shell out from tests; the meta is enough for
  * readAllAgents (which teamAdd uses) to surface the id.
  */
 async function plantTestAgent(repoDir: string, id: string): Promise<string> {
-  const agentDir = join(repoDir, ".ittybitty", "agents", id);
+  const agentDir = join(repoDir, ".itsybitsy", "agents", id);
   await mkdir(agentDir, { recursive: true });
   await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
   await writeAgentTransient(agentDir, {
@@ -2728,7 +2728,7 @@ function mkAgent(id: string, repoName: string): Agent {
     meta: {
       id,
       session_id: `sess-${id}`,
-      tmux_session: `ittybitty-${repoName}-${id}`,
+      tmux_session: `itsybitsy-${repoName}-${id}`,
       prompt: `Task for ${id}`,
       manager: null,
       created: "2025-01-01T00:00:00Z",
@@ -3297,8 +3297,8 @@ describe("handleAnswerQuestion — deliver the answer before acknowledging", () 
   /** Build a repo dir; optionally seed a pending user-questions.json for q1. */
   async function makeQuestionRepo(withFile: boolean): Promise<{ repoDir: string; questionsPath: string }> {
     const repoDir = await mkdtemp(join(tmpdir(), "aa-answer-"));
-    await mkdir(join(repoDir, ".ittybitty"), { recursive: true });
-    const questionsPath = join(repoDir, ".ittybitty", "user-questions.json");
+    await mkdir(join(repoDir, ".itsybitsy"), { recursive: true });
+    const questionsPath = join(repoDir, ".itsybitsy", "user-questions.json");
     if (withFile) {
       await Bun.write(questionsPath, JSON.stringify({
         questions: [{ id: "q1", agent: "agent-1", question: "?", status: "pending", timestamp: "2026-01-01T00:00:00Z" }],

@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Built-in watchdog for itsybitsy.
  * Monitors agents, detects state transitions, and notifies managers.
@@ -870,7 +871,7 @@ async function saveUnknownDebugLog(agent: Agent): Promise<void> {
     const output = await captureTmuxOutput(tmuxSession);
     if (output === null) return;
 
-    const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+    const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
     const debugDir = join(agentDir, "debug-logs");
     mkdirSync(debugDir, { recursive: true });
 
@@ -986,7 +987,7 @@ async function handleCreating(_agent: Agent, tracker: AgentTracker, _getAllAgent
 async function handleCompacting(agent: Agent, tracker: AgentTracker, _getAllAgents: GetAllAgents): Promise<void> {
   tracker.rateLimitBypassed = false;
 
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   const transient = await readAgentTransient(agentDir);
   const restartedAt = transient?.last_restarted_at_ms ?? null;
   if (!restartedAt || nowFn() - restartedAt > RESTART_COMPACT_CANCEL_WINDOW_MS) return;
@@ -1237,7 +1238,7 @@ async function handleApiError(agent: Agent, tracker: AgentTracker, _getAllAgents
   if (tracker.apiErrorRetries >= API_ERROR_MAX_RETRIES) {
     // One-shot log on the tick we hit the cap so user knows we backed off.
     if (tracker.previousState !== "api_error") {
-      const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+      const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
       try {
         await logAgent(agentDir, `[watchdog] api_error: hit MAX_RETRIES (${API_ERROR_MAX_RETRIES}) — leaving agent for user intervention`);
       } catch { /* best-effort */ }
@@ -1788,7 +1789,7 @@ async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSess
  * the bash watchdog's per-agent model. Does NOT use lock files.
  */
 export async function runPerAgentWatchdog(agentId: string, repoPath: string): Promise<void> {
-  const agentDir = join(repoPath, ".ittybitty", "agents", agentId);
+  const agentDir = runtimeNames.agentDir(repoPath, agentId);
   const worktreeDir = join(agentDir, "repo");
 
   // Read agent meta to get tmux session

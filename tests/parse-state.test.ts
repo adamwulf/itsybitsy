@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { isCodexTmuxOutput, parseCodexState, parseState, parseStateForCli } from "../src/parse-state";
 
 // Real codex tmux capture (Codex CLI v0.135.0, gpt-5.5) — abridged from
-// /Users/adamwulf/Developer/muse/muse-ios/.ittybitty/agents/agent-2a4815af/debug-logs/
+// /Users/adamwulf/Developer/muse/muse-ios/.itsybitsy/agents/agent-2a4815af/debug-logs/
 //   snapshot-2026-05-31T19-31-32-456Z-waiting.txt
 // with the leading "State: ... Reason: ..." header line stripped (per the task).
 // This is the load-bearing fixture: it MUST parse as `waiting`, not `unknown`.
@@ -35,7 +35,7 @@ const CODEX_IDLE_SNAPSHOT = `
   the project accurately before standing by.
 
 • Ran pwd
-  └ /Users/adamwulf/Developer/muse/muse-ios/.ittybitty/agents/agent-2a4815af/repo
+  └ /Users/adamwulf/Developer/muse/muse-ios/.itsybitsy/agents/agent-2a4815af/repo
 
 • PreToolUse hook (blocked)
   feedback: Tool not in allow list
@@ -94,7 +94,7 @@ const CODEX_IDLE_SNAPSHOT = `
 
 › Explain this codebase
 
-  gpt-5.5 default · ~/Developer/muse/muse-ios/.ittybitty/agents/agent-2a4815af/repo
+  gpt-5.5 default · ~/Developer/muse/muse-ios/.itsybitsy/agents/agent-2a4815af/repo
 `;
 
 // Synthetic minimal codex idle pane — banner + queued prompt + status bar.
@@ -215,7 +215,7 @@ describe("parseCodexState", () => {
       "",
       "› Improve documentation in @filename",
       "",
-      "  gpt-5.5 default · ~/Developer/bun/itsybitsy/.ittybitty/agents/codex-git-commit/repo",
+      "  gpt-5.5 default · ~/Developer/bun/itsybitsy/.itsybitsy/agents/codex-git-commit/repo",
     ].join("\n");
     const r = parseCodexState(input);
     expect(r.state).toBe("running");

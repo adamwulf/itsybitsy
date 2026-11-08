@@ -1,10 +1,11 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Watchdog lifecycle broker — how a SANDBOXED agent retires, merges or rehires
  * a child agent.
  *
  * A sandboxed manager cannot do this work itself. Its profile grants its own
- * agent dir, its worktree, the repo's git dir and `<repo>/.ittybitty/agents`,
- * but NOT the main repo root or `<repo>/.ittybitty/archive`. The lifecycle code
+ * agent dir, its worktree, the repo's git dir and `<repo>/.itsybitsy/agents`,
+ * but NOT the main repo root or `<repo>/.itsybitsy/archive`. The lifecycle code
  * runs `git -C <main repo> ...` (which dies with `Unable to read current working
  * directory: Operation not permitted`) and moves the agent into the archive or
  * reads it back, so a direct `ib retire`, `ib merge` or `ib rehire` fails inside
@@ -296,7 +297,7 @@ async function findAgentInRepo(repoPath: string, agentId: string): Promise<Agent
   const repo = (await listRepos()).find((entry) => resolve(entry.path) === resolve(repoPath));
   const name = repo ? repoDisplayName(repo) : basename(repoPath);
   const { agents } = await readAllAgents([{ path: repoPath, name }], false);
-  const directory = join(repoPath, ".ittybitty", "agents", agentId);
+  const directory = runtimeNames.agentDir(repoPath, agentId);
   return agents.find((agent) => agent.storageDir === directory && agent.id === agentId) ?? null;
 }
 
@@ -325,7 +326,7 @@ export async function handleLifecycleRequest(
   }
 
   const seams = deps.lifecycle ?? {};
-  const agentsDir = join(ctx.repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(ctx.repoPath);
   const authorize = (): Promise<string | null> =>
     (seams.authorize ?? authorizeLifecycle)(
       op,

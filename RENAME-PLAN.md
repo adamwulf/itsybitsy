@@ -12,7 +12,7 @@ etc.). New-agent creation rejects names that collide with any existing `id` **or
 ## Why nickname (not physical rename)
 
 The agent `id` is woven into ~7 on-disk/runtime artifacts — directory name, git branch
-(`agent/<id>`), git worktree path, tmux session (`ittybitty-<repoId>-<id>`), `meta.json`
+(`agent/<id>`), git worktree path, tmux session (`itsybitsy-<repoId>-<id>`), `meta.json`
 path, the hook commands baked into `settings.local.json` (`ib hook-check-path <id>` …),
 and Claude's transcript dir (`~/.claude/projects/<encoded-worktree>/<session_id>.jsonl`).
 A physical rename would have to move/rewrite all of them and restart Claude.

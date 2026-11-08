@@ -8,7 +8,7 @@
 │                                                          │
 │              Sonnet 4.6 with medium effort               │
 │                        Claude Max                        │
-│     ~/…/tools/.ittybitty/agents/agent-ac7b5633/repo      │
+│     ~/…/tools/.itsybitsy/agents/agent-ac7b5633/repo      │
 │                                                          │
 ╰──────────────────────────────────────────────────────────╯
   ⎿  Closed agent: agent-479c648c

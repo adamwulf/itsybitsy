@@ -34,23 +34,23 @@ When a new agent is created (`ib new-agent "prompt"`):
 
 1. **Validate inputs**: A prompt is required. If `--manager` is specified, the manager must exist and must not be a leaf agent (an agent whose type has `canSpawnChildren: false`). Leaf agents cannot manage sub-agents. If `--type` is specified, the type must exist as a `.md` file in `~/.itsybitsy/agent-types/`.
 
-1a0. **Caller spawn permission gate**: Independently of the `--manager` *target* check above, the spawn is gated on the *caller* — the agent whose worktree contains the CWD (`opts._cwd` if provided, else `process.cwd()`; matched against `/.ittybitty/agents/<id>/repo`). If that agent is not permitted to spawn children, the spawn is rejected regardless of which `--manager` is named. "Permitted to spawn children" is decided by `metaCanSpawnChildren`, the single predicate that BOTH this CLI caller gate and the intercept-task hook's Task/Agent/TaskCreate gate call, so a leaf agent is blocked identically on either path: a per-agent `canSpawnChildren` boolean override wins outright; otherwise the `system` type and any agent-type whose `canSpawnChildren` is true may spawn, an unknown/broken type may not (fail-closed on both paths), and legacy agents fall back to the `worker` boolean. This closes the hole where a leaf agent (worker) bypassed its no-spawn restriction by running `ib new-agent --manager <other-manager>` directly via Bash — a path the intercept-task hook (which only sees the `Task`/`Agent`/`TaskCreate` tools) never observes. The one deliberate divergence is `@system`: `metaCanSpawnChildren` reports it *can* spawn (via `ib new-agent --repo`), but the Task/Agent hook denies it with a specific "use `ib new-agent --repo`" message as a pre-check, because Task is the wrong mechanism for the system coordinator, not a permission denial. A caller not inside any agent worktree (primary Claude, a human shell, a top-level coordinator running from a repo root) has no caller meta and is unrestricted. In the implementation this gate executes *before* the step-1 `--manager` resolution and leaf-check, so an unpermitted caller is rejected with the caller error even when `--manager` is missing or names a nonexistent/invalid agent (it does not first surface a "manager not found"). Note this gate is about the *caller's* permission only; whether the *named* `--manager` may parent children is the separate step-1 target check, which still uses its own narrower `worker`-based leaf test (it inspects a different agent — the prospective parent — whose stored `worker` flag reliably reflects its type).
+1a0. **Caller spawn permission gate**: Independently of the `--manager` *target* check above, the spawn is gated on the *caller* — the agent whose worktree contains the CWD (`opts._cwd` if provided, else `process.cwd()`; matched against `/.itsybitsy/agents/<id>/repo`). If that agent is not permitted to spawn children, the spawn is rejected regardless of which `--manager` is named. "Permitted to spawn children" is decided by `metaCanSpawnChildren`, the single predicate that BOTH this CLI caller gate and the intercept-task hook's Task/Agent/TaskCreate gate call, so a leaf agent is blocked identically on either path: a per-agent `canSpawnChildren` boolean override wins outright; otherwise the `system` type and any agent-type whose `canSpawnChildren` is true may spawn, an unknown/broken type may not (fail-closed on both paths), and legacy agents fall back to the `worker` boolean. This closes the hole where a leaf agent (worker) bypassed its no-spawn restriction by running `ib new-agent --manager <other-manager>` directly via Bash — a path the intercept-task hook (which only sees the `Task`/`Agent`/`TaskCreate` tools) never observes. The one deliberate divergence is `@system`: `metaCanSpawnChildren` reports it *can* spawn (via `ib new-agent --repo`), but the Task/Agent hook denies it with a specific "use `ib new-agent --repo`" message as a pre-check, because Task is the wrong mechanism for the system coordinator, not a permission denial. A caller not inside any agent worktree (primary Claude, a human shell, a top-level coordinator running from a repo root) has no caller meta and is unrestricted. In the implementation this gate executes *before* the step-1 `--manager` resolution and leaf-check, so an unpermitted caller is rejected with the caller error even when `--manager` is missing or names a nonexistent/invalid agent (it does not first surface a "manager not found"). Note this gate is about the *caller's* permission only; whether the *named* `--manager` may parent children is the separate step-1 target check, which still uses its own narrower `worker`-based leaf test (it inspects a different agent — the prospective parent — whose stored `worker` flag reliably reflects its type).
 
 **`--model` is a user-only override.** Independently of whether the caller may spawn at all, an agent (even a spawn-permitted manager or coordinator) may **not** pin a spawned child's model — the child's model must come from the agent-type layers / config precedence chain (§2 item 3), never a caller-supplied override. Only a human running `ib new-agent` from the CLI (or the TUI new-agent dialog) may set `--model`. Enforcement covers every spawn vector: (1) the agent-path hook (`checkIbCommandAccess`) denies any Bash `ib new-agent … --model …` (and the `ib new` alias) for every agent — the detection is quote/heredoc aware so a prompt body containing the literal text `--model` is not mistaken for the flag; (2) the intercept-task hook (`processTaskIntercept`, `src/hooks/intercept-task.ts`) denies the native `Task`/`Agent` tool's `model` argument when the caller is a resolved agent (the native-spawn equivalent of `--model`); (3) `newAgent()` (`src/ib-commands.ts`) is the defense-in-depth backstop shared by both — when the resolved caller context is a verified agent and `opts.model` is set, the spawn is refused (a human / primary-Claude caller resolves to null and is unrestricted). The backstop runs after the caller spawn-permission gate, so a manager supplying a model is refused specifically for the model override rather than the spawn permission.
 
 1a. **Spawner worktree cleanliness**: The spawner's CWD (`opts._cwd` if provided by the intercept-task hook, else `process.cwd()`) must have an empty `git status --porcelain`. If non-empty, the spawn is rejected before any side effects (no agent directory created, no worktree allocated, no tmux session started). Skipped when the CWD is not a git working tree (e.g. system coordinator home, raw temp dir) — `git rev-parse --is-inside-work-tree` must exit 0 AND print `true` for the check to fire. Also skipped (falls open) when `git status --porcelain` itself exits non-zero, since a transient git failure shouldn't block spawning. The rationale differs by spawn mode: for worktree spawns, the new sub-agent's worktree forks from HEAD and would silently miss the spawner's pending edits; for supported Claude `--no-worktree` spawns (item 3a), the sub-agent runs in the spawner's own CWD and its edits would interleave with the spawner's pending edits, producing incoherent diffs. The error message names both `uncommitted changes` and `untracked files`, suggests `commit` / `.gitignore` / `remove` as remediations, and includes the raw porcelain output for the user to triage.
 
-2. **Auto-detect manager**: If no `--manager` is provided and the caller is running inside an agent worktree (CWD matches `/.ittybitty/agents/<id>/repo`), the caller's agent ID is automatically set as the manager.
+2. **Auto-detect manager**: If no `--manager` is provided and the caller is running inside an agent worktree (CWD matches `/.itsybitsy/agents/<id>/repo`), the caller's agent ID is automatically set as the manager.
 
 3. **Configuration**: Config is loaded from `~/.itsybitsy/config.json` (user-wide). The agent type is resolved by: `--type` flag > default `"manager"`. The type definition is loaded from `~/.itsybitsy/agent-types/<name>.md` — the `.md` file on disk is the sole source of truth (no hardcoded fallback). On first run, `~/.itsybitsy/agent-types/` is auto-populated with embedded default templates (see §2.7). The model is determined by a most-specific-wins precedence chain across the agent-type layer files (same layer set and gating as the permissions merge, §2.3): `--model` flag > `<type>.md` `model` > `_non_coordinator.md` `model` (non-coordinator agents only) > `_all.md` `model` > config `model` (non-coordinator agents only) > `"opus"` (default). The agent-type layers all override the user's config `model`; config `model` is the final fallback before `"opus"` for non-coordinator agents only. Coordinators deliberately skip config `model` — the coordinator agent-type file is authoritative for coordinators, since otherwise the user's global `model` setting would clobber the coordinator agent-type. A blank `model:` value in any layer (parsed to `undefined`) is skipped, so a more-specific file declaring `model:` with no value does NOT clobber a real model set by a less-specific file. The reasoning-effort level (`--effort <level>` for Claude, `model_reasoning_effort` for codex) is resolved by the identical chain and gating: `--effort` flag > `<type>.md` `effort` > `_non_coordinator.md` `effort` (non-coordinator agents only) > `_all.md` `effort` > config `effort` (non-coordinator agents only) > `"xhigh"` (default). Valid levels are `low|medium|high|xhigh|max`; codex has no `xhigh`/`max`, so those two collapse to codex's `high` (see §18). A blank `effort:` is skipped the same way a blank `model:` is.
 
 3a. **CLI/worktree compatibility**: `--no-worktree` is supported only for Claude. After resolving the model/CLI and before allocating an agent directory, worktree, tmux session, or other persistent state, creation rejects `--no-worktree` for Codex, Fugu, and agy. Their hook/rule/precheck paths require a real isolated worktree. Resume and rehire likewise refuse legacy or malformed non-Claude metadata with `worktree: false` before regenerating hooks/rules, changing trust state, or touching other shared files. This is an explicit unsupported-mode error, not a fallback to partial setup.
 
-4. **Max agents check**: The number of active agents (directories with `meta.json` in `.ittybitty/agents/`) must not exceed the `maxAgents` config value (default: 10).
+4. **Max agents check**: The number of active agents (directories with `meta.json` in `.itsybitsy/agents/`) must not exceed the `maxAgents` config value (default: 10).
 
 5. **Generate agent ID**: Either `--name NAME` or `agent-<8 random hex chars>` (e.g., `agent-a1b2c3d4`).
 
-6. **Tmux session naming**: The tmux session name is `ittybitty-<repo-id>-<agent-id>`, where `<repo-id>` is an 8-character hex identifier stored in `.ittybitty/repo-id`. This prevents session collisions across different repositories.
+6. **Tmux session naming**: The tmux session name is `itsybitsy-<repo-id>-<agent-id>`, where `<repo-id>` is an 8-character hex identifier stored in `.itsybitsy/repo-id`. This prevents session collisions across different repositories.
 
 7. **Git worktree setup** (default, unless `--no-worktree`):
    - Branch name: `agent/<agent-id>`
@@ -205,7 +205,7 @@ snapshot:
 
 1. **Prepare recovery state before destructive teardown**:
    a. Retain the exact worktree HEAD at
-      `refs/ittybitty/retired/<archive-key>/head`
+      `refs/itsybitsy/retired/<archive-key>/head`
    b. Save `git diff --binary HEAD` as `worktree.patch`
    c. Copy non-ignored untracked files without following unsafe symlinks
    d. Abort without stopping the agent if any required snapshot step fails
@@ -265,7 +265,7 @@ transitions restore the prior seal where possible or report explicit recovery.
 
 ### 1.7 Archiving
 
-Archive moves agent artifacts to `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id>/`:
+Archive moves agent artifacts to `.itsybitsy/archive/<YYYYMMDD-HHMMSS>-<agent-id>/`:
 
 | File | Action |
 |------|--------|
@@ -284,6 +284,8 @@ Merge and nuke continue to create historical archives without
 
 ### 1.7.1 Rehiring
 
+New retirements retain HEAD at `refs/itsybitsy/retired/<archive-key>/head`. Rehire tries that ref first and falls back to `refs/ittybitty/retired/<archive-key>/head` only if it is not found. A resolved ref with a mismatched HEAD is corrupt and never triggers fallback. Existing manifests accept either name; migration does not move refs.
+
 `ib rehire <agent-id>` accepts an immutable exact agent ID (not a nickname):
 
 1. Scan timestamped `archive/*` folders across registered repositories and
@@ -293,7 +295,7 @@ Merge and nuke continue to create historical archives without
    `agent/<id>` branch, missing recovery manifest/ref, or malformed archive.
    Stale worktree metadata is pruned; an unclaimed orphan branch is replaced
    only when it still points at the retained retirement HEAD.
-3. Recreate `.ittybitty/agents/<id>/` and sanitize stale runtime fields:
+3. Recreate `.itsybitsy/agents/<id>/` and sanitize stale runtime fields:
    clear `claude_pid`/`watchdog_pid`, discard transient state, and set
    `state: "stopped"` while preserving session IDs, deterministic tmux name,
    model/effort, type, hierarchy, nickname, and worktree mode.
@@ -329,7 +331,7 @@ Nuke (`ib nuke <id>`) recursively kills a manager and all its descendants:
    non-rehirable archive. Nuke also accepts a childless worker, providing an
    explicit destructive escape hatch when a recoverable retirement cannot be
    prepared (for example, after its worktree was manually removed).
-3. Clean up orphaned tmux sessions (sessions with `ittybitty-<repo-id>-` prefix that don't match any remaining agent in the same repository) [^callout]: The bash reference checks only sessions matching the current repo's prefix (`ittybitty-<repo-id>-`). The TypeScript `cleanupOrphanedTmuxSessions` checks all sessions starting with `ittybitty-`, which may clean up sessions from other repos. The agent ID extraction logic (stripping the prefix) still works correctly cross-repo.
+3. Clean up orphaned tmux sessions (sessions with `itsybitsy-<repo-id>-` prefix that don't match any remaining agent in the same repository) [^callout]: The bash reference checks only sessions matching the current repo's prefix (`ittybitty-<repo-id>-`). The TypeScript `cleanupOrphanedTmuxSessions` checks all sessions starting with `itsybitsy-`, which may clean up sessions from other repos. The agent ID extraction logic (stripping the prefix) still works correctly cross-repo.
 4. Scan and kill orphaned Claude processes
 
 Nuke-all (`ib nuke` with no agent ID) kills all agents in the repository. The `--force` flag skips confirmation but does not change what gets nuked.
@@ -421,7 +423,7 @@ Agents with `canSpawnChildren: true` spawn sub-agents either explicitly with `ib
 
 When a top-level agent (no manager of its own) with `canSpawnChildren: true` signals completion, the stop hook checks for unfinished children. Both bash and TS determine "unfinished" by checking actual tmux state (creating, running, waiting, or complete — but NOT stopped/unknown).
 
-Specifically, it looks for children — agents in `.ittybitty/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or retire each one before completing.
+Specifically, it looks for children — agents in `.itsybitsy/agents/` whose `meta.json` `manager` field matches the completing agent's ID. If any exist, the agent receives a nudge message listing them and instructing it to merge or retire each one before completing.
 
 A child the agent acknowledged with `ib ack` (§8.5.2) is still unfinished: it is open on purpose, for human review. When any are listed, the nudge also names them and tells the agent it cannot complete while they are open and must end its turn with `WAITING` instead.
 
@@ -502,8 +504,8 @@ The `worker` boolean field is still written to meta.json for backward compatibil
 
 The merge strategy depends on whether the caller is an agent or a user. Detection uses two checks:
 
-1. **CWD path pattern**: `/.ittybitty/agents/<id>/repo` anywhere in the current working directory
-2. **TMUX session name**: If inside tmux, the session name starts with `ittybitty-`
+1. **CWD path pattern**: `/.itsybitsy/agents/<id>/repo` anywhere in the current working directory
+2. **TMUX session name**: If inside tmux, the session name starts with `itsybitsy-`
 
 If either check matches, the caller is considered an agent.
 
@@ -600,13 +602,13 @@ After successful merge:
 
 **Sandboxed caller (TypeScript only)**: a worktree agent inside its itsybitsy sandbox can list the agents of its own repo only, so its watchdog resolves the target and sends for it (§8.5, send-request broker). The steps do not change. The sender is the agent itself: `--from` for another agent is refused. A send to itself is not brokered (the watchdog refuses one, since the agent writes its own `tmux_session`); it goes the direct way, which works in the sandbox. When the watchdog cannot take the request (no fresh heartbeat, or a watchdog older than the broker), the agent sends directly, which reaches its own repo only.
 
-**Unreadable agents directory**: when a target is not found and the `.ittybitty/agents` directory of a searched repo could not be read, the error names it: `Agent not found: <id> (could not read <dir>; a sandbox may block it)`.
+**Unreadable agents directory**: when a target is not found and the `.itsybitsy/agents` directory of a searched repo could not be read, the error names it: `Agent not found: <id> (could not read <dir>; a sandbox may block it)`.
 
 #### 4.1.1 Per-agent outbox queue (serialized delivery)
 
 [^note] **TypeScript only.** To stop two near-simultaneous sends to the SAME agent from interleaving their `send-keys -l` chunks and `Enter` keystrokes (which would merge two messages into one prompt), every delivery path enqueues to a **per-agent outbox queue** and a single drainer types into the tmux session. There is **no central dispatcher** — the queue and lock are keyed per-agent (i.e. per tmux session), so busy multi-agent communication has no shared bottleneck.
 
-- **Queue file**: `outbox.jsonl` beside `meta.json` (`<repoPath>/.ittybitty/agents/<id>/`). One JSON object per line: `{id, message, fromAgent, raw, enqueuedAtMs}`. `fromAgent` is the resolved sender (real agent id, `@`-sentinel, or `""` for the human user). The `[sent by ...]` prefix is **not** pre-formatted at enqueue time — prefix/label resolution (including the `user.name` config read) happens at DRAIN time so the formatting matches the historical behavior exactly. The one thing resolved at ENQUEUE time is `fromAgent` (cwd-based sender auto-detection depends on the sender process's cwd, which is gone by drain time).
+- **Queue file**: `outbox.jsonl` beside `meta.json` (`<repoPath>/.itsybitsy/agents/<id>/`). One JSON object per line: `{id, message, fromAgent, raw, enqueuedAtMs}`. `fromAgent` is the resolved sender (real agent id, `@`-sentinel, or `""` for the human user). The `[sent by ...]` prefix is **not** pre-formatted at enqueue time — prefix/label resolution (including the `user.name` config read) happens at DRAIN time so the formatting matches the historical behavior exactly. The one thing resolved at ENQUEUE time is `fromAgent` (cwd-based sender auto-detection depends on the sender process's cwd, which is gone by drain time).
 - **`sendMessage` behavior**: resolve sender → enqueue → if a **live watchdog** exists (fresh `meta.transient.json` `watchdog_pid` within `TRANSIENT_FRESH_MS` and `process.kill(pid, 0)` alive), return immediately (the watchdog drains); otherwise **drain inline** under the lock (the sender becomes the drainer for this batch — preserves `ib send` to a stopped/complete agent and the coordinator path). Public signature, return shape, and the `sendSpawnCtx`/`setSendSpawnRunner`/`sendDelayOverrideMs` test hooks are unchanged. With no transient file present (the common unit-test case) the inline drain produces the SAME observable tmux spawn calls in the same order as before this feature.
 - **The drainer is the single tmux writer**: `deliverMessage(agent, queued)` does the has-session check, prefix formatting, chunked `send-keys -l`, length-scaled delay, `Enter`, recipient/sender logging, and `writeAgentState("running")` for exactly one message. `drainOutbox` pops messages one at a time under the lock with a 250 ms settle gap between consecutive messages so they land as distinct prompts. A delivered message is removed from the outbox (tmp+rename rewrite of the remainder) only AFTER its `Enter` succeeds and it is logged — so a crash mid-batch never redelivers, and a failed delivery leaves the message enqueued (no loss). Appends that arrive mid-drain are preserved by re-reading the file before each rewrite and picked up on the next drain.
 - **Per-session lock**: `.outbox.lock` in the agent dir, an advisory lock via exclusive file creation (`open(path, "wx")`, O_CREAT|O_EXCL). On EEXIST the holder retries with backoff up to ~5 s. The inline fallback may **steal** a lock whose mtime is older than 30 s (crashed holder); the watchdog never steals (it just retries next tick). The holder pid is written into the lock file for debuggability; the lock is always released in a `finally`. Both the watchdog drain and the inline fallback acquire the SAME lock, so even a fallback that races a newly-alive watchdog cannot collide.
@@ -633,11 +635,11 @@ Cross-cutting impact: agent lifecycle and metadata policy are unchanged; hooks u
 1. **Auto-detect agent ID** from CWD if in an agent worktree (or specify `--id <agent-id>` explicitly)
 2. **Top-level check**: Only agents with no manager (or whose manager has been merged/retired) can ask. Others are told to use `ib send` to communicate with their manager.
 3. **Config check**: `allowAgentQuestions` must be `true` (default)
-4. **Question storage**: Stale questions from agents whose directories no longer exist are cleaned up. New questions are appended to `.ittybitty/user-questions.json`
+4. **Question storage**: Stale questions from agents whose directories no longer exist are cleaned up. New questions are appended to `.itsybitsy/user-questions.json`
 5. **Question ID format**: `q-<unix-epoch>-<6-char-hash>` where the hash is the first 6 hex characters of `md5("$AGENT_ID-$QUESTION\n")` (note: bash `echo` appends a trailing newline to the hash input)
 6. **Logging**: The question is logged to the asking agent's `agent.log`.
 
-**Sandboxed caller (TypeScript only)**: a worktree agent inside its itsybitsy sandbox cannot write `.ittybitty/user-questions.json`, so its watchdog runs steps 2–6 for it (§8.5, ask-request broker). The steps themselves do not change. Such a caller asks only as itself: `--id` for another agent is refused.
+**Sandboxed caller (TypeScript only)**: a worktree agent inside its itsybitsy sandbox cannot write `.itsybitsy/user-questions.json`, so its watchdog runs steps 2–6 for it (§8.5, ask-request broker). The steps themselves do not change. Such a caller asks only as itself: `--id` for another agent is refused.
 
 **Questions raised by the harness.** The session-start hook raises a question on an agent's behalf when the agent's instructions are over Claude Code's hook context cap (§6.3.1, "Size flag"). These questions use the same storage, ID format, logging and notifications, with two differences: the top-level check is skipped (the question is about the agent, so a sub-agent gets one too), and the same text is recorded only once per agent, because the hook fires again on resume, `/clear` and after each compaction.
 
@@ -666,7 +668,7 @@ Fields:
 - `status`: `"pending"` or `"acknowledged"`
 - `acknowledged_at`: Set when `ib acknowledge <id>` is called
 
-Questions from agents that no longer exist (no directory in `.ittybitty/agents/`) are filtered out when reading.
+Questions from agents that no longer exist (no directory in `.itsybitsy/agents/`) are filtered out when reading.
 
 ### 4.4 ib acknowledge
 
@@ -684,7 +686,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 
 ```
 <repo-root>/
-  .ittybitty/
+  .itsybitsy/
     repo-id                          # 8-char hex, unique per repo
     user-questions.json              # Pending agent questions
     agents/
@@ -730,7 +732,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 {
   "id": "agent-a1b2c3d4",
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "tmux_session": "ittybitty-e5f6a7b8-agent-a1b2c3d4",
+  "tmux_session": "itsybitsy-e5f6a7b8-agent-a1b2c3d4",
   "prompt": "Implement the login page",
   "manager": "agent-parent01" | null,
   "created": "2024-01-09T14:30:00-0600",
@@ -754,7 +756,7 @@ Questions from agents that no longer exist (no directory in `.ittybitty/agents/`
 |-------|------|-------------|
 | `id` | string | Unique agent identifier |
 | `session_id` | string | UUID for Claude `--session-id` / `--resume` |
-| `tmux_session` | string | Full tmux session name (`ittybitty-<repo-id>-<agent-id>`) |
+| `tmux_session` | string | Full tmux session name (`itsybitsy-<repo-id>-<agent-id>`) |
 | `prompt` | string | Original user prompt text |
 | `manager` | string \| null | Manager agent ID, or `null` for top-level agents |
 | `created` | string | ISO 8601 creation timestamp with timezone |
@@ -782,7 +784,7 @@ Each agent's worktree is linked to a git branch named `agent/<agent-id>`:
 - Top-level agents (no `--manager`) branch from `HEAD` of the main repo
 - Sub-agents (any agent with `--manager`) branch from `agent/<manager-id>` regardless of worker/manager role
 - All branches are local (no remote tracking)
-- The worktree is at `.ittybitty/agents/<id>/repo`
+- The worktree is at `.itsybitsy/agents/<id>/repo`
 - On merge or retire, both the worktree and branch are removed
 
 ### 5.4 Diff and Status — Parent Branch Resolution
@@ -798,7 +800,7 @@ The external diff tool (launched via the `o` keybinding in the TUI) has the same
 
 ### 5.5 Archive Structure
 
-Archives are stored at `.ittybitty/archive/<YYYYMMDD-HHMMSS>-<agent-id>/` using the local time of archival. The same files as listed in §1.7 are preserved.
+Archives are stored at `.itsybitsy/archive/<YYYYMMDD-HHMMSS>-<agent-id>/` using the local time of archival. The same files as listed in §1.7 are preserved.
 
 ---
 
@@ -810,9 +812,9 @@ itsybitsy hooks operate across these execution contexts. Each context has differ
 
 | Context | CWD | Hooks source | Permissions source | Role detection |
 |---------|-----|-------------|-------------------|----------------|
-| **Primary Claude** | Any non-worktree path | `~/.claude/settings.json` (global hooks only) | User's own `~/.claude/settings.json` + repo `.claude/settings.local.json` | CWD does NOT match `/.ittybitsy/agents/<id>/repo` |
-| **Spawning agent** (`canSpawnChildren: true`) | `<repo>/.ittybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.3 with `_all.md` (always) + `_non_coordinator.md` (non-coordinators only) + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: true` |
-| **Leaf agent** (`canSpawnChildren: false`) | `<repo>/.ittybitty/agents/<id>/repo` | Agent's `settings.local.json` (4 hooks: path-check, stop, session-start, permission-denied — NO intercept-task) | Built per §2.3 with `_all.md` + `_non_coordinator.md` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: false` |
+| **Primary Claude** | Any non-worktree path | `~/.claude/settings.json` (global hooks only) | User's own `~/.claude/settings.json` + repo `.claude/settings.local.json` | CWD does NOT match `/.itsybitsy/agents/<id>/repo` |
+| **Spawning agent** (`canSpawnChildren: true`) | `<repo>/.itsybitsy/agents/<id>/repo` | Agent's `settings.local.json` (5 hooks: path-check, stop, session-start, permission-denied, intercept-task) | Built per §2.3 with `_all.md` (always) + `_non_coordinator.md` (non-coordinators only) + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: true` |
+| **Leaf agent** (`canSpawnChildren: false`) | `<repo>/.itsybitsy/agents/<id>/repo` | Agent's `settings.local.json` (4 hooks: path-check, stop, session-start, permission-denied — NO intercept-task) | Built per §2.3 with `_all.md` + `_non_coordinator.md` + type-defined permissions | CWD matches pattern AND agent type has `canSpawnChildren: false` |
 | **Claude `worktree: false` agent** | Shared repo/coordinator working directory | `<agent-dir>/.claude/settings.local.json`, passed with `--settings`; normal user/project sources also load | Built from the same applicable layers as its role above; the hook reads this exact agent file | Explicit agent-bound hook commands and `meta.json`, not the worktree CWD pattern |
 
 **Key distinction**: Primary Claude uses ONLY the global hooks from `~/.claude/settings.json` (§6.7). Per-agent hooks (§6.1–6.6) live either in the isolated worktree settings file or, for `worktree: false`, in the agent-local settings file passed with `--settings`. The agent-local file is an additional explicit settings file, not a setting-source override: normal user/project sources continue to load and may add restrictions. itsybitsy never writes those repository or user files.
@@ -823,7 +825,7 @@ itsybitsy hooks operate across these execution contexts. Each context has differ
 3. The isolated worktree or agent directory is removed on retire/merge/nuke.
 4. Repository and user settings are never modified by agent lifecycle operations.
 
-**Detection pattern**: The `AGENT_CWD_PATTERN` regex (`/.ittybitty/agents/([^/]+)/repo(/|$)`) distinguishes ordinary worktree agents from primary Claude. A Claude `worktree: false` session cannot use that CWD signal, so its explicitly passed settings bind hook commands to the agent ID and the handlers resolve role/policy from that agent's `meta.json`.
+**Detection pattern**: The `AGENT_CWD_PATTERN` regex (`/.itsybitsy/agents/([^/]+)/repo(/|$)`) distinguishes ordinary worktree agents from primary Claude. A Claude `worktree: false` session cannot use that CWD signal, so its explicitly passed settings bind hook commands to the agent ID and the handlers resolve role/policy from that agent's `meta.json`.
 
 itsybitsy installs hooks into each agent's `settings.local.json`, plus optional global hooks in `~/.claude/settings.json`. Agents with `canSpawnChildren: true` get six hooks (path isolation, stop, session-start, permission-denied, mark-running, and intercept-task); leaf agents (`canSpawnChildren: false`) get five (no intercept-task).
 
@@ -846,17 +848,17 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 5. **Normalize**: resolve `.`/`..` via `path.resolve`, then canonicalize with `canonicalizeAccessPath()` (`src/sandbox.ts`): symlinks resolve through the longest existing prefix, and the rest is kept as spelled. With the agent's kernel sandbox off this is `realpathSync` of that prefix, as it always was. With it on (see the hook invariant below) symlinks resolve with `lstat`/`readlink`, and `realpathSync` (which also corrects the letter case) runs only on a prefix that an allow entry matches, or that leads to a path an allow entry matches, in any case, and that no deny entry matches as spelled. A component that such a deny entry matches takes its on-disk spelling from a listing of its parent once `realpathSync` has opened the parent (the entry with the same dev+ino; none or several throws, and the hook denies), and the walk runs again on the corrected path (at most one pass per component; more throws, and the hook denies).
 
-**Hook invariant (kernel sandbox)**: hook code runs inside the agent's kernel sandbox and must not open (`realpath`, `readdir`, read) a path the agent may not read: the kernel reports each such open as a denial in the agent's DENIALS view, on every tool call. So, when the agent's kernel sandbox is on (`metaKernelSandboxed()`: its frozen `meta.sandbox` policy on macOS, by the launch's own rule — the kernel check `isSandboxedProcess()` is not used per call, because loading `bun:ffi` opens the macOS SDK directory, itself a denial), the hook (a) builds its access table from the `meta.paths` stored by spawn and `ib sandbox refresh` (`canonicalizePathsConfig` output, made unsandboxed) as stored, and canonicalizes the runtime roots and the tmux socket deny root without opening denied paths (`storedPathAccessTable`); (b) canonicalizes every candidate path as in step 5; and (c) when every `worktree: false` record found for the id has its kernel sandbox on, searches for a shared-repo caller only in the repos of the records found for the id, not in every registered repo. In every mode, the hook finds its registered agent by `realpath` of `<repo>/.ittybitty/agents/<id>` (a runtime root), not of the repo root — except for a layout with a symlinked `.ittybitty`, `agents` or `<id>` directory, or an id directory in another letter case, where `locateRegisteredAgentDir()` falls back to `realpath` of the repo root as before. With the agent's kernel sandbox off every path is canonicalized as before, so decisions there are unchanged by construction. With it on, decisions are those of the same hook with the sandbox off, except: (1) the hook uses the stored `meta.paths` forms (the running profile's forms) and does not re-resolve them on each call, so if a symlinked entry changes after spawn or refresh, decisions can differ either way, like the profile's; (2) below a directory the hook may not open (one that a deny entry matches as typed, or that the kernel profile does not let the agent read), a component whose letter case differs from the disk can keep the typed case, which can change TABLE decisions only — the kernel enforces the table itself, on the vnode path. The hook-only structural checks (protected writes, other agents' directories, the main repo) compare the EXISTING prefixes of the path by identity: the deepest existing prefix that is the same file (dev+ino, by `lstat`) as one of their anchors (the main repo, the agents dir, the agent dir, its worktree and `.claude`, the agy boundary files, the protected paths) takes that anchor's spelling first (`structuralPath()` in `src/hooks/agent-path.ts`). That covers letter case, Unicode folding (APFS equates `ſ` and `s`) and firmlink aliases such as `/System/Volumes/Data/...` in existing directories (measured live: Seatbelt evaluates the vnode path, so allowRead `/System` does not expose the data volume through that alias). Known limits, where these checks still compare by spelling (also on main, in every mode): (a) a name that does not exist yet keeps its typed spelling, for example a new `.claude/Settings.json` or a protected file that does not exist yet; (b) relative traversal tokens in a Bash command are resolved textually against the cwd (`escapeDenial` in `checkRelativeTraversalPaths`); (c) `name=/path` tokens such as `dd of=/path` are not recognized as paths by the Bash path scanner. Compared with the old hook inside the sandbox, a symlink below such a directory now resolves (the old code kept the typed path). Metadata (`lstat`) is not an open: measured live, the generated profile reports no `file-read-metadata` denial even on a `paths.deny` entry or the tmux socket deny root.
+**Hook invariant (kernel sandbox)**: hook code runs inside the agent's kernel sandbox and must not open (`realpath`, `readdir`, read) a path the agent may not read: the kernel reports each such open as a denial in the agent's DENIALS view, on every tool call. So, when the agent's kernel sandbox is on (`metaKernelSandboxed()`: its frozen `meta.sandbox` policy on macOS, by the launch's own rule — the kernel check `isSandboxedProcess()` is not used per call, because loading `bun:ffi` opens the macOS SDK directory, itself a denial), the hook (a) builds its access table from the `meta.paths` stored by spawn and `ib sandbox refresh` (`canonicalizePathsConfig` output, made unsandboxed) as stored, and canonicalizes the runtime roots and the tmux socket deny root without opening denied paths (`storedPathAccessTable`); (b) canonicalizes every candidate path as in step 5; and (c) when every `worktree: false` record found for the id has its kernel sandbox on, searches for a shared-repo caller only in the repos of the records found for the id, not in every registered repo. In every mode, the hook finds its registered agent by `realpath` of `<repo>/.itsybitsy/agents/<id>` (a runtime root), not of the repo root — except for a layout with a symlinked `.itsybitsy`, `agents` or `<id>` directory, or an id directory in another letter case, where `locateRegisteredAgentDir()` falls back to `realpath` of the repo root as before. With the agent's kernel sandbox off every path is canonicalized as before, so decisions there are unchanged by construction. With it on, decisions are those of the same hook with the sandbox off, except: (1) the hook uses the stored `meta.paths` forms (the running profile's forms) and does not re-resolve them on each call, so if a symlinked entry changes after spawn or refresh, decisions can differ either way, like the profile's; (2) below a directory the hook may not open (one that a deny entry matches as typed, or that the kernel profile does not let the agent read), a component whose letter case differs from the disk can keep the typed case, which can change TABLE decisions only — the kernel enforces the table itself, on the vnode path. The hook-only structural checks (protected writes, other agents' directories, the main repo) compare the EXISTING prefixes of the path by identity: the deepest existing prefix that is the same file (dev+ino, by `lstat`) as one of their anchors (the main repo, the agents dir, the agent dir, its worktree and `.claude`, the agy boundary files, the protected paths) takes that anchor's spelling first (`structuralPath()` in `src/hooks/agent-path.ts`). That covers letter case, Unicode folding (APFS equates `ſ` and `s`) and firmlink aliases such as `/System/Volumes/Data/...` in existing directories (measured live: Seatbelt evaluates the vnode path, so allowRead `/System` does not expose the data volume through that alias). Known limits, where these checks still compare by spelling (also on main, in every mode): (a) a name that does not exist yet keeps its typed spelling, for example a new `.claude/Settings.json` or a protected file that does not exist yet; (b) relative traversal tokens in a Bash command are resolved textually against the cwd (`escapeDenial` in `checkRelativeTraversalPaths`); (c) `name=/path` tokens such as `dd of=/path` are not recognized as paths by the Bash path scanner. Compared with the old hook inside the sandbox, a symlink below such a directory now resolves (the old code kept the typed path). Metadata (`lstat`) is not an open: measured live, the generated profile reports no `file-read-metadata` denial even on a `paths.deny` entry or the tmux socket deny root.
 
 **Structural steps** (run before the resolver; the hook is deliberately stricter than the kernel here):
 
 6. **Protected-write block** (mutation tools only): writes to `<worktree>/.claude/settings*.json`, the agy boundary files (`.agents/hooks.json` and its rule file), and the agent's own `<agent-dir>/meta.json` are protected against self-escalation. For `@system`, the hook also protects its `agent-types/` directory, `config.json`, `repos.json`, `layout.json`, and `sealed/` against writes. Read access follows the shared path resolver and any authored denies. Protected paths are canonicalized to resolve symlinks. These are hook checks; the global coordinator has no kernel profile in this rollout (§12.1.8).
-10. **Other agents' / own non-worktree files**: deny anything under `.ittybitty/agents/` that is not the agent's own worktree or its own `agent.log` (so `meta.json`, `prompt.txt`, the outbox, and sibling agents stay denied to file tools, stricter than the kernel's `AGENTDIR` write root).
+10. **Other agents' / own non-worktree files**: deny anything under `.itsybitsy/agents/` that is not the agent's own worktree or its own `agent.log` (so `meta.json`, `prompt.txt`, the outbox, and sibling agents stay denied to file tools, stricter than the kernel's `AGENTDIR` write root).
 11. **Main repo (outside worktree)**: deny the main checkout — including its `.git` (a kernel write root) — for worktree agents. The worktree and the agents dir are excluded (handled above / by the resolver).
 
 **Shared resolver** (steps 7–9 and 12–13 folded in): the resolved path is decided by `resolvePreparedAccess()` (`src/sandbox.ts`) against the per-agent **access table** built by `src/hooks/paths-table.ts` — normalized `meta.paths` unioned with CLI-appropriate runtime roots. Supported kernel profiles are generated from the corresponding table, so hook and kernel agree. A Write/Edit/MultiEdit/NotebookEdit (and codex `apply_patch`) resolves as a `write` op; Read/Grep/Glob/LS/`cd` as `read`.
 
-**Runtime roots** (injected by code — never in a `.md`): every CLI receives the worktree (read+write), agent dir / `agent.log`, git common dir (read+write), repo agents dir (`REPOAGENTS` — **write** for a spawner, **read** for a non-spawner, keyed on resolved `canSpawnChildren`), the parent repo's `.claude` (`PARENTCLAUDE`, write, spawners only), and the parent repo's `.ittybitty/repo-id` (`REPOID`, **read-only**, spawners only — `getRepoId` reads it to name and seal a child). Claude — including legacy metadata with an absent model, a safe bare model such as `sonnet`/`opus`, or the `unknown` value produced by `readAgentMeta` — additionally receives its project directory (`~/.claude/projects/<encoded-worktree>`) and scratchpad (`/private/tmp/claude-<uid>/<encoded-worktree>`); those Claude-only roots are omitted from codex, fugu, and agy hook tables, just as they are from those CLIs' kernel parameter sets. **agy** additionally receives its whole `~/.gemini` state directory (read+write) as an **agy-only** runtime root — omitted from the claude/codex/fugu tables — because agy writes both `~/.gemini/antigravity-cli/` and `~/.gemini/config/` at runtime; its OAuth credentials live in the macOS keyring, not there. For a **non-spawner**, the **tmux socket dir is a deny root** (reaching the tmux server is a sandbox escape); a spawner keeps it (accepted, SPEC-SANDBOX §4C.3).
+**Runtime roots** (injected by code — never in a `.md`): every CLI receives the worktree (read+write), agent dir / `agent.log`, git common dir (read+write), repo agents dir (`REPOAGENTS` — **write** for a spawner, **read** for a non-spawner, keyed on resolved `canSpawnChildren`), the parent repo's `.claude` (`PARENTCLAUDE`, write, spawners only), and the parent repo's `.itsybitsy/repo-id` (`REPOID`, **read-only**, spawners only — `getRepoId` reads it to name and seal a child). Claude — including legacy metadata with an absent model, a safe bare model such as `sonnet`/`opus`, or the `unknown` value produced by `readAgentMeta` — additionally receives its project directory (`~/.claude/projects/<encoded-worktree>`) and scratchpad (`/private/tmp/claude-<uid>/<encoded-worktree>`); those Claude-only roots are omitted from codex, fugu, and agy hook tables, just as they are from those CLIs' kernel parameter sets. **agy** additionally receives its whole `~/.gemini` state directory (read+write) as an **agy-only** runtime root — omitted from the claude/codex/fugu tables — because agy writes both `~/.gemini/antigravity-cli/` and `~/.gemini/config/` at runtime; its OAuth credentials live in the macOS keyring, not there. For a **non-spawner**, the **tmux socket dir is a deny root** (reaching the tmux server is a sandbox escape); a spawner keeps it (accepted, SPEC-SANDBOX §4C.3).
 
 **Resolution rules**: `paths.deny` **wins** over any allow at any depth; otherwise the **most specific** (longest canonical) matching entry decides — `allowWrite` grants read+write, `allowRead` grants read-only, and the same path in both lists **writes**. **No match denies.** A missing `paths` key defaults all three lists to empty. In a partially populated object, only omitted member lists default empty; every populated `allowRead`, `allowWrite`, or `deny` entry is retained and enforced. Neither case implies a wildcard.
 
@@ -922,18 +924,18 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 **Input**: JSON from stdin with `cwd` field (falls back to `process.cwd()` if absent).
 
 **Role detection** based on CWD and `meta.json`:
-- If CWD does not match `/.ittybitty/agents/<id>/repo` → **primary** (user-level Claude)
+- If CWD does not match `/.itsybitsy/agents/<id>/repo` → **primary** (user-level Claude)
 - If CWD matches → reads `meta.json` and checks `agentType`, then falls back to legacy booleans:
   - `agentType` is set → role is derived from the type name (`"coordinator"` → coordinator, `"worker"` → worker, else → manager). However, this role is only used as a fallback — the actual instruction generation uses the type's `instructionStyle` field.
   - `agentType` is not set (legacy agent) → `coordinator: true` → coordinator, `worker: true` → worker, else → manager
 
-**Output**: JSON with `hookSpecificOutput.additionalContext` containing role-appropriate instructions wrapped in `<ittybitty>` tags.
+**Output**: JSON with `hookSpecificOutput.additionalContext` containing role-appropriate instructions wrapped in `<itsybitsy>` tags.
 
 ### 6.3.1 Instruction Generation
 
 Instructions are generated based on the agent's type definition:
 
-1. **If `agentType` is set in meta.json**: Load the type definition via `loadAgentType()`. If the type has a `markdownBody` (template body from the `.md` file), interpolate it with the session context variables and wrap in `<ittybitty>` tags. If no body, fall back to the hardcoded instructions matching the type's `instructionStyle` field (`"manager"`, `"worker"`, or `"coordinator"`).
+1. **If `agentType` is set in meta.json**: Load the type definition via `loadAgentType()`. If the type has a `markdownBody` (template body from the `.md` file), interpolate it with the session context variables and wrap in `<itsybitsy>` tags. If no body, fall back to the hardcoded instructions matching the type's `instructionStyle` field (`"manager"`, `"worker"`, or `"coordinator"`).
 
 2. **If `agentType` is not set (legacy agent)**: Use the detected role (from legacy `worker`/`coordinator` booleans) to select hardcoded instructions.
 
@@ -962,7 +964,7 @@ The hook still returns the full text. A failure to write the log line or the que
 Two cases give the log line only, with no question:
 
 - `allowAgentQuestions` is `false` (§7.2). The config check in `askQuestion` applies to a harness question too.
-- The kernel sandbox is ON for a worktree agent. The hook runs in the sandboxed agent process, and `<repo>/.ittybitty/user-questions.json` is not one of its write roots, so the write fails. `ib ask` from a sandboxed agent does not have this limit (its watchdog writes the question, §4.2); the hook's question is not sent through the watchdog.
+- The kernel sandbox is ON for a worktree agent. The hook runs in the sandboxed agent process, and `<repo>/.itsybitsy/user-questions.json` is not one of its write roots, so the write fails. `ib ask` from a sandboxed agent does not have this limit (its watchdog writes the question, §4.2); the hook's question is not sent through the watchdog.
 
 The `@system` coordinator and primary Claude have no agent record and get no flag. Codex and agy agents do not use this cap (§18.6, §19.3) and get no flag.
 
@@ -1140,7 +1142,7 @@ Summary:
 
 ### 7.4 Custom Prompts
 
-Custom prompt files in `.ittybitty/prompts/`:
+Custom prompt files in `.itsybitsy/prompts/`:
 
 | File | Injected into |
 |------|--------------|
@@ -1252,8 +1254,8 @@ Removes a key from the config file, reverting it to its built-in default.
 
 Agent IDs can be specified as partial strings. Resolution:
 
-1. **Exact match** — check agent directory, then tmux sessions (`ittybitty-*-<partial>`)
-2. **Substring match** — scan all agent directories and tmux sessions for the pattern, extracting agent IDs from session names (format: `ittybitty-<repoid>-<agentid>`)
+1. **Exact match** — check agent directory, then tmux sessions (`itsybitsy-*-<partial>`)
+2. **Substring match** — scan all agent directories and tmux sessions for the pattern, extracting agent IDs from session names (format: `itsybitsy-<repoid>-<agentid>`)
 3. If 0 matches → error. If 1 match → use it. If 2+ matches → error listing all matches.
 
 ### 8.2 Agent Logging
@@ -1273,7 +1275,7 @@ After retires/nukes, the system scans for orphaned Claude processes:
 
 1. Find all processes matching "claude" via `pgrep`
 2. For each, determine its CWD (macOS: `lsof -d cwd`, Linux: `/proc/<pid>/cwd`)
-3. If CWD contains `/.ittybitty/agents/` and the agent directory no longer exists → orphan
+3. If CWD contains `/.itsybitsy/agents/` and the agent directory no longer exists → orphan
 4. Kill orphans with SIGTERM → wait 2s → SIGKILL
 
 ### 8.4 Auto-Compact
@@ -1296,11 +1298,11 @@ Per-agent watchdogs do not use a watchdog lock file for state detection, and the
 
 **Spawn-request broker (sandboxed spawners)**: **TypeScript only.** The watchdog runs unsandboxed (started by the tmux server), so it also performs `ib new-agent` on behalf of its own SANDBOXED agent, which cannot (nested `sandbox-exec` is refused, the proxy port cannot be bound). A sandboxed `ib new-agent` (kernel check `sandbox_check`, `src/sandbox-detect.ts`) writes `<agentDir>/spawn-requests/<id>.json` — carrying the FULL prompt text, never a file path — fails at once if the watchdog has no fresh heartbeat, and otherwise waits at most 30 s for `<agentDir>/spawn-results/<id>.json`. At the top of every tick, and on an `fs.watch` of the request directory, the watchdog handles queued requests (`processSpawnRequests`, `src/spawn-broker.ts`): each request file is deleted before it is acted on (at-most-once), only allowlisted fields are honored (never `model`, `repo` or `spawnedBy`), the caller's `meta.json` is verified against its sealed record, and `newAgent()` runs with that verified caller (`_trustedCaller`) so every ordinary caller gate applies. The handler is not awaited by the loop (a spawn takes seconds) and at most one runs at a time; a handler error never crashes the watchdog. Unsandboxed callers never use the broker. Details and limitations: SPEC-SANDBOX.md §4C.6.
 
-**Lifecycle-request broker (sandboxed managers)**: **TypeScript only.** The same queue carries the lifecycle commands a sandboxed worktree agent cannot run itself, because its profile grants neither the main repo root nor `.ittybitty/archive`: `ib retire <id>`, `ib merge <id> [--keep]` and `ib rehire <id>`. Only a worktree agent with its itsybitsy sandbox enabled is routed; every other caller — unsandboxed, not an agent, `worktree: false` (no per-agent watchdog, and its profile grants the repo root), or itsybitsy sandbox off (for example codex in its own sandbox) — runs the command directly as before. The routed command writes `{v:1, id, op, target, keep?}` to `<agentDir>/spawn-requests/<id>.json` and waits at most 100 s for the result (`src/lifecycle-broker.ts`). The watchdog verifies the requester against its sealed record, resolves a retire/merge target by its directory entry inside the requester's own repo (the `id` in a `meta.json` alone identifies nothing), refuses a target that is the requester itself, applies the PreToolUse hook's manager-or-spawner rule itself (`checkManagerCommandAccess`, including the coordinator authority of §12.2 — the hook cannot be the only gate, since a sandboxed agent can write a request file without running `ib`), and runs the normal command. The rule is given the verified meta and no unsealed field of the requester's `meta.json` is trusted; the TARGET's `manager` / `spawned_by` are still the target's own word. A merge is aimed at the requester's own worktree (`<agentDir>/repo`, checked once to be a real directory) with agent (`--ff-only`) semantics (§3.1); neither the request nor `meta.worktree` can choose the directory. A rehire is authorized from, and searches, the requester's repo archive only. Because a sandboxed worktree agent cannot read `.ittybitty/archive`, the hook rule leaves `ib rehire` of a non-active target undecided in that one case and the watchdog's check is the gate. Details and limitations: SPEC-SANDBOX.md §4C.7.
+**Lifecycle-request broker (sandboxed managers)**: **TypeScript only.** The same queue carries the lifecycle commands a sandboxed worktree agent cannot run itself, because its profile grants neither the main repo root nor `.itsybitsy/archive`: `ib retire <id>`, `ib merge <id> [--keep]` and `ib rehire <id>`. Only a worktree agent with its itsybitsy sandbox enabled is routed; every other caller — unsandboxed, not an agent, `worktree: false` (no per-agent watchdog, and its profile grants the repo root), or itsybitsy sandbox off (for example codex in its own sandbox) — runs the command directly as before. The routed command writes `{v:1, id, op, target, keep?}` to `<agentDir>/spawn-requests/<id>.json` and waits at most 100 s for the result (`src/lifecycle-broker.ts`). The watchdog verifies the requester against its sealed record, resolves a retire/merge target by its directory entry inside the requester's own repo (the `id` in a `meta.json` alone identifies nothing), refuses a target that is the requester itself, applies the PreToolUse hook's manager-or-spawner rule itself (`checkManagerCommandAccess`, including the coordinator authority of §12.2 — the hook cannot be the only gate, since a sandboxed agent can write a request file without running `ib`), and runs the normal command. The rule is given the verified meta and no unsealed field of the requester's `meta.json` is trusted; the TARGET's `manager` / `spawned_by` are still the target's own word. A merge is aimed at the requester's own worktree (`<agentDir>/repo`, checked once to be a real directory) with agent (`--ff-only`) semantics (§3.1); neither the request nor `meta.worktree` can choose the directory. A rehire is authorized from, and searches, the requester's repo archive only. Because a sandboxed worktree agent cannot read `.itsybitsy/archive`, the hook rule leaves `ib rehire` of a non-active target undecided in that one case and the watchdog's check is the gate. Details and limitations: SPEC-SANDBOX.md §4C.7.
 
-**Ask-request broker (sandboxed agents)**: **TypeScript only.** The same queue carries `ib ask` (§4.2) for a sandboxed worktree agent, whose profile does not grant `.ittybitty/user-questions.json`. The same callers are routed as for a lifecycle command, and every other caller asks directly as before. The routed command writes `{v:1, id, op:"ask", question}` to `<agentDir>/spawn-requests/<id>.json` and waits at most 30 s for the result (`src/ask-broker.ts`). The request carries the question text only: it cannot name an agent, a repo or a file, and it cannot mark a harness question. The watchdog verifies the requester against its sealed record and runs the normal `askQuestion()` with its OWN agent id, so the top-level rule, the `allowAgentQuestions` check, the log line and the notifications apply unchanged. Details and limitations: SPEC-SANDBOX.md §4C.8.
+**Ask-request broker (sandboxed agents)**: **TypeScript only.** The same queue carries `ib ask` (§4.2) for a sandboxed worktree agent, whose profile does not grant `.itsybitsy/user-questions.json`. The same callers are routed as for a lifecycle command, and every other caller asks directly as before. The routed command writes `{v:1, id, op:"ask", question}` to `<agentDir>/spawn-requests/<id>.json` and waits at most 30 s for the result (`src/ask-broker.ts`). The request carries the question text only: it cannot name an agent, a repo or a file, and it cannot mark a harness question. The watchdog verifies the requester against its sealed record and runs the normal `askQuestion()` with its OWN agent id, so the top-level rule, the `allowAgentQuestions` check, the log line and the notifications apply unchanged. Details and limitations: SPEC-SANDBOX.md §4C.8.
 
-**Send-request broker (sandboxed agents)**: **TypeScript only.** The same queue carries `ib send` (§4.1) for a sandboxed worktree agent. Its profile grants `.ittybitty/agents` of its own repo only, so a target in another repo cannot be resolved (writing an agent's outbox is allowed). It could not reach `@system` at all (the coordinator's outbox is in `~/.itsybitsy/` itself, and `tmux` is denied to a non-spawner); through the broker it now can, as an unsandboxed agent can, labelled `[sent by agent <id>]`. The same callers are routed as for a lifecycle command, and every other caller sends directly as before. The routed command reads the message (inline, `-f <path>` or stdin) inside the sandbox, writes `{v:1, id, op:"send", target, message}` to `<agentDir>/spawn-requests/<id>.json` and waits at most 30 s for the result (`src/send-broker.ts`). The request cannot name a sender, a directory or a file. The watchdog verifies the requester against its sealed record, resolves the target with the normal resolver (every form of §4.1 and §12.3.1; `@coordinator` is the requester's repo coordinator), and sends with the normal `sendMessage`, team fan-out or `sendToSystemCoordinator` as its OWN agent. It never stages attachments (§4.1.2). When the watchdog has no fresh heartbeat or predates the broker, the command sends directly as before; once a current watchdog has taken the request, a timeout or failure is reported and the message is not sent again. Details and limitations: SPEC-SANDBOX.md §4C.9.
+**Send-request broker (sandboxed agents)**: **TypeScript only.** The same queue carries `ib send` (§4.1) for a sandboxed worktree agent. Its profile grants `.itsybitsy/agents` of its own repo only, so a target in another repo cannot be resolved (writing an agent's outbox is allowed). It could not reach `@system` at all (the coordinator's outbox is in `~/.itsybitsy/` itself, and `tmux` is denied to a non-spawner); through the broker it now can, as an unsandboxed agent can, labelled `[sent by agent <id>]`. The same callers are routed as for a lifecycle command, and every other caller sends directly as before. The routed command reads the message (inline, `-f <path>` or stdin) inside the sandbox, writes `{v:1, id, op:"send", target, message}` to `<agentDir>/spawn-requests/<id>.json` and waits at most 30 s for the result (`src/send-broker.ts`). The request cannot name a sender, a directory or a file. The watchdog verifies the requester against its sealed record, resolves the target with the normal resolver (every form of §4.1 and §12.3.1; `@coordinator` is the requester's repo coordinator), and sends with the normal `sendMessage`, team fan-out or `sendToSystemCoordinator` as its OWN agent. It never stages attachments (§4.1.2). When the watchdog has no fresh heartbeat or predates the broker, the command sends directly as before; once a current watchdog has taken the request, a timeout or failure is reported and the message is not sent again. Details and limitations: SPEC-SANDBOX.md §4C.9.
 
 **State resolution per tick**: The watchdog resolves the agent's effective state on each 5-second tick using the same resolution order as consumers (§1.3):
 1. No tmux session → `stopped` (or `creating` if within grace period)
@@ -1353,7 +1355,7 @@ With no agent id, `ib ack` resolves the caller once and acknowledges all direct 
 - **Watchdog** (§8.5): `handleWaiting` and `handleComplete` read the ack from meta.json on each tick (so it survives a watchdog restart), and send nothing while it covers the current state. When a tick finds that an ack the watchdog saw before is gone, a new episode started, maybe between two polls. The watchdog then restarts that episode's schedule: reminders from `1/5` at the first interval, and the 30 s complete fallback. Until an ack is written, timings do not change. There is no ack for `unknown`.
 - **Queued notices**: an ack stops notices created after it. A notice already in the manager's outbox is delivered as usual.
 - **Manager completion**: an acknowledged child is still unfinished (§2.5). The manager is told to end its turn with `WAITING`.
-- **Sandbox**: `ib ack` reads the registry and `<repo>/.ittybitty/agents`, and writes only in the child's agent directory (`meta.json`, its lock and temp file, `agent.log`). A spawner's kernel profile grants write on `<repo>/.ittybitty/agents`, and it needs neither the main repo root nor the archive, so a sandboxed manager runs it directly, without the watchdog broker. The opt-in live test in `src/ib-ack.test.ts` (`IB_LIVE_ACK=1`) runs the compiled `ib ack` under a real manager profile.
+- **Sandbox**: `ib ack` reads the registry and `<repo>/.itsybitsy/agents`, and writes only in the child's agent directory (`meta.json`, its lock and temp file, `agent.log`). A spawner's kernel profile grants write on `<repo>/.itsybitsy/agents`, and it needs neither the main repo root nor the archive, so a sandboxed manager runs it directly, without the watchdog broker. The opt-in live test in `src/ib-ack.test.ts` (`IB_LIVE_ACK=1`) runs the compiled `ib ack` under a real manager profile.
 - **Dashboard**: not changed.
 
 ### 8.6 Root Repo Resolution
@@ -1466,6 +1468,9 @@ The REPO pane mode displays repo-level action hints — available `ib` commands 
 ---
 
 ## 9. Multi-Repo Registry
+
+`addRepo` refuses a path whose real path equals `$HOME`, including a symlink to it, to prevent collision with the user-wide `~/.itsybitsy/` state. Subdirectories of HOME remain valid.
+
 
 ### 9.1 Registry File
 
@@ -1753,7 +1758,7 @@ The system coordinator boots like every other agent type. Its prompt body comes 
 The `ib hooks session-start @system` hook (§12.1.7) builds a `SessionContext` with `agentType: "system"` and runs `generateInstructions(ctx)`. That path:
 - Prepends `_all.md`'s markdown body (always — `_all.md` applies to every agent).
 - Skips `_non_coordinator.md` (whose body covers commit-message etiquette and other things irrelevant to `@system`, which has no Write/Edit/git access).
-- Wraps the resulting content in `<ittybitty>…</ittybitty>` (the wrapper is added by `generateInstructions`, not by the markdown file).
+- Wraps the resulting content in `<itsybitsy>…</itsybitsy>` (the wrapper is added by `generateInstructions`, not by the markdown file).
 
 Users can customize the prompt by editing `~/.itsybitsy/agent-types/system.md`. The change takes effect on the next coordinator session start.
 
@@ -1806,12 +1811,12 @@ Per-repo coordinators are Claude Code agents that coordinate work within a singl
 
 #### 12.2.2 Identity
 
-Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, but with distinguishing characteristics:
+Per-repo coordinators are stored in `.itsybitsy/agents/` like regular agents, but with distinguishing characteristics:
 
-- **Agent ID**: The repo basename (e.g., `itsybitsy` for `/Users/adam/Developer/itsybitsy`). This is computed by `getCoordinatorAgentId(repoPath)` which returns `basename(repoPath)`. Only one coordinator per repo. The agent directory is `.ittybitty/agents/<repo-basename>/` (matching the standard `agents/<id>/` convention). Using the repo basename as the agent ID means standard agent ID resolution (§4.1) naturally routes `ib send <repo-basename>` to the per-repo coordinator — no special addressing logic needed. If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended (e.g., `itsybitsy-a3f1`). **Reserved name**: The name `coordinator` is reserved for system coordinator addressing (§12.3.1). Repos with basename `coordinator` are rejected at registration time (`ib add`, §9). As a secondary guard, `newAgent()` also rejects any agent with ID `coordinator`.
+- **Agent ID**: The repo basename (e.g., `itsybitsy` for `/Users/adam/Developer/itsybitsy`). This is computed by `getCoordinatorAgentId(repoPath)` which returns `basename(repoPath)`. Only one coordinator per repo. The agent directory is `.itsybitsy/agents/<repo-basename>/` (matching the standard `agents/<id>/` convention). Using the repo basename as the agent ID means standard agent ID resolution (§4.1) naturally routes `ib send <repo-basename>` to the per-repo coordinator — no special addressing logic needed. If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended (e.g., `itsybitsy-a3f1`). **Reserved name**: The name `coordinator` is reserved for system coordinator addressing (§12.3.1). Repos with basename `coordinator` are rejected at registration time (`ib add`, §9). As a secondary guard, `newAgent()` also rejects any agent with ID `coordinator`.
 - **meta.json flag**: `"coordinator": true` — marks this agent as a coordinator
-- **Tmux session naming**: Standard convention: `ittybitty-<repo-id>-<agent-id>` (where `<agent-id>` is the repo basename)
-- **Branch name**: `agent/<agent-id>-<repo-id>` (includes repo-id to avoid collision across repos sharing the same git remote — each repo has a unique 8-char hex repo-id in `.ittybitty/repo-id`)
+- **Tmux session naming**: Standard convention: `itsybitsy-<repo-id>-<agent-id>` (where `<agent-id>` is the repo basename)
+- **Branch name**: `agent/<agent-id>-<repo-id>` (includes repo-id to avoid collision across repos sharing the same git remote — each repo has a unique 8-char hex repo-id in `.itsybitsy/repo-id`)
 
 #### 12.2.3 Lifecycle
 
@@ -1826,7 +1831,7 @@ Per-repo coordinators are stored in `.ittybitty/agents/` like regular agents, bu
 7. Defaults to the model resolved by walking `~/.itsybitsy/agent-types/coordinator.md` `model:` > `~/.itsybitsy/agent-types/_all.md` `model:` > `claude:opus` when no explicit `--model` is provided — overridable with `--model <model>` on `ib new-agent --type coordinator`. The user's global `model` config key is NOT consulted on the coordinator path (see §12.5).
 8. Otherwise follows the standard agent creation flow (§1.1)
 
-**One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.ittybitty/agents/` for any agent with `coordinator: true` in meta.json. If a coordinator already exists, `ib new-agent --type coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.ittybitty/archive/`) do not block creation — "active" means a directory in `.ittybitty/agents/` (not `.ittybitty/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
+**One-per-repo constraint**: `checkCoordinatorExists(repoPath)` scans all agent directories in `.itsybitsy/agents/` for any agent with `coordinator: true` in meta.json. If a coordinator already exists, `ib new-agent --type coordinator` prints `"Coordinator already exists for <repo-name>"` and exits 0 (idempotent no-op). If a non-coordinator agent already has the repo basename as its ID (collision), a random 4-char hex suffix is appended to the coordinator's ID. There is exactly one coordinator per repo, never more. Archived coordinators (in `.itsybitsy/archive/`) do not block creation — "active" means a directory in `.itsybitsy/agents/` (not `.itsybitsy/archive/`). A stopped or paused coordinator whose directory is still in `agents/` DOES block creation — only archiving removes the block.
 
 **No auto-spawn on watch startup**: Per-repo coordinators are NOT auto-spawned when `ib watch` launches. Only the system coordinator is auto-spawned (§12.1.2). Per-repo coordinators are created manually via one of: (a) `ib new-agent --type coordinator` from the CLI, (b) pressing `R` on a repo header in the TUI (which spawns a coordinator if none exists, or resumes a stopped one), or (c) the system coordinator running `ib new-agent --type coordinator` from within a repo directory.
 
@@ -1897,7 +1902,7 @@ When a repo header is selected, the dashboard locates the per-repo coordinator (
 
 #### 12.2.6 Session Start Context
 
-Per-repo coordinators use a custom session-start context (injected via the session-start hook, which detects the `coordinator: true` flag in meta.json). The `generateCoordinatorInstructions()` function produces a full `<ittybitty>` block including:
+Per-repo coordinators use a custom session-start context (injected via the session-start hook, which detects the `coordinator: true` flag in meta.json). The `generateCoordinatorInstructions()` function produces a full `<itsybitsy>` block including:
 
 - Role identification and purpose (read code, coordinate workers, don't write code directly)
 - Bash rules (single-command enforcement)
@@ -1958,7 +1963,7 @@ Other commands (`ib retire`, `ib nuke`, `ib status`, `ib diff`, `ib merge`, etc.
 | `ib nuke itsybitsy` | Standard: exact match on agent ID | Kills coordinator + children (§1.8) |
 | `ib status itsybitsy` | Standard: exact match on agent ID | Shows coordinator's commits |
 
-The system coordinator has no agent ID and cannot be targeted by any standard CLI command (only via `@system` in `ib send`). It is not a regular agent — it has no agent directory, no meta.json, and no entry in any repo's `.ittybitty/agents/`. To send messages to the system coordinator programmatically, use `ib send @system` (§12.3.3).
+The system coordinator has no agent ID and cannot be targeted by any standard CLI command (only via `@system` in `ib send`). It is not a regular agent — it has no agent directory, no meta.json, and no entry in any repo's `.itsybitsy/agents/`. To send messages to the system coordinator programmatically, use `ib send @system` (§12.3.3).
 
 **Reserved name `coordinator`**: The name `coordinator` is reserved and cannot be used as an agent ID. `newAgent()` rejects any attempt to create an agent with the ID `coordinator` — whether via `--name coordinator`, or because a repo's basename happens to be `coordinator` (in coordinator mode). This prevents confusion: if someone types `ib send coordinator` (without the `@`), they get "Agent not found" rather than silently messaging the wrong target. The old `ib send coordinator` special routing is removed — use `ib send @system` instead.
 
@@ -1985,11 +1990,11 @@ All messages to the system coordinator — interactive (TUI) and programmatic (`
 ```
 User
  └── System Coordinator (ib-coordinator, ~/.itsybitsy/)
-      ├── Per-Repo Coordinator (agent ID: itsybitsy, .ittybitty/agents/itsybitsy/)
+      ├── Per-Repo Coordinator (agent ID: itsybitsy, .itsybitsy/agents/itsybitsy/)
       │    ├── agent-a1b2c3d4 (worker, manager: "itsybitsy")
       │    └── agent-e5f6a7b8 (manager, manager: "itsybitsy")
       │         └── agent-f9a0b1c2 (worker, manager: "agent-e5f6a7b8")
-      └── Per-Repo Coordinator (agent ID: muse-ios, .ittybitty/agents/muse-ios/)
+      └── Per-Repo Coordinator (agent ID: muse-ios, .itsybitsy/agents/muse-ios/)
            └── agent-d3e4f5a6 (worker, manager: "muse-ios")
 ```
 
@@ -2014,7 +2019,7 @@ export type FlatEntry =
 
 #### 12.4.3 maxAgents
 
-Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agent --type coordinator` or TUI `R` key) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.ittybitty/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
+Per-repo coordinators bypass the `maxAgents` check during creation (`ib new-agent --type coordinator` or TUI `R` key) — coordinators are infrastructure, not user tasks. They DO occupy agent directories in `.itsybitsy/agents/` and appear in `ib list` output, but they are **excluded from the agent count** when checking `maxAgents` for regular agent creation. Example: if `maxAgents=10` and there are 3 coordinators, you can still create 10 regular agents (not 7). The system coordinator does NOT count — it is not a regular agent and lives outside any repo.
 
 ### 12.5 Coordinator-Specific Config
 
@@ -2264,11 +2269,11 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 #### 14.3.3 Orphaned Agent Directories (warning)
 
-**What**: An agent directory exists in `.ittybitty/agents/<id>/` but has no corresponding tmux session AND no valid `meta.json`, or has a `meta.json` that references a tmux session that doesn't exist and the agent is older than 30 seconds (past the creating grace period).
+**What**: An agent directory exists in `.itsybitsy/agents/<id>/` but has no corresponding tmux session AND no valid `meta.json`, or has a `meta.json` that references a tmux session that doesn't exist and the agent is older than 30 seconds (past the creating grace period).
 
 **Why it's a problem**: Orphaned directories consume the `maxAgents` count and clutter the agent tree. They may indicate a failed retire/nuke that left artifacts behind.
 
-**Detection**: For each agent directory in `.ittybitty/agents/`:
+**Detection**: For each agent directory in `.itsybitsy/agents/`:
 1. Check if `meta.json` exists and is valid JSON with required fields (`id`, `tmux_session`)
 2. If `meta.json` is missing or malformed → orphaned (error severity)
 3. If `meta.json` is valid but the tmux session doesn't exist and `created_epoch` is older than 30s → check if the agent has a worktree (`<agent-dir>/repo` exists). If no worktree, it's a stale directory (warning). If the worktree exists, it's a stopped agent — not flagged (normal state).
@@ -2292,11 +2297,11 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 #### 14.3.5 Orphaned Git Worktrees (warning)
 
-**What**: Git worktrees exist for agent branches (`agent/<id>`) that no longer have a corresponding agent directory in `.ittybitty/agents/`.
+**What**: Git worktrees exist for agent branches (`agent/<id>`) that no longer have a corresponding agent directory in `.itsybitsy/agents/`.
 
 **Why it's a problem**: Orphaned worktrees consume disk space and may cause branch conflicts when creating new agents.
 
-**Detection**: Run `git worktree list --porcelain` in the repo root. For each worktree whose branch matches `agent/<id>`, check if `.ittybitty/agents/<id>/` exists. If the directory is gone, the worktree is orphaned.
+**Detection**: Run `git worktree list --porcelain` in the repo root. For each worktree whose branch matches `agent/<id>`, check if `.itsybitsy/agents/<id>/` exists. If the directory is gone, the worktree is orphaned.
 
 **Message**: `"Orphaned git worktree for agent/<id> — no agent directory exists. Clean up with: git worktree remove <path>"`
 
@@ -2306,7 +2311,7 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 **Why it's a problem**: Low severity — branches are cheap, but many orphaned branches clutter `git branch` output and may indicate incomplete cleanup.
 
-**Detection**: Run `git branch --list 'agent/*'` in the repo root. For each branch `agent/<id>`, check if `.ittybitty/agents/<id>/` exists OR if a worktree is checked out on that branch. If neither, the branch is orphaned.
+**Detection**: Run `git branch --list 'agent/*'` in the repo root. For each branch `agent/<id>`, check if `.itsybitsy/agents/<id>/` exists OR if a worktree is checked out on that branch. If neither, the branch is orphaned.
 
 **Message**: `"Orphaned git branch: agent/<id> — no agent or worktree exists"`
 
@@ -2316,7 +2321,7 @@ Each check produces zero or more **warnings**. Warnings have a severity level an
 
 **Why it's a problem**: The stop hook and watchdog attempt to notify the manager agent. If the manager doesn't exist, notifications silently fail. More importantly, the agent tree will show broken parent-child relationships.
 
-**Detection**: For each agent, if `meta.json.manager` is set, check if `.ittybitty/agents/<manager-id>/` exists.
+**Detection**: For each agent, if `meta.json.manager` is set, check if `.itsybitsy/agents/<manager-id>/` exists.
 
 **Message**: `"Agent <id> references non-existent manager <manager-id>"`
 
@@ -2373,7 +2378,7 @@ When a repo header is selected and the pane mode is REPO, the health warnings ar
    Fix: Remove the hook entry from .claude/settings.local.json
 ⚠️ Missing global safety hooks — run setup (h) to install
 ⚠️ Orphaned git worktree for agent/agent-deadbeef
-   Fix: git worktree remove .ittybitty/agents/agent-deadbeef/repo
+   Fix: git worktree remove .itsybitsy/agents/agent-deadbeef/repo
 ℹ️ Orphaned git branch: agent/agent-cafebabe
 ```
 
@@ -2399,7 +2404,7 @@ The `H` keybinding (Shift+h, distinct from `h` for setup dialog) triggers a re-r
 
 - Health checks should complete in <100ms per repo for typical repos (a few agents, standard git setup). Git operations (`worktree list`, `branch --list`) are the most expensive and should be batched.
 - The global hooks check (`~/.claude/settings.json`) runs once at startup, not per-repo.
-- Results are cached in memory as a `Map<repoPath, RepoHealthReport>`. The cache is invalidated on manual re-check or when the watcher detects changes in `.ittybitty/agents/`.
+- Results are cached in memory as a `Map<repoPath, RepoHealthReport>`. The cache is invalidated on manual re-check or when the watcher detects changes in `.itsybitsy/agents/`.
 - Health checks must not modify any files — they are strictly read-only and diagnostic.
 - The `readAllAgents()` pipeline already reads `meta.json` for every agent — health checks for §14.3.3, §14.3.4, and §14.3.7 can piggyback on this data rather than re-reading.
 
@@ -2412,7 +2417,7 @@ Some health check categories can be automatically resolved. The `f` keybinding (
 | Category | Action |
 |----------|--------|
 | `leaked-hooks` (§14.3.1) | Remove the matching hook entries from `.claude/settings.local.json` |
-| `orphaned-dir` (§14.3.3, all variants) | Remove the agent directory (`rm -rf`) — both the "stale directory" variant (warning severity, valid meta but no tmux/worktree) and the "no valid meta.json" variant (error severity). Directories inside `.ittybitty/agents/` with no valid meta.json are clearly abandoned and safe to remove; agent IDs are validated to prevent path traversal. |
+| `orphaned-dir` (§14.3.3, all variants) | Remove the agent directory (`rm -rf`) — both the "stale directory" variant (warning severity, valid meta but no tmux/worktree) and the "no valid meta.json" variant (error severity). Directories inside `.itsybitsy/agents/` with no valid meta.json are clearly abandoned and safe to remove; agent IDs are validated to prevent path traversal. |
 | `orphaned-worktree` (§14.3.5) | Run `git worktree remove <path> --force` |
 | `orphaned-branch` (§14.3.6) | Run `git branch -D <branch>` |
 | `stale-manager-ref` (§14.3.7) | Remove the `manager` field from the agent's `meta.json` |
@@ -2659,7 +2664,7 @@ With bidirectional creation-time prevention, the resolver never has to guess. Re
 
 ### 16.2 Team Registry State
 
-Teams span repos, so team state cannot live in any one repo's `.ittybitty/` directory. It lives at the user-wide tier alongside `repos.json` and `config.json` (§9, §7):
+Teams span repos, so team state cannot live in any one repo's `.itsybitsy/` directory. It lives at the user-wide tier alongside `repos.json` and `config.json` (§9, §7):
 
 - **File**: `~/.itsybitsy/teams.json`
 
@@ -3195,7 +3200,7 @@ At spawn and resume, Codex/Fugu always use `-a never`, so native approval UI is 
 
 - **Why it exists.** Codex keeps the resolved `gitdir:` target of the worktree's `.git` pointer read-only, and on macOS also carves it out of the broader `--add-dir <commonDir>` root. That per-worktree Git admin dir holds `index.lock`, `logs/HEAD` and `COMMIT_EDITMSG`, so under `-s workspace-write` `git add`/`git commit` failed. An entry for that exact path lifts the protection.
 - **Where the paths come from.** `<gitDir>` is `git rev-parse --git-dir` and `<commonDir>` is `git rev-parse --git-common-dir`. Both run in the worktree, and the results are canonicalized. The admin dir's name is Git's own and is never derived from the agent id. A `--git-dir` failure refuses the launch. The paths live in one TOML inline-table value because Codex splits `-c` keys on every `.`.
-- **What it does not change.** The `--add-dir` grants (coordinator home, `~/Library/Caches`, `<commonDir>`, parent `.ittybitty`/`.claude`) are unchanged. `--add-dir <commonDir>` already grants the whole common Git dir, including `hooks/` and `config`, and the profile does not narrow it. The `objects`/`refs`/`logs` entries are redundant with it, so only the `<gitDir>` entry adds access. `:workspace` has no network, so `network.enabled=true` restores the old unrestricted network.
+- **What it does not change.** The `--add-dir` grants (coordinator home, `~/Library/Caches`, `<commonDir>`, parent `.itsybitsy`/`.claude`) are unchanged. `--add-dir <commonDir>` already grants the whole common Git dir, including `hooks/` and `config`, and the profile does not narrow it. The `objects`/`refs`/`logs` entries are redundant with it, so only the `<gitDir>` entry adds access. `:workspace` has no network, so `network.enabled=true` restores the old unrestricted network.
 - **Why no `-s`.** Any `-s` makes Codex ignore `default_permissions`, and a selected profile ignores `sandbox_workspace_write.*`.
 - **No fallback and no config writes.** A disabled launch without the Git dirs is refused rather than falling back to `-s workspace-write` or `danger-full-access`. No Codex config file is written.
 - **Resume** re-passes the identical flags. Per the codex 0.165.0 source, a resume request that carries these permission keys suppresses the session's saved permissions. So resume uses this profile both for sessions spawned under it and for sessions spawned before it with `-s workspace-write`.
@@ -3251,7 +3256,7 @@ path whose generated files and hook prechecks were skipped.
 - **codex path:** generates a codex-shaped `start.sh` via `buildCodexStartContent()` in `src/codex-spawn.ts`. The codex branch:
   1. Skips `<worktree>/.claude/settings.local.json` entirely (codex doesn't read it).
   2. Appends `.codex/` to `<worktree>/.gitignore` via `appendCodexGitignoreEntry()` (idempotent; respects `!.codex/` negation) to cover any incidental files codex itself drops.
-  3. Puts **no role text on the launch line**. The codex SessionStart hook (`ib hooks codex-session-start`, `src/hooks/codex-session-start.ts`) returns the role instructions as `hookSpecificOutput.additionalContext`, the same way the Claude session-start hook does. The text is `buildAgentRoleBody()` for the agent's frozen `meta.json` and worktree: the session-start template (the `<ittybitty>` wrapper stripped via `stripItsybitsyWrapper()`) plus the skills catalogue. Codex (verified against the 0.154.0 source) runs SessionStart on startup, resume, `/clear` and after every compaction (`source` = `startup` / `resume` / `clear` / `compact`; our matcher is `.*`) and records the text as a developer message before that turn's user input, so the agent has it before its first turn and again after each compaction (compaction drops the old copy). Codex cuts `additionalContext` above 2,500 estimated tokens (bytes ÷ 4) down to a preview plus a file path; the SessionStart registration sets `additionalContextLimit=0` so the whole role text reaches the model. Hook stdout has no size cap. **Nothing is written into the worktree**: an earlier design wrote a generated `<worktree>/AGENTS.md`, which clobbered a repo-tracked `AGENTS.md` (codex reads one `AGENTS.md` per directory).
+  3. Puts **no role text on the launch line**. The codex SessionStart hook (`ib hooks codex-session-start`, `src/hooks/codex-session-start.ts`) returns the role instructions as `hookSpecificOutput.additionalContext`, the same way the Claude session-start hook does. The text is `buildAgentRoleBody()` for the agent's frozen `meta.json` and worktree: the session-start template (the `<itsybitsy>` wrapper stripped via `stripItsybitsyWrapper()`) plus the skills catalogue. Codex (verified against the 0.154.0 source) runs SessionStart on startup, resume, `/clear` and after every compaction (`source` = `startup` / `resume` / `clear` / `compact`; our matcher is `.*`) and records the text as a developer message before that turn's user input, so the agent has it before its first turn and again after each compaction (compaction drops the old copy). Codex cuts `additionalContext` above 2,500 estimated tokens (bytes ÷ 4) down to a preview plus a file path; the SessionStart registration sets `additionalContextLimit=0` so the whole role text reaches the model. Hook stdout has no size cap. **Nothing is written into the worktree**: an earlier design wrote a generated `<worktree>/AGENTS.md`, which clobbered a repo-tracked `AGENTS.md` (codex reads one `AGENTS.md` per directory).
   4. Runs a spawn-time precheck: invokes `ib hooks codex-pre-tool-use --dry-run <agentId>` and the SessionStart + Stop counterparts before launching codex. If any dispatcher fails to resolve (binary missing, module-import crash), the spawn fails cleanly — closing the out-of-process fail-open hole.
   5. Generates `start.sh` launching the §18.4 canonical line in tmux. Same `setsid … &` + `wait` + `exit-check` skeleton as the claude path; same SIGHUP-ignore insulation. PID capture goes through the `ib write-pid` subcommand (§18.11), not an inline `bun -e` snippet.
 
@@ -3261,7 +3266,7 @@ path whose generated files and hook prechecks were skipped.
 |---|---|---|---|
 | claude | `AGENTS.md` (Claude Code 2.1.277+, when the project has no `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md` in the working directory or above it), else `CLAUDE.md` | `~/.claude/CLAUDE.md` | SessionStart hook injection |
 | codex / fugu | `AGENTS.md` (`AGENTS.override.md` wins in the same directory); not `CLAUDE.md` by default (only if listed in `project_doc_fallback_filenames`) | `~/.codex/AGENTS.md` | SessionStart hook injection |
-| agy | `AGENTS.md` / `GEMINI.md`, plus always-on workspace rules under `.agents/rules/`; not `CLAUDE.md` | `~/.gemini/GEMINI.md` | `.agents/rules/ittybitty-agent.md` (§19.3) |
+| agy | `AGENTS.md` / `GEMINI.md`, plus always-on workspace rules under `.agents/rules/`; not `CLAUDE.md` | `~/.gemini/GEMINI.md` | `.agents/rules/itsybitsy-agent.md` (§19.3) |
 
 So a repo keeps its instructions in `AGENTS.md`. itsybitsy does not check for it: an agent in a repo that has only `CLAUDE.md` starts without the project instructions under codex and agy. For one user-wide file, keep `~/.claude/CLAUDE.md` as the real file (Claude Code has no user-level `AGENTS.md`, and its Edit/Write tools refuse to write through a symlink) and symlink the others to it: `~/.codex/AGENTS.md -> ~/.claude/CLAUDE.md` and `~/.gemini/GEMINI.md -> ~/.claude/CLAUDE.md` (make sure no `~/.codex/AGENTS.override.md` exists, since codex reads it instead). Under the kernel sandbox the CLI process must read both the link and its target: the embedded `_all.md` floor grants read on `~/.claude` and `~/.codex` to every agent, and agy gets `~/.gemini` as its runtime state root (§6.1), so no profile change is needed.
 
@@ -3395,10 +3400,10 @@ Verbatim summary of `SPEC-ANTIGRAVITY-CLI.md` §2:
 |---|---|
 | D1 | Selector is `agy:<slug>`; the slug is passed verbatim to `--model`. `--effort <low\|medium\|high>` is passed only when the slug does NOT already end in `-low`/`-medium`/`-high` (Gemini slugs encode effort). `xhigh`/`max` map to `high` (`mapEffortForAgy`). The reserved slug `agy:default` launches agy with no `--model`/`--effort`, so agy uses its own configured default model. |
 | D2 | Launch = `agy --dangerously-skip-permissions --mode=accept-edits --model <slug> [--effort <e>] --log-file <agentDir>/agy.log -i "<prompt>"`. Resume = same flags with `--conversation <uuid>` and no `-i` (resume does not carry `--model`, so it is re-passed). |
-| D3 | The PreToolUse hook resolves `meta.paths` plus agy runtime roots (including the agy-only `~/.gemini` write root) through the shared deny-by-default table and does the fine-grained path isolation the coarse kernel walls cannot express. It is retained in both modes and is authoritative for every tool approval; a native user prompt is never a fallback. Hooks are registered in `<worktree>/.agents/hooks.json` under the named hook `ittybitty` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`; each `command` = `<abs ib> hooks agy-<event> <agentId>`, timeout 30. |
+| D3 | The PreToolUse hook resolves `meta.paths` plus agy runtime roots (including the agy-only `~/.gemini` write root) through the shared deny-by-default table and does the fine-grained path isolation the coarse kernel walls cannot express. It is retained in both modes and is authoritative for every tool approval; a native user prompt is never a fallback. Hooks are registered in `<worktree>/.agents/hooks.json` under the named hook `itsybitsy` for `PreToolUse` (matcher `*`), `PreInvocation`, and `Stop`; each `command` = `<abs ib> hooks agy-<event> <agentId>`, timeout 30. |
 | D4 | The hook contract is **FAIL-CLOSED**: crash, non-JSON, `{}`, and timeout all DENY (the opposite of codex). The dispatcher still wraps everything in try/catch, emits an explicit logged deny, and exits 0. |
 | D5 | **Pre-trust the worktree before launch** — add `realpath(worktree)` to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json` (read-modify-write, lock-guarded) BEFORE tmux starts, remove at teardown. Without it, `-i` submits the first turn ~2s after launch, before the trust card is answered, with no hooks/rules loaded. The watchdog trust-card accept is a FALLBACK only. |
-| D6 | Instructions go in `<worktree>/.agents/rules/ittybitty-agent.md` with frontmatter `trigger: always_on`; body = session-start template (wrapper stripped) + the skills catalogue. No project or user instruction file is copied in: agy reads the repo's `AGENTS.md` / `GEMINI.md` and the user's `~/.gemini/GEMINI.md` natively (§18.6 "Instruction files"). Never `--agent`, never overwrite `AGENTS.md`. (Superseded 2026-09-23: the body used to inline the project `CLAUDE.md` and `~/.claude/CLAUDE.md`.) |
+| D6 | Instructions go in `<worktree>/.agents/rules/itsybitsy-agent.md` with frontmatter `trigger: always_on`; body = session-start template (wrapper stripped) + the skills catalogue. No project or user instruction file is copied in: agy reads the repo's `AGENTS.md` / `GEMINI.md` and the user's `~/.gemini/GEMINI.md` natively (§18.6 "Instruction files"). Never `--agent`, never overwrite `AGENTS.md`. (Superseded 2026-09-23: the body used to inline the project `CLAUDE.md` and `~/.claude/CLAUDE.md`.) |
 | D7 | Both generated files are appended to the worktree `.gitignore`. If either path is already **tracked**, the spawn is refused (v1). |
 | D8 | Sub-agent tools (`invoke_subagent`, `define_subagent`, `manage_subagents`) are always denied ("spawn sub-agents with `ib new-agent`"). Every tool not in the translation table is denied unless an agent-type allow list names the raw `agy` tool. |
 | D9 | State: `PreInvocation` → `running` + captures `agy_conversation_id`; `Stop` → `waiting`, or `complete` when the last `PLANNER_RESPONSE` carries the completion sentinel; `Stop` may return `{"decision":"continue"}` for the uncommitted-work nudge. |
@@ -3411,8 +3416,8 @@ Verbatim summary of `SPEC-ANTIGRAVITY-CLI.md` §2:
 
 The canonical spawn launch line (D2) is rendered by `buildAgyStartContent()` in `src/agy-spawn.ts` inside the same setsid + SIGHUP-ignore + `ib write-pid` + wait + exit-check skeleton as codex. The PID is stored as `claude_pid` (name preserved so the watchdog/dashboard readers are unchanged). Two files are written into the worktree at spawn (regenerated on resume so permission edits take effect):
 
-- `<worktree>/.agents/hooks.json` — the `ittybitty` named hook registration for PreToolUse/PreInvocation/Stop (`buildAgyHooksJson`, `src/agy-config.ts`).
-- `<worktree>/.agents/rules/ittybitty-agent.md` — the `trigger: always_on` rule file (`buildAgyRulesFile`): the role text plus the skills catalogue, nothing else. agy loads it next to the repo's own `AGENTS.md`.
+- `<worktree>/.agents/hooks.json` — the `itsybitsy` named hook registration for PreToolUse/PreInvocation/Stop (`buildAgyHooksJson`, `src/agy-config.ts`).
+- `<worktree>/.agents/rules/itsybitsy-agent.md` — the `trigger: always_on` rule file (`buildAgyRulesFile`): the role text plus the skills catalogue, nothing else. agy loads it next to the repo's own `AGENTS.md`.
 
 Both are appended to `<worktree>/.gitignore` (`appendGitignoreEntries`), and the spawn is refused if either is already tracked (`refuseIfTracked`, D7). `ensureAgyTrustedWorkspace` / `removeAgyTrustedWorkspace` do the lock-guarded read-modify-write of `~/.gemini/antigravity-cli/settings.json` (D5/D13).
 

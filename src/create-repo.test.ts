@@ -63,6 +63,26 @@ describe("createRepo", () => {
     expect((await loadRegistry()).repos).toEqual([]);
   });
 
+  test.each([false, true])("refuses HOME before creating a folder or running git (exists: %p)", async (exists) => {
+    const home = join(parent, "home");
+    if (exists) await mkdir(home);
+    setUserHome(home);
+    let gitCalls = 0;
+    createRepoSpawnCtx.set(() => {
+      gitCalls++;
+      throw new Error("git must not run for HOME");
+    });
+
+    const result = await createRepo(parent, "home");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Cannot register $HOME");
+    expect(result.path).toBeUndefined();
+    expect(gitCalls).toBe(0);
+    expect(await readdir(parent)).toEqual(exists ? ["home"] : []);
+    if (exists) expect(await readdir(home)).toEqual([]);
+    expect((await loadRegistry()).repos).toEqual([]);
+  });
+
   test("refuses a parent that is a git repo", async () => {
     await mkdir(join(parent, ".git"));
     const result = await createRepo(parent, "child");

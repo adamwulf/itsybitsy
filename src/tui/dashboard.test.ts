@@ -164,7 +164,7 @@ describe("readAgentLog", () => {
   });
 
   test("reads agent.log for active agent", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "line one\nline two\nline three");
 
@@ -174,7 +174,7 @@ describe("readAgentLog", () => {
   });
 
   test("reads agent.log for archived agent", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "archive", "agent-xyz");
+    const agentDir = join(tmpDir, ".itsybitsy", "archive", "agent-xyz");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "archived log");
 
@@ -184,7 +184,7 @@ describe("readAgentLog", () => {
   });
 
   test("returns placeholder when agent.log does not exist", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-nolog");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-nolog");
     await mkdir(agentDir, { recursive: true });
 
     const agent = makeAgent("agent-nolog", tmpDir, false);
@@ -194,7 +194,7 @@ describe("readAgentLog", () => {
   });
 
   test("returns placeholder when agent.log is empty", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-empty");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-empty");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "");
 
@@ -217,7 +217,7 @@ describe("readAgentFileWindow (agent.log)", () => {
   });
 
   test("returns the entire file when small (atTop=true)", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-small");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-small");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "line one\nline two\nline three");
 
@@ -232,7 +232,7 @@ describe("readAgentFileWindow (agent.log)", () => {
   test("drops partial first line when window starts past BOF", async () => {
     // Build a log large enough that the default window won't cover it from the top.
     // Each line is ~250 chars (over the 200 estimate) so 1000 lines is ~250KB.
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-big");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-big");
     await mkdir(agentDir, { recursive: true });
     const filler = "x".repeat(240);
     const lines: string[] = [];
@@ -260,7 +260,7 @@ describe("readAgentFileWindow (agent.log)", () => {
   });
 
   test("scrollOffset extends window further back", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-scroll");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-scroll");
     await mkdir(agentDir, { recursive: true });
     const filler = "x".repeat(240);
     const lines: string[] = [];
@@ -278,7 +278,7 @@ describe("readAgentFileWindow (agent.log)", () => {
   });
 
   test("returns 'No agent.log found' when file does not exist", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-missing");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-missing");
     await mkdir(agentDir, { recursive: true });
     const agent = makeAgent("agent-missing", tmpDir, false);
     const win = await readAgentFileWindow(agent, "agent.log", { rows: 20, scrollOffset: 0 });
@@ -289,7 +289,7 @@ describe("readAgentFileWindow (agent.log)", () => {
   });
 
   test("returns 'agent.log is empty' for zero-byte file", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-empty2");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-empty2");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "");
     const agent = makeAgent("agent-empty2", tmpDir, false);
@@ -300,7 +300,7 @@ describe("readAgentFileWindow (agent.log)", () => {
   });
 
   test("works for archived agents", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "archive", "agent-arc");
+    const agentDir = join(tmpDir, ".itsybitsy", "archive", "agent-arc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "agent.log"), "old line one\nold line two");
     const agent = makeAgent("agent-arc", tmpDir, true);
@@ -313,7 +313,7 @@ describe("readAgentFileWindow (agent.log)", () => {
     // Build a file where the trailing line is longer than any reasonable
     // tail-window byte budget. The first line is short so we have a clear
     // partial-line cut after the newline.
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-bigline");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-bigline");
     await mkdir(agentDir, { recursive: true });
     // 50KB single line (well over the default 8KB minimum read).
     const huge = "z".repeat(50_000);
@@ -547,14 +547,14 @@ describe("TmuxPaneComponent scroll logic", () => {
       "",
       "› Use /skills to list available skills",
       "",
-      "  gpt-5.5 default · ~/Developer/muse/muse-ios/.ittybitty/agents/agent-c8fc00e0/repo",
+      "  gpt-5.5 default · ~/Developer/muse/muse-ios/.itsybitsy/agents/agent-c8fc00e0/repo",
       "",
       "",
     ].join("\n");
 
     pane.parseStatusLines(120);
     expect(pane.statusLines).toEqual([
-      "  gpt-5.5 default · ~/Developer/muse/muse-ios/.ittybitty/agents/agent-c8fc00e0/repo",
+      "  gpt-5.5 default · ~/Developer/muse/muse-ios/.itsybitsy/agents/agent-c8fc00e0/repo",
     ]);
 
     const rendered = pane.render(120).map((line) => stripAnsi(line)).join("\n");
@@ -1025,7 +1025,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     // Create temp dir for native kill/pause operations
     actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-action-"));
-    const agentDir = join(actionTempDir, ".ittybitty", "agents", "agent-test");
+    const agentDir = join(actionTempDir, ".itsybitsy", "agents", "agent-test");
     await mkdir(agentDir, { recursive: true });
     // Mandatory sandbox: a resumable agent carries an enabled sandbox + paths.
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -1133,7 +1133,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Dialog should be dismissed after native retire executes
     expect(dashboard.dialog).toBeNull();
     // Agent directory should be removed by teardown
-    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
@@ -1184,7 +1184,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Dialog should be dismissed after native nuke executes
     expect(dashboard.dialog).toBeNull();
     // Agent directory should be removed by native nuke teardown
-    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
@@ -1207,7 +1207,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     // Create temp dir with agent for nukeAllAgents to find
     actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-nukeall-"));
-    const agentDir = join(actionTempDir, ".ittybitty", "agents", "agent-one");
+    const agentDir = join(actionTempDir, ".itsybitsy", "agents", "agent-one");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-one",
@@ -1250,7 +1250,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.handleInput("R");
     await dashboard.flushPendingActions();
     // Native resume creates resume.sh and logs to agent.log
-    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Agent resumed");
   });
@@ -1265,7 +1265,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.notice).toContain("Resuming");
     await dashboard.flushPendingActions();
     // Resume proceeded: native resume logs to agent.log.
-    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
     const log = await Bun.file(join(agentDir, "agent.log")).text();
     expect(log).toContain("Agent resumed");
   });
@@ -1290,7 +1290,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Dialog should be dismissed after native pause executes
     expect(dashboard.dialog).toBeNull();
     // Agent directory should be preserved (pause does NOT remove it)
-    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
     // Agent.log should contain "Agent paused"
     const log = await Bun.file(join(agentDir, "agent.log")).text();
@@ -1334,7 +1334,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("reassign fuzzy: selecting 'No parent' clears manager in meta.json", async () => {
     await setupDashboardWithAgent();
     // Write initial manager value
-    const metaPath = join(actionTempDir!, ".ittybitty", "agents", "agent-test", "meta.json");
+    const metaPath = join(actionTempDir!, ".itsybitsy", "agents", "agent-test", "meta.json");
     const meta = await Bun.file(metaPath).json();
     meta.manager = "agent-old";
     await Bun.write(metaPath, JSON.stringify(meta));
@@ -1351,7 +1351,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Set up with multiple agents in a temp dir so meta.json exists
     dashboard = makeDashboard();
     actionTempDir = await mkdtemp(join(tmpdir(), "dashboard-reassign-"));
-    const agentsDir = join(actionTempDir, ".ittybitty", "agents");
+    const agentsDir = join(actionTempDir, ".itsybitsy", "agents");
     await mkdir(join(agentsDir, "agent-test"), { recursive: true });
     await mkdir(join(agentsDir, "agent-manager"), { recursive: true });
     await Bun.write(join(agentsDir, "agent-test", "meta.json"), JSON.stringify({
@@ -1677,7 +1677,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("m key runs merge-check then shows confirm", async () => {
     await setupDashboardWithAgent();
     // Create worktree dir so mergeCheckAgent passes that check
-    await mkdir(join(actionTempDir!, ".ittybitty", "agents", "agent-test", "repo"), { recursive: true });
+    await mkdir(join(actionTempDir!, ".itsybitsy", "agents", "agent-test", "repo"), { recursive: true });
     dashboard.handleInput("m");
     await dashboard.flushPendingActions();
     expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("Merge agent-test");
@@ -1701,7 +1701,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   for (const keep of [false, true]) {
     test(`merge confirmation ${keep ? "keeps the agent when checked" : "closes the agent by default"}`, async () => {
       await setupDashboardWithAgent();
-      const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+      const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
       await mkdir(join(agentDir, "repo"), { recursive: true });
       const commands: string[][] = [];
       setMergeSpawnRunner((cmd: string[]) => {
@@ -1733,7 +1733,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("keep merge with no new commits reports nothing to merge", async () => {
     await setupDashboardWithAgent();
-    const agentDir = join(actionTempDir!, ".ittybitty", "agents", "agent-test");
+    const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     dashboard.handleInput("m");
     await dashboard.flushPendingActions();
@@ -1749,7 +1749,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   test("merge: merge-check failure shows error message", async () => {
     await setupDashboardWithAgent();
     // Create worktree dir so mergeCheckAgent passes that check
-    await mkdir(join(actionTempDir!, ".ittybitty", "agents", "agent-test", "repo"), { recursive: true });
+    await mkdir(join(actionTempDir!, ".itsybitsy", "agents", "agent-test", "repo"), { recursive: true });
     // Mock mergeSpawnRunner to return dirty status
     setMergeSpawnRunner((cmd: string[]) => {
       if (cmd.includes("--porcelain")) {
@@ -1979,8 +1979,8 @@ describe("DashboardComponent dialog and action handlers", () => {
   // would otherwise inject extra spawnable types between manager and worker).
   test("new-agent form: cycling from manager to worker creates agent with worker meta field", async () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
-    await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
-    await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+    await mkdir(join(newAgentTempDir, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(newAgentTempDir, ".itsybitsy", "repo-id"), "abcd1234\n");
     setUserConfigPath(join(newAgentTempDir, "config.json"));
     await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
@@ -2038,7 +2038,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await dashboard.flushPendingActions();
 
     // Find the created agent's meta.json
-    const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
+    const agentsDir = join(newAgentTempDir, ".itsybitsy", "agents");
     const { readdir: rd } = await import("fs/promises");
     const entries = await rd(agentsDir, { withFileTypes: true });
     const agentDirs = entries.filter(e => e.isDirectory());
@@ -2057,8 +2057,8 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("new-agent form: Name field passes --name flag", async () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
-    await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
-    await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+    await mkdir(join(newAgentTempDir, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(newAgentTempDir, ".itsybitsy", "repo-id"), "abcd1234\n");
     setUserConfigPath(join(newAgentTempDir, "config.json"));
     await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
@@ -2117,7 +2117,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     await dashboard.flushPendingActions();
 
-    const meta = await Bun.file(join(newAgentTempDir, ".ittybitty", "agents", "my-agent", "meta.json")).json();
+    const meta = await Bun.file(join(newAgentTempDir, ".itsybitsy", "agents", "my-agent", "meta.json")).json();
     expect(meta.id).toBe("my-agent");
     expect(meta.prompt).toBe("do stuff");
 
@@ -2140,8 +2140,8 @@ describe("DashboardComponent dialog and action handlers", () => {
   ] as const) {
     test(`new-agent form: a ${agentType} made from the ${tab} tab ${expectFavorite ? "is" : "is not"} a favorite`, async () => {
       const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-fav-"));
-      await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
-      await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+      await mkdir(join(newAgentTempDir, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(newAgentTempDir, ".itsybitsy", "repo-id"), "abcd1234\n");
       setUserConfigPath(join(newAgentTempDir, "config.json"));
       await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
@@ -2204,7 +2204,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
         await dashboard.flushPendingActions();
 
-        const agentsDir = join(newAgentTempDir, ".ittybitty", "agents");
+        const agentsDir = join(newAgentTempDir, ".itsybitsy", "agents");
         const { readdir: rd } = await import("fs/promises");
         const agentDirs = (await rd(agentsDir, { withFileTypes: true })).filter(e => e.isDirectory());
         expect(agentDirs.length).toBe(1);
@@ -2253,8 +2253,8 @@ describe("DashboardComponent dialog and action handlers", () => {
 
   test("new-agent form: stays open and shows notice when spawn fails", async () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-fail-"));
-    await mkdir(join(newAgentTempDir, ".ittybitty"), { recursive: true });
-    await Bun.write(join(newAgentTempDir, ".ittybitty", "repo-id"), "deadbeef\n");
+    await mkdir(join(newAgentTempDir, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(newAgentTempDir, ".itsybitsy", "repo-id"), "deadbeef\n");
     setUserConfigPath(join(newAgentTempDir, "config.json"));
     await Bun.write(join(newAgentTempDir, "config.json"), JSON.stringify({ model: "claude:sonnet" }));
 
@@ -2646,7 +2646,7 @@ describe("readAgentPrompt", () => {
   });
 
   test("reads prompt.txt for active agent", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "prompt.txt"), "Do the thing\nLine 2");
 
@@ -2656,7 +2656,7 @@ describe("readAgentPrompt", () => {
   });
 
   test("falls back to meta.prompt when prompt.txt missing", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
 
     const agent = makeAgent("agent-abc", tmpDir, false);
@@ -2666,7 +2666,7 @@ describe("readAgentPrompt", () => {
   });
 
   test("reads from archive dir for archived agent", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "archive", "agent-old");
+    const agentDir = join(tmpDir, ".itsybitsy", "archive", "agent-old");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "prompt.txt"), "archived prompt");
 
@@ -2848,8 +2848,8 @@ describe("DashboardComponent right pane and navigation features", () => {
   test("answer question sends acknowledge then message", async () => {
     // Set up a temp dir with a questions file for native acknowledgeQuestion
     const tempRepo = await mkdtemp(join(tmpdir(), "dash-ack-"));
-    await mkdir(join(tempRepo, ".ittybitty"), { recursive: true });
-    const questionsPath = join(tempRepo, ".ittybitty", "user-questions.json");
+    await mkdir(join(tempRepo, ".itsybitsy"), { recursive: true });
+    const questionsPath = join(tempRepo, ".itsybitsy", "user-questions.json");
     await Bun.write(questionsPath, JSON.stringify({
       questions: [{ id: "q-1", agent: "agent-test", question: "Should I proceed?", status: "pending", timestamp: "2026-03-05T15:00:00Z" }],
     }, null, 2));
@@ -2891,8 +2891,8 @@ describe("DashboardComponent right pane and navigation features", () => {
   test("Escape in QUESTIONS mode acknowledges question", async () => {
     // Set up a temp dir with a questions file for native acknowledgeQuestion
     const tempRepo = await mkdtemp(join(tmpdir(), "dash-esc-ack-"));
-    await mkdir(join(tempRepo, ".ittybitty"), { recursive: true });
-    const questionsPath = join(tempRepo, ".ittybitty", "user-questions.json");
+    await mkdir(join(tempRepo, ".itsybitsy"), { recursive: true });
+    const questionsPath = join(tempRepo, ".itsybitsy", "user-questions.json");
     await Bun.write(questionsPath, JSON.stringify({
       questions: [{ id: "q-1", agent: "agent-test", question: "Should I proceed?", status: "pending", timestamp: "2026-03-05T15:00:00Z" }],
     }, null, 2));
@@ -3981,20 +3981,20 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-abc-orphan1", "ittybitty-abc-orphan2"]);
-    expect(dashboard.rightPane.orphanedTmuxSessions).toEqual(["ittybitty-abc-orphan1", "ittybitty-abc-orphan2"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-abc-orphan1", "itsybitsy-abc-orphan2"]);
+    expect(dashboard.rightPane.orphanedTmuxSessions).toEqual(["itsybitsy-abc-orphan1", "itsybitsy-abc-orphan2"]);
   });
 
   test("ERRORS pane shows orphaned tmux sessions", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-abc-orphan1"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-abc-orphan1"]);
     dashboard.jumpToMode("ERRORS");
     const lines = dashboard.rightPane.render(80);
     const allText = lines.map(stripAnsi).join("\n");
     expect(allText).toContain("Orphaned tmux sessions:");
-    expect(allText).toContain("ittybitty-abc-orphan1");
+    expect(allText).toContain("itsybitsy-abc-orphan1");
     expect(allText).toContain("no matching agent");
   });
 
@@ -4002,7 +4002,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-orphan"]);
     dashboard.addError("Some error");
     // Error badge should show 2 (1 error + 1 orphan)
     const rendered = dashboard.render(160);
@@ -4014,7 +4014,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-orphan"]);
     dashboard.addError("Some error");
     dashboard.clearErrors();
     expect(dashboard.errors.length).toBe(0);
@@ -4022,14 +4022,14 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard.jumpToMode("ERRORS");
     const lines = dashboard.rightPane.render(80);
     const allText = lines.map(stripAnsi).join("\n");
-    expect(allText).toContain("ittybitty-orphan");
+    expect(allText).toContain("itsybitsy-orphan");
   });
 
   test("ERRORS pane shows Enter hint when orphans exist", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-orphan"]);
     dashboard.jumpToMode("ERRORS");
     const lines = dashboard.rightPane.render(80);
     const allText = lines.map(stripAnsi).join("\n");
@@ -4041,11 +4041,11 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
 
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-orphan"]);
     dashboard.handleInput("e"); // jump to ERRORS mode
     dashboard.handleInput("\r"); // Enter
     expect(dashboard.dialog).not.toBeNull();
-    expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("ittybitty-orphan");
+    expect(assertDialog(dashboard.dialog, 'confirm').prompt).toContain("itsybitsy-orphan");
 
   });
 
@@ -4054,13 +4054,13 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
 
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan1", "ittybitty-orphan2"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-orphan1", "itsybitsy-orphan2"]);
     dashboard.handleInput("e"); // jump to ERRORS mode
     dashboard.handleInput("\r"); // Enter
     expect(dashboard.dialog).not.toBeNull();
     const d = assertDialog(dashboard.dialog, 'select');
-    expect(d.items).toContain("ittybitty-orphan1");
-    expect(d.items).toContain("ittybitty-orphan2");
+    expect(d.items).toContain("itsybitsy-orphan1");
+    expect(d.items).toContain("itsybitsy-orphan2");
 
   });
 
@@ -4069,7 +4069,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     // No regular errors, but orphans exist
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-orphan"]);
     // Cycle through all modes — ERRORS should be reachable
     const modes: string[] = [];
     for (let i = 0; i < PANE_MODES.length + 1; i++) {
@@ -4121,7 +4121,7 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
     dashboard = makeDashboard();
     const agent = makeAgent("agent-test", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    dashboard.onUpdate([agent], flatList, [], ["ittybitty-orphan"]);
+    dashboard.onUpdate([agent], flatList, [], ["itsybitsy-orphan"]);
     expect(dashboard.rightPane.orphanedTmuxSessions.length).toBe(1);
     dashboard.onUpdate([agent], flatList, [], []);
     expect(dashboard.rightPane.orphanedTmuxSessions.length).toBe(0);
@@ -7415,7 +7415,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       const repoTmp = await mkdtemp(join(tmpdir(), "dash-roster-repo-"));
       const { writeAgentTransient } = await import("../agents");
       async function plant(id: string) {
-        const agentDir = join(repoTmp, ".ittybitty", "agents", id);
+        const agentDir = join(repoTmp, ".itsybitsy", "agents", id);
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
         await writeAgentTransient(agentDir, {

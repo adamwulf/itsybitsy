@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * `ib state` — read-only diagnostic command that lists agents (like `ib list`)
  * but augmented with PID liveness for tmux pane, claude process, and watchdog,
@@ -107,7 +108,7 @@ async function readUnexpectedChildren(
  * PID is `null` so callers can distinguish "no PID recorded" from "PID dead".
  */
 export async function gatherAgentState(agent: Agent): Promise<AgentStateRow> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
 
   const claudePid = parsePid(agent.meta.claude_pid);
   const tmuxSession = agent.meta.tmux_session || null;
@@ -186,13 +187,13 @@ export interface OrphanReport {
  *
  * Patterns recognized:
  *   - `ib-coordinator` — the system coordinator (exact match)
- *   - `ittybitty-<repoId>-<agentId>` — every spawned agent and per-repo
+ *   - `itsybitsy-<repoId>-<agentId>` — every spawned agent and per-repo
  *     coordinator (newAgent in src/ib-commands.ts builds this name)
  */
 export function isItsybitsyTmuxSession(name: string): boolean {
   if (!name) return false;
   if (name === IB_COORDINATOR_SESSION) return true;
-  return name.startsWith("ittybitty-");
+  return runtimeNames.isAgentTmuxSession(name);
 }
 
 /**
@@ -332,13 +333,13 @@ export function looksLikeAgyArgv(command: string): boolean {
 }
 
 /**
- * True when `pid`'s cwd lives inside `<repoPath>/.ittybitty/agents/…` for at
+ * True when `pid`'s cwd lives inside `<repoPath>/.itsybitsy/agents/…` for at
  * least one REGISTERED repo. Shared cwd anchor for both the claude and agy
  * agent-process classifiers: itsybitsy-spawned agent CLIs always run from inside
  * an agent worktree under a registered repo (see the start.sh templates), and a
  * user's own `claude --resume` / `agy --conversation` in a regular terminal does
  * not — so argv shape alone is never enough. Anchoring on the registered repo
- * paths (not just the `.ittybitty/agents/` substring) also closes the stray /
+ * paths (not just the `.itsybitsy/agents/` substring) also closes the stray /
  * backup-directory hole. Returns false when `repoPaths` is empty.
  */
 async function cwdUnderRegisteredWorktree(pid: number, repoPaths: string[]): Promise<boolean> {
@@ -347,9 +348,7 @@ async function cwdUnderRegisteredWorktree(pid: number, repoPaths: string[]): Pro
   if (!cwd) return false;
   for (const repoPath of repoPaths) {
     if (!repoPath) continue;
-    const prefix = repoPath.endsWith("/")
-      ? `${repoPath}.ittybitty/agents/`
-      : `${repoPath}/.ittybitty/agents/`;
+    const prefix = runtimeNames.registeredAgentsPrefix(repoPath);
     if (cwd === prefix.slice(0, -1) || cwd.startsWith(prefix)) return true;
   }
   return false;
@@ -358,7 +357,7 @@ async function cwdUnderRegisteredWorktree(pid: number, repoPaths: string[]): Pro
 /**
  * Decide whether a process IS a Claude agent spawned by itsybitsy. Combines
  * the argv shape pre-filter with a positive cwd check: the process's cwd must
- * be inside `<repoPath>/.ittybitty/agents/...` for at least one REGISTERED
+ * be inside `<repoPath>/.itsybitsy/agents/...` for at least one REGISTERED
  * repo (see `cwdUnderRegisteredWorktree`).
  *
  * Why: `claude --resume` / `claude --session-id` are STANDARD Claude CLI
@@ -430,7 +429,7 @@ export async function buildTrackedSets(agents: Agent[]): Promise<TrackedSets> {
       const wp = parsePid(agent.meta.watchdog_pid);
       if (wp !== null) watchdogPids.add(wp);
     }
-    const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+    const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
     const transient = await readAgentTransient(agentDir);
     if (transient) {
       const wp = parsePid(transient.watchdog_pid);
@@ -452,7 +451,7 @@ export async function buildTrackedSets(agents: Agent[]): Promise<TrackedSets> {
  *
  * `repoPaths` are the absolute paths of registered repos — used to verify
  * that a `claude` process's cwd lives under an itsybitsy worktree of one of
- * OUR repos (defense against stray/backup `.ittybitty/agents/` directories
+ * OUR repos (defense against stray/backup `.itsybitsy/agents/` directories
  * elsewhere on disk). When no repos are registered, no claude process can
  * be classified as an orphan.
  *

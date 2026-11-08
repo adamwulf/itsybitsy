@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Agent action handlers — extracted from DashboardComponent.
  * Each function takes a context object that provides access to dashboard state.
@@ -94,7 +95,7 @@ export function clearCoordinatorSpawnsInFlight() { coordinatorSpawnsInFlight.cle
  * Coordinator agents use <agentDir>/.claude/; everyone else uses <agentDir>/repo/.claude/. */
 export function agentSettingsLocalPath(agent: Agent): string {
   const dir = agent.archived ? "archive" : "agents";
-  const agentDir = join(agent.repoPath, ".ittybitty", dir, agent.id);
+  const agentDir = join(runtimeNames.runtimeDir(agent.repoPath), dir, agent.id);
   const base = agent.meta.agentType === "coordinator" ? agentDir : join(agentDir, "repo");
   return join(base, ".claude", "settings.local.json");
 }
@@ -1553,7 +1554,7 @@ export async function effectiveSpawnCapability(agent: Agent): Promise<boolean> {
 /** Physical agent dir backing an agent record (archived agents are blocked before this). */
 function agentDirFor(agent: Agent): string {
   const dir = agent.archived ? "archive" : "agents";
-  return join(agent.repoPath, ".ittybitty", dir, agent.id);
+  return join(runtimeNames.runtimeDir(agent.repoPath), dir, agent.id);
 }
 
 export function handleAddPermission(ctx: ActionCtx) {
@@ -2539,7 +2540,7 @@ export function handleSnapshot(ctx: ActionCtx) {
       const unwrappedFile = `${baseName}-unwrapped.txt`;
       const wrappedFile = `${baseName}-wrapped.txt`;
       const dir = agent.archived ? "archive" : "agents";
-      const debugDir = `${agent.repoPath}/.ittybitty/${dir}/${agent.id}/debug-logs`;
+      const debugDir = join(runtimeNames.runtimeDir(agent.repoPath), dir, agent.id, "debug-logs");
       const unwrappedPath = `${debugDir}/${unwrappedFile}`;
       const wrappedPath = `${debugDir}/${wrappedFile}`;
       const notePath = `${debugDir}/${baseName}-note.txt`;
@@ -2775,9 +2776,9 @@ export async function handleAddRepo(ctx: ActionCtx) {
   return handleFolderBrowser(ctx);
 }
 
-/** Count live agent directories under .ittybitty/agents/ (archived agents do not block removal) */
+/** Count live agent directories under .itsybitsy/agents/ (archived agents do not block removal) */
 async function countAgentDirs(repoPath: string): Promise<{ count: number; error?: string }> {
-  const dir = join(repoPath, ".ittybitty", "agents");
+  const dir = runtimeNames.agentsDir(repoPath);
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     return { count: entries.filter((e) => e.isDirectory()).length };

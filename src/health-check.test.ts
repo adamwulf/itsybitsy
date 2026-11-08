@@ -178,7 +178,7 @@ describe("checkAgentDirectories", () => {
   });
 
   test("detects missing meta.json (orphaned dir)", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-orphan1");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-orphan1");
     await mkdir(agentDir, { recursive: true });
 
     const warnings = await checkAgentDirectories(tmpDir);
@@ -190,7 +190,7 @@ describe("checkAgentDirectories", () => {
   });
 
   test("detects invalid JSON in meta.json", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-badjson");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-badjson");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), "not valid json{{{");
 
@@ -202,7 +202,7 @@ describe("checkAgentDirectories", () => {
   });
 
   test("detects missing required fields in meta.json", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-missing");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-missing");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-missing" }));
 
@@ -214,7 +214,7 @@ describe("checkAgentDirectories", () => {
   });
 
   test("detects id mismatch with directory name", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-realid");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-realid");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-wrongid",
@@ -229,7 +229,7 @@ describe("checkAgentDirectories", () => {
   });
 
   test("valid agent with no tmux session and no worktree is flagged as stale", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-stale1");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-stale1");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-stale1",
@@ -246,7 +246,7 @@ describe("checkAgentDirectories", () => {
   });
 
   test("new agent (< 30s) is NOT flagged even without tmux session", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-new1");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-new1");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-new1",
@@ -260,7 +260,7 @@ describe("checkAgentDirectories", () => {
   });
 
   test("valid agent with worktree is NOT flagged (stopped agent)", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-stopped");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-stopped");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-stopped",
@@ -279,7 +279,7 @@ describe("checkAgentDirectories", () => {
   });
 
   test("skips non-agent-id directory names", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", ".DS_Store");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", ".DS_Store");
     await mkdir(agentDir, { recursive: true });
 
     const warnings = await checkAgentDirectories(tmpDir);
@@ -291,7 +291,7 @@ describe("checkAgentDirectories", () => {
 
 describe("checkOrphanedWorktrees", () => {
   test("detects orphaned worktree when agent dir is missing", async () => {
-    await mkdir(join(tmpDir, ".ittybitty", "agents"), { recursive: true });
+    await mkdir(join(tmpDir, ".itsybitsy", "agents"), { recursive: true });
 
     healthSpawnCtx.set((cmd: string[]) => {
       if (cmd.includes("worktree")) {
@@ -312,7 +312,7 @@ describe("checkOrphanedWorktrees", () => {
   });
 
   test("does not flag worktree when agent dir exists", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-alive");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-alive");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), "{}");
 
@@ -334,11 +334,11 @@ describe("checkOrphanedWorktrees", () => {
     // Coordinator branch is agent/{id}-{repoId} but agent dir is agents/{id}
     const coordinatorId = "itsybitsy";
     const repoId = "a3f2b1c0";
-    const agentDir = join(tmpDir, ".ittybitty", "agents", coordinatorId);
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", coordinatorId);
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({ agentType: "coordinator" }));
 
-    const worktreePath = join(tmpDir, ".ittybitty", "agents", coordinatorId, "repo");
+    const worktreePath = join(tmpDir, ".itsybitsy", "agents", coordinatorId, "repo");
     healthSpawnCtx.set((cmd: string[]) => {
       if (cmd.includes("worktree")) {
         return mockResult(
@@ -365,7 +365,7 @@ describe("checkOrphanedWorktrees", () => {
 
 describe("checkOrphanedBranches", () => {
   test("detects orphaned branch when no agent dir or worktree exists", async () => {
-    await mkdir(join(tmpDir, ".ittybitty", "agents"), { recursive: true });
+    await mkdir(join(tmpDir, ".itsybitsy", "agents"), { recursive: true });
 
     healthSpawnCtx.set((cmd: string[]) => {
       if (cmd.includes("branch")) {
@@ -385,7 +385,7 @@ describe("checkOrphanedBranches", () => {
   });
 
   test("does not flag branch when agent dir exists", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-exists");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-exists");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), "{}");
 
@@ -404,7 +404,7 @@ describe("checkOrphanedBranches", () => {
   });
 
   test("does not flag branch when worktree exists for it", async () => {
-    await mkdir(join(tmpDir, ".ittybitty", "agents"), { recursive: true });
+    await mkdir(join(tmpDir, ".itsybitsy", "agents"), { recursive: true });
 
     healthSpawnCtx.set((cmd: string[]) => {
       if (cmd.includes("branch")) {
@@ -425,7 +425,7 @@ describe("checkOrphanedBranches", () => {
 
 describe("checkStaleManagerRefs", () => {
   test("detects reference to non-existent manager", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-child");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-child");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-child",
@@ -443,7 +443,7 @@ describe("checkStaleManagerRefs", () => {
   });
 
   test("does not flag when manager exists", async () => {
-    const managerDir = join(tmpDir, ".ittybitty", "agents", "agent-manager");
+    const managerDir = join(tmpDir, ".itsybitsy", "agents", "agent-manager");
     await mkdir(managerDir, { recursive: true });
     await writeFile(join(managerDir, "meta.json"), JSON.stringify({
       id: "agent-manager",
@@ -451,7 +451,7 @@ describe("checkStaleManagerRefs", () => {
       created_epoch: Math.floor(Date.now() / 1000),
     }));
 
-    const childDir = join(tmpDir, ".ittybitty", "agents", "agent-child2");
+    const childDir = join(tmpDir, ".itsybitsy", "agents", "agent-child2");
     await mkdir(childDir, { recursive: true });
     await writeFile(join(childDir, "meta.json"), JSON.stringify({
       id: "agent-child2",
@@ -465,7 +465,7 @@ describe("checkStaleManagerRefs", () => {
   });
 
   test("does not flag agents without manager field", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-solo");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-solo");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-solo",
@@ -482,7 +482,7 @@ describe("checkStaleManagerRefs", () => {
 
 describe("checkAgentHookIds", () => {
   test("detects hooks referencing a different agent ID", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-correct");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-correct");
     const settingsDir = join(agentDir, "repo", ".claude");
     await mkdir(settingsDir, { recursive: true });
     await writeFile(join(settingsDir, "settings.local.json"), JSON.stringify({
@@ -502,7 +502,7 @@ describe("checkAgentHookIds", () => {
   });
 
   test("does not flag hooks referencing correct agent ID", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-ok");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-ok");
     const settingsDir = join(agentDir, "repo", ".claude");
     await mkdir(settingsDir, { recursive: true });
     await writeFile(join(settingsDir, "settings.local.json"), JSON.stringify({
@@ -521,7 +521,7 @@ describe("checkAgentHookIds", () => {
   });
 
   test("returns empty when agent has no settings.local.json", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-nosettings");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-nosettings");
     await mkdir(agentDir, { recursive: true });
 
     const warnings = await checkAgentHookIds(tmpDir);
@@ -555,7 +555,7 @@ describe("checkRepoHealth", () => {
     }));
 
     // Create orphaned agent dir (no meta.json)
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-orphan");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-orphan");
     await mkdir(agentDir, { recursive: true });
 
     // Mock git commands to return empty
@@ -570,7 +570,7 @@ describe("checkRepoHealth", () => {
   });
 
   test("severity ordering: errors > warnings > info", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-test");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-test");
     await mkdir(agentDir, { recursive: true });
 
     healthSpawnCtx.set(() => mockResult("", 0));
@@ -672,11 +672,11 @@ describe("resolveHealthWarnings", () => {
   });
 
   test("resolves orphaned-dir by removing directory and its sealed profile", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-stale2");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-stale2");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-stale2" }));
     // The test home seam keeps the sealed tree inside tmpDir.
-    setUserHome(tmpDir);
+    setUserHome(join(tmpDir, "home"));
     const profile = sandboxProfilePath(agentDir);
     await mkdir(join(profile, ".."), { recursive: true });
     await writeFile(profile, "(version 1)\n");
@@ -701,7 +701,7 @@ describe("resolveHealthWarnings", () => {
   });
 
   test("resolves orphaned-dir with missing meta.json (error severity)", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-nometa1");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-nometa1");
     await mkdir(agentDir, { recursive: true });
     // No meta.json — simulates the missing-meta variant
 
@@ -820,7 +820,7 @@ describe("resolveHealthWarnings", () => {
   });
 
   test("resolves stale-manager-ref by removing manager field from meta.json", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-child3");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-child3");
     await mkdir(agentDir, { recursive: true });
     const metaPath = join(agentDir, "meta.json");
     await writeFile(metaPath, JSON.stringify({
@@ -862,7 +862,7 @@ describe("resolveHealthWarnings", () => {
 
   test("handles partial failures gracefully", async () => {
     // Set up one resolvable (stale-manager-ref) and one that will fail (orphaned-worktree with bad git)
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-ok1");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-ok1");
     await mkdir(agentDir, { recursive: true });
     const metaPath = join(agentDir, "meta.json");
     await writeFile(metaPath, JSON.stringify({

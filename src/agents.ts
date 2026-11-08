@@ -1,5 +1,6 @@
+import * as runtimeNames from "./runtime-names";
 /**
- * Read .ittybitty/agents/ directory directly to get agent data.
+ * Read .itsybitsy/agents/ directory directly to get agent data.
  * Also reads user-questions.json for pending questions.
  */
 
@@ -656,7 +657,7 @@ function lifecycleRecordPidEpoch(record: any): number | undefined {
  * Write a lifecycle staging file, WITHOUT creating parent directories.
  *
  * `Bun.write` makes missing parents, so publishing via a staging file quietly
- * gained the power to recreate a deleted `.ittybitty/agents` tree — where the
+ * gained the power to recreate a deleted `.itsybitsy/agents` tree — where the
  * `open(wx)` this replaced simply returned ENOENT and the caller failed safe.
  * `open(wx)` here restores that, and the exclusivity is free: staging names
  * carry a uuid, so a collision means something is badly wrong.
@@ -1628,7 +1629,7 @@ export function agentWorktreePath(agent: Agent): string {
 export function agentStorageDir(agent: Agent): string {
   if (agent.storageDir) return agent.storageDir;
   const dir = agent.archived ? "archive" : "agents";
-  return join(agent.repoPath, ".ittybitty", dir, agent.id);
+  return join(runtimeNames.runtimeDir(agent.repoPath), dir, agent.id);
 }
 
 /** Compute human-readable age from epoch timestamp */
@@ -1943,13 +1944,13 @@ export async function readRepoAgents(
   repoName: string,
   includeArchived = true
 ): Promise<ReadAgentsResult> {
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
 
   if (!includeArchived) {
     return readAgentsFromDir(agentsDir, repoPath, repoName, false);
   }
 
-  const archiveDir = join(repoPath, ".ittybitty", "archive");
+  const archiveDir = runtimeNames.archiveDir(repoPath);
   const [active, archived] = await Promise.all([
     readAgentsFromDir(agentsDir, repoPath, repoName, false),
     readAgentsFromDir(archiveDir, repoPath, repoName, true),
@@ -1966,14 +1967,14 @@ export async function readRepoAgents(
 /** Internal helper: read questions for a repo, optionally filtering to pending-only */
 async function readQuestionsInternal(repoPath: string, pendingOnly: boolean): Promise<PendingQuestion[]> {
   try {
-    const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
+    const questionsPath = runtimeNames.userQuestionsFile(repoPath);
     const file = Bun.file(questionsPath);
     if (!(await file.exists())) return [];
     const data = await file.json();
     if (!data || !Array.isArray(data.questions)) return [];
 
     // Read active agent IDs from the agents directory
-    const agentsDir = join(repoPath, ".ittybitty", "agents");
+    const agentsDir = runtimeNames.agentsDir(repoPath);
     let activeAgentIds: Set<string>;
     try {
       const entries = await readdir(agentsDir, { withFileTypes: true });
@@ -2329,7 +2330,7 @@ export function resetListTmuxSessionsCache(): void {
  * stopped agent whose meta.json still carries a stale tmux_session would
  * re-spawn `tmux kill-session` on every tick forever, re-killing an
  * already-dead session. Keyed on the session name, which is unique per agent
- * (ittybitty-<repoId>-<agentId>). Only the kill-session call is memoized; PID
+ * (itsybitsy-<repoId>-<agentId>). Only the kill-session call is memoized; PID
  * reaping is NOT (a PID could in principle still be alive on a later tick and
  * warrant another SIGTERM).
  *
@@ -2740,7 +2741,7 @@ export async function readAgentsOfRepos(
 
 /**
  * Read all agents across multiple repos.
- * Also detects orphaned tmux sessions (sessions matching ittybitty-* pattern
+ * Also detects orphaned tmux sessions (sessions matching itsybitsy-* pattern
  * that don't correspond to any known agent). The tmux session list is cached
  * for a short TTL so back-to-back refreshes don't each spawn `tmux list-sessions`.
  *
@@ -2764,7 +2765,7 @@ export async function readAllAgents(
     getCachedTmuxSessions(),
   ]);
 
-  // Detect orphaned tmux sessions: sessions starting with "ittybitty-"
+  // Detect orphaned tmux sessions: sessions starting with "itsybitsy-"
   // that don't match any known agent's tmux_session. The "ib-coordinator"
   // session is owned by `ib watch` itself (not by any agent in any repo) and
   // is intentionally NOT counted here — there is no agent meta.json that
@@ -2776,7 +2777,7 @@ export async function readAllAgents(
     allAgents.map((a) => a.meta.tmux_session).filter((s) => s)
   );
   const orphanedTmuxSessions = tmuxSessions.filter(
-    (s) => s.startsWith("ittybitty-") && !knownSessions.has(s)
+    (s) => runtimeNames.isAgentTmuxSession(s) && !knownSessions.has(s)
   );
 
   return {
@@ -3779,7 +3780,7 @@ export async function detectAgentStates(
   await Promise.all(
     active.map(async (agent) => {
       const tmuxSession = agent.meta.tmux_session;
-      const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+      const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
 
       // Step 2: check tmux session existence
       if (!tmuxSession) {

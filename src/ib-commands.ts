@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Async wrappers for ib mutation commands.
  * Git operations target the agent's repo via `git -C <repoPath>` rather than
@@ -61,6 +62,7 @@ import {
   captureTmuxOutputToFile,
   isRunningAsAgent,
   prepareAgentRetirement,
+  resolveRetainedHeadRef,
   cleanupPreparedRetirement,
   findRetiredAgentArchives,
   isSafeRetirementRelativePath,
@@ -435,8 +437,8 @@ async function emitCoalescedLeaveNotice(
  * 5. scanAndKillOrphans()
  */
 export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
-  const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
+  const agentsDir = runtimeNames.agentsDir(agent.repoPath);
   const tmuxSession = agent.meta.tmux_session;
 
   // Check if agent exists (directory or tmux session)
@@ -737,11 +739,11 @@ export async function rehireAgent(
     );
   }
   const repoPath = archived.repoPath;
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
   const agentDir = join(agentsDir, agentId);
   const worktreePath = join(agentDir, "repo");
   const branchName = `agent/${agentId}`;
-  const expectedTmuxSession = `ittybitty-${await getRepoId(repoPath)}-${agentId}`;
+  const expectedTmuxSession = runtimeNames.tmuxSessionName(await getRepoId(repoPath), agentId);
 
   if (archived.meta.tmux_session !== expectedTmuxSession) {
     return {
@@ -776,6 +778,7 @@ export async function rehireAgent(
     };
   }
 
+  let retainedRef: string | null = null;
   if (manifest.worktree) {
     const prune = await rehireSpawnCtx.run([
       "git", "-C", repoPath, "worktree", "prune",
@@ -839,19 +842,14 @@ export async function rehireAgent(
       }
     }
 
-    const retainedHead = await rehireSpawnCtx.run([
-      "git", "-C", repoPath, "rev-parse", manifest.headRef!,
-    ]);
-    if (
-      retainedHead.exitCode !== 0 ||
-      retainedHead.stdout.trim() !== manifest.gitHead
-    ) {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: `Retained HEAD is missing or corrupt: ${manifest.headRef}`,
-      };
+    try {
+      const retainedHead = await resolveRetainedHeadRef(repoPath, manifest.archiveKey, rehireSpawnCtx);
+      if (retainedHead.gitHead !== manifest.gitHead) {
+        throw new Error(`Retained HEAD is corrupt: ${retainedHead.ref}`);
+      }
+      retainedRef = retainedHead.ref;
+    } catch (error) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: String(error) };
     }
   }
 
@@ -876,7 +874,7 @@ export async function rehireAgent(
     if (manifest.worktree) {
       const worktreeResult = await rehireSpawnCtx.run([
         "git", "-C", repoPath, "worktree", "add", worktreePath,
-        "-b", branchName, manifest.headRef!,
+        "-b", branchName, retainedRef!,
       ]);
       if (worktreeResult.exitCode !== 0) {
         throw new Error(worktreeResult.stderr || "could not recreate agent worktree");
@@ -1162,7 +1160,7 @@ export function mergeSandboxLayerConfigs(
 /**
  * After relative entries are anchored and canonicalized, check each
  * allowRead/allowWrite entry for repo containment (SPEC-PATH-ALLOWLIST.md 6.2):
- *  - an entry resolving to, or under, `<repoRoot>/.ittybitty/agents` is a hard
+ *  - an entry resolving to, or under, `<repoRoot>/.itsybitsy/agents` is a hard
  *    ERROR — the hook denies that subtree structurally, so it is a dead entry;
  *  - an entry resolving inside `repoRoot` but not under the agents dir is a
  *    WARNING — denied for worktree agents, meaningful for coordinators.
@@ -1175,7 +1173,7 @@ export function checkPathsRepoContainment(
   repoRoot: string,
 ): { error?: string; warnings: string[] } {
   const warnings: string[] = [];
-  const agentsDir = canonicalizeSandboxPath(join(repoRoot, ".ittybitty", "agents"));
+  const agentsDir = canonicalizeSandboxPath(runtimeNames.agentsDir(repoRoot));
   const repoCanonical = canonicalizeSandboxPath(repoRoot);
   const isAtOrUnder = (candidate: string, base: string): boolean =>
     candidate === base || candidate.startsWith(base + "/");
@@ -1236,9 +1234,9 @@ async function prepareSandbox(
     AGENTDIR: agentDir,
     WORKTREE: workPath,
     GITDIR: resolveGitRevParsePath(workPath, gitCommonDirResult.stdout),
-    REPOAGENTS: join(repoPath, ".ittybitty", "agents"),
+    REPOAGENTS: runtimeNames.agentsDir(repoPath),
     PARENTCLAUDE: join(repoPath, ".claude"),
-    REPOID: join(repoPath, ".ittybitty", "repo-id"),
+    REPOID: runtimeNames.repoIdFile(repoPath),
     TMUXSOCK: resolveTmuxSocketDir(uid),
     canSpawnChildren,
     HOME: userHome(),
@@ -1297,7 +1295,7 @@ async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Prom
 /**
  * Derive the narrow set of parent-repo subdirectories codex agents need
  * write access to under Codex's own sandbox. Returns absolute, canonicalised
- * paths for `<parentRepo>/.ittybitty` and `<parentRepo>/.claude` (the only
+ * paths for `<parentRepo>/.itsybitsy` and `<parentRepo>/.claude` (the only
  * two subdirs `ib new-agent` writes outside the worktree/gitdir/caches).
  *
  * Granting the bare `<parentRepo>` would expose src/, AGENTS.md, etc. to
@@ -1308,12 +1306,12 @@ async function stopSandboxProxyForAgent(agentDir: string, meta: AgentMeta): Prom
  * The directories are mkdir'd before realpathSync so resolution succeeds
  * even on first spawn (codex spawn runs before `ib new-agent` would
  * otherwise create them). If mkdir or realpathSync fails, we fall back to
- * the unresolved `join(parentRepo, ".ittybitty"|".claude")` path — codex's
+ * the unresolved runtime or `.claude` subdirectory path — codex's
  * own path-safety check rejects only quotes/backslashes/control chars, so
  * the unresolved path is still safe to pass.
  */
 async function deriveCodexParentRepoRoots(parentRepoPath: string): Promise<string[]> {
-  const subdirs = [".ittybitty", ".claude"];
+  const subdirs = [runtimeNames.RUNTIME_DIR_NAME, ".claude"];
   const out: string[] = [];
   for (const sub of subdirs) {
     const dir = join(parentRepoPath, sub);
@@ -1363,7 +1361,7 @@ async function resolveCodexGitRoots(
 }
 
 /**
- * Clean up orphaned tmux sessions — sessions with the ittybitty- prefix
+ * Clean up orphaned tmux sessions — sessions with the itsybitsy- prefix
  * that don't correspond to any remaining agent directory.
  */
 async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
@@ -1384,14 +1382,14 @@ async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
 
   const sessions = listResult.stdout.split("\n").filter((s) => s.trim());
   for (const session of sessions) {
-    if (!session.startsWith("ittybitty-")) continue;
+    if (!runtimeNames.isAgentTmuxSession(session)) continue;
 
-    // Extract agent ID: strip prefix (ittybitty-<repoid>-<agentid>)
-    // The session format is: ittybitty-<8hex>-<agentid>
+    // Extract agent ID: strip prefix (itsybitsy-<repoid>-<agentid>)
+    // The session format is: itsybitsy-<8hex>-<agentid>
     // We need to match the agent ID portion against known IDs
     const parts = session.split("-");
-    // Session: "ittybitty-<repoid>-agent-<hex>" or "ittybitty-<repoid>-<name>"
-    // The repo ID is parts[1], agent ID is everything after "ittybitty-<repoid>-"
+    // Session: "itsybitsy-<repoid>-agent-<hex>" or "itsybitsy-<repoid>-<name>"
+    // The repo ID is parts[1], agent ID is everything after "itsybitsy-<repoid>-"
     if (parts.length < 3) continue;
     const agentId = parts.slice(2).join("-");
 
@@ -1501,7 +1499,7 @@ async function nukeAgentList(
  * 4. scanAndKillOrphans()
  */
 export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
-  const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(agent.repoPath);
 
   // Get all descendants (includes the agent itself)
   const descendants = await getDescendantsRecursive(agentsDir, agent.id);
@@ -1530,7 +1528,7 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
  * Kills ALL agents in the agents directory.
  */
 export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> {
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
 
   // Collect all agents with meta.json
   const agentsToKill: string[] = [];
@@ -1625,7 +1623,7 @@ export async function resumeAgent(
   agent: Agent,
   opts?: { resetCoordinator?: boolean },
 ): Promise<IbCommandResult> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
 
   // Check agent directory exists
   const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
@@ -1930,7 +1928,7 @@ export async function resumeAgent(
         // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree —
         // identical reason to the newAgent path above (resolveAgentDir's
-        // cwd regex must match `/\.ittybitty\/agents/`).
+        // cwd regex must match `/\.itsybitsy\/agents/`).
         const result = await dispatcherDryRunSpawnCtx.run(
           [codexIbBinaryPath, "hooks", event, agent.id, "--dry-run"],
           workPath,
@@ -1959,9 +1957,9 @@ export async function resumeAgent(
       }
       // Parent repo subdirs — granted as writable roots so `ib new-agent`
       // from inside the resumed codex agent can mkdir into
-      // <parentRepo>/.ittybitty/ and write <parentRepo>/.claude/settings.local.json.
+      // <parentRepo>/.itsybitsy/ and write <parentRepo>/.claude/settings.local.json.
       // See the spawn path for the full rationale on why we narrow to the
-      // .ittybitty + .claude subdirs rather than granting the bare parent
+      // .itsybitsy + .claude subdirs rather than granting the bare parent
       // repo (round-2 review HIGH: bypass via relative-path Bash writes).
       //
       // Derive via resolveGitRoot for consistency with the spawn-side
@@ -2497,7 +2495,7 @@ export async function respawnAgent(agent: Agent): Promise<IbCommandResult> {
   // Confirm the agent's directory still exists; respawning a stale ID is a
   // common mistake and returning a clear error beats a hanging detached
   // worker.
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
   if (!dirExists) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
@@ -2564,7 +2562,7 @@ export async function respawnAgent(agent: Agent): Promise<IbCommandResult> {
  * content is injected into the new conversation.
  */
 export async function respawnSelf(agent: Agent): Promise<IbCommandResult> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
 
   const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
   if (!dirExists) {
@@ -2728,7 +2726,7 @@ async function restoreSealSnapshot(
  * established the agent is left stopped with the error already in agent.log.
  */
 export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   const dirExists = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
   if (!dirExists) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' not found` };
@@ -2779,7 +2777,7 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   const newSandbox = merged.sandbox;
   // Anchor relative (./ ../) entries at this agent's main repo root, exactly as
   // newAgent does at spawn — agent.repoPath is `<repo>` and agentDir is
-  // `<repo>/.ittybitty/agents/<id>` — so the refreshed meta.paths holds only
+  // `<repo>/.itsybitsy/agents/<id>` — so the refreshed meta.paths holds only
   // absolute paths (SPEC-PATH-ALLOWLIST.md 6.2). Known limit: if the repo has
   // MOVED since spawn, refresh anchors at the stale `agent.repoPath` silently,
   // mirroring the resume path's own fallback to the recorded repo path.
@@ -3055,7 +3053,7 @@ export async function autoAcceptWorkspaceTrust(tmuxSession: string): Promise<voi
  * 6. Send notifications (skip if tmux session doesn't exist)
  */
 export async function reassignAgent(agent: Agent, newManager: string | null): Promise<IbCommandResult> {
-  const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(agent.repoPath);
   const agentDir = join(agentsDir, agent.id);
   const metaPath = join(agentDir, "meta.json");
 
@@ -3215,7 +3213,7 @@ export async function ackAllSubagents(opts: AckAgentOptions = {}): Promise<IbCom
  *
  * Writes only `ack` into the child's meta.json. The child's state, session,
  * tmux pane and worktree are not touched, so a sandboxed manager needs no
- * broker: its profile grants write on `<repo>/.ittybitty/agents`.
+ * broker: its profile grants write on `<repo>/.itsybitsy/agents`.
  *
  * The owner gate is checked again inside the meta.json lock, against the
  * record `writeAgentState` also writes under that lock: a child that changed
@@ -3246,7 +3244,7 @@ async function ackAgentForCaller(agent: Agent, caller: ResolvedCallerContext | n
     );
   }
 
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   let refusal = "";
   let ackedState = "";
   let already = false;
@@ -3310,7 +3308,7 @@ async function ackAgentForCaller(agent: Agent, caller: ResolvedCallerContext | n
  * Re-setting THIS agent's own existing nickname to a new value is allowed.
  */
 export async function renameAgent(agent: Agent, nickname: string | null): Promise<IbCommandResult> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   const metaPath = join(agentDir, "meta.json");
 
   // ── Clear path ──────────────────────────────────────────────────────────
@@ -3410,7 +3408,7 @@ export async function renameAgent(agent: Agent, nickname: string | null): Promis
  * 5. Run checkRebaseConflicts for conflict detection
  */
 export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   const worktreePath = join(agentDir, "repo");
   const branchName = `agent/${agent.id}`;
 
@@ -3610,8 +3608,8 @@ export async function mergeAgent(
   targetDir: string,
   options: MergeAgentOptions = {},
 ): Promise<IbCommandResult> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
-  const agentsDir = join(agent.repoPath, ".ittybitty", "agents");
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
+  const agentsDir = runtimeNames.agentsDir(agent.repoPath);
   const branchName = `agent/${agent.id}`;
   const worktreePath = join(agentDir, "repo");
   const tmuxSession = agent.meta.tmux_session;
@@ -3983,11 +3981,11 @@ function resolveSenderId(agentRepoPath: string, opts?: { fromAgent?: string; cwd
   if (fromId) return fromId;
 
   const cwd = opts?.cwd ?? process.cwd();
-  const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/(?:[^/]+)\/repo/);
+  const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
   if (worktreeMatch) {
     // Read the sender's meta.json to get their ID (synchronously here is fine —
     // this runs at enqueue time in the sender process).
-    const senderAgentDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]+)\/repo.*/, "$1");
+    const senderAgentDir = runtimeNames.worktreeAgentDir(cwd);
     try {
       const senderMeta = JSON.parse(require("fs").readFileSync(join(senderAgentDir, "meta.json"), "utf-8"));
       if (senderMeta?.id) fromId = senderMeta.id;
@@ -4084,7 +4082,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   }
 
   // Log/state writes target the per-worktree agent dir.
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
 
   // A pane parked in tmux view-mode / copy-mode never sees our keystrokes: tmux
   // routes `send-keys` through the copy-mode key table instead (Space pages,
@@ -4222,7 +4220,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
 
   // Log to sender's agent.log if applicable
   if (fromId) {
-    const senderDir = join(agent.repoPath, ".ittybitty", "agents", fromId);
+    const senderDir = runtimeNames.agentDir(agent.repoPath, fromId);
     const verb = raw ? "Sent raw message" : "Sent message";
     await logAgent(senderDir, `${verb} to ${agent.id}: ${message}`);
   }
@@ -4386,7 +4384,7 @@ export async function sendMessage(
   // running under `-s workspace-write` can write to other agents' outboxes.
   // Log/state writes still target the per-worktree agent dir
   // (`deliverMessage`), which is correct for both cases.
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   const queueDir = opts?.outboxDir ?? agentOutboxDir(agent.id);
 
   // Resolve sender at ENQUEUE time (depends on the sender process's cwd).
@@ -5749,7 +5747,7 @@ let sealDeleteOverride: typeof deleteSealRecord | null = null;
 export function setSealDeleteForTesting(fn: typeof deleteSealRecord | null): void { sealDeleteOverride = fn; }
 
 /**
- * Read custom prompts from .ittybitty/prompts/ directory.
+ * Read custom prompts from .itsybitsy/prompts/ directory.
  * Mirrors load_custom_prompts() in ib bash.
  */
 async function loadCustomPrompts(repoPath: string): Promise<{
@@ -5757,7 +5755,7 @@ async function loadCustomPrompts(repoPath: string): Promise<{
   manager: string;
   worker: string;
 }> {
-  const promptsDir = join(repoPath, ".ittybitty", "prompts");
+  const promptsDir = runtimeNames.promptsDir(repoPath);
   const result = { all: "", manager: "", worker: "" };
 
   for (const [key, filename] of [
@@ -5794,11 +5792,11 @@ async function countAgents(agentsDir: string): Promise<number> {
 }
 
 /**
- * Read the repo-id from .ittybitty/repo-id (or create one).
+ * Read the repo-id from .itsybitsy/repo-id (or create one).
  * Mirrors get_repo_id() in ib bash.
  */
 export async function getRepoId(repoPath: string): Promise<string> {
-  const repoIdFile = join(repoPath, ".ittybitty", "repo-id");
+  const repoIdFile = runtimeNames.repoIdFile(repoPath);
   let existing = "";
   try {
     existing = (await Bun.file(repoIdFile).text()).trim();
@@ -5806,7 +5804,7 @@ export async function getRepoId(repoPath: string): Promise<string> {
     // Only a file that is genuinely absent may be (re)created. Any other read
     // failure (a sandboxed agent's EPERM/EACCES, an I/O error) means an id may
     // already exist that we simply cannot see; generating a new one would
-    // silently re-key every tmux session name (`ittybitty-<repoId>-<agent>`)
+    // silently re-key every tmux session name (`itsybitsy-<repoId>-<agent>`)
     // and sealed record of the repo. Fail loudly instead.
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
       throw new Error(
@@ -5822,7 +5820,7 @@ export async function getRepoId(repoPath: string): Promise<string> {
   const bytes = new Uint8Array(4);
   crypto.getRandomValues(bytes);
   const newId = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
-  await mkdir(join(repoPath, ".ittybitty"), { recursive: true });
+  await mkdir(runtimeNames.runtimeDir(repoPath), { recursive: true });
   await Bun.write(repoIdFile, newId + "\n");
   return newId;
 }
@@ -6027,7 +6025,7 @@ export function buildClaudePidBootstrapCommand(
  *
  * Sequence (mirrors cmd_new_agent in ib bash):
  * 1.  Validate prompt (required)
- * 2.  Ensure .ittybitty/agents/ and .ittybitty/archive/ dirs exist
+ * 2.  Ensure .itsybitsy/agents/ and .itsybitsy/archive/ dirs exist
  * 3.  Auto-detect manager from cwd if not provided
  * 4.  Validate manager (resolve partial ID, check not a worker)
  * 5.  Load config for model, maxAgents, permissions, prompts
@@ -6099,7 +6097,7 @@ async function checkTargetWorktreeClean(cwd: string): Promise<string | null> {
 /**
  * Auto-detect a manager agent ID from a cwd that lies inside an agent worktree
  * within `rootRepoPath`. Returns the manager ID if cwd matches the
- * `<rootRepoPath>/.ittybitty/agents/<id>/repo/...` pattern and that agent's
+ * `<rootRepoPath>/.itsybitsy/agents/<id>/repo/...` pattern and that agent's
  * meta.json declares an `id`. Returns "" otherwise.
  *
  * Used both for resolving an unspecified `opts.manager` AND for picking the
@@ -6108,11 +6106,11 @@ async function checkTargetWorktreeClean(cwd: string): Promise<string | null> {
  * `baseRef` derivation reading from the same source of truth.
  */
 async function detectManagerFromCwd(cwd: string, rootRepoPath: string): Promise<string> {
-  const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+  const agentPattern = runtimeNames.AGENT_CWD_PATTERN;
   const match = cwd.match(agentPattern);
   if (!match) return "";
   if (cwd !== rootRepoPath && !cwd.startsWith(rootRepoPath + "/")) return "";
-  const agentDirPath = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+  const agentDirPath = runtimeNames.worktreeAgentDir(cwd);
   try {
     const metaFile = Bun.file(join(agentDirPath, "meta.json"));
     if (await metaFile.exists()) {
@@ -6167,13 +6165,13 @@ async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext
   )(cwd);
   if (noWorktreeCaller) return noWorktreeCaller;
 
-  const agentPattern = /\/\.ittybitty\/agents\/([^/]+)\/repo/;
+  const agentPattern = runtimeNames.AGENT_CWD_PATTERN;
   if (agentPattern.test(cwd)) {
-    const callerDir = cwd.replace(/(\/\.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+    const callerDir = runtimeNames.worktreeAgentDir(cwd);
     try {
       const meta = await Bun.file(join(callerDir, "meta.json")).json();
       if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-        const marker = cwd.indexOf("/.ittybitty/agents/");
+        const marker = runtimeNames.firstAgentsMarker(cwd);
         return {
           meta: meta as Record<string, unknown>,
           agentDir: callerDir,
@@ -6226,8 +6224,8 @@ export async function newAgent(
     };
   }
 
-  const agentsDir = join(rootRepoPath, ".ittybitty", "agents");
-  const archiveDir = join(rootRepoPath, ".ittybitty", "archive");
+  const agentsDir = runtimeNames.agentsDir(rootRepoPath);
+  const archiveDir = runtimeNames.archiveDir(rootRepoPath);
 
   // Configuration
   let useWorktree = opts?.noWorktree !== true;
@@ -6340,15 +6338,15 @@ export async function newAgent(
       };
     }
 
-    // Case 1: Worktree agent — CWD matches /.ittybitty/agents/<id>/repo
-    const agentPattern = /\/.ittybitty\/agents\/([^/]+)\/repo/;
+    // Case 1: Worktree agent — CWD matches /.itsybitsy/agents/<id>/repo
+    const agentPattern = runtimeNames.AGENT_CWD_PATTERN;
     const worktreeMatch = cwd.match(agentPattern);
     if (!spawnedBy && worktreeMatch) {
-      const spawnerDir = cwd.replace(/(\/.ittybitty\/agents\/[^/]*)\/repo.*/, "$1");
+      const spawnerDir = runtimeNames.worktreeAgentDir(cwd);
       try {
         const spawnerMeta = await Bun.file(join(spawnerDir, "meta.json")).json();
         if (spawnerMeta.id) {
-          const spawnerRepoPath = cwd.substring(0, cwd.indexOf("/.ittybitty/agents/"));
+          const spawnerRepoPath = cwd.substring(0, runtimeNames.firstAgentsMarker(cwd));
           spawnedBy = {
             agent_id: spawnerMeta.id,
             repo_path: spawnerRepoPath,
@@ -6488,14 +6486,14 @@ export async function newAgent(
   // is forked from — see baseRef computation in the worktree-add step:
   //   baseRef = manager ? `agent/${manager}` : "HEAD"
   // - manager set → parent agent's worktree at
-  //   `<rootRepoPath>/.ittybitty/agents/<manager>/repo`
+  //   `<rootRepoPath>/.itsybitsy/agents/<manager>/repo`
   // - no manager → `rootRepoPath`
   // If the parent worktree path doesn't exist (e.g. agent was killed), fall
   // back to rootRepoPath rather than crashing — better to surface stale
   // host-repo dirt than to break the spawn entirely.
   let dirtyCheckPath = rootRepoPath;
   if (manager) {
-    const parentWorktree = join(rootRepoPath, ".ittybitty", "agents", manager, "repo");
+    const parentWorktree = runtimeNames.agentWorktree(rootRepoPath, manager);
     const parentExists = await stat(parentWorktree).then(() => true).catch(() => false);
     if (parentExists) dirtyCheckPath = parentWorktree;
   }
@@ -6911,7 +6909,7 @@ export async function newAgent(
 
   // Get repo-id for session naming
   const repoId = await getRepoId(rootRepoPath);
-  const tmuxSession = `ittybitty-${repoId}-${id}`;
+  const tmuxSession = runtimeNames.tmuxSessionName(repoId, id);
 
   // 9. Uniqueness check
   const agentDir = join(agentsDir, id);
@@ -6955,7 +6953,7 @@ export async function newAgent(
   // so logSpawn writes only to the spawnee's log.
   const spawnerAgentDir: string | null =
     spawnedBy && spawnedBy.repo_path !== null && !spawnedBy.agent_id.startsWith("@")
-      ? join(spawnedBy.repo_path, ".ittybitty", "agents", spawnedBy.agent_id)
+      ? runtimeNames.agentDir(spawnedBy.repo_path, spawnedBy.agent_id)
       : manager
         ? join(agentsDir, manager)
         : null;
@@ -7229,13 +7227,13 @@ export async function newAgent(
       }
       codexProfileGitRoots = gitRoots.profileGitRoots;
       // Parent repo subdirs — granted as writable roots so `ib new-agent`
-      // from inside a codex agent can mkdir into <parentRepo>/.ittybitty/
+      // from inside a codex agent can mkdir into <parentRepo>/.itsybitsy/
       // (agents+archive subdirs) and write <parentRepo>/.claude/settings.local.json
       // when spawning a claude sub-agent. These remain necessary for Codex's
       // own sandbox (the permission profile used when ours is off); under our
       // Seatbelt wrapper they are redundant but harmless.
       //
-      // We grant the .ittybitty and .claude SUBDIRS rather than the bare
+      // We grant the .itsybitsy and .claude SUBDIRS rather than the bare
       // parent repo so a misbehaving agent cannot reach src/, AGENTS.md,
       // etc. via a relative-path Bash write that bypasses the textual
       // matcher in checkBashCommandPaths.
@@ -7264,9 +7262,9 @@ export async function newAgent(
         // Route through dispatcherDryRunSpawnCtx with cwd=workPath so the dry-run
         // subprocess's process.cwd() lands inside the agent's worktree. The
         // hook handlers' resolveAgentContext / resolveAgentDir regex matches
-        // `/\.ittybitty\/agents/` in cwd; without this, callers whose cwd is
+        // `/\.itsybitsy\/agents/` in cwd; without this, callers whose cwd is
         // outside any worktree (e.g. system coordinator at ~/.itsybitsy/repo)
-        // would fall back to `<cwd>/.ittybitty/agents/<id>` and the dry-run
+        // would fall back to `<cwd>/.itsybitsy/agents/<id>` and the dry-run
         // would fail with `meta.json not found`.
         const result = await dispatcherDryRunSpawnCtx.run(
           [codexIbBinaryPath!, "hooks", event, id, "--dry-run"],
@@ -8060,13 +8058,9 @@ export type ResolveAgentResult =
   | { resolved: string }
   | { error: string; matches: string[] };
 
-/** Extract agent ID from a tmux session name (format: ittybitty-<repoid>-<agentid>) */
+/** Extract agent ID from a tmux session name (format: itsybitsy-<repoid>-<agentid>) */
 function extractAgentIdFromTmuxSession(sessionName: string): string | null {
-  if (!sessionName.startsWith("ittybitty-")) return null;
-  // Format: ittybitty-<8hexchars>-<agentid>
-  // repoId is always exactly 8 hex characters (4 random bytes)
-  const match = sessionName.match(/^ittybitty-[a-f0-9]{8}-(.+)$/);
-  return match ? match[1]! : null;
+  return runtimeNames.agentIdFromTmuxSession(sessionName);
 }
 
 /**
@@ -8087,7 +8081,7 @@ export async function resolveAgentId(
     return { resolved: partial };
   }
 
-  // Exact match: check tmux sessions for ittybitty-*-<partial>
+  // Exact match: check tmux sessions for itsybitsy-*-<partial>
   const sessions = await tmuxLister();
   for (const session of sessions) {
     const agentId = extractAgentIdFromTmuxSession(session);
@@ -8118,7 +8112,7 @@ export function resetDiffStatusSpawnRunner(): void {
  * Runs git merge-base HEAD main, then git diff <merge-base> in the agent worktree.
  */
 export async function diffAgent(agent: Agent, opts?: { stat?: boolean }): Promise<IbCommandResult> {
-  const worktreePath = join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
+  const worktreePath = runtimeNames.agentWorktree(agent.repoPath, agent.id);
   try {
     await readdir(worktreePath);
   } catch {
@@ -8181,7 +8175,7 @@ export async function diffCwd(opts?: { stat?: boolean }): Promise<IbCommandResul
  * Shows header, commits vs parent branch, uncommitted changes, and file change summary.
  */
 export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
-  const worktreePath = join(agent.repoPath, ".ittybitty", "agents", agent.id, "repo");
+  const worktreePath = runtimeNames.agentWorktree(agent.repoPath, agent.id);
   try {
     await readdir(worktreePath);
   } catch {
@@ -8309,7 +8303,7 @@ export async function statusAgent(agent: Agent): Promise<IbCommandResult> {
  * Does NOT archive, remove worktree, or delete directory.
  */
 export async function pauseAgent(agent: Agent): Promise<IbCommandResult> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   const tmuxSession = agent.meta.tmux_session;
 
   // Check if agent directory exists
@@ -8473,7 +8467,7 @@ export async function askTopLevelRefusal(agentsDir: string, meta: Record<string,
  */
 export async function askQuestion(repoPath: string, agentId: string, question: string, opts: AskQuestionOptions = {}): Promise<IbCommandResult> {
   // Verify agent exists
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
   const agentDir = join(agentsDir, agentId);
   const metaPath = join(agentDir, "meta.json");
 
@@ -8502,7 +8496,7 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
   }
 
   // Read or initialize user-questions.json
-  const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
+  const questionsPath = runtimeNames.userQuestionsFile(repoPath);
   let data: { questions: any[] } = { questions: [] };
   try {
     const file = Bun.file(questionsPath);
@@ -8542,7 +8536,7 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
     status: "pending",
   });
 
-  await mkdir(join(repoPath, ".ittybitty"), { recursive: true });
+  await mkdir(runtimeNames.runtimeDir(repoPath), { recursive: true });
   await Bun.write(questionsPath, JSON.stringify(data, null, 2) + "\n");
 
   // Log to agent's log
@@ -8582,7 +8576,7 @@ export async function askQuestion(repoPath: string, agentId: string, question: s
  * Reads user-questions.json, marks the question as acknowledged, writes back.
  */
 export async function acknowledgeQuestion(repoPath: string, questionId: string): Promise<IbCommandResult> {
-  const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
+  const questionsPath = runtimeNames.userQuestionsFile(repoPath);
 
   let data: { questions: any[] };
   try {

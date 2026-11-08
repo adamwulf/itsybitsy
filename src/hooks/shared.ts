@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Shared constants and patterns used across hook implementations.
  */
@@ -8,10 +9,10 @@ import { realpathSync } from "fs";
 import { loadAgentType } from "../agent-types";
 
 /**
- * Matches agent worktree paths: .ittybitty/agents/<agentId>/repo
+ * Matches agent worktree paths: .itsybitsy/agents/<agentId>/repo
  * Capturing group 1 contains the agent ID.
  */
-export const AGENT_CWD_PATTERN = /\.ittybitty\/agents\/([^/]+)\/repo(\/|$)/;
+export const AGENT_CWD_PATTERN = runtimeNames.AGENT_CWD_PATTERN;
 
 /**
  * Sentinel agent ID for the system coordinator. Not a valid agent ID per
@@ -45,13 +46,13 @@ export function systemCoordinatorHome(): string {
  * Returns one of:
  * - `{ agentId: "@system", agentDir: <coordinator home>, syntheticMeta: {...} }`
  *   when cwd is inside the system coordinator's home directory.
- * - `{ agentId: <id>, agentDir: <repo>/.ittybitty/agents/<id> }` when cwd
+ * - `{ agentId: <id>, agentDir: <repo>/.itsybitsy/agents/<id> }` when cwd
  *   matches the agent worktree pattern. No `syntheticMeta` — callers should
  *   read the on-disk `meta.json` themselves.
  * - `null` for primary Claude / unrecognized cwds.
  *
  * Per-repo coordinators are intentionally NOT handled here — their existing
- * flow (cwd matches pattern, meta.json read from `<repo>/.ittybitty/agents/<basename>/`)
+ * flow (cwd matches pattern, meta.json read from `<repo>/.itsybitsy/agents/<basename>/`)
  * already works because per-repo coordinators ARE worktree agents. This
  * helper exists primarily to give the system coordinator (which lives outside
  * any repo) a uniform identity object so hook bodies don't need special-case
@@ -97,11 +98,11 @@ export function resolveAgentFromCwd(cwd: string): ResolvedAgent | null {
   const m = AGENT_CWD_PATTERN.exec(cwd);
   if (m) {
     const agentId = m[1]!;
-    const itsybitsyIdx = cwd.indexOf("/.ittybitty/agents/");
+    const itsybitsyIdx = runtimeNames.firstAgentsMarker(cwd);
     const repoRoot = cwd.substring(0, itsybitsyIdx);
     return {
       agentId,
-      agentDir: join(repoRoot, ".ittybitty", "agents", agentId),
+      agentDir: runtimeNames.agentDir(repoRoot, agentId),
     };
   }
 

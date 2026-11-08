@@ -59,7 +59,7 @@ function fakeWatchdogDeps(calls: BrokerCall[], repoPath: string, overrides: Part
     askQuestion: record("askQuestion"),
     lifecycle: {
       authorize: async () => null,
-      findAgent: async (repo, id) => makeAgent({ id, repoPath: repo, storageDir: join(repo, ".ittybitty", "agents", id) }),
+      findAgent: async (repo, id) => makeAgent({ id, repoPath: repo, storageDir: join(repo, ".itsybitsy", "agents", id) }),
       retire: record("retire"),
       merge: record("merge"),
       rehire: record("rehire"),
@@ -139,7 +139,7 @@ describe("the isolated CLI runner", () => {
 
   test("refuses an agent-shaped temp directory, which would make every fixture look like that agent", async () => {
     const root = await mkdtemp(join(tmpdir(), "ib-cli-agent-tmp-"));
-    const agentShaped = join(root, ".ittybitty", "agents", "agent-tmp", "repo");
+    const agentShaped = join(root, ".itsybitsy", "agents", "agent-tmp", "repo");
     await mkdir(agentShaped, { recursive: true });
     const realTmpdir = process.env.TMPDIR;
     process.env.TMPDIR = agentShaped;
@@ -197,7 +197,7 @@ describe("the isolated CLI runner", () => {
   test("production code never reads the driver's config or imports the test modules", async () => {
     const offenders: string[] = [];
     for await (const path of new Bun.Glob("**/*.ts").scan({ cwd: REPO_ROOT, followSymlinks: false })) {
-      if (path.startsWith("node_modules/") || path.startsWith(".ittybitty/")) continue;
+      if (path.startsWith("node_modules/") || path.startsWith(".itsybitsy/")) continue;
       if (path.endsWith(".test.ts") || path === "test-preload.ts") continue;
       if (path === "src/test-cli-driver.ts" || path === "src/test-cli-runner.ts" || path === "src/test-utils.ts") continue;
       const source = await Bun.file(join(REPO_ROOT, path)).text();

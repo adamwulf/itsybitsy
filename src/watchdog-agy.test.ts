@@ -176,7 +176,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     tempHome = await mkdtemp(join(tmpdir(), "agy-wd-home-"));
     setCoordinatorHome(tempHome);
     agentId = "agy-hb";
-    agentDir = join(tempRepo, ".ittybitty", "agents", agentId);
+    agentDir = join(tempRepo, ".itsybitsy", "agents", agentId);
     await mkdir(agentDir, { recursive: true });
 
     setWatchdogSpawnRunner(recordingRunner([]));
@@ -272,7 +272,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
       model: "claude:opus",
       claude_pid: "111",
     };
-    const managerDir = join(tempRepo, ".ittybitty", "agents", managerId);
+    const managerDir = join(tempRepo, ".itsybitsy", "agents", managerId);
     await mkdir(managerDir, { recursive: true });
     // Give the manager a LIVE watchdog so sendMessage just ENQUEUES to its
     // outbox and returns — no inline chunked delivery (which has real inter-key

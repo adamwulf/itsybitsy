@@ -79,7 +79,7 @@ describe("send broker", () => {
       { path: senderRepo, name: "hunch" },
       { path: targetRepo, name: "iris" },
     ];
-    agentDir = join(senderRepo, ".ittybitty", "agents", SENDER_ID);
+    agentDir = join(senderRepo, ".itsybitsy", "agents", SENDER_ID);
     await writeAgent(senderRepo, SENDER_ID, {});
     await writeAgent(targetRepo, TARGET_ID, {});
     tmuxCalls = [];
@@ -112,11 +112,11 @@ describe("send broker", () => {
    * tmux itself.
    */
   async function writeAgent(repo: string, id: string, meta: Record<string, unknown>): Promise<string> {
-    const dir = join(repo, ".ittybitty", "agents", id);
+    const dir = join(repo, ".itsybitsy", "agents", id);
     await mkdir(dir, { recursive: true });
     await Bun.write(
       join(dir, "meta.json"),
-      JSON.stringify({ id, tmux_session: `ittybitty-test-${id}`, created_epoch: 0, worktree: true, ...meta }),
+      JSON.stringify({ id, tmux_session: `itsybitsy-test-${id}`, created_epoch: 0, worktree: true, ...meta }),
     );
     await Bun.write(
       join(dir, "meta.transient.json"),

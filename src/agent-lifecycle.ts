@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Shared agent lifecycle helpers used by multiple ib commands.
  * Mirrors the behavior of the ib bash script's teardown, archive,
@@ -36,6 +37,23 @@ import { formatLogTimestamp } from "./log-timestamp";
 
 /** Spawn context for agent lifecycle operations */
 export const spawnCtx = new SpawnContext();
+
+/** Prefer new retirements; the legacy namespace is consulted only if absent. */
+export async function resolveRetainedHeadRef(
+  repoPath: string,
+  archiveKey: string,
+  context: SpawnContext = spawnCtx,
+): Promise<{ ref: string; gitHead: string }> {
+  const refs = [runtimeNames.retiredHeadRef(archiveKey), runtimeNames.legacyRetiredHeadRef(archiveKey)];
+  for (const ref of refs) {
+    const result = await context.run(["git", "-C", repoPath, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    if (result.exitCode === 0) return { ref, gitHead: result.stdout.trim() };
+    if (result.exitCode !== 1) {
+      throw new Error(`Cannot resolve retained HEAD ${ref}: ${result.stderr.trim() || `git exited ${result.exitCode}`}`);
+    }
+  }
+  throw new Error(`Retained HEAD not found: neither ${refs[0]} nor ${refs[1]}`);
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -119,7 +137,7 @@ export function parseRetirementManifest(
     if (!isGitObjectId(raw.gitHead)) return null;
     if (
       typeof raw.headRef !== "string" ||
-      raw.headRef !== `refs/ittybitty/retired/${raw.archiveKey}/head`
+      !runtimeNames.isRetiredHeadRef(raw.headRef, raw.archiveKey)
     ) return null;
   } else if (raw.gitHead !== null || raw.headRef !== null) {
     return null;
@@ -188,7 +206,7 @@ export async function prepareAgentRetirement(
   }
 
   const archiveKey = `${formatArchiveTimestamp()}-${agentId}`;
-  const archivePath = join(repoPath, ".ittybitty", "archive", archiveKey);
+  const archivePath = join(runtimeNames.runtimeDir(repoPath), "archive", archiveKey);
   if (await lstat(archivePath).then(() => true).catch(() => false)) {
     throw new Error(`retirement archive already exists: ${archiveKey}`);
   }
@@ -317,7 +335,7 @@ export async function prepareAgentRetirement(
         untrackedFiles.push(relativePath);
       }
 
-      headRef = `refs/ittybitty/retired/${archiveKey}/head`;
+      headRef = runtimeNames.retiredHeadRef(archiveKey);
       const refResult = await spawnCtx.run([
         "git", "-C", repoPath, "update-ref", headRef, gitHead,
       ]);
@@ -373,7 +391,7 @@ export async function findRetiredAgentArchives(
   agentId: string,
 ): Promise<RetiredAgentArchive[]> {
   if (!isValidAgentId(agentId)) return [];
-  const archiveRoot = join(repoPath, ".ittybitty", "archive");
+  const archiveRoot = runtimeNames.archiveDir(repoPath);
   const entries = await readdir(archiveRoot, { withFileTypes: true }).catch(() => []);
   const matches: RetiredAgentArchive[] = [];
   for (const entry of entries) {
@@ -430,10 +448,10 @@ export async function logSpawn(
 // ── removeAgentQuestions ─────────────────────────────────────────────────────
 
 /**
- * Remove entries for the given agent from .ittybitty/user-questions.json.
+ * Remove entries for the given agent from .itsybitsy/user-questions.json.
  */
 export async function removeAgentQuestions(repoPath: string, agentId: string): Promise<void> {
-  const questionsPath = join(repoPath, ".ittybitty", "user-questions.json");
+  const questionsPath = runtimeNames.userQuestionsFile(repoPath);
   try {
     const file = Bun.file(questionsPath);
     if (!(await file.exists())) return;
@@ -575,7 +593,7 @@ export interface ArchiveAgentResult {
 }
 
 /**
- * Archive agent artifacts to .ittybitty/archive/YYYYMMDD-HHMMSS-<id>/.
+ * Archive agent artifacts to .itsybitsy/archive/YYYYMMDD-HHMMSS-<id>/.
  * Moves/copies: output.log (move), agent.log (copy), meta.json (copy),
  * settings.local.json (move), debug-logs/ (copy recursive).
  *
@@ -597,7 +615,7 @@ export async function archiveAgent(
   // to archive. Pruning is by id only and never emits a notice.
   const prunedTeams = await pruneAgentFromAllTeams(agentId);
 
-  const archiveDir = join(repoPath, ".ittybitty", "archive");
+  const archiveDir = runtimeNames.archiveDir(repoPath);
   const archiveKey =
     preparedRetirement?.archiveKey ?? `${formatArchiveTimestamp()}-${agentId}`;
   const archiveFolder = join(archiveDir, archiveKey);
@@ -619,8 +637,7 @@ export async function archiveAgent(
     const pendingHeadRef = pending?.headRef;
     if (
       isSafeArchiveKey(pendingArchiveKey, agentId) &&
-      pendingHeadRef ===
-        `refs/ittybitty/retired/${pendingArchiveKey}/head`
+      runtimeNames.isRetiredHeadRef(pendingHeadRef, pendingArchiveKey)
     ) {
       await spawnCtx.run([
         "git", "-C", repoPath, "update-ref", "-d", pendingHeadRef,
@@ -961,11 +978,11 @@ export async function scanAndKillOrphans(agentsDir: string): Promise<number> {
 
     if (!procCwd) continue;
 
-    // Safety check 1: Must contain "/.ittybitty/agents/"
-    if (!procCwd.includes("/.ittybitty/agents/")) continue;
+    // Safety check 1: Must contain "/.itsybitsy/agents/"
+    if (runtimeNames.firstAgentsMarker(procCwd) === -1) continue;
 
     // Safety check 2: Extract agent dir and verify it doesn't exist
-    const match = procCwd.match(/(.*\/.ittybitty\/agents\/[^/]+)/);
+    const match = runtimeNames.matchAgentPrefix(procCwd);
     if (!match) continue;
     const agentPath = match[1]!;
 
@@ -1038,7 +1055,7 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
   const dir = cwd ?? process.cwd();
 
   // Primary check: worktree path pattern
-  if (/\/.ittybitty\/agents\/[^/]+\/repo/.test(dir)) {
+  if (runtimeNames.AGENT_WORKTREE_PATTERN.test(dir)) {
     return true;
   }
 
@@ -1046,7 +1063,7 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
   if (process.env.TMUX) {
     try {
       const result = await spawnCtx.run(["tmux", "display-message", "-p", "#{session_name}"]);
-      if (result.exitCode === 0 && result.stdout.startsWith("ittybitty-")) {
+      if (result.exitCode === 0 && runtimeNames.isAgentTmuxSession(result.stdout)) {
         return true;
       }
     } catch { /* ignore */ }

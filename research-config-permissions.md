@@ -262,7 +262,7 @@ The **coordinator module** builds these settings for per-repo coordinators by re
 Once a tool is allowed by the allow list, path checks are applied:
 
 1. **TaskCreate is always denied** (must use `ib new-agent` instead)
-2. **Bash cd commands** — check resolved path is in worktree or `.ittybitty/agents/{self}/`
+2. **Bash cd commands** — check resolved path is in worktree or `.itsybitsy/agents/{self}/`
 3. **Other Bash commands** — scan for references to other agents' dirs or main repo
 4. **File-path tools** — verify file_path/path/notebook_path resolves to worktree or own agent.log
 5. **System paths** — `/usr/bin`, `~/.claude`, etc. are allowed if in allow list

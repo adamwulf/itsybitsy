@@ -136,7 +136,7 @@ Confirmed via the official doc `developers.openai.com/codex/hooks` AND the binar
 
 ## Phase 2 spike findings — 2026-05-30
 
-> Spike performed by `agent-6e76ccd2` (worker) under `codex-agent` manager. All tests on `codex-cli 0.135.0`, macOS Darwin 25.3.0 (Mac OS 26.3.1), zsh inside tmux 3.6a. ChatGPT-account auth (no API key billing). Worktree: `/Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-6e76ccd2/repo`.
+> Spike performed by `agent-6e76ccd2` (worker) under `codex-agent` manager. All tests on `codex-cli 0.135.0`, macOS Darwin 25.3.0 (Mac OS 26.3.1), zsh inside tmux 3.6a. ChatGPT-account auth (no API key billing). Worktree: `/Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/agent-6e76ccd2/repo`.
 
 ### THE canonical launch line (Phase 2 verified, use exactly this shape)
 
@@ -216,7 +216,7 @@ When a PreToolUse hook returns `{"hookSpecificOutput":{"hookEventName":"PreToolU
   "session_id": "019e7b21-cb7d-7f23-8674-11036ed141ef",
   "turn_id": "019e7b21-cbce-7d00-8e6d-1fa40d030352",
   "transcript_path": "/Users/adamwulf/.codex/sessions/2026/05/30/rollout-2026-05-30T18-04-32-019e7b21-cb7d-7f23-8674-11036ed141ef.jsonl",
-  "cwd": "/Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-6e76ccd2/repo",
+  "cwd": "/Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/agent-6e76ccd2/repo",
   "hook_event_name": "PreToolUse",
   "model": "gpt-5.4-mini",
   "permission_mode": "bypassPermissions",
@@ -535,7 +535,7 @@ codex -m gpt-5.4-mini -a never -s workspace-write \
 **Why it succeeded:** the rollout-file's system prompt explicitly lists writable roots:
 ```
 The writable roots are /Users/adamwulf/.codex/memories,
-  /Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-6e76ccd2/repo,
+  /Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/agent-6e76ccd2/repo,
   /private/tmp,
   /private/var/folders/n3/nm2j2qb55ss7ystx9_vps3lw0000gn/T
 ```
@@ -614,7 +614,7 @@ TUI trace:
   "tool_input": {
     "command": "*** Begin Patch\n*** Add File: /private/tmp/codex-sandbox-escape.txt\n+I escaped\n*** End Patch\n"
   },
-  "cwd": "/Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-6e76ccd2/repo",
+  "cwd": "/Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/agent-6e76ccd2/repo",
   ...
 }
 

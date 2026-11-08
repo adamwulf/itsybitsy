@@ -14,7 +14,7 @@ describe("hookAgyPreInvocation", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "agy-preinv-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-inv01");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-inv01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
       join(agentDir, "meta.json"),
@@ -92,7 +92,7 @@ describe("hookAgyPreInvocationDryRun", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "agy-preinv-dry-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-invdry");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-invdry");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-invdry", state: "waiting" }));
   });

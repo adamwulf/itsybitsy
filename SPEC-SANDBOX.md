@@ -562,11 +562,11 @@ comes from merged `.md` configuration.
   - the agent's **worktree** path,
   - the **git common dir** (`resolveGitRevParsePath` — reuse codex's
     computation, `ib-commands.ts:4721`),
-  - the **agent dir** (`<repoPath>/.ittybitty/agents/<id>`, which contains the
+  - the **agent dir** (`<repoPath>/.itsybitsy/agents/<id>`, which contains the
     worktree at `/repo`) — **MANDATORY**, not a candidate: hooks write its
     `meta.json`/`agent.log`/`debug-logs/` (§4C.1). Injecting it subsumes
     `WORKTREE`.
-  - **`REPOAGENTS`** = `<repoPath>/.ittybitty/agents` (the parent-repo registry) —
+  - **`REPOAGENTS`** = `<repoPath>/.itsybitsy/agents` (the parent-repo registry) —
     **read**-injected; `ib status` needs it to resolve the agent ("Agent not found"
     without it; `ib list` works without it). New finding, phase-1.5 verification.
   - Claude project data is covered by the static `~/.claude` baseline; the
@@ -691,7 +691,7 @@ sort. `AGENTDIR`, `WORKTREE`, and `GITDIR` join the table as write roots. The
 remaining runtime roots are **keyed on the resolved `canSpawnChildren`** (A3):
 `REPOAGENTS` is a **write** root for a spawner and a **read** root otherwise, and
 `PARENTCLAUDE` (`<repo>/.claude`) joins as a **write** root only for a spawner,
-as does the **read-only** `REPOID` (`<repo>/.ittybitty/repo-id`, one file; see
+as does the **read-only** `REPOID` (`<repo>/.itsybitsy/repo-id`, one file; see
 §4C.1 for why it is never writable).
 Their resolved `-D` values determine their specificity, while the emitted
 matchers remain `(param "NAME")`. There is also one **runtime deny root**,
@@ -849,7 +849,7 @@ Required in the baseline:
   state live in `<agentDir>` — a **sibling of** `WORKTREE`, *outside* the
   `WORKTREE` subpath. The agent-status hook's `writeAgentState` writes `meta.json`;
   hooks write `debug-logs/`. Inject `<agentDir>` (which *is*
-  `<repoPath>/.ittybitty/agents/<id>`, cf. `ib-commands.ts:370`; the worktree is
+  `<repoPath>/.itsybitsy/agents/<id>`, cf. `ib-commands.ts:370`; the worktree is
   `<agentDir>/repo`) as a runtime `-D` writable root. Since `<agentDir>` contains
   the worktree, this single root subsumes `WORKTREE` — keep both `-D` params for
   clarity or drop the redundant one, but comment the overlap.
@@ -860,13 +860,13 @@ Required in the baseline:
   `--add-dir`). The exact same lesson transfers 1:1 to seatbelt. (This is the
   second lesson in the codex-roots code; the plan previously used it only for the
   gitdir computation.)
-- **`ib list`/`ib look`** read every registered repo's `.ittybitty/agents/*/meta.json`
+- **`ib list`/`ib look`** read every registered repo's `.itsybitsy/agents/*/meta.json`
   (cross-repo reads). Decision: allow-read those trees in the `_all.md` baseline,
   or accept `ib list` degrading inside sandboxed agents. (Recommend read-allow.)
   `ib send` resolves its target with the same cross-repo read; for a sandboxed
   worktree agent it now goes through the watchdog instead (§4C.9). `ib list` and
   `ib look` are unchanged.
-- **`ib new-agent` from a sandboxed manager** needs parent-repo `.ittybitty/`
+- **`ib new-agent` from a sandboxed manager** needs parent-repo `.itsybitsy/`
   mkdir + `.claude/settings.local.json` write — exactly what
   `deriveCodexParentRepoRoots` grants codex today (`ib-commands.ts:4708-4724`).
   Reuse that precedent in the baseline for `canSpawnChildren` types.
@@ -875,7 +875,7 @@ Required in the baseline:
   `canSpawnChildren` (metaCanSpawnChildren: per-agent meta override, then the
   type), passed into `prepareSandbox` at spawn (from `initialMetaJson`) and
   resume (from `agent.meta`). For a spawner, **REPOAGENTS**
-  (`<repo>/.ittybitty/agents`) becomes a **write** runtime root (it writes the
+  (`<repo>/.itsybitsy/agents`) becomes a **write** runtime root (it writes the
   child's agent dir) and **PARENTCLAUDE** (`<repo>/.claude`, where `newAgent`'s
   non-coordinator settings-merge branch writes `rootSettingsPath` =
   `<rootRepoPath>/.claude/settings.local.json`) is added
@@ -888,9 +888,9 @@ Required in the baseline:
   write `newAgent` performs for a child.
 
   **REPOID (added 2026-09-29).** `newAgent` (and rehire / `ib sandbox refresh`)
-  also READ `<repo>/.ittybitty/repo-id` through `getRepoId` to name the child's
-  tmux session (`ittybitty-<repoId>-<agent>`) and key its sealed record. Only
-  `.ittybitty/agents` was granted, so a sandboxed spawner saw the file as
+  also READ `<repo>/.itsybitsy/repo-id` through `getRepoId` to name the child's
+  tmux session (`itsybitsy-<repoId>-<agent>`) and key its sealed record. Only
+  `.itsybitsy/agents` was granted, so a sandboxed spawner saw the file as
   missing and `ib new-agent` failed trying to create it. A spawner now gets that
   one file as a **read-only** runtime root (`REPOID`, `SandboxProfileParams`
   optional field; a non-spawner never gets it). It is deliberately not writable:
@@ -1039,7 +1039,7 @@ MCP network egress is subject to the same domain allowlist.
 ### 4C.5 Realistic isolation story (set expectations in §1)
 
 Once 4C.1's requirements land (`~/.itsybitsy/agents/**` write, agents-dir reads,
-parent-repo `.ittybitty`, `/usr/local/bin`, `~/.claude` write, tmux socket for
+parent-repo `.itsybitsy`, `/usr/local/bin`, `~/.claude` write, tmux socket for
 managers), the **kernel layer cannot distinguish "`ib` writing an outbox" from
 "the agent writing an outbox"** — Seatbelt is per-path, not per-binary. The honest
 isolation story: **kernel = coarse walls + network deny; hook (`agent-path.ts`) =
@@ -1143,7 +1143,7 @@ in ~1s with the right caller and cwd, a stale heartbeat failed in ~1s, `--repo`
 and `--model` were refused, and both queue directories were left empty.
 
 **Known limitations.**
-1. While a spawner holds a WRITE grant on `<repo>/.ittybitty/agents` (§4C.1, A3)
+1. While a spawner holds a WRITE grant on `<repo>/.itsybitsy/agents` (§4C.1, A3)
    it can write ANOTHER agent's request directory in the same repo and so ask
    that agent's watchdog to spawn as it. Removing that grant (and the
    spawner-only `PARENTCLAUDE`, `REPOID` and tmux-socket grants) for spawners is
@@ -1170,7 +1170,7 @@ shape: the three git calls in the child's worktree pass, the main-root call
 fails with exactly that text, and the same `update-ref` run in the child's
 worktree passes. The teardown that follows has the same problem
 (`git -C <main repo> worktree remove` / `branch -D`) and then moves the agent
-into `<repo>/.ittybitty/archive`, which no worktree agent's profile grants.
+into `<repo>/.itsybitsy/archive`, which no worktree agent's profile grants.
 `ib merge <child>` fails the same way, earlier and with a misleading message:
 its `git -C <main repo> show-ref` cannot run, so it reports `Branch
 'agent/<id>' does not exist`. `ib rehire <child>` never got that far: the
@@ -1206,7 +1206,7 @@ broker's. `src/lifecycle-broker.ts` adds:
     `isSandboxedProcess()` is still true for a codex agent in that mode — it
     sits in codex's own sandbox (the `itsybitsy_agent` permission profile),
     which grants the git common dir, the worktree's Git admin dir and
-    `<repo>/.ittybitty` — and such an agent has no seal to verify.
+    `<repo>/.itsybitsy` — and such an agent has no seal to verify.
 
   This only routes; it grants nothing. A caller that edits its own `meta.json`
   to get the direct path runs the command inside its real sandbox, where it
@@ -1234,7 +1234,7 @@ broker's. `src/lifecycle-broker.ts` adds:
   `sandbox`. Five rules follow:
   1. *The target is a directory entry, not an `id` in a `meta.json`.* For
      `retire` and `merge` the target is resolved before anything else: it must
-     be the real directory named exactly `<repo>/.ittybitty/agents/<target>`
+     be the real directory named exactly `<repo>/.itsybitsy/agents/<target>`
      (as `readdir` spells it — a case variant or a symlink does not count),
      and the `meta.json` in it must carry the same id. `meta.id` is unsealed
      too, and `readAllAgents` reports it as the agent's id.
@@ -1273,7 +1273,7 @@ broker's. `src/lifecycle-broker.ts` adds:
   spawn.
 - **The hook defers one case.** The PreToolUse rule authorizes `ib rehire` from
   the archived `meta.json`, and a sandboxed worktree agent cannot list
-  `<repo>/.ittybitty/archive`. The rule therefore found nothing and denied every
+  `<repo>/.itsybitsy/archive`. The rule therefore found nothing and denied every
   rehire — including the agent's own child — before the command could run.
   The hook rule now returns "no decision" for `rehire` when the target
   is not an active agent in the caller's repo AND the process is sandboxed AND
@@ -1333,7 +1333,7 @@ in place of its worktree) — each against files on disk.
      (limitation 2) with no real manager in the sequence. One agent alone
      cannot do this: the broker trusts no unsealed field of the REQUESTER's
      own file, and an agent is never its own target (above).
-   - *A spawner* — it holds a write grant on `<repo>/.ittybitty/agents`, so it
+   - *A spawner* — it holds a write grant on `<repo>/.itsybitsy/agents`, so it
      can write itself in as the manager of any agent in its repo and then
      retire it, or merge its branch into its own. This is the same grant as
      limitation 1 of §4C.6.
@@ -1385,9 +1385,9 @@ in place of its worktree) — each against files on disk.
 
 **Problem.** `ib ask "question"` from a sandboxed worktree agent did not reach
 the user. `askQuestion()` appends the question to
-`<repo>/.ittybitty/user-questions.json`. A worktree agent's profile grants
+`<repo>/.itsybitsy/user-questions.json`. A worktree agent's profile grants
 `AGENTDIR`, `WORKTREE`, `GITDIR` and `REPOAGENTS` (§4C.1) — `REPOAGENTS` is
-`<repo>/.ittybitty/agents`, not `<repo>/.ittybitty` — so the questions file is
+`<repo>/.itsybitsy/agents`, not `<repo>/.itsybitsy` — so the questions file is
 outside its write roots and the write is refused. The notifications that follow
 the write (`say`, Telegram) are never reached. A write grant on that file would
 let every agent rewrite any pending question in the repo, so the command leaves
@@ -1474,7 +1474,7 @@ agent existed. For an agent target, writing the message was not the problem:
 agent outboxes are in `~/.itsybitsy/agents/<id>/` (§4C.1), which every agent
 can write. Finding the target was. (`@system` is different; see "New reach"
 below.) `resolveTarget` calls `readAllAgents`, which lists the
-`.ittybitty/agents` directory of every registered repo. A worktree agent's
+`.itsybitsy/agents` directory of every registered repo. A worktree agent's
 profile grants `REPOAGENTS` of its own repo only, so the other repos fail with
 `EPERM`; `readAllAgents` reports that in `errors`, and `resolveTarget` ignored
 it. A read grant on every repo's agents tree (the §4C.1 `ib list` decision)
@@ -1617,7 +1617,7 @@ agent profile.
    goes but not what it says. This is not new: every unsandboxed `ib send`
    (the user's, an unsandboxed agent's) already trusts the recipient's
    `meta.json` the same way. Binding a session to its agent (the seal, or the
-   `ittybitty-<repoId>-<id>` naming) would close it for every sender and is out
+   `itsybitsy-<repoId>-<id>` naming) would close it for every sender and is out
    of scope here (from the code; not run).
 
 ## 5. Shipped components

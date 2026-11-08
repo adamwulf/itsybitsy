@@ -4,17 +4,17 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 # Suppress the "How is Claude doing?" feedback survey for spawned agents
 export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
-AGENT_LOG='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/agent.log'
-STDERR_LOG='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/claude.stderr.log'
+AGENT_LOG='<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/agent.log'
+STDERR_LOG='<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/claude.stderr.log'
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [resume.sh] $1" >> "$AGENT_LOG"; }
 # Start the per-agent proxy outside Seatbelt. The launcher detaches/unrefs the
 # proxy before returning; the agent CLI alone is wrapped below. Fail closed if the
 # actual bind loses the small race after the parent-process port preflight.
 PROXY_PORT=<PORT>
-PROXY_PID_FILE='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.pid'
-PROXY_READY_FILE='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.ready'
+PROXY_PID_FILE='<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/sandbox-proxy.pid'
+PROXY_READY_FILE='<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/sandbox-proxy.ready'
 rm -f "$PROXY_PID_FILE" "$PROXY_READY_FILE"
-if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-domains.txt' --log '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/sandbox-proxy.log' --agent-log '<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/agent.log' --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
+if ! ib sandbox-proxy-launch --port "$PROXY_PORT" --domains '<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/sandbox-domains.txt' --log '<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/sandbox-proxy.log' --agent-log '<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/agent.log' --pid-file "$PROXY_PID_FILE" --ready-file "$PROXY_READY_FILE"; then
     log "sandbox refused: proxy could not bind localhost:$PROXY_PORT"
     exit 1
 fi
@@ -129,7 +129,7 @@ trap 'log "script received SIGINT; sending SIGINT to Claude PID=$CLAUDE_PID"; ki
 
 # Store PID in meta.json — route through "ib write-pid" which uses
 # mutateAgentMeta + the meta-lock (HIGH 2 from the Phase 4 review).
-META_JSON='<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/meta.json'
+META_JSON='<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/meta.json'
 if [[ -f "$META_JSON" ]]; then
     ib write-pid 'agent-claude-snapshot' "$CLAUDE_PID" || log "write-pid failed (exit=$?); meta.json claude_pid not set"
 fi
@@ -163,4 +163,4 @@ if [[ "$EXIT_CODE" -ne 0 && -s "$STDERR_LOG" ]]; then
 fi
 
 # Run exit check
-'<AGENTSDIR>/.ittybitty/agents/agent-claude-snapshot/exit-check.sh'
+'<AGENTSDIR>/.itsybitsy/agents/agent-claude-snapshot/exit-check.sh'

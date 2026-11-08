@@ -143,7 +143,7 @@ pane out of mode, and the helper log carries `[helper] exited rc=143`.
 Restoring raw mode is enough — the process does not need to be killed or resumed.
 
 ```sh
-SESSION=<agent tmux session>          # e.g. ittybitty-<repo>-<agent>
+SESSION=<agent tmux session>          # e.g. itsybitsy-<repo>-<agent>
 TTY=$(tmux display-message -p -t "$SESSION" '#{pane_tty}')
 
 # 1) if the pane is in copy-mode (pane_in_mode=1), exit it first.

@@ -186,7 +186,7 @@ describe("hookCodexStopDryRun — exercises real handler with synthetic payload"
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "codex-stop-dryrun-"));
     setUserHome(tempHome);
-    agentDir = join(tempHome, ".ittybitty", "agents", "agent-dryrun01");
+    agentDir = join(tempHome, "project", ".itsybitsy", "agents", "agent-dryrun01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
       join(agentDir, "meta.json"),
@@ -206,7 +206,7 @@ describe("hookCodexStopDryRun — exercises real handler with synthetic payload"
 
   test("succeeds when meta.json exists", async () => {
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await hookCodexStopDryRun("agent-dryrun01");
     } finally {
@@ -216,7 +216,7 @@ describe("hookCodexStopDryRun — exercises real handler with synthetic payload"
 
   test("throws when meta.json is missing", async () => {
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await expect(hookCodexStopDryRun("agent-missing")).rejects.toThrow(/meta\.json not found/);
     } finally {
@@ -231,7 +231,7 @@ describe("hookCodexStopDryRun — exercises real handler with synthetic payload"
   test("does NOT mutate meta.json state (skipMetaWrites is set)", async () => {
     const before = await Bun.file(join(agentDir, "meta.json")).text();
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await hookCodexStopDryRun("agent-dryrun01");
     } finally {

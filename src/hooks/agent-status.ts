@@ -553,8 +553,8 @@ export async function executeResultActions(
     return "invalid_session";
   }
 
-  // The repo root is three levels up from <repoPath>/.ittybitty/agents/<id>.
-  // (agentDir → agents dir → .ittybitty → repo root.)
+  // The repo root is three levels up from <repoPath>/.itsybitsy/agents/<id>.
+  // (agentDir → agents dir → .itsybitsy → repo root.)
   const repoPath = dirname(dirname(agentsDir));
   const agentId = basename(agentDir);
 

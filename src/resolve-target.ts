@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * `ib send` target resolution (@-addressing, SPEC §12.3.1 and §16.1).
  *
@@ -18,12 +19,12 @@ const MAX_NAMED_UNREADABLE_DIRS = 3;
 /**
  * The tail of an "Agent not found" error when the agents directory of a
  * searched repo could not be listed. Inside an itsybitsy sandbox, another
- * repo's `.ittybitty/agents` is not readable (EPERM), so an agent that exists
+ * repo's `.itsybitsy/agents` is not readable (EPERM), so an agent that exists
  * there would otherwise look absent. Empty when every searched directory was
  * read; a single unreadable `meta.json` is not named.
  */
 function unreadableAgentsDirsNote(errors: AgentReadError[], searched: RepoEntry[]): string {
-  const agentsDirs = new Set(searched.map((r) => join(r.path, ".ittybitty", "agents")));
+  const agentsDirs = new Set(searched.map((r) => runtimeNames.agentsDir(r.path)));
   const unreadable = [...new Set(errors.map((e) => e.agentDir))].filter((dir) => agentsDirs.has(dir));
   if (unreadable.length === 0) return "";
   const named = unreadable.slice(0, MAX_NAMED_UNREADABLE_DIRS).join(", ");
@@ -95,11 +96,11 @@ export async function resolveSendTarget(
     const prefixMatch = repos.find((r) => cwd.startsWith(r.path + "/"));
     if (prefixMatch) return prefixMatch;
 
-    // Check if CWD is inside an agent worktree: /.ittybitty/agents/([^/]+)/repo/
-    const match = cwd.match(/\/.ittybitty\/agents\/[^/]+\/repo$/);
+    // Check if CWD is inside an agent worktree: /.itsybitsy/agents/([^/]+)/repo/
+    const match = runtimeNames.matchExactWorktree(cwd);
     if (match) {
-      // Extract the root repo path by going up from /.ittybitty/agents/
-      const repoRoot = cwd.substring(0, cwd.lastIndexOf("/.ittybitty"));
+      // Extract the root repo path by going up from /.itsybitsy/agents/
+      const repoRoot = cwd.substring(0, runtimeNames.lastRuntimeMarker(cwd));
       return repos.find((r) => r.path === repoRoot) || null;
     }
 

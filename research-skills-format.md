@@ -149,7 +149,7 @@ description: "Write, verify, and fix citations in research-to-summary workflows.
 ```yaml
 ---
 name: ib-merge
-description: Review and merge an ittybitty agent's work...
+description: Review and merge an itsybitsy agent's work...
 argument-hint: <agent-id>
 allowed-tools: [Bash, Read, Grep, Glob]
 ---

@@ -19,7 +19,7 @@ function makeAgent(id: string, state: string = "running", overrides: Partial<Age
     meta: {
       id,
       session_id: `sess-${id}`,
-      tmux_session: `ittybitty-myrepo-${id}`,
+      tmux_session: `itsybitsy-myrepo-${id}`,
       prompt: `Task for ${id}`,
       manager: null,
       created: "2025-01-01T00:00:00Z",

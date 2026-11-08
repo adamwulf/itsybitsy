@@ -66,7 +66,7 @@ export function isValidTmuxSession(value: string): boolean {
  * Build a tmux `-t` target string that forces exact-match on the session name.
  *
  * tmux's `-t` flag does unambiguous-prefix matching by default, which causes
- * `ittybitty-foo` to silently match `ittybitty-foo-codex` if that's the only
+ * `itsybitsy-foo` to silently match `itsybitsy-foo-codex` if that's the only
  * other match. The `=` modifier forces verbatim matching, with one caveat:
  *
  * - Session-target commands (has-session, kill-session, attach, list-clients)

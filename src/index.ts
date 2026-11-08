@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import * as runtimeNames from "./runtime-names";
 /**
  * ib — Cross-repo agent management dashboard
  * CLI entrypoint
@@ -164,7 +165,7 @@ export async function resolveLauncherAgentDir(
       continue;
     }
 
-    const agentDir = join(repoPath, ".ittybitty", "agents", agentId);
+    const agentDir = runtimeNames.agentDir(repoPath, agentId);
     const metaFile = Bun.file(join(agentDir, "meta.json"));
     try {
       if (!(await metaFile.exists())) continue;
@@ -284,7 +285,7 @@ export function buildSystemCoordinatorAgent(
   tmuxSessionName: string,
   cwd: string = process.cwd(),
 ): Agent {
-  const m = cwd.match(/^(.+?)\/\.ittybitty\/agents\/[^/]+\/repo(?:\/|$)/);
+  const m = runtimeNames.matchWorktreeRepo(cwd);
   const repoPath = m ? m[1]! : "/tmp";
   return {
     id: "ib-coordinator",
@@ -1273,7 +1274,7 @@ export async function main() {
       // tmux-orphan view is consistent with the rest of the codebase's view
       // of live sessions (no extra `tmux list-sessions` call). `repoPaths`
       // is the absolute repo paths from the registry — required so a
-      // claude process whose cwd is inside a stray `.ittybitty/agents/`
+      // claude process whose cwd is inside a stray `.itsybitsy/agents/`
       // directory NOT under any registered repo isn't classified as ours.
       const repoPaths = repos.map((r) => r.path);
       const tracked = await buildTrackedSets(agents);
@@ -1433,7 +1434,7 @@ export async function main() {
       // Find the repo containing this agent
       const { existsSync } = await import("fs");
       const agentRepo = repos.find((r) =>
-        existsSync(join(r.path, ".ittybitty", "agents", watchdogAgentId, "meta.json"))
+        existsSync(join(runtimeNames.runtimeDir(r.path), "agents", watchdogAgentId, "meta.json"))
       );
       if (!agentRepo) {
         console.error(`Agent ${watchdogAgentId} not found in any registered repo.`);
@@ -1831,7 +1832,7 @@ export async function main() {
       // Auto-detect agent ID from CWD if not provided
       if (!diffAgentId) {
         const cwd = process.cwd();
-        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
         if (worktreeMatch) {
           diffAgentId = worktreeMatch[1];
         }
@@ -1859,7 +1860,7 @@ export async function main() {
       // Auto-detect agent ID from CWD if not provided
       if (!statusAgentId) {
         const cwd = process.cwd();
-        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
         if (worktreeMatch) {
           statusAgentId = worktreeMatch[1];
         }
@@ -2136,9 +2137,9 @@ export async function main() {
             repos.find((r) => r.path === cwd) ||
             repos.find((r) => cwd.startsWith(r.path + "/")) ||
             (() => {
-              const m = cwd.match(/\/.ittybitty\/agents\/[^/]+\/repo$/);
+              const m = runtimeNames.matchExactWorktree(cwd);
               if (!m) return undefined;
-              const repoRoot = cwd.substring(0, cwd.lastIndexOf("/.ittybitty"));
+              const repoRoot = cwd.substring(0, runtimeNames.lastRuntimeMarker(cwd));
               return repos.find((r) => r.path === repoRoot);
             })();
           if (!ownRepo) {
@@ -2551,7 +2552,7 @@ export async function main() {
       // Auto-detect agent ID from CWD
       if (!askAgentId) {
         const cwd = process.cwd();
-        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
         if (worktreeMatch) {
           askAgentId = worktreeMatch[1];
         }
@@ -2567,7 +2568,7 @@ export async function main() {
       }
 
       // A sandboxed WORKTREE agent cannot record a question itself
-      // (`<repo>/.ittybitty/user-questions.json` is outside its write roots), so
+      // (`<repo>/.itsybitsy/user-questions.json` is outside its write roots), so
       // it asks its own — unsandboxed — watchdog to do it. Null for every other
       // caller, which asks directly as before. See routeAskThroughWatchdog.
       {
@@ -2609,7 +2610,7 @@ export async function main() {
       // Auto-detect agent ID from cwd if not specified
       if (!logAgentId) {
         const cwd = process.cwd();
-        const worktreeMatch = cwd.match(/\/.ittybitty\/agents\/([^/]+)\/repo/);
+        const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
         if (worktreeMatch) {
           logAgentId = worktreeMatch[1];
         }
@@ -2632,7 +2633,7 @@ export async function main() {
 
       const { join } = await import("path");
       const { logAgent } = await import("./agent-lifecycle");
-      const agentDir = join(agent.repoPath, ".ittybitty", agent.archived ? "archive" : "agents", agent.id);
+      const agentDir = join(runtimeNames.runtimeDir(agent.repoPath), agent.archived ? "archive" : "agents", agent.id);
       await logAgent(agentDir, logMessage);
 
       if (!logQuiet) {

@@ -470,7 +470,7 @@ describe("buildCodexLaunchArgs — permission profile (itsybitsy kernel sandbox 
     ibBinaryPath: "/usr/local/bin/ib",
     agentId: "agent-abc123",
     agentDir: "/var/agents/agent-abc123",
-    extraWritableRoots: [GIT_ROOTS.commonDir, "/Users/me/src/my.repo/.ittybitty"],
+    extraWritableRoots: [GIT_ROOTS.commonDir, "/Users/me/src/my.repo/.itsybitsy"],
     permissionProfileGitRoots: GIT_ROOTS,
   }).args;
   const configValues = (args: string[]) => args.flatMap((arg, i) => (args[i - 1] === "-c" ? [arg] : []));
@@ -522,7 +522,7 @@ describe("buildCodexLaunchArgs — permission profile (itsybitsy kernel sandbox 
       FAKE_COORDINATOR_HOME,
       FAKE_LIBRARY_CACHES,
       GIT_ROOTS.commonDir,
-      "/Users/me/src/my.repo/.ittybitty",
+      "/Users/me/src/my.repo/.itsybitsy",
     ]);
     for (const event of CODEX_REGISTERED_EVENTS) {
       expect(args.some((arg) => arg.startsWith(`hooks.${event}=`))).toBe(true);
@@ -655,13 +655,13 @@ describe("buildCodexLaunchArgs — log_dir and tui.show_tooltips flags", () => {
     const { args } = buildCodexLaunchArgs({
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",
-      agentDir: "/Users/me/work/.ittybitty/agents/agent-abc123",
+      agentDir: "/Users/me/work/.itsybitsy/agents/agent-abc123",
     });
     let foundAt = -1;
     for (let i = 0; i < args.length - 1; i++) {
       if (
         args[i] === "-c" &&
-        args[i + 1] === 'log_dir="/Users/me/work/.ittybitty/agents/agent-abc123/codex"'
+        args[i + 1] === 'log_dir="/Users/me/work/.itsybitsy/agents/agent-abc123/codex"'
       ) {
         foundAt = i;
         break;

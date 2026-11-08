@@ -27,9 +27,9 @@ import {
 } from "../sandbox";
 import { parseDenials } from "../agents";
 
-const AGENT_DIR = "/repo/.ittybitty/agents/agent-abc123";
+const AGENT_DIR = "/repo/.itsybitsy/agents/agent-abc123";
 const WORKTREE = `${AGENT_DIR}/repo`;
-const AGENTS_DIR = "/repo/.ittybitty/agents";
+const AGENTS_DIR = "/repo/.itsybitsy/agents";
 const ROOT_REPO = "/repo";
 const UID = process.getuid?.() ?? 0;
 const realRealpathSync = fs.realpathSync;
@@ -354,18 +354,18 @@ describe("agentPathAccessTable — spawn-keyed runtime roots", () => {
     expect(resolvePreparedAccess(worker, child, "read")).toBe("allow");
   });
 
-  test("REPOID (<repo>/.ittybitty/repo-id) is a read-only root only for a spawner", () => {
+  test("REPOID (<repo>/.itsybitsy/repo-id) is a read-only root only for a spawner", () => {
     // Mirrors the kernel profile: `ib new-agent` reads the repo id to name and
     // seal its child. Never writable, and a non-spawner gets no access at all.
-    const idFile = `${ROOT_REPO}/.ittybitty/repo-id`;
+    const idFile = `${ROOT_REPO}/.itsybitsy/repo-id`;
     const spawner = prepareAccessTable(table({}, { canSpawnChildren: true }));
     const worker = prepareAccessTable(table({}, { canSpawnChildren: false }));
     expect(resolvePreparedAccess(spawner, idFile, "read")).toBe("allow");
     expect(resolvePreparedAccess(spawner, idFile, "write")).toBe("deny");
     expect(resolvePreparedAccess(worker, idFile, "read")).toBe("deny");
     expect(resolvePreparedAccess(worker, idFile, "write")).toBe("deny");
-    // Only the one file, not the rest of <repo>/.ittybitty.
-    expect(resolvePreparedAccess(spawner, `${ROOT_REPO}/.ittybitty/other`, "read")).toBe("deny");
+    // Only the one file, not the rest of <repo>/.itsybitsy.
+    expect(resolvePreparedAccess(spawner, `${ROOT_REPO}/.itsybitsy/other`, "read")).toBe("deny");
   });
 
   test("PARENTCLAUDE (<repo>/.claude) is a write root only for a spawner", () => {

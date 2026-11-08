@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Auto-compact: reads Claude transcript files to determine context usage %,
  * and sends /compact to agents that exceed the configured threshold.
@@ -269,7 +270,7 @@ export async function checkAndCompact(
       // not call sendCompact() at all to make the early exit explicit at the
       // policy layer rather than relying on the inner guard.
       if (AUTO_COMPACT_DISABLED) {
-        const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+        const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
         await logAgent(
           agentDir,
           `[auto-compact] DISABLED — would have sent /compact: usage=${usagePct}% threshold=${threshold}% tmux=${agent.meta.tmux_session}`,
@@ -282,7 +283,7 @@ export async function checkAndCompact(
       const sent = await sendCompact(agent.meta.tmux_session);
       if (sent) {
         state.compactSent = true;
-        const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+        const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
         const sinceLast = lastCheckMs && lastCheckMs > 0
           ? `${Date.now() - lastCheckMs}ms`
           : "n/a";

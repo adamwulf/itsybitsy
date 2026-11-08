@@ -624,7 +624,7 @@ describe("watchdog", () => {
       // First tick: transition from null to unknown — should save debug log
       await tick([mgr, a1]);
 
-      const debugDir = join(tmpDir, ".ittybitty", "agents", "a1", "debug-logs");
+      const debugDir = join(tmpDir, ".itsybitsy", "agents", "a1", "debug-logs");
       const files = await Array.fromAsync(new Bun.Glob("watchdog-*-unknown.txt").scan(debugDir));
       expect(files.length).toBe(1);
 
@@ -1078,7 +1078,7 @@ describe("watchdog", () => {
         });
 
         // Real on-disk coordinator meta so checkCoordinatorExists finds it.
-        const agentDir = `${repoDir}/.ittybitty/agents/${repoBasename}`;
+        const agentDir = `${repoDir}/.itsybitsy/agents/${repoBasename}`;
         mkdirSync(agentDir, { recursive: true });
         writeFileSync(`${agentDir}/meta.json`, JSON.stringify({
           id: repoBasename,
@@ -1792,7 +1792,7 @@ describe("watchdog", () => {
       resetWatchdogReadAck(); // the real meta.json reader
       const repo = mkdtempSync(join(tmpdir(), "ib-watchdog-ack-"));
       try {
-        const agentDir = join(repo, ".ittybitty", "agents", "a1");
+        const agentDir = join(repo, ".itsybitsy", "agents", "a1");
         mkdirSync(agentDir, { recursive: true });
         const a1: Agent = { ...agent("a1", "waiting", "mgr"), repoPath: repo };
         writeFileSync(join(agentDir, "meta.json"), JSON.stringify({
@@ -1927,7 +1927,7 @@ describe("watchdog", () => {
       const sleepCalls: number[] = [];
       setPerAgentSleep(async (ms) => { sleepCalls.push(ms); });
       const tempRepo = join(tmpdir(), `watchdog-restart-compact-${process.pid}-${Date.now()}`);
-      const agentDir = join(tempRepo, ".ittybitty", "agents", "a1");
+      const agentDir = join(tempRepo, ".itsybitsy", "agents", "a1");
       mkdirSync(agentDir, { recursive: true });
       await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
         tmux_compacting: true,
@@ -1973,7 +1973,7 @@ describe("watchdog", () => {
       const now = 1_000_000;
       setWatchdogNow(() => now);
       const tempRepo = join(tmpdir(), `watchdog-late-compact-${process.pid}-${Date.now()}`);
-      const agentDir = join(tempRepo, ".ittybitty", "agents", "a1");
+      const agentDir = join(tempRepo, ".itsybitsy", "agents", "a1");
       mkdirSync(agentDir, { recursive: true });
       await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
         tmux_compacting: true,
@@ -2768,7 +2768,7 @@ describe("watchdog", () => {
   // =========================================================================
   // watchdog sentinel prefix — regression test for human-attribution bug.
   // The watchdog process runs with cwd = agent.repoPath (root repo, not a
-  // worktree under .ittybitty/agents/<id>/repo), so without WATCHDOG_SENTINEL
+  // worktree under .itsybitsy/agents/<id>/repo), so without WATCHDOG_SENTINEL
   // the new user-prefix branch in sendMessage would tag every watchdog nudge
   // as `[sent by user]`, making agents think the user typed "please retry"
   // when actually the watchdog injected it. The displayed prefix renders
@@ -3367,7 +3367,7 @@ describe("runPerAgentWatchdog", () => {
     setPerAgentDrain(async (agent, agentDir) => {
       drainCalls++;
       expect(agent.id).toBe("agent-test1");
-      expect(agentDir).toBe("/tmp/test/.ittybitty/agents/agent-test1");
+      expect(agentDir).toBe("/tmp/test/.itsybitsy/agents/agent-test1");
     });
     // Exit after 3 ticks via existsSync.
     let existsChecks = 0;
@@ -3398,7 +3398,7 @@ describe("runPerAgentWatchdog", () => {
 
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
 
-    expect(setups).toEqual(["/tmp/test/.ittybitty/agents/agent-test1"]);
+    expect(setups).toEqual(["/tmp/test/.itsybitsy/agents/agent-test1"]);
     expect(processed.length).toBeGreaterThanOrEqual(1);
     expect(processed.every(([id, repo]) => id === "agent-test1" && repo === "/tmp/test")).toBe(true);
   });
@@ -4162,7 +4162,7 @@ describe("runPerAgentWatchdog — ib ack", () => {
 
     await runPerAgentWatchdog("agent-test1", "/tmp/test");
 
-    expect([...ackDirs]).toEqual(["/tmp/test/.ittybitty/agents/agent-test1"]);
+    expect([...ackDirs]).toEqual(["/tmp/test/.itsybitsy/agents/agent-test1"]);
     // Polls 1-8 are acked (well past the 6-poll delay) and send nothing. Poll 9
     // re-arms the countdown, so the fallback fires on its 6th poll: poll 14.
     expect(sendPolls).toEqual([14]);
@@ -4178,7 +4178,7 @@ describe("runPerAgentWatchdog — meta.transient.json persistence", () => {
   beforeEach(async () => {
     const { mkdtemp } = await import("fs/promises");
     tempDir = await mkdtemp(join(tmpdir(), "ib-wd-transient-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test1");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-test1");
     mkdirSync(agentDir, { recursive: true });
 
     setPerAgentReadMeta(async () => ({
@@ -4482,7 +4482,7 @@ describe("runPerAgentWatchdog — one tmux client per steady-state tick", () => 
   beforeEach(async () => {
     const { mkdtemp } = await import("fs/promises");
     tempDir = await mkdtemp(join(tmpdir(), "ib-wd-one-tmux-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test1");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-test1");
     mkdirSync(agentDir, { recursive: true });
 
     // No capture / pane-probe overrides: the tick must use its real tmux path.

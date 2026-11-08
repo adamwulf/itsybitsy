@@ -51,7 +51,7 @@ describe("hookPermissionDenied", () => {
     tempDir = await mkdtemp(join(tmpdir(), "perm-denied-test-"));
     originalCwd = process.cwd();
     process.chdir(tempDir);
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test123");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-test123");
     // Create agent directory structure
     await Bun.write(join(agentDir, "agent.log"), "");
     await Bun.write(
@@ -129,7 +129,7 @@ describe("hookPermissionDenied", () => {
 
   test("registered ordinary worktree logging remains supported", async () => {
     const worktreeId = "agent-permworktree1";
-    const worktreeAgentDir = join(tempDir, ".ittybitty", "agents", worktreeId);
+    const worktreeAgentDir = join(tempDir, ".itsybitsy", "agents", worktreeId);
     const worktree = join(worktreeAgentDir, "repo");
     await mkdir(worktree, { recursive: true });
     await Bun.write(join(worktreeAgentDir, "meta.json"), JSON.stringify({ id: worktreeId, worktree: true }));
@@ -147,10 +147,10 @@ describe("hookPermissionDenied", () => {
 
   test("registered caller logging and debug routing ignore a standalone fake cwd and reject a sibling claim", async () => {
     const siblingId = "agent-permsibling1";
-    const siblingDir = join(tempDir, ".ittybitty", "agents", siblingId);
+    const siblingDir = join(tempDir, ".itsybitsy", "agents", siblingId);
     const fakeRoot = await mkdtemp(join(tmpdir(), "perm-denied-fake-"));
     try {
-      const fakeAgentDir = join(fakeRoot, ".ittybitty", "agents", siblingId);
+      const fakeAgentDir = join(fakeRoot, ".itsybitsy", "agents", siblingId);
       const fakeCwd = join(fakeAgentDir, "repo");
       await mkdir(siblingDir, { recursive: true });
       await mkdir(fakeCwd, { recursive: true });
@@ -185,10 +185,10 @@ describe("hookPermissionDenied", () => {
     const fakeRoot = await mkdtemp(join(tmpdir(), "perm-denied-entrypoint-fake-"));
     try {
       const fakeId = "agent-permspoof1";
-      const fakeCwd = join(fakeRoot, ".ittybitty", "agents", fakeId, "repo");
+      const fakeCwd = join(fakeRoot, ".itsybitsy", "agents", fakeId, "repo");
       await mkdir(fakeCwd, { recursive: true });
       await Bun.write(
-        join(fakeRoot, ".ittybitty", "agents", fakeId, "meta.json"),
+        join(fakeRoot, ".itsybitsy", "agents", fakeId, "meta.json"),
         JSON.stringify({ id: fakeId, worktree: false }),
       );
       const { stdout, stderr, exitCode } = await runIsolatedCli(["hook-permission-denied", fakeId], {

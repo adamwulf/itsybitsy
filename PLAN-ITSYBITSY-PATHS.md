@@ -1,7 +1,8 @@
 # Finish the rename: `ittybitty` → `itsybitsy` runtime names
 
-Plan only — no code yet. Base: `main` at `009750dd`. Line numbers are as of that
-commit; symbol names are the stable reference.
+Approved implementation plan. Original base: `main` at `009750dd`. Line numbers
+are as of that commit; symbol names are the stable reference. Implementation
+findings are recorded below; Part 3 remains Adam's unexecuted deployment runbook.
 
 This supersedes `PLAN.md` Phase 25 (which also misspells the target as
 `.ittybitsy/`) and the retired attempt at `de837a25` (`PLAN-RUNTIME-NAMES.md`
@@ -287,14 +288,19 @@ because the fallback and script tests need the old name.
 
 ### 2.1 Form
 
-- It lives at `scripts/update-repos.sh`, mode 755, `#!/bin/bash`, `set -u -o
+Implementation update approved by the manager: no executable-bit requirement.
+Invoke it with `/bin/bash scripts/update-repos.sh`, ensuring the same macOS
+bash 3.2 interpreter used by the tests.
+
+- It lives at `scripts/update-repos.sh`, `#!/bin/bash`, `set -u -o
   pipefail`.
 - **It must run on macOS's bash 3.2.** That means no associative arrays, no
   `mapfile`, and no `**` globs (`globstar` is bash 4), so it uses `find`
   instead. Under `set -u`, bash before 4.4 treats `"${arr[@]}"` on an empty array
   as an unbound-variable error: write `${arr[@]+"${arr[@]}"}`, or avoid arrays.
 - It uses only `git` 2.31 or later, `perl` (literal replacements with `\Q…\E`,
-  values passed in environment variables; core `JSON::PP` to read `repos.json`),
+  values held in the embedded program and passed to commands as separate argv
+  entries; core `JSON::PP` to read `repos.json`),
   `ps`, `lsof`, read-only `tmux`, `mv` and `find`.
 - It never calls `ib`, because the installed binary may be either the old one or
   the new one.
@@ -313,7 +319,7 @@ because the fallback and script tests need the old name.
   --file`, which already writes through a lock file and a rename.
 
 ```
-scripts/update-repos.sh [--apply] [REPO_PATH ...]
+/bin/bash scripts/update-repos.sh [--apply] [REPO_PATH ...]
 ```
 
 - With no flags it is a **dry run**: it prints every action it would take and
@@ -369,7 +375,7 @@ it is a repo error before step 1.
 | Both OLD and NEW exist | Error; skip the repo; other repos continue. The likely cause is a repo skipped earlier as missing, in which the new `ib` then wrote a fresh `.itsybitsy/repo-id` (`getRepoId` and `askQuestion`, `src/ib-commands.ts:5825, 8545`; also `ib sandbox seal --repo-id`, `src/index.ts:2193-2196`). If NEW holds nothing but `repo-id` and empty dirs, the error tells Adam to remove it (`rm -rf '<repo>/.itsybitsy'`) and re-run; the real `repo-id` is the one in OLD. Otherwise it prints what NEW holds (counts of `agents/*`, `archive/*` and `prompts/*`, and whether `user-questions.json` exists) and the merge steps below. A plain copy of NEW into OLD won't work: agents created under NEW carry `tmux_session` `itsybitsy-<NEW repo-id>-…` and seal records keyed by NEW's `repo-id` (`src/ib-commands.ts:5612`), so whichever `repo-id` is kept breaks the other side's agents and rehire's tmux check (`src/ib-commands.ts:744-746`) |
 | OLD is a symlink | Error; skip the repo |
 | OLD only | Migrate: every step |
-| NEW only | Already moved. Run steps 3 to 8, which find nothing to do in a finished repo, and print "already migrated — nothing to do". This is also how an interrupted run finishes |
+| NEW only | Already moved. Recheck step 1's ignore rules, then run steps 3 to 8, which find nothing to do in a finished repo, and print "already migrated — nothing to do". This is also how an interrupted run finishes |
 | Neither | "no runtime dir"; skip the repo |
 
 **Merging "both exist" when NEW holds real data.** NEW can only hold agents if
@@ -383,7 +389,7 @@ after the deploy. The error text prints these steps, in this order:
    those agents won't be rehirable afterwards, because their `tmux_session` names
    NEW's `repo-id`.
 3. Set NEW's `prompts/` and `user-questions.json` aside, `rm -rf
-   '<repo>/.itsybitsy'`, and run `scripts/update-repos.sh --apply '<repo>'`.
+   '<repo>/.itsybitsy'`, and run `/bin/bash scripts/update-repos.sh --apply '<repo>'`.
    After the migration, copy back what is still needed.
 
 **An unmigrated repo can lose its agents' work.** The new `ib watch`
@@ -395,7 +401,7 @@ So every repo the run leaves with OLD in place gets the same advice line:
 "missing", a stat error, a step 1 or 2 failure, a symlinked OLD, "both exist".
 The line says: "Keep this repo registered. Until it is migrated, don't press `f`
 on it in `ib watch`, and don't spawn, ask or rehire there. Fix the cause and
-re-run `scripts/update-repos.sh --apply '<repo>'`."
+re-run `/bin/bash scripts/update-repos.sh --apply '<repo>'`."
 
 Removing the repo from the registry instead is not offered, for four reasons:
 
@@ -446,6 +452,11 @@ for that repo still run, and a re-run finishes it.
    '<path the entry records>'`. On a re-run the entry is already locked and the
    lock command exits non-zero. Treat that as success when `<admin dir>/locked`
    exists.
+   Implementation finding: older Git cannot address an entry with a relative
+   `gitdir` when locking it. Only for that unsupported shape, if the lock command
+   fails, the script atomically writes the same reason to that known admin
+   directory's `locked` file. It still reports a repo error and never repairs
+   the relative link automatically.
 2. **Print diagnostics, not just the command that just failed:** `cat
    '<new dir>/.git'`, the admin entry's dir and its `gitdir` contents, and git's
    error.
@@ -558,7 +569,7 @@ Preflight: ok (no agent tmux sessions, no ib processes, no cwd under a runtime d
 [some-offline-repo] missing — skipped
   Keep this repo registered. Until it is migrated, don't press f on it in
   ib watch, and don't spawn, ask or rehire there. Fix the cause and re-run
-  scripts/update-repos.sh --apply '/…/some-offline-repo'
+  /bin/bash scripts/update-repos.sh --apply '/…/some-offline-repo'
   (the same advice line follows each skipped ERROR above)
 User-wide
   would rewrite 9 files in ~/.itsybitsy/agent-types
@@ -580,7 +591,8 @@ quotes its paths, so it can be pasted as is for a path with spaces.
 
 - Every step checks before it acts (dir state, exact old prefix, line present,
   target exists). A re-run over a finished repo takes no actions and leaves every
-  byte the same.
+  migrated byte the same. Apply still writes its migration audit log; test
+  snapshots also exclude the test-generated stub command traces.
 - If a run is interrupted at any point, re-run the same command. Every rewrite is
   atomic (§2.1), so no file is left half-written. After step 2 the repo
   classifies as "NEW only", and steps 3 to 8 finish it. Run no `ib` command and no
@@ -621,7 +633,7 @@ below starts after all agents have stopped.
    `git add -A` there.**
 3. **Dry run.**
    ```sh
-   scripts/update-repos.sh | tee ~/update-repos-dry-run.txt
+   /bin/bash scripts/update-repos.sh | tee ~/update-repos-dry-run.txt
    ```
    Clear every blocker and repo error, then repeat until it is clean:
    - **"both exist":** before the deploy this is unexpected, because the new `ib`
@@ -631,7 +643,7 @@ below starts after all agents have stopped.
    - **A repo registered at `$HOME`:** `ib remove` it now, with the old `ib`.
 4. **Apply.**
    ```sh
-   scripts/update-repos.sh --apply
+   /bin/bash scripts/update-repos.sh --apply
    ```
    - **A failed repair, including a relative `gitdir`:** read the printed
      diagnostics (the worktree's `.git` file, the admin entry) and fix the link.
@@ -644,7 +656,7 @@ below starts after all agents have stopped.
      exist", a symlinked `.ittybitty`. Its old dir is still in place, and the new
      `ib watch` would flag every agent worktree there as orphaned (§2.3). Keep it
      registered. Fix the cause (for example, give the terminal access to that
-     app's data) and re-run with that path: `scripts/update-repos.sh --apply
+     app's data) and re-run with that path: `/bin/bash scripts/update-repos.sh --apply
      '<repo>'`, ideally before step 6. Until it is migrated, don't press `f` on it
      in `ib watch`, and don't spawn, ask or rehire there.
    - **A failure in steps 4 to 7:** these happen after the move, so the repo is
@@ -663,7 +675,7 @@ below starts after all agents have stopped.
    2. Keep the repo registered. With `ib watch` quit and no `f`, use the `ib` CLI
       to merge or retire every agent created under `.itsybitsy/`.
    3. Set its `prompts/` and `user-questions.json` aside, `rm -rf
-      '<repo>/.itsybitsy'`, and run `scripts/update-repos.sh --apply '<repo>'`.
+      '<repo>/.itsybitsy'`, and run `/bin/bash scripts/update-repos.sh --apply '<repo>'`.
 5. **Check.**
    - For a few repos, `git -C <repo> worktree list` shows the agent worktrees under
      `.itsybitsy/`, with nothing `prunable` except the stale entries the script

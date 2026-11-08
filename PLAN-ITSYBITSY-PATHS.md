@@ -708,7 +708,7 @@ below starts after all agents have stopped.
      fresh agent instead.
    - **Rehire:** rehire one old retired agent (legacy ref), if you have one you
      don't mind restoring.
-   - **New worker — the real new-layout test run:** `ib new-agent --type worker
+   - **New codex agent — the real new-layout test run:** `ib new-agent --type codex
      "Print your working directory, which must contain .itsybitsy. Run bun test
      and bunx tsc --noEmit, and compare the failing tests with the baseline in
      PLAN-ITSYBITSY-PATHS.md (Appendix A). Re-run any test that fails now but not
@@ -716,7 +716,7 @@ below starts after all agents have stopped.
      run git log <Appendix A commit>..HEAD -- <its test file> and report whether
      later commits changed it. Change nothing."`
 
-     It must be a worker, like the agent that measured Appendix A: the two
+     It must be a codex agent, like the agent that measured Appendix A: the two
      dashboard caller-gate tests depend on the measuring agent's
      `canSpawnChildren`. A failure that survives the re-run, and that isn't
      explained by a test file changed since the baseline commit (the baseline goes
@@ -805,14 +805,14 @@ the script, repair worktrees by hand, or fix the new code.
   anything. It records in **Appendix A** of this file, committed with its first
   commit:
   - the commit it measured;
-  - its own agent type, which must be `worker` (below);
+  - its actual agent type and whether it can spawn children;
   - the pass/fail totals;
   - each failing test, by file and test name.
 
   Some tests fail in any agent worktree. For example, the two dashboard
   new-agent tests fail because of the cwd-based caller gate, and their result
   depends on the measuring agent's `canSpawnChildren`. So the baseline is
-  measured by a worker, and runbook step 8 compares a worker's run against it.
+  measured by a codex agent that can spawn children; runbook step 8 uses the same type.
 - **The implementer's gate:** `bun test` from its own worktree (still under
   `.ittybitty/`) fails exactly the Appendix A tests, no more and no fewer, and
   `bunx tsc --noEmit` is clean. The entry-point check (`ib list-types` on a
@@ -824,7 +824,7 @@ the script, repair worktrees by hand, or fix the new code.
   - The cwd parsers are covered by unit tests with explicit new-name paths
     (`src/runtime-names.test.ts`).
   - The real in-worktree shape is checked once, at runbook step 8, while
-    everything else is still stopped. The new worker there runs `bun test` in a
+    everything else is still stopped. The new codex agent there runs `bun test` in a
     real `.itsybitsy` worktree and compares against Appendix A.
 
 ### 4.2 The script: `src/update-repos-script.test.ts`
@@ -1000,20 +1000,63 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
 | Gitignored build output in a worktree holds old absolute paths (`.build`, `DerivedData`, virtualenvs) | Not scanned. If a resumed agent's build errors mention `.ittybitty`, do a clean build in that worktree |
 | Another branch adds old names after this lands | The guard test fails on rebase |
 
-## Open questions for Adam
-
-- **Pending:** whether the script should also move `refs/ittybitty/retired/*` to
-  `refs/itsybitsy/retired/*`, which would remove the rehire fallback. §1.3 and the
-  ref tests assume it does not; a yes means deleting the fallback and adding one
-  ref-move step to the script.
+Refs are not moved by the script; §1.3 retains the new-first, legacy-only-if-missing rehire fallback.
 
 ## Appendix A — Baseline test failures
 
-*To be filled in by the implementer before its first commit (§4.1):*
+Measured before any implementation changes or commits:
 
-- the `main` commit measured;
-- the measuring agent's type, which must be `worker`;
-- the pass/fail totals of `bun test` in its own agent worktree;
-- each failing test, by file and name.
+- Commit: `3222f9536d598efcee60ead3272ef8a3e891f46b`.
+- Agent: `agent-8606c130`, type `codex`, `canSpawnChildren: true` (confirmed with `ib show-type codex`).
+- `bun test`: **7,282 pass, 11 skip, 48 fail**, 37,899 assertions; 7,341 tests across 144 files.
+- Measured in the existing `.ittybitty` worktree on 2026-11-07.
+- Runbook step 8 compares a new `--type codex` agent against this failure set.
 
-Runbook step 8 compares a new worker's run against this list.
+- `src/sandbox.test.ts` — canonicalization without reading what the agent may not read > kernelSandboxed: a component refused by a typed-case deny gets its on-disk case (b)
+- `src/sandbox.test.ts` — canonicalization without reading what the agent may not read > kernelSandboxed: a component refused by a typed-case deny gets its on-disk case (c)
+- `src/sandbox.test.ts` — canonicalization without reading what the agent may not read > kernelSandboxed: a component refused by a typed-case deny gets its on-disk case (d)
+- `src/sandbox.test.ts` — canonicalization without reading what the agent may not read > kernelSandboxed: a component refused by a typed-case deny gets its on-disk case (e (reverse))
+- `src/ib-commands.test.ts` — resumeAgent (native) > refuses when tmux session is alive, regardless of meta.state
+- `src/ib-commands.test.ts` — resumeAgent (native) > returns error when no session_id in meta.json
+- `src/ib-commands.test.ts` — resumeAgent (native) > creates resume.sh and starts tmux session
+- `src/ib-commands.test.ts` — resumeAgent (native) > resume.sh re-applies --effort from persisted meta.effort
+- `src/ib-commands.test.ts` — resumeAgent (native) > resume.sh omits --effort for a legacy agent with no meta.effort
+- `src/ib-commands.test.ts` — resumeAgent (native) > resume.sh captures stderr and annotates exit codes; resume sets pane-died hook
+- `src/ib-commands.test.ts` — resumeAgent (native) > resume.sh ignores SIGHUP and launches claude under setsid (no kill-on-HUP)
+- `src/ib-commands.test.ts` — resumeAgent (native) > resume sets window-size manual on the new tmux session
+- `src/ib-commands.test.ts` — resumeAgent (native) > logs 'Agent resumed' and 'Sent resume nudge'
+- `src/ib-commands.test.ts` — resumeAgent (native) > uses repoPath when worktree repo dir doesn't exist
+- `src/ib-commands.test.ts` — resumeAgent (native) > rejects model with shell injection characters
+- `src/ib-commands.test.ts` — resumeAgent (native) > rejects session_id with shell injection characters
+- `src/ib-commands.test.ts` — resumeAgent (native) > rejects tmux session with shell injection characters
+- `src/ib-commands.test.ts` — resumeAgent (native) > resume.sh shell-quotes paths for safety
+- `src/ib-commands.test.ts` — resumeAgent (native) > spawns watchdog for top-level agents (no manager)
+- `src/ib-commands.test.ts` — resumeAgent (native) > saves watchdog_pid to meta.json after resumeAgent
+- `src/ib-commands.test.ts` — resumeAgent (native) > self-heals: resume succeeds when meta.state='complete' but tmux session is dead
+- `src/ib-commands.test.ts` — resumeAgent (native) > regression: resume succeeds when meta.state='stopped' and tmux session is dead
+- `src/ib-commands.test.ts` — resumeAgent (native) > refuses to resume when agent is in creating grace period and has no tmux session yet
+- `src/ib-commands.test.ts` — resumeAgent (native) > claude resume.sh matches the byte-equality fixture (regression snapshot)
+- `src/ib-commands.test.ts` — resumeAgent (native) > resumes codex agent with valid codex_session_id — writes codex-shaped resume.sh + spawns tmux
+- `src/ib-commands.test.ts` — resumeAgent (native) > codex resume refuses when dispatcher precheck fails — no resume.sh, no tmux launch
+- `src/ib-commands.test.ts` — resumeAgent (native) > codex resume — live tmux session refusal applies (CLI-agnostic guard)
+- `src/ib-commands.test.ts` — resumeAgent (native) > refuses to resume codex agent when codex_session_id is missing
+- `src/ib-commands.test.ts` — resumeAgent (native) > refuses to resume codex agent when codex_session_id is malformed
+- `src/ib-commands.test.ts` — respawnSelf (native) > non-coordinator: writes resume.sh (proving pause-then-resume routing)
+- `src/ib-commands.test.ts` — respawnSelf (native) > non-coordinator already-stopped: skips pause but still resumes
+- `src/ib-commands.test.ts` — long-running-op guard > resumeAgent refuses when an op is in flight with a LIVE holder
+- `src/ib-commands.test.ts` — long-running-op guard > resumeAgent clears the op marker after a successful resume
+- `src/ib-commands.test.ts` — long-running-op guard > coordinator: second concurrent resume is refused by the op-guard
+- `src/send-broker.test.ts` — send broker > the watchdog's queue handler > never stages attachments: a path in the message is sent as text and no file is copied
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > allowed, denied and deny-listed paths: same decision and reason
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > miscased spellings: same decision (existing and new leaves, plain and glob allows)
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > a typed-case deny does not stop the case correction (round 2: <tmp>/**/WORK/**)
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > a typed-case deny does not stop the case correction (round 3a: **/REPO)
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > a typed-case deny does not stop the case correction (round 3 wildcard: <tmp>/work/*)
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > structural checks by identity > a: a Unicode-folded spelling (ſ for s) of the main repo
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > structural checks by identity > b: two typed-case denies (**/work and **/REPO) above the main repo
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > structural checks by identity > c: the kernel refuses to open the main repo and its ancestors
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > structural checks by identity > d: the /System/Volumes/Data firmlink alias of the main repo
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > structural checks by identity > each structural call site denies a miscased spelling it can only see by identity
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > structural checks by identity > a miscased worktree path and a miscased own agent.log stay allowed
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > where nothing may be opened the reason keeps the spelled case
+- `src/hooks/agent-path.test.ts` — hook decisions inside the kernel sandbox equal the opening hook's > no call site realpaths a path the agent may not read

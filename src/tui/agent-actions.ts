@@ -1714,12 +1714,26 @@ export function handleNewAgent(ctx: ActionCtx) {
   showNewAgentFormDialog(ctx, ctx.repos[0]!);
 }
 
+/**
+ * Order the new-agent form's Type cycle: alphabetical, except the per-repo
+ * coordinator type goes last. A coordinator is one per repo, so a Space press
+ * that lands on it by accident makes the form a no-op when one already exists
+ * ("Coordinator already exists"). Keeping it last also keeps the built-in
+ * cycle from `manager` as manager → worker → repo-coordinator. Applies to the
+ * TUI form only; `ib list-types` and the other users of the list keep the
+ * alphabetical order.
+ */
+export function newAgentFormTypeOrder(typeNames: string[]): string[] {
+  const others = typeNames.filter((name) => name !== REPO_COORDINATOR_TYPE);
+  return others.length === typeNames.length ? others : [...others, REPO_COORDINATOR_TYPE];
+}
+
 function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
   // Read the names of available spawnable agent types synchronously so the
   // dialog can open immediately. Layer-only types (e.g. `_all`, `_non_coordinator`)
   // are filtered out — they act only as permission/prompt layers. Falls back to
   // embedded defaults when the on-disk types directory is missing.
-  const availableTypes = listSpawnableTypeNamesSync();
+  const availableTypes = newAgentFormTypeOrder(listSpawnableTypeNamesSync());
   const defaultType = resolveDefaultAgentType(repo.defaultAgentType, availableTypes);
   // An agent made from the Favorites tab becomes a favorite, so it stays in
   // that view (SPEC §17.1). Read when the form opens: the tab the user was

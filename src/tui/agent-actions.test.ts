@@ -25,7 +25,7 @@ import {
   effectiveSpawnCapability, handleAnswerQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
   handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam,
-  handleFolderBrowser, newRepoPrompt,
+  handleFolderBrowser, newRepoPrompt, newAgentFormTypeOrder,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
@@ -1078,6 +1078,22 @@ describe("handleFuzzyAgent nickname search", () => {
     handleFuzzyAgent(ctx);
     const d = assertDialog(dialogs[0]!, "fuzzy");
     expect(d.allItems.some((s) => s.includes("agent-fuzz2"))).toBe(true);
+  });
+});
+
+describe("newAgentFormTypeOrder", () => {
+  test("moves repo-coordinator to the end and keeps the rest in order", () => {
+    expect(newAgentFormTypeOrder(["manager", "repo-coordinator", "worker"])).toEqual(["manager", "worker", "repo-coordinator"]);
+  });
+
+  test("repo-coordinator stays last even when custom types sort after it", () => {
+    expect(newAgentFormTypeOrder(["assistant", "manager", "repo-coordinator", "researcher", "worker", "zeta"]))
+      .toEqual(["assistant", "manager", "researcher", "worker", "zeta", "repo-coordinator"]);
+  });
+
+  test("leaves a list without repo-coordinator unchanged", () => {
+    expect(newAgentFormTypeOrder(["manager", "worker"])).toEqual(["manager", "worker"]);
+    expect(newAgentFormTypeOrder([])).toEqual([]);
   });
 });
 

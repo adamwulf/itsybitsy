@@ -1972,11 +1972,13 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(writes).toEqual([]);
   });
 
-  // Relies on the embedded spawnable types sorting as [manager, repo-coordinator,
-  // worker], so two Space presses from the default focus advance the selection
-  // from manager to worker. Isolates the home directory (via setUserHome) so the
-  // cycle reads only the embedded layer files (developer-customized
-  // ~/.itsybitsy/agent-types/ would otherwise inject extra spawnable types).
+  // Relies on the form's Type cycle for the embedded spawnable types being
+  // [manager, worker, repo-coordinator] (repo-coordinator is always last in the
+  // form), so a single Space press from the default focus advances the
+  // selection from manager to worker. Isolates the home directory (via
+  // setUserHome) so the cycle reads only the embedded layer files
+  // (developer-customized ~/.itsybitsy/agent-types/ would otherwise inject
+  // extra spawnable types between manager and worker).
   test("new-agent form: cycling from manager to worker creates agent with worker meta field", async () => {
     const newAgentTempDir = await mkdtemp(join(tmpdir(), "ib-na-test-"));
     await mkdir(join(newAgentTempDir, ".itsybitsy"), { recursive: true });
@@ -1986,9 +1988,9 @@ describe("DashboardComponent dialog and action handlers", () => {
 
     const tempHome = await mkdtemp(join(tmpdir(), "ib-na-home-"));
     setUserHome(tempHome);
-    // Populate the temp home with embedded defaults so listSpawnableTypeNamesSync
-    // returns exactly [manager, repo-coordinator, worker] (system-coordinator /
-    // _all / _non_coordinator are filtered out as spawnable: false).
+    // Populate the temp home with embedded defaults so the form's Type cycle is
+    // exactly [manager, worker, repo-coordinator] (system-coordinator / _all /
+    // _non_coordinator are filtered out as spawnable: false).
     await (await import("../agent-types")).ensureAgentTypesDir();
 
     const spawnCalls: string[] = [];
@@ -2027,10 +2029,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
 
     dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    expect(form.availableTypes).toEqual(["manager", "worker", "repo-coordinator"]);
     dashboard.handleInput("\t");
-    dashboard.handleInput(" "); // manager → repo-coordinator
-    dashboard.handleInput(" "); // repo-coordinator → worker
-    expect(assertDialog(dashboard.dialog, "new-agent-form").agentType).toBe("worker");
+    dashboard.handleInput(" "); // manager → worker
+    expect(form.agentType).toBe("worker");
     dashboard.handleInput("\t");
     for (const ch of "do stuff") dashboard.handleInput(ch);
     dashboard.handleInput("\t");
@@ -2055,6 +2058,33 @@ describe("DashboardComponent dialog and action handlers", () => {
     resetUserHome();
     await rm(newAgentTempDir, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test("new-agent form: repo-coordinator is last in the Type cycle even when custom types sort after it", async () => {
+    const tempHome = await mkdtemp(join(tmpdir(), "ib-na-order-home-"));
+    setUserHome(tempHome);
+    try {
+      const { ensureAgentTypesDir, listSpawnableTypeNamesSync } = await import("../agent-types");
+      await ensureAgentTypesDir();
+      // Both names sort after "repo-coordinator" alphabetically.
+      const typesDir = join(tempHome, ".itsybitsy", "agent-types");
+      await Bun.write(join(typesDir, "researcher.md"), "---\nname: researcher\ndescription: r\ncanSpawnChildren: false\n---\nbody");
+      await Bun.write(join(typesDir, "zeta.md"), "---\nname: zeta\ndescription: z\ncanSpawnChildren: false\n---\nbody");
+
+      // The shared list stays alphabetical (ib list-types and the info panel use it)...
+      expect(listSpawnableTypeNamesSync()).toEqual(["manager", "repo-coordinator", "researcher", "worker", "zeta"]);
+
+      // ...but the new-agent form puts the per-repo coordinator last.
+      dashboard = makeDashboard();
+      dashboard.setRepos([{ path: "/repos/only", name: "only-repo" }]);
+      dashboard.handleInput("a");
+      const form = assertDialog(dashboard.dialog, "new-agent-form");
+      expect(form.availableTypes).toEqual(["manager", "researcher", "worker", "zeta", "repo-coordinator"]);
+      expect(form.agentType).toBe("manager");
+    } finally {
+      resetUserHome();
+      await rm(tempHome, { recursive: true, force: true });
+    }
   });
 
   test("new-agent form: Name field passes --name flag", async () => {

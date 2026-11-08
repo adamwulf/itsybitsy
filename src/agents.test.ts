@@ -82,6 +82,7 @@ import { stripAnsi } from "./parse-state";
 import { spawnCtx as tmuxPollerSpawnCtx } from "./tmux-poller";
 import type { Agent, AgentMeta, FlatEntry, SpawnedBy } from "./agents";
 import { makeAgent } from "./test-utils";
+import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 
 // Most state-detection fixtures use synthetic PIDs. Give those processes an
 // old start time by default, then let the focused PID-reuse tests override it.
@@ -590,7 +591,7 @@ describe("flattenAgentTree", () => {
     // Coordinator should be excluded entirely — only regular agents appear
     const agentEntries = flat.filter((f): f is Extract<typeof f, { kind: "agent" }> => f.kind === "agent");
     expect(agentEntries.length).toBe(2);
-    expect(agentEntries.every(e => e.agent.meta.agentType !== "coordinator")).toBe(true);
+    expect(agentEntries.every(e => e.agent.meta.agentType !== REPO_COORDINATOR_TYPE)).toBe(true);
     expect(agentEntries[0]!.agent.id).toBe("regular-2");
     expect(agentEntries[1]!.agent.id).toBe("regular-1");
   });

@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * System coordinator configuration, prompt, permissions, and lifecycle.
  * Per-repo coordinator settings, prompt, and lifecycle.
@@ -1326,7 +1327,7 @@ export async function checkCoordinatorExists(repoPath: string): Promise<
   | { exists: true; isCoordinator: true; agentId: string }
   | { exists: false; collision: boolean }
 > {
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
 
   if (!existsSync(agentsDir)) {
     return { exists: false, collision: false };

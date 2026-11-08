@@ -9,10 +9,10 @@ describe("getRepoId", () => {
   let idFile: string;
   beforeEach(async () => {
     repo = await mkdtemp(join(tmpdir(), "ib-repo-id-"));
-    idFile = join(repo, ".ittybitty", "repo-id");
+    idFile = join(repo, ".itsybitsy", "repo-id");
   });
   afterEach(async () => {
-    await chmod(join(repo, ".ittybitty"), 0o755).catch(() => {});
+    await chmod(join(repo, ".itsybitsy"), 0o755).catch(() => {});
     await rm(repo, { recursive: true, force: true });
   });
 
@@ -24,14 +24,14 @@ describe("getRepoId", () => {
   });
 
   test("returns an existing id without rewriting it", async () => {
-    await mkdir(join(repo, ".ittybitty"), { recursive: true });
+    await mkdir(join(repo, ".itsybitsy"), { recursive: true });
     await Bun.write(idFile, "8b157909\n");
     expect(await getRepoId(repo)).toBe("8b157909");
     expect(await readFile(idFile, "utf8")).toBe("8b157909\n");
   });
 
   test("rejects a malformed id instead of replacing it", async () => {
-    await mkdir(join(repo, ".ittybitty"), { recursive: true });
+    await mkdir(join(repo, ".itsybitsy"), { recursive: true });
     await Bun.write(idFile, "not-an-id\n");
     await expect(getRepoId(repo)).rejects.toThrow("Invalid repository id");
     expect(await readFile(idFile, "utf8")).toBe("not-an-id\n");
@@ -45,7 +45,7 @@ describe("getRepoId", () => {
   const unreadableTest = process.getuid?.() === 0 ? test.skip : test;
 
   unreadableTest("an unreadable existing id is an error, never regenerated", async () => {
-    await mkdir(join(repo, ".ittybitty"), { recursive: true });
+    await mkdir(join(repo, ".itsybitsy"), { recursive: true });
     await Bun.write(idFile, "8b157909\n");
     await chmod(idFile, 0o200);
     try {

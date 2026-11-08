@@ -33,7 +33,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
-.ittybitty/
+.itsybitsy/
 
 # Claude session artifacts
 .claude/scheduled_tasks.lock
@@ -48,4 +48,4 @@ rebase-editor.sh
 # Local Netlify folder
 .netlify
 .agents/hooks.json
-.agents/rules/ittybitty-agent.md
+.agents/rules/itsybitsy-agent.md

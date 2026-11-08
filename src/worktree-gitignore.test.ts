@@ -4,7 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { appendGitignoreEntries } from "./worktree-gitignore";
 
-const AGY_FILES = [".agents/hooks.json", ".agents/rules/ittybitty-agent.md"];
+const AGY_FILES = [".agents/hooks.json", ".agents/rules/itsybitsy-agent.md"];
 
 describe("appendGitignoreEntries", () => {
   let tempDir: string;
@@ -19,10 +19,10 @@ describe("appendGitignoreEntries", () => {
   test("creates .gitignore and appends multiple entries", async () => {
     const results = await appendGitignoreEntries(tempDir, AGY_FILES);
     expect(results[".agents/hooks.json"]).toBe("appended");
-    expect(results[".agents/rules/ittybitty-agent.md"]).toBe("appended");
+    expect(results[".agents/rules/itsybitsy-agent.md"]).toBe("appended");
     const text = await Bun.file(join(tempDir, ".gitignore")).text();
     expect(text).toContain(".agents/hooks.json");
-    expect(text).toContain(".agents/rules/ittybitty-agent.md");
+    expect(text).toContain(".agents/rules/itsybitsy-agent.md");
   });
 
   test("is idempotent — a second call reports already-present and does not rewrite", async () => {
@@ -30,7 +30,7 @@ describe("appendGitignoreEntries", () => {
     const before = await Bun.file(join(tempDir, ".gitignore")).text();
     const results = await appendGitignoreEntries(tempDir, AGY_FILES);
     expect(results[".agents/hooks.json"]).toBe("already-present");
-    expect(results[".agents/rules/ittybitty-agent.md"]).toBe("already-present");
+    expect(results[".agents/rules/itsybitsy-agent.md"]).toBe("already-present");
     const after = await Bun.file(join(tempDir, ".gitignore")).text();
     expect(after).toBe(before);
   });
@@ -39,11 +39,11 @@ describe("appendGitignoreEntries", () => {
     await Bun.write(join(tempDir, ".gitignore"), "node_modules/\n!.agents/hooks.json\n");
     const results = await appendGitignoreEntries(tempDir, AGY_FILES);
     expect(results[".agents/hooks.json"]).toBe("negation-respected");
-    expect(results[".agents/rules/ittybitty-agent.md"]).toBe("appended");
+    expect(results[".agents/rules/itsybitsy-agent.md"]).toBe("appended");
     const text = await Bun.file(join(tempDir, ".gitignore")).text();
     expect(text).toContain("!.agents/hooks.json");
     expect(text).not.toContain("\n.agents/hooks.json\n");
-    expect(text).toContain(".agents/rules/ittybitty-agent.md");
+    expect(text).toContain(".agents/rules/itsybitsy-agent.md");
   });
 
   test("recognizes a trailing-slash equivalent as already-present (.codex ≡ .codex/)", async () => {

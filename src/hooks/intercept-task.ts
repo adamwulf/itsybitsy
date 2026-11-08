@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Hook: intercept Claude Task tool calls and spawn ib agents instead.
  */
@@ -429,7 +430,7 @@ export async function processTaskIntercept(
   // 8. Determine repoPath
   let repoPath = resolved?.noWorktreeRepoPath ?? input.cwd;
   if (!resolved?.noWorktreeRepoPath) {
-    const itsybitsyIdx = input.cwd.indexOf("/.ittybitty/agents/");
+    const itsybitsyIdx = runtimeNames.firstAgentsMarker(input.cwd);
     if (itsybitsyIdx !== -1) {
       repoPath = input.cwd.substring(0, itsybitsyIdx);
     }

@@ -884,7 +884,7 @@ describe("loadAgentLog (windowed)", () => {
   /** Build a Bun.file shim that counts reads via a wrapper around Bun.file. */
   function makeBigLog(agentId: string, lineCount: number): Promise<Agent> {
     return (async () => {
-      const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
       await mkdir(agentDir, { recursive: true });
       const filler = "x".repeat(240);
       const lines: string[] = [];
@@ -896,7 +896,7 @@ describe("loadAgentLog (windowed)", () => {
 
   test("populates loadedLogWindow + agentLogContent on first read", async () => {
     // Small log that comfortably fits within the 8KB minimum tail read.
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-pm-1");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-pm-1");
     await mkdir(agentDir, { recursive: true });
     const lines: string[] = [];
     for (let i = 0; i < 20; i++) lines.push(`line${i}`);
@@ -1030,7 +1030,7 @@ describe("loadAgentLog (windowed)", () => {
   });
 
   test("file growth (active agent appending) invalidates cache", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-pm-grow");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-pm-grow");
     await mkdir(agentDir, { recursive: true });
     const logPath = join(agentDir, "agent.log");
     // Initial small log
@@ -1073,7 +1073,7 @@ describe("loadTailLog (WATCHDOG LOG / PROXY LOG)", () => {
 
   /** Create the agent's storage dir and return [agent, agentDir]. */
   async function makeAgentDir(agentId: string): Promise<[Agent, string]> {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", agentId);
     await mkdir(agentDir, { recursive: true });
     return [makeAgent({ id: agentId, repoPath: tmpDir }), agentDir];
   }
@@ -1364,7 +1364,7 @@ describe("loadDenials (lazy)", () => {
   });
 
   test("populates denialsContent from full agent.log", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-d");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-d");
     await mkdir(agentDir, { recursive: true });
     const log = [
       "[2025-01-01 10:00:00] [PreToolUse] Permission denied: Bash(rm:*)",
@@ -1394,7 +1394,7 @@ describe("loadDenials (lazy)", () => {
   });
 
   test("refreshes growing denial logs while retaining cached content between reads", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-growing");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-growing");
     await mkdir(agentDir, { recursive: true });
     const logPath = join(agentDir, "agent.log");
     const initial = '[2026-09-06 16:58:14.229856-0500] [Sandbox] file-read-data process="security" target="/Users/adamwulf"\n';
@@ -1425,7 +1425,7 @@ describe("loadDenials (lazy)", () => {
   });
 
   test("triggerAsyncLoadIfNeeded triggers loadDenials when DENIALS mode is active", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-d2");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-d2");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "agent.log"),
@@ -1448,7 +1448,7 @@ describe("loadDenials (lazy)", () => {
   });
 
   test("triggerAsyncLoadIfNeeded does NOT load denials when not in DENIALS mode", async () => {
-    const agentDir = join(tmpDir, ".ittybitty", "agents", "agent-d3");
+    const agentDir = join(tmpDir, ".itsybitsy", "agents", "agent-d3");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "agent.log"),
@@ -1467,7 +1467,7 @@ describe("loadDenials (lazy)", () => {
   });
 
   test("stale loadDenials (agent switched mid-await) does not clobber denialsLoading after switch", async () => {
-    const agentDirA = join(tmpDir, ".ittybitty", "agents", "agent-race-A");
+    const agentDirA = join(tmpDir, ".itsybitsy", "agents", "agent-race-A");
     await mkdir(agentDirA, { recursive: true });
     await Bun.write(
       join(agentDirA, "agent.log"),

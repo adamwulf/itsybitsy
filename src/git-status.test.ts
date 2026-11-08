@@ -36,9 +36,9 @@ describe("checkWorktreeCleanliness", () => {
   test("runs a lock-free porcelain status against the given path", async () => {
     const { fn, calls } = fakeSpawn(() => ({ stdout: "" }));
     gitStatusSpawnCtx.set(fn);
-    await checkWorktreeCleanliness("/repo/.ittybitty/agents/agent-1/repo");
+    await checkWorktreeCleanliness("/repo/.itsybitsy/agents/agent-1/repo");
     expect(calls).toEqual([[
-      "git", "-C", "/repo/.ittybitty/agents/agent-1/repo",
+      "git", "-C", "/repo/.itsybitsy/agents/agent-1/repo",
       "--no-optional-locks", "status", "--porcelain",
     ]]);
   });

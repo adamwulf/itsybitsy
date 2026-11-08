@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Repo configuration health check — detects configuration inconsistencies.
  * See SPEC.md §14 for full specification.
@@ -183,7 +184,7 @@ export async function checkMissingGlobalHooks(): Promise<RepoHealthWarning[]> {
  * Combined because both need to iterate agent directories and read meta.json.
  */
 export async function checkAgentDirectories(repoPath: string): Promise<RepoHealthWarning[]> {
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
   let entries: string[];
   try {
     entries = await readdir(agentsDir);
@@ -297,7 +298,7 @@ export async function checkOrphanedWorktrees(repoPath: string): Promise<RepoHeal
   let currentWorktreePath: string | null = null;
   let currentBranch: string | null = null;
 
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
 
   /** Check the current worktree entry and emit a warning if orphaned */
   const checkEntry = async () => {
@@ -396,7 +397,7 @@ export async function checkOrphanedBranches(repoPath: string): Promise<RepoHealt
     const agentId = branchName.slice("agent/".length); // e.g., "agent-abc123"
 
     // Check if agent directory exists
-    const agentDir = join(repoPath, ".ittybitty", "agents", agentId);
+    const agentDir = runtimeNames.agentDir(repoPath, agentId);
     let agentExists = false;
     try {
       const file = Bun.file(join(agentDir, "meta.json"));
@@ -424,7 +425,7 @@ export async function checkOrphanedBranches(repoPath: string): Promise<RepoHealt
  * §14.3.7 — Stale manager references in meta.json (warning)
  */
 export async function checkStaleManagerRefs(repoPath: string): Promise<RepoHealthWarning[]> {
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
   let entries: string[];
   try {
     entries = await readdir(agentsDir);
@@ -473,7 +474,7 @@ export async function checkStaleManagerRefs(repoPath: string): Promise<RepoHealt
  * §14.3.8 — Agent hooks referencing wrong agent ID (warning)
  */
 export async function checkAgentHookIds(repoPath: string): Promise<RepoHealthWarning[]> {
-  const agentsDir = join(repoPath, ".ittybitty", "agents");
+  const agentsDir = runtimeNames.agentsDir(repoPath);
   let entries: string[];
   try {
     entries = await readdir(agentsDir);
@@ -669,7 +670,7 @@ async function resolveLeakedHooks(w: RepoHealthWarning): Promise<void> {
 /** Remove a stale agent directory, and its tagged profile in the sealed tree */
 async function resolveOrphanedDir(w: RepoHealthWarning): Promise<void> {
   if (!w.agentId) return;
-  const agentDir = join(w.repoPath, ".ittybitty", "agents", w.agentId);
+  const agentDir = runtimeNames.agentDir(w.repoPath, w.agentId);
   removeSandboxProfile(agentDir);
   await rm(agentDir, { recursive: true, force: true });
 }
@@ -705,7 +706,7 @@ async function resolveOrphanedBranch(w: RepoHealthWarning): Promise<void> {
 /** Remove stale manager field from meta.json */
 async function resolveStaleManagerRef(w: RepoHealthWarning): Promise<void> {
   if (!w.agentId) return;
-  const metaPath = join(w.repoPath, ".ittybitty", "agents", w.agentId, "meta.json");
+  const metaPath = join(runtimeNames.runtimeDir(w.repoPath), "agents", w.agentId, "meta.json");
   const meta = await readJsonFile(metaPath);
   if (!meta || typeof meta !== "object") return;
 

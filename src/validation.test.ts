@@ -90,7 +90,7 @@ describe("isValidAgentId", () => {
 
 describe("isValidTmuxSession", () => {
   test("accepts typical tmux session names", () => {
-    expect(isValidTmuxSession("ittybitty-abc123-agent-deadbeef")).toBe(true);
+    expect(isValidTmuxSession("itsybitsy-abc123-agent-deadbeef")).toBe(true);
     expect(isValidTmuxSession("my_session")).toBe(true);
   });
 

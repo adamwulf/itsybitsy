@@ -34,9 +34,9 @@ Deep-dive technical analysis of the TypeScript `ib watch` replacement — how it
 itsybitsy is a terminal dashboard for managing Claude Code agents across multiple git repositories. It replaces the `ib watch` bash script with a full TypeScript TUI built on `@mariozechner/pi-tui`.
 
 **Key architectural decisions:**
-- Reads `.ittybitty/agents/` directories directly via filesystem (faster than shelling to `ib list`)
+- Reads `.itsybitsy/agents/` directories directly via filesystem (faster than shelling to `ib list`)
 - Shells out to `ib` CLI for all mutations (kill, merge, send, new-agent, diff, status)
-- Uses `fs.watch` on `.ittybitty/agents/` for instant structural updates
+- Uses `fs.watch` on `.itsybitsy/agents/` for instant structural updates
 - Polls `tmux capture-pane` every ~1s for the *selected* agent's live output
 - Terminal-only rendering via pi-tui (no browser UI)
 - `ib` is always resolved from `$PATH`
@@ -46,7 +46,7 @@ itsybitsy is a terminal dashboard for managing Claude Code agents across multipl
 src/
   index.ts           # CLI entrypoint (add/remove/list/watch/agents)
   registry.ts        # ~/.itsybitsy.json repo registry
-  agents.ts          # Read .ittybitty/agents/ and archive/ directories
+  agents.ts          # Read .itsybitsy/agents/ and archive/ directories
   parse-state.ts     # Pure string-matching state detection
   tmux-poller.ts     # TmuxPoller class + one-shot captureTmuxOutput()
   watcher.ts         # AgentWatcher: fs.watch + periodic refresh
@@ -146,7 +146,7 @@ export interface AgentMeta {
 
 ### Reading agents
 
-`readAllAgents(repos)` reads from both `.ittybitty/agents/` (active) and `.ittybitty/archive/` (archived) directories for each repo. Returns `{ agents, errors }` — errors are reported but don't stop the process:
+`readAllAgents(repos)` reads from both `.itsybitsy/agents/` (active) and `.itsybitsy/archive/` (archived) directories for each repo. Returns `{ agents, errors }` — errors are reported but don't stop the process:
 
 ```typescript
 async function readAgentsFromDir(dir, repoPath, repoName, archived): Promise<ReadAgentsResult> {
@@ -361,9 +361,9 @@ export async function captureTmuxOutput(tmuxSession: string, lines = 20): Promis
 
 ### Watched paths (per repo)
 
-- `.ittybitty/agents/` (recursive) — agent creation/deletion/metadata changes
-- `.ittybitty/archive/` (recursive) — archived agent changes
-- `.ittybitty/user-questions.json` — pending questions
+- `.itsybitsy/agents/` (recursive) — agent creation/deletion/metadata changes
+- `.itsybitsy/archive/` (recursive) — archived agent changes
+- `.itsybitsy/user-questions.json` — pending questions
 
 ### Refresh strategy
 
@@ -820,7 +820,7 @@ Used for:
 Three layers of updates keep the dashboard current:
 
 ### 1. fs.watch (instant, structural)
-- Fires on any file change in `.ittybitty/agents/` or `.ittybitty/archive/`
+- Fires on any file change in `.itsybitsy/agents/` or `.itsybitsy/archive/`
 - Also watches `user-questions.json`
 - Debounced to 200ms to batch rapid changes
 - Triggers full `refresh()`: re-read all agents, detect states, rebuild tree

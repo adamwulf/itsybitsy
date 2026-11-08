@@ -46,7 +46,7 @@ describe("ask broker", () => {
     setUserHome(home);
     setUserConfigPath(join(home, "config.json"));
     repo = await mkdtemp(join(tmpdir(), "ib-ask-"));
-    agentsDir = join(repo, ".ittybitty", "agents");
+    agentsDir = join(repo, ".itsybitsy", "agents");
     agentDir = join(agentsDir, ASKER_ID);
     await writeAgent(ASKER_ID, {});
     // The real askQuestion() notifies the user; never run `say` or touch the
@@ -91,7 +91,7 @@ describe("ask broker", () => {
   }
 
   async function questionsOnDisk(): Promise<any[]> {
-    const file = Bun.file(join(repo, ".ittybitty", "user-questions.json"));
+    const file = Bun.file(join(repo, ".itsybitsy", "user-questions.json"));
     return (await file.exists()) ? (await file.json()).questions : [];
   }
 

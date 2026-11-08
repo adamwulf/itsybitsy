@@ -52,7 +52,7 @@ describe("hookMarkRunning", () => {
     originalCwd = process.cwd();
     tempDir = await mkdtemp(join(tmpdir(), "mark-running-test-"));
     agentId = "agent-test1234";
-    agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     worktreeCwd = join(agentDir, "repo");
     await mkdir(worktreeCwd, { recursive: true });
     setNoWorktreeRepoRootsLoader(async () => [tempDir]);
@@ -125,7 +125,7 @@ describe("hookMarkRunning", () => {
   });
 
   test("direct human turn on an acknowledged complete child: the tool-free answer notifies the manager again", async () => {
-    const managerDir = join(tempDir, ".ittybitty", "agents", "agent-mgr12345");
+    const managerDir = join(tempDir, ".itsybitsy", "agents", "agent-mgr12345");
     await mkdir(managerDir, { recursive: true });
     await Bun.write(join(managerDir, "meta.json"), JSON.stringify({ id: "agent-mgr12345", tmux_session: "ib-mgr" }));
     await Bun.write(
@@ -148,7 +148,7 @@ describe("hookMarkRunning", () => {
       agentId,
       "answered\nI HAVE COMPLETED THE GOAL",
       agentDir,
-      join(tempDir, ".ittybitty", "agents"),
+      join(tempDir, ".itsybitsy", "agents"),
       { checkGitStatus: async () => "" },
     );
     expect(result.action).toBe("notify_manager");
@@ -174,7 +174,7 @@ describe("hookMarkRunning", () => {
       const sharedRoot = await mkdtemp(join(tmpdir(), "mark-running-no-worktree-"));
       try {
         const noWorktreeId = "agent-shared123";
-        const noWorktreeDir = join(sharedRoot, ".ittybitty", "agents", noWorktreeId);
+        const noWorktreeDir = join(sharedRoot, ".itsybitsy", "agents", noWorktreeId);
         const cwd = relativeCwd === "." ? sharedRoot : join(sharedRoot, relativeCwd);
         await mkdir(cwd, { recursive: true });
         await mkdir(noWorktreeDir, { recursive: true });
@@ -219,11 +219,11 @@ describe("hookMarkRunning", () => {
   test("registered no-worktree identity wins over a standalone fake cwd and cannot mutate a sibling", async () => {
     const callerId = "agent-markcaller1";
     const siblingId = "agent-marksibling1";
-    const callerDir = join(tempDir, ".ittybitty", "agents", callerId);
-    const siblingDir = join(tempDir, ".ittybitty", "agents", siblingId);
+    const callerDir = join(tempDir, ".itsybitsy", "agents", callerId);
+    const siblingDir = join(tempDir, ".itsybitsy", "agents", siblingId);
     const fakeRoot = await mkdtemp(join(tmpdir(), "mark-running-fake-"));
     try {
-      const fakeDir = join(fakeRoot, ".ittybitty", "agents", siblingId);
+      const fakeDir = join(fakeRoot, ".itsybitsy", "agents", siblingId);
       const fakeCwd = join(fakeDir, "repo");
       await mkdir(callerDir, { recursive: true });
       await mkdir(siblingDir, { recursive: true });
@@ -257,6 +257,6 @@ describe("hookMarkRunning", () => {
     const { hookMarkRunning } = await import("./mark-running");
     await hookMarkRunning("agent-missing123");
 
-    expect(await Bun.file(join(tempDir, ".ittybitty", "agents", "agent-missing123", "meta.json")).exists()).toBe(false);
+    expect(await Bun.file(join(tempDir, ".itsybitsy", "agents", "agent-missing123", "meta.json")).exists()).toBe(false);
   });
 });

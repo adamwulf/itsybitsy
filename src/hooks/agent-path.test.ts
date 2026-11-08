@@ -57,9 +57,9 @@ function buildAccessFor(opts: {
 function makeAccess(paths: Partial<PathsConfig> = {}, opts: { canSpawnChildren?: boolean } = {}): PreparedAccessTable {
   return buildAccessFor({
     paths,
-    agentDir: "/repo/.ittybitty/agents/agent-abc123",
-    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
-    agentsDir: "/repo/.ittybitty/agents",
+    agentDir: "/repo/.itsybitsy/agents/agent-abc123",
+    worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
+    agentsDir: "/repo/.itsybitsy/agents",
     rootRepo: "/repo",
     canSpawnChildren: opts.canSpawnChildren,
   });
@@ -69,14 +69,14 @@ function makeAccess(paths: Partial<PathsConfig> = {}, opts: { canSpawnChildren?:
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
     agentId: "agent-abc123",
-    agentDir: "/repo/.ittybitty/agents/agent-abc123",
-    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
-    agentsDir: "/repo/.ittybitty/agents",
+    agentDir: "/repo/.itsybitsy/agents/agent-abc123",
+    worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
+    agentsDir: "/repo/.itsybitsy/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
     denyList: [],
     access: makeAccess(),
-    protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
+    protectedWritePaths: agentProtectedWritePaths("/repo/.itsybitsy/agents/agent-abc123"),
     ...overrides,
   };
 }
@@ -86,7 +86,7 @@ function makeInput(overrides: Partial<PathCheckInput> = {}): PathCheckInput {
   return {
     toolName: "Read",
     toolInput: {},
-    cwd: "/repo/.ittybitty/agents/agent-abc123/repo",
+    cwd: "/repo/.itsybitsy/agents/agent-abc123/repo",
     ...overrides,
   };
 }
@@ -161,7 +161,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/src/index.ts" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -170,11 +170,11 @@ describe("checkPathAccess", () => {
 
   test("block other agent directory", () => {
     const ctx = makeCtx({
-      agentsDir: "/repo/.ittybitty/agents",
+      agentsDir: "/repo/.itsybitsy/agents",
     });
     const input = makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-other/repo/secret.ts" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-other/repo/secret.ts" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -227,7 +227,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/agent.log" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/agent.log" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -249,7 +249,7 @@ describe("checkPathAccess", () => {
     });
     const read = checkPathAccess(makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/file.ts" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/file.ts" },
     }), ctx);
     const bash = checkPathAccess(makeInput({
       toolName: "Bash",
@@ -261,11 +261,11 @@ describe("checkPathAccess", () => {
 
   test("Bash cd extraction — blocks cd to other agent", () => {
     const ctx = makeCtx({
-      agentsDir: "/repo/.ittybitty/agents",
+      agentsDir: "/repo/.itsybitsy/agents",
     });
     const input = makeInput({
       toolName: "Bash",
-      toolInput: { command: "cd /repo/.ittybitty/agents/agent-other/repo" },
+      toolInput: { command: "cd /repo/.itsybitsy/agents/agent-other/repo" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -312,7 +312,7 @@ describe("checkPathAccess", () => {
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "src/foo.ts" },
-      cwd: "/repo/.ittybitty/agents/agent-abc123/repo",
+      cwd: "/repo/.itsybitsy/agents/agent-abc123/repo",
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -324,7 +324,7 @@ describe("checkPathAccess", () => {
     const input = makeInput({
       toolName: "Read",
       toolInput: { file_path: "../../../../src/index.ts" },
-      cwd: "/repo/.ittybitty/agents/agent-abc123/repo",
+      cwd: "/repo/.itsybitsy/agents/agent-abc123/repo",
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -346,7 +346,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Glob",
-      toolInput: { path: "/repo/.ittybitty/agents/agent-abc123/repo/src", pattern: "*.ts" },
+      toolInput: { path: "/repo/.itsybitsy/agents/agent-abc123/repo/src", pattern: "*.ts" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -357,7 +357,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
-      toolInput: { command: 'cd "/repo/.ittybitty/agents/agent-abc123/repo/src"' },
+      toolInput: { command: 'cd "/repo/.itsybitsy/agents/agent-abc123/repo/src"' },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -368,7 +368,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -379,7 +379,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Edit",
-      toolInput: { notebook_path: "/repo/.ittybitty/agents/agent-other/repo/notebook.ipynb" },
+      toolInput: { notebook_path: "/repo/.itsybitsy/agents/agent-other/repo/notebook.ipynb" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -390,7 +390,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Edit",
-      toolInput: { notebook_path: "/repo/.ittybitty/agents/agent-abc123/repo/notebook.ipynb" },
+      toolInput: { notebook_path: "/repo/.itsybitsy/agents/agent-abc123/repo/notebook.ipynb" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -399,11 +399,11 @@ describe("checkPathAccess", () => {
 
   test("path with .. traversal is normalized and blocked", () => {
     const ctx = makeCtx();
-    // Goes up from repo → agent-abc123 → agents → .ittybitty, then into agent-other
-    // Resolves to /repo/.ittybitty/agent-other/repo/secret.ts which is under rootRepo
+    // Goes up from repo → agent-abc123 → agents → .itsybitsy, then into agent-other
+    // Resolves to /repo/.itsybitsy/agent-other/repo/secret.ts which is under rootRepo
     const input = makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/../../../agent-other/repo/secret.ts" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/../../../agent-other/repo/secret.ts" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -414,7 +414,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
-      toolInput: { command: "cat /repo/.ittybitty/agents/agent-other/repo/secret.ts" },
+      toolInput: { command: "cat /repo/.itsybitsy/agents/agent-other/repo/secret.ts" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -425,7 +425,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
-      toolInput: { command: "cat /repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" },
+      toolInput: { command: "cat /repo/.itsybitsy/agents/agent-abc123/repo/src/index.ts" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -455,7 +455,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx({ access: makeAccess({ allowRead: ["/repo-copy"] }) });
     expect(checkPathAccess(makeInput({
       toolName: "Bash",
-      toolInput: { command: "ls /repo/.ittybitty/agents/agent-abc123/repo" },
+      toolInput: { command: "ls /repo/.itsybitsy/agents/agent-abc123/repo" },
     }), ctx).decision).toBe("allow");
     expect(checkPathAccess(makeInput({
       toolName: "Bash",
@@ -467,7 +467,7 @@ describe("checkPathAccess", () => {
 
   test("bash RELATIVE cat ../../x from the worktree is denied (escapes to agents dir)", () => {
     const ctx = makeCtx();
-    // ../../x from the worktree resolves to /repo/.ittybitty/agents/x — under
+    // ../../x from the worktree resolves to /repo/.itsybitsy/agents/x — under
     // agentsDir, outside this agent's own dir.
     const input = makeInput({
       toolName: "Bash",
@@ -492,7 +492,7 @@ describe("checkPathAccess", () => {
 
   test("bash RELATIVE traversal into the main checkout is denied", () => {
     const ctx = makeCtx();
-    // ../../../../SPEC.md resolves up out of .ittybitty into /repo (the main checkout).
+    // ../../../../SPEC.md resolves up out of .itsybitsy into /repo (the main checkout).
     const input = makeInput({
       toolName: "Bash",
       toolInput: { command: "cat ../../../../SPEC.md" },
@@ -696,7 +696,7 @@ describe("checkPathAccess", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
-      toolInput: { command: "git -C /repo/.ittybitty/agents/agent-abc123/repo status" },
+      toolInput: { command: "git -C /repo/.itsybitsy/agents/agent-abc123/repo status" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -1068,7 +1068,7 @@ describe("checkPathAccess — advisory Bash path scanner", () => {
     expect(traversal.reason).toContain("other agents");
     expect(traversal.reason).not.toContain("paths.allowRead/allowWrite");
 
-    const sibling = run("cat /repo/.ittybitty/agents/agent-other/repo/.env");
+    const sibling = run("cat /repo/.itsybitsy/agents/agent-other/repo/.env");
     expect(sibling.reason).toContain("other agents' directory");
     expect(sibling.reason).not.toContain("paths.allowRead/allowWrite");
 
@@ -1079,7 +1079,7 @@ describe("checkPathAccess — advisory Bash path scanner", () => {
 
   test("canonical Bash and file aliases cannot enter main or sibling roots through an allow entry", async () => {
     const rootRepo = canonicalizeSandboxPath(join(home, "main"));
-    const agentsDir = join(rootRepo, ".ittybitty", "agents");
+    const agentsDir = join(rootRepo, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc123");
     const worktreePath = join(agentDir, "repo");
     const sibling = join(agentsDir, "agent-other", "repo");
@@ -1123,7 +1123,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Edit",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.local.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -1134,7 +1134,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Write",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.json" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -1145,7 +1145,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Write",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.foo.json" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.foo.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -1156,7 +1156,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx({ allowList: ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "Bash"] });
     const input = makeInput({
       toolName: "NotebookEdit",
-      toolInput: { notebook_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+      toolInput: { notebook_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.local.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -1170,7 +1170,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx({ allowList: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "Bash"] });
     const input = makeInput({
       toolName: "MultiEdit",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.local.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -1181,7 +1181,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Write",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/other.json" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/other.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -1192,7 +1192,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Write",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/sub/settings.local.json" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/sub/settings.local.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -1203,7 +1203,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.local.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -1214,7 +1214,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Glob",
-      toolInput: { path: "/repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+      toolInput: { path: "/repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.local.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -1322,7 +1322,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
-      toolInput: { command: "echo {} > /repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+      toolInput: { command: "echo {} > /repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.local.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -1333,7 +1333,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
-      toolInput: { command: "sed -i 's/x/y/' /repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.json" },
+      toolInput: { command: "sed -i 's/x/y/' /repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -1344,7 +1344,7 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
     const ctx = makeCtx();
     const input = makeInput({
       toolName: "Bash",
-      toolInput: { command: "cat /repo/.ittybitty/agents/agent-abc123/repo/.claude/settings.local.json" },
+      toolInput: { command: "cat /repo/.itsybitsy/agents/agent-abc123/repo/.claude/settings.local.json" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -1375,8 +1375,8 @@ describe("checkPathAccess — .claude/settings*.json write protection", () => {
 // ── agy boundary-file write protection (boundary review fix B) ───────────────
 
 describe("checkPathAccess — .agents/ boundary-file write protection", () => {
-  const HOOKS = "/repo/.ittybitty/agents/agent-abc123/repo/.agents/hooks.json";
-  const RULES = "/repo/.ittybitty/agents/agent-abc123/repo/.agents/rules/ittybitty-agent.md";
+  const HOOKS = "/repo/.itsybitsy/agents/agent-abc123/repo/.agents/hooks.json";
+  const RULES = "/repo/.itsybitsy/agents/agent-abc123/repo/.agents/rules/itsybitsy-agent.md";
 
   test("Write on .agents/hooks.json → DENIED", () => {
     const ctx = makeCtx();
@@ -1429,7 +1429,7 @@ describe("checkPathAccess — .agents/ boundary-file write protection", () => {
   test("Write on an unrelated .agents/ file → ALLOWED", () => {
     const ctx = makeCtx();
     const result = checkPathAccess(
-      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/.agents/notes.md" } }),
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/.agents/notes.md" } }),
       ctx,
     );
     expect(result.decision).toBe("allow");
@@ -1438,7 +1438,7 @@ describe("checkPathAccess — .agents/ boundary-file write protection", () => {
   test("Write on an unrelated worktree file → ALLOWED (regression)", () => {
     const ctx = makeCtx();
     const result = checkPathAccess(
-      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" } }),
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/src/index.ts" } }),
       ctx,
     );
     expect(result.decision).toBe("allow");
@@ -1446,7 +1446,7 @@ describe("checkPathAccess — .agents/ boundary-file write protection", () => {
 
   // ── obfuscated bash write-target spellings (boundary review round 4 fix 2) ──
 
-  const WT = "/repo/.ittybitty/agents/agent-abc123/repo";
+  const WT = "/repo/.itsybitsy/agents/agent-abc123/repo";
 
   test.each([
     ["sed -i on .agents/rules/../hooks.json (relative, dotdot)", `sed -i 's/x/y/' .agents/rules/../hooks.json`, "agy hook/rule files"],
@@ -1591,7 +1591,7 @@ describe("checkIbCommandAccess", () => {
 
   beforeEach(async () => {
     tmpDir = await import("fs/promises").then((fs) => fs.mkdtemp("/tmp/ib-test-ib-access-"));
-    agentsDir = join(tmpDir, ".ittybitty", "agents");
+    agentsDir = join(tmpDir, ".itsybitsy", "agents");
   });
 
   afterEach(async () => {
@@ -1606,7 +1606,7 @@ describe("checkIbCommandAccess", () => {
 
   async function writeRetiredMeta(id: string, meta: object): Promise<void> {
     const archiveKey = `20260703-120000-${id}`;
-    const archiveDir = join(tmpDir, ".ittybitty", "archive", archiveKey);
+    const archiveDir = join(tmpDir, ".itsybitsy", "archive", archiveKey);
     await mkdir(archiveDir, { recursive: true });
     await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id, ...meta }));
     await Bun.write(join(archiveDir, "retirement.json"), JSON.stringify({
@@ -1715,7 +1715,7 @@ describe("checkIbCommandAccess", () => {
     await rm(
       join(
         tmpDir,
-        ".ittybitty",
+        ".itsybitsy",
         "archive",
         `20260703-120000-${id}`,
         "retirement.json",
@@ -1743,7 +1743,7 @@ describe("checkIbCommandAccess", () => {
   });
 
   test("rehire is exact-id-only and denies an archived nickname target", async () => {
-    setUserHome(tmpDir);
+    setUserHome(join(tmpDir, "home"));
     try {
       await writeRetiredMeta("agent-target1", {
         manager: "agent-manager1",
@@ -1760,12 +1760,12 @@ describe("checkIbCommandAccess", () => {
     }
   });
 
-  // A sandboxed worktree agent's profile does not grant <repo>/.ittybitty/archive,
+  // A sandboxed worktree agent's profile does not grant <repo>/.itsybitsy/archive,
   // so this rule cannot see an archived agent's manager. `ib rehire` then goes to
   // the caller's watchdog, which runs this rule again where the archive is
   // readable (lifecycle-broker.ts) — so the hook must not deny first.
   describe("rehire when the sandbox hides the archive", () => {
-    const archiveRoot = () => join(tmpDir, ".ittybitty", "archive");
+    const archiveRoot = () => join(tmpDir, ".itsybitsy", "archive");
 
     /** Make the archive unlistable, as the kernel sandbox does. */
     async function hideArchive(): Promise<void> {
@@ -1774,7 +1774,7 @@ describe("checkIbCommandAccess", () => {
 
     beforeEach(async () => {
       // Keep the cross-repo fallback off the real registry.
-      setUserHome(tmpDir);
+      setUserHome(join(tmpDir, "home"));
       await writeRetiredMeta("agent-target1", { manager: "agent-manager1" });
     });
 
@@ -1828,6 +1828,20 @@ describe("checkIbCommandAccess", () => {
   // The watchdog lifecycle broker calls the rule with structured arguments
   // (lifecycle-broker.ts). There, null must mean "allowed" and nothing else.
   describe("checkManagerCommandAccess (the rule, without a command line)", () => {
+    test("ownArchiveOnly prefers a valid legacy manifest over a newer historical archive", async () => {
+      const id = "agent-target1";
+      await writeRetiredMeta(id, { manager: "agent-manager1" });
+      const key = `20260703-120000-${id}`;
+      const file = join(tmpDir, ".itsybitsy", "archive", key, "retirement.json");
+      const manifest = await Bun.file(file).json();
+      await Bun.write(file, JSON.stringify({ ...manifest, worktree: true, gitHead: "a".repeat(40), headRef: `refs/ittybitty/retired/${key}/head` }));
+      const newer = join(tmpDir, ".itsybitsy", "archive", `20260704-120000-${id}`);
+      await mkdir(newer, { recursive: true });
+      await Bun.write(join(newer, "meta.json"), JSON.stringify({ id, manager: "agent-manager2" }));
+      const opts = { ownArchiveOnly: true };
+      expect(await checkManagerCommandAccess("rehire", id, "agent-manager1", agentsDir, opts)).toBeNull();
+      expect((await checkManagerCommandAccess("rehire", id, "agent-manager2", agentsDir, opts))?.decision).toBe("deny");
+    });
     test("allows the manager and denies a stranger", async () => {
       await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
       expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-manager1", agentsDir)).toBeNull();
@@ -2196,7 +2210,7 @@ describe("checkPathAccess with the paths access table", () => {
     const ctx = makeCtx({ access: makeAccess() });
     const input = makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/index.ts" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/src/index.ts" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("allow");
@@ -2224,10 +2238,10 @@ describe("checkPathAccess with the paths access table", () => {
   });
 
   test("step 10 (other agents) still blocks even if the path is in allowWrite", () => {
-    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/repo/.ittybitty/agents"] }) });
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/repo/.itsybitsy/agents"] }) });
     const input = makeInput({
       toolName: "Read",
-      toolInput: { file_path: "/repo/.ittybitty/agents/agent-other/repo/src/index.ts" },
+      toolInput: { file_path: "/repo/.itsybitsy/agents/agent-other/repo/src/index.ts" },
     });
     const result = checkPathAccess(input, ctx);
     expect(result.decision).toBe("deny");
@@ -2269,16 +2283,16 @@ describe("checkPathAccess with the paths access table", () => {
 // ── Claude project dir access (own spilled tool-results / transcripts) ──────
 
 describe("checkPathAccess with own Claude project dir", () => {
-  const WORKTREE = "/Users/test/repo/.ittybitty/agents/agent-abc123/repo";
+  const WORKTREE = "/Users/test/repo/.itsybitsy/agents/agent-abc123/repo";
   const OWN_PROJECT_DIR = claudeProjectDirFor(WORKTREE);
-  const OTHER_WORKTREE = "/Users/test/repo/.ittybitty/agents/agent-other/repo";
+  const OTHER_WORKTREE = "/Users/test/repo/.itsybitsy/agents/agent-other/repo";
   const OTHER_PROJECT_DIR = claudeProjectDirFor(OTHER_WORKTREE);
 
   // The project dir is a WRITE runtime root in the access table (appended by
   // agentPathAccessTable), so it is allowed by the resolver with EMPTY paths.
   function makeClaudeCtx(paths: Partial<PathsConfig> = {}): PathCheckContext {
-    const agentDir = "/Users/test/repo/.ittybitty/agents/agent-abc123";
-    const agentsDir = "/Users/test/repo/.ittybitty/agents";
+    const agentDir = "/Users/test/repo/.itsybitsy/agents/agent-abc123";
+    const agentsDir = "/Users/test/repo/.itsybitsy/agents";
     return {
       agentId: "agent-abc123",
       agentDir,
@@ -2404,8 +2418,8 @@ describe("checkPathAccess with own Claude project dir", () => {
   test("coordinator case: worktreePath === rootRepo, own project dir allowed", () => {
     const coordRepo = "/Users/test/repo";
     const coordProjectDir = claudeProjectDirFor(coordRepo);
-    const agentDir = "/Users/test/repo/.ittybitty/agents/itsybitsy";
-    const agentsDir = "/Users/test/repo/.ittybitty/agents";
+    const agentDir = "/Users/test/repo/.itsybitsy/agents/itsybitsy";
+    const agentsDir = "/Users/test/repo/.itsybitsy/agents";
     const ctx: PathCheckContext = {
       agentId: "itsybitsy",
       agentDir,
@@ -2430,7 +2444,7 @@ describe("checkPathAccess with own Claude project dir", () => {
 // ── Phase B: own meta.json protection + resolver behaviour via the tools ─────
 
 describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
-  const META = "/repo/.ittybitty/agents/agent-abc123/meta.json";
+  const META = "/repo/.itsybitsy/agents/agent-abc123/meta.json";
 
   for (const tool of ["Write", "Edit", "MultiEdit"] as const) {
     test(`${tool} on own meta.json → DENIED`, () => {
@@ -2444,7 +2458,7 @@ describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
   test("a Bash redirect onto own meta.json → DENIED", () => {
     const ctx = makeCtx();
     const result = checkPathAccess(
-      makeInput({ toolName: "Bash", toolInput: { command: "echo {} > /repo/.ittybitty/agents/agent-abc123/meta.json" } }),
+      makeInput({ toolName: "Bash", toolInput: { command: "echo {} > /repo/.itsybitsy/agents/agent-abc123/meta.json" } }),
       ctx,
     );
     expect(result.decision).toBe("deny");
@@ -2454,7 +2468,7 @@ describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
   test("a sed -i in-place edit of own meta.json → DENIED", () => {
     const ctx = makeCtx();
     const result = checkPathAccess(
-      makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' /repo/.ittybitty/agents/agent-abc123/meta.json" } }),
+      makeInput({ toolName: "Bash", toolInput: { command: "sed -i 's/x/y/' /repo/.itsybitsy/agents/agent-abc123/meta.json" } }),
       ctx,
     );
     expect(result.decision).toBe("deny");
@@ -2467,7 +2481,7 @@ describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
       makeInput({
         toolName: "Bash",
         toolInput: { command: "echo {} > ../meta.json" },
-        cwd: "/repo/.ittybitty/agents/agent-abc123/repo",
+        cwd: "/repo/.itsybitsy/agents/agent-abc123/repo",
       }),
       ctx,
     );
@@ -2484,8 +2498,8 @@ describe("checkPathAccess — own meta.json write protection (Phase B)", () => {
 });
 
 describe("checkPathAccess — reserved seal-helper result namespace", () => {
-  const ownResult = "/repo/.ittybitty/agents/agent-abc123/.ib-seal-helper-deadbeef/output";
-  const otherResult = "/repo/.ittybitty/agents/agent-other/.ib-seal-helper-cafebabe/result";
+  const ownResult = "/repo/.itsybitsy/agents/agent-abc123/.ib-seal-helper-deadbeef/output";
+  const otherResult = "/repo/.itsybitsy/agents/agent-other/.ib-seal-helper-cafebabe/result";
   const tmpResult = "/private/tmp/.ib-seal-helper-01234567-89ab-cdef-0123-456789abcdef/output";
   const writable = makeAccess(
     { allowRead: ["/private/tmp"], allowWrite: ["/private/tmp"] },
@@ -2516,7 +2530,7 @@ describe("checkPathAccess — reserved seal-helper result namespace", () => {
     `cp --link ${tmpResult} /private/tmp/forged-cp-long-link`,
     `cp -al ${tmpResult} /private/tmp/forged-cp-al-link`,
     `cp -fl ${tmpResult} /private/tmp/forged-cp-fl-link`,
-    `mkdir /repo/.ittybitty/agents/agent-other/.ib-seal-helper-deadbeef`,
+    `mkdir /repo/.itsybitsy/agents/agent-other/.ib-seal-helper-deadbeef`,
   ]) {
     test(`Bash/translated run_command cannot mutate reserved result: ${command.split(" ")[0]}`, () => {
       const result = checkPathAccess(
@@ -2696,7 +2710,7 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
 
 describe("checkPathAccess — runtime roots and deny via the tools (Phase B)", () => {
   test("scratchpad is allowed with EMPTY paths lists", () => {
-    const scratch = claudeScratchpadDirFor("/repo/.ittybitty/agents/agent-abc123/repo", UID);
+    const scratch = claudeScratchpadDirFor("/repo/.itsybitsy/agents/agent-abc123/repo", UID);
     const ctx = makeCtx();
     const result = checkPathAccess(
       makeInput({ toolName: "Write", toolInput: { file_path: `${scratch}/tmp.txt` } }),
@@ -2707,9 +2721,9 @@ describe("checkPathAccess — runtime roots and deny via the tools (Phase B)", (
   });
 
   test("other agents' dir is denied even when listed in allowWrite", () => {
-    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/repo/.ittybitty/agents"] }) });
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/repo/.itsybitsy/agents"] }) });
     const result = checkPathAccess(
-      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-other/repo/x.ts" } }),
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.itsybitsy/agents/agent-other/repo/x.ts" } }),
       ctx,
     );
     expect(result.decision).toBe("deny");
@@ -2728,14 +2742,14 @@ describe("checkPathAccess — runtime roots and deny via the tools (Phase B)", (
 
   test("deny **/.env denies <worktree>/.env (Read and Write) but not <worktree>/src/x", () => {
     const ctx = makeCtx({ access: makeAccess({ deny: ["**/.env"] }) });
-    const env = "/repo/.ittybitty/agents/agent-abc123/repo/.env";
+    const env = "/repo/.itsybitsy/agents/agent-abc123/repo/.env";
     const read = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: env } }), ctx);
     const write = checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: env } }), ctx);
     expect(read.decision).toBe("deny");
     expect(read.reason).toContain("matches a paths.deny entry");
     expect(write.decision).toBe("deny");
     const src = checkPathAccess(
-      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.ittybitty/agents/agent-abc123/repo/src/x.ts" } }),
+      makeInput({ toolName: "Write", toolInput: { file_path: "/repo/.itsybitsy/agents/agent-abc123/repo/src/x.ts" } }),
       ctx,
     );
     expect(src.decision).toBe("allow");
@@ -2989,7 +3003,7 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "mark-running-side-effect-"));
     const agentId = "agent-test99";
-    agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     worktreeCwd = join(agentDir, "repo");
     await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
     await writeFile(
@@ -3026,7 +3040,7 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
   test("duplicate registered ids bind path policy and state to the matching worktree cwd", async () => {
     const otherRepo = await mkdtemp(join(tmpdir(), "duplicate-worktree-hook-"));
     try {
-      const otherAgentDir = join(otherRepo, ".ittybitty", "agents", "agent-test99");
+      const otherAgentDir = join(otherRepo, ".itsybitsy", "agents", "agent-test99");
       const otherWorktree = join(otherAgentDir, "repo");
       await mkdir(join(otherWorktree, ".claude"), { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -3081,7 +3095,7 @@ describe("hookCheckPath with worktree:false agent settings", () => {
 
   beforeEach(async () => {
     repo = await mkdtemp(join(tmpdir(), "no-worktree-hook-settings-"));
-    agentDir = join(repo, ".ittybitty", "agents", "agent-shared");
+    agentDir = join(repo, ".itsybitsy", "agents", "agent-shared");
     await mkdir(join(agentDir, ".claude"), { recursive: true });
     await mkdir(join(repo, ".claude"), { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({
@@ -3130,7 +3144,7 @@ describe("hookCheckPath with worktree:false agent settings", () => {
 
   test("outer no-worktree authority wins over a forged worktree-shaped cwd", async () => {
     const nested = join(repo, "packages", "feature");
-    const forgedAgentDir = join(nested, ".ittybitty", "agents", "agent-shared");
+    const forgedAgentDir = join(nested, ".itsybitsy", "agents", "agent-shared");
     const forgedWorktree = join(forgedAgentDir, "repo");
     await mkdir(join(forgedWorktree, ".claude"), { recursive: true });
     await writeFile(join(forgedAgentDir, "meta.json"), JSON.stringify({
@@ -3158,7 +3172,7 @@ describe("hookCheckPath with worktree:false agent settings", () => {
   test("a standalone worktree-shaped same-id tree cannot redirect authority", async () => {
     const standalone = await mkdtemp(join(tmpdir(), "standalone-worktree-hook-"));
     try {
-      const standaloneAgentDir = join(standalone, ".ittybitty", "agents", "agent-shared");
+      const standaloneAgentDir = join(standalone, ".itsybitsy", "agents", "agent-shared");
       const standaloneWorktree = join(standaloneAgentDir, "repo");
       const ownFile = join(standaloneWorktree, "tracked.txt");
       await mkdir(join(standaloneWorktree, ".claude"), { recursive: true });
@@ -3210,8 +3224,8 @@ describe("hookCheckPath with worktree:false agent settings", () => {
   }
 
   for (const command of [
-    "echo '{}' > .ittybitty/agents/agent-shared/.claude/settings.local.json",
-    "sed -i 's/Read/Write/' .ittybitty/agents/agent-shared/.claude/settings.local.json",
+    "echo '{}' > .itsybitsy/agents/agent-shared/.claude/settings.local.json",
+    "sed -i 's/Read/Write/' .itsybitsy/agents/agent-shared/.claude/settings.local.json",
   ]) {
     test(`Bash cannot mutate the isolated settings authority: ${command.split(" ")[0]}`, async () => {
       await hookCheckPath("agent-shared", JSON.stringify({
@@ -3248,7 +3262,7 @@ describe("hookCheckPath with worktree:false agent settings", () => {
     ["Bash", { command: "cat meta.json" }],
   ] as const) {
     test(`${toolName} cannot access a sibling agent through the shared repo root`, async () => {
-      const siblingDir = join(repo, ".ittybitty", "agents", "agent-sibling");
+      const siblingDir = join(repo, ".itsybitsy", "agents", "agent-sibling");
       await mkdir(siblingDir, { recursive: true });
       await writeFile(join(siblingDir, "meta.json"), JSON.stringify({ id: "agent-sibling" }));
       await writeFile(
@@ -3302,7 +3316,7 @@ describe("hookCheckPath — deny by default (missing meta, malformed stdin)", ()
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "hook-deny-default-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test77");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-test77");
     worktreeCwd = join(agentDir, "repo");
     await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
     await writeFile(
@@ -3449,7 +3463,7 @@ describe("hookCheckPath — denied wait attempts point at WAITING", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "hook-wait-hint-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-test66");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-test66");
     worktreeCwd = join(agentDir, "repo");
     await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
     // A typical agent allow list: Read plus prefix-scoped Bash. Monitor, sleep,
@@ -3536,7 +3550,7 @@ describe("hookCheckPath when the agent cannot read its repo root", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "hook-unreadable-root-"));
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-test77");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-test77");
     worktreeCwd = join(agentDir, "repo");
     await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
     await writeFile(
@@ -3578,7 +3592,7 @@ describe("hookCheckPath when the access table cannot be built from meta.json", (
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "hook-bad-paths-"));
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-test88");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-test88");
     worktreeCwd = join(agentDir, "repo");
     await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
     await writeFile(
@@ -3636,7 +3650,7 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
     created = await realpath(await mkdtemp(join(tmpdir(), "ib-stored-decisions-")));
     home = join(created, "home");
     repo = join(created, "repo");
-    agentsDir = join(repo, ".ittybitty", "agents");
+    agentsDir = join(repo, ".itsybitsy", "agents");
     agentDir = join(agentsDir, "agent-abc123");
     worktreePath = join(agentDir, "repo");
     setUserHome(home);
@@ -3750,7 +3764,7 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
     { name: "round 3 wildcard: <tmp>/work/*", deny: (c: string) => [`${c}/work/*`], dir: ["work", "Repo"] },
   ])("a typed-case deny does not stop the case correction ($name)", async ({ deny, dir }) => {
     const mainRepo = join(created, "work", "repo");
-    const agentsDirHere = join(mainRepo, ".ittybitty", "agents");
+    const agentsDirHere = join(mainRepo, ".itsybitsy", "agents");
     const agentDirHere = join(agentsDirHere, "agent-abc123");
     const worktreeHere = join(agentDirHere, "repo");
     await mkdir(join(mainRepo, "src"), { recursive: true });
@@ -3796,7 +3810,7 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
 
     async function mainRepoAgent(repoName: string) {
       const mainRepo = join(created, "work", repoName);
-      const agentsDirHere = join(mainRepo, ".ittybitty", "agents");
+      const agentsDirHere = join(mainRepo, ".itsybitsy", "agents");
       const agentDirHere = join(agentsDirHere, "agent-abc123");
       const worktreeHere = join(agentDirHere, "repo");
       for (const dir of [join(mainRepo, "src"), join(mainRepo, ".git"), worktreeHere]) await mkdir(dir, { recursive: true });

@@ -81,7 +81,7 @@ describe("teams: deliverMessage team-prefix rendering", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "team-deliver-"));
-    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-abc"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-abc"), { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
       spawnCalls.push(cmd);
@@ -178,7 +178,7 @@ describe("teams: sendMessage threads team into the outbox", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "team-send-thread-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
@@ -247,7 +247,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
   // transient so any delivery to it DEFERS into its outbox. Returns the
   // WORKTREE agent dir; readers of the outbox queue should use queueDirOf(id).
   async function plantAgent(id: string): Promise<string> {
-    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    const agentDir = join(repoDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
@@ -505,7 +505,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
   // "unknown".
   test("roster renders each member's live detected state, not 'unknown'", async () => {
     await teamCreate("backend");
-    const agentDir = join(repoDir, ".ittybitty", "agents", "agent-wait");
+    const agentDir = join(repoDir, ".itsybitsy", "agents", "agent-wait");
     await mkdir(agentDir, { recursive: true });
     // meta.state === "waiting" → detectAgentStates resolves "waiting" through the
     // fresh-watchdog transient fast-path (isPidAliveCtx is stubbed true).
@@ -632,7 +632,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     await plantAgent("agent-keep");
     // Plant an archived agent: same meta.json shape, but under archive/, not agents/.
     // readAllAgents(repos, false) must NOT surface it → liveAgentIds drops it → prune.
-    const archivedDir = join(repoDir, ".ittybitty", "archive", "agent-archived");
+    const archivedDir = join(repoDir, ".itsybitsy", "archive", "agent-archived");
     await mkdir(archivedDir, { recursive: true });
     await Bun.write(join(archivedDir, "meta.json"), JSON.stringify({ id: "agent-archived", tmux_session: "t-agent-archived" }));
     await addMember("backend", "agent-archived");
@@ -697,7 +697,7 @@ describe("teams: resolveTarget team branch", () => {
   }
 
   async function plantAgent(id: string): Promise<void> {
-    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    const agentDir = join(repoDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
   }

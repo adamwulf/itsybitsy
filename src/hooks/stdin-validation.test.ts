@@ -18,7 +18,7 @@ import { runIsolatedCli } from "../test-cli-runner";
 // fail; it weakens no assertion, and passing tests are unaffected.
 setDefaultTimeout(60_000);
 
-// Temp directory structured as .ittybitty/agents/<id>/repo so that
+// Temp directory structured as .itsybitsy/agents/<id>/repo so that
 // resolveAgentDir() points debug-logs writes into /tmp instead of the
 // real agents directory.
 let tempBase: string;
@@ -40,7 +40,7 @@ let testHome: string;
 
 beforeAll(async () => {
   tempBase = await mkdtemp(join(tmpdir(), "ib-hook-test-"));
-  hookCwd = join(tempBase, ".ittybitty", "agents", "agent-test1234", "repo");
+  hookCwd = join(tempBase, ".itsybitsy", "agents", "agent-test1234", "repo");
   await mkdir(hookCwd, { recursive: true });
 
   testHome = await mkdtemp(join(tmpdir(), "ib-stdin-validation-home-"));

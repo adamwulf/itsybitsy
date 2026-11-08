@@ -36,27 +36,27 @@ import { runIsolatedCli } from "./test-cli-runner";
 
 let root: string;
 
-/** `<root>/<repo>/.ittybitty/agents/<id>` with a meta.json and a worktree dir. */
+/** `<root>/<repo>/.itsybitsy/agents/<id>` with a meta.json and a worktree dir. */
 async function writeAgent(repo: string, id: string, meta: Record<string, unknown>): Promise<string> {
-  const agentDir = join(root, repo, ".ittybitty", "agents", id);
+  const agentDir = join(root, repo, ".itsybitsy", "agents", id);
   await mkdir(join(agentDir, "repo"), { recursive: true });
-  await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `ittybitty-r-${id}`, ...meta }, null, 2));
+  await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `itsybitsy-r-${id}`, ...meta }, null, 2));
   return agentDir;
 }
 
 /** The Agent that `requireAgent` would hand to `ackAgent`, read from disk. */
 async function agentFor(repo: string, id: string): Promise<Agent> {
-  const meta = JSON.parse(await readFile(join(root, repo, ".ittybitty", "agents", id, "meta.json"), "utf-8"));
+  const meta = JSON.parse(await readFile(join(root, repo, ".itsybitsy", "agents", id, "meta.json"), "utf-8"));
   return makeAgent({ id, repoPath: join(root, repo), meta: { ...makeAgent({ id }).meta, ...meta } });
 }
 
 /** The cwd of agent `id`'s session: its worktree. */
 function sessionOf(repo: string, id: string): string {
-  return join(root, repo, ".ittybitty", "agents", id, "repo");
+  return join(root, repo, ".itsybitsy", "agents", id, "repo");
 }
 
 async function readMeta(repo: string, id: string): Promise<Record<string, unknown>> {
-  return JSON.parse(await readFile(join(root, repo, ".ittybitty", "agents", id, "meta.json"), "utf-8"));
+  return JSON.parse(await readFile(join(root, repo, ".itsybitsy", "agents", id, "meta.json"), "utf-8"));
 }
 
 beforeEach(async () => {
@@ -82,7 +82,7 @@ describe("ackAllSubagents — manager shortcut", () => {
     await writeAgent("repo", "grandchild", { manager: "child", state: "waiting" });
     await writeAgent("repo", "unrelated", { manager: "other-mgr", state: "waiting" });
     await writeAgent("other", "foreign", { manager: "mgr", state: "waiting" });
-    const archiveDir = join(root, "repo", ".ittybitty", "archive", "retired");
+    const archiveDir = join(root, "repo", ".itsybitsy", "archive", "retired");
     await mkdir(archiveDir, { recursive: true });
     await writeFile(join(archiveDir, "meta.json"), JSON.stringify({ id: "retired", manager: "mgr", state: "complete" }));
 
@@ -149,7 +149,7 @@ describe("ackAllSubagents — manager shortcut", () => {
   });
 
   test("a child starting a new turn during a batch is skipped successfully", async () => {
-    const childDir = join(root, "repo", ".ittybitty", "agents", "child");
+    const childDir = join(root, "repo", ".itsybitsy", "agents", "child");
     for (let i = 0; i < 10; i++) {
       await writeAgent("repo", "child", { manager: "mgr", state: "waiting" });
       const [result] = await Promise.all([
@@ -183,7 +183,7 @@ describe("ackAgent — owner gate", () => {
     const { ack, ...rest } = after;
     expect(rest).toEqual(before); // state, state_updated_at, session: untouched
     expect(ack).toEqual({ state: "waiting", by: "mgr", at: expect.any(Number) });
-    const log = await readFile(join(root, "repo", ".ittybitty", "agents", "child", "agent.log"), "utf-8");
+    const log = await readFile(join(root, "repo", ".itsybitsy", "agents", "child", "agent.log"), "utf-8");
     expect(log).toContain("[ack] mgr acknowledged the waiting state");
   });
 
@@ -258,17 +258,17 @@ describe("ackAgent — state gate and idempotence", () => {
   test("acknowledging the same episode again changes nothing", async () => {
     const child = await agentFor("repo", "child");
     await ackAgent(child, { _cwd: sessionOf("repo", "mgr") });
-    const first = await readFile(join(root, "repo", ".ittybitty", "agents", "child", "meta.json"), "utf-8");
+    const first = await readFile(join(root, "repo", ".itsybitsy", "agents", "child", "meta.json"), "utf-8");
 
     const again = await ackAgent(child, { _cwd: sessionOf("repo", "mgr") });
     expect(again.ok).toBe(true);
     expect(again.stdout).toBe("child is already acknowledged (waiting); nothing changed");
-    expect(await readFile(join(root, "repo", ".ittybitty", "agents", "child", "meta.json"), "utf-8")).toBe(first);
+    expect(await readFile(join(root, "repo", ".itsybitsy", "agents", "child", "meta.json"), "utf-8")).toBe(first);
   });
 });
 
 describe("ack persistence and invalidation", () => {
-  const childDir = () => join(root, "repo", ".ittybitty", "agents", "child");
+  const childDir = () => join(root, "repo", ".itsybitsy", "agents", "child");
 
   test("the ack is on disk: a fresh reader (e.g. a restarted watchdog) sees it", async () => {
     await ackAgent(await agentFor("repo", "child"), { _cwd: sessionOf("repo", "mgr") });
@@ -331,15 +331,15 @@ describe("LIVE: ib ack inside a manager's kernel sandbox", () => {
     const scratch = canonicalizeSandboxPath(await mkdtemp(join(tmpdir(), "itsybitsy-ack-live-")));
     try {
       const repo = join(repoBase, "repo");
-      const agentsDir = join(repo, ".ittybitty", "agents");
+      const agentsDir = join(repo, ".itsybitsy", "agents");
       const mgrDir = join(agentsDir, "mgr");
       const childDir = join(agentsDir, "child");
-      for (const dir of [join(repo, ".git"), join(repo, ".claude"), join(repo, ".ittybitty", "archive"), join(mgrDir, "repo"), join(childDir, "repo")]) {
+      for (const dir of [join(repo, ".git"), join(repo, ".claude"), join(repo, ".itsybitsy", "archive"), join(mgrDir, "repo"), join(childDir, "repo")]) {
         await mkdir(dir, { recursive: true });
       }
-      await writeFile(join(repo, ".ittybitty", "repo-id"), "abcd1234\n");
-      await writeFile(join(mgrDir, "meta.json"), JSON.stringify({ id: "mgr", manager: null, state: "running", worktree: true, tmux_session: "ittybitty-abcd1234-mgr" }));
-      await writeFile(join(childDir, "meta.json"), JSON.stringify({ id: "child", manager: "mgr", state: "waiting", state_updated_at: 1234, worktree: true, tmux_session: "ittybitty-abcd1234-child" }));
+      await writeFile(join(repo, ".itsybitsy", "repo-id"), "abcd1234\n");
+      await writeFile(join(mgrDir, "meta.json"), JSON.stringify({ id: "mgr", manager: null, state: "running", worktree: true, tmux_session: "itsybitsy-abcd1234-mgr" }));
+      await writeFile(join(childDir, "meta.json"), JSON.stringify({ id: "child", manager: "mgr", state: "waiting", state_updated_at: 1234, worktree: true, tmux_session: "itsybitsy-abcd1234-child" }));
 
       // `ib`'s registry ($HOME/.itsybitsy/repos.json) lists the repo. The
       // profile's HOME stays the real home, as in production, so the caller
@@ -366,7 +366,7 @@ describe("LIVE: ib ack inside a manager's kernel sandbox", () => {
         GITDIR: join(repo, ".git"),
         REPOAGENTS: agentsDir,
         PARENTCLAUDE: join(repo, ".claude"),
-        REPOID: join(repo, ".ittybitty", "repo-id"),
+        REPOID: join(repo, ".itsybitsy", "repo-id"),
         TMUXSOCK: resolveTmuxSocketDir(process.getuid?.() ?? 0),
         canSpawnChildren: true,
         HOME: homedir(),
@@ -391,7 +391,7 @@ describe("LIVE: ib ack inside a manager's kernel sandbox", () => {
 
       // The profile really hides what the lifecycle broker exists for.
       expect(run(["/bin/ls", repo]).exitCode).not.toBe(0);
-      expect(run(["/bin/ls", join(repo, ".ittybitty", "archive")]).exitCode).not.toBe(0);
+      expect(run(["/bin/ls", join(repo, ".itsybitsy", "archive")]).exitCode).not.toBe(0);
 
       // Control: the same caller under a non-spawner profile (agents dir
       // read-only) resolves everything but the kernel refuses the write. So

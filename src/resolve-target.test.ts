@@ -27,7 +27,7 @@ let _tempDirs: string[] = [];
 
 function makeTempRepo(name: string): RepoEntry {
   const dir = mkdtempSync(join(tmpdir(), `ib-test-${name}-`));
-  mkdirSync(join(dir, ".ittybitty", "agents"), { recursive: true });
+  mkdirSync(join(dir, ".itsybitsy", "agents"), { recursive: true });
   _tempDirs.push(dir);
   return { path: dir, name };
 }
@@ -38,12 +38,12 @@ function makeTempRepoWithNickname(name: string, nickname: string): RepoEntry {
 }
 
 function addAgentToRepo(repoPath: string, id: string, extra: Record<string, any> = {}) {
-  const agentDir = join(repoPath, ".ittybitty", "agents", id);
+  const agentDir = join(repoPath, ".itsybitsy", "agents", id);
   mkdirSync(agentDir, { recursive: true });
   const meta = {
     id,
     session_id: "test-session",
-    tmux_session: `ittybitty-test-${id}`,
+    tmux_session: `itsybitsy-test-${id}`,
     prompt: "test",
     manager: null,
     created: "2026-01-01T00:00:00Z",
@@ -155,7 +155,7 @@ describe("Group B: @coordinator addressing", () => {
 
   test("B6: CWD in worktree finds own repo", async () => {
     addCoordinatorToRepo(repoA.path, "coord-a");
-    const cwdWorktree = join(repoA.path, ".ittybitty", "agents", "agent-abc", "repo");
+    const cwdWorktree = join(repoA.path, ".itsybitsy", "agents", "agent-abc", "repo");
     const result = await resolveTarget("@coordinator", repos, cwdWorktree);
     expect(result.agent?.id).toBe("coord-a");
   });
@@ -425,7 +425,7 @@ describe("Group G: findOwnRepo edge cases", () => {
   });
 
   test("G3: CWD in worktree path", async () => {
-    const cwdWorktree = join(repoA.path, ".ittybitty", "agents", "agent-with-hyphens-123", "repo");
+    const cwdWorktree = join(repoA.path, ".itsybitsy", "agents", "agent-with-hyphens-123", "repo");
     const result = await resolveTarget("agent-aaa", repos, cwdWorktree);
     expect(result.agent?.id).toBe("agent-aaa");
   });
@@ -433,7 +433,7 @@ describe("Group G: findOwnRepo edge cases", () => {
   test("G4: CWD in worktree subdir does NOT match worktree regex", async () => {
     // Ends with /repo/src, not /repo — worktree regex fails, falls back to prefix match
     // But the path starts with repoA.path so prefix match succeeds
-    const cwdWorktreeSubdir = join(repoA.path, ".ittybitty", "agents", "agent-abc", "repo", "src");
+    const cwdWorktreeSubdir = join(repoA.path, ".itsybitsy", "agents", "agent-abc", "repo", "src");
     const result = await resolveTarget("agent-aaa", repos, cwdWorktreeSubdir);
     expect(result.agent?.id).toBe("agent-aaa");
   });
@@ -447,7 +447,7 @@ describe("Group G: findOwnRepo edge cases", () => {
   test("G6: worktree path with no matching repo returns null ownRepo", async () => {
     // Worktree path for unknown repo: extracts a path but no repo matches
     // Falls back to global search
-    const unknownWorktree = "/tmp/unknown/.ittybitty/agents/agent-xyz/repo";
+    const unknownWorktree = "/tmp/unknown/.itsybitsy/agents/agent-xyz/repo";
     const result = await resolveTarget("agent-aaa", repos, unknownWorktree);
     // ownRepo=null, falls back to global search
     expect(result.agent?.id).toBe("agent-aaa");
@@ -543,12 +543,12 @@ describe("Group K: Cross-cutting edge cases", () => {
 // Group L: not-found errors name an unreadable agents directory
 // ============================================================
 describe("Group L: unreadable agents directories in not-found errors", () => {
-  // Inside an itsybitsy sandbox another repo's `.ittybitty/agents` cannot be
+  // Inside an itsybitsy sandbox another repo's `.itsybitsy/agents` cannot be
   // listed (EPERM). Any non-ENOENT readdir failure takes the same path in
   // readAllAgents; a regular FILE where the directory should be (ENOTDIR) is
   // used here because it fails the same way for every user, root included.
   function makeAgentsDirUnreadable(repo: RepoEntry): string {
-    const agentsDir = join(repo.path, ".ittybitty", "agents");
+    const agentsDir = join(repo.path, ".itsybitsy", "agents");
     rmSync(agentsDir, { recursive: true, force: true });
     writeFileSync(agentsDir, "not a directory");
     return agentsDir;
@@ -593,7 +593,7 @@ describe("Group L: unreadable agents directories in not-found errors", () => {
   });
 
   test("L6: an unreadable meta.json of one agent is not named", async () => {
-    const brokenDir = join(repoB.path, ".ittybitty", "agents", "agent-broken");
+    const brokenDir = join(repoB.path, ".itsybitsy", "agents", "agent-broken");
     mkdirSync(brokenDir, { recursive: true });
     writeFileSync(join(brokenDir, "meta.json"), "{oops");
     // A new directory's read error is suppressed (spawn in progress); age it

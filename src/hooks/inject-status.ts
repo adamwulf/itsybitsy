@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Global UserPromptSubmit hook: injects agent status into primary Claude's context.
  *
@@ -60,7 +61,7 @@ export function formatAgentStatus(
   }
 
   const lines: string[] = [];
-  lines.push("<ittybitty-status>");
+  lines.push(`<${runtimeNames.STATUS_TAG}>`);
 
   for (const repo of repos) {
     const name = repoDisplayName(repo);
@@ -81,7 +82,7 @@ export function formatAgentStatus(
     }
   }
 
-  lines.push("</ittybitty-status>");
+  lines.push(`</${runtimeNames.STATUS_TAG}>`);
   return lines.join("\n");
 }
 
@@ -136,7 +137,7 @@ export async function countPendingQuestions(
   );
   let count = 0;
   for (const repo of repos) {
-    const questionsPath = join(repo.path, ".ittybitty", "user-questions.json");
+    const questionsPath = runtimeNames.userQuestionsFile(repo.path);
     try {
       const file = Bun.file(questionsPath);
       if (!(await file.exists())) continue;

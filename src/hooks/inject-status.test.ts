@@ -56,14 +56,14 @@ function mockAgent(overrides: Partial<Agent> & { id: string }): Agent {
 describe("shouldInjectStatus", () => {
   test("skip-agent-worktree: cwd inside agent repo returns false", () => {
     expect(
-      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitty/agents/abc123/repo" })
+      shouldInjectStatus({ cwd: "/Users/test/project/.itsybitsy/agents/abc123/repo" })
     ).toBe(false);
   });
 
   test("skip-agent-subdir: cwd inside agent repo subdir returns false", () => {
     expect(
       shouldInjectStatus({
-        cwd: "/Users/test/project/.ittybitty/agents/hook-filter/repo/src/components",
+        cwd: "/Users/test/project/.itsybitsy/agents/hook-filter/repo/src/components",
       })
     ).toBe(false);
   });
@@ -74,7 +74,7 @@ describe("shouldInjectStatus", () => {
 
   test("inject-ittybitty-dir-not-repo: cwd at agent dir (not /repo) returns true", () => {
     expect(
-      shouldInjectStatus({ cwd: "/Users/test/project/.ittybitty/agents/abc123" })
+      shouldInjectStatus({ cwd: "/Users/test/project/.itsybitsy/agents/abc123" })
     ).toBe(true);
   });
 
@@ -97,9 +97,9 @@ describe("formatAgentStatus", () => {
   test("shows (no agents) for repo with no agents", () => {
     const repos: RepoEntry[] = [{ path: "/Users/test/project", name: "project" }];
     const result = formatAgentStatus(repos, new Map());
-    expect(result).toContain("<ittybitty-status>");
+    expect(result).toContain("<itsybitsy-status>");
     expect(result).toContain("project: (no agents)");
-    expect(result).toContain("</ittybitty-status>");
+    expect(result).toContain("</itsybitsy-status>");
   });
 
   test("shows agents with state, age, and prompt", () => {
@@ -356,7 +356,7 @@ describe("countPendingQuestions", () => {
   test("counts pending questions from active agents", async () => {
     const { mkdir, writeFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    const questionsDir = join(tmpDir, ".ittybitty");
+    const questionsDir = join(tmpDir, ".itsybitsy");
     await mkdir(questionsDir, { recursive: true });
     await writeFile(
       join(questionsDir, "user-questions.json"),
@@ -381,7 +381,7 @@ describe("countPendingQuestions", () => {
   test("filters out questions from archived agents", async () => {
     const { mkdir, writeFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    const questionsDir = join(tmpDir, ".ittybitty");
+    const questionsDir = join(tmpDir, ".itsybitsy");
     await mkdir(questionsDir, { recursive: true });
     await writeFile(
       join(questionsDir, "user-questions.json"),
@@ -405,7 +405,7 @@ describe("countPendingQuestions", () => {
   test("filters out questions from unknown agents", async () => {
     const { mkdir, writeFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    const questionsDir = join(tmpDir, ".ittybitty");
+    const questionsDir = join(tmpDir, ".itsybitsy");
     await mkdir(questionsDir, { recursive: true });
     await writeFile(
       join(questionsDir, "user-questions.json"),
@@ -500,11 +500,11 @@ describe("buildStatusText", () => {
     };
 
     const { text, agents: returnedAgents, repos: returnedRepos } = await buildStatusText(provider);
-    expect(text).toContain("<ittybitty-status>");
+    expect(text).toContain("<itsybitsy-status>");
     expect(text).toContain("project:");
     expect(text).toContain("m agent-aaa [running] 3m");
     expect(text).toContain("w agent-bbb [waiting] 10m");
-    expect(text).toContain("</ittybitty-status>");
+    expect(text).toContain("</itsybitsy-status>");
     expect(returnedAgents).toHaveLength(2);
     expect(returnedRepos).toEqual(repos);
   });

@@ -170,4 +170,4 @@ the Xcode `xcrun` shim and failed loading `libxcrun.dylib` from `/Applications`
 before attempting the disposable forbidden read. The mandatory root, descendant,
 sealed-control tamper, parser/display, cleanup, helper-lifeline, and post-failure
 enforcement checks passed. Durable evidence is preserved under
-`/Users/adamwulf/.claude/projects/-Users-adamwulf-Developer-bun-itsybitsy--ittybitty-agents-agent-7ceddb24-repo/evidence-agent-7ceddb24/`.
+`/Users/adamwulf/.claude/projects/-Users-adamwulf-Developer-bun-itsybitsy--itsybitsy-agents-agent-7ceddb24-repo/evidence-agent-7ceddb24/`.

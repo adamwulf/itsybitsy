@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * The shared way for a test to run the `ib` CLI in a subprocess. See
  * test-cli-driver.ts for why a subprocess needs more than a temporary HOME.
@@ -71,7 +72,7 @@ export interface IsolatedCliResult extends CliRunResult {
 function isolatedTempRoot(): string {
   const root = realpathSync(tmpdir());
   // An agent-shaped TMPDIR would make every fixture cwd resolve to that agent.
-  if (root.includes("/.ittybitty/")) {
+  if (runtimeNames.containsRuntimeDir(root)) {
     throw new Error(`Refusing to run CLI tests: the temp directory ${root} is inside an agent directory`);
   }
   return root;
@@ -230,13 +231,13 @@ export async function createCliFixture(): Promise<CliFixture> {
     async addRepo(name, options = {}) {
       const path = join(root, "repos", `${repos.length}`, name);
       await mkdir(join(path, ".git", "worktrees"), { recursive: true });
-      await mkdir(join(path, ".ittybitty", "agents"), { recursive: true });
+      await mkdir(runtimeNames.agentsDir(path), { recursive: true });
       repos.push({ path, name, ...(options.nickname ? { nickname: options.nickname } : {}) });
       await writeRegistry({ version: 1, repos });
       return path;
     },
     async addAgent(repoPath, id, meta = {}) {
-      const agentDir = join(repoPath, ".ittybitty", "agents", id);
+      const agentDir = runtimeNames.agentDir(repoPath, id);
       const worktree = meta.worktree !== false;
       await mkdir(agentDir, { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `ib-fixture-${id}`, worktree, ...meta }));

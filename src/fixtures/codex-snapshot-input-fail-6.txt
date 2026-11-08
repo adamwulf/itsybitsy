@@ -30,7 +30,7 @@ Reason: no codex patterns matched
   performance tmux snapshot and turn the failing input into a focused test before fixing the parser.
 
 • Ran pwd
-  └ /Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/codex-input-line/repo
+  └ /Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/codex-input-line/repo
 
 • PreToolUse hook (blocked)
   feedback: Tool not in allow list
@@ -54,7 +54,7 @@ Reason: no codex patterns matched
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 • I found the S trail: dashboard action routes to handleSnapshot, which writes snapshot-...txt and an
-  optional snapshot-...-note.txt under the selected agent’s .ittybitty/.../debug-logs. I’m going to
+  optional snapshot-...-note.txt under the selected agent’s .itsybitsy/.../debug-logs. I’m going to
   document that, then work from the available fixture pattern unless I can reach the new agent snapshot
   locally.
 
@@ -70,7 +70,7 @@ Reason: no codex patterns matched
     310  - Multi-step flows (merge, diff-tool, snapshot) use `.then().catch()` because they need intermed
          iate UI or skip refresh
     311 +- The `S` snapshot key in `ib watch` routes through `handleSnapshot()` in `src/tui/agent-actions
-         .ts`. It writes the captured tmux output to `${agent.repoPath}/.ittybitty/${agent.archived ? "ar
+         .ts`. It writes the captured tmux output to `${agent.repoPath}/.itsybitsy/${agent.archived ? "ar
          chive" : "agents"}/${agent.id}/debug-logs/snapshot-<timestamp>-<state>.txt`; if the user enters
          a note, it writes `snapshot-<timestamp>-<state>-note.txt` next to it.
     312
@@ -148,7 +148,7 @@ Reason: no codex patterns matched
     204 +      "",
     205 +      "› Improve documentation in @filename",
     206 +      "",
-    207 +      "  gpt-5.5 default · ~/Developer/bun/itsybitsy/.ittybitty/agents/codex-git-commit/repo",
+    207 +      "  gpt-5.5 default · ~/Developer/bun/itsybitsy/.itsybitsy/agents/codex-git-commit/repo",
     208 +    ].join("\n");
     209 +    const r = parseCodexState(input);
     210 +    expect(r.state).toBe("running");

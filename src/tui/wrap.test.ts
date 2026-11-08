@@ -238,7 +238,7 @@ describe("wordWrapSingleLine", () => {
   });
 
   test("handles long path-like strings without spaces", () => {
-    const path = "/Users/adam/Developer/bun/itsybitsy/.ittybitty/agents/agent-abc123/repo";
+    const path = "/Users/adam/Developer/bun/itsybitsy/.itsybitsy/agents/agent-abc123/repo";
     const result = wordWrapSingleLine(path, 40);
     // No spaces, so falls back to character-level wrapping
     expect(result.length).toBe(2);

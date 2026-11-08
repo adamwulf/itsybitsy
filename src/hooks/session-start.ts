@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Hook: generate itsybitsy session-start instructions based on detected role.
  */
@@ -68,13 +69,8 @@ export function detectRole(
   // For worktree agents: derive paths from CWD pattern
   // For non-worktree agents (e.g., coordinators): CWD is the repo root, agent ID is passed explicitly
   const agentId = match ? match[1]! : agentIdOverride!;
-  const rootRepoPath = match ? cwd.substring(0, cwd.indexOf("/.ittybitty/agents/")) : cwd;
-  const agentDir = join(
-    rootRepoPath,
-    ".ittybitty",
-    "agents",
-    agentId
-  );
+  const rootRepoPath = match ? cwd.substring(0, runtimeNames.firstAgentsMarker(cwd)) : cwd;
+  const agentDir = runtimeNames.agentDir(rootRepoPath, agentId);
   const worktreePath = match ? join(agentDir, "repo") : "";
 
   const meta = metaJson ?? {};
@@ -251,7 +247,7 @@ async function loadPrefixLayerBody(
  * match a stored bare agent id) get no injection and no behavior change.
  *
  * When the agent IS a member, returns an imperative `## Teams` markdown section
- * (NO `<ittybitty>` wrapper — the caller already wraps) that:
+ * (NO `<itsybitsy>` wrapper — the caller already wraps) that:
  *   - names the team(s) the agent belongs to,
  *   - teaches how to READ the inbound delivery prefix `[sent by <agent-id> in
  *     @<team>]: <message>` — `<agent-id>` is WHO spoke, `@<team>` is WHERE to
@@ -299,11 +295,11 @@ export async function generateInstructions(ctx: SessionContext): Promise<string>
   const body = await generateInstructionsInner(ctx);
   const teamBlock = await teamAwarenessBlock(ctx.agentId);
   if (!teamBlock) return body;
-  // Splice the team block in just before the FINAL closing </ittybitty> tag so
+  // Splice the team block in just before the FINAL closing </itsybitsy> tag so
   // it lands inside the wrapper on whichever return path produced `body`. Every
-  // agent-instruction path emits exactly one trailing </ittybitty>; if for some
+  // agent-instruction path emits exactly one trailing </itsybitsy>; if for some
   // reason it's absent (defensive), append the block at the end instead.
-  const closeIdx = body.lastIndexOf("</ittybitty>");
+  const closeIdx = body.lastIndexOf(`</${runtimeNames.PROMPT_TAG}>`);
   if (closeIdx === -1) {
     return `${body}\n\n${teamBlock}`;
   }
@@ -316,7 +312,7 @@ async function generateInstructionsInner(ctx: SessionContext): Promise<string> {
     const agentType = await loadAgentType(ctx.agentType);
 
     // If the type definition has a markdown body, use it as the full template
-    // The <ittybitty> wrapper is added by the code so users don't need to include it
+    // The <itsybitsy> wrapper is added by the code so users don't need to include it
     if (agentType.markdownBody) {
       // Prepend prefix layer bodies: _all (always) + _non_coordinator (when not
       // coordinator and not system). The system coordinator is its own type
@@ -332,7 +328,7 @@ async function generateInstructionsInner(ctx: SessionContext): Promise<string> {
       const typeBody = interpolateTemplate(agentType.markdownBody, ctx);
       const parts = [allPrefix, nonCoordPrefix, typeBody].filter((p) => p.trim().length > 0);
       const content = parts.join("\n\n");
-      return `<ittybitty>\n${content}\n</ittybitty>`;
+      return `<${runtimeNames.PROMPT_TAG}>\n${content}\n</${runtimeNames.PROMPT_TAG}>`;
     }
 
     // No body — fall back to hardcoded instructions based on instructionStyle.
@@ -432,7 +428,7 @@ Run \`ib list-types\` to see the agent types, and \`ib show-type <name>\` for th
 }
 
 function generatePrimaryInstructions(): string {
-  return `<ittybitty>
+  return `<${runtimeNames.PROMPT_TAG}>
 ## Multi-Agent Orchestration (itsybitsy)
 
 \`ib\` spawns persistent Claude agents in isolated git worktrees. Check your role marker at conversation start.
@@ -490,7 +486,7 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
 - NO subshells or command substitution that runs multiple commands
 - If you need to run two commands, make two separate Bash tool calls
 
-</ittybitty>`;
+</${runtimeNames.PROMPT_TAG}>`;
 }
 
 /**
@@ -530,7 +526,7 @@ function generateManagerInstructions(ctx: SessionContext): string {
 Top-level managers can ask the user questions with \`ib ask "question"\`. After asking, enter WAITING mode - you'll be notified when the user responds.`
     : "";
 
-  return `<ittybitty>
+  return `<${runtimeNames.PROMPT_TAG}>
 ## ItsyBitsy Manager Agent
 
 You are manager agent \`${ctx.agentId}\` in the itsybitsy multi-agent orchestration system.
@@ -635,7 +631,7 @@ ${askSection}
 | \`stopped\` | Session ended |
 | \`unknown\` | State unclear |
 
-</ittybitty>`;
+</${runtimeNames.PROMPT_TAG}>`;
 }
 
 function generateWorkerInstructions(ctx: SessionContext): string {
@@ -646,7 +642,7 @@ function generateWorkerInstructions(ctx: SessionContext): string {
 
   const spawnerInfo = ctx.spawnedBy ? formatSpawnerInfo(ctx.spawnedBy) : "";
 
-  return `<ittybitty>
+  return `<${runtimeNames.PROMPT_TAG}>
 ## ItsyBitsy Worker Agent
 
 You are worker agent \`${ctx.agentId}\` in the itsybitsy multi-agent orchestration system.
@@ -711,13 +707,13 @@ To wait, just emit \`WAITING\` and stop — don't \`sleep\`, run \`Monitor\`, or
 4. Say "I HAVE COMPLETED THE GOAL" as the final line
 5. Wait for your manager to merge or retire your session
 
-</ittybitty>`;
+</${runtimeNames.PROMPT_TAG}>`;
 }
 
 function generateCoordinatorInstructions(ctx: SessionContext): string {
   const repoName = basename(ctx.rootRepoPath);
 
-  return `<ittybitty>
+  return `<${runtimeNames.PROMPT_TAG}>
 ## ItsyBitsy Per-Repo Coordinator
 
 You are a per-repo coordinator for the \`${repoName}\` repository. You work directly in the repo directory (no git worktree). You can read files and code using Read, Glob, Grep, and Bash(ls:*). You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --type worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
@@ -789,7 +785,7 @@ To wait for a sub-agent, just emit \`WAITING\` and stop — don't \`sleep\`, run
 | \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need retire/nuke |
 | \`stopped\` | Session ended |
 
-</ittybitty>`;
+</${runtimeNames.PROMPT_TAG}>`;
 }
 
 /**
@@ -935,9 +931,9 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
     metaJson = bound.meta;
   } else if (match) {
     const agentId = match[1]!;
-    const itsybitsyIdx = cwd.indexOf("/.ittybitty/agents/");
+    const itsybitsyIdx = runtimeNames.firstAgentsMarker(cwd);
     const rootRepoPath = cwd.substring(0, itsybitsyIdx);
-    const agentDir = join(rootRepoPath, ".ittybitty", "agents", agentId);
+    const agentDir = runtimeNames.agentDir(rootRepoPath, agentId);
     agentDirForState = agentDir;
     try {
       const metaFile = Bun.file(join(agentDir, "meta.json"));

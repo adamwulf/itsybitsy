@@ -25,9 +25,9 @@ function makeAccess(
   return prepareAccessTable(
     agentPathAccessTable({
       paths: { allowRead: [], allowWrite: [], deny: [], ...paths },
-      agentDir: "/repo/.ittybitty/agents/agent-abc123",
-      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
-      agentsDir: "/repo/.ittybitty/agents",
+      agentDir: "/repo/.itsybitsy/agents/agent-abc123",
+      worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
+      agentsDir: "/repo/.itsybitsy/agents",
       rootRepo: "/repo",
       gitDir: "/repo/.git",
       tmuxSock: "/private/tmp/tmux-501",
@@ -39,18 +39,18 @@ function makeAccess(
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
     agentId: "agent-abc123",
-    agentDir: "/repo/.ittybitty/agents/agent-abc123",
-    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
-    agentsDir: "/repo/.ittybitty/agents",
+    agentDir: "/repo/.itsybitsy/agents/agent-abc123",
+    worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
+    agentsDir: "/repo/.itsybitsy/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "LS", "Glob", "Grep", "Bash"],
     access: makeAccess(),
-    protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
+    protectedWritePaths: agentProtectedWritePaths("/repo/.itsybitsy/agents/agent-abc123"),
     ...overrides,
   };
 }
 
-const SIBLING = "/repo/.ittybitty/agents/agent-other/repo";
+const SIBLING = "/repo/.itsybitsy/agents/agent-other/repo";
 
 // ── checkAgyPreToolUse — path isolation (SPEC §5) ────────────────────────────
 
@@ -362,7 +362,7 @@ describe("checkAgyPreToolUse — run_command relative traversal", () => {
 
 describe("checkAgyPreToolUse — agy boundary-file write protection", () => {
   const HOOKS_REL = ".agents/hooks.json";
-  const RULES_REL = ".agents/rules/ittybitty-agent.md";
+  const RULES_REL = ".agents/rules/itsybitsy-agent.md";
 
   test("write_to_file on .agents/hooks.json is denied", () => {
     const ctx = makeCtx();
@@ -592,14 +592,14 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
       join(typesDir, "_all.md"),
       "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n    - Read\n    - Write\n  deny: []\n---\n",
     );
-    agentDir = join(tempHome, "fake-repo", ".ittybitty", "agents", "agent-test01");
+    agentDir = join(tempHome, "fake-repo", ".itsybitsy", "agents", "agent-test01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
       join(agentDir, "meta.json"),
       JSON.stringify({
         id: "agent-test01",
         session_id: "uuid",
-        tmux_session: "ittybitty-x-agent-test01",
+        tmux_session: "itsybitsy-x-agent-test01",
         prompt: "do work",
         manager: null,
         created: "2026-09-01",
@@ -773,7 +773,7 @@ describe("hookAgyPreToolUseDryRun", () => {
     const typesDir = join(tempHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
     await writeFile(join(typesDir, "_all.md"), "---\nname: _all\ndescription: shared\npermissions:\n  allow: []\n  deny: []\n---\n");
-    agentDir = join(tempHome, ".ittybitty", "agents", "agent-dryrun01");
+    agentDir = join(tempHome, "project", ".itsybitsy", "agents", "agent-dryrun01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-dryrun01", worktree: true, worker: true, model: "agy:gemini-3.7-flash-low", agentType: "worker" }));
   });
@@ -784,7 +784,7 @@ describe("hookAgyPreToolUseDryRun", () => {
 
   test("succeeds when meta.json exists", async () => {
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await hookAgyPreToolUseDryRun("agent-dryrun01");
     } finally {
@@ -794,7 +794,7 @@ describe("hookAgyPreToolUseDryRun", () => {
 
   test("throws when meta.json is missing", async () => {
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await expect(hookAgyPreToolUseDryRun("agent-missing")).rejects.toThrow(/meta\.json not found/);
     } finally {
@@ -822,7 +822,7 @@ describe("hookAgyPreToolUse — deny by default (Phase B invariant)", () => {
       join(typesDir, "_all.md"),
       "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n  deny: []\n---\n",
     );
-    agentDir = join(tempHome, "fake-repo", ".ittybitty", "agents", "agent-nometa");
+    agentDir = join(tempHome, "fake-repo", ".itsybitsy", "agents", "agent-nometa");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     // Deliberately NO meta.json.
   });

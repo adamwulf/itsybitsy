@@ -366,7 +366,7 @@ describe("buildCodexStartContent — launch line", () => {
     expect(() =>
       buildCodexStartContent({
         ...baseInput(),
-        agentDir: "/Users/o'malley/work/.ittybitty/agents/agent-abc12345",
+        agentDir: "/Users/o'malley/work/.itsybitsy/agents/agent-abc12345",
       }),
     ).toThrow(/Unsafe agent directory path/);
   });
@@ -483,7 +483,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
       absExitScript: "/tmp/test/exit-check.sh",
       absAgentLog: "/tmp/test/agent.log",
       absStderrLog: "/tmp/test/claude.stderr.log",
-      extraWritableRoots: [GIT_ROOTS.commonDir, "/repo/my.app/.ittybitty"],
+      extraWritableRoots: [GIT_ROOTS.commonDir, "/repo/my.app/.itsybitsy"],
       pathGrants: { "/external/read only": "read", "/external/write": "write", "/external/denied": "deny" } as const,
       fugu,
       ...disabledFields(),
@@ -704,7 +704,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     expect(() =>
       buildCodexResumeContent({
         ...baseInput(),
-        agentDir: "/Users/o'malley/work/.ittybitty/agents/agent-abc12345",
+        agentDir: "/Users/o'malley/work/.itsybitsy/agents/agent-abc12345",
       }),
     ).toThrow(/Unsafe agent directory path/);
   });
@@ -844,9 +844,9 @@ describe("appendCodexGitignoreEntry", () => {
 
 describe("stripItsybitsyWrapper", () => {
   test("removes a clean outer wrapper", () => {
-    const input = "<ittybitty>\n## Hello\n\nbody text\n</ittybitty>";
+    const input = "<itsybitsy>\n## Hello\n\nbody text\n</itsybitsy>";
     const out = stripItsybitsyWrapper(input);
-    expect(out.startsWith("<ittybitty>")).toBe(false);
+    expect(out.startsWith("<itsybitsy>")).toBe(false);
     expect(out).toContain("## Hello");
     expect(out).toContain("body text");
   });
@@ -858,7 +858,7 @@ describe("stripItsybitsyWrapper", () => {
   });
 
   test("preserves text before AND after the wrapper (defensive)", () => {
-    const input = "preface\n<ittybitty>\ninner\n</ittybitty>\npostscript";
+    const input = "preface\n<itsybitsy>\ninner\n</itsybitsy>\npostscript";
     const out = stripItsybitsyWrapper(input);
     expect(out).toContain("preface");
     expect(out).toContain("inner");
@@ -866,15 +866,15 @@ describe("stripItsybitsyWrapper", () => {
   });
 
   test("uses lastIndexOf for the close tag — survives commentary mentioning the tag", () => {
-    const input = `<ittybitty>
+    const input = `<itsybitsy>
 ## Header
 
-The agent runs inside <ittybitty>...</ittybitty>.
-</ittybitty>`;
+The agent runs inside <itsybitsy>...</itsybitsy>.
+</itsybitsy>`;
     const out = stripItsybitsyWrapper(input);
     expect(out).toContain("## Header");
     // The inner mention is preserved because we drop the OUTER tags only.
-    expect(out).toContain("inside <ittybitty>...");
+    expect(out).toContain("inside <itsybitsy>...");
   });
 });
 
@@ -911,7 +911,7 @@ describe("buildAgentRoleBody (the role text the codex SessionStart hook returns)
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("strips the <ittybitty> wrapper", async () => {
+  test("strips the <itsybitsy> wrapper", async () => {
     const { buildAgentRoleBody } = await import("./agent-instructions-shared");
     const ctx = {
       role: "worker" as const,
@@ -924,9 +924,9 @@ describe("buildAgentRoleBody (the role text the codex SessionStart hook returns)
       agentType: "worker",
     };
     const body = await buildAgentRoleBody(ctx);
-    expect(body.startsWith("<ittybitty>")).toBe(false);
-    expect(body.endsWith("</ittybitty>")).toBe(false);
-    expect(body.endsWith("</ittybitty>\n")).toBe(false);
+    expect(body.startsWith("<itsybitsy>")).toBe(false);
+    expect(body.endsWith("</itsybitsy>")).toBe(false);
+    expect(body.endsWith("</itsybitsy>\n")).toBe(false);
   });
 
   test("contains the agent id (interpolated from template)", async () => {

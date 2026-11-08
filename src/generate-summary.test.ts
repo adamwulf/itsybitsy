@@ -17,23 +17,23 @@ function fakeProc(stdoutText: string, exitCode: number): SpawnResult {
 describe("isValidAgentDir", () => {
   test("rejects relative paths", () => {
     expect(isValidAgentDir("relative/path")).toBe(false);
-    expect(isValidAgentDir(".ittybitty/agents/foo")).toBe(false);
+    expect(isValidAgentDir(".itsybitsy/agents/foo")).toBe(false);
   });
 
-  test("rejects paths without .ittybitty/agents/ structure", () => {
+  test("rejects paths without .itsybitsy/agents/ structure", () => {
     expect(isValidAgentDir("/tmp/not-an-agent-dir")).toBe(false);
-    expect(isValidAgentDir("/tmp/.ittybitty/foo")).toBe(false);
-    expect(isValidAgentDir("/tmp/.ittybitty")).toBe(false);
+    expect(isValidAgentDir("/tmp/.itsybitsy/foo")).toBe(false);
+    expect(isValidAgentDir("/tmp/.itsybitsy")).toBe(false);
   });
 
   test("rejects paths with trailing slash or extra segments", () => {
-    expect(isValidAgentDir("/tmp/.ittybitty/agents/foo/")).toBe(false);
-    expect(isValidAgentDir("/tmp/.ittybitty/agents/foo/bar")).toBe(false);
+    expect(isValidAgentDir("/tmp/.itsybitsy/agents/foo/")).toBe(false);
+    expect(isValidAgentDir("/tmp/.itsybitsy/agents/foo/bar")).toBe(false);
   });
 
   test("accepts valid agent directory paths", () => {
-    expect(isValidAgentDir("/tmp/.ittybitty/agents/agent-abc123")).toBe(true);
-    expect(isValidAgentDir("/Users/me/project/.ittybitty/agents/test-agent")).toBe(true);
+    expect(isValidAgentDir("/tmp/.itsybitsy/agents/agent-abc123")).toBe(true);
+    expect(isValidAgentDir("/Users/me/project/.itsybitsy/agents/test-agent")).toBe(true);
   });
 });
 
@@ -65,7 +65,7 @@ describe("generateSummary", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "generate-summary-test-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "test-agent");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "test-agent");
     await mkdir(agentDir, { recursive: true });
   });
 

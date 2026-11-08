@@ -265,7 +265,7 @@ describe("ib-commands", () => {
       spawnCalls = [];
       tempDir = await mkdtemp(join(tmpdir(), "send-test-"));
       // Create agent directory for log writing
-      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-abc"), { recursive: true });
+      await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-abc"), { recursive: true });
 
       // Isolate user config — sendMessage reads `user.name` to format user
       // sends. Without isolation tests would pick up whatever's in the host
@@ -330,7 +330,7 @@ describe("ib-commands", () => {
       ]);
       // The cancel is recorded in the recipient's agent.log so the wedge is
       // diagnosable after the fact.
-      const log = await Bun.file(join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")).text();
+      const log = await Bun.file(join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")).text();
       expect(log).toContain("view/copy-mode");
     });
 
@@ -398,7 +398,7 @@ describe("ib-commands", () => {
     test("prefixes message when fromAgent is provided", async () => {
       const agent = makeAgent("agent-abc", tempDir);
       // Create sender dir for logging
-      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+      await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-sender"), { recursive: true });
 
       await sendMessage(agent, "hello", { fromAgent: "agent-sender" });
 
@@ -471,7 +471,7 @@ describe("ib-commands", () => {
         // Create a sender agent dir with meta.json so the worktree branch
         // can resolve a real ID.
         const senderId = "agent-sender";
-        const senderAgentDir = join(tempDir, ".ittybitty", "agents", senderId);
+        const senderAgentDir = join(tempDir, ".itsybitsy", "agents", senderId);
         await mkdir(senderAgentDir, { recursive: true });
         await Bun.write(join(senderAgentDir, "meta.json"), JSON.stringify({ id: senderId }));
 
@@ -495,24 +495,24 @@ describe("ib-commands", () => {
       await sendMessage(agent, "test message", { cwd: "/" });
 
       const logContent = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(logContent).toContain("Received message from user: test message");
     });
 
     test("logs to sender agent.log when fromAgent set", async () => {
       const agent = makeAgent("agent-abc", tempDir);
-      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+      await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-sender"), { recursive: true });
 
       await sendMessage(agent, "test", { fromAgent: "agent-sender" });
 
       const senderLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-sender", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-sender", "agent.log")
       ).text();
       expect(senderLog).toContain("Sent message to agent-abc: test");
 
       const recipientLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(recipientLog).toContain("Received message from agent-sender: test");
     });
@@ -525,7 +525,7 @@ describe("ib-commands", () => {
 
     test("returns empty stdout when fromAgent is set", async () => {
       const agent = makeAgent("agent-abc", tempDir);
-      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+      await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-sender"), { recursive: true });
       const result = await sendMessage(agent, "hello", { fromAgent: "agent-sender" });
       expect(result.stdout).toBe("");
     });
@@ -584,7 +584,7 @@ describe("ib-commands", () => {
 
     test("raw=true suppresses [sent by ...] prefix even when fromAgent is set", async () => {
       const agent = makeAgent("agent-abc", tempDir);
-      await mkdir(join(tempDir, ".ittybitty", "agents", "@telegram"), { recursive: true }).catch(() => {});
+      await mkdir(join(tempDir, ".itsybitsy", "agents", "@telegram"), { recursive: true }).catch(() => {});
       await sendMessage(agent, "/context", { fromAgent: "@telegram", raw: true, cwd: "/" });
 
       const sendKeysCall = spawnCalls.find(
@@ -600,7 +600,7 @@ describe("ib-commands", () => {
       await sendMessage(agent, "/clear", { fromAgent: "@telegram", raw: true, cwd: "/" });
 
       const recipientLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(recipientLog).toContain("Received raw message: /clear");
       // Must NOT contain the standard "from <sender>" phrasing.
@@ -609,7 +609,7 @@ describe("ib-commands", () => {
 
     test("raw=true logs sender as 'Sent raw message' when sender dir exists", async () => {
       const agent = makeAgent("agent-abc", tempDir);
-      const senderDir = join(tempDir, ".ittybitty", "agents", "agent-sender");
+      const senderDir = join(tempDir, ".itsybitsy", "agents", "agent-sender");
       await mkdir(senderDir, { recursive: true });
 
       await sendMessage(agent, "ping", { fromAgent: "agent-sender", raw: true });
@@ -621,7 +621,7 @@ describe("ib-commands", () => {
 
     test("raw is opt-in: default (no raw flag) still adds the [sent by ...] prefix", async () => {
       const agent = makeAgent("agent-abc", tempDir);
-      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+      await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-sender"), { recursive: true });
 
       await sendMessage(agent, "hello", { fromAgent: "agent-sender" });
 
@@ -642,7 +642,7 @@ describe("ib-commands", () => {
       expect(sendKeysCall![6]).toBe("[sent by user]: hello");
 
       const recipientLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(recipientLog).toContain("Received message from user: hello");
     });
@@ -663,7 +663,7 @@ describe("ib-commands", () => {
       expect(sendKeysCall![6]).toBe("[sent by user Adam]: hello");
 
       const recipientLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(recipientLog).toContain("Received message from user Adam: hello");
     });
@@ -685,7 +685,7 @@ describe("ib-commands", () => {
       expect(sendKeysCall![6]).toBe("/clear");
 
       const recipientLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(recipientLog).toContain("Received command from user: /clear");
       expect(recipientLog).not.toContain("[sent by user");
@@ -702,7 +702,7 @@ describe("ib-commands", () => {
       expect(sendKeysCall![6]).toBe("!ls -la");
 
       const recipientLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(recipientLog).toContain("Received command from user: !ls -la");
     });
@@ -711,7 +711,7 @@ describe("ib-commands", () => {
       // Passthrough is user-only — an agent forwarding a `/`-leading string must
       // still carry its [sent by agent ...] prefix so the recipient knows the source.
       const agent = makeAgent("agent-abc", tempDir);
-      await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+      await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-sender"), { recursive: true });
 
       await sendMessage(agent, "/clear", { fromAgent: "agent-sender" });
 
@@ -771,7 +771,7 @@ describe("ib-commands", () => {
       expect(sendKeysCall![6]).toBe("/clear");
 
       const recipientLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(recipientLog).toContain("Received raw message: /clear");
       expect(recipientLog).not.toContain("Received command from user");
@@ -793,7 +793,7 @@ describe("ib-commands", () => {
       expect(sendKeysCall![6]).toBe("verbatim");
 
       const recipientLog = await Bun.file(
-        join(tempDir, ".ittybitty", "agents", "agent-abc", "agent.log")
+        join(tempDir, ".itsybitsy", "agents", "agent-abc", "agent.log")
       ).text();
       expect(recipientLog).toContain("Received raw message: verbatim");
       expect(recipientLog).not.toContain("[sent by user");
@@ -941,7 +941,7 @@ describe("sendMessage outbox integration", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-outbox-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     // Point the coordinator-home to a sandbox subdir so agentOutboxDir() resolves
     // there instead of the real ~/.itsybitsy/.
@@ -1112,7 +1112,7 @@ describe("sendMessage send-time attachment staging", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-stage-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
@@ -1409,7 +1409,7 @@ describe("sendMessage send-time attachment staging", () => {
     });
     const src = join(tempDir, "real.png");
     await Bun.write(src, "BYTES");
-    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-sender"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-sender"), { recursive: true });
 
     const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, repoName: "r", state: "running" as AgentState });
     const result = await sendMessage(agent, `${src} check this`, { fromAgent: "agent-sender" });
@@ -1443,7 +1443,7 @@ describe("teamSend send-time attachment staging", () => {
   // transient + isPidAliveCtx → true) and returns ok:true (accepted) without
   // draining, so we can inspect exactly what each member had queued.
   async function plantMember(id: string): Promise<void> {
-    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    const agentDir = join(repoDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
@@ -1641,8 +1641,8 @@ describe("teamSend send-time attachment staging", () => {
     expect((await readChannel("backend")).filter((r) => r.message === "/shot.png hi").length).toBe(1);
 
     // Both members die before the retry -> pruneDeadMembers empties the roster.
-    await rm(join(repoDir, ".ittybitty", "agents", "agent-m1"), { recursive: true, force: true });
-    await rm(join(repoDir, ".ittybitty", "agents", "agent-m2"), { recursive: true, force: true });
+    await rm(join(repoDir, ".itsybitsy", "agents", "agent-m1"), { recursive: true, force: true });
+    await rm(join(repoDir, ".itsybitsy", "agents", "agent-m2"), { recursive: true, force: true });
     resetReadAgentMetaCache();
 
     // Retry the SAME draft, skipping the accepted m1. All members are now pruned
@@ -1757,7 +1757,7 @@ function mockSpawnFnWithFailures(
  * `resumeAgent(makeAgent(...))` and are intentionally NOT routed through here.
  */
 async function armAgent(agent: Agent): Promise<void> {
-  const agentDir = join(agent.repoPath, ".ittybitty", "agents", agent.id);
+  const agentDir = join(agent.repoPath, ".itsybitsy", "agents", agent.id);
   const hasMeta = await Bun.file(join(agentDir, "meta.json")).exists().catch(() => false);
   if (!hasMeta) return;
   (agent.meta as unknown as Record<string, unknown>).sandbox = { enabled: true, rawAllow: [], domains: [] };
@@ -1811,7 +1811,7 @@ describe("retireAgent (native)", () => {
 
   test("succeeds and returns 'Closed agent: <id>' when agent directory exists", async () => {
     // Create agent directory with meta.json
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -1837,7 +1837,7 @@ describe("retireAgent (native)", () => {
     const id = "agent-retire-sealed";
     const sealHome = join(tempDir, "seal-home");
     setUserHome(sealHome);
-    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     const agent = makeAgent(id, tempDir, "running", {
       sandbox: { enabled: true, rawAllow: [], domains: [] },
       paths: { allowRead: [], allowWrite: [], deny: [] },
@@ -1884,7 +1884,7 @@ describe("retireAgent (native)", () => {
   });
 
   test("removes agent directory after teardown", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -1906,7 +1906,7 @@ describe("retireAgent (native)", () => {
   });
 
   test("retire kills the persisted sandbox proxy when its pidfile is missing", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-proxy");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-proxy");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-proxy",
@@ -1932,7 +1932,7 @@ describe("retireAgent (native)", () => {
   });
 
   test("removes user-questions.json entries for killed agent", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -1940,7 +1940,7 @@ describe("retireAgent (native)", () => {
     }));
 
     // Write a questions file with entries for the agent
-    const questionsPath = join(tempDir, ".ittybitty", "user-questions.json");
+    const questionsPath = join(tempDir, ".itsybitsy", "user-questions.json");
     await Bun.write(questionsPath, JSON.stringify({
       questions: [
         { agent: "agent-abc", question: "Q1" },
@@ -1978,7 +1978,7 @@ describe("retireAgent (native)", () => {
   });
 
   test("appends a [retire] line to the system watch log on success", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-loggy");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-loggy");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-loggy",
@@ -2036,7 +2036,7 @@ describe("retire → rehire recovery", () => {
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "rehire-integration-"));
     originalHome = process.env.HOME;
-    process.env.HOME = tempDir;
+    process.env.HOME = join(tempDir, "home");
     await git("init", tempDir);
     await git("-C", tempDir, "config", "user.email", "test@example.com");
     await git("-C", tempDir, "config", "user.name", "Test User");
@@ -2050,8 +2050,8 @@ describe("retire → rehire recovery", () => {
     );
     await git("-C", tempDir, "add", "tracked.txt", "latin1.txt");
     await git("-C", tempDir, "commit", "-m", "base");
-    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
-    await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "1a2b3c4d\n");
+    await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(tempDir, ".itsybitsy", "repo-id"), "1a2b3c4d\n");
     await saveRegistry({
       repos: [{ path: tempDir, name: basename(tempDir) }],
     });
@@ -2078,10 +2078,10 @@ describe("retire → rehire recovery", () => {
     opts: { manager?: string | null; includeSettings?: boolean; worker?: boolean } = {},
   ): Promise<{ archiveKey: string; archiveDir: string }> {
     const archiveKey = `20260703-120000-${agentId}`;
-    const archiveDir = join(tempDir, ".ittybitty", "archive", archiveKey);
+    const archiveDir = join(tempDir, ".itsybitsy", "archive", archiveKey);
     await mkdir(archiveDir, { recursive: true });
     const meta = makeAgent(agentId, tempDir, "stopped", {
-      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      tmux_session: `itsybitsy-1a2b3c4d-${agentId}`,
       worktree: false,
       model: "claude:sonnet",
       claude_pid: "",
@@ -2126,14 +2126,14 @@ describe("retire → rehire recovery", () => {
   // rehire notice into the manager's CENTRAL outbox queue (asserted via
   // `readOutbox`) rather than draining it inline through tmux.
   async function plantLiveManager(managerId: string): Promise<void> {
-    const managerDir = join(tempDir, ".ittybitty", "agents", managerId);
+    const managerDir = join(tempDir, ".itsybitsy", "agents", managerId);
     await mkdir(managerDir, { recursive: true });
     await Bun.write(
       join(managerDir, "meta.json"),
       JSON.stringify(
         makeAgent(managerId, tempDir, "running", {
           worktree: false,
-          tmux_session: `ittybitty-1a2b3c4d-${managerId}`,
+          tmux_session: `itsybitsy-1a2b3c4d-${managerId}`,
         }).meta,
       ),
     );
@@ -2151,10 +2151,10 @@ describe("retire → rehire recovery", () => {
   }
 
   // The manager's CENTRAL outbox queue dir (getCoordinatorHome()/agents/<id>).
-  // With HOME=tempDir and no setCoordinatorHome override, this resolves under
-  // tempDir/.itsybitsy.
+  // With HOME=tempDir/home and no setCoordinatorHome override, this resolves under
+  // tempDir/home/.itsybitsy.
   function managerQueueDir(managerId: string): string {
-    return join(tempDir, ".itsybitsy", "agents", managerId);
+    return join(tempDir, "home", ".itsybitsy", "agents", managerId);
   }
 
   // Spawn runner matching the existing no-worktree success test: tmux
@@ -2234,7 +2234,7 @@ describe("retire → rehire recovery", () => {
       const missed = await rehireAgent(agentId, { repoPath: otherRepo });
       expect(missed.ok).toBe(false);
       expect(missed.stderr).toBe("Retired agent not found");
-      expect(await Bun.file(join(tempDir, ".ittybitty", "agents", agentId, "meta.json")).exists()).toBe(false);
+      expect(await Bun.file(join(tempDir, ".itsybitsy", "agents", agentId, "meta.json")).exists()).toBe(false);
 
       const found = await rehireAgent(agentId, { repoPath: tempDir });
       expect(found.ok).toBe(true);
@@ -2250,7 +2250,7 @@ describe("retire → rehire recovery", () => {
       await (await import("./agent-types")).ensureAgentTypesDir();
       const roleTool = `Legacy${legacyRole[0]!.toUpperCase()}${legacyRole.slice(1)}Tool`;
       await Bun.write(
-        join(tempDir, ".itsybitsy", "agent-types", `${legacyRole}.md`),
+        join(tempDir, "home", ".itsybitsy", "agent-types", `${legacyRole}.md`),
         `---\nname: ${legacyRole}\ncanSpawnChildren: ${!worker}\npermissions:\n  allow: ["${roleTool}"]\n---\nlegacy ${legacyRole}\n`,
       );
       await plantRehirableArchive(agentId, { includeSettings: false, worker });
@@ -2265,7 +2265,7 @@ describe("retire → rehire recovery", () => {
       const result = await rehireAgent(agentId);
 
       expect(result.ok).toBe(true);
-      const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+      const agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
       const isolatedSettingsPath = join(agentDir, ".claude", "settings.local.json");
       const isolated = await Bun.file(isolatedSettingsPath).json();
       expect(isolated.permissions.allow).toContain("Bash(ib:*)");
@@ -2298,7 +2298,7 @@ describe("retire → rehire recovery", () => {
 
       expect(result.ok).toBe(false);
       expect(result.stderr).toContain(`Cannot rehire worktree:false ${cli} agent`);
-      expect(await Bun.file(join(tempDir, ".ittybitty", "agents", agentId)).exists()).toBe(false);
+      expect(await Bun.file(join(tempDir, ".itsybitsy", "agents", agentId)).exists()).toBe(false);
       expect(await Bun.file(join(tempDir, "AGENTS.md")).text()).toBe("user agents content\n");
       expect(await Bun.file(join(tempDir, ".agents", "hooks.json")).text()).toBe("user hooks content\n");
     });
@@ -2334,7 +2334,7 @@ describe("retire → rehire recovery", () => {
       if (action !== "verify") return ["sh", "-c", "exit 99"];
       const script = [
         `const m = await import(${JSON.stringify(modulePath)});`,
-        `const result = await m.applySealCapabilityAction("verify", ${JSON.stringify(repoId)}, ${JSON.stringify(target)}, process.env.IB_SEAL_CAP, ${JSON.stringify(meta)}, ${JSON.stringify(tempDir)});`,
+        `const result = await m.applySealCapabilityAction("verify", ${JSON.stringify(repoId)}, ${JSON.stringify(target)}, process.env.IB_SEAL_CAP, ${JSON.stringify(meta)}, ${JSON.stringify(join(tempDir, "home"))});`,
         "console.log(JSON.stringify(result));",
       ].join(" ");
       return ["bun", "-e", script];
@@ -2352,13 +2352,51 @@ describe("retire → rehire recovery", () => {
     const result = await rehireAgent(agentId);
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain(`Rehired agent: ${agentId}`);
-    expect(await readSealRecord("1a2b3c4d", agentId, tempDir)).not.toBeNull();
-    expect(await Bun.file(join(tempDir, ".ittybitty", "agents", agentId, "resume.sh")).exists()).toBe(true);
+    expect(await readSealRecord("1a2b3c4d", agentId, join(tempDir, "home"))).not.toBeNull();
+    expect(await Bun.file(join(tempDir, ".itsybitsy", "agents", agentId, "resume.sh")).exists()).toBe(true);
   });
+
+  for (const variant of ["legacy", "both", "new-corrupt", "legacy-corrupt", "missing"] as const) {
+    test(`rehire retained ref lookup: ${variant}`, async () => {
+      const id = "agent-ref-test";
+      const key = `20261107-120000-${id}`;
+      const archive = join(tempDir, ".itsybitsy", "archive", key);
+      const head = await git("-C", tempDir, "rev-parse", "HEAD");
+      await git("-C", tempDir, "commit", "--allow-empty", "-m", "other head");
+      const other = await git("-C", tempDir, "rev-parse", "HEAD");
+      const legacy = `refs/ittybitty/retired/${key}/head`;
+      const current = `refs/itsybitsy/retired/${key}/head`;
+      if (variant !== "missing") await git("-C", tempDir, "update-ref", legacy, variant === "legacy-corrupt" || variant === "both" ? other : head);
+      if (variant === "both" || variant === "new-corrupt") await git("-C", tempDir, "update-ref", current, variant === "both" ? head : other);
+      await mkdir(archive, { recursive: true });
+      await Bun.write(join(archive, "retirement.json"), JSON.stringify({ version: 1, agentId: id, retiredAt: "2026-11-07T12:00:00Z", repoPath: tempDir, archiveKey: key, worktree: true, gitHead: head, headRef: legacy, untrackedFiles: [], prunedTeams: [] }));
+      await Bun.write(join(archive, "worktree.patch"), "");
+      await Bun.write(join(archive, "exit-check.sh"), "#!/bin/bash\nexit 0\n");
+      const agent = makeAgent(id, tempDir, "stopped", { tmux_session: `itsybitsy-1a2b3c4d-${id}`, worktree: true, model: "codex:gpt-5.5", sandbox: { enabled: false, rawAllow: [], domains: [] } });
+      await Bun.write(join(archive, "meta.json"), JSON.stringify(agent.meta));
+      const runner: SpawnFn = cmd => cmd[0] === "git"
+        ? Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" }) as SpawnResult
+        : makeSpawnResult(cmd[0] === "tmux" && cmd.includes("has-session") ? 1 : 0);
+      setRehireSpawnRunner(runner);
+      setNukeResumeSpawnRunner(runner);
+      const result = await rehireAgent(id);
+      const worktree = join(tempDir, ".itsybitsy", "agents", id, "repo");
+      if (variant === "legacy" || variant === "both") {
+        expect(result.stdout).toContain("Reconstructed stopped agent");
+        expect(await git("-C", worktree, "rev-parse", "HEAD")).toBe(head);
+      } else {
+        expect(result.ok).toBe(false);
+        expect(result.stderr).toContain(variant === "missing" ? "neither" : "corrupt");
+        expect(result.stderr).toContain(variant === "new-corrupt" ? current : legacy);
+        if (variant === "missing") expect(result.stderr).toContain(current);
+        expect(await Bun.file(join(worktree, ".git")).exists()).toBe(false);
+      }
+    });
+  }
 
   test("round-trips committed HEAD, tracked changes, and untracked files; resume failure leaves stopped agent", async () => {
     const agentId = "agent-rehire";
-    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     const worktreePath = join(agentDir, "repo");
     await mkdir(agentDir, { recursive: true });
     await git(
@@ -2382,7 +2420,7 @@ describe("retire → rehire recovery", () => {
     await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
 
     const agent = makeAgent(agentId, tempDir, "running", {
-      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      tmux_session: `itsybitsy-1a2b3c4d-${agentId}`,
       worktree: true,
       model: "codex:gpt-5.5",
       claude_pid: "",
@@ -2424,11 +2462,12 @@ describe("retire → rehire recovery", () => {
     expect(retired.ok).toBe(true);
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
 
-    const archives = await readdir(join(tempDir, ".ittybitty", "archive"));
+    const archives = await readdir(join(tempDir, ".itsybitsy", "archive"));
     expect(archives).toHaveLength(1);
-    const archiveDir = join(tempDir, ".ittybitty", "archive", archives[0]!);
+    const archiveDir = join(tempDir, ".itsybitsy", "archive", archives[0]!);
     const manifest = await Bun.file(join(archiveDir, "retirement.json")).json();
     expect(manifest.agentId).toBe(agentId);
+    expect(manifest.headRef).toBe(`refs/itsybitsy/retired/${archives[0]!}/head`);
     expect(manifest.gitHead).toMatch(/^[0-9a-f]{40,64}$/);
     expect(manifest.untrackedFiles).toEqual([
       "absolute-link",
@@ -2469,7 +2508,7 @@ describe("retire → rehire recovery", () => {
     );
     const restoredMeta = await Bun.file(join(agentDir, "meta.json")).json();
     expect(restoredMeta.state).toBe("stopped");
-    expect(restoredMeta.tmux_session).toBe(`ittybitty-1a2b3c4d-${agentId}`);
+    expect(restoredMeta.tmux_session).toBe(`itsybitsy-1a2b3c4d-${agentId}`);
     expect(restoredMeta.claude_pid).toBe("");
     expect(restoredMeta.watchdog_pid).toBeUndefined();
     expect((await getTeam("rehire-test"))!.members).toContain(agentId);
@@ -2480,13 +2519,13 @@ describe("retire → rehire recovery", () => {
     // so the sealed record exists even though this resume fails on
     // codex_session_id (retire deleted it; rehire brought it back).
     const rehireRepoId = await getRepoId(tempDir);
-    expect(await readSealRecord(rehireRepoId, agentId, tempDir)).not.toBeNull();
+    expect(await readSealRecord(rehireRepoId, agentId, join(tempDir, "home"))).not.toBeNull();
   });
 
   test("rejects an archive without a supported retirement manifest", async () => {
     const archiveDir = join(
       tempDir,
-      ".ittybitty",
+      ".itsybitsy",
       "archive",
       "20260703-120000-agent-legacy",
     );
@@ -2495,7 +2534,7 @@ describe("retire → rehire recovery", () => {
       join(archiveDir, "meta.json"),
       JSON.stringify({
         id: "agent-legacy",
-        tmux_session: "ittybitty-1a2b3c4d-agent-legacy",
+        tmux_session: "itsybitsy-1a2b3c4d-agent-legacy",
       }),
     );
 
@@ -2509,7 +2548,7 @@ describe("retire → rehire recovery", () => {
 
   test("rolls back the reconstructed directory and branch when a patch is corrupt", async () => {
     const agentId = "agent-corrupt";
-    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     const worktreePath = join(agentDir, "repo");
     await mkdir(agentDir, { recursive: true });
     await git(
@@ -2520,7 +2559,7 @@ describe("retire → rehire recovery", () => {
     await Bun.write(join(agentDir, "exit-check.sh"), "#!/bin/bash\n");
 
     const agent = makeAgent(agentId, tempDir, "running", {
-      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      tmux_session: `itsybitsy-1a2b3c4d-${agentId}`,
       worktree: true,
       model: "codex:gpt-5.5",
       claude_pid: "",
@@ -2552,11 +2591,11 @@ describe("retire → rehire recovery", () => {
     expect((await retireAgent(agent)).ok).toBe(true);
 
     const [archiveKey] = await readdir(
-      join(tempDir, ".ittybitty", "archive"),
+      join(tempDir, ".itsybitsy", "archive"),
     );
     const archiveDir = join(
       tempDir,
-      ".ittybitty",
+      ".itsybitsy",
       "archive",
       archiveKey!,
     );
@@ -2587,13 +2626,13 @@ describe("retire → rehire recovery", () => {
     const archiveKey = `20260703-120000-${agentId}`;
     const archiveDir = join(
       tempDir,
-      ".ittybitty",
+      ".itsybitsy",
       "archive",
       archiveKey,
     );
     await mkdir(archiveDir, { recursive: true });
     const meta = makeAgent(agentId, tempDir, "stopped", {
-      tmux_session: `ittybitty-1a2b3c4d-${agentId}`,
+      tmux_session: `itsybitsy-1a2b3c4d-${agentId}`,
       worktree: false,
       model: "claude:sonnet",
       claude_pid: "",
@@ -2631,7 +2670,7 @@ describe("retire → rehire recovery", () => {
     );
     const activeOwnerDir = join(
       tempDir,
-      ".ittybitty",
+      ".itsybitsy",
       "agents",
       "agent-owner",
     );
@@ -2674,12 +2713,12 @@ describe("retire → rehire recovery", () => {
     expect(newSessionSeen).toBe(true);
     expect(
       await Bun.file(
-        join(tempDir, ".ittybitty", "agents", agentId, "resume.sh"),
+        join(tempDir, ".itsybitsy", "agents", agentId, "resume.sh"),
       ).exists(),
     ).toBe(true);
     expect(
       (await Bun.file(
-        join(tempDir, ".ittybitty", "agents", agentId, "meta.json"),
+        join(tempDir, ".itsybitsy", "agents", agentId, "meta.json"),
       ).json()).nickname,
     ).toBeUndefined();
   });
@@ -2709,7 +2748,7 @@ describe("retire → rehire recovery", () => {
 
     expect(result.ok).toBe(true);
     expect(await readSealRecord(repoId, agentId, process.env.HOME!)).toBeNull();
-    const restoredDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const restoredDir = join(tempDir, ".itsybitsy", "agents", agentId);
     expect((await Bun.file(join(restoredDir, "meta.json")).json()).sandbox.enabled).toBe(false);
     const resume = await Bun.file(join(restoredDir, "resume.sh")).text();
     expect(resume).not.toContain("--permission-mode");
@@ -2745,7 +2784,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("returns error when agent is already stopped", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -2760,7 +2799,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("succeeds and returns pause message when agent directory exists", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -2783,7 +2822,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("preserves agent directory and meta.json after pause", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -2805,7 +2844,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("logs 'Agent paused' to agent.log", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -2826,7 +2865,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("kills tmux session when it exists", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -2856,7 +2895,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("writes meta.state = 'stopped' when pausing a 'complete' agent", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -2879,7 +2918,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("writes meta.state = 'stopped' when pausing a 'waiting' agent", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -2902,7 +2941,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("second pause on already-paused agent returns 'already stopped'", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -2933,7 +2972,7 @@ describe("pauseAgent (native)", () => {
   });
 
   test("appends a [pause] line to the system watch log on success", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-pauseloggy");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-pauseloggy");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-pauseloggy",
@@ -2987,7 +3026,7 @@ describe("nukeAgent (native)", () => {
   });
 
   test("destructively removes a worker with no children", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-worker");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-worker");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-worker",
@@ -3010,7 +3049,7 @@ describe("nukeAgent (native)", () => {
 
   test("tears down the agent and its descendants", async () => {
     // Create manager with a child
-    const managerDir = join(tempDir, ".ittybitty", "agents", "agent-mgr");
+    const managerDir = join(tempDir, ".itsybitsy", "agents", "agent-mgr");
     await mkdir(managerDir, { recursive: true });
     await Bun.write(join(managerDir, "meta.json"), JSON.stringify({
       id: "agent-mgr",
@@ -3018,7 +3057,7 @@ describe("nukeAgent (native)", () => {
       worker: false,
     }));
 
-    const childDir = join(tempDir, ".ittybitty", "agents", "agent-child");
+    const childDir = join(tempDir, ".itsybitsy", "agents", "agent-child");
     await mkdir(childDir, { recursive: true });
     await Bun.write(join(childDir, "meta.json"), JSON.stringify({
       id: "agent-child",
@@ -3041,7 +3080,7 @@ describe("nukeAgent (native)", () => {
   });
 
   test("removes user-questions.json entries for nuked agents", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-mgr");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-mgr");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-mgr",
@@ -3049,7 +3088,7 @@ describe("nukeAgent (native)", () => {
       worker: false,
     }));
 
-    const questionsPath = join(tempDir, ".ittybitty", "user-questions.json");
+    const questionsPath = join(tempDir, ".itsybitsy", "user-questions.json");
     await Bun.write(questionsPath, JSON.stringify({
       questions: [
         { agent: "agent-mgr", question: "Q1" },
@@ -3066,7 +3105,7 @@ describe("nukeAgent (native)", () => {
 
   test("succeeds even when no agents found to kill", async () => {
     // Empty agents directory
-    await mkdir(join(tempDir, ".ittybitty", "agents"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents"), { recursive: true });
 
     const agent = makeAgent("agent-nonexistent", tempDir);
     const result = await nukeAgent(agent);
@@ -3097,14 +3136,14 @@ describe("nukeAllAgents (native)", () => {
   });
 
   test("tears down all agents in the directory", async () => {
-    const agent1Dir = join(tempDir, ".ittybitty", "agents", "agent-one");
+    const agent1Dir = join(tempDir, ".itsybitsy", "agents", "agent-one");
     await mkdir(agent1Dir, { recursive: true });
     await Bun.write(join(agent1Dir, "meta.json"), JSON.stringify({
       id: "agent-one",
       tmux_session: "tmux-agent-one",
     }));
 
-    const agent2Dir = join(tempDir, ".ittybitty", "agents", "agent-two");
+    const agent2Dir = join(tempDir, ".itsybitsy", "agents", "agent-two");
     await mkdir(agent2Dir, { recursive: true });
     await Bun.write(join(agent2Dir, "meta.json"), JSON.stringify({
       id: "agent-two",
@@ -3124,7 +3163,7 @@ describe("nukeAllAgents (native)", () => {
   });
 
   test("succeeds with empty agents directory", async () => {
-    await mkdir(join(tempDir, ".ittybitty", "agents"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents"), { recursive: true });
 
     const result = await nukeAllAgents(tempDir);
 
@@ -3133,9 +3172,9 @@ describe("nukeAllAgents (native)", () => {
   });
 
   test("skips directories without meta.json", async () => {
-    await mkdir(join(tempDir, ".ittybitty", "agents", "no-meta"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents", "no-meta"), { recursive: true });
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-real");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-real");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-real",
@@ -3237,7 +3276,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("refuses when tmux session is alive, regardless of meta.state", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3266,7 +3305,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("returns error when no session_id in meta.json", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3287,7 +3326,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("creates resume.sh and starts tmux session", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3340,7 +3379,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("resume.sh re-applies --effort from persisted meta.effort", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-effort");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-effort");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-effort",
@@ -3371,7 +3410,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("resume.sh omits --effort for a legacy agent with no meta.effort", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-legacy-effort");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-legacy-effort");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-legacy-effort",
@@ -3399,7 +3438,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("resume.sh captures stderr and annotates exit codes; resume sets pane-died hook", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-resume");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-resume");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-resume",
@@ -3444,7 +3483,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("resume.sh ignores SIGHUP and launches claude under setsid (no kill-on-HUP)", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-hup");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-hup");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-hup",
@@ -3508,7 +3547,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("resume sets window-size manual on the new tmux session", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-window-size");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-window-size");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-window-size",
@@ -3545,7 +3584,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("logs 'Agent resumed' and 'Sent resume nudge'", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3570,7 +3609,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("uses repoPath when worktree repo dir doesn't exist", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     // Don't create repo/ subdirectory
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -3604,7 +3643,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("rejects model with shell injection characters", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3626,7 +3665,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("rejects session_id with shell injection characters", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3647,7 +3686,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("rejects tmux session with shell injection characters", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3668,7 +3707,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("resume.sh shell-quotes paths for safety", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3706,7 +3745,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("spawns watchdog for top-level agents (no manager)", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3739,7 +3778,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("saves watchdog_pid to meta.json after resumeAgent", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3776,7 +3815,7 @@ describe("resumeAgent (native)", () => {
     // Bug scenario: a pre-Phase-42 paused agent has stale state="complete" in
     // meta.json because the old pause path never wrote "stopped". The new
     // tmux-based guard must let resume proceed because the session is dead.
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3807,7 +3846,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("regression: resume succeeds when meta.state='stopped' and tmux session is dead", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3838,7 +3877,7 @@ describe("resumeAgent (native)", () => {
   test("refuses to resume when agent is in creating grace period and has no tmux session yet", async () => {
     // Agent created < 6s ago with no tmux_session means spawn pipeline is still
     // running. Resuming now would race with the spawn. meta.state is irrelevant.
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -3884,11 +3923,11 @@ describe("resumeAgent (native)", () => {
 
     beforeEach(async () => {
       // newAgent needs a fake HOME with an agent-types directory and a
-      // .ittybitty/repo-id file. Set those up so the respawn half of
+      // .itsybitsy/repo-id file. Set those up so the respawn half of
       // resetCoordinator can run far enough to verify routing.
       coordTempDir = tempDir;
-      await mkdir(join(coordTempDir, ".ittybitty"), { recursive: true });
-      await Bun.write(join(coordTempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+      await mkdir(join(coordTempDir, ".itsybitsy"), { recursive: true });
+      await Bun.write(join(coordTempDir, ".itsybitsy", "repo-id"), "abcd1234\n");
 
       originalHome = process.env.HOME;
       const fakeHome = join(coordTempDir, "home");
@@ -3930,7 +3969,7 @@ describe("resumeAgent (native)", () => {
 
     test("on coordinator: nukes the original agent dir and does NOT generate resume.sh", async () => {
       const repoBasename = coordTempDir.split("/").pop()!;
-      const coordDir = join(coordTempDir, ".ittybitty", "agents", repoBasename);
+      const coordDir = join(coordTempDir, ".itsybitsy", "agents", repoBasename);
       await mkdir(coordDir, { recursive: true });
       await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
         id: repoBasename,
@@ -3972,7 +4011,7 @@ describe("resumeAgent (native)", () => {
 
     test("on coordinator: returns success with 'Reset' in stdout when respawn succeeds", async () => {
       const repoBasename = coordTempDir.split("/").pop()!;
-      const coordDir = join(coordTempDir, ".ittybitty", "agents", repoBasename);
+      const coordDir = join(coordTempDir, ".itsybitsy", "agents", repoBasename);
       await mkdir(coordDir, { recursive: true });
       await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
         id: repoBasename,
@@ -4012,7 +4051,7 @@ describe("resumeAgent (native)", () => {
     test("non-coordinator resume is unchanged (still writes resume.sh)", async () => {
       // Regression guard: a regular agent (no coordinator flag) must still
       // go through the resume-session path.
-      const agentDir = join(coordTempDir, ".ittybitty", "agents", "agent-noncoord");
+      const agentDir = join(coordTempDir, ".itsybitsy", "agents", "agent-noncoord");
       await mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
         id: "agent-noncoord",
@@ -4051,7 +4090,7 @@ describe("resumeAgent (native)", () => {
   // baseline; if the divergence is intentional, update the fixture in the
   // same PR with a visible diff and a clear reason in the commit message.
   test("claude resume.sh matches the byte-equality fixture (regression snapshot)", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-claude-snapshot");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-claude-snapshot");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-claude-snapshot",
@@ -4106,7 +4145,7 @@ describe("resumeAgent (native)", () => {
 
   // ── codex resume (SPEC-CODEX-MODEL.md §5.8 + §6 Phase 7) ────────────────────
   test("resumes codex agent with valid codex_session_id — writes codex-shaped resume.sh + spawns tmux", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-ok");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-codex-ok");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-codex-ok",
@@ -4166,7 +4205,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("codex resume refuses when dispatcher precheck fails — no resume.sh, no tmux launch", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-pre");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-codex-pre");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-codex-pre",
@@ -4221,7 +4260,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("codex resume — live tmux session refusal applies (CLI-agnostic guard)", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex-live");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-codex-live");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-codex-live",
@@ -4258,7 +4297,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("refuses to resume codex agent when codex_session_id is missing", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex01");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-codex01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-codex01",
@@ -4287,7 +4326,7 @@ describe("resumeAgent (native)", () => {
   });
 
   test("refuses to resume codex agent when codex_session_id is malformed", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-codex02");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-codex02");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-codex02",
@@ -4333,7 +4372,7 @@ describe("resumeAgent (native)", () => {
     });
 
     test("resumes an agy agent — regenerates worktree files + writes resume.sh with --conversation and no -i", async () => {
-      const agentDir = join(tempDir, ".ittybitty", "agents", "agent-agy-ok");
+      const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-agy-ok");
       await mkdir(join(agentDir, "repo", ".agents"), { recursive: true });
       // Pre-write a TAMPERED hooks.json to prove resume overwrites it.
       await Bun.write(join(agentDir, "repo", ".agents", "hooks.json"), "TAMPERED");
@@ -4380,8 +4419,8 @@ describe("resumeAgent (native)", () => {
 
       // Worktree files regenerated unconditionally (tampered file overwritten).
       const hooks = JSON.parse(await Bun.file(join(agentDir, "repo", ".agents", "hooks.json")).text());
-      expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agent-agy-ok");
-      const rule = await Bun.file(join(agentDir, "repo", ".agents", "rules", "ittybitty-agent.md")).text();
+      expect(hooks.itsybitsy.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agent-agy-ok");
+      const rule = await Bun.file(join(agentDir, "repo", ".agents", "rules", "itsybitsy-agent.md")).text();
       expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
       // The rule does not print the frozen path lists.
       expect(rule).not.toContain("/frozen/agy/read");
@@ -4401,7 +4440,7 @@ describe("resumeAgent (native)", () => {
     });
 
     test("refuses to resume an agy agent when agy_conversation_id is missing", async () => {
-      const agentDir = join(tempDir, ".ittybitty", "agents", "agent-agy-noconv");
+      const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-agy-noconv");
       await mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
         id: "agent-agy-noconv",
@@ -4565,7 +4604,7 @@ describe("mergeAgent (native)", () => {
    * process.cwd() reports the realpath, and the macOS tmpdir is a symlink.
    */
   async function makeFixtureAgent(repoPath: string, id = "agent-abc") {
-    const agentDir = join(repoPath, ".ittybitty", "agents", id);
+    const agentDir = join(repoPath, ".itsybitsy", "agents", id);
     const worktreePath = join(agentDir, "repo");
     await mkdir(worktreePath, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -4658,7 +4697,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when worktree directory doesn't exist", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4677,7 +4716,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when worktree has uncommitted changes", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4695,7 +4734,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when repo has uncommitted changes", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4713,7 +4752,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when agent branch doesn't exist", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4731,7 +4770,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when pre-rebase conflict check fails", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4749,7 +4788,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when rebase fails", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4769,7 +4808,7 @@ describe("mergeAgent (native)", () => {
   test("succeeds with full merge sequence and includes merge commit SHA in stdout", async () => {
     const sealHome = join(tempDir, "seal-home");
     setUserHome(sealHome);
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     const agent = makeAgent("agent-abc", tempDir);
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
@@ -4814,7 +4853,7 @@ describe("mergeAgent (native)", () => {
     const sealHome = join(tempDir, "seal-home");
     setUserHome(sealHome);
     const id = "agent-seal-cleanup-failure";
-    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     await mkdir(join(agentDir, "repo"), { recursive: true });
     const agent = makeAgent(id, tempDir);
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
@@ -4844,7 +4883,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("performs git rebase, checkout, and merge in correct order", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4884,7 +4923,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("removes agent directory after successful merge", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4902,13 +4941,13 @@ describe("mergeAgent (native)", () => {
   });
 
   test("removes user-questions.json entries for merged agent", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
     }));
     await Bun.write(
-      join(tempDir, ".ittybitty", "user-questions.json"),
+      join(tempDir, ".itsybitsy", "user-questions.json"),
       JSON.stringify({
         questions: [
           { agent: "agent-abc", question: "Q1" },
@@ -4924,12 +4963,12 @@ describe("mergeAgent (native)", () => {
     const agent = makeAgent("agent-abc", tempDir);
     await mergeAgent(agent, tempDir);
 
-    const updated = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+    const updated = await Bun.file(join(tempDir, ".itsybitsy", "user-questions.json")).json();
     expect(updated.questions).toEqual([{ agent: "agent-other", question: "Q2" }]);
   });
 
   test("skips rebase/checkout/merge when commit count is 0", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4960,7 +4999,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("logs merge activity to agent.log", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -4975,7 +5014,7 @@ describe("mergeAgent (native)", () => {
 
     // agent.log gets archived, but archive creates a copy.
     // Since the dir gets removed at the end, we check archive instead.
-    const archiveDir = join(tempDir, ".ittybitty", "archive");
+    const archiveDir = join(tempDir, ".itsybitsy", "archive");
     const archiveEntries = await (async () => {
       try {
         const { readdir } = await import("fs/promises");
@@ -4995,7 +5034,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("deletes agent branch via git branch -D", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5015,7 +5054,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("removes worktree via git worktree remove --force", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5035,7 +5074,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("conflict check creates temp branch and worktree", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5096,7 +5135,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when checkout fails", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5114,7 +5153,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("returns error when merge (ff-only/no-ff) fails", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5133,7 +5172,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("includes stderr content in error messages when git commands fail", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5185,7 +5224,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("merge still succeeds when worktree remove fails (rm -rf fallback)", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5215,7 +5254,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("logs conflict check failure to agent.log", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5234,7 +5273,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("detects target branch from targetDir via -C", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5263,7 +5302,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("status, checkout, and merge all use -C targetDir", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5299,7 +5338,7 @@ describe("mergeAgent (native)", () => {
   });
 
   test("merges into manager branch when called from manager worktree", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc", tmux_session: "tmux-agent-abc",
@@ -5345,7 +5384,7 @@ describe("mergeAgent (native)", () => {
     const KEEP = { keep: true } as const;
 
     async function makeKeepAgentDir(id = "agent-abc"): Promise<string> {
-      const agentDir = join(tempDir, ".ittybitty", "agents", id);
+      const agentDir = join(tempDir, ".itsybitsy", "agents", id);
       await mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
         id, tmux_session: `tmux-${id}`, state: "running",
@@ -5551,7 +5590,7 @@ describe("mergeAgent (native)", () => {
       expect(teardownCalls(agentDir)).toEqual([]);
 
       // Not archived.
-      const archived = await readdir(join(tempDir, ".ittybitty", "archive")).catch(() => null);
+      const archived = await readdir(join(tempDir, ".itsybitsy", "archive")).catch(() => null);
       expect(archived).toBeNull();
 
       // The op marker was taken (agent rendered `merging` during the op) and is
@@ -5767,11 +5806,11 @@ describe("mergeAgent --keep (real git)", () => {
     await Bun.write(join(tempDir, "tracked.txt"), "base\n");
     await git("-C", tempDir, "add", "tracked.txt");
     await git("-C", tempDir, "commit", "-q", "-m", "base");
-    // `ib add` keeps .ittybitty/ out of the checkout's status; mirror that here
+    // `ib add` keeps .itsybitsy/ out of the checkout's status; mirror that here
     // so the preflight's clean-target check sees a clean primary checkout.
-    await Bun.write(join(tempDir, ".git", "info", "exclude"), ".ittybitty/\n");
+    await Bun.write(join(tempDir, ".git", "info", "exclude"), ".itsybitsy/\n");
 
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     worktree = join(agentDir, "repo");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -5914,8 +5953,8 @@ describe("mergeAgent --keep (real git)", () => {
   });
 
   test("targets the manager's branch when run from a manager worktree, leaving main untouched", async () => {
-    const managerWorktree = join(tempDir, ".ittybitty", "agents", "agent-manager", "repo");
-    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-manager"), { recursive: true });
+    const managerWorktree = join(tempDir, ".itsybitsy", "agents", "agent-manager", "repo");
+    await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-manager"), { recursive: true });
     await git("-C", tempDir, "worktree", "add", "-q", "-b", "agent/agent-manager", managerWorktree, "main");
     const agentTip = await agentCommit("feature.txt", "one\n", "agent: one");
     // The manager moves on after the agent forked, so the rebase targets its branch.
@@ -6010,7 +6049,7 @@ describe("mergeAgent --keep (real git)", () => {
     expect(await git("-C", tempDir, "branch", "--list", "agent/agent-abc")).toBe("");
     expect(await readdir(worktree).catch(() => null)).toBeNull();
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
-    expect(await readdir(join(tempDir, ".ittybitty", "archive"))).toHaveLength(1);
+    expect(await readdir(join(tempDir, ".itsybitsy", "archive"))).toHaveLength(1);
   });
 });
 
@@ -6168,7 +6207,7 @@ describe("newAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "ib-newagent-test-"));
-    agentsDir = join(tempDir, ".ittybitty", "agents");
+    agentsDir = join(tempDir, ".itsybitsy", "agents");
     spawnCalls = [];
     dispatcherDryRunCalls = [];
 
@@ -6183,9 +6222,9 @@ describe("newAgent (native)", () => {
       return makeSpawnResult("", 0);
     });
 
-    // Create .ittybitty/repo-id
-    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
-    await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+    // Create .itsybitsy/repo-id
+    await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(tempDir, ".itsybitsy", "repo-id"), "abcd1234\n");
 
     // Override HOME so agent-types lookups resolve to a temp dir isolated from
     // the developer's real ~/.itsybitsy/agent-types/.
@@ -7064,7 +7103,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expectProfileGitGrants(start, dirs);
     // The existing --add-dir grants stay: the common dir and parent-repo subdirs.
     expect(start).toContain(`'--add-dir' '${dirs.commonDir}'`);
-    expect(start).toContain(`'--add-dir' '${realpathSync(join(tempDir, ".ittybitty"))}'`);
+    expect(start).toContain(`'--add-dir' '${realpathSync(join(tempDir, ".itsybitsy"))}'`);
     expect(start).not.toContain("-s workspace-write");
     expect(start).not.toContain("-s danger-full-access");
     expect(start).not.toContain("sandbox_workspace_write");
@@ -7324,7 +7363,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // prints anything gets a notice written into some OTHER agent's pane,
     // parking that pane in view-mode (see buildTmuxHelperScript).
     expect(script).toBe(
-      buildTmuxHelperScript(tempDir, ["ib", "watchdog", "watchdog-via-tmux"], join(tempDir, ".ittybitty", "agents", "watchdog-via-tmux", "watchdog.log")),
+      buildTmuxHelperScript(tempDir, ["ib", "watchdog", "watchdog-via-tmux"], join(tempDir, ".itsybitsy", "agents", "watchdog-via-tmux", "watchdog.log")),
     );
     expect(script).toContain(`cd '${tempDir}' || `);
     expect(script).toContain(`'ib' 'watchdog' 'watchdog-via-tmux' >>`);
@@ -7332,17 +7371,17 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   test("buildTmuxHelperScript never lets tmux see output or a non-zero status", async () => {
-    const script = buildTmuxHelperScript("/repo/root", ["ib", "watchdog", "a1"], "/repo/root/.ittybitty/agents/a1/watchdog.log");
+    const script = buildTmuxHelperScript("/repo/root", ["ib", "watchdog", "a1"], "/repo/root/.itsybitsy/agents/a1/watchdog.log");
     // Wrapper's own stdout/stderr go nowhere — the job pipe tmux reads stays empty.
     expect(script.startsWith("exec >/dev/null 2>&1; ")).toBe(true);
     // The WRAPPER cd's (not just the helper): its cwd must be the repo root,
     // never the spawner's cwd (an agent dir that may be deleted later — the
     // orphan scanners key on cwd). A failed cd is logged and reported as 0.
-    expect(script).toContain("cd '/repo/root' || { echo \"[helper] cd failed\" >>'/repo/root/.ittybitty/agents/a1/watchdog.log' 2>&1; exit 0; }");
+    expect(script).toContain("cd '/repo/root' || { echo \"[helper] cd failed\" >>'/repo/root/.itsybitsy/agents/a1/watchdog.log' 2>&1; exit 0; }");
     // The helper is a CHILD (backgrounded + waited), not an exec replacement,
     // so a SIGTERM aimed at the helper (orphan-kill) leaves the wrapper alive
     // to report 0.
-    expect(script).toContain("'ib' 'watchdog' 'a1' >>'/repo/root/.ittybitty/agents/a1/watchdog.log' 2>&1 & child=$!");
+    expect(script).toContain("'ib' 'watchdog' 'a1' >>'/repo/root/.itsybitsy/agents/a1/watchdog.log' 2>&1 & child=$!");
     expect(script).toContain('wait "$child"');
     // The wrapper's own command line must NOT read as an `ib watchdog` process
     // to `ib state`'s classifier — only the real helper child does.
@@ -7353,14 +7392,14 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // helper and still reported as 0.
     expect(script).toContain(`trap 'if [ -n "$child" ]; then kill -TERM "$child"; fi; exit 0' HUP INT TERM`);
     // The helper's own status is preserved in its log for diagnosis.
-    expect(script).toContain('echo "[helper] exited rc=$rc" >>\'/repo/root/.ittybitty/agents/a1/watchdog.log\' 2>&1');
+    expect(script).toContain('echo "[helper] exited rc=$rc" >>\'/repo/root/.itsybitsy/agents/a1/watchdog.log\' 2>&1');
     expect(script.endsWith("; exit 0")).toBe(true);
     // run-shell format-expands `#…` — the script must not contain any.
     expect(script).not.toContain("#");
     // No log → everything to /dev/null (the summary worker).
-    const quiet = buildTmuxHelperScript("/repo/root", ["ib", "generate-summary", "/repo/root/.ittybitty/agents/a1"]);
+    const quiet = buildTmuxHelperScript("/repo/root", ["ib", "generate-summary", "/repo/root/.itsybitsy/agents/a1"]);
     expect(quiet).toContain("cd '/repo/root' || { echo \"[helper] cd failed\" >/dev/null 2>&1; exit 0; }");
-    expect(quiet).toContain("'ib' 'generate-summary' '/repo/root/.ittybitty/agents/a1' >/dev/null 2>&1 & child=$!");
+    expect(quiet).toContain("'ib' 'generate-summary' '/repo/root/.itsybitsy/agents/a1' >/dev/null 2>&1 & child=$!");
     expect(quiet).not.toContain("#");
   });
 
@@ -7984,7 +8023,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const agentDir = join(agentsDir, id);
     await mkdir(agentDir, { recursive: true });
     const oldMeta = {
-      id, agentType: id, state: "running", model: "claude:sonnet", tmux_session: "ittybitty-pause-failure",
+      id, agentType: id, state: "running", model: "claude:sonnet", tmux_session: "itsybitsy-pause-failure",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       sandbox: { enabled: false, rawAllow: [], domains: [] },
       paths: { allowRead: [tempDir], allowWrite: [], deny: [] },
@@ -8215,10 +8254,10 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const meta = await Bun.file(join(agentDir, "meta.json")).json() as AgentMeta;
     meta.state = "stopped";
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta, null, 2));
-    // Add an entry under .ittybitty/agents AFTER spawn (a dead entry the hook
+    // Add an entry under .itsybitsy/agents AFTER spawn (a dead entry the hook
     // denies structurally) — refresh must refuse it.
     await writeSandboxType("refresh-under-agents", {
-      allowRead: [tempDir, join(tempDir, ".ittybitty", "agents", "victim")],
+      allowRead: [tempDir, join(tempDir, ".itsybitsy", "agents", "victim")],
       allowWrite: [tempDir],
       deny: ["**/.env"],
     });
@@ -8226,7 +8265,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const result = await refreshAgentSandbox(makeAgent("refresh-under-agents", tempDir, "stopped", meta));
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("dead entry");
-    expect(result.stderr).toContain(canonicalizeSandboxPath(join(tempDir, ".ittybitty", "agents")));
+    expect(result.stderr).toContain(canonicalizeSandboxPath(join(tempDir, ".itsybitsy", "agents")));
     // The agent stays stopped: refusal happens before any resume.
     expect(await Bun.file(join(agentDir, "resume.sh")).exists()).toBe(false);
   });
@@ -8269,7 +8308,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
   // ── A4 G3: sealed record ────────────────────────────────────────────────────
   test("malformed stored repo id is rejected before seal capability issuance or escaped mutation", async () => {
-    const repoIdPath = join(tempDir, ".ittybitty", "repo-id");
+    const repoIdPath = join(tempDir, ".itsybitsy", "repo-id");
     const escaped = join(process.env.HOME!, "escaped-agent.json");
     await Bun.write(repoIdPath, "../../escaped\n");
     const meta = {
@@ -9459,7 +9498,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   test("dirty check inspects parent worktree (not host repo) when manager is set", async () => {
     // When spawning with a manager, the child worktree forks from
     // `agent/<manager>` — not host HEAD. The dirty gate must inspect the parent
-    // agent's worktree at <root>/.ittybitty/agents/<manager>/repo, mirroring
+    // agent's worktree at <root>/.itsybitsy/agents/<manager>/repo, mirroring
     // baseRef.  Repro: host repo dirty, parent worktree clean → spawn succeeds.
     const mgrDir = join(agentsDir, "agent-mgr");
     await mkdir(mgrDir, { recursive: true });
@@ -9801,7 +9840,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const forgedDir = join(
       tempDir,
       "nested",
-      ".ittybitty",
+      ".itsybitsy",
       "agents",
       "forged-manager",
     );
@@ -9843,7 +9882,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     };
     await mkdir(callerDir, { recursive: true });
     await Bun.write(join(callerDir, "meta.json"), JSON.stringify(callerMeta));
-    const forgedDir = join(tempDir, "nested", ".ittybitty", "agents", "forged-manager");
+    const forgedDir = join(tempDir, "nested", ".itsybitsy", "agents", "forged-manager");
     const forgedCwd = join(forgedDir, "repo");
     await mkdir(forgedCwd, { recursive: true });
     await Bun.write(join(forgedDir, "meta.json"), JSON.stringify({
@@ -9998,7 +10037,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // caller from its absolute worktree path, not relative to rootRepoPath.
     const otherRepo = await mkdtemp(join(tmpdir(), "ib-newagent-otherrepo-"));
     try {
-      const callerDir = join(otherRepo, ".ittybitty", "agents", "agent-xrepo-worker");
+      const callerDir = join(otherRepo, ".itsybitsy", "agents", "agent-xrepo-worker");
       await mkdir(join(callerDir, "repo"), { recursive: true });
       await Bun.write(join(callerDir, "meta.json"), JSON.stringify({ id: "agent-xrepo-worker", worker: true, agentType: "worker" }));
       const callerCwd = join(callerDir, "repo");
@@ -10086,7 +10125,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const meta = await Bun.file(join(agentsDir, "test-meta", "meta.json")).json();
     expect(meta.id).toBe("test-meta");
-    expect(meta.tmux_session).toBe("ittybitty-abcd1234-test-meta");
+    expect(meta.tmux_session).toBe("itsybitsy-abcd1234-test-meta");
     expect(meta.prompt).toBe("test prompt");
     expect(meta.manager).toBeNull();
     expect(meta.worktree).toBe(true);
@@ -10343,7 +10382,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const widthStr = tmuxNewSession![xIndex + 1];
     expect(Number(widthStr)).toBeGreaterThanOrEqual(40);
     expect(tmuxNewSession).toContain("-s");
-    expect(tmuxNewSession).toContain("ittybitty-abcd1234-test-tmux");
+    expect(tmuxNewSession).toContain("itsybitsy-abcd1234-test-tmux");
   });
 
   test("creates git worktree by default", async () => {
@@ -10515,8 +10554,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // _all.md's model. Set _non_coordinator to a value that must NOT win.
     const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-model-"));
     const coordRepo = join(coordRepoDir, "myrepo");
-    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
-    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "c00d0001\n");
+    await mkdir(join(coordRepo, ".itsybitsy", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".itsybitsy", "repo-id"), "c00d0001\n");
 
     const userConfigPath = join(coordRepo, "config.json");
     setUserConfigPath(userConfigPath);
@@ -10542,13 +10581,13 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await newAgent(coordRepo, "start", { type: "coordinator", _cwd: coordRepo });
     expect(result.ok).toBe(true);
-    const coordinatorStart = await Bun.file(join(coordRepo, ".ittybitty", "agents", "myrepo", "start.sh")).text();
+    const coordinatorStart = await Bun.file(join(coordRepo, ".itsybitsy", "agents", "myrepo", "start.sh")).text();
     expect(coordinatorStart.indexOf("ib sandbox-collector attach")).toBeGreaterThan(0);
     expect(coordinatorStart.indexOf("ib sandbox-collector attach")).toBeLessThan(coordinatorStart.indexOf("setsid /bin/sh -c"));
     expect(coordinatorStart.match(/sandbox-log-gate/g)?.length).toBe(2);
 
     const coordId = result.stdout.trim();
-    const meta = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "meta.json")).json();
+    const meta = await Bun.file(join(coordRepo, ".itsybitsy", "agents", coordId, "meta.json")).json();
     // _all.md wins; _non_coordinator.md ignored for coordinators.
     expect(meta.model).toBe("claude:claude-opus-4-7");
 
@@ -10931,7 +10970,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   test("custom prompts are included in prompt.txt", async () => {
-    const promptsDir = join(tempDir, ".ittybitty", "prompts");
+    const promptsDir = join(tempDir, ".itsybitsy", "prompts");
     await mkdir(promptsDir, { recursive: true });
     await Bun.write(join(promptsDir, "all.md"), "Always be thorough.");
     await Bun.write(join(promptsDir, "manager.md"), "Coordinate sub-agents.");
@@ -10948,7 +10987,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   test("worker prompts use worker-specific custom prompt", async () => {
-    const promptsDir = join(tempDir, ".ittybitty", "prompts");
+    const promptsDir = join(tempDir, ".itsybitsy", "prompts");
     await mkdir(promptsDir, { recursive: true });
     await Bun.write(join(promptsDir, "worker.md"), "Focus on task.");
     await Bun.write(join(promptsDir, "manager.md"), "Coordinate sub-agents.");
@@ -11331,11 +11370,11 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // ib hooks session-start, ib hook-permission-denied) into the repo's
     // .claude/settings.local.json, polluting every Claude session opened in
     // that repo. The fix routes these into an isolated settings file at
-    // .ittybitty/agents/<coord-id>/.claude/settings.local.json instead.
+    // .itsybitsy/agents/<coord-id>/.claude/settings.local.json instead.
     const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-settings-"));
     const coordRepo = join(coordRepoDir, "myrepo");
-    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
-    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "c00d0002\n");
+    await mkdir(join(coordRepo, ".itsybitsy", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".itsybitsy", "repo-id"), "c00d0002\n");
 
     // Pre-existing repo settings with an unrelated user permission; must
     // remain untouched by coordinator spawn.
@@ -11373,7 +11412,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const coordId = result.stdout.trim();
     expect(coordId.length).toBeGreaterThan(0);
     const isolatedSettingsPath = join(
-      coordRepo, ".ittybitty", "agents", coordId, ".claude", "settings.local.json",
+      coordRepo, ".itsybitsy", "agents", coordId, ".claude", "settings.local.json",
     );
     const isolatedSettings = await Bun.file(isolatedSettingsPath).json();
     expect(isolatedSettings.hooks).toBeDefined();
@@ -11386,7 +11425,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolatedSettings.permissions.allow).toContain("Bash(ib:*)");
 
     // start.sh must launch claude with --settings pointing at the isolated file.
-    const startSh = await Bun.file(join(coordRepo, ".ittybitty", "agents", coordId, "start.sh")).text();
+    const startSh = await Bun.file(join(coordRepo, ".itsybitsy", "agents", coordId, "start.sh")).text();
     expect(startSh).toContain(`--settings '${isolatedSettingsPath}'`);
 
     await rm(coordRepoDir, { recursive: true, force: true });
@@ -11506,8 +11545,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // generating id = "coordinator" via getCoordinatorAgentId()
     const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-test-"));
     const coordRepo = join(coordRepoDir, "coordinator");
-    await mkdir(join(coordRepo, ".ittybitty", "agents"), { recursive: true });
-    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "c00d0003\n");
+    await mkdir(join(coordRepo, ".itsybitsy", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".itsybitsy", "repo-id"), "c00d0003\n");
 
     const userConfigPath = join(coordRepo, "config.json");
     setUserConfigPath(userConfigPath);
@@ -11551,11 +11590,11 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // The collision suffix should produce "coordinator-XXXX", not "coordinator".
     const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-coll-"));
     const coordRepo = join(coordRepoDir, "coordinator");
-    const coordAgentsDir = join(coordRepo, ".ittybitty", "agents");
+    const coordAgentsDir = join(coordRepo, ".itsybitsy", "agents");
     // Create existing non-coordinator agent named "coordinator" (the collision)
     await mkdir(join(coordAgentsDir, "coordinator"), { recursive: true });
     await Bun.write(join(coordAgentsDir, "coordinator", "meta.json"), JSON.stringify({ id: "coordinator" }));
-    await Bun.write(join(coordRepo, ".ittybitty", "repo-id"), "c00d0004\n");
+    await Bun.write(join(coordRepo, ".itsybitsy", "repo-id"), "c00d0004\n");
 
     const userConfigPath = join(coordRepo, "config.json");
     setUserConfigPath(userConfigPath);
@@ -11684,7 +11723,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       }));
       await (await import("./agent-types")).ensureAgentTypesDir();
       // Plant an ARCHIVED agent whose nickname is "taken" — should NOT block reuse.
-      const archiveDir = join(tempDir, ".ittybitty", "archive", "agent-archived");
+      const archiveDir = join(tempDir, ".itsybitsy", "archive", "agent-archived");
       await mkdir(archiveDir, { recursive: true });
       await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id: "agent-archived", nickname: "taken", tmux_session: "t-archived" }));
       resetReadAgentMetaCache();
@@ -12071,7 +12110,7 @@ body`,
       expect(gitignore).toContain(".codex/");
     });
 
-    test("the SessionStart hook gives the spawned agent its role + agent id (no <ittybitty> wrapper); no AGENTS.md is written", async () => {
+    test("the SessionStart hook gives the spawned agent its role + agent id (no <itsybitsy> wrapper); no AGENTS.md is written", async () => {
       setNewAgentSpawnRunner(mockSpawnRunner());
       const result = await callNewAgent("task", {
         name: "codex-agents-md",
@@ -12082,8 +12121,8 @@ body`,
       const agentDir = join(agentsDir, "codex-agents-md");
       const instructions = await codexHookRoleText("codex-agents-md", agentDir);
       expect(instructions).toContain("codex-agents-md");
-      expect(instructions.startsWith("<ittybitty>")).toBe(false);
-      expect(instructions).not.toContain("</ittybitty>");
+      expect(instructions.startsWith("<itsybitsy>")).toBe(false);
+      expect(instructions).not.toContain("</itsybitsy>");
       expect(await Bun.file(join(agentDir, "repo", "AGENTS.md")).exists()).toBe(false);
     });
 
@@ -12144,7 +12183,7 @@ body`,
 
     // Regression: spawn-time dispatcher dry-run must run with cwd === workPath.
     // The runtime codex hook handlers resolve `agentsDir` via a cwd regex
-    // (`/\.ittybitty\/agents/`). If cwd is the spawn caller's cwd (e.g. the
+    // (`/\.itsybitsy\/agents/`). If cwd is the spawn caller's cwd (e.g. the
     // system coordinator's `~/.itsybitsy/repo`), the regex misses and the
     // dry-run dies with "meta.json not found". Reverting the fix (dropping
     // the `cwd: workPath` from the dispatcherDryRunSpawnCtx.run call) MUST fail
@@ -12283,13 +12322,13 @@ body`,
     });
 
     // Round-2 review HIGH: the codex `-s workspace-write` sandbox is granted
-    // the NARROW `.ittybitty` + `.claude` subdirs of the parent repo, not
+    // the NARROW `.itsybitsy` + `.claude` subdirs of the parent repo, not
     // the bare parent repo. Granting the bare parent would let a misbehaving
     // codex agent reach src/, AGENTS.md, etc. via relative-path Bash writes
     // (`../../../../AGENTS.md`) that the PreToolUse hook's textual matcher
     // does not catch. This test asserts the narrowed grant is encoded in
     // the rendered start.sh launch line.
-    test("codex start.sh grants narrow parent-repo subdirs (.ittybitty + .claude), not the bare parent repo", async () => {
+    test("codex start.sh grants narrow parent-repo subdirs (.itsybitsy + .claude), not the bare parent repo", async () => {
       const { realpathSync } = await import("fs");
       setNewAgentSpawnRunner(mockSpawnRunner());
       const result = await callNewAgent("task", {
@@ -12301,14 +12340,14 @@ body`,
       // Resolve via realpathSync because /tmp on macOS is a symlink to
       // /private/tmp, and the production code canonicalises before pushing
       // each entry into the --add-dir list.
-      const expectedAgentDataDir = realpathSync(join(tempDir, ".ittybitty"));
+      const expectedAgentDataDir = realpathSync(join(tempDir, ".itsybitsy"));
       const expectedClaude = realpathSync(join(tempDir, ".claude"));
       // Each argv element is shell-quoted independently in the rendered
       // launch line, so the flag and path appear as `'--add-dir' '<path>'`.
       expect(startSh).toContain(`'--add-dir' '${expectedAgentDataDir}'`);
       expect(startSh).toContain(`'--add-dir' '${expectedClaude}'`);
       // The bare parent repo MUST NOT appear as its own `--add-dir` entry.
-      // Use the trailing apostrophe to anchor the match so the .ittybitty /
+      // Use the trailing apostrophe to anchor the match so the .itsybitsy /
       // .claude lines (which begin with `'--add-dir' '<tempDir>/.`) don't
       // false-positive the negation.
       const realTempDir = realpathSync(tempDir);
@@ -12400,8 +12439,8 @@ sandbox:
       expect(result.ok).toBe(true);
       const worktree = join(agentsDir, "agy-worktree-files", "repo");
       const hooks = JSON.parse(await Bun.file(join(worktree, ".agents", "hooks.json")).text());
-      expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agy-worktree-files");
-      const rule = await Bun.file(join(worktree, ".agents", "rules", "ittybitty-agent.md")).text();
+      expect(hooks.itsybitsy.PreToolUse[0].hooks[0].command).toContain("hooks agy-pre-tool-use agy-worktree-files");
+      const rule = await Bun.file(join(worktree, ".agents", "rules", "itsybitsy-agent.md")).text();
       expect(rule.startsWith("---\ntrigger: always_on")).toBe(true);
       // The rule states the access rule and the resolved sandbox state. It does
       // not print the resolved path lists.
@@ -12421,7 +12460,7 @@ sandbox:
       expect(result.ok).toBe(true);
       const gitignore = await Bun.file(join(agentsDir, "agy-gitignore", "repo", ".gitignore")).text();
       expect(gitignore).toContain(".agents/hooks.json");
-      expect(gitignore).toContain(".agents/rules/ittybitty-agent.md");
+      expect(gitignore).toContain(".agents/rules/itsybitsy-agent.md");
     });
 
     test("pre-trusts the worktree BEFORE creating the tmux session (D5 — §17.9)", async () => {
@@ -12668,7 +12707,7 @@ describe("reassignAgent (native)", () => {
   });
 
   test("reassign to new manager updates meta.json", async () => {
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     const managerDir = join(agentsDir, "agent-mgr");
     await mkdir(agentDir, { recursive: true });
@@ -12686,7 +12725,7 @@ describe("reassignAgent (native)", () => {
   });
 
   test("clear manager (null) sets manager to null", async () => {
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "agent-old", tmux_session: "tmux-agent-abc" }));
@@ -12700,7 +12739,7 @@ describe("reassignAgent (native)", () => {
   });
 
   test("circular dependency detected", async () => {
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const parentDir = join(agentsDir, "agent-parent");
     const childDir = join(agentsDir, "agent-child");
     await mkdir(parentDir, { recursive: true });
@@ -12716,7 +12755,7 @@ describe("reassignAgent (native)", () => {
   });
 
   test("worker-as-parent rejected", async () => {
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     const workerDir = join(agentsDir, "agent-worker");
     await mkdir(agentDir, { recursive: true });
@@ -12734,7 +12773,7 @@ describe("reassignAgent (native)", () => {
   test("worker-as-parent with canSpawnChildren:true override is accepted", async () => {
     // A worker toggled ON can also be a reassign target — the override wins
     // over the worker check, mirroring newAgent's manager-validation.
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     const workerDir = join(agentsDir, "agent-worker-on");
     await mkdir(agentDir, { recursive: true });
@@ -12751,7 +12790,7 @@ describe("reassignAgent (native)", () => {
   });
 
   test("new manager not found", async () => {
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", manager: "", tmux_session: "t1" }));
@@ -12790,7 +12829,7 @@ describe("reassignAgent (native)", () => {
       } as SpawnResult;
     });
 
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     const oldMgrDir = join(agentsDir, "agent-old");
     const newMgrDir = join(agentsDir, "agent-new");
@@ -12842,7 +12881,7 @@ describe("reassignAgent (native)", () => {
       } as SpawnResult;
     });
 
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     const newMgrDir = join(agentsDir, "agent-new");
     await mkdir(agentDir, { recursive: true });
@@ -12881,7 +12920,7 @@ describe("reassignAgent (native)", () => {
       } as SpawnResult;
     });
 
-    const agentsDir = join(tempDir, ".ittybitty", "agents");
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
     const agentDir = join(agentsDir, "agent-abc");
     const oldMgrDir = join(agentsDir, "agent-old");
     await mkdir(agentDir, { recursive: true });
@@ -12948,9 +12987,9 @@ describe("renameAgent (native, nickname)", () => {
     });
   }
 
-  // Write a meta.json for an agent under <repoPath>/.ittybitty/agents/<id>/.
+  // Write a meta.json for an agent under <repoPath>/.itsybitsy/agents/<id>/.
   async function writeAgentMeta(repoPath: string, id: string, extra: Record<string, unknown> = {}): Promise<string> {
-    const agentDir = join(repoPath, ".ittybitty", "agents", id);
+    const agentDir = join(repoPath, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}`, ...extra }));
     return agentDir;
@@ -13113,7 +13152,7 @@ describe("renameAgent (native, nickname)", () => {
     // killing an agent and re-aliasing a live one with its old nickname fails.
     await writeAgentMeta(tempDir, "agent-abc");
     // Plant an ARCHIVED agent in the same repo whose nickname is "taken".
-    const archivedDir = join(tempDir, ".ittybitty", "archive", "agent-archived");
+    const archivedDir = join(tempDir, ".itsybitsy", "archive", "agent-archived");
     await mkdir(archivedDir, { recursive: true });
     await Bun.write(join(archivedDir, "meta.json"), JSON.stringify({ id: "agent-archived", nickname: "taken", tmux_session: "t-archived" }));
     await registerRepos([tempDir]);
@@ -13122,7 +13161,7 @@ describe("renameAgent (native, nickname)", () => {
     const agent = makeAgent("agent-abc", tempDir);
     const result = await renameAgent(agent, "taken");
     expect(result.ok).toBe(true);
-    const meta = await Bun.file(join(tempDir, ".ittybitty", "agents", "agent-abc", "meta.json")).json();
+    const meta = await Bun.file(join(tempDir, ".itsybitsy", "agents", "agent-abc", "meta.json")).json();
     expect(meta.nickname).toBe("taken");
   });
 
@@ -13201,7 +13240,7 @@ describe("mergeCheckAgent (native)", () => {
   });
 
   test("fails when worktree doesn't exist", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     // No "repo" directory
 
@@ -13213,7 +13252,7 @@ describe("mergeCheckAgent (native)", () => {
   });
 
   test("fails with uncommitted changes", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
 
     setMergeSpawnRunner((cmd: string[]) => {
@@ -13233,7 +13272,7 @@ describe("mergeCheckAgent (native)", () => {
   });
 
   test("passes when clean", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
 
     setMergeSpawnRunner((cmd: string[]) => {
@@ -13253,7 +13292,7 @@ describe("mergeCheckAgent (native)", () => {
   });
 
   test("fails when branch doesn't exist", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
 
     setMergeSpawnRunner((cmd: string[]) => {
@@ -13286,7 +13325,7 @@ describe("diffAgent (native)", () => {
   });
 
   test("returns diff output", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
 
     setDiffStatusSpawnRunner((cmd: string[]) => {
@@ -13419,7 +13458,7 @@ describe("statusAgent (native)", () => {
   });
 
   test("returns combined log and status output", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     const repoDir = join(agentDir, "repo");
     await mkdir(repoDir, { recursive: true });
     // Ensure directory is visible (Bun async fs timing workaround)
@@ -13482,8 +13521,8 @@ describe("acknowledgeQuestion (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "ack-test-"));
-    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
-    questionsPath = join(tempDir, ".ittybitty", "user-questions.json");
+    await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
+    questionsPath = join(tempDir, ".itsybitsy", "user-questions.json");
   });
 
   afterEach(async () => {
@@ -13550,7 +13589,7 @@ describe("askQuestion (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "ask-test-"));
-    agentsDir = join(tempDir, ".ittybitty", "agents");
+    agentsDir = join(tempDir, ".itsybitsy", "agents");
     agentId = "agent-ask-test";
     agentDir = join(agentsDir, agentId);
     await mkdir(agentDir, { recursive: true });
@@ -13575,7 +13614,7 @@ describe("askQuestion (native)", () => {
     expect(result.ok).toBe(true);
     expect(result.stdout).toContain("Question submitted");
 
-    const data = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+    const data = await Bun.file(join(tempDir, ".itsybitsy", "user-questions.json")).json();
     expect(data.questions).toHaveLength(1);
     expect(data.questions[0].agent).toBe(agentId);
     expect(data.questions[0].question).toBe("Should I proceed?");
@@ -13622,7 +13661,7 @@ describe("askQuestion (native)", () => {
   test("cleans up stale questions from non-existent agents", async () => {
     // Pre-populate with a stale question
     await Bun.write(
-      join(tempDir, ".ittybitty", "user-questions.json"),
+      join(tempDir, ".itsybitsy", "user-questions.json"),
       JSON.stringify({ questions: [
         { id: "q-old", agent: "agent-gone", question: "old", status: "pending", timestamp: "2025-01-01T00:00:00Z" },
       ] }),
@@ -13631,7 +13670,7 @@ describe("askQuestion (native)", () => {
     const result = await askQuestion(tempDir, agentId, "New question");
     expect(result.ok).toBe(true);
 
-    const data = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+    const data = await Bun.file(join(tempDir, ".itsybitsy", "user-questions.json")).json();
     // Stale question should be removed, only the new one remains
     expect(data.questions).toHaveLength(1);
     expect(data.questions[0].agent).toBe(agentId);
@@ -13649,7 +13688,7 @@ describe("askQuestion (native)", () => {
     const result = await askQuestion(tempDir, agentId, "Hash test");
     expect(result.ok).toBe(true);
 
-    const data = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+    const data = await Bun.file(join(tempDir, ".itsybitsy", "user-questions.json")).json();
     const qId = data.questions[0].id;
     // ID format: q-<epoch>-<6hex>
     expect(qId).toMatch(/^q-\d+-[0-9a-f]{6}$/);
@@ -13740,7 +13779,7 @@ describe("askQuestion (native)", () => {
       expect(result.ok).toBe(true);
       expect(result.stdout).toContain("Question submitted");
       // Question still written to disk
-      const data = await Bun.file(join(tempDir, ".ittybitty", "user-questions.json")).json();
+      const data = await Bun.file(join(tempDir, ".itsybitsy", "user-questions.json")).json();
       expect(data.questions).toHaveLength(1);
     });
 
@@ -14389,7 +14428,7 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
 
   beforeEach(async () => {
     tempDir = require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-case2-")));
-    agentsDir = join(tempDir, ".ittybitty", "agents");
+    agentsDir = join(tempDir, ".itsybitsy", "agents");
     fakeHome = require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-case2-home-")));
     spawnCalls = [];
     setNewAgentNoWorktreeCallerResolver(async () => null);
@@ -14402,8 +14441,8 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     originalClaudeSessionId = process.env.CLAUDE_SESSION_ID;
 
     // Set up repo structure
-    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
-    await Bun.write(join(tempDir, ".ittybitty", "repo-id"), "abcd1234\n");
+    await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(tempDir, ".itsybitsy", "repo-id"), "abcd1234\n");
 
     // Register this tempDir as a repo in the fake home's repos.json
     await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
@@ -14418,7 +14457,7 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
       id: coordId,
       agentType: "coordinator",
-      tmux_session: `ittybitty-abcd1234-${coordId}`,
+      tmux_session: `itsybitsy-abcd1234-${coordId}`,
       prompt: "coordinate",
       manager: null,
       worktree: false,
@@ -14585,7 +14624,7 @@ describe("resolveAgentId", () => {
 
   test("exact match via tmux session only (no directory)", async () => {
     const result = await resolveAgentId(agentsDir, "agent-abc123", async () => [
-      "ittybitty-abc12345-agent-abc123",
+      "itsybitsy-abc12345-agent-abc123",
     ]);
     expect(result).toEqual({ resolved: "agent-abc123" });
   });
@@ -14601,7 +14640,7 @@ describe("resolveAgentId", () => {
 
   test("substring does NOT match via tmux session (exact-only)", async () => {
     const result = await resolveAgentId(agentsDir, "abc123", async () => [
-      "ittybitty-abc12345-agent-abc123",
+      "itsybitsy-abc12345-agent-abc123",
     ]);
     expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
@@ -14631,7 +14670,7 @@ describe("resolveAgentId", () => {
     await Bun.write(join(dir, "meta.json"), "{}");
 
     const result = await resolveAgentId(agentsDir, "agent-abc123", async () => [
-      "ittybitty-abc12345-agent-abc123",
+      "itsybitsy-abc12345-agent-abc123",
     ]);
     expect(result).toEqual({ resolved: "agent-abc123" });
   });
@@ -14646,28 +14685,28 @@ describe("resolveAgentId", () => {
 
   test("extracts default agent ID from ittybitty tmux session", async () => {
     const result = await resolveAgentId(agentsDir, "agent-deadbeef", async () => [
-      "ittybitty-abc12345-agent-deadbeef",
+      "itsybitsy-abc12345-agent-deadbeef",
     ]);
     expect(result).toEqual({ resolved: "agent-deadbeef" });
   });
 
   test("extracts coordinator-style ID from tmux session", async () => {
     const result = await resolveAgentId(agentsDir, "myrepo", async () => [
-      "ittybitty-abc12345-myrepo",
+      "itsybitsy-abc12345-myrepo",
     ]);
     expect(result).toEqual({ resolved: "myrepo" });
   });
 
   test("extracts custom-named agent ID from tmux session", async () => {
     const result = await resolveAgentId(agentsDir, "my-custom-name", async () => [
-      "ittybitty-def67890-my-custom-name",
+      "itsybitsy-def67890-my-custom-name",
     ]);
     expect(result).toEqual({ resolved: "my-custom-name" });
   });
 
   test("extracts custom-named agent with hyphens from tmux session", async () => {
     const result = await resolveAgentId(agentsDir, "my-long-custom-name", async () => [
-      "ittybitty-fe98dcba-my-long-custom-name",
+      "itsybitsy-fe98dcba-my-long-custom-name",
     ]);
     expect(result).toEqual({ resolved: "my-long-custom-name" });
   });
@@ -14681,15 +14720,15 @@ describe("resolveAgentId", () => {
 
   test("rejects tmux session with wrong repo ID format (not 8 hex chars)", async () => {
     const result = await resolveAgentId(agentsDir, "agent-abc", async () => [
-      "ittybitty-abc123-agent-abc",
-      "ittybitty-abc123456789-agent-abc",
+      "itsybitsy-abc123-agent-abc",
+      "itsybitsy-abc123456789-agent-abc",
     ]);
     expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
 
   test("rejects tmux session with non-hex repo ID", async () => {
     const result = await resolveAgentId(agentsDir, "agent-abc", async () => [
-      "ittybitty-abcdefgx-agent-abc",
+      "itsybitsy-abcdefgx-agent-abc",
     ]);
     expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
@@ -15216,7 +15255,7 @@ describe("respawnAgent (native)", () => {
     // Setting up a meta.json for an obviously-bad id like "../etc" would be
     // a test bug; instead, write meta.json under a clean id and then craft
     // an Agent object that uses an unsafe id to exercise the validator.
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-bad");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-bad");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-bad",
@@ -15231,7 +15270,7 @@ describe("respawnAgent (native)", () => {
 
     // Repoint meta.json to the unsafe id so the dirExists check passes —
     // we want the validator to be the gate, not the dir check.
-    const unsafeDir = join(tempDir, ".ittybitty", "agents", "agent$(rm)");
+    const unsafeDir = join(tempDir, ".itsybitsy", "agents", "agent$(rm)");
     await mkdir(unsafeDir, { recursive: true });
     await Bun.write(join(unsafeDir, "meta.json"), JSON.stringify({ id: "agent$(rm)" }));
 
@@ -15246,7 +15285,7 @@ describe("respawnAgent (native)", () => {
   });
 
   test("schedules detached tmux worker on success", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -15277,7 +15316,7 @@ describe("respawnAgent (native)", () => {
   });
 
   test("logs scheduling event to agent.log", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -15293,7 +15332,7 @@ describe("respawnAgent (native)", () => {
   });
 
   test("honors the test detach override", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -15326,7 +15365,7 @@ describe("respawnAgent (native)", () => {
   });
 
   test("returns error when tmux new-session fails", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-abc",
@@ -15389,7 +15428,7 @@ describe("respawnSelf (native)", () => {
   });
 
   test("non-coordinator: writes resume.sh (proving pause-then-resume routing)", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-noncoord");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-noncoord");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-noncoord",
@@ -15445,7 +15484,7 @@ describe("respawnSelf (native)", () => {
   });
 
   test("non-coordinator already-stopped: skips pause but still resumes", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-stopped");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-stopped");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-stopped",
@@ -15528,7 +15567,7 @@ describe("long-running-op guard", () => {
 
   /** Build a backed agent dir with meta.json + worktree, returning the dir. */
   async function makeBackedAgentDir(id: string): Promise<string> {
-    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id, tmux_session: `tmux-${id}`, claude_pid: "99999",
@@ -15789,7 +15828,7 @@ describe("long-running-op guard", () => {
     // op-guard sits ABOVE that branch. Set an in-flight restarting op with a
     // live holder; the resume must be refused before resetCoordinator runs
     // (resetCoordinator would nuke + respawn — we must not reach it).
-    const agentDir = join(tempDir, ".ittybitty", "agents", "coord-x");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "coord-x");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "coord-x", tmux_session: "ib-coord-x", agentType: "coordinator",
@@ -15902,7 +15941,7 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
   // Returns the WORKTREE agent dir; readers of the outbox queue should use
   // `queueDirOf(id)` instead.
   async function plantSurvivor(id: string): Promise<string> {
-    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    const agentDir = join(repoDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
@@ -15920,7 +15959,7 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
 
   // Plant a to-be-torn-down agent with a real worktree dir (needed by merge).
   async function plantDeparting(id: string): Promise<string> {
-    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    const agentDir = join(repoDir, ".itsybitsy", "agents", id);
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
@@ -16142,7 +16181,7 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
     const recs = await readChannel("backend");
     expect(recs.filter((r) => r.kind === "system" && r.message === "left the team")).toEqual([]);
     // And the agent itself is still there.
-    expect(await Bun.file(join(repoDir, ".ittybitty", "agents", "agent-kept", "meta.json")).exists()).toBe(true);
+    expect(await Bun.file(join(repoDir, ".itsybitsy", "agents", "agent-kept", "meta.json")).exists()).toBe(true);
   });
 
   // --- nukeAgent (coalesced) ----------------------------------------------
@@ -16160,11 +16199,11 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
     // Make b and c descendants of a so getDescendantsRecursive picks all three.
     await Bun.write(join(aDir, "meta.json"), JSON.stringify({ id: "agent-a", tmux_session: "t-agent-a", manager: "" }));
     await Bun.write(
-      join(repoDir, ".ittybitty", "agents", "agent-b", "meta.json"),
+      join(repoDir, ".itsybitsy", "agents", "agent-b", "meta.json"),
       JSON.stringify({ id: "agent-b", tmux_session: "t-agent-b", manager: "agent-a" }),
     );
     await Bun.write(
-      join(repoDir, ".ittybitty", "agents", "agent-c", "meta.json"),
+      join(repoDir, ".itsybitsy", "agents", "agent-c", "meta.json"),
       JSON.stringify({ id: "agent-c", tmux_session: "t-agent-c", manager: "agent-a" }),
     );
     for (const id of ["agent-a", "agent-b", "agent-c", "agent-d"]) {
@@ -16207,10 +16246,10 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
     // manager tears down manager+leaf, so exactly ONE member departs T → the
     // singular "1 member left @T" coalesced notice goes to the survivor.
     await createTeam("T", "", 1000);
-    const mgrDir = join(repoDir, ".ittybitty", "agents", "agent-mgr");
+    const mgrDir = join(repoDir, ".itsybitsy", "agents", "agent-mgr");
     await mkdir(join(mgrDir, "repo"), { recursive: true });
     await Bun.write(join(mgrDir, "meta.json"), JSON.stringify({ id: "agent-mgr", tmux_session: "t-agent-mgr", manager: "" }));
-    const leafDir = join(repoDir, ".ittybitty", "agents", "agent-leaf");
+    const leafDir = join(repoDir, ".itsybitsy", "agents", "agent-leaf");
     await mkdir(join(leafDir, "repo"), { recursive: true });
     await Bun.write(join(leafDir, "meta.json"), JSON.stringify({ id: "agent-leaf", tmux_session: "t-agent-leaf", manager: "agent-mgr" }));
     const survivorDir = await plantSurvivor("agent-keep");
@@ -16274,7 +16313,7 @@ describe("teamAdd suppressJoinNotice opt", () => {
   // Plant a real agent so readAllAgents surfaces it. The transient with a
   // watchdog pid makes sendMessage defer to the outbox queue.
   async function plant(id: string): Promise<string> {
-    const agentDir = join(repoDir, ".ittybitty", "agents", id);
+    const agentDir = join(repoDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     await mkdir(queueDirOf(id), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `t-${id}` }));
@@ -16600,11 +16639,11 @@ describe("checkPathsRepoContainment", () => {
 
   test("errors on an allow entry resolving under the agents directory", () => {
     const result = checkPathsRepoContainment(
-      { allowRead: [], allowWrite: [entry(".ittybitty/agents/agent-x/repo/src")], deny: [] },
+      { allowRead: [], allowWrite: [entry(".itsybitsy/agents/agent-x/repo/src")], deny: [] },
       repoRoot,
     );
     expect(result.error).toBeDefined();
-    expect(result.error).toContain(canonicalizeSandboxPath(join(repoRoot, ".ittybitty/agents")));
+    expect(result.error).toContain(canonicalizeSandboxPath(join(repoRoot, ".itsybitsy/agents")));
     expect(result.error).toContain("dead entry");
   });
 
@@ -16629,7 +16668,7 @@ describe("checkPathsRepoContainment", () => {
 
   test("does not check deny entries (a deny under the agents dir is allowed)", () => {
     const result = checkPathsRepoContainment(
-      { allowRead: [], allowWrite: [], deny: [entry(".ittybitty/agents/secret")] },
+      { allowRead: [], allowWrite: [], deny: [entry(".itsybitsy/agents/secret")] },
       repoRoot,
     );
     expect(result.error).toBeUndefined();
@@ -16637,7 +16676,7 @@ describe("checkPathsRepoContainment", () => {
   });
 
   test("errors on a glob whose literal directory is under the agents dir", () => {
-    const agentsDir = canonicalizeSandboxPath(join(repoRoot, ".ittybitty/agents"));
+    const agentsDir = canonicalizeSandboxPath(join(repoRoot, ".itsybitsy/agents"));
     const result = checkPathsRepoContainment(
       { allowRead: [`${agentsDir}/**`], allowWrite: [], deny: [] },
       repoRoot,

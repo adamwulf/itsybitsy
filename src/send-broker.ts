@@ -1,10 +1,11 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Watchdog send broker — how a SANDBOXED agent sends to an agent in another repo.
  *
  * For an agent target, writing the message is not the problem: agent outboxes
  * live in `~/.itsybitsy/agents/<id>/` (outbox.ts), which the sandbox grants.
  * Finding the target is. `ib send` resolves it by listing the
- * `.ittybitty/agents` directory of every registered repo. A worktree agent's
+ * `.itsybitsy/agents` directory of every registered repo. A worktree agent's
  * profile grants that directory for its own repo only, so every other repo
  * fails with EPERM and the target is reported as not found. `@system` is new
  * reach: its outbox is in `~/.itsybitsy/` itself and its delivery needs tmux,
@@ -133,7 +134,7 @@ interface AgentLocation {
  */
 async function isAgentAt(agent: Agent, self: AgentLocation): Promise<boolean> {
   if (agent.id === self.id && resolve(agent.repoPath) === resolve(self.repoPath)) return true;
-  return isSameDirectory(agent.storageDir ?? join(agent.repoPath, ".ittybitty", "agents", agent.id), self.agentDir);
+  return isSameDirectory(agent.storageDir ?? runtimeNames.agentDir(agent.repoPath, agent.id), self.agentDir);
 }
 
 /** Strictly parse an untrusted request; only the allowlisted fields survive. */

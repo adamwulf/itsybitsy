@@ -284,11 +284,11 @@ describe("sandbox profile emission", () => {
   });
 
   test("REPOID is a read-only root for a spawner and absent for a non-spawner", () => {
-    // `ib new-agent` reads <repo>/.ittybitty/repo-id from inside the spawner's
+    // `ib new-agent` reads <repo>/.itsybitsy/repo-id from inside the spawner's
     // sandbox to name and seal its child. It must be readable but never
     // writable (the id keys every tmux session name and seal of the repo), and
     // a non-spawner never gets it.
-    const idFile = "/tmp/itsybitsy-repo/.ittybitty/repo-id";
+    const idFile = "/tmp/itsybitsy-repo/.itsybitsy/repo-id";
     const withId = { ...PARAMS, REPOID: idFile };
     const spawner = { ...withId, canSpawnChildren: true };
     const nonSpawner = { ...withId, canSpawnChildren: false };
@@ -299,14 +299,14 @@ describe("sandbox profile emission", () => {
     expect(spawnerProfile).not.toContain('(allow file-write* (subpath (param "REPOID")))');
 
     const spawnerValues = sandboxProfileParameterValues(EMPTY_PATHS, spawner);
-    expect(spawnerValues.REPOID).toBe("/private/tmp/itsybitsy-repo/.ittybitty/repo-id");
+    expect(spawnerValues.REPOID).toBe("/private/tmp/itsybitsy-repo/.itsybitsy/repo-id");
     // The evaluator compares canonical paths (/tmp is a symlink to /private/tmp).
     const canonicalId = spawnerValues.REPOID!;
     expect(evaluateProfileAccess(spawnerProfile, spawnerValues, canonicalId, "read")).toBe("allow");
     expect(evaluateProfileAccess(spawnerProfile, spawnerValues, canonicalId, "write")).toBe("deny");
-    // The grant is the one file, not the .ittybitty directory around it.
+    // The grant is the one file, not the .itsybitsy directory around it.
     expect(evaluateProfileAccess(
-      spawnerProfile, spawnerValues, "/private/tmp/itsybitsy-repo/.ittybitty/other", "read",
+      spawnerProfile, spawnerValues, "/private/tmp/itsybitsy-repo/.itsybitsy/other", "read",
     )).toBe("deny");
 
     const nonSpawnerProfile = generateProfile(EMPTY_CONFIG, EMPTY_PATHS, nonSpawner);
@@ -422,7 +422,7 @@ describe("sandbox profile emission", () => {
     const profile = generateProfile(
       config({ rawAllow: ["(allow process*)", "(deny network*)", ' ( deny  file-read* (literal "/x (deny y)") ) '] }),
       paths({ allowRead: ["/tmp/read-only"], allowWrite: ["/tmp/shared"], deny: ["/tmp/shared/secret", "**/.env"] }),
-      { ...PARAMS, REPOID: "/tmp/itsybitsy-repo/.ittybitty/repo-id", canSpawnChildren: true },
+      { ...PARAMS, REPOID: "/tmp/itsybitsy-repo/.itsybitsy/repo-id", canSpawnChildren: true },
     );
     const denies = profile.trimEnd().split("\n").filter((line) => line.startsWith("(deny"));
     // default, 2 read-only write denies (/tmp/read-only, REPOID), 2 raw, 2 per
@@ -877,10 +877,10 @@ function floorLayout(roots: FloorLayoutRoots, baselinePaths: PathsConfig) {
   const exampleTwoDesktop = join(exampleTwoRoot, "Desktop/file.txt");
   const tieFile = join(root, "examples/tie/file.txt");
   const params: SandboxProfileParams = {
-    AGENTDIR: join(root, "Developer/app/.ittybitty/agents/live"),
-    WORKTREE: join(root, "Developer/app/.ittybitty/agents/live/repo"),
+    AGENTDIR: join(root, "Developer/app/.itsybitsy/agents/live"),
+    WORKTREE: join(root, "Developer/app/.itsybitsy/agents/live/repo"),
     GITDIR: join(root, "Developer/app/.git/worktrees/live"),
-    REPOAGENTS: join(root, "Developer/app/.ittybitty/agents"),
+    REPOAGENTS: join(root, "Developer/app/.itsybitsy/agents"),
     PARENTCLAUDE: join(root, "Developer/app/.claude"),
     TMUXSOCK: tmuxSockStandin,
     canSpawnChildren: false,
@@ -1009,20 +1009,20 @@ describe("most-specific filesystem access oracle", () => {
   async function buildAccessFixtures(): Promise<AccessFixture[]> {
     const home = "/Users/sandbox-test-user";
     const ordinaryParams: SandboxProfileParams = {
-      AGENTDIR: "/runtime/repo/.ittybitty/agents/oracle",
-      WORKTREE: "/runtime/repo/.ittybitty/agents/oracle/repo",
+      AGENTDIR: "/runtime/repo/.itsybitsy/agents/oracle",
+      WORKTREE: "/runtime/repo/.itsybitsy/agents/oracle/repo",
       GITDIR: "/runtime/repo/.git/worktrees/oracle",
-      REPOAGENTS: "/runtime/repo/.ittybitty/agents",
+      REPOAGENTS: "/runtime/repo/.itsybitsy/agents",
       PARENTCLAUDE: "/runtime/repo/.claude",
       TMUXSOCK: "/private/tmp/tmux-501",
       canSpawnChildren: false,
       HOME: home,
     };
     const developerParams: SandboxProfileParams = {
-      AGENTDIR: `${home}/Developer/app/.ittybitty/agents/oracle`,
-      WORKTREE: `${home}/Developer/app/.ittybitty/agents/oracle/repo`,
+      AGENTDIR: `${home}/Developer/app/.itsybitsy/agents/oracle`,
+      WORKTREE: `${home}/Developer/app/.itsybitsy/agents/oracle/repo`,
       GITDIR: `${home}/Developer/app/.git/worktrees/oracle`,
-      REPOAGENTS: `${home}/Developer/app/.ittybitty/agents`,
+      REPOAGENTS: `${home}/Developer/app/.itsybitsy/agents`,
       PARENTCLAUDE: `${home}/Developer/app/.claude`,
       TMUXSOCK: "/private/tmp/tmux-501",
       canSpawnChildren: false,
@@ -1611,7 +1611,7 @@ describe("LIVE claude boot under the floor", () => {
       // floor's ~/.claude, ~/.claude.json, and ~/Library/Keychains grant the
       // real config claude reads at boot (the floor was bisected against it).
       const repoRoot = join(root, "repo-root");
-      const repoAgents = join(repoRoot, ".ittybitty", "agents");
+      const repoAgents = join(repoRoot, ".itsybitsy", "agents");
       const agentDir = join(repoAgents, "boot");
       const worktree = join(agentDir, "repo");
       const parentClaude = join(repoRoot, ".claude");
@@ -2159,7 +2159,7 @@ describe("canonicalization without reading what the agent may not read", () => {
     try {
       // tmpdir() is /var/folders/… (not canonical), like an uncanonicalized root.
       const home = join(created, "home");
-      const agentDir = join(created, "repo", ".ittybitty", "agents", "a1");
+      const agentDir = join(created, "repo", ".itsybitsy", "agents", "a1");
       await mkdir(join(agentDir, "repo"), { recursive: true });
       await mkdir(join(home, ".ssh"), { recursive: true });
       await mkdir(join(created, "repo", ".git"), { recursive: true });
@@ -2173,9 +2173,9 @@ describe("canonicalization without reading what the agent may not read", () => {
           AGENTDIR: agentDir,
           WORKTREE: join(agentDir, "repo"),
           GITDIR: join(created, "repo", ".git"),
-          REPOAGENTS: join(created, "repo", ".ittybitty", "agents"),
+          REPOAGENTS: join(created, "repo", ".itsybitsy", "agents"),
           PARENTCLAUDE: join(created, "repo", ".claude"),
-          REPOID: join(created, "repo", ".ittybitty", "repo-id"),
+          REPOID: join(created, "repo", ".itsybitsy", "repo-id"),
           TMUXSOCK: "/tmp/tmux-stored-table-test",
           canSpawnChildren,
           PROJECTDIR: join(home, ".claude", "projects", "x"),

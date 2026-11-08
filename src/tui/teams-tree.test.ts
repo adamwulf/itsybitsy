@@ -25,7 +25,7 @@ function makeAgent(
     meta: {
       id,
       session_id: `sess-${id}`,
-      tmux_session: `ittybitty-${repoName}-${id}`,
+      tmux_session: `itsybitsy-${repoName}-${id}`,
       prompt: `Task for ${id}`,
       manager: null,
       created: "2025-01-01T00:00:00Z",

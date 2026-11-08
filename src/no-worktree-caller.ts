@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { readdir, realpath } from "fs/promises";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
@@ -115,11 +116,11 @@ function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
 async function isRegisteredAgentWorktree(cwd: string, roots: string[]): Promise<boolean> {
   try {
     const canonicalCwd = await realpath(cwd);
-    const match = canonicalCwd.match(/^(.*?)\/\.ittybitty\/agents\/([^/]+)\/repo(?:\/|$)/);
+    const match = runtimeNames.matchWorktreeCaller(canonicalCwd);
     if (!match || !roots.includes(match[1]!) || !isValidAgentId(match[2]!)) return false;
     const repoPath = match[1]!;
     const agentId = match[2]!;
-    const agentDir = join(repoPath, ".ittybitty", "agents", agentId);
+    const agentDir = runtimeNames.agentDir(repoPath, agentId);
     const worktreePath = join(agentDir, "repo");
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     if (!meta || Array.isArray(meta) || meta.id !== agentId || meta.worktree === false) return false;
@@ -165,7 +166,7 @@ export async function resolveNoWorktreeCaller(
   const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir);
   if (await isRegisteredAgentWorktree(cwd, roots)) return null;
   for (const repoPath of roots) {
-    const agentsDir = join(repoPath, ".ittybitty", "agents");
+    const agentsDir = runtimeNames.agentsDir(repoPath);
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
       if (error.code === "ENOTDIR" || isSkippableRepoError(error)) return [];
       throw error;

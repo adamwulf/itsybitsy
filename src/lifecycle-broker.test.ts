@@ -34,7 +34,7 @@ describe("lifecycle broker", () => {
     home = await mkdtemp(join(tmpdir(), "ib-lifecycle-home-"));
     setUserHome(home);
     repo = await mkdtemp(join(tmpdir(), "ib-lifecycle-"));
-    agentsDir = join(repo, ".ittybitty", "agents");
+    agentsDir = join(repo, ".itsybitsy", "agents");
     agentDir = join(agentsDir, MANAGER_ID);
     await mkdir(agentDir, { recursive: true });
   });
@@ -105,7 +105,7 @@ describe("lifecycle broker", () => {
 
   /** Put a retired agent's archive on disk, where the authorization rule reads it. */
   async function writeArchive(id: string, meta: Record<string, unknown>): Promise<void> {
-    const archiveDir = join(repo, ".ittybitty", "archive", `20260703-120000-${id}`);
+    const archiveDir = join(repo, ".itsybitsy", "archive", `20260703-120000-${id}`);
     await mkdir(archiveDir, { recursive: true });
     await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id, ...meta }));
   }
@@ -354,14 +354,14 @@ describe("lifecycle broker", () => {
 
     test("the target is resolved from the requester's repo on disk", async () => {
       // No findAgent seam: the production lookup reads the agents directory.
-      await writeAgent(CHILD_ID, { manager: MANAGER_ID, tmux_session: "ittybitty-test-child" });
+      await writeAgent(CHILD_ID, { manager: MANAGER_ID, tmux_session: "itsybitsy-test-child" });
       const { deps, retired } = server({ findAgent: undefined });
       await queue(ID_A, retireRequest(ID_A));
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(retired).toHaveLength(1);
       expect(retired[0]!.id).toBe(CHILD_ID);
       expect(retired[0]!.repoPath).toBe(repo);
-      expect(retired[0]!.meta.tmux_session).toBe("ittybitty-test-child");
+      expect(retired[0]!.meta.tmux_session).toBe("itsybitsy-test-child");
     });
 
     test("the spawner of the target may act on it", async () => {
@@ -696,7 +696,7 @@ describe("lifecycle broker", () => {
   // leaves its loop at once: no heartbeat, and nobody to serve a request. That
   // is why such a caller is never routed here.
   test("a worktree:false agent's watchdog does not stay up", async () => {
-    await writeAgent(MANAGER_ID, { worktree: false, tmux_session: "ittybitty-test-manager" });
+    await writeAgent(MANAGER_ID, { worktree: false, tmux_session: "itsybitsy-test-manager" });
     const started = Date.now();
     await runPerAgentWatchdog(MANAGER_ID, repo);
     expect(Date.now() - started).toBeLessThan(2000);

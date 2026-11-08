@@ -58,7 +58,7 @@ describe("sendMessage centralized outbox location", () => {
     baseDir = await mkdtemp(join(tmpdir(), "outbox-path-send-"));
     repoDir = join(baseDir, "repo");
     coordHome = join(baseDir, ".itsybitsy");
-    perWorktreeAgentDir = join(repoDir, ".ittybitty", "agents", "agent-target");
+    perWorktreeAgentDir = join(repoDir, ".itsybitsy", "agents", "agent-target");
     // Set the coordinator-home BEFORE computing centralQueueDir so
     // agentOutboxDir resolves into our sandbox.
     setCoordinatorHome(coordHome);

@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Watchdog spawn broker — how a SANDBOXED agent spawns a child agent.
  *
@@ -15,7 +16,7 @@
  * The child is then launched exactly as for any spawn: its CLI is wrapped in its
  * OWN profile by start.sh, and it gets its own (unsandboxed) watchdog.
  *
- * Files live in the requesting agent's own directory (`<repo>/.ittybitty/agents/
+ * Files live in the requesting agent's own directory (`<repo>/.itsybitsy/agents/
  * <id>/`), the one place a sandboxed agent can always write:
  *   spawn-requests/<id>.json   client -> watchdog
  *   spawn-results/<id>.json    watchdog -> client
@@ -39,7 +40,7 @@
  * the transport, the routing rule and the requester check defined here.
  *
  * Known limitation (SPEC-SANDBOX §4C.6): while a spawner still holds a WRITE
- * grant on `.ittybitty/agents` it can write another agent's request directory in
+ * grant on `.itsybitsy/agents` it can write another agent's request directory in
  * the same repo. Dropping that grant for spawners is the follow-up that removes
  * the impersonation path.
  */
@@ -471,7 +472,7 @@ export async function processSpawnRequests(
   repoPath: string,
   deps: SpawnServerDeps = {},
 ): Promise<number> {
-  const agentDir = join(repoPath, ".ittybitty", "agents", agentId);
+  const agentDir = runtimeNames.agentDir(repoPath, agentId);
   const nowMs = (deps.now ?? Date.now)();
   await pruneStaleResults(agentDir, nowMs);
 

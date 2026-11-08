@@ -90,7 +90,7 @@ describe("hookCodexUserPromptSubmitDryRun", () => {
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "codex-ups-dryrun-"));
     setUserHome(tempHome);
-    agentDir = join(tempHome, ".ittybitty", "agents", "agent-dryrun01");
+    agentDir = join(tempHome, "project", ".itsybitsy", "agents", "agent-dryrun01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
       join(agentDir, "meta.json"),
@@ -117,7 +117,7 @@ describe("hookCodexUserPromptSubmitDryRun", () => {
 
   test("throws when meta.json is missing or the id is invalid", async () => {
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await expect(hookCodexUserPromptSubmitDryRun("agent-missing")).rejects.toThrow(/meta\.json not found/);
     } finally {
@@ -145,7 +145,7 @@ describe("LIVE: codex UserPromptSubmit on the installed codex", () => {
     const session = `ib-live-codex-ups-${process.pid}`;
     const agentId = "agent-livecodex1";
     const repo = join(root, "repo");
-    const agentDir = join(repo, ".ittybitty", "agents", agentId);
+    const agentDir = join(repo, ".itsybitsy", "agents", agentId);
     const worktree = join(agentDir, "repo");
     const metaPath = join(agentDir, "meta.json");
     // One ordered log for BOTH hooks. Each wrapper appends its line after its
@@ -272,7 +272,7 @@ describe("LIVE: codex UserPromptSubmit on the installed codex", () => {
         ibBinaryPath: ib,
         agentId,
         agentDir,
-        extraWritableRoots: [join(repo, ".ittybitty")],
+        extraWritableRoots: [join(repo, ".itsybitsy")],
       });
       const launch = args.map((arg) => arg
         .replace(`${ib} hooks codex-user-prompt-submit ${agentId}`, `${upsWrapper} ${agentId}`)

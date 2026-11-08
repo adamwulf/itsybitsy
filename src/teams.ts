@@ -3,7 +3,7 @@
  *
  * A team is a named, cross-repo group of agents that share a "chat room":
  * `ib send @<team>` fans out to every member except the sender. Because teams
- * span repos, their state cannot live in any one repo's `.ittybitty/` directory
+ * span repos, their state cannot live in any one repo's `.itsybitsy/` directory
  * — it lives at the user-wide tier alongside `repos.json` and `config.json`, at
  * `~/.itsybitsy/teams.json` (§16.2).
  *

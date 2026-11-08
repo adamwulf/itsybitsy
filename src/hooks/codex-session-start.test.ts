@@ -227,7 +227,7 @@ describe("hookCodexSessionStart — role text in additionalContext", () => {
     tempHome = await mkdtemp(join(tmpdir(), "codex-ss-role-"));
     setUserHome(tempHome);
     await (await import("../agent-types")).ensureAgentTypesDir();
-    agentDir = join(tempHome, "project", ".ittybitty", "agents", "agent-role01");
+    agentDir = join(tempHome, "project", ".itsybitsy", "agents", "agent-role01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
       join(agentDir, "meta.json"),
@@ -262,7 +262,7 @@ describe("hookCodexSessionStart — role text in additionalContext", () => {
     expect(context).toBe(await buildAgentRoleBody(detectRole(join(agentDir, "repo"), meta, "agent-role01")));
     expect(context).toContain("agent-role01");
     expect(context).toContain("agent-mgr01");
-    expect(context).not.toContain("<ittybitty>");
+    expect(context).not.toContain("<itsybitsy>");
   });
 });
 
@@ -274,7 +274,7 @@ describe("hookCodexSessionStartDryRun — exercises real handler with synthetic 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "codex-ss-dryrun-"));
     setUserHome(tempHome);
-    agentDir = join(tempHome, ".ittybitty", "agents", "agent-dryrun01");
+    agentDir = join(tempHome, "project", ".itsybitsy", "agents", "agent-dryrun01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
       join(agentDir, "meta.json"),
@@ -293,7 +293,7 @@ describe("hookCodexSessionStartDryRun — exercises real handler with synthetic 
 
   test("succeeds when meta.json exists", async () => {
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await hookCodexSessionStartDryRun("agent-dryrun01");
     } finally {
@@ -303,7 +303,7 @@ describe("hookCodexSessionStartDryRun — exercises real handler with synthetic 
 
   test("throws when meta.json is missing", async () => {
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await expect(hookCodexSessionStartDryRun("agent-missing")).rejects.toThrow(/meta\.json not found/);
     } finally {
@@ -318,7 +318,7 @@ describe("hookCodexSessionStartDryRun — exercises real handler with synthetic 
   test("does NOT mutate meta.json (skipMetaWrites is set)", async () => {
     const before = await Bun.file(join(agentDir, "meta.json")).text();
     const origCwd = process.cwd();
-    process.chdir(tempHome);
+    process.chdir(join(tempHome, "project"));
     try {
       await hookCodexSessionStartDryRun("agent-dryrun01");
     } finally {

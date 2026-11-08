@@ -87,8 +87,8 @@ describe("encodeClaudeProjectPath", () => {
 
   test("matches ib's encode_claude_project_path behavior", () => {
     // ib uses: echo "$path" | tr '/.' '--'
-    const path = "/Users/adamwulf/Developer/bun/itsybitsy/.ittybitty/agents/agent-123/repo";
-    const expected = "-Users-adamwulf-Developer-bun-itsybitsy--ittybitty-agents-agent-123-repo";
+    const path = "/Users/adamwulf/Developer/bun/itsybitsy/.itsybitsy/agents/agent-123/repo";
+    const expected = "-Users-adamwulf-Developer-bun-itsybitsy--itsybitsy-agents-agent-123-repo";
     expect(encodeClaudeProjectPath(path)).toBe(expected);
   });
 });
@@ -97,8 +97,8 @@ describe("transcriptPath", () => {
   test("builds correct path for worktree agent", () => {
     const agent = makeAgent();
     const path = transcriptPath(agent);
-    // agentWorktreePath joins with ".ittybitty" (see agents.ts line 51)
-    const worktree = "/tmp/test-repo/.ittybitty/agents/agent-abc123/repo";
+    // agentWorktreePath joins with ".itsybitsy" (see agents.ts line 51)
+    const worktree = "/tmp/test-repo/.itsybitsy/agents/agent-abc123/repo";
     const encoded = encodeClaudeProjectPath(worktree);
     const home = process.env.HOME!;
     expect(path).toBe(join(home, ".claude", "projects", encoded, "sess-001.jsonl"));
@@ -523,7 +523,7 @@ describe("checkAndCompact — agent.log audit line", () => {
 
   beforeEach(async () => {
     tempRepo = await mkdtemp(join(tmpdir(), "auto-compact-log-"));
-    agentDir = join(tempRepo, ".ittybitty", "agents", "agent-abc123");
+    agentDir = join(tempRepo, ".itsybitsy", "agents", "agent-abc123");
     await mkdir(agentDir, { recursive: true });
     logPath = join(agentDir, "agent.log");
     setCompactSpawnRunner(() => ({ exited: Promise.resolve(0) }));

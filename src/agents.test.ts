@@ -886,8 +886,8 @@ describe("readRepoAgents", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("reads agents from .ittybitty/agents/", async () => {
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-abc");
+  test("reads agents from .itsybitsy/agents/", async () => {
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),
@@ -915,7 +915,7 @@ describe("readRepoAgents", () => {
   });
 
   test("reads archived agents", async () => {
-    const archiveDir = join(tempDir, ".ittybitty", "archive", "agent-old");
+    const archiveDir = join(tempDir, ".itsybitsy", "archive", "agent-old");
     await mkdir(archiveDir, { recursive: true });
     await Bun.write(
       join(archiveDir, "meta.json"),
@@ -935,7 +935,7 @@ describe("readRepoAgents", () => {
     );
 
     // Need agents/ dir to exist (even empty) since readRepoAgents reads both
-    await mkdir(join(tempDir, ".ittybitty", "agents"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents"), { recursive: true });
 
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(errors.length).toBe(0);
@@ -944,7 +944,7 @@ describe("readRepoAgents", () => {
     expect(agents[0]!.meta.worker).toBe(true);
   });
 
-  test("returns empty for missing .ittybitty dir", async () => {
+  test("returns empty for missing .itsybitsy dir", async () => {
     const { agents, errors } = await readRepoAgents(tempDir, "test-repo");
     expect(agents.length).toBe(0);
     expect(errors.length).toBe(0);
@@ -952,7 +952,7 @@ describe("readRepoAgents", () => {
 
   test("includeArchived=false excludes archived agents and does not touch archive dir", async () => {
     // One active agent and one archived agent on disk.
-    const activeDir = join(tempDir, ".ittybitty", "agents", "agent-active");
+    const activeDir = join(tempDir, ".itsybitsy", "agents", "agent-active");
     await mkdir(activeDir, { recursive: true });
     await Bun.write(join(activeDir, "meta.json"), JSON.stringify({
       id: "agent-active", session_id: "s-a", tmux_session: "t-a",
@@ -961,7 +961,7 @@ describe("readRepoAgents", () => {
       worktree: true, worker: false, model: "sonnet", claude_pid: "1",
     }));
 
-    const archiveDir = join(tempDir, ".ittybitty", "archive", "agent-old");
+    const archiveDir = join(tempDir, ".itsybitsy", "archive", "agent-old");
     await mkdir(archiveDir, { recursive: true });
     await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({
       id: "agent-old", session_id: "s-o", tmux_session: "t-o",
@@ -985,7 +985,7 @@ describe("readRepoAgents", () => {
   });
 
   test("includeArchived=true (default) still reads archived agents", async () => {
-    const archiveDir = join(tempDir, ".ittybitty", "archive", "agent-old");
+    const archiveDir = join(tempDir, ".itsybitsy", "archive", "agent-old");
     await mkdir(archiveDir, { recursive: true });
     await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({
       id: "agent-old", session_id: "s-o", tmux_session: "t-o",
@@ -993,7 +993,7 @@ describe("readRepoAgents", () => {
       created_epoch: Math.floor(Date.now() / 1000) - 86400,
       worktree: true, worker: true, model: "opus", claude_pid: "2",
     }));
-    await mkdir(join(tempDir, ".ittybitty", "agents"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents"), { recursive: true });
 
     // Explicit true and the no-arg default must both include archived agents.
     const explicit = await readRepoAgents(tempDir, "test-repo", true);
@@ -1008,7 +1008,7 @@ describe("readRepoAgents", () => {
   test("reports error for malformed meta.json (non-recent dir)", async () => {
     // Override to simulate a directory that's past the grace period
     isRecentlyCreatedDirCtx.set(async () => false);
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-bad");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-bad");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), '{"not_valid": true}');
 
@@ -1020,7 +1020,7 @@ describe("readRepoAgents", () => {
 
   test("reports error for unparseable meta.json (non-recent dir)", async () => {
     isRecentlyCreatedDirCtx.set(async () => false);
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-corrupt");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-corrupt");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), "not json at all");
 
@@ -1032,7 +1032,7 @@ describe("readRepoAgents", () => {
 
   test("skips directories without meta.json (non-recent dir)", async () => {
     isRecentlyCreatedDirCtx.set(async () => false);
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-empty");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-empty");
     await mkdir(agentDir, { recursive: true });
     // No meta.json written
 
@@ -1044,7 +1044,7 @@ describe("readRepoAgents", () => {
 
   test("suppresses errors for recently-created agent directories", async () => {
     // Default isRecentlyCreatedDirCtx uses real birthtime — dirs just created are < 6s old
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-new");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-new");
     await mkdir(agentDir, { recursive: true });
     // No meta.json — simulates agent still being set up
 
@@ -1054,7 +1054,7 @@ describe("readRepoAgents", () => {
   });
 
   test("suppresses errors for malformed meta.json in recently-created dirs", async () => {
-    const agentDir = join(tempDir, ".ittybitsy", "agents", "agent-new2");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-new2");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), '{"not_valid": true}');
 
@@ -1073,7 +1073,7 @@ describe("readRepoAgents", () => {
       startEpochMs: Date.now() - 30_000, // 30s ago — well within window
     }));
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-spawning");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-spawning");
     await mkdir(agentDir, { recursive: true });
     // No meta.json — but a `[spawn] start` line in agent.log indicates active spawn.
     await Bun.write(
@@ -1095,7 +1095,7 @@ describe("readRepoAgents", () => {
     isRecentlyCreatedDirCtx.set(async () => false);
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-stale");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-stale");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "agent.log"),
@@ -1114,7 +1114,7 @@ describe("readRepoAgents", () => {
     isRecentlyCreatedDirCtx.set(async () => false);
     classifySpawnLogCtx.set(async () => ({ kind: "orphan" }));
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-failed");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-failed");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "agent.log"),
@@ -1142,7 +1142,7 @@ describe("readRepoAgents", () => {
       `${oneMinAgo.getFullYear()}-${pad(oneMinAgo.getMonth() + 1)}-${pad(oneMinAgo.getDate())} ` +
       `${pad(oneMinAgo.getHours())}:${pad(oneMinAgo.getMinutes())}:${pad(oneMinAgo.getSeconds())}`;
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-real");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-real");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "agent.log"),
@@ -1405,7 +1405,7 @@ describe("readAgentFileWindow / statAgentFileSize (per-file log tail reads)", ()
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-filewindow-test-"));
-    agentDir = join(tempDir, ".ittybitty", "agents", "agent-fw");
+    agentDir = join(tempDir, ".itsybitsy", "agents", "agent-fw");
     await mkdir(agentDir, { recursive: true });
     agent = makeAgent({ id: "agent-fw", repoPath: tempDir });
   });
@@ -1498,9 +1498,9 @@ describe("readPendingQuestions", () => {
   });
 
   test("reads pending questions from existing agents", async () => {
-    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-1"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-1"), { recursive: true });
     await Bun.write(
-      join(tempDir, ".ittybitty", "user-questions.json"),
+      join(tempDir, ".itsybitsy", "user-questions.json"),
       JSON.stringify({
         questions: [
           { id: "q-1", agent: "agent-1", question: "Should I?", timestamp: "2026-03-05T00:00:00Z", status: "pending" },
@@ -1517,9 +1517,9 @@ describe("readPendingQuestions", () => {
 
   test("filters out questions from agents that no longer exist", async () => {
     // Only agent-2 exists in agents dir; agent-1 does not
-    await mkdir(join(tempDir, ".ittybitty", "agents", "agent-2"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-2"), { recursive: true });
     await Bun.write(
-      join(tempDir, ".ittybitty", "user-questions.json"),
+      join(tempDir, ".itsybitsy", "user-questions.json"),
       JSON.stringify({
         questions: [
           { id: "q-1", agent: "agent-1", question: "Should I?", timestamp: "2026-03-05T00:00:00Z", status: "pending" },
@@ -1535,9 +1535,9 @@ describe("readPendingQuestions", () => {
 
   test("filters out all questions when agents directory does not exist", async () => {
     // Create questions file but no agents/ directory
-    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
     await Bun.write(
-      join(tempDir, ".ittybitty", "user-questions.json"),
+      join(tempDir, ".itsybitsy", "user-questions.json"),
       JSON.stringify({
         questions: [
           { id: "q-1", agent: "agent-ghost", question: "Hello?", timestamp: "2026-03-05T00:00:00Z", status: "pending" },
@@ -1555,8 +1555,8 @@ describe("readPendingQuestions", () => {
   });
 
   test("returns empty for malformed file", async () => {
-    await mkdir(join(tempDir, ".ittybitty"), { recursive: true });
-    await Bun.write(join(tempDir, ".ittybitty", "user-questions.json"), "garbage");
+    await mkdir(join(tempDir, ".itsybitsy"), { recursive: true });
+    await Bun.write(join(tempDir, ".itsybitsy", "user-questions.json"), "garbage");
     const questions = await readPendingQuestions(tempDir);
     expect(questions.length).toBe(0);
   });
@@ -1619,7 +1619,7 @@ describe("readAllAgents", () => {
 
   test("reads across multiple repos", async () => {
     // Create agent in repo 1
-    const dir1 = join(tempDir1, ".ittybitty", "agents", "agent-r1");
+    const dir1 = join(tempDir1, ".itsybitsy", "agents", "agent-r1");
     await mkdir(dir1, { recursive: true });
     await Bun.write(join(dir1, "meta.json"), JSON.stringify({
       id: "agent-r1", session_id: "s1", tmux_session: "t1",
@@ -1628,7 +1628,7 @@ describe("readAllAgents", () => {
     }));
 
     // Create agent in repo 2
-    const dir2 = join(tempDir2, ".ittybitty", "agents", "agent-r2");
+    const dir2 = join(tempDir2, ".itsybitsy", "agents", "agent-r2");
     await mkdir(dir2, { recursive: true });
     await Bun.write(join(dir2, "meta.json"), JSON.stringify({
       id: "agent-r2", session_id: "s2", tmux_session: "t2",
@@ -1655,7 +1655,7 @@ describe("readAllAgents", () => {
 
   test("includeArchived flag controls whether archived agents are returned", async () => {
     // repo1: one active agent
-    const active = join(tempDir1, ".ittybitty", "agents", "agent-active");
+    const active = join(tempDir1, ".itsybitsy", "agents", "agent-active");
     await mkdir(active, { recursive: true });
     await Bun.write(join(active, "meta.json"), JSON.stringify({
       id: "agent-active", session_id: "s1", tmux_session: "t1",
@@ -1665,9 +1665,9 @@ describe("readAllAgents", () => {
     }));
 
     // repo2: one archived agent (and an empty agents/ dir)
-    const archived = join(tempDir2, ".ittybitty", "archive", "agent-old");
+    const archived = join(tempDir2, ".itsybitsy", "archive", "agent-old");
     await mkdir(archived, { recursive: true });
-    await mkdir(join(tempDir2, ".ittybitty", "agents"), { recursive: true });
+    await mkdir(join(tempDir2, ".itsybitsy", "agents"), { recursive: true });
     await Bun.write(join(archived, "meta.json"), JSON.stringify({
       id: "agent-old", session_id: "s2", tmux_session: "t2",
       prompt: "p2", manager: null, created: "2026-03-04",
@@ -3899,7 +3899,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
   test("reap aborts when lifecycle metadata changes after observation", async () => {
     reapReadAgentMetaCtx.reset();
     const repoTmp = await mkdtemp(join(tmpdir(), "reap-revalidation-"));
-    const agentDir = join(repoTmp, ".ittybitty", "agents", "agent-race");
+    const agentDir = join(repoTmp, ".itsybitsy", "agents", "agent-race");
     await mkdir(agentDir, { recursive: true });
 
     const a = makeAgent({
@@ -4038,7 +4038,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
   test("lifecycle operation cannot start between final validation and teardown", async () => {
     acquireAgentLifecycleLockCtx.reset();
     const repoTmp = await mkdtemp(join(tmpdir(), "reap-lock-race-"));
-    const agentDir = join(repoTmp, ".ittybitty", "agents", "agent-lock-race");
+    const agentDir = join(repoTmp, ".itsybitsy", "agents", "agent-lock-race");
     await mkdir(agentDir, { recursive: true });
     const a = makeAgent({
       id: "agent-lock-race",
@@ -4129,7 +4129,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     // Create a real agent dir with meta.transient.json so readAgentTransient
     // returns the watchdog_pid we expect.
     const agentTmp = await mkdtemp(join(tmpdir(), "orphan-kill-agent-"));
-    const agentDir = join(agentTmp, ".ittybitty", "agents", "agent-1");
+    const agentDir = join(agentTmp, ".itsybitsy", "agents", "agent-1");
     await mkdir(agentDir, { recursive: true });
     const transient: TransientState = {
       tmux_compacting: false,
@@ -4179,7 +4179,7 @@ describe("detectAgentStates — reapOrphanedClaude", () => {
     });
 
     const agentTmp = await mkdtemp(join(tmpdir(), "orphan-kill-agent-"));
-    const agentDir = join(agentTmp, ".ittybitty", "agents", "agent-1");
+    const agentDir = join(agentTmp, ".itsybitsy", "agents", "agent-1");
     await mkdir(agentDir, { recursive: true });
     const transient: TransientState = {
       tmux_compacting: false,
@@ -4302,7 +4302,7 @@ describe("detectAgentStates — reap-pass memo", () => {
 
   /** A long-stopped agent on disk whose claude_pid gate resolves `stopped`. */
   async function makeStoppedAgent(id: string, meta: Partial<AgentMeta> = {}): Promise<Agent> {
-    await mkdir(join(repoTmp, ".ittybitty", "agents", id), { recursive: true });
+    await mkdir(join(repoTmp, ".itsybitsy", "agents", id), { recursive: true });
     return makeAgent({
       id,
       repoPath: repoTmp,
@@ -4330,7 +4330,7 @@ describe("detectAgentStates — reap-pass memo", () => {
       ...fields,
     };
     await writeFile(
-      join(repoTmp, ".ittybitty", "agents", agent.id, "meta.transient.json"),
+      join(repoTmp, ".itsybitsy", "agents", agent.id, "meta.transient.json"),
       JSON.stringify(transient)
     );
   }
@@ -4865,7 +4865,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
 
     // Real on-disk agent dir so reapOrphanedClaude finds a watchdog to kill.
     const agentTmp = await mkdtemp(join(tmpdir(), "claude-liveness-agent-"));
-    const agentDir = join(agentTmp, ".ittybitty", "agents", "agent-live-veto-wd");
+    const agentDir = join(agentTmp, ".itsybitsy", "agents", "agent-live-veto-wd");
     await mkdir(agentDir, { recursive: true });
     const transient: TransientState = {
       tmux_compacting: false,
@@ -5186,7 +5186,7 @@ describe("detectAgentStates — claude_pid liveness gate", () => {
 
     // Real on-disk agent dir so readAgentTransient finds the watchdog_pid
     const agentTmp = await mkdtemp(join(tmpdir(), "claude-liveness-agent-"));
-    const agentDir = join(agentTmp, ".ittybitty", "agents", "agent-1");
+    const agentDir = join(agentTmp, ".itsybitsy", "agents", "agent-1");
     await mkdir(agentDir, { recursive: true });
     const transient: TransientState = {
       tmux_compacting: false,
@@ -5735,7 +5735,7 @@ describe("readAllAgents — listTmuxSessions cache", () => {
   });
 
   test("readAgentsOfRepos reads the same agents as readAllAgents with no tmux client", async () => {
-    const dir = join(tempDir, ".ittybitty", "agents", "agent-r1");
+    const dir = join(tempDir, ".itsybitsy", "agents", "agent-r1");
     await mkdir(dir, { recursive: true });
     await Bun.write(join(dir, "meta.json"), JSON.stringify({
       id: "agent-r1", session_id: "s1", tmux_session: "t1",
@@ -6279,7 +6279,7 @@ describe("acquireAgentLifecycleLock — stale-lock reclamation", () => {
 
   // Regression: publishing the lock via a staging file moved the create from
   // `open(wx)` to Bun.write, which makes missing parent directories. Acquiring
-  // under a removed `.ittybitty/agents` tree therefore recreated it instead of
+  // under a removed `.itsybitsy/agents` tree therefore recreated it instead of
   // failing with ENOENT.
   test("acquiring under a deleted agents directory does not resurrect it", async () => {
     const goneDir = join(tempDir, "gone", "agent-x");
@@ -6705,7 +6705,7 @@ describe("detectAgentStates — operation op-branch", () => {
 
   /** Build an agent backed by a real dir, with an explicit claude_pid. */
   async function makeOpAgent(id: string, claudePid: string): Promise<Agent> {
-    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     return makeAgent({
       id,
@@ -6733,7 +6733,7 @@ describe("detectAgentStates — operation op-branch", () => {
     const now = 10_000_000;
     nowMsCtx.set(() => now);
     isPidAliveCtx.set(() => true); // op holder + claude both alive
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: now - 1_000 });
 
     await detectAgentStates([a]);
@@ -6745,7 +6745,7 @@ describe("detectAgentStates — operation op-branch", () => {
     const now = 10_000_000;
     nowMsCtx.set(() => now);
     isPidAliveCtx.set(() => true);
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await setAgentOperation(agentDir, { kind: "merge_check", pid: 4242, started_at_ms: now - 1_000 });
 
     await detectAgentStates([a]);
@@ -6757,7 +6757,7 @@ describe("detectAgentStates — operation op-branch", () => {
     const now = 10_000_000;
     nowMsCtx.set(() => now);
     isPidAliveCtx.set(() => true);
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await setAgentOperation(agentDir, { kind: "restarting", pid: 4242, started_at_ms: now - 1_000 });
 
     await detectAgentStates([a]);
@@ -6769,7 +6769,7 @@ describe("detectAgentStates — operation op-branch", () => {
     const now = 10_000_000;
     nowMsCtx.set(() => now);
     isPidAliveCtx.set(() => true); // holder alive, but op too old
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await setAgentOperation(agentDir, {
       kind: "merging",
       pid: 4242,
@@ -6785,7 +6785,7 @@ describe("detectAgentStates — operation op-branch", () => {
     const now = 10_000_000;
     nowMsCtx.set(() => now);
     isPidAliveCtx.set(() => true);
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await setAgentOperation(agentDir, {
       kind: "merging",
       pid: 4242,
@@ -6802,7 +6802,7 @@ describe("detectAgentStates — operation op-branch", () => {
     nowMsCtx.set(() => now);
     // claude_pid 12345 alive, op holder 4242 dead.
     isPidAliveCtx.set((pid: number) => pid !== 4242);
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: now - 100 });
 
     await detectAgentStates([a]);
@@ -6824,7 +6824,7 @@ describe("detectAgentStates — operation op-branch", () => {
     // claude_pid 99999 is DEAD; the op holder 4242 is ALIVE (the merge is
     // still grinding away in another process).
     isPidAliveCtx.set((pid: number) => pid === 4242);
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: now - 1_000 });
 
     await detectAgentStates([a]);
@@ -6839,7 +6839,7 @@ describe("detectAgentStates — operation op-branch", () => {
     // The claude_pid gate, if it ran first, would paint "stopped"; the op-branch
     // above it must win and paint "op_stuck".
     isPidAliveCtx.set(() => false);
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await setAgentOperation(agentDir, { kind: "merging", pid: 4242, started_at_ms: now - 1_000 });
 
     await detectAgentStates([a]);
@@ -6882,9 +6882,9 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     }) as any);
   }
 
-  /** Build an agent backed by a real .ittybitty/agents/<id>/ directory. */
+  /** Build an agent backed by a real .itsybitsy/agents/<id>/ directory. */
   async function makeBackedAgent(id: string, metaState: "running" | "waiting" = "running"): Promise<Agent> {
-    const agentDir = join(tempDir, ".ittybitty", "agents", id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     await mkdir(agentDir, { recursive: true });
     return makeAgent({
       id,
@@ -6926,7 +6926,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
@@ -6948,7 +6948,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: true,
       tmux_rate_limited: false,
@@ -6970,7 +6970,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: true,
@@ -6992,7 +6992,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
@@ -7014,7 +7014,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: false,
       tmux_rate_limited: false,
@@ -7036,7 +7036,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path
       tmux_rate_limited: false,
@@ -7065,7 +7065,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path if trusted
       tmux_rate_limited: false,
@@ -7093,7 +7093,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: true,
       tmux_rate_limited: false,
@@ -7115,7 +7115,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path
       tmux_rate_limited: false,
@@ -7145,7 +7145,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const a = await makeBackedAgent("agent-seed");
     isPidAliveCtx.set(() => true);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
     await writeAgentTransient(agentDir, {
       tmux_compacting: true, // would say compacting via fast-path if trusted
       tmux_rate_limited: false,
@@ -7176,7 +7176,7 @@ describe("detectAgentStates — meta.transient.json fast-path", () => {
     const fakeNow = 5_000_000;
     nowMsCtx.set(() => fakeNow);
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", a.id);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", a.id);
 
     // First call: disk says rate_limited
     await writeAgentTransient(agentDir, {
@@ -7223,7 +7223,7 @@ describe("archive cleanup deletes meta.transient.json", () => {
   test("archiveAgent deletes meta.transient.json", async () => {
     const { archiveAgent } = await import("./agent-lifecycle");
 
-    const agentDir = join(tempDir, ".ittybitty", "agents", "agent-arch");
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-arch");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-arch" }));
     await writeAgentTransient(agentDir, {

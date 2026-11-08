@@ -29,7 +29,7 @@ describe("spawn broker", () => {
 
   beforeEach(async () => {
     repo = await mkdtemp(join(tmpdir(), "ib-broker-"));
-    agentDir = join(repo, ".ittybitty", "agents", AGENT_ID);
+    agentDir = join(repo, ".itsybitsy", "agents", AGENT_ID);
     await mkdir(agentDir, { recursive: true });
   });
   afterEach(async () => {

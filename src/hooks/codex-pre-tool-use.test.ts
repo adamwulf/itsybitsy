@@ -26,9 +26,9 @@ function makeAccess(
   return prepareAccessTable(
     agentPathAccessTable({
       paths: { allowRead: [], allowWrite: [], deny: [], ...paths },
-      agentDir: "/repo/.ittybitty/agents/agent-abc123",
-      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
-      agentsDir: "/repo/.ittybitty/agents",
+      agentDir: "/repo/.itsybitsy/agents/agent-abc123",
+      worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
+      agentsDir: "/repo/.itsybitsy/agents",
       rootRepo: "/repo",
       gitDir: "/repo/.git",
       tmuxSock: "/private/tmp/tmux-501",
@@ -40,13 +40,13 @@ function makeAccess(
 function makeCtx(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
     agentId: "agent-abc123",
-    agentDir: "/repo/.ittybitty/agents/agent-abc123",
-    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
-    agentsDir: "/repo/.ittybitty/agents",
+    agentDir: "/repo/.itsybitsy/agents/agent-abc123",
+    worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
+    agentsDir: "/repo/.itsybitsy/agents",
     rootRepo: "/repo",
     allowList: ["Read", "Write", "Edit", "Bash"],
     access: makeAccess(),
-    protectedWritePaths: agentProtectedWritePaths("/repo/.ittybitty/agents/agent-abc123"),
+    protectedWritePaths: agentProtectedWritePaths("/repo/.itsybitsy/agents/agent-abc123"),
     ...overrides,
   };
 }
@@ -138,7 +138,7 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
     const decision = checkCodexPreToolUse(
       {
         toolName: "Bash",
-        toolInput: { command: "cd /repo/.ittybitty/agents/agent-other/repo" },
+        toolInput: { command: "cd /repo/.itsybitsy/agents/agent-other/repo" },
         cwd: ctx.worktreePath,
       },
       ctx,
@@ -183,7 +183,7 @@ describe("checkCodexPreToolUse — allow/deny matcher applies to Bash AND apply_
   test("apply_patch: target in another agent's worktree is denied", () => {
     const ctx = makeCtx();
     const patch =
-      "*** Begin Patch\n*** Add File: /repo/.ittybitty/agents/agent-other/repo/x.ts\n+x\n*** End Patch\n";
+      "*** Begin Patch\n*** Add File: /repo/.itsybitsy/agents/agent-other/repo/x.ts\n+x\n*** End Patch\n";
     const decision = checkCodexPreToolUse(
       { toolName: "apply_patch", toolInput: { command: patch }, cwd: ctx.worktreePath },
       ctx,
@@ -292,14 +292,14 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     );
 
     // Build a fake agent directory with a meta.json.
-    agentDir = join(tempHome, "fake-repo", ".ittybitty", "agents", "agent-test01");
+    agentDir = join(tempHome, "fake-repo", ".itsybitsy", "agents", "agent-test01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
       join(agentDir, "meta.json"),
       JSON.stringify({
         id: "agent-test01",
         session_id: "uuid",
-        tmux_session: "ittybitty-x-agent-test01",
+        tmux_session: "itsybitsy-x-agent-test01",
         prompt: "do work",
         manager: null,
         created: "2026-05-30",
@@ -736,11 +736,11 @@ describe("hookCodexPreToolUseDryRun — exercises real handler with synthetic pa
       "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n  deny: []\n---\n",
     );
     // Use cwd resolution that resolveAgentContext expects: cwd contains
-    // ".ittybitty/agents/<id>" — we use process.cwd() in the dry-run, so
-    // put the agent dir under the current cwd's .ittybitty/agents/...
+    // ".itsybitsy/agents/<id>" — we use process.cwd() in the dry-run, so
+    // put the agent dir under the current cwd's .itsybitsy/agents/...
     // Easier: pre-resolve by chdir'ing? No — use realpath default. Place
     // the agent dir under tempHome and rely on dir-resolution.
-    agentDir = join(tempHome, ".ittybitty", "agents", "agent-dryrun01");
+    agentDir = join(tempHome, "project", ".itsybitsy", "agents", "agent-dryrun01");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await writeFile(
       join(agentDir, "meta.json"),
@@ -761,7 +761,7 @@ describe("hookCodexPreToolUseDryRun — exercises real handler with synthetic pa
 
   test("succeeds when meta.json exists and the handler resolves cleanly", async () => {
     const origCwd = process.cwd();
-    process.chdir(join(tempHome));
+    process.chdir(join(tempHome, "project"));
     try {
       await hookCodexPreToolUseDryRun("agent-dryrun01");
     } finally {
@@ -771,7 +771,7 @@ describe("hookCodexPreToolUseDryRun — exercises real handler with synthetic pa
 
   test("throws when meta.json is missing", async () => {
     const origCwd = process.cwd();
-    process.chdir(join(tempHome));
+    process.chdir(join(tempHome, "project"));
     try {
       await expect(hookCodexPreToolUseDryRun("agent-missing")).rejects.toThrow(/meta\.json not found/);
     } finally {
@@ -799,7 +799,7 @@ describe("hookCodexPreToolUse — deny by default (Phase B invariant)", () => {
       join(typesDir, "_all.md"),
       "---\nname: _all\ndescription: shared\npermissions:\n  allow:\n    - Bash(ls:*)\n  deny: []\n---\n",
     );
-    agentDir = join(tempHome, "fake-repo", ".ittybitty", "agents", "agent-nometa");
+    agentDir = join(tempHome, "fake-repo", ".itsybitsy", "agents", "agent-nometa");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     // Deliberately NO meta.json.
   });

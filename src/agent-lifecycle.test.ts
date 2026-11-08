@@ -68,7 +68,7 @@ describe("agent-lifecycle", () => {
   describe("removeAgentQuestions", () => {
     test("removes questions for the given agent", async () => {
       const dir = await makeTempDir();
-      const ittyDir = join(dir, ".ittybitty");
+      const ittyDir = join(dir, ".itsybitsy");
       await mkdir(ittyDir, { recursive: true });
       const questionsPath = join(ittyDir, "user-questions.json");
       await Bun.write(
@@ -97,7 +97,7 @@ describe("agent-lifecycle", () => {
 
     test("does nothing if no questions array", async () => {
       const dir = await makeTempDir();
-      const ittyDir = join(dir, ".ittybitty");
+      const ittyDir = join(dir, ".itsybitsy");
       await mkdir(ittyDir, { recursive: true });
       await Bun.write(join(ittyDir, "user-questions.json"), JSON.stringify({ other: "data" }));
       await removeAgentQuestions(dir, "agent-abc");
@@ -113,8 +113,8 @@ describe("agent-lifecycle", () => {
       const dir = await makeTempDir();
       const repoPath = dir;
       const agentId = "agent-test";
-      const agentDir = join(dir, ".ittybitty", "agents", agentId);
-      const archiveDir = join(dir, ".ittybitty", "archive");
+      const agentDir = join(dir, ".itsybitsy", "agents", agentId);
+      const archiveDir = join(dir, ".itsybitsy", "archive");
       await mkdir(agentDir, { recursive: true });
       await mkdir(archiveDir, { recursive: true });
 
@@ -149,8 +149,8 @@ describe("agent-lifecycle", () => {
 
     test("archives settings.local.json (move) and debug-logs/ (copy)", async () => {
       const dir = await makeTempDir();
-      const agentDir = join(dir, ".ittybitty", "agents", "agent-test");
-      const archiveDir = join(dir, ".ittybitty", "archive");
+      const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
+      const archiveDir = join(dir, ".itsybitsy", "archive");
       await mkdir(agentDir, { recursive: true });
       await mkdir(archiveDir, { recursive: true });
       await mkdir(join(agentDir, "debug-logs"), { recursive: true });
@@ -178,7 +178,7 @@ describe("agent-lifecycle", () => {
 
     test("returns null if nothing to archive", async () => {
       const dir = await makeTempDir();
-      const agentDir = join(dir, ".ittybitty", "agents", "agent-empty");
+      const agentDir = join(dir, ".itsybitsy", "agents", "agent-empty");
       await mkdir(agentDir, { recursive: true });
 
       const result = await archiveAgent(dir, "agent-empty", agentDir);
@@ -190,14 +190,14 @@ describe("agent-lifecycle", () => {
 
     test("deletes outbox.jsonl and .outbox.lock (not archived)", async () => {
       const dir = await makeTempDir();
-      const agentDir = join(dir, ".ittybitty", "agents", "agent-test");
+      const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
       await mkdir(agentDir, { recursive: true });
       // The outbox queue now lives under the CENTRAL coordinator-home root.
       // Point coordinator-home into a sandbox subdir so agentOutboxDir
       // resolves there, plant the queue + lock there, then verify deletion.
       const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
       const { agentOutboxDir } = await import("./outbox");
-      const coordHome = join(dir, ".itsybitsy");
+      const coordHome = join(dir, "home", ".itsybitsy");
       setCoordinatorHome(coordHome);
       const queueDir = agentOutboxDir("agent-test");
       await mkdir(queueDir, { recursive: true });
@@ -214,7 +214,7 @@ describe("agent-lifecycle", () => {
         // (runtime state only, no historical value).
         expect(await Bun.file(join(queueDir, "outbox.jsonl")).exists()).toBe(false);
         expect(await Bun.file(join(queueDir, ".outbox.lock")).exists()).toBe(false);
-        const archiveDir = join(dir, ".ittybitty", "archive");
+        const archiveDir = join(dir, ".itsybitsy", "archive");
         const archiveEntries = await readdir(archiveDir);
         const archiveFolder = join(archiveDir, archiveEntries[0]!);
         expect(await Bun.file(join(archiveFolder, "outbox.jsonl")).exists()).toBe(false);
@@ -227,12 +227,12 @@ describe("agent-lifecycle", () => {
 
     test("removes the per-agent folder after a statusline rate-limit record was written", async () => {
       const dir = await makeTempDir();
-      const agentDir = join(dir, ".ittybitty", "agents", "agent-test");
+      const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
       await mkdir(agentDir, { recursive: true });
       const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
       const { agentOutboxDir } = await import("./outbox");
       const { recordClaudeRateLimits, CLAUDE_RATE_LIMITS_FILE } = await import("./claude-rate-limits");
-      setCoordinatorHome(join(dir, ".itsybitsy"));
+      setCoordinatorHome(join(dir, "home", ".itsybitsy"));
       const queueDir = agentOutboxDir("agent-test");
 
       try {
@@ -245,7 +245,7 @@ describe("agent-lifecycle", () => {
 
         // Without the record removed first, the rmdir fails and the folder
         // stays for good (and every usage read scans it).
-        expect(await readdir(join(dir, ".itsybitsy", "agents"))).toEqual([]);
+        expect(await readdir(join(dir, "home", ".itsybitsy", "agents"))).toEqual([]);
       } finally {
         resetCoordinatorHome();
         await rm(dir, { recursive: true, force: true });
@@ -254,6 +254,37 @@ describe("agent-lifecycle", () => {
   });
 
   describe("retirement manifest and archive discovery", () => {
+    for (const namespace of ["itsybitsy", "ittybitty"]) {
+      test(`accepts ${namespace} manifests and cleans their pending ref`, async () => {
+        const { setUserHome, resetUserHome } = await import("./home");
+        const dir = await makeTempDir();
+        setUserHome(join(dir, "home"));
+        const repo = join(dir, "repo");
+        await mkdir(repo);
+        const git = async (...args: string[]) => {
+          const proc = Bun.spawn(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+          const text = await new Response(proc.stdout).text();
+          expect(await proc.exited).toBe(0);
+          return text.trim();
+        };
+        try {
+          await git("init");
+          await git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "base");
+          const head = await git("rev-parse", "HEAD");
+          const key = "20261107-120000-agent-test";
+          const ref = `refs/${namespace}/retired/${key}/head`;
+          await git("update-ref", ref, head);
+          const manifest = { version: 1, agentId: "agent-test", retiredAt: "2026-11-07T12:00:00Z", repoPath: repo, archiveKey: key, worktree: true, gitHead: head, headRef: ref, untrackedFiles: [], prunedTeams: [] };
+          expect(parseRetirementManifest(manifest)?.headRef).toBe(ref);
+          const agentDir = join(repo, ".itsybitsy", "agents", "agent-test");
+          await mkdir(join(agentDir, ".retirement"), { recursive: true });
+          await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test" }));
+          await Bun.write(join(agentDir, ".retirement", "prepared-retirement.json"), JSON.stringify(manifest));
+          await archiveAgent(repo, "agent-test", agentDir);
+          expect(await git("for-each-ref", "--format=%(refname)", ref)).toBe("");
+        } finally { resetUserHome(); await rm(dir, { recursive: true, force: true }); }
+      });
+    }
     test("validates safe relative paths and rejects traversal", () => {
       expect(isSafeRetirementRelativePath("nested/file.txt")).toBe(true);
       expect(isSafeRetirementRelativePath("../escape")).toBe(false);
@@ -280,7 +311,7 @@ describe("agent-lifecycle", () => {
 
     test("scans timestamped folders by meta.id and returns newest first", async () => {
       const dir = await makeTempDir();
-      const archiveRoot = join(dir, ".ittybitty", "archive");
+      const archiveRoot = join(dir, ".itsybitsy", "archive");
       for (const stamp of ["20260703-110000", "20260703-120000"]) {
         const archiveKey = `${stamp}-agent-test`;
         const archiveDir = join(archiveRoot, archiveKey);
@@ -326,7 +357,7 @@ describe("agent-lifecycle", () => {
       setCoordinatorHome(home);
       try {
         const dir = await makeTempDir();
-        const agentDir = join(dir, ".ittybitty", "agents", "agent-arch");
+        const agentDir = join(dir, ".itsybitsy", "agents", "agent-arch");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-arch"}');
 
@@ -364,7 +395,7 @@ describe("agent-lifecycle", () => {
       setCoordinatorHome(home);
       try {
         const dir = await makeTempDir();
-        const agentDir = join(dir, ".ittybitty", "agents", "agent-solo");
+        const agentDir = join(dir, ".itsybitsy", "agents", "agent-solo");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-solo"}');
 
@@ -390,7 +421,7 @@ describe("agent-lifecycle", () => {
       setCoordinatorHome(home);
       try {
         const dir = await makeTempDir();
-        const agentDir = join(dir, ".ittybitty", "agents", "agent-empty");
+        const agentDir = join(dir, ".itsybitsy", "agents", "agent-empty");
         await mkdir(agentDir, { recursive: true }); // no output/agent/meta files
 
         await createTeam("backend", "", 1000);
@@ -427,7 +458,7 @@ describe("agent-lifecycle", () => {
       });
       try {
         const dir = await makeTempDir();
-        const agentDir = join(dir, ".ittybitty", "agents", "agent-td");
+        const agentDir = join(dir, ".itsybitsy", "agents", "agent-td");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-td"}');
 
@@ -452,7 +483,7 @@ describe("agent-lifecycle", () => {
       const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
       const home = await mkdtemp(join(tmpdir(), "lc-proxy-home-"));
       const dir = await makeTempDir();
-      const agentDir = join(dir, ".ittybitty", "agents", "agent-proxy");
+      const agentDir = join(dir, ".itsybitsy", "agents", "agent-proxy");
       await mkdir(agentDir, { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-proxy"}');
       await Bun.write(join(agentDir, "sandbox-proxy.pid"), "54321\n");
@@ -541,8 +572,8 @@ describe("agent-lifecycle", () => {
 
   describe("isRunningAsAgent", () => {
     test("returns true for agent worktree path", async () => {
-      expect(await isRunningAsAgent("/repos/proj/.ittybitty/agents/agent-abc/repo")).toBe(true);
-      expect(await isRunningAsAgent("/repos/proj/.ittybitty/agents/agent-abc/repo/src")).toBe(true);
+      expect(await isRunningAsAgent("/repos/proj/.itsybitsy/agents/agent-abc/repo")).toBe(true);
+      expect(await isRunningAsAgent("/repos/proj/.itsybitsy/agents/agent-abc/repo/src")).toBe(true);
     });
 
     test("returns false for non-agent paths (with TMUX unset)", async () => {
@@ -551,8 +582,8 @@ describe("agent-lifecycle", () => {
       delete process.env.TMUX;
       try {
         expect(await isRunningAsAgent("/repos/proj")).toBe(false);
-        expect(await isRunningAsAgent("/repos/proj/.ittybitty/agents")).toBe(false);
-        expect(await isRunningAsAgent("/repos/proj/.ittybitty/archive/agent-abc/repo")).toBe(false);
+        expect(await isRunningAsAgent("/repos/proj/.itsybitsy/agents")).toBe(false);
+        expect(await isRunningAsAgent("/repos/proj/.itsybitsy/archive/agent-abc/repo")).toBe(false);
       } finally {
         if (savedTmux !== undefined) process.env.TMUX = savedTmux;
       }

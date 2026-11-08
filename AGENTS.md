@@ -128,6 +128,7 @@ The interesting modules and their entry points:
 
 | Area | Module(s) |
 |---|---|
+| Runtime names and migration | `src/runtime-names.ts`, `scripts/update-repos.sh` |
 | Message-delivery queue | `src/outbox.ts`, `src/watchdog.ts` |
 | State detection | `src/agents.ts` (`detectAgentStates`, `writeAgentState`), `src/parse-state.ts` (legacy) |
 | Hooks | `src/hooks/` (path-isolation access table: `src/hooks/paths-table.ts`) |

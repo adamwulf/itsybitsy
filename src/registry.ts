@@ -1,6 +1,6 @@
 import { join, resolve, basename } from "path";
 import { userHome } from "./home";
-import { mkdir } from "fs/promises";
+import { mkdir, realpath } from "fs/promises";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
 // because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
@@ -159,6 +159,11 @@ export async function checkNewRepoEntry(
   repoName: string,
   registry: RegistryData,
 ): Promise<string | null> {
+  const canonicalRepo = await realpath(resolvedPath).catch(() => resolve(resolvedPath));
+  const canonicalHome = await realpath(userHome()).catch(() => resolve(userHome()));
+  if (canonicalRepo === canonicalHome) {
+    return "Cannot register $HOME as a repo: its runtime directory would collide with ~/.itsybitsy user-wide state";
+  }
   if (!isValidRepoName(repoName)) {
     return `"${repoName}" is not a valid repo name — use alphanumeric, hyphens, underscores only (1-64 chars)`;
   }

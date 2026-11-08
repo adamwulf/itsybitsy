@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Global PreToolUse hook: blocks primary Claude from cd-ing into agent worktrees.
  *
@@ -23,7 +24,7 @@ export interface MainPathResult {
 
 // ── Pattern ──────────────────────────────────────────────────────────────────
 
-const AGENT_WORKTREE_PATTERN = /\.ittybitty\/agents\/[^/]+\/repo(\/|$)/;
+const AGENT_WORKTREE_PATTERN = runtimeNames.AGENT_WORKTREE_PATTERN;
 
 // ── Pure decision logic ──────────────────────────────────────────────────────
 

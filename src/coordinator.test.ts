@@ -2893,7 +2893,7 @@ describe("checkCoordinatorExists", () => {
 
   test("returns exists when any agent has agentType: coordinator", async () => {
     const td = join(tmpdir(), `coord-true-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    const coordDir = join(td, ".ittybitty", "agents", "my-repo");
+    const coordDir = join(td, ".itsybitsy", "agents", "my-repo");
     await mkdir(coordDir, { recursive: true });
     await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo", agentType: "coordinator" }));
 
@@ -2909,7 +2909,7 @@ describe("checkCoordinatorExists", () => {
   test("returns collision when basename-named agent exists without coordinator flag", async () => {
     // Repo path ends in "coord-repo" so basename is "coord-repo"
     const td = join(tmpdir(), `coord-repo`);
-    const agentDir = join(td, ".ittybitty", "agents", "coord-repo");
+    const agentDir = join(td, ".itsybitsy", "agents", "coord-repo");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "coord-repo" }));
 
@@ -2923,7 +2923,7 @@ describe("checkCoordinatorExists", () => {
 
   test("returns no collision when agents exist but none match basename", async () => {
     const td = join(tmpdir(), `coord-nocol-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    const agentDir = join(td, ".ittybitty", "agents", "agent-abc123");
+    const agentDir = join(td, ".itsybitsy", "agents", "agent-abc123");
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc123" }));
 
@@ -2938,7 +2938,7 @@ describe("checkCoordinatorExists", () => {
   test("finds coordinator regardless of agent directory name", async () => {
     const td = join(tmpdir(), `coord-anyname-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     // Agent named with suffix due to collision, but still has agentType: coordinator
-    const coordDir = join(td, ".ittybitty", "agents", "my-repo-a3f2");
+    const coordDir = join(td, ".itsybitsy", "agents", "my-repo-a3f2");
     await mkdir(coordDir, { recursive: true });
     await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo-a3f2", agentType: "coordinator" }));
 

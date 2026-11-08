@@ -188,7 +188,7 @@ describe("checkIbCommandAccess spawned_by", () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "ib-test-spawner-access-"));
-    agentsDir = join(tmpDir, ".ittybitty", "agents");
+    agentsDir = join(tmpDir, ".itsybitsy", "agents");
   });
 
   afterEach(async () => {
@@ -394,7 +394,7 @@ describe("checkIbCommandAccess spawned_by", () => {
 
 describe("detectRole spawned_by", () => {
   test("sets spawnedBy when spawned_by differs from manager", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-child1/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-child1/repo";
     const ctx = detectRole(cwd, {
       id: "agent-child1",
       manager: "agent-manager1",
@@ -410,7 +410,7 @@ describe("detectRole spawned_by", () => {
   });
 
   test("does NOT set spawnedBy when spawned_by matches manager", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-child2/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-child2/repo";
     const ctx = detectRole(cwd, {
       id: "agent-child2",
       manager: "agent-manager2",
@@ -424,7 +424,7 @@ describe("detectRole spawned_by", () => {
   });
 
   test("does NOT set spawnedBy when spawned_by is absent", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-child3/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-child3/repo";
     const ctx = detectRole(cwd, {
       id: "agent-child3",
       manager: "agent-manager3",
@@ -434,7 +434,7 @@ describe("detectRole spawned_by", () => {
   });
 
   test("sets spawnedBy for manager with no manager field", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-child4/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-child4/repo";
     const ctx = detectRole(cwd, {
       id: "agent-child4",
       manager: null,
@@ -453,7 +453,7 @@ describe("detectRole spawned_by", () => {
 
 describe("generateInstructions spawner info", () => {
   test("manager instructions include spawner info when spawnedBy is set", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-child1/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-child1/repo";
     const ctx = detectRole(cwd, {
       id: "agent-child1",
       manager: "agent-manager1",
@@ -470,7 +470,7 @@ describe("generateInstructions spawner info", () => {
   });
 
   test("worker instructions include spawner info when spawnedBy is set", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-child2/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-child2/repo";
     const ctx = detectRole(cwd, {
       id: "agent-child2",
       manager: "agent-manager2",
@@ -487,7 +487,7 @@ describe("generateInstructions spawner info", () => {
   });
 
   test("manager instructions do NOT include spawner info when spawnedBy matches manager", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-child3/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-child3/repo";
     const ctx = detectRole(cwd, {
       id: "agent-child3",
       manager: "agent-manager3",

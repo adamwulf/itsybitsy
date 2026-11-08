@@ -64,7 +64,7 @@ describe("session-start", () => {
   });
 
   test("detectRole manager cwd (with meta)", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -79,7 +79,7 @@ describe("session-start", () => {
   });
 
   test("detectRole worker cwd (with meta)", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-def67890/repo";
     const ctx = detectRole(cwd, {
       id: "agent-def67890",
       manager: "agent-abc12345",
@@ -95,8 +95,8 @@ describe("session-start", () => {
     const ctx = detectRole("/Users/me/project");
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Primary Claude");
-    expect(instructions).toContain("<ittybitty>");
-    expect(instructions).toContain("</ittybitty>");
+    expect(instructions).toContain("<itsybitsy>");
+    expect(instructions).toContain("</itsybitsy>");
   });
 
   test("all roles include Bash Rules", async () => {
@@ -105,13 +105,13 @@ describe("session-start", () => {
     expect(primaryInstructions).toContain("### Bash Rules");
     expect(primaryInstructions).toContain("Each Bash tool call must run exactly ONE command");
 
-    const managerCwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const managerCwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const managerCtx = detectRole(managerCwd, { id: "agent-abc12345", manager: null, worker: false });
     const managerInstructions = await generateInstructions(managerCtx);
     expect(managerInstructions).toContain("### Bash Rules");
     expect(managerInstructions).toContain("Each Bash tool call must run exactly ONE command");
 
-    const workerCwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
+    const workerCwd = "/Users/me/project/.itsybitsy/agents/agent-def67890/repo";
     const workerCtx = detectRole(workerCwd, { id: "agent-def67890", manager: "agent-abc12345", worker: true });
     const workerInstructions = await generateInstructions(workerCtx);
     expect(workerInstructions).toContain("### Bash Rules");
@@ -119,7 +119,7 @@ describe("session-start", () => {
   });
 
   test("generateInstructions manager contains agent ID", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -132,7 +132,7 @@ describe("session-start", () => {
   });
 
   test("generateInstructions worker contains manager ID", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-def67890/repo";
     const ctx = detectRole(cwd, {
       id: "agent-def67890",
       manager: "agent-abc12345",
@@ -145,7 +145,7 @@ describe("session-start", () => {
   });
 
   test("top-level manager has 'ib ask'", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -157,7 +157,7 @@ describe("session-start", () => {
   });
 
   test("sub-manager (has manager) no 'ib ask'", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-sub11111/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-sub11111/repo";
     const ctx = detectRole(cwd, {
       id: "agent-sub11111",
       manager: "agent-parent00",
@@ -170,7 +170,7 @@ describe("session-start", () => {
   });
 
   test("manager: 'null' string treated as no manager", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: "null" as unknown as string,
@@ -181,7 +181,7 @@ describe("session-start", () => {
   });
 
   test("detectRole coordinator cwd (with meta)", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/coordinator/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/coordinator/repo";
     const ctx = detectRole(cwd, {
       id: "coordinator",
       manager: null,
@@ -221,7 +221,7 @@ describe("session-start", () => {
       agentManager: "",
       parentBranch: "main",
       branchName: "agent/coordinator",
-      worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
+      worktreePath: "/Users/me/project/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
     };
     const instructions = await generateInstructions(ctx);
@@ -239,7 +239,7 @@ describe("session-start", () => {
       agentManager: "",
       parentBranch: "main",
       branchName: "agent/coordinator",
-      worktreePath: "/Users/me/muse-ios/.ittybitty/agents/coordinator/repo",
+      worktreePath: "/Users/me/muse-ios/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/muse-ios",
     };
     const instructions = await generateInstructions(ctx);
@@ -251,7 +251,7 @@ describe("session-start", () => {
   });
 
   test("manager State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -266,7 +266,7 @@ describe("session-start", () => {
   });
 
   test("worker State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-def67890/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-def67890/repo";
     const ctx = detectRole(cwd, {
       id: "agent-def67890",
       manager: "agent-abc12345",
@@ -288,7 +288,7 @@ describe("session-start", () => {
       agentManager: "",
       parentBranch: "main",
       branchName: "agent/coordinator",
-      worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
+      worktreePath: "/Users/me/project/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
     };
     const instructions = await generateInstructions(ctx);
@@ -300,7 +300,7 @@ describe("session-start", () => {
   });
 
   test("worker under coordinator uses repo basename for messaging (SPEC §12.2.6)", async () => {
-    const cwd = "/Users/me/muse-ios/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/muse-ios/.itsybitsy/agents/agent-abc12345/repo";
     // After the rename, per-repo coordinators are named by repo basename,
     // so the worker's manager field is "muse-ios" (not "coordinator").
     const ctx = detectRole(cwd, {
@@ -317,7 +317,7 @@ describe("session-start", () => {
   });
 
   test("detectRole includes agentType from meta.json", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -328,7 +328,7 @@ describe("session-start", () => {
   });
 
   test("backward compat: no agentType in meta.json", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -345,7 +345,7 @@ describe("session-start", () => {
       agentManager: "",
       parentBranch: "main",
       branchName: "agent/agent-abc12345",
-      worktreePath: "/Users/me/project/.ittybitty/agents/agent-abc12345/repo",
+      worktreePath: "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo",
       rootRepoPath: "/Users/me/project",
       agentType: "manager",
     };
@@ -362,7 +362,7 @@ describe("session-start", () => {
       agentManager: "agent-abc12345",
       parentBranch: "agent/agent-abc12345",
       branchName: "agent/agent-def67890",
-      worktreePath: "/Users/me/project/.ittybitty/agents/agent-def67890/repo",
+      worktreePath: "/Users/me/project/.itsybitsy/agents/agent-def67890/repo",
       rootRepoPath: "/Users/me/project",
       agentType: "worker",
     };
@@ -380,14 +380,14 @@ describe("session-start", () => {
       agentManager: "",
       parentBranch: "main",
       branchName: "agent/coordinator",
-      worktreePath: "/Users/me/project/.ittybitty/agents/coordinator/repo",
+      worktreePath: "/Users/me/project/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
       agentType: "coordinator",
     };
     const instructions = await generateInstructions(ctx);
     // Should have the closing tag
-    expect(instructions).toContain("</ittybitty>");
-    expect(instructions).toContain("<ittybitty>");
+    expect(instructions).toContain("</itsybitsy>");
+    expect(instructions).toContain("<itsybitsy>");
   });
 });
 
@@ -398,7 +398,7 @@ describe("interpolateTemplate", () => {
     agentManager: "agent-parent",
     parentBranch: "agent/agent-parent",
     branchName: "agent/agent-abc123",
-    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
     rootRepoPath: "/repo",
   };
 
@@ -411,7 +411,7 @@ describe("interpolateTemplate", () => {
   test("replaces all available variables", () => {
     const template = "{{agentId}} {{agentManager}} {{parentBranch}} {{worktreePath}} {{rootRepoPath}} {{repoName}}";
     const result = interpolateTemplate(template, baseCtx);
-    expect(result).toBe("agent-abc123 agent-parent agent/agent-parent /repo/.ittybitty/agents/agent-abc123/repo /repo repo");
+    expect(result).toBe("agent-abc123 agent-parent agent/agent-parent /repo/.itsybitsy/agents/agent-abc123/repo /repo repo");
   });
 
   test("unknown variables become empty string", () => {
@@ -458,7 +458,7 @@ describe("interpolateTemplate {{availableTypes}}", () => {
     agentManager: "agent-parent",
     parentBranch: "agent/agent-parent",
     branchName: "agent/agent-abc123",
-    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
     rootRepoPath: "/repo",
   };
 
@@ -542,14 +542,14 @@ describe("buildPathIsolationSection", () => {
     agentManager: "",
     parentBranch: "main",
     branchName: "agent/agent-abc123",
-    worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+    worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
     rootRepoPath: "/repo",
   };
 
   test("worktree agent gets the worktree root and the access rule, not path lists", () => {
     const section = buildPathIsolationSection(baseCtx);
     expect(section).toContain("### Path Isolation");
-    expect(section).toContain("You are isolated to your worktree at: /repo/.ittybitty/agents/agent-abc123/repo");
+    expect(section).toContain("You are isolated to your worktree at: /repo/.itsybitsy/agents/agent-abc123/repo");
     expect(section).toContain("Your access is limited to your worktree and the paths your agent type needs.");
     expect(section).toContain('If a path you need is blocked ("Access denied" or "Path violation")');
     expect(section).toContain("or use a different path");
@@ -649,7 +649,7 @@ describe("buildPathIsolationSection", () => {
   });
 
   test("detectRole parses sandbox.enabled from meta.json", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -660,7 +660,7 @@ describe("buildPathIsolationSection", () => {
   });
 
   test("detectRole sandbox undefined when not in meta", () => {
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-abc12345/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-abc12345/repo";
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: null,
@@ -676,7 +676,7 @@ describe("buildPathIsolationSection", () => {
       agentManager: "",
       parentBranch: "main",
       branchName: "agent/agent-abc123",
-      worktreePath: "/repo/.ittybitty/agents/agent-abc123/repo",
+      worktreePath: "/repo/.itsybitsy/agents/agent-abc123/repo",
       rootRepoPath: "/repo",
     };
     const instructions = await generateInstructions(ctx);
@@ -691,7 +691,7 @@ describe("buildPathIsolationSection", () => {
       agentManager: "agent-abc12345",
       parentBranch: "agent/agent-abc12345",
       branchName: "agent/agent-def67890",
-      worktreePath: "/repo/.ittybitty/agents/agent-def67890/repo",
+      worktreePath: "/repo/.itsybitsy/agents/agent-def67890/repo",
       rootRepoPath: "/repo",
     };
     const instructions = await generateInstructions(ctx);
@@ -724,7 +724,7 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     agentDir: string;
     cwd: string;
   }> {
-    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     const cwd = join(agentDir, "repo");
     await mkdir(cwd, { recursive: true });
     await Bun.write(
@@ -766,7 +766,7 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
   test("meta.state === 'creating' for non-worktree agent (agentIdArg) → 'running'", async () => {
     // Coordinator-style: cwd is the repo root, agent ID passed as arg.
     const agentId = "agent-coord";
-    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     await mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),
@@ -791,7 +791,7 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
 
   test("explicit id injects the no-worktree agent role from a nested cwd", async () => {
     const agentId = "agent-shared-worker";
-    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     const nested = join(tempDir, "packages", "feature");
     await mkdir(agentDir, { recursive: true });
     await mkdir(nested, { recursive: true });
@@ -824,8 +824,8 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
   test("explicit id cannot claim a sibling or mutate its startup state", async () => {
     const agentA = "agent-real-a";
     const agentB = "agent-claimed-b";
-    const agentDirA = join(tempDir, ".ittybitty", "agents", agentA);
-    const agentDirB = join(tempDir, ".ittybitty", "agents", agentB);
+    const agentDirA = join(tempDir, ".itsybitsy", "agents", agentA);
+    const agentDirB = join(tempDir, ".itsybitsy", "agents", agentB);
     await mkdir(agentDirA, { recursive: true });
     await mkdir(agentDirB, { recursive: true });
     const metaA = { id: agentA, worker: true, worktree: false, state: "running" };
@@ -846,8 +846,8 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     const otherRepo = await mkdtemp(join(tmpdir(), "duplicate-session-start-"));
     try {
       const agentId = "agent-duplicate";
-      const agentDirA = join(tempDir, ".ittybitty", "agents", agentId);
-      const agentDirB = join(otherRepo, ".ittybitty", "agents", agentId);
+      const agentDirA = join(tempDir, ".itsybitsy", "agents", agentId);
+      const agentDirB = join(otherRepo, ".itsybitsy", "agents", agentId);
       await mkdir(agentDirA, { recursive: true });
       await mkdir(agentDirB, { recursive: true });
       await Bun.write(join(agentDirA, "meta.json"), JSON.stringify({
@@ -884,7 +884,7 @@ describe("hookSessionStart — stale 'creating' state correction", () => {
     const forgedRoot = await mkdtemp(join(tmpdir(), "forged-session-start-"));
     try {
       const agentId = "agent-forged";
-      const agentDir = join(forgedRoot, ".ittybitty", "agents", agentId);
+      const agentDir = join(forgedRoot, ".itsybitsy", "agents", agentId);
       await mkdir(agentDir, { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
         id: agentId,
@@ -927,7 +927,7 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
     agentDir: string;
     cwd: string;
   }> {
-    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     const cwd = join(agentDir, "repo");
     await mkdir(cwd, { recursive: true });
     await Bun.write(
@@ -938,7 +938,7 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
   }
 
   async function readQuestions(): Promise<Array<{ agent: string; question: string; status: string }>> {
-    const file = Bun.file(join(tempDir, ".ittybitty", "user-questions.json"));
+    const file = Bun.file(join(tempDir, ".itsybitsy", "user-questions.json"));
     if (!(await file.exists())) return [];
     return (await file.json()).questions;
   }
@@ -997,7 +997,7 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
 
   test("raises the question on the explicit-id path (no-worktree agent from a nested cwd)", async () => {
     const agentId = "agent-shared-big";
-    const agentDir = join(tempDir, ".ittybitty", "agents", agentId);
+    const agentDir = join(tempDir, ".itsybitsy", "agents", agentId);
     const nested = join(tempDir, "packages", "feature");
     await mkdir(agentDir, { recursive: true });
     await mkdir(nested, { recursive: true });
@@ -1059,7 +1059,7 @@ describe("hookSessionStart — instructions over the hook context cap", () => {
   test("still delivers the instructions when the question cannot be written", async () => {
     const { cwd } = await setupAgent("agent-big", "oversized");
     // A directory where the questions file belongs makes the write fail.
-    await mkdir(join(tempDir, ".ittybitty", "user-questions.json"), { recursive: true });
+    await mkdir(join(tempDir, ".itsybitsy", "user-questions.json"), { recursive: true });
     const originalErr = process.stderr.write.bind(process.stderr);
     let stderr = "";
     process.stderr.write = ((chunk: unknown) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
@@ -1129,9 +1129,9 @@ describe("hookSessionStart with @system", () => {
     const ctx: string = output.hookSpecificOutput.additionalContext;
     expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
 
-    // The body is wrapped in <ittybitty>.
-    expect(ctx).toContain("<ittybitty>");
-    expect(ctx).toContain("</ittybitty>");
+    // The body is wrapped in <itsybitsy>.
+    expect(ctx).toContain("<itsybitsy>");
+    expect(ctx).toContain("</itsybitsy>");
 
     // system.md body and _all.md content present; _non_coordinator.md absent.
     expect(ctx).toContain("SYSTEM_BODY_MARKER");
@@ -1248,7 +1248,7 @@ describe("session-start team awareness (§16.6)", () => {
     await createTeam("backend", "@system", 100);
     await addMember("backend", "agent-member1");
 
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-member1/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-member1/repo";
     const ctx = detectRole(cwd, {
       id: "agent-member1",
       manager: "agent-mgr",
@@ -1267,11 +1267,11 @@ describe("session-start team awareness (§16.6)", () => {
     expect(instructions).toContain("[sent by <agent-id> in @<team>]");
     expect(instructions).toContain("WHO");
     expect(instructions).toContain("WHERE");
-    // The block lives inside the <ittybitty> wrapper.
-    expect(instructions).toContain("<ittybitty>");
-    expect(instructions).toContain("</ittybitty>");
+    // The block lives inside the <itsybitsy> wrapper.
+    expect(instructions).toContain("<itsybitsy>");
+    expect(instructions).toContain("</itsybitsy>");
     const teamsIdx = instructions.indexOf("## Teams");
-    const closeIdx = instructions.lastIndexOf("</ittybitty>");
+    const closeIdx = instructions.lastIndexOf("</itsybitsy>");
     expect(teamsIdx).toBeGreaterThan(-1);
     expect(teamsIdx).toBeLessThan(closeIdx);
   });
@@ -1282,7 +1282,7 @@ describe("session-start team awareness (§16.6)", () => {
     await addMember("backend", "agent-multi");
     await addMember("infra", "agent-multi");
 
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-multi/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-multi/repo";
     const ctx = detectRole(cwd, { id: "agent-multi", manager: "agent-mgr", worker: true });
     const instructions = await generateInstructions(ctx);
 
@@ -1295,7 +1295,7 @@ describe("session-start team awareness (§16.6)", () => {
     await createTeam("backend", "@system", 100);
     await addMember("backend", "agent-someoneelse");
 
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-loner/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-loner/repo";
     const ctx = detectRole(cwd, { id: "agent-loner", manager: "agent-mgr", worker: true });
     const instructions = await generateInstructions(ctx);
 
@@ -1306,7 +1306,7 @@ describe("session-start team awareness (§16.6)", () => {
 
   test("team block appears on the markdownBody path (the real agent path)", async () => {
     // Materialize an agent-type with a markdown body — this is the path real
-    // agents hit (generateInstructions wraps the body in <ittybitty>).
+    // agents hit (generateInstructions wraps the body in <itsybitsy>).
     await Bun.write(
       join(typesDir, "_all.md"),
       "---\nname: _all\nspawnable: false\n---\nALL_LAYER_MARKER",
@@ -1323,7 +1323,7 @@ describe("session-start team awareness (§16.6)", () => {
     await createTeam("backend", "@system", 100);
     await addMember("backend", "agent-md1");
 
-    const cwd = "/Users/me/project/.ittybitty/agents/agent-md1/repo";
+    const cwd = "/Users/me/project/.itsybitsy/agents/agent-md1/repo";
     const ctx = detectRole(cwd, { id: "agent-md1", manager: "agent-mgr", agentType: "researcher" });
     const instructions = await generateInstructions(ctx);
 
@@ -1335,7 +1335,7 @@ describe("session-start team awareness (§16.6)", () => {
     expect(instructions).toContain("ib send @backend");
     expect(instructions).toContain("ib roster @backend");
     const teamsIdx = instructions.indexOf("## Teams");
-    const closeIdx = instructions.lastIndexOf("</ittybitty>");
+    const closeIdx = instructions.lastIndexOf("</itsybitsy>");
     expect(teamsIdx).toBeLessThan(closeIdx);
   });
 

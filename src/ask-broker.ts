@@ -1,10 +1,10 @@
 /**
  * Watchdog ask broker — how a SANDBOXED agent asks the user a question.
  *
- * `ib ask` records the question in `<repo>/.ittybitty/user-questions.json` and
+ * `ib ask` records the question in `<repo>/.itsybitsy/user-questions.json` and
  * then tells the user (macOS `say`, Telegram). A sandboxed worktree agent
  * cannot do that itself: its profile grants its own agent dir, its worktree and
- * `<repo>/.ittybitty/agents`, but NOT `<repo>/.ittybitty` — so the questions
+ * `<repo>/.itsybitsy/agents`, but NOT `<repo>/.itsybitsy` — so the questions
  * file is outside its write roots and the question never reaches the user.
  *
  * The answer is the one `ib new-agent` and the lifecycle commands already use

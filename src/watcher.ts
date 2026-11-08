@@ -1,5 +1,6 @@
+import * as runtimeNames from "./runtime-names";
 /**
- * Watch each repo's .ittybitty/agents/ directory (shallow / non-recursive) with
+ * Watch each repo's .itsybitsy/agents/ directory (shallow / non-recursive) with
  * fs.watch, so the watch stays off macOS fseventsd — see the rationale at the
  * watch() call in setupWatchersAsync (recursive watching pegged fseventsd at
  * ~100% CPU and cost ~27s at startup). NOTE: on Bun 1.3.10 / macOS a
@@ -143,7 +144,7 @@ export class AgentWatcher {
     // Run health checks asynchronously (non-blocking — don't delay first render)
     this.runHealthChecks();
 
-    // Set up fs.watch on each repo's .ittybitty/agents/, archive/, and user-questions.json
+    // Set up fs.watch on each repo's .itsybitsy/agents/, archive/, and user-questions.json
     this.setupWatchers();
 
     // The one periodic pass. On Bun 1.3.10 / macOS the non-recursive agents/
@@ -257,7 +258,7 @@ export class AgentWatcher {
   private watcherGeneration = 0;
   private hasLoggedInitialWatchers = false;
 
-  /** Set up fs.watch on each repo's .ittybitty/agents/ and user-questions.json */
+  /** Set up fs.watch on each repo's .itsybitsy/agents/ and user-questions.json */
   private setupWatchers(): void {
     const gen = ++this.watcherGeneration;
     void this.setupWatchersAsync(gen);
@@ -275,8 +276,8 @@ export class AgentWatcher {
       if (!this.running || gen !== this.watcherGeneration) return;
 
       const repo = this.repos[i]!;
-      const agentsDir = join(repo.path, ".ittybitty", "agents");
-      const questionsFile = join(repo.path, ".ittybitty", "user-questions.json");
+      const agentsDir = runtimeNames.agentsDir(repo.path);
+      const questionsFile = runtimeNames.userQuestionsFile(repo.path);
 
       // Watch the agents dir NON-RECURSIVELY. We deliberately do NOT recurse:
       // each agent dir holds a full `repo/` worktree (a complete checkout), and a

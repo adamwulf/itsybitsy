@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Logs every hook execution to the agent's debug-logs directory.
  *
@@ -19,13 +20,13 @@ export function resolveAgentDir(
   agentId?: string,
 ): string | null {
   // If we have an agentId, look for the agents dir in cwd
-  const agentsMatch = cwd.match(/(.*\/.ittybitty\/agents)/);
+  const agentsMatch = runtimeNames.matchAgentsPrefix(cwd);
   if (agentId && agentsMatch) {
     return join(agentsMatch[1]!, agentId);
   }
 
   // Try to extract full agent dir from cwd pattern
-  const agentMatch = cwd.match(/(.*\/.ittybitty\/agents\/[^/]+)/);
+  const agentMatch = runtimeNames.matchAgentPrefix(cwd);
   if (agentMatch) {
     return agentMatch[1]!;
   }

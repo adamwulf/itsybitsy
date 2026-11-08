@@ -45,7 +45,7 @@ export const OUTBOX_LOCK_FILENAME = ".outbox.lock";
  * single root to every codex spawn (see `buildCodexLaunchArgs`).
  *
  * The agent's own log, state, and meta still live under the per-worktree
- * `<repoPath>/.ittybitty/agents/<id>/` — only the message-delivery queue and
+ * `<repoPath>/.itsybitsy/agents/<id>/` — only the message-delivery queue and
  * its lock move here.
  */
 export function agentOutboxDir(agentId: string): string {

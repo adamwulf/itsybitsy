@@ -58,7 +58,7 @@ describe("gatherAgentState", () => {
 
   beforeEach(async () => {
     repoPath = await mkdtemp(join(tmpdir(), "ib-state-test-"));
-    agentDir = join(repoPath, ".ittybitty", "agents", "agent-test01");
+    agentDir = join(repoPath, ".itsybitsy", "agents", "agent-test01");
     await mkdir(agentDir, { recursive: true });
   });
 
@@ -275,8 +275,8 @@ describe("isItsybitsyTmuxSession", () => {
   test("recognizes the system coordinator session by exact name", () => {
     expect(isItsybitsyTmuxSession("ib-coordinator")).toBe(true);
   });
-  test("recognizes ittybitty-prefixed agent sessions", () => {
-    expect(isItsybitsyTmuxSession("ittybitty-abcdef01-agent-foo")).toBe(true);
+  test("recognizes itsybitsy-prefixed agent sessions", () => {
+    expect(isItsybitsyTmuxSession("itsybitsy-abcdef01-agent-foo")).toBe(true);
   });
   test("rejects unrelated session names", () => {
     expect(isItsybitsyTmuxSession("dev-server")).toBe(false);
@@ -285,7 +285,7 @@ describe("isItsybitsyTmuxSession", () => {
   });
   test("does NOT match ib-coord-* patterns (those are test fixtures only)", () => {
     // Real codebase has no `ib-coord-<repo>` pattern — only `ib-coordinator`
-    // exact + `ittybitty-…`. Guards against accidental over-matching.
+    // exact + `itsybitsy-…`. Guards against accidental over-matching.
     expect(isItsybitsyTmuxSession("ib-coord-myrepo")).toBe(false);
   });
 });
@@ -308,7 +308,7 @@ describe("looksLikeClaudeArgv", () => {
 });
 
 describe("isClaudeAgentProcess (cwd-anchored, repo-path-cross-referenced)", () => {
-  // The cwd must be under one of the registered repos' .ittybitty/agents/
+  // The cwd must be under one of the registered repos' .itsybitsy/agents/
   // — both the cwd anchor AND the repo-path cross-reference are required.
   const REPOS = ["/Users/me/Code/repo"];
 
@@ -317,7 +317,7 @@ describe("isClaudeAgentProcess (cwd-anchored, repo-path-cross-referenced)", () =
   });
 
   test("returns true when argv looks right AND cwd is inside a registered repo's worktree", async () => {
-    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.itsybitsy/agents/agent-foo/repo");
     expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(true);
   });
 
@@ -326,11 +326,11 @@ describe("isClaudeAgentProcess (cwd-anchored, repo-path-cross-referenced)", () =
     expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(false);
   });
 
-  test("rejects when cwd looks itsybitsy-shaped but is under an UNREGISTERED repo (stray .ittybitty/)", async () => {
-    // R2 polish: a stray/backup `.ittybitty/agents/` directory anywhere on
+  test("rejects when cwd looks itsybitsy-shaped but is under an UNREGISTERED repo (stray .itsybitsy/)", async () => {
+    // R2 polish: a stray/backup `.itsybitsy/agents/` directory anywhere on
     // disk used to flag user processes as orphans. Repo-path cross-reference
     // closes that hole.
-    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.ittybitty/agents/agent-x/repo");
+    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.itsybitsy/agents/agent-x/repo");
     expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(false);
   });
 
@@ -341,26 +341,26 @@ describe("isClaudeAgentProcess (cwd-anchored, repo-path-cross-referenced)", () =
   });
 
   test("rejects when no repos are registered (empty repoPaths)", async () => {
-    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.itsybitsy/agents/agent-foo/repo");
     expect(await isClaudeAgentProcess(1234, "claude --resume abc", [])).toBe(false);
   });
 
   test("rejects when argv doesn't look like claude even if cwd is in a worktree", async () => {
-    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.itsybitsy/agents/agent-foo/repo");
     expect(await isClaudeAgentProcess(1234, "vim notes.txt", REPOS)).toBe(false);
   });
 
   test("matches when cwd is the agent dir itself (no /repo subpath)", async () => {
     // start.sh runs claude from the worktree, but during certain failure modes
     // the cwd may briefly be the agent dir itself. Both shapes pass as long
-    // as the prefix is a registered repo's `.ittybitty/agents/`.
-    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo");
+    // as the prefix is a registered repo's `.itsybitsy/agents/`.
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.itsybitsy/agents/agent-foo");
     expect(await isClaudeAgentProcess(1234, "claude --resume abc", REPOS)).toBe(true);
   });
 
   test("matches across multiple registered repos", async () => {
     const repos = ["/repo-a", "/repo-b"];
-    readProcessCwdCtx.set(async () => "/repo-b/.ittybitty/agents/agent-x/repo");
+    readProcessCwdCtx.set(async () => "/repo-b/.itsybitsy/agents/agent-x/repo");
     expect(await isClaudeAgentProcess(1234, "claude --resume abc", repos)).toBe(true);
   });
 });
@@ -397,7 +397,7 @@ describe("isAgyAgentProcess (cwd-anchored, repo-path-cross-referenced)", () => {
   });
 
   test("agy --conversation whose cwd is inside an itsybitsy worktree → ours", async () => {
-    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.itsybitsy/agents/agent-foo/repo");
     expect(await isAgyAgentProcess(1234, "agy --dangerously-skip-permissions --conversation abc", REPOS)).toBe(true);
   });
 
@@ -406,18 +406,18 @@ describe("isAgyAgentProcess (cwd-anchored, repo-path-cross-referenced)", () => {
     expect(await isAgyAgentProcess(1234, "agy --conversation abc --model x", REPOS)).toBe(false);
   });
 
-  test("cwd under a stray/backup .ittybitty/agents not in a registered repo → NOT ours", async () => {
-    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.ittybitty/agents/agent-x/repo");
+  test("cwd under a stray/backup .itsybitsy/agents not in a registered repo → NOT ours", async () => {
+    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.itsybitsy/agents/agent-x/repo");
     expect(await isAgyAgentProcess(1234, "agy --conversation abc", REPOS)).toBe(false);
   });
 
   test("no repos registered → never ours", async () => {
-    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.itsybitsy/agents/agent-foo/repo");
     expect(await isAgyAgentProcess(1234, "agy --conversation abc", [])).toBe(false);
   });
 
   test("argv shape not agy → not ours even inside a worktree", async () => {
-    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.ittybitty/agents/agent-foo/repo");
+    readProcessCwdCtx.set(async () => "/Users/me/Code/repo/.itsybitsy/agents/agent-foo/repo");
     expect(await isAgyAgentProcess(1234, "claude --resume abc", REPOS)).toBe(false);
   });
 });
@@ -433,7 +433,7 @@ describe("sanitizeForDisplay", () => {
     expect(sanitizeForDisplay("\x1b[1;31mfoo\x00bar")).toBe("foo?bar");
   });
   test("leaves regular printable text alone", () => {
-    expect(sanitizeForDisplay("ittybitty-abc-foo")).toBe("ittybitty-abc-foo");
+    expect(sanitizeForDisplay("itsybitsy-abc-foo")).toBe("itsybitsy-abc-foo");
   });
 });
 
@@ -474,8 +474,8 @@ describe("buildTrackedSets", () => {
   });
 
   test("collects tmux sessions, claude PIDs, watchdog PIDs across multiple agents", async () => {
-    const agentDirA = join(repoPath, ".ittybitty", "agents", "agent-aaaa");
-    const agentDirB = join(repoPath, ".ittybitty", "agents", "agent-bbbb");
+    const agentDirA = join(repoPath, ".itsybitsy", "agents", "agent-aaaa");
+    const agentDirB = join(repoPath, ".itsybitsy", "agents", "agent-bbbb");
     await mkdir(agentDirA, { recursive: true });
     await mkdir(agentDirB, { recursive: true });
 
@@ -497,7 +497,7 @@ describe("buildTrackedSets", () => {
       meta: {
         id: "agent-aaaa",
         session_id: "x",
-        tmux_session: "ittybitty-deadbeef-agent-aaaa",
+        tmux_session: "itsybitsy-deadbeef-agent-aaaa",
         prompt: "",
         manager: null,
         created: "",
@@ -515,7 +515,7 @@ describe("buildTrackedSets", () => {
       meta: {
         id: "agent-bbbb",
         session_id: "y",
-        tmux_session: "ittybitty-deadbeef-agent-bbbb",
+        tmux_session: "itsybitsy-deadbeef-agent-bbbb",
         prompt: "",
         manager: null,
         created: "",
@@ -530,8 +530,8 @@ describe("buildTrackedSets", () => {
 
     const tracked = await buildTrackedSets([a, b]);
     expect(tracked.tmuxSessions.has("ib-coordinator")).toBe(true);
-    expect(tracked.tmuxSessions.has("ittybitty-deadbeef-agent-aaaa")).toBe(true);
-    expect(tracked.tmuxSessions.has("ittybitty-deadbeef-agent-bbbb")).toBe(true);
+    expect(tracked.tmuxSessions.has("itsybitsy-deadbeef-agent-aaaa")).toBe(true);
+    expect(tracked.tmuxSessions.has("itsybitsy-deadbeef-agent-bbbb")).toBe(true);
     expect(tracked.claudePids.has(1001)).toBe(true);
     expect(tracked.claudePids.has(1002)).toBe(true);
     expect(tracked.watchdogPids.has(2001)).toBe(true);
@@ -541,7 +541,7 @@ describe("buildTrackedSets", () => {
   });
 
   test("ignores empty tmux sessions and missing/invalid PIDs", async () => {
-    const agentDir = join(repoPath, ".ittybitty", "agents", "agent-empty");
+    const agentDir = join(repoPath, ".itsybitsy", "agents", "agent-empty");
     await mkdir(agentDir, { recursive: true });
     const a = makeAgent({
       id: "agent-empty",
@@ -582,7 +582,7 @@ function fakePsOutput(entries: { pid: number; command: string }[]): string {
 // claude detection to succeed (cwd anchor + repo cross-reference are
 // required). Pair with `FAKE_REPOS` when calling gatherOrphans/cleanupOrphans.
 function fakeCwdInsideWorktree(): void {
-  readProcessCwdCtx.set(async (pid) => `/tmp/repo/.ittybitty/agents/agent-${pid}/repo`);
+  readProcessCwdCtx.set(async (pid) => `/tmp/repo/.itsybitsy/agents/agent-${pid}/repo`);
 }
 const FAKE_REPOS = ["/tmp/repo"];
 
@@ -598,7 +598,7 @@ describe("gatherOrphans", () => {
   test("clean state — no orphans of any kind", async () => {
     fakeCwdInsideWorktree();
     const tracked: TrackedSets = {
-      tmuxSessions: new Set(["ib-coordinator", "ittybitty-deadbeef-agent-aaaa"]),
+      tmuxSessions: new Set(["ib-coordinator", "itsybitsy-deadbeef-agent-aaaa"]),
       claudePids: new Set([1111]),
       watchdogPids: new Set([2222]),
     };
@@ -615,7 +615,7 @@ describe("gatherOrphans", () => {
 
     const orphans = await gatherOrphans(
       tracked,
-      new Set(["ib-coordinator", "ittybitty-deadbeef-agent-aaaa"]),
+      new Set(["ib-coordinator", "itsybitsy-deadbeef-agent-aaaa"]),
       FAKE_REPOS,
     );
     expect(orphans.tmux_sessions).toEqual([]);
@@ -634,7 +634,7 @@ describe("gatherOrphans", () => {
     spawnCtx.set((cmd: string[]) => {
       if (cmd[0] === "tmux" && cmd[1] === "list-sessions") {
         listSessionsCalled = true;
-        return makeSpawnResult(0, "ib-coordinator\nittybitty-stale-foo\n");
+        return makeSpawnResult(0, "ib-coordinator\nitsybitsy-stale-foo\n");
       }
       if (cmd[0] === "ps") return makeSpawnResult(0, "");
       return makeSpawnResult(1);
@@ -642,10 +642,10 @@ describe("gatherOrphans", () => {
 
     const orphans = await gatherOrphans(tracked, null);
     expect(listSessionsCalled).toBe(true);
-    expect(orphans.tmux_sessions).toEqual(["ittybitty-stale-foo"]);
+    expect(orphans.tmux_sessions).toEqual(["itsybitsy-stale-foo"]);
   });
 
-  test("detects orphan tmux session matching ittybitty- pattern", async () => {
+  test("detects orphan tmux session matching itsybitsy- pattern", async () => {
     const tracked: TrackedSets = {
       tmuxSessions: new Set(["ib-coordinator"]),
       claudePids: new Set(),
@@ -656,9 +656,9 @@ describe("gatherOrphans", () => {
       return makeSpawnResult(1);
     });
 
-    const live = new Set(["ib-coordinator", "ittybitty-aabbccdd-agent-stale", "user-session"]);
+    const live = new Set(["ib-coordinator", "itsybitsy-aabbccdd-agent-stale", "user-session"]);
     const orphans = await gatherOrphans(tracked, live);
-    expect(orphans.tmux_sessions).toEqual(["ittybitty-aabbccdd-agent-stale"]);
+    expect(orphans.tmux_sessions).toEqual(["itsybitsy-aabbccdd-agent-stale"]);
     // user-session is NOT itsybitsy-shaped, must not be flagged
     expect(orphans.tmux_sessions).not.toContain("user-session");
   });
@@ -774,10 +774,10 @@ describe("gatherOrphans", () => {
     expect(orphans.claude_processes).toEqual([]);
   });
 
-  test("does NOT flag claude process whose cwd is in a stray .ittybitty/agents/ NOT under any registered repo", async () => {
-    // R2 polish: this is the "user has a backup .ittybitty/agents/ from an
+  test("does NOT flag claude process whose cwd is in a stray .itsybitsy/agents/ NOT under any registered repo", async () => {
+    // R2 polish: this is the "user has a backup .itsybitsy/agents/ from an
     // un-registered project" scenario. Repo cross-reference is what closes it.
-    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.ittybitty/agents/agent-x/repo");
+    readProcessCwdCtx.set(async () => "/Users/me/Backup/old-clone/.itsybitsy/agents/agent-x/repo");
     const tracked: TrackedSets = {
       tmuxSessions: new Set(),
       claudePids: new Set(),
@@ -842,7 +842,7 @@ describe("gatherOrphans", () => {
   test("multiple orphan types together", async () => {
     fakeCwdInsideWorktree();
     const tracked: TrackedSets = {
-      tmuxSessions: new Set(["ib-coordinator", "ittybitty-aaaa-agent-good"]),
+      tmuxSessions: new Set(["ib-coordinator", "itsybitsy-aaaa-agent-good"]),
       claudePids: new Set([1111]),
       watchdogPids: new Set([2222]),
     };
@@ -859,9 +859,9 @@ describe("gatherOrphans", () => {
       return makeSpawnResult(1);
     });
 
-    const live = new Set(["ib-coordinator", "ittybitty-aaaa-agent-good", "ittybitty-bbbb-agent-stale"]);
+    const live = new Set(["ib-coordinator", "itsybitsy-aaaa-agent-good", "itsybitsy-bbbb-agent-stale"]);
     const orphans = await gatherOrphans(tracked, live, FAKE_REPOS);
-    expect(orphans.tmux_sessions).toEqual(["ittybitty-bbbb-agent-stale"]);
+    expect(orphans.tmux_sessions).toEqual(["itsybitsy-bbbb-agent-stale"]);
     expect(orphans.claude_processes).toEqual([
       { pid: 3333, command: "claude --resume orphan" },
     ]);
@@ -873,7 +873,7 @@ describe("gatherOrphans", () => {
 
   test("does NOT flag a tmux session belonging to a tracked agent", async () => {
     const tracked: TrackedSets = {
-      tmuxSessions: new Set(["ib-coordinator", "ittybitty-aaaa-agent-tracked"]),
+      tmuxSessions: new Set(["ib-coordinator", "itsybitsy-aaaa-agent-tracked"]),
       claudePids: new Set(),
       watchdogPids: new Set(),
     };
@@ -882,7 +882,7 @@ describe("gatherOrphans", () => {
       return makeSpawnResult(1);
     });
 
-    const orphans = await gatherOrphans(tracked, new Set(["ittybitty-aaaa-agent-tracked"]));
+    const orphans = await gatherOrphans(tracked, new Set(["itsybitsy-aaaa-agent-tracked"]));
     expect(orphans.tmux_sessions).toEqual([]);
   });
 
@@ -895,8 +895,8 @@ describe("gatherOrphans", () => {
     const repoADir = await mkdtemp(join(tmpdir(), "ib-orphan-repoA-"));
     const repoBDir = await mkdtemp(join(tmpdir(), "ib-orphan-repoB-"));
     try {
-      await mkdir(join(repoADir, ".ittybitty", "agents", "agent-a"), { recursive: true });
-      await mkdir(join(repoBDir, ".ittybitty", "agents", "agent-b"), { recursive: true });
+      await mkdir(join(repoADir, ".itsybitsy", "agents", "agent-a"), { recursive: true });
+      await mkdir(join(repoBDir, ".itsybitsy", "agents", "agent-b"), { recursive: true });
 
       const aA = makeAgent({
         id: "agent-a",
@@ -904,7 +904,7 @@ describe("gatherOrphans", () => {
         meta: {
           id: "agent-a",
           session_id: "x",
-          tmux_session: "ittybitty-aaaa-agent-a",
+          tmux_session: "itsybitsy-aaaa-agent-a",
           prompt: "",
           manager: null,
           created: "",
@@ -922,7 +922,7 @@ describe("gatherOrphans", () => {
         meta: {
           id: "agent-b",
           session_id: "y",
-          tmux_session: "ittybitty-bbbb-agent-b",
+          tmux_session: "itsybitsy-bbbb-agent-b",
           prompt: "",
           manager: null,
           created: "",
@@ -950,7 +950,7 @@ describe("gatherOrphans", () => {
 
       const orphans = await gatherOrphans(
         tracked,
-        new Set(["ittybitty-aaaa-agent-a", "ittybitty-bbbb-agent-b"]),
+        new Set(["itsybitsy-aaaa-agent-a", "itsybitsy-bbbb-agent-b"]),
         [repoADir, repoBDir],
       );
       expect(orphans.tmux_sessions).toEqual([]);
@@ -987,15 +987,15 @@ describe("cleanupOrphans", () => {
     });
 
     const report: OrphanReport = {
-      tmux_sessions: ["ittybitty-stale-foo", "ittybitty-stale-bar"],
+      tmux_sessions: ["itsybitsy-stale-foo", "itsybitsy-stale-bar"],
       claude_processes: [],
       watchdog_processes: [],
       ib_watch_processes: [],
     };
     const cleanup = await cleanupOrphans(report, EMPTY_TRACKED);
 
-    expect(calls.filter((c) => c[0] === "tmux" && c[1] === "kill-session" && c[3] === "=ittybitty-stale-foo:").length).toBe(1);
-    expect(calls.filter((c) => c[0] === "tmux" && c[1] === "kill-session" && c[3] === "=ittybitty-stale-bar:").length).toBe(1);
+    expect(calls.filter((c) => c[0] === "tmux" && c[1] === "kill-session" && c[3] === "=itsybitsy-stale-foo:").length).toBe(1);
+    expect(calls.filter((c) => c[0] === "tmux" && c[1] === "kill-session" && c[3] === "=itsybitsy-stale-bar:").length).toBe(1);
     expect(cleanup.actions.length).toBe(2);
     for (const action of cleanup.actions) {
       expect(action.kind).toBe("tmux_session");
@@ -1109,7 +1109,7 @@ describe("cleanupOrphans", () => {
     killPidCtx.set((pid) => { signaled.add(pid); return true; });
 
     const report: OrphanReport = {
-      tmux_sessions: ["ittybitty-orphan-only"],
+      tmux_sessions: ["itsybitsy-orphan-only"],
       claude_processes: [{ pid: 7777, command: "claude --resume only" }],
       watchdog_processes: [],
       ib_watch_processes: [],
@@ -1117,12 +1117,12 @@ describe("cleanupOrphans", () => {
     await cleanupOrphans(report, EMPTY_TRACKED);
 
     // Only the explicit orphan entries get killed.
-    expect(tmuxKills).toEqual(["=ittybitty-orphan-only:"]);
+    expect(tmuxKills).toEqual(["=itsybitsy-orphan-only:"]);
     expect([...signaled]).toEqual([7777]);
   });
 
   test("RACE GUARD: skips kill when target became tracked between gather and cleanup", async () => {
-    // Scenario: gather flagged ittybitty-late-foo and PID 4242 as orphans;
+    // Scenario: gather flagged itsybitsy-late-foo and PID 4242 as orphans;
     // between gather and cleanup, a new agent was spawned that owns those.
     // cleanupOrphans must skip both.
     cleanupSleepCtx.set(async () => { /* skip */ });
@@ -1139,13 +1139,13 @@ describe("cleanupOrphans", () => {
     killPidCtx.set(() => { signalled++; return true; });
 
     const report: OrphanReport = {
-      tmux_sessions: ["ittybitty-late-foo"],
+      tmux_sessions: ["itsybitsy-late-foo"],
       claude_processes: [{ pid: 4242, command: "claude --resume late" }],
       watchdog_processes: [],
       ib_watch_processes: [],
     };
     const trackedNow: TrackedSets = {
-      tmuxSessions: new Set(["ittybitty-late-foo"]),
+      tmuxSessions: new Set(["itsybitsy-late-foo"]),
       claudePids: new Set([4242]),
       watchdogPids: new Set(),
     };
@@ -1260,7 +1260,7 @@ describe("cleanupOrphans", () => {
     killPidCtx.set(() => { killCalls++; return true; });
 
     const report: OrphanReport = {
-      tmux_sessions: ["ittybitty-dryrun-foo"],
+      tmux_sessions: ["itsybitsy-dryrun-foo"],
       claude_processes: [{ pid: 9999, command: "claude --resume x" }],
       watchdog_processes: [],
       ib_watch_processes: [],
@@ -1305,14 +1305,14 @@ describe("cleanupOrphans", () => {
     });
 
     const tracked: TrackedSets = {
-      tmuxSessions: new Set(["ib-coordinator", "ittybitty-aaaa-agent-good"]),
+      tmuxSessions: new Set(["ib-coordinator", "itsybitsy-aaaa-agent-good"]),
       claudePids: new Set([1111]),
       watchdogPids: new Set(),
     };
 
-    const liveBefore = new Set(["ib-coordinator", "ittybitty-aaaa-agent-good", "ittybitty-bbbb-stale"]);
+    const liveBefore = new Set(["ib-coordinator", "itsybitsy-aaaa-agent-good", "itsybitsy-bbbb-stale"]);
     const before = await gatherOrphans(tracked, liveBefore, FAKE_REPOS);
-    expect(before.tmux_sessions).toEqual(["ittybitty-bbbb-stale"]);
+    expect(before.tmux_sessions).toEqual(["itsybitsy-bbbb-stale"]);
     expect(before.claude_processes.map((p) => p.pid)).toEqual([9999]);
 
     const cleanup = await cleanupOrphans(before, tracked, { repoPaths: FAKE_REPOS });
@@ -1320,7 +1320,7 @@ describe("cleanupOrphans", () => {
     expect(cleanup.actions.every((a) => a.killed)).toBe(true);
 
     isPidAliveCtx.set(() => false);
-    const liveAfter = new Set(["ib-coordinator", "ittybitty-aaaa-agent-good"]);
+    const liveAfter = new Set(["ib-coordinator", "itsybitsy-aaaa-agent-good"]);
     const after = await gatherOrphans(tracked, liveAfter, FAKE_REPOS);
     expect(after.tmux_sessions).toEqual([]);
     expect(after.claude_processes).toEqual([]);
@@ -1365,10 +1365,10 @@ describe("prepareAndRunCleanup (CLI race-guard integration)", () => {
   test("BLOCKER FIX: re-reads agents from disk so a freshly-spawned agent is NOT killed", async () => {
     // Scenario timeline:
     //   T=0:  initial readAllAgents — returns [agent-good]. Orphans gather
-    //         finds session "ittybitty-late-foo" + claude PID 4242 +
+    //         finds session "itsybitsy-late-foo" + claude PID 4242 +
     //         watchdog PID 8888 as orphans (not yet tracked).
     //   T=10: another terminal spawns `agent-late` whose meta.json contains
-    //         tmux_session=ittybitty-late-foo, claude_pid=4242,
+    //         tmux_session=itsybitsy-late-foo, claude_pid=4242,
     //         watchdog_pid=8888.
     //   T=50: prepareAndRunCleanup is invoked. It MUST re-read from disk
     //         (refreshAgents callback returns [agent-good, agent-late]) and
@@ -1388,7 +1388,7 @@ describe("prepareAndRunCleanup (CLI race-guard integration)", () => {
 
     // Orphans built at T=0 — before agent-late existed.
     const orphans: OrphanReport = {
-      tmux_sessions: ["ittybitty-late-foo"],
+      tmux_sessions: ["itsybitsy-late-foo"],
       claude_processes: [{ pid: 4242, command: "claude --resume late" }],
       watchdog_processes: [{ pid: 8888, command: "ib watchdog agent-late" }],
       ib_watch_processes: [],
@@ -1400,13 +1400,13 @@ describe("prepareAndRunCleanup (CLI race-guard integration)", () => {
       agents: [
         makeRaceAgent({
           id: "agent-good",
-          tmuxSession: "ittybitty-aaaa-agent-good",
+          tmuxSession: "itsybitsy-aaaa-agent-good",
           claudePid: "1111",
           watchdogPid: 2222,
         }),
         makeRaceAgent({
           id: "agent-late",
-          tmuxSession: "ittybitty-late-foo",
+          tmuxSession: "itsybitsy-late-foo",
           claudePid: "4242",
           watchdogPid: 8888,
         }),
@@ -1426,7 +1426,7 @@ describe("prepareAndRunCleanup (CLI race-guard integration)", () => {
     }
 
     // Sanity: trackedNow contains the freshly-spawned agent's identifiers.
-    expect(result.trackedNow.tmuxSessions.has("ittybitty-late-foo")).toBe(true);
+    expect(result.trackedNow.tmuxSessions.has("itsybitsy-late-foo")).toBe(true);
     expect(result.trackedNow.claudePids.has(4242)).toBe(true);
     expect(result.trackedNow.watchdogPids.has(8888)).toBe(true);
   });
@@ -1446,7 +1446,7 @@ describe("prepareAndRunCleanup (CLI race-guard integration)", () => {
     killPidCtx.set(() => true);
 
     const orphans: OrphanReport = {
-      tmux_sessions: ["ittybitty-truly-stale"],
+      tmux_sessions: ["itsybitsy-truly-stale"],
       claude_processes: [],
       watchdog_processes: [{ pid: 9000, command: "ib watchdog stale-agent" }],
       ib_watch_processes: [],
@@ -1469,7 +1469,7 @@ describe("prepareAndRunCleanup (CLI race-guard integration)", () => {
     killPidCtx.set(() => { kills++; return true; });
 
     const orphans: OrphanReport = {
-      tmux_sessions: ["ittybitty-dryrun"],
+      tmux_sessions: ["itsybitsy-dryrun"],
       claude_processes: [],
       watchdog_processes: [{ pid: 1234, command: "ib watchdog x" }],
       ib_watch_processes: [],

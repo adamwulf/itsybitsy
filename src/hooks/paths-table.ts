@@ -1,3 +1,4 @@
+import * as runtimeNames from "../runtime-names";
 /**
  * Build the per-agent filesystem access table the PreToolUse hooks resolve
  * against. This is the hook-side counterpart of the kernel profile generator:
@@ -130,7 +131,7 @@ export interface AgentAccessTableParams {
  *
  * The runtime roots come from `sandboxPathAccessTable` (AGENTDIR, WORKTREE,
  * GITDIR, REPOAGENTS — spawn-keyed — and PARENTCLAUDE plus the read-only
- * REPOID (`<repo>/.ittybitty/repo-id`) for spawners, plus the
+ * REPOID (`<repo>/.itsybitsy/repo-id`) for spawners, plus the
  * tmux deny for non-spawners). Each CLI gets ONLY its own extra runtime roots:
  * Claude receives PROJECTDIR/SCRATCHPAD, agy receives AGYSTATEDIR (`~/.gemini`),
  * and codex/fugu receive neither. The same CLI-specific params are passed to the
@@ -144,7 +145,7 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
     GITDIR: p.gitDir,
     REPOAGENTS: p.agentsDir,
     PARENTCLAUDE: join(p.rootRepo, ".claude"),
-    REPOID: join(p.rootRepo, ".ittybitty", "repo-id"),
+    REPOID: runtimeNames.repoIdFile(p.rootRepo),
     TMUXSOCK: p.tmuxSock,
     canSpawnChildren: p.canSpawnChildren,
     HOME: p.home,

@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Antigravity CLI (`agy`) spawn-path helpers — pure builders that the
  * `newAgent()` / `resumeAgent()` agy branches (SPEC-ANTIGRAVITY-CLI.md §4.5,
@@ -16,7 +17,7 @@
  *      generated fail-closed hooks remain the tool permission boundary.
  *      Resume substitutes `--conversation <uuid>` for `-i` in either mode.
  *   2. `writeAgyWorktreeFiles` — write `.agents/hooks.json` and
- *      `.agents/rules/ittybitty-agent.md` into the worktree (D3 + D6).
+ *      `.agents/rules/itsybitsy-agent.md` into the worktree (D3 + D6).
  *   3. `refuseIfTracked` — the D7 guard: refuse the spawn if either boundary
  *      file is already tracked in the repo.
  *   4. `untrustAgyWorkspaceForTeardown` — the D5 teardown counterpart: remove
@@ -456,7 +457,7 @@ ${qResumeExitScript}
  * Write the two agy boundary files into the worktree (D3 + D6):
  *   - `<worktree>/.agents/hooks.json` — the PreToolUse/PreInvocation/Stop
  *     dispatcher registration (the ONLY permission boundary).
- *   - `<worktree>/.agents/rules/ittybitty-agent.md` — the always-on rule file
+ *   - `<worktree>/.agents/rules/itsybitsy-agent.md` — the always-on rule file
  *     carrying the agent's role instructions + skills (agy reads the repo's
  *     own AGENTS.md natively).
  *
@@ -470,7 +471,7 @@ export async function writeAgyWorktreeFiles(
   opts: { ibBinaryPath: string; agentId: string },
 ): Promise<{ hooksPath: string; rulesPath: string }> {
   const hooksPath = join(worktreePath, ".agents", "hooks.json");
-  const rulesPath = join(worktreePath, ".agents", "rules", "ittybitty-agent.md");
+  const rulesPath = join(worktreePath, runtimeNames.AGY_RULE_FILE);
   await mkdir(dirname(hooksPath), { recursive: true });
   await mkdir(dirname(rulesPath), { recursive: true });
   const hooksJson = buildAgyHooksJson({ ibBinaryPath: opts.ibBinaryPath, agentId: opts.agentId });

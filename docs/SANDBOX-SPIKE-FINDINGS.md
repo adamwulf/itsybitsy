@@ -116,7 +116,7 @@ of stderr (verified: the debug file stays empty). The symlink roots `/etc`, `/tm
 | **git** (`~/.gitconfig`, osxkeychain) | ✅ `git status/log/rev-parse/config user.name` all succeed under the profile (§2.5). `user.name` reads `~/.gitconfig`. |
 | **`~/.claude.json`** (G-1, sibling FILE) | ✅ exists; baseline allows it read+write as a `(literal …)`. Boot succeeded with it allowed. |
 | **dev toolchain gate** (G-2) | ✅ `bunx tsc --noEmit` → exit 0; `bun test src/known-models.test.ts` → 4 pass/0 fail — **under the profile**. `~/.bun` covered by home read; **no npm fetch needed** (deps cached), so `registry.npmjs.org` is optional for the gate. |
-| **`~/.itsybitsy/**` reads + `ib`** (G-3, §4C.1) | ✅ `ib list` (cross-repo `.ittybitty/agents/*/meta.json` reads across 4 repos) + `ib status` → exit 0. `~/.itsybitsy/agents/**` **write** verified (`touch` succeeds; a write to `~/Documents` is correctly **denied**). |
+| **`~/.itsybitsy/**` reads + `ib`** (G-3, §4C.1) | ✅ `ib list` (cross-repo `.itsybitsy/agents/*/meta.json` reads across 4 repos) + `ib status` → exit 0. `~/.itsybitsy/agents/**` **write** verified (`touch` succeeds; a write to `~/Documents` is correctly **denied**). |
 | **MCP server** | ❌ **NOT tested** — deferred. See §7 gaps. |
 | **codex** (§4B) | ❌ **NOT tested** — `-s danger-full-access` flag + proxy-honoring still to verify. See §7. |
 
@@ -212,7 +212,7 @@ paths on the target install (they are Claude-version- and install-layout-depende
 ### 4.1 `-D` runtime params (injected by spawn/resume, per §4A.7)
 - `WORKTREE` = `<agentDir>/repo`
 - `GITDIR`   = git common dir (`git rev-parse --git-common-dir`; reuse codex's `resolveGitRevParsePath`)
-- `AGENTDIR` = `<repoPath>/.ittybitty/agents/<id>` (subsumes WORKTREE; hooks write meta.json/agent.log/debug-logs here)
+- `AGENTDIR` = `<repoPath>/.itsybitsy/agents/<id>` (subsumes WORKTREE; hooks write meta.json/agent.log/debug-logs here)
 - `HOME`     = the user's home (used for the `string-append` write rules)
 
 ### 4.2 SBPL skeleton (proven-working shape)
@@ -397,7 +397,7 @@ not its descendants. All spike scripts live in the session scratchpad
   `http(s)_proxy` under it + `-a never`/tty interaction. Untested.
 - **Full interactive TUI** in a real tmux pane (pty path, `--tmux`) — only `-p` mode
   was driven. The pane pty `/dev/ttysNNN` requirement is inferred, not exercised.
-- **`ib new-agent` from a sandboxed manager** (§4C.1) — parent-repo `.ittybitty`
+- **`ib new-agent` from a sandboxed manager** (§4C.1) — parent-repo `.itsybitsy`
   mkdir + `.claude/settings.local.json` write; and **§4C.2 watchdog spawn
   inheritance** (the design decision that must precede phase 3).
 - **tmux socket escape** (§4C.3) — not exercised; the recommendation (deny the tmux

@@ -1,3 +1,4 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Standalone script for generating an agent prompt summary using claude -p with Haiku.
  * Spawned as a detached subprocess by newAgent() so it survives parent process.exit().
@@ -30,12 +31,12 @@ export type SummarySpawnFn = (
 export const spawnCtx = new InjectionContext<SummarySpawnFn>(Bun.spawn as SummarySpawnFn);
 
 /**
- * Validate that agentDir looks like a legitimate .ittybitty/agents/ path.
+ * Validate that agentDir looks like a legitimate .itsybitsy/agents/ path.
  * Prevents arbitrary file system access via the CLI subcommand.
  */
 export function isValidAgentDir(agentDir: string): boolean {
-  // Must be an absolute path containing the .ittybitty/agents/ structure
-  return agentDir.startsWith("/") && /\/\.ittybitty\/agents\/[^/]+$/.test(agentDir);
+  // Must be an absolute path containing the .itsybitsy/agents/ structure
+  return runtimeNames.isExactAgentDir(agentDir);
 }
 
 /** Build the claude -p command array for summary generation. Exported for testing. */

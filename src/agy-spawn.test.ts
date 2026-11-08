@@ -377,15 +377,15 @@ describe("refuseIfTracked", () => {
     const run = async (cmd: string[]) => {
       calls.push(cmd);
       // Pretend the second file is tracked (exit 0), the first is not.
-      const tracked = cmd[cmd.length - 1] === ".agents/rules/ittybitty-agent.md";
+      const tracked = cmd[cmd.length - 1] === ".agents/rules/itsybitsy-agent.md";
       return { stdout: "", stderr: "", exitCode: tracked ? 0 : 1 };
     };
     const result = await refuseIfTracked(
       "/wt",
-      [".agents/hooks.json", ".agents/rules/ittybitty-agent.md"],
+      [".agents/hooks.json", ".agents/rules/itsybitsy-agent.md"],
       run,
     );
-    expect(result).toBe(".agents/rules/ittybitty-agent.md");
+    expect(result).toBe(".agents/rules/itsybitsy-agent.md");
     // Uses `git -C <worktree> ls-files --error-unmatch <file>`.
     expect(calls[0]).toEqual(["git", "-C", "/wt", "ls-files", "--error-unmatch", ".agents/hooks.json"]);
   });
@@ -433,16 +433,16 @@ describe("writeAgyWorktreeFiles / untrust (temp HOME)", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("writes .agents/hooks.json and .agents/rules/ittybitty-agent.md, creating dirs", async () => {
+  test("writes .agents/hooks.json and .agents/rules/itsybitsy-agent.md, creating dirs", async () => {
     const { hooksPath, rulesPath } = await writeAgyWorktreeFiles(worktree, ctxFor(), {
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-wtf01",
     });
     expect(hooksPath).toBe(join(worktree, ".agents", "hooks.json"));
-    expect(rulesPath).toBe(join(worktree, ".agents", "rules", "ittybitty-agent.md"));
+    expect(rulesPath).toBe(join(worktree, ".agents", "rules", "itsybitsy-agent.md"));
 
     const hooks = JSON.parse(await Bun.file(hooksPath).text());
-    expect(hooks.ittybitty.PreToolUse[0].hooks[0].command).toBe(
+    expect(hooks.itsybitsy.PreToolUse[0].hooks[0].command).toBe(
       "/usr/local/bin/ib hooks agy-pre-tool-use agent-wtf01",
     );
     const rules = await Bun.file(rulesPath).text();

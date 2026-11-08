@@ -23,17 +23,17 @@ describe("buildAgyHooksJson", () => {
       agentId: "agent-abc123",
     });
     const doc = JSON.parse(text);
-    expect(doc.ittybitty).toBeDefined();
-    expect(Array.isArray(doc.ittybitty.PreToolUse)).toBe(true);
-    expect(Array.isArray(doc.ittybitty.PreInvocation)).toBe(true);
-    expect(Array.isArray(doc.ittybitty.Stop)).toBe(true);
+    expect(doc.itsybitsy).toBeDefined();
+    expect(Array.isArray(doc.itsybitsy.PreToolUse)).toBe(true);
+    expect(Array.isArray(doc.itsybitsy.PreInvocation)).toBe(true);
+    expect(Array.isArray(doc.itsybitsy.Stop)).toBe(true);
   });
 
   test("PreToolUse carries a matcher '*' and points at agy-pre-tool-use", () => {
     const doc = JSON.parse(
       buildAgyHooksJson({ ibBinaryPath: "/usr/local/bin/ib", agentId: "agent-abc123" }),
     );
-    const pre = doc.ittybitty.PreToolUse[0];
+    const pre = doc.itsybitsy.PreToolUse[0];
     expect(pre.matcher).toBe("*");
     expect(pre.hooks[0].type).toBe("command");
     expect(pre.hooks[0].command).toBe("/usr/local/bin/ib hooks agy-pre-tool-use agent-abc123");
@@ -44,18 +44,18 @@ describe("buildAgyHooksJson", () => {
     const doc = JSON.parse(
       buildAgyHooksJson({ ibBinaryPath: "/opt/ib", agentId: "agent-xyz" }),
     );
-    expect(doc.ittybitty.PreInvocation[0].command).toBe("/opt/ib hooks agy-pre-invocation agent-xyz");
-    expect(doc.ittybitty.PreInvocation[0].type).toBe("command");
-    expect(doc.ittybitty.Stop[0].command).toBe("/opt/ib hooks agy-stop agent-xyz");
-    expect(doc.ittybitty.Stop[0].type).toBe("command");
+    expect(doc.itsybitsy.PreInvocation[0].command).toBe("/opt/ib hooks agy-pre-invocation agent-xyz");
+    expect(doc.itsybitsy.PreInvocation[0].type).toBe("command");
+    expect(doc.itsybitsy.Stop[0].command).toBe("/opt/ib hooks agy-stop agent-xyz");
+    expect(doc.itsybitsy.Stop[0].type).toBe("command");
   });
 
   test("honors a custom timeout", () => {
     const doc = JSON.parse(
       buildAgyHooksJson({ ibBinaryPath: "/opt/ib", agentId: "agent-xyz", timeoutSecs: 45 }),
     );
-    expect(doc.ittybitty.PreToolUse[0].hooks[0].timeout).toBe(45);
-    expect(doc.ittybitty.Stop[0].timeout).toBe(45);
+    expect(doc.itsybitsy.PreToolUse[0].hooks[0].timeout).toBe(45);
+    expect(doc.itsybitsy.Stop[0].timeout).toBe(45);
   });
 
   test("throws on an unsafe ib binary path (apostrophe)", () => {
@@ -83,7 +83,7 @@ describe("AGY_WORKTREE_FILES", () => {
   test("names the hooks.json and always-on rule file", () => {
     expect(AGY_WORKTREE_FILES).toEqual([
       ".agents/hooks.json",
-      ".agents/rules/ittybitty-agent.md",
+      ".agents/rules/itsybitsy-agent.md",
     ]);
   });
 });
@@ -129,10 +129,10 @@ describe("buildAgyRulesFile", () => {
     expect(body.startsWith("---\ntrigger: always_on\ndescription: itsybitsy agent instructions\n---\n")).toBe(true);
   });
 
-  test("strips the <ittybitty> wrapper from the instruction body", async () => {
+  test("strips the <itsybitsy> wrapper from the instruction body", async () => {
     const body = await buildAgyRulesFile(ctxFor());
-    expect(body).not.toContain("<ittybitty>");
-    expect(body).not.toContain("</ittybitty>");
+    expect(body).not.toContain("<itsybitsy>");
+    expect(body).not.toContain("</itsybitsy>");
   });
 
   test("interpolates the agent id from the template", async () => {

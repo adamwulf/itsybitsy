@@ -27,7 +27,7 @@ describe("checkMainPath", () => {
     test("allow-non-bash-tool: Read tool even with agent path is allowed", () => {
       const input: MainPathInput = {
         tool_name: "Read",
-        tool_input: { file_path: "/Users/dev/project/.ittybitty/agents/test/repo/file.txt" },
+        tool_input: { file_path: "/Users/dev/project/.itsybitsy/agents/test/repo/file.txt" },
         cwd: "/some/path",
       };
       expect(checkMainPath(input)).toEqual({ action: "allow" });
@@ -56,7 +56,7 @@ describe("checkMainPath", () => {
     test("deny-cd-agent-worktree: cd to agent repo is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo" },
+        tool_input: { command: "cd /Users/dev/project/.itsybitsy/agents/test-agent/repo" },
         cwd: "/Users/dev/project",
       };
       const result = checkMainPath(input);
@@ -67,7 +67,7 @@ describe("checkMainPath", () => {
     test("deny-cd-agent-worktree-subdir: cd to agent repo subdir is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo/src" },
+        tool_input: { command: "cd /Users/dev/project/.itsybitsy/agents/test-agent/repo/src" },
         cwd: "/Users/dev/project",
       };
       const result = checkMainPath(input);
@@ -77,7 +77,7 @@ describe("checkMainPath", () => {
     test("deny-cd-compound-and: cd to agent path with && is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo && chmod +x script.sh" },
+        tool_input: { command: "cd /Users/dev/project/.itsybitsy/agents/test-agent/repo && chmod +x script.sh" },
         cwd: "/Users/dev/project",
       };
       const result = checkMainPath(input);
@@ -87,7 +87,7 @@ describe("checkMainPath", () => {
     test("deny-cd-compound-or: cd to agent path with || is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo || echo failed" },
+        tool_input: { command: "cd /Users/dev/project/.itsybitsy/agents/test-agent/repo || echo failed" },
         cwd: "/Users/dev/project",
       };
       const result = checkMainPath(input);
@@ -97,7 +97,7 @@ describe("checkMainPath", () => {
     test("deny-cd-compound-pipe: cd to agent path with | is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo | cat" },
+        tool_input: { command: "cd /Users/dev/project/.itsybitsy/agents/test-agent/repo | cat" },
         cwd: "/Users/dev/project",
       };
       const result = checkMainPath(input);
@@ -107,7 +107,7 @@ describe("checkMainPath", () => {
     test("deny-cd-compound-semicolon: cd to agent path with ; is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo; ls -la" },
+        tool_input: { command: "cd /Users/dev/project/.itsybitsy/agents/test-agent/repo; ls -la" },
         cwd: "/Users/dev/project",
       };
       const result = checkMainPath(input);
@@ -117,7 +117,7 @@ describe("checkMainPath", () => {
     test("deny-cd-multiple-chain: cd to agent path with multiple && is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo && git add . && git commit -m test" },
+        tool_input: { command: "cd /Users/dev/project/.itsybitsy/agents/test-agent/repo && git add . && git commit -m test" },
         cwd: "/Users/dev/project",
       };
       const result = checkMainPath(input);
@@ -140,7 +140,7 @@ describe("checkMainPath", () => {
     test("cd to relative agent path resolves against cwd", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd .ittybitty/agents/agent-abc123/repo" },
+        tool_input: { command: "cd .itsybitsy/agents/agent-abc123/repo" },
         cwd: "/Users/me/project",
       };
       const result = checkMainPath(input);
@@ -150,7 +150,7 @@ describe("checkMainPath", () => {
     test("cd with .. resolved against cwd targets agent worktree is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd ../project/.ittybitty/agents/agent-xyz/repo" },
+        tool_input: { command: "cd ../project/.itsybitsy/agents/agent-xyz/repo" },
         cwd: "/Users/me/other",
       };
       const result = checkMainPath(input);
@@ -160,7 +160,7 @@ describe("checkMainPath", () => {
     test("cd with double-quoted agent path is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: 'cd "/Users/me/project/.ittybitty/agents/agent-abc/repo"' },
+        tool_input: { command: 'cd "/Users/me/project/.itsybitsy/agents/agent-abc/repo"' },
         cwd: "/Users/me/project",
       };
       const result = checkMainPath(input);
@@ -170,26 +170,26 @@ describe("checkMainPath", () => {
     test("cd with single-quoted agent path is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd '/Users/me/project/.ittybitty/agents/agent-abc/repo'" },
+        tool_input: { command: "cd '/Users/me/project/.itsybitsy/agents/agent-abc/repo'" },
         cwd: "/Users/me/project",
       };
       const result = checkMainPath(input);
       expect(result.action).toBe("block");
     });
 
-    test("cd to .ittybitty/agents (no /repo) is allowed", () => {
+    test("cd to .itsybitsy/agents (no /repo) is allowed", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/me/project/.ittybitty/agents" },
+        tool_input: { command: "cd /Users/me/project/.itsybitsy/agents" },
         cwd: "/Users/me/project",
       };
       expect(checkMainPath(input)).toEqual({ action: "allow" });
     });
 
-    test("cd to .ittybitty/agents/some-id (no /repo) is allowed", () => {
+    test("cd to .itsybitsy/agents/some-id (no /repo) is allowed", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/me/project/.ittybitty/agents/agent-abc123" },
+        tool_input: { command: "cd /Users/me/project/.itsybitsy/agents/agent-abc123" },
         cwd: "/Users/me/project",
       };
       expect(checkMainPath(input)).toEqual({ action: "allow" });
@@ -207,7 +207,7 @@ describe("checkMainPath", () => {
     test("cd with shell comment to agent worktree is blocked", () => {
       const input: MainPathInput = {
         tool_name: "Bash",
-        tool_input: { command: "cd /Users/dev/project/.ittybitty/agents/test-agent/repo # checkout" },
+        tool_input: { command: "cd /Users/dev/project/.itsybitsy/agents/test-agent/repo # checkout" },
         cwd: "/Users/dev/project",
       };
       const result = checkMainPath(input);
@@ -228,7 +228,7 @@ describe("checkMainPath", () => {
       for (const tool of ["Write", "Edit", "Task", "Grep", "Glob"]) {
         const input: MainPathInput = {
           tool_name: tool,
-          tool_input: { file_path: "/Users/me/.ittybitty/agents/agent-x/repo/file.ts" },
+          tool_input: { file_path: "/Users/me/.itsybitsy/agents/agent-x/repo/file.ts" },
           cwd: "/some/path",
         };
         expect(checkMainPath(input)).toEqual({ action: "allow" });

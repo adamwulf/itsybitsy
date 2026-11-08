@@ -284,10 +284,10 @@ rules that reference `(param "…")`:
 
 | `-D` param | Value | Rules it backs |
 |---|---|---|
-| `AGENTDIR` | `<repoPath>/.ittybitty/agents/<id>` | `file-read* + file-write* (subpath (param "AGENTDIR"))` — **contains WORKTREE**; MANDATORY read+write (V3 fix) |
+| `AGENTDIR` | `<repoPath>/.itsybitsy/agents/<id>` | `file-read* + file-write* (subpath (param "AGENTDIR"))` — **contains WORKTREE**; MANDATORY read+write (V3 fix) |
 | `WORKTREE` | `<agentDir>/repo` | `file-write* (subpath (param "WORKTREE"))` (subsumed by AGENTDIR read) |
 | `GITDIR` | `git rev-parse --git-common-dir` (reuse codex's `resolveGitRevParsePath`) | `file-read* + file-write* (subpath (param "GITDIR"))` — MANDATORY read+write |
-| `REPOAGENTS` | `<repoPath>/.ittybitty/agents` (the parent-repo registry) | `file-read* (subpath (param "REPOAGENTS"))` — needed by **`ib status`** to resolve the agent ("Agent not found" without it; `ib list` works without it). NEW finding (V5). |
+| `REPOAGENTS` | `<repoPath>/.itsybitsy/agents` (the parent-repo registry) | `file-read* (subpath (param "REPOAGENTS"))` — needed by **`ib status`** to resolve the agent ("Agent not found" without it; `ib list` works without it). NEW finding (V5). |
 | `HOME` | user home | only if the generator needs it to build `~`-relative write rules |
 
 > ⚠️ **`file-read*` on AGENTDIR + GITDIR is what lets whole-home read collapse to 5

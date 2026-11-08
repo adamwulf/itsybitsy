@@ -1,11 +1,12 @@
+import * as runtimeNames from "./runtime-names";
 /**
  * Antigravity CLI (`agy`) worktree-file + trust helpers (SPEC-ANTIGRAVITY-CLI.md
  * §4.2). Pure builders plus the two on-disk mutations the spawn path composes:
  *
  *   1. `.agents/hooks.json` — registers itsybitsy's PreToolUse / PreInvocation /
- *      Stop hooks under the named hook `ittybitty` (D3). This is the ONLY
+ *      Stop hooks under the named hook `itsybitsy` (D3). This is the ONLY
  *      permission boundary — there is no sandbox, no `--add-dir` (D3).
- *   2. `.agents/rules/ittybitty-agent.md` — the always-on rule file carrying the
+ *   2. `.agents/rules/itsybitsy-agent.md` — the always-on rule file carrying the
  *      agent's role instructions + the skills catalog (D6). Project and
  *      user-wide instructions are not copied in: agy reads the repo's own
  *      `AGENTS.md` and its global `~/.gemini/GEMINI.md` natively.
@@ -52,7 +53,7 @@ export interface BuildAgyHooksJsonInput {
 
 /**
  * Build the JSON text for `<worktree>/.agents/hooks.json` (D3). Registers the
- * three itsybitsy hooks under the named hook `ittybitty`. `command` runs under
+ * three itsybitsy hooks under the named hook `itsybitsy`. `command` runs under
  * `sh -c`, so `<abs ib>` must be path-safe (no apostrophes / quotes /
  * backslashes / control chars — reuse `isCodexSafeBinaryPath`) and `<agentId>`
  * must satisfy `isValidAgentId`.
@@ -85,7 +86,7 @@ export function buildAgyHooksJson(input: BuildAgyHooksJsonInput): string {
     `${ibBinaryPath} hooks ${AGY_HOOK_DISPATCHER[event]} ${agentId}`;
 
   const doc = {
-    ittybitty: {
+    [runtimeNames.AGY_HOOK_KEY]: {
       PreToolUse: [
         {
           matcher: "*",
@@ -100,7 +101,7 @@ export function buildAgyHooksJson(input: BuildAgyHooksJsonInput): string {
 }
 
 /**
- * Build the body for `<worktree>/.agents/rules/ittybitty-agent.md` (D6). The
+ * Build the body for `<worktree>/.agents/rules/itsybitsy-agent.md` (D6). The
  * always-on rule file frontmatter is followed by:
  *   - the session-start instruction template (wrapper stripped),
  *   - the skills catalog.

@@ -21,22 +21,22 @@ afterEach(async () => {
 // ── resolveAgentDir ─────────────────────────────────────────────────────────
 
 test("resolveAgentDir with agentId and agents dir in cwd", () => {
-  const cwd = "/repo/.ittybitty/agents/agent-abc12345/repo";
+  const cwd = "/repo/.itsybitsy/agents/agent-abc12345/repo";
   expect(resolveAgentDir(cwd, "agent-abc12345")).toBe(
-    "/repo/.ittybitty/agents/agent-abc12345",
+    "/repo/.itsybitsy/agents/agent-abc12345",
   );
 });
 
 test("resolveAgentDir without agentId extracts from cwd agent path", () => {
-  const cwd = "/repo/.ittybitty/agents/agent-abc12345/repo";
+  const cwd = "/repo/.itsybitsy/agents/agent-abc12345/repo";
   expect(resolveAgentDir(cwd)).toBe(
-    "/repo/.ittybitty/agents/agent-abc12345",
+    "/repo/.itsybitsy/agents/agent-abc12345",
   );
 });
 
 test("resolveAgentDir without agentId extracts from cwd", () => {
-  const cwd = "/repo/.ittybitty/agents/agent-abc12345/repo/src";
-  expect(resolveAgentDir(cwd)).toBe("/repo/.ittybitty/agents/agent-abc12345");
+  const cwd = "/repo/.itsybitsy/agents/agent-abc12345/repo/src";
+  expect(resolveAgentDir(cwd)).toBe("/repo/.itsybitsy/agents/agent-abc12345");
 });
 
 test("resolveAgentDir returns null for non-agent cwd", () => {

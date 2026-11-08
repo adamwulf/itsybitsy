@@ -12,7 +12,7 @@
 - With explicit false, Codex/Fugu's own sandbox is the process boundary under the hooks. Since 2026-10-30 its native profile forwards configured `paths`, while retaining a native baseline broader than the hook policy:
   - **The profile.** `itsybitsy_agent` extends `:workspace`. That writes the worktree (cwd), every `--add-dir` root and the temp dirs, and keeps `.git`/`.codex`/`.agents`/`.aws` under those roots read-only. The profile enables network, and adds write entries for the worktree's exact Git admin dir (canonical `git rev-parse --git-dir`) and the common dir's `objects`/`refs`/`logs`. All of it is defined by inline `-c` flags; no Codex config file is written.
   - **Path forwarding.** Spawn translates resolved paths and resume translates frozen `meta.paths` into the same filesystem map. Exact and plain trailing `/**` allow entries become direct roots; other allow globs snapshot existing authorized matches without granting enclosing directories. New matches require the next launch/resume. Read stays read, equal-path writes win, and denies cannot be reopened by explicit Git grants. Unsupported forms fail closed; see SPEC-CODEX-MODEL.md for snapshot, symlink and quoting limitations. Enabled mode does not use this translation.
-  - **The `--add-dir` roots are unchanged:** `~/.itsybitsy`, `~/Library/Caches` on macOS, the whole git common dir (including `hooks/` and `config`), and the parent repo's `.ittybitty` and `.claude`. The Git entries alone do not narrow the common-dir grant; `objects`/`refs`/`logs` are redundant with it. The admin-dir entry enables `git add`/`git commit`, subject to configured path restrictions.
+  - **The `--add-dir` roots are unchanged:** `~/.itsybitsy`, `~/Library/Caches` on macOS, the whole git common dir (including `hooks/` and `config`), and the parent repo's `.itsybitsy` and `.claude`. The Git entries alone do not narrow the common-dir grant; `objects`/`refs`/`logs` are redundant with it. The admin-dir entry enables `git add`/`git commit`, subject to configured path restrictions.
   - **Resume** regenerates the profile from frozen policy, re-expanding its globs without reloading live type files. The flags also apply when resuming sessions spawned under the earlier `-s workspace-write` (per the codex 0.165.0 source).
   - **Live checks have NOT passed yet** (docs/SANDBOX-ROLLOUT.md). Details: SPEC-CODEX-MODEL.md permission-profile addendum.
 - Spawn freezes policy in metadata; resume preserves it. Metadata readers and displays treat only literal false as an opt-out. `ib sandbox refresh` applies current type settings in either direction, and Codex/Fugu instructions are regenerated to match the policy.
@@ -93,7 +93,7 @@ SPEC §6.1 defines them[^25]:
 | 7 | Path is the worktree or under it | **allow** |
 | 8 | Path is the agent's own `agent.log` | allow |
 | 9 | Path is under the agent's own `~/.claude/projects/<encoded-worktree>` | allow |
-| 10 | Path is under `.ittybitty/agents/` (any agent, including own dir) | deny |
+| 10 | Path is under `.itsybitsy/agents/` (any agent, including own dir) | deny |
 | 11 | Path is under the main repo root but outside the worktree | deny |
 | 12 | `allowedPaths` defined → in list = allow, else deny | — |
 | 13 | `allowedPaths` undefined → allow | allow |
@@ -152,7 +152,7 @@ own Claude from `cd`-ing into an agent worktree[^28].
 **Launch.** `codex -m <model> -a never -s workspace-write
 --dangerously-bypass-hook-trust`[^41] plus `--add-dir` for `~/.itsybitsy`,
 `~/Library/Caches` on macOS, the git common dir, and the parent repo's
-`.ittybitty` and `.claude` subdirectories[^14][^15].
+`.itsybitsy` and `.claude` subdirectories[^14][^15].
 
 **Sandbox.** `workspace-write` is a write boundary: edits and commands are
 confined to cwd[^17] plus the `--add-dir` roots[^14]. It also leaks: `/tmp`, `$TMPDIR`
@@ -229,14 +229,14 @@ readable roots, or accepting the claude-parity default)"[^23].
 ### 5.2 Why the worktree is the wrong anchor for relative entries
 
 The request proposes resolving `../../fumble` relative to the worktree. The
-worktree sits at `<repo>/.ittybitty/agents/<id>/repo`[^10]. Its first four
+worktree sits at `<repo>/.itsybitsy/agents/<id>/repo`[^10]. Its first four
 ancestors are:
 
 | Levels of `..` | Resolves to | Verdict from `checkFilePath` |
 |---|---|---|
-| 1 | `<repo>/.ittybitty/agents/<id>` | deny, step 10 (only `agent.log` survives) |
-| 2 | `<repo>/.ittybitty/agents` | deny, step 10 |
-| 3 | `<repo>/.ittybitty` | deny, step 11 |
+| 1 | `<repo>/.itsybitsy/agents/<id>` | deny, step 10 (only `agent.log` survives) |
+| 2 | `<repo>/.itsybitsy/agents` | deny, step 10 |
+| 3 | `<repo>/.itsybitsy` | deny, step 11 |
 | 4 | `<repo>` | deny, step 11 |
 | 5 | parent of the repo | reachable |
 
@@ -299,7 +299,7 @@ Replace the current block[^5] with:
 1. Expand `~`.
 2. If the entry is relative, join it to the anchor (§6.1).
 3. `path.resolve()`, then `realpathSync` when the path exists.
-4. **Reject** an entry that resolves to, or under, `<repo>/.ittybitty/agents`,
+4. **Reject** an entry that resolves to, or under, `<repo>/.itsybitsy/agents`,
    because step 10 will deny it anyway. Print the resolved path in the error so
    the author sees the mistake.
 5. **Warn** (do not reject) on an entry that resolves inside the main repo root,
@@ -503,7 +503,7 @@ name the allowed roots. I agree.
 the repo: `/private/tmp/claude-<uid>/<encoded-cwd>/<session-uuid>/scratchpad`,
 where `<encoded-cwd>` is the cwd with `/` and `.` replaced by `-`, the same
 transform as `encodeClaudeProjectPath`[^44] (this session's value:
-`-Users-adamwulf-Developer-bun-itsybitsy--ittybitty-agents-path-isolation-repo`).
+`-Users-adamwulf-Developer-bun-itsybitsy--itsybitsy-agents-path-isolation-repo`).
 Proposed allowed root for both layers:
 `/private/tmp/claude-<uid>/<encodeClaudeProjectPath(worktree)>`, one level above
 the session id so a respawned session is covered. Take `<uid>` from
@@ -635,7 +635,7 @@ path permissions in the `.md` files, basic defaults shipped.
    `sandbox-safety` split them by kind, and the split is adopted:
    - **Runtime roots, code-injected, keyed on the resolved
      `canSpawnChildren`:** the git common dir, and the parent repo's
-     `.ittybitty/agents` and `.claude` subdirectories. A spawning type gets
+     `.itsybitsy/agents` and `.claude` subdirectories. A spawning type gets
      them for writing (child agent dir, `settings.local.json`) and keeps the
      tmux socket; a non-spawning type gets them read-only and loses the tmux
      socket (§6.10 amendment 3). One key, one rule.

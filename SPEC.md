@@ -358,7 +358,7 @@ Agents are assigned a **type** at creation time that determines their behavior, 
 | `worker` | `false` | `⚙` | Executes tasks assigned by a manager |
 | `repo-coordinator` | `true` | `◇` | Read-only per-repo coordinator that manages agents without writing code (§12.2) |
 
-The system coordinator's type, `system-coordinator`, is a layer file (`spawnable: false`) for the global `@system` agent (§12.1). The two coordinator type names are the constants `REPO_COORDINATOR_TYPE` and `SYSTEM_COORDINATOR_TYPE` in `src/coordinator-type-names.ts`; they are the only type names the code treats specially.
+The system coordinator's type, `system-coordinator`, is a layer file (`spawnable: false`) for the global `@system` agent (§12.1). The two coordinator type names are the constants `REPO_COORDINATOR_TYPE` and `SYSTEM_COORDINATOR_TYPE` in `src/coordinator-type-names.ts`; they are the only coordinator-specific type names.
 
 **All types** are defined as `.md` files in `~/.itsybitsy/agent-types/<name>.md` with YAML frontmatter and an optional markdown body for instructions. The `.md` file on disk is the sole source of truth — there is no hardcoded fallback. Users can edit the default type files, create custom types, or delete the manager/worker files (coordinator types auto-regenerate; see §2.7). See §2.6 for the file format.
 

@@ -10572,6 +10572,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     await writeLayerModel("_all", "model: claude:claude-opus-4-7", { spawnable: false });
     await writeLayerModel("_non_coordinator", "model: claude:claude-sonnet-4-6", { spawnable: false });
+    // A third, distinct model in system-coordinator.md: it is the @system
+    // layer and must never be a fallback for a per-repo coordinator either.
+    await writeLayerModel("system-coordinator", "model: claude:claude-haiku-4-5", { spawnable: false });
     // Override the embedded repo-coordinator.md (which declares `model: claude:opus`)
     // with a blank model so the precedence chain falls through to _all.md.
     // canSpawnChildren: true preserves coordinator semantics.
@@ -10595,7 +10598,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const coordId = result.stdout.trim();
     const meta = await Bun.file(join(coordRepo, ".itsybitsy", "agents", coordId, "meta.json")).json();
-    // _all.md wins; _non_coordinator.md ignored for coordinators.
+    // _all.md wins; _non_coordinator.md and system-coordinator.md are both
+    // ignored for a per-repo coordinator.
     expect(meta.model).toBe("claude:claude-opus-4-7");
 
     await rm(coordRepoDir, { recursive: true, force: true });

@@ -453,7 +453,7 @@ skipped; sealed-path reporting cannot abort migration of another directory.
 | 1 | Ignore rules | Append `.itsybitsy/` and `.agents/rules/itsybitsy-agent.md` to `$(git rev-parse --path-format=absolute --git-common-dir)/info/exclude`, under a `# added by itsybitsy scripts/update-repos.sh` comment, each only if that exact line is missing. (Without `--path-format=absolute`, a main worktree returns the relative `.git`.) `mkdir -p` the `info/` dir first. If the file doesn't end in a newline, add one before the comment: otherwise the comment joins the last pattern (`*.log# added by …`) and silently un-ignores it. Every worktree shares this file, and no tracked file changes. It is needed because the spawn dirty-gate (`src/ib-commands.ts:6487-6514`) refuses on `?? .itsybitsy/`, and agy resume writes the new rule file, which old worktree `.gitignore` files don't list. It runs before the move, so `git status` stays clean |
 | 2 | Move | `mv <repo>/OLD <repo>/NEW`: one `rename(2)` that carries `agents/`, `archive/`, `prompts/`, `repo-id` and `user-questions.json` |
 | 3 | Repair worktrees, immediately | Look at each `<common-dir>/worktrees/*/gitdir` that names an absolute path under `<repo>/OLD/`, in either the registered or the real path form. The new path is the same path under NEW. If `<new>/.git` exists, run `git -C <repo> worktree repair "<new dir>"`, one path per call. Git then scans every admin entry, so an unrelated bad entry can make any call exit 1. Print its output as context, but decide success for this worktree only from the following link checks, not the command status. Working from admin entries also covers nested worktrees such as `agents/<id>/repo/.claude/worktrees/<name>` (Claude's `isolation: "worktree"`). Then verify two things, comparing **real paths** in both: `git -C <new dir> rev-parse --show-toplevel` equals the new dir (in a dir without `.git` the command falls through to the parent repo and still succeeds), and the admin `gitdir` now names `<new dir>/.git`. The second compare must use real paths too, because repair writes the real path (`/private/var/…`), and a literal compare against `/var/…` would fail falsely, lock the entry and exit 1. A failed repair is handled as below. A relative `gitdir` (`worktree.useRelativePaths`, not in use here) that resolves, against its admin dir, under `<repo>/OLD/` is not supported: it is a repo error handled the same way. If `<new>/.git` is missing, warn "stale entry, left in place" |
-| 4 | Submodules in worktrees | For each regular `config` file that `find "<common-dir>/worktrees" -path '*/modules/*' -type f -name config` finds outside `refs/` and `logs/`, replace the `/OLD/agents/` segment in a `core.worktree` that contains it (`git config --file`). These values may be relative, so step 3's anchored rule can't match them. Handle each config independently so a bad one does not block the others |
+| 4 | Submodules in worktrees | For each regular `config` file that `find "<common-dir>/worktrees" -path '*/modules/*' -type f -name config` finds whose containing directory has a `HEAD` entry (a git directory), replace the `/OLD/agents/` segment in a `core.worktree` that contains it (`git config --file`). These values may be relative, so step 3's anchored rule can't match them. Handle each config independently so a bad one does not block the others |
 | 5 | Agent and archive records | For each dir D in `NEW/agents/*`, `NEW/archive/*` and `NEW/agents/*/.retirement/runtime`: in `D/meta.json`, rewrite only the `ittybitty-` prefix of the `tmux_session` value, using a regex on that field. Rehire refuses a mismatch (`src/ib-commands.ts:746`), and the field isn't sealed. In `D/start.sh`, `D/resume.sh`, `D/settings.local.json`, `D/.claude/settings.local.json` and `NEW/agents/*/repo/.claude/settings.local.json`, replace the literal `<repo>/OLD/` with `<repo>/NEW/` in both path forms, only in files that contain it. Never touch `retirement.json` or `prepared-retirement.json`: their `headRef` is valid under §1.3 |
 | 6 | agy worktree files | In `NEW/agents/*/repo/.agents/`: if `rules/ittybitty-agent.md` exists and is untracked, rename it to `rules/itsybitsy-agent.md`, or delete it if the new file already exists, because agy would otherwise load both always-on rules. In `hooks.json`, rename the `"ittybitty":` key. Resume rewrites both files anyway (`writeAgyWorktreeFiles`), but stopped and archived worktrees shouldn't keep the old name |
 | 7 | Claude transcripts | Rename every `~/.claude/projects/<enc(repo)>--ittybitty-agents-*` to `…--itsybitsy-agents-*`, where `enc` replaces each character outside `[A-Za-z0-9]` with `-`. That is Claude's rule, not `encodeClaudeProjectPath`'s. Use both path forms. If the target exists, skip and warn. If the old or the new name is over 200 characters (where Claude is said to truncate and add a hash, which I could not confirm), warn and skip. Contents aren't changed |
@@ -1006,7 +1006,9 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
     forms must move, and an idempotent re-run reports no actions for each repo.
 22. **Submodules and recovery commands:** directories, refs and reflogs named
     `config` are not parsed as configuration; a bad config does not block other
-    files. With a registered subdirectory, runtime removal/untracking commands
+    files. Submodules named `logs`, `refs` or containing those path segments still
+    qualify by their containing git directory's `HEAD` entry. With a registered
+    subdirectory, runtime removal/untracking commands
     use the git toplevel while labels and re-run commands preserve the input.
 
 ## Part 5 — Cross-cutting checklist
@@ -1065,15 +1067,17 @@ Reported by the manager from Claude worker `agent-c1361af1` on 2026-11-07:
 - Failing tests: **none**. Runbook step 8 uses `--type worker` and expects
   zero failures; re-run a failing file once for flakes, then inspect its history
   with `git log` against this baseline commit.
-- A Claude-worker full-suite run on the implementation tip is still required;
-  the manager will arrange it after these review fixes are committed.
+- Implementation validation reported by the manager: a Claude worker ran the
+  full suite on `04efba78` with **7,453 pass, 11 LIVE-gated skips, 0 fail**.
+  This validates the code-side review fixes against the zero-failure base.
+  Later script-review fixes receive their own isolated script test run.
 
 ### Codex baseline (context only)
 
 **Validation limitation:** the codex sandbox causes the 48 failures below on
 the base and prevents those tests from exercising the edited behavior. Matching
 this list does not validate those edits. The authoritative Claude-worker base
-above passes them; a non-codex implementation-tip run is required as well.
+and implementation validation above exercise these tests without that masking.
 
 Re-measured on the untouched updated base in detached HEAD after rebasing the
 implementation, before applying any implementation changes to that baseline:

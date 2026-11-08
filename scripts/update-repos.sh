@@ -407,8 +407,8 @@ for my $r (@repos) {
               my $inside = substr($file, length("$r->{common}/worktrees/"));
               my (undef, $module_path) = split m{/modules/}, $inside, 2;
               next unless defined $module_path;
-              next if $module_path =~ m{(?:^|/)(?:refs|logs)/};
               later_step(sub {
+                return unless -e (dirname($file) . '/HEAD');
                 my ($rc, $value, $err) = git_read($root, 'config', '--file', $file, '--get', 'core.worktree');
                 return if $rc == 1;
                 die "read submodule config: $err\n" if $rc;

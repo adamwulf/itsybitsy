@@ -265,13 +265,19 @@ describe("update-repos.sh isolated migration", () => {
     const f = await fixture(); const source = join(f.root, "submodule-source");
     await f.init(source);
     await f.git(f.worktree, "-c", "protocol.file.allow=always", "submodule", "add", `file://${source}`, "module");
+    await f.git(f.worktree, "-c", "protocol.file.allow=always", "submodule", "add", `file://${source}`, "logs");
     const moduleGit = await f.git(join(f.worktree, "module"), "rev-parse", "--absolute-git-dir");
+    const logsGit = await f.git(join(f.worktree, "logs"), "rev-parse", "--absolute-git-dir");
     await write(join(moduleGit, "refs", "heads", "config"), f.head + "\n");
     await write(join(moduleGit, "logs", "refs", "heads", "config"), "not a git config\n");
     await mkdir(join(moduleGit, "branches", "config"), { recursive: true });
     const before = await f.git(f.worktree, "diff", "--cached", "--name-only");
     const result = await f.run("--apply"); expect(result.code, result.text).toBe(0);
     expect(await f.git(join(f.moved(f.worktree), "module"), "status", "--porcelain")).toBe("");
+    expect(await f.git(join(f.moved(f.worktree), "logs"), "status", "--porcelain")).toBe("");
+    const logsWorktree = await f.git(f.repo, "config", "--file", join(logsGit, "config"), "--get", "core.worktree");
+    expect(logsWorktree).toContain("/.itsybitsy/agents/");
+    expect(logsWorktree).not.toContain("/.ittybitty/");
     expect(await f.git(f.moved(f.worktree), "diff", "--cached", "--name-only")).toBe(before);
     expect(await Bun.file(join(moduleGit, "refs", "heads", "config")).text()).toBe(f.head + "\n");
   });
@@ -279,6 +285,7 @@ describe("update-repos.sh isolated migration", () => {
   test("a malformed submodule config does not block later config rewrites", async () => {
     const f = await fixture();
     const modules = join(f.admin, "modules");
+    for (const name of ["aaa", "zzz"]) await write(join(modules, name, "HEAD"), "ref: refs/heads/main\n");
     await write(join(modules, "aaa", "config"), "[broken\n");
     await write(join(modules, "zzz", "config"), `[core]\n\tworktree = ${f.worktree}/module\n`);
     const result = await f.run("--apply");
@@ -396,15 +403,34 @@ describe("update-repos.sh isolated migration", () => {
     await f.assertAdminLinks();
   });
 
-  test("stray files, symlinks and malformed metadata do not block other entries", async () => {
+  test("stray files and symlinks are skipped without errors or changes to their targets", async () => {
     const f = await fixture();
     const outside = join(f.root, "untouched");
     await write(join(outside, "meta.json"), '{"tmux_session":"ittybitty-1234abcd-untouched"}');
+    const outsideGitdir = join(f.worktree, ".git") + "\n";
+    await write(join(outside, "gitdir"), outsideGitdir);
     const oldDirs = [join(f.repo, ".ittybitty", "agents"), join(f.repo, ".ittybitty", "archive"), dirname(f.admin)];
     for (const dir of oldDirs) {
       await write(join(dir, ".DS_Store"), "Finder metadata");
       await symlink(outside, join(dir, "000-symlink"));
     }
+    const result = await f.run("--apply");
+    expect(result.code, result.text).toBe(0);
+    expect(result.out).not.toMatch(/^\s*ERROR /m);
+    for (const dir of oldDirs) {
+      const moved = f.moved(dir);
+      expect(await Bun.file(join(moved, ".DS_Store")).text()).toBe("Finder metadata");
+      expect((await lstat(join(moved, "000-symlink"))).isSymbolicLink()).toBe(true);
+      expect(await readlink(join(moved, "000-symlink"))).toBe(outside);
+    }
+    expect(await Bun.file(join(outside, "meta.json")).text()).toBe('{"tmux_session":"ittybitty-1234abcd-untouched"}');
+    expect(await Bun.file(join(outside, "gitdir")).text()).toBe(outsideGitdir);
+    expect(await Bun.file(join(outside, "locked")).exists()).toBe(false);
+    await f.assertAdminLinks();
+  });
+
+  test("malformed metadata and an unreadable admin entry do not block other entries", async () => {
+    const f = await fixture();
     const bad = join(f.repo, ".ittybitty", "agents", "000-malformed");
     await write(join(bad, "meta.json"), "{broken");
     await write(join(bad, "start.sh"), f.worktree);
@@ -427,7 +453,6 @@ describe("update-repos.sh isolated migration", () => {
     expect(await Bun.file(join(f.moved(f.worktree), ".agents", "hooks.json")).json()).toEqual({ itsybitsy: { hooks: {} } });
     expect(await Bun.file(join(f.moved(bad), "meta.json")).text()).toBe("{broken");
     expect(await Bun.file(join(f.moved(bad), "start.sh")).text()).toBe(f.worktree);
-    expect(await Bun.file(join(outside, "meta.json")).text()).toContain("ittybitty-");
     expect(await Bun.file(join(f.newTranscript, "session.jsonl")).exists()).toBe(true);
   });
 

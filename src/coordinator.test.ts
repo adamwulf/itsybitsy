@@ -1809,10 +1809,18 @@ describe("acquireSystemCoordinator / releaseSystemCoordinator", () => {
 // -------------------------------------------------------------------
 describe("restartSystemCoordinator", () => {
   let tmpDir: string;
+  let typesHome: string;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-restart-"));
     setCoordinatorHome(tmpDir);
+    // Same isolation as the ensureSystemCoordinator describe: the restart
+    // re-runs the spawn, which loads agent types through userHome() and
+    // writes [coordinator] lines to the watch log. Without these it read the
+    // developer's real ~/.itsybitsy/agent-types/ and wrote the real watch.log.
+    typesHome = await mkdtemp(join(tmpdir(), "coord-restart-home-"));
+    setUserHome(typesHome);
+    setWatchLogPath(join(tmpDir, "watch.log"));
     setCoordinatorSleepFn(async () => {});
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream("Claude Code v1.0.0"),
@@ -1826,7 +1834,10 @@ describe("restartSystemCoordinator", () => {
     tmuxSpawnCtx.reset();
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
+    resetWatchLogPath();
+    resetUserHome();
     await rm(tmpDir, { recursive: true, force: true });
+    await rm(typesHome, { recursive: true, force: true });
   });
 
   test("kills existing session then creates new one", async () => {

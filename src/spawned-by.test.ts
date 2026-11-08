@@ -284,7 +284,7 @@ describe("checkIbCommandAccess spawned_by", () => {
   // ── @<repo-name> sentinel access checks ──────────────────────────────────
   // Per-repo coordinators are stamped as `@<basename>` in spawned_by. The
   // hasAccess path must grant the actual coordinator (whose ID is the
-  // basename and meta.agentType==="coordinator") and deny everyone else.
+  // basename and meta.agentType==="repo-coordinator") and deny everyone else.
 
   // We use `ib merge` for these tests instead of `ib retire` because the
   // per-repo coordinator bypass (SPEC §12.2) lets any same-repo coordinator

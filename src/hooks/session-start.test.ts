@@ -22,7 +22,7 @@ import {
  *
  * This file was not merely writing into the developer's real `~/.itsybitsy` —
  * several tests were READING it and depending on its contents. `generateInstructions`
- * calls `loadAgentType`, which resolves `manager` / `worker` / `coordinator` from
+ * calls `loadAgentType`, which resolves `manager` / `worker` / `repo-coordinator` from
  * `$HOME/.itsybitsy/agent-types/<name>.md`. Four tests here therefore asserted
  * against whatever type files this particular machine happens to have, including
  * any local edits, and would fail outright on a machine that had never run

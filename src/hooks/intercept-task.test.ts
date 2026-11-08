@@ -21,7 +21,7 @@ import {
  * behind `processTaskIntercept` does not read that temp dir — `loadAgentType`
  * resolves `$HOME/.itsybitsy/agent-types/<name>.md`, and `ensureAgentTypesDir`
  * CREATES that tree when it is missing. Running this file against a fresh home
- * writes `agent-types/{_all,_non_coordinator,coordinator,manager,system,worker}.md`
+ * writes `agent-types/{_all,_non_coordinator,manager,repo-coordinator,system-coordinator,worker}.md`
  * plus `agents/agent-9c1b4a42` — i.e. unisolated, it was writing agent-type
  * files and an agent directory into the developer's real `~/.itsybitsy`.
  *

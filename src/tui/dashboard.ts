@@ -23,6 +23,7 @@ import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { loadRegistry, setRepoDefaultAgentType, setRepoNotes } from "../registry";
 import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow, expandTabs } from "../tmux-poller";
@@ -1898,7 +1899,7 @@ export class DashboardComponent implements Component {
       // full agent list, plus the system coordinator's fixed session. These run
       // even when flatList is empty (no agents yet).
       for (const a of this.watcher?.lastAgents ?? []) {
-        if (a.meta.agentType === "coordinator" && a.meta.tmux_session) {
+        if (a.meta.agentType === REPO_COORDINATOR_TYPE && a.meta.tmux_session) {
           resizeTmuxWindow(a.meta.tmux_session, PINNED_TMUX_WIDTH);
         }
       }
@@ -2045,7 +2046,7 @@ export class DashboardComponent implements Component {
       // Repo header is selected — find coordinator agent from the full agent list
       // (coordinators are filtered out of flatList, so search lastAgents directly)
       const coordAgent = this.watcher?.lastAgents.find(
-        a => a.repoPath === repoPathForCoordinator && a.meta.agentType === "coordinator"
+        a => a.repoPath === repoPathForCoordinator && a.meta.agentType === REPO_COORDINATOR_TYPE
       );
       this.rightPane.repoCoordinatorAgent = coordAgent ?? null;
       this.infoPanel.repoCoordinatorAgent = coordAgent ?? null;
@@ -3641,7 +3642,7 @@ export async function launchDashboard(): Promise<void> {
   }
 
   await acquireSystemCoordinator();
-  // agent-types dir must exist before ensureSystemCoordinator() — it reads coordinator.md to resolve its model.
+  // agent-types dir must exist before ensureSystemCoordinator() — it reads system-coordinator.md to resolve its model.
   await ensureAgentTypesDir();
   ensureSystemCoordinator().catch((err) => {
     // Fires asynchronously — may resolve after the TUI has mounted, so
@@ -3907,7 +3908,7 @@ export async function launchDashboard(): Promise<void> {
         return releaseSystemCoordinator(async () => {
           // Pause all per-repo coordinators when last watcher exits
           const agents = dashboard.watcher?.lastAgents ?? [];
-          const coordinators = agents.filter(a => a.meta.agentType === "coordinator");
+          const coordinators = agents.filter(a => a.meta.agentType === REPO_COORDINATOR_TYPE);
           await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
         });
       }).finally(() => {

@@ -11,6 +11,7 @@ import type { FlatEntry } from "../agents";
 import { displayState } from "./agent-tree";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM } from "./colors";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 
 /** Abbreviate agent type for display — built-in types get short forms, custom types truncate to 5 chars */
 function abbreviateRole(agentType: string | undefined, isWorker: boolean | undefined): string {
@@ -18,7 +19,7 @@ function abbreviateRole(agentType: string | undefined, isWorker: boolean | undef
   switch (name) {
     case "manager": return "mgr";
     case "worker": return "wkr";
-    case "coordinator": return "coord";
+    case REPO_COORDINATOR_TYPE: return "coord";
     default: return name.length > 5 ? name.slice(0, 5) : name;
   }
 }
@@ -79,7 +80,7 @@ export function buildDashboardRows(flatList: FlatEntry[]): SystemDashboardRow[] 
     }
     // kind === "agent"
     const agent = entry.agent;
-    const isCoordinator = agent.meta.agentType === "coordinator";
+    const isCoordinator = agent.meta.agentType === REPO_COORDINATOR_TYPE;
     const role = isCoordinator ? "coord" : abbreviateRole(agent.meta.agentType, agent.meta.worker);
     const summary = (agent.meta.summary ?? agent.meta.prompt).replace(/\n/g, " ");
 

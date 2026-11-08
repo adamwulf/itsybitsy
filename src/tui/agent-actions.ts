@@ -30,6 +30,7 @@ import type { AgentCli } from "../agent-cli";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { sendStagedMessage } from "./message-send";
@@ -96,7 +97,7 @@ export function clearCoordinatorSpawnsInFlight() { coordinatorSpawnsInFlight.cle
 export function agentSettingsLocalPath(agent: Agent): string {
   const dir = agent.archived ? "archive" : "agents";
   const agentDir = join(runtimeNames.runtimeDir(agent.repoPath), dir, agent.id);
-  const base = agent.meta.agentType === "coordinator" ? agentDir : join(agentDir, "repo");
+  const base = agent.meta.agentType === REPO_COORDINATOR_TYPE ? agentDir : join(agentDir, "repo");
   return join(base, ".claude", "settings.local.json");
 }
 
@@ -505,7 +506,7 @@ export function handleResume(ctx: ActionCtx) {
           }
         } else {
           // No coordinator — spawn one
-          const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: "coordinator" });
+          const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: REPO_COORDINATOR_TYPE });
           if (result.ok) ctx.setNotice(`Spawned coordinator ${result.stdout}`, "info");
           else ctx.setNotice(`Spawn failed: ${result.stderr || result.stdout}`, "error");
         }
@@ -1713,12 +1714,26 @@ export function handleNewAgent(ctx: ActionCtx) {
   showNewAgentFormDialog(ctx, ctx.repos[0]!);
 }
 
+/**
+ * Order the new-agent form's Type cycle: alphabetical, except the per-repo
+ * coordinator type goes last. A coordinator is one per repo, so a Space press
+ * that lands on it by accident makes the form a no-op when one already exists
+ * ("Coordinator already exists"). Keeping it last also keeps the built-in
+ * cycle from `manager` as manager → worker → repo-coordinator. Applies to the
+ * TUI form only; `ib list-types` and the other users of the list keep the
+ * alphabetical order.
+ */
+export function newAgentFormTypeOrder(typeNames: string[]): string[] {
+  const others = typeNames.filter((name) => name !== REPO_COORDINATOR_TYPE);
+  return others.length === typeNames.length ? others : [...others, REPO_COORDINATOR_TYPE];
+}
+
 function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
   // Read the names of available spawnable agent types synchronously so the
   // dialog can open immediately. Layer-only types (e.g. `_all`, `_non_coordinator`)
   // are filtered out — they act only as permission/prompt layers. Falls back to
   // embedded defaults when the on-disk types directory is missing.
-  const availableTypes = listSpawnableTypeNamesSync();
+  const availableTypes = newAgentFormTypeOrder(listSpawnableTypeNamesSync());
   const defaultType = resolveDefaultAgentType(repo.defaultAgentType, availableTypes);
   // An agent made from the Favorites tab becomes a favorite, so it stays in
   // that view (SPEC §17.1). Read when the form opens: the tab the user was
@@ -1750,7 +1765,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
               ctx.closeDialog();
               // newAgent's stdout is the new agent's id. A coordinator has no
               // row in the Agents tree, so `.` could never unfavorite it.
-              if (favoriteOnCreate && agentType !== "coordinator") ctx.addFavorite(result.stdout.trim());
+              if (favoriteOnCreate && agentType !== REPO_COORDINATOR_TYPE) ctx.addFavorite(result.stdout.trim());
               ctx.pendingSelectNewestInRepo = repo.path;
               ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`, "info");
             } else {

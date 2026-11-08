@@ -1073,7 +1073,7 @@ describe("watchdog", () => {
             worker: false,
             model: "sonnet",
             claude_pid: "12345",
-            agentType: "coordinator",
+            agentType: "repo-coordinator",
           },
         });
 
@@ -1082,7 +1082,7 @@ describe("watchdog", () => {
         mkdirSync(agentDir, { recursive: true });
         writeFileSync(`${agentDir}/meta.json`, JSON.stringify({
           id: repoBasename,
-          agentType: "coordinator",
+          agentType: "repo-coordinator",
         }));
 
         // The registry name DELIBERATELY differs from basename — the lookup

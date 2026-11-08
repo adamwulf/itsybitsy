@@ -95,7 +95,7 @@ permissions:
 Use the web tools to investigate...
 ```
 
-Built-in types are installed on first run: `manager` (the default; may spawn sub-agents), `worker` (a leaf; may not), `coordinator`, and `system`, plus two layer files (`_all.md`, `_non_coordinator.md`) whose permissions and instructions apply to every matching agent. To create a custom type, add a new `.md` file and spawn with `--type <name>`. Types can inherit from each other (`inherits:`) and can be restricted to specific repos (`repos:`). See [docs/agent-types/README.md](./docs/agent-types/README.md).
+Built-in types are installed on first run: `manager` (the default; may spawn sub-agents), `worker` (a leaf; may not), `repo-coordinator` (a per-repo coordinator), and `system-coordinator` (the system coordinator's layer), plus two layer files (`_all.md`, `_non_coordinator.md`) whose permissions and instructions apply to every matching agent. To create a custom type, add a new `.md` file and spawn with `--type <name>`. Types can inherit from each other (`inherits:`) and can be restricted to specific repos (`repos:`). See [docs/agent-types/README.md](./docs/agent-types/README.md).
 
 ```sh
 ib list-types          # what can I spawn?

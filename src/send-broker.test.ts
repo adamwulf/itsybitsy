@@ -335,14 +335,14 @@ describe("send broker", () => {
       });
 
       test("@repo is that repo's coordinator", async () => {
-        await writeAgent(targetRepo, "iris-coord", { agentType: "coordinator" });
+        await writeAgent(targetRepo, "iris-coord", { agentType: "repo-coordinator" });
         const { calls } = await sendTo("@iris");
         expect(calls.map((c) => c.args.slice(0, 2))).toEqual([["iris-coord", targetRepo]]);
       });
 
       test("@coordinator is the REQUESTER's repo coordinator, not the watchdog's cwd", async () => {
-        await writeAgent(senderRepo, "hunch-coord", { agentType: "coordinator" });
-        await writeAgent(targetRepo, "iris-coord", { agentType: "coordinator" });
+        await writeAgent(senderRepo, "hunch-coord", { agentType: "repo-coordinator" });
+        await writeAgent(targetRepo, "iris-coord", { agentType: "repo-coordinator" });
         const seen: string[] = [];
         const { calls } = await sendTo("@coordinator", {
           resolveTarget: async (target, rs, cwd) => {

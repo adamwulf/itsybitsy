@@ -60,7 +60,7 @@ describe("IB_COORDINATOR_SESSION", () => {
 
 describe("buildSystemCoordinatorSettings", () => {
   // Isolate the home dir (via setUserHome) so these tests read the
-  // embedded `_all.md` / `system.md` layers rather than the developer's
+  // embedded `_all.md` / `system-coordinator.md` layers rather than the developer's
   // customized files. Without this, any extra entry the user has added locally
   // leaks into the test assertions.
   let tempHome: string;
@@ -68,7 +68,7 @@ describe("buildSystemCoordinatorSettings", () => {
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "sys-coord-settings-"));
     setUserHome(tempHome);
-    // Populate with embedded defaults (including _all.md and system.md)
+    // Populate with embedded defaults (including _all.md and system-coordinator.md)
     // so loadAgentType works and returns the unmodified layers.
     await (await import("./agent-types")).ensureAgentTypesDir();
   });
@@ -85,7 +85,7 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(settings.permissions).toHaveProperty("deny");
   });
 
-  // The scheduling tools come from the embedded system.md layer: the watchdog
+  // The scheduling tools come from the embedded system-coordinator.md layer: the watchdog
   // does not notify @system about agents in other repos, so it schedules its
   // own check-ins (the coordinator wait hint in hooks/wait-hint.ts names them).
   test("allows Bash(ib:*), ToolSearch, and the scheduling tools", async () => {
@@ -159,14 +159,14 @@ describe("buildSystemCoordinatorSettings", () => {
     expect(b.permissions.allow).not.toContain("extra");
   });
 
-  test("merges system.md allow entries into final allow list", async () => {
-    // Edit ~/.itsybitsy/agent-types/system.md to add a custom permission
-    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system.md");
+  test("merges system-coordinator.md allow entries into final allow list", async () => {
+    // Edit ~/.itsybitsy/agent-types/system-coordinator.md to add a custom permission
+    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system-coordinator.md");
     await Bun.write(
       systemPath,
       `---
-name: system
-description: System coordinator layer (permissions only)
+name: system-coordinator
+description: System coordinator layer (permissions, prompt and optional model for @system)
 spawnable: false
 permissions:
   allow:
@@ -201,13 +201,13 @@ permissions:
     expect(settings.permissions.allow).toContain("Bash(date:*)");
   });
 
-  test("merges system.md deny entries into final deny list", async () => {
-    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system.md");
+  test("merges system-coordinator.md deny entries into final deny list", async () => {
+    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system-coordinator.md");
     await Bun.write(
       systemPath,
       `---
-name: system
-description: System coordinator layer (permissions only)
+name: system-coordinator
+description: System coordinator layer (permissions, prompt and optional model for @system)
 spawnable: false
 permissions:
   allow: []
@@ -222,14 +222,14 @@ permissions:
     expect(settings.permissions.deny).toContain("Read");
   });
 
-  test("silently drops system.md allow entry that conflicts with hardcoded deny", async () => {
+  test("silently drops system-coordinator.md allow entry that conflicts with hardcoded deny", async () => {
     // Read is in SYSTEM_COORDINATOR_DENY, so a layer that tries to allow it must be dropped
-    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system.md");
+    const systemPath = join(tempHome, ".itsybitsy", "agent-types", "system-coordinator.md");
     await Bun.write(
       systemPath,
       `---
-name: system
-description: System coordinator layer (permissions only)
+name: system-coordinator
+description: System coordinator layer (permissions, prompt and optional model for @system)
 spawnable: false
 permissions:
   allow:
@@ -372,7 +372,7 @@ describe("ensureSystemCoordinator", () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-test-"));
     setCoordinatorHome(tmpDir);
     // Isolate the home dir (via setUserHome) for agent-types loading
-    // so buildSystemCoordinatorSettings reads the embedded `_all.md`/`system.md`
+    // so buildSystemCoordinatorSettings reads the embedded `_all.md`/`system-coordinator.md`
     // layers, not the developer's customized ones (which would leak extra allow
     // entries into the assertions).
     typesHome = await mkdtemp(join(tmpdir(), "coord-types-home-"));
@@ -453,11 +453,12 @@ describe("ensureSystemCoordinator", () => {
     await ensureSystemCoordinator();
     const log = await readFile(join(tmpDir, "watch.log"), "utf-8");
     // The log must name the resolved model AND which layer supplied it — that
-    // source token is how an unexpected fall-off-coordinator.md is spotted. The
-    // exact source depends on the environment's agent-type files, so assert the
-    // SHAPE (a resolved model + a valid source token), not a fixed value.
+    // source token is how an unexpected fall-off-system-coordinator.md is
+    // spotted. The exact source depends on the environment's agent-type files,
+    // so assert the SHAPE (a resolved model + a valid source token), not a
+    // fixed value.
     expect(log).toMatch(
-      /\[coordinator\] model resolved to '[^']+' from (coordinator\.md|_all\.md|default\(claude:opus\))/,
+      /\[coordinator\] model resolved to '[^']+' from (system-coordinator\.md|_all\.md|default\(claude:opus\))/,
     );
   });
 
@@ -687,21 +688,20 @@ describe("ensureSystemCoordinator", () => {
     await expect(ensureSystemCoordinator()).rejects.toThrow("Failed to create system coordinator tmux session");
   });
 
-  test("reads model from the coordinator agent-type file", async () => {
-    // The system coordinator's model is now sourced from the `coordinator`
-    // agent-type file (~/.itsybitsy/agent-types/coordinator.md), NOT from
-    // any config.json key. Seed a coordinator agent-type with a custom model
-    // and confirm the spawn line picks it up.
-    const coordTypePath = join(typesHome, ".itsybitsy", "agent-types", "coordinator.md");
+  test("reads model from the system-coordinator agent-type file", async () => {
+    // The system coordinator's model is sourced from its own agent-type file
+    // (~/.itsybitsy/agent-types/system-coordinator.md), NOT from any
+    // config.json key. Seed it with a custom model and confirm the spawn line
+    // picks it up.
+    const systemTypePath = join(typesHome, ".itsybitsy", "agent-types", "system-coordinator.md");
     await mkdir(join(typesHome, ".itsybitsy", "agent-types"), { recursive: true });
     await Bun.write(
-      coordTypePath,
+      systemTypePath,
       [
         "---",
-        "name: coordinator",
-        "description: test coordinator",
-        "canSpawnChildren: true",
-        "instructionStyle: coordinator",
+        "name: system-coordinator",
+        "description: test system coordinator",
+        "spawnable: false",
         "model: claude:sonnet",
         "---",
         "",
@@ -731,17 +731,48 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).not.toContain("coordinator-prompt.txt");
   });
 
-  test("falls back to _all.md model when coordinator.md declares no model", async () => {
-    // Precedence chain for the system coordinator is:
-    //   coordinator.md model > _all.md model > "claude:opus"
-    // Must match the per-repo coordinator path in src/ib-commands.ts. Seed
-    // _all.md with a model and leave coordinator.md's model: blank — the
-    // _all.md value must win.
+  test("does not read the per-repo coordinator's model", async () => {
+    // repo-coordinator.md belongs to per-repo coordinators. A model there must
+    // not reach the system coordinator: with no model in
+    // system-coordinator.md or _all.md, the chain ends at claude:opus.
     const typesDir = join(typesHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
     await Bun.write(
-      join(typesDir, "coordinator.md"),
-      "---\nname: coordinator\ndescription: test coordinator\ncanSpawnChildren: true\nmodel:\n---\n\nbody\n",
+      join(typesDir, "repo-coordinator.md"),
+      "---\nname: repo-coordinator\ndescription: test repo coordinator\ncanSpawnChildren: true\nmodel: claude:sonnet\n---\n\nbody\n",
+    );
+    await Bun.write(
+      join(typesDir, "system-coordinator.md"),
+      "---\nname: system-coordinator\ndescription: test system coordinator\nspawnable: false\nmodel:\n---\n\nbody\n",
+    );
+
+    const commands: string[][] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      commands.push([...cmd]);
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("has-session")) {
+        return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
+      }
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+
+    await ensureSystemCoordinator();
+
+    const claudeCmd = commands.map((c) => c.join(" ")).find((c) => c.includes("claude --model"));
+    expect(claudeCmd).toContain("claude --model opus");
+    expect(claudeCmd).not.toContain("claude --model sonnet");
+  });
+
+  test("falls back to _all.md model when system-coordinator.md declares no model", async () => {
+    // Precedence chain for the system coordinator is:
+    //   system-coordinator.md model > _all.md model > "claude:opus"
+    // Seed _all.md with a model and leave system-coordinator.md's model:
+    // blank — the _all.md value must win.
+    const typesDir = join(typesHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await Bun.write(
+      join(typesDir, "system-coordinator.md"),
+      "---\nname: system-coordinator\ndescription: test system coordinator\nspawnable: false\nmodel:\n---\n\nbody\n",
     );
     await Bun.write(
       join(typesDir, "_all.md"),
@@ -767,8 +798,8 @@ describe("ensureSystemCoordinator", () => {
   test("ignores config.model on the coordinator path (final fallback is claude:opus)", async () => {
     // config.model is intentionally NOT consulted for coordinators — the
     // coordinator agent-type file is authoritative. Set a config.model
-    // distractor, leave both coordinator.md and _all.md with no model:,
-    // and assert the spawn line uses the literal claude:opus fallback
+    // distractor, leave both system-coordinator.md and _all.md with no
+    // model:, and assert the spawn line uses the literal claude:opus fallback
     // rather than the config.model value.
     await mkdir(tmpDir, { recursive: true });
     const configPath = join(tmpDir, "config.json");
@@ -779,8 +810,8 @@ describe("ensureSystemCoordinator", () => {
     const typesDir = join(typesHome, ".itsybitsy", "agent-types");
     await mkdir(typesDir, { recursive: true });
     await Bun.write(
-      join(typesDir, "coordinator.md"),
-      "---\nname: coordinator\ndescription: test coordinator\ncanSpawnChildren: true\nmodel:\n---\n\nbody\n",
+      join(typesDir, "system-coordinator.md"),
+      "---\nname: system-coordinator\ndescription: test system coordinator\nspawnable: false\nmodel:\n---\n\nbody\n",
     );
     // _all.md absent — chain terminates at the hardcoded claude:opus default.
 
@@ -1160,7 +1191,7 @@ describe("ensureSystemCoordinator", () => {
     expect(claudeCmd).toContain(`claude --resume ${sessionId}`);
     expect(claudeCmd).toContain("--model");
 
-    // No positional prompt — the SessionStart hook delivers system.md's
+    // No positional prompt — the SessionStart hook delivers system-coordinator.md's
     // markdown body via additionalContext on every session start.
     expect(claudeCmd).not.toContain("$(cat");
     expect(claudeCmd).not.toContain("coordinator-prompt.txt");
@@ -1188,7 +1219,7 @@ describe("ensureSystemCoordinator", () => {
     expect(cmdStrs.some((c) => c.includes("claude --resume"))).toBe(false);
     expect(cmdStrs.some((c) => c.includes("claude --model"))).toBe(true);
     // Fresh launch must NOT include a positional prompt — the SessionStart
-    // hook delivers system.md's markdown body via additionalContext.
+    // hook delivers system-coordinator.md's markdown body via additionalContext.
     expect(cmdStrs.some((c) => c.includes("$(cat"))).toBe(false);
     expect(cmdStrs.some((c) => c.includes("coordinator-prompt.txt"))).toBe(false);
     // No tmux -l (literal paste) fallback.
@@ -1778,10 +1809,18 @@ describe("acquireSystemCoordinator / releaseSystemCoordinator", () => {
 // -------------------------------------------------------------------
 describe("restartSystemCoordinator", () => {
   let tmpDir: string;
+  let typesHome: string;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-restart-"));
     setCoordinatorHome(tmpDir);
+    // Same isolation as the ensureSystemCoordinator describe: the restart
+    // re-runs the spawn, which loads agent types through userHome() and
+    // writes [coordinator] lines to the watch log. Without these it read the
+    // developer's real ~/.itsybitsy/agent-types/ and wrote the real watch.log.
+    typesHome = await mkdtemp(join(tmpdir(), "coord-restart-home-"));
+    setUserHome(typesHome);
+    setWatchLogPath(join(tmpDir, "watch.log"));
     setCoordinatorSleepFn(async () => {});
     tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => ({
       stdout: mockStream("Claude Code v1.0.0"),
@@ -1795,7 +1834,10 @@ describe("restartSystemCoordinator", () => {
     tmuxSpawnCtx.reset();
     resetCoordinatorHome();
     resetCoordinatorSleepFn();
+    resetWatchLogPath();
+    resetUserHome();
     await rm(tmpDir, { recursive: true, force: true });
+    await rm(typesHome, { recursive: true, force: true });
   });
 
   test("kills existing session then creates new one", async () => {
@@ -2799,23 +2841,22 @@ describe("buildPerRepoCoordinatorSettings", () => {
   test("silently drops config allow entries that conflict with hardcoded deny", async () => {
     // Write is in hardcoded deny, so adding it to permissions.all.allow should be dropped.
     // (permissions.coordinator.* is removed; coordinator-specific permissions now live in
-    // ~/.itsybitsy/agent-types/coordinator.md frontmatter.)
+    // ~/.itsybitsy/agent-types/repo-coordinator.md frontmatter.)
     const settings = await buildPerRepoCoordinatorSettings();
     expect(settings.permissions.deny).toContain("Write");
     expect(settings.permissions.allow).not.toContain("Write");
   });
 
-  test("merges coordinator.md allow entries into final allow list", async () => {
-    // Edit ~/.itsybitsy/agent-types/coordinator.md to add a custom allow entry.
-    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "coordinator.md");
+  test("merges repo-coordinator.md allow entries into final allow list", async () => {
+    // Edit ~/.itsybitsy/agent-types/repo-coordinator.md to add a custom allow entry.
+    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "repo-coordinator.md");
     await Bun.write(
       coordPath,
       `---
-name: coordinator
+name: repo-coordinator
 description: Read-only coordinator that manages agents without writing code
 canSpawnChildren: true
 icon: ◇
-instructionStyle: coordinator
 permissions:
   allow:
     - "Bash(echo:*)"
@@ -2831,16 +2872,15 @@ permissions:
     expect(settings.permissions.allow).toContain("Bash(ib:*)");
   });
 
-  test("merges coordinator.md deny entries into final deny list", async () => {
-    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "coordinator.md");
+  test("merges repo-coordinator.md deny entries into final deny list", async () => {
+    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "repo-coordinator.md");
     await Bun.write(
       coordPath,
       `---
-name: coordinator
+name: repo-coordinator
 description: Read-only coordinator that manages agents without writing code
 canSpawnChildren: true
 icon: ◇
-instructionStyle: coordinator
 permissions:
   allow: []
   deny:
@@ -2854,18 +2894,17 @@ permissions:
     expect(settings.permissions.deny).toContain("Write");
   });
 
-  test("silently drops coordinator.md allow entry that conflicts with hardcoded deny", async () => {
-    // Write is in PER_REPO_COORDINATOR_DENY; a coordinator.md that tries to allow it
+  test("silently drops repo-coordinator.md allow entry that conflicts with hardcoded deny", async () => {
+    // Write is in PER_REPO_COORDINATOR_DENY; a repo-coordinator.md that tries to allow it
     // must be silently dropped from the final allow list.
-    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "coordinator.md");
+    const coordPath = join(tempHome, ".itsybitsy", "agent-types", "repo-coordinator.md");
     await Bun.write(
       coordPath,
       `---
-name: coordinator
+name: repo-coordinator
 description: Read-only coordinator that manages agents without writing code
 canSpawnChildren: true
 icon: ◇
-instructionStyle: coordinator
 permissions:
   allow:
     - Write
@@ -2891,11 +2930,11 @@ describe("checkCoordinatorExists", () => {
     await rm(td, { recursive: true, force: true });
   });
 
-  test("returns exists when any agent has agentType: coordinator", async () => {
+  test("returns exists when any agent has agentType: repo-coordinator", async () => {
     const td = join(tmpdir(), `coord-true-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const coordDir = join(td, ".itsybitsy", "agents", "my-repo");
     await mkdir(coordDir, { recursive: true });
-    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo", agentType: "coordinator" }));
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo", agentType: "repo-coordinator" }));
 
     const result = await checkCoordinatorExists(td);
     expect(result.exists).toBe(true);
@@ -2937,10 +2976,10 @@ describe("checkCoordinatorExists", () => {
 
   test("finds coordinator regardless of agent directory name", async () => {
     const td = join(tmpdir(), `coord-anyname-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    // Agent named with suffix due to collision, but still has agentType: coordinator
+    // Agent named with suffix due to collision, but still has agentType: repo-coordinator
     const coordDir = join(td, ".itsybitsy", "agents", "my-repo-a3f2");
     await mkdir(coordDir, { recursive: true });
-    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo-a3f2", agentType: "coordinator" }));
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({ id: "my-repo-a3f2", agentType: "repo-coordinator" }));
 
     const result = await checkCoordinatorExists(td);
     expect(result.exists).toBe(true);

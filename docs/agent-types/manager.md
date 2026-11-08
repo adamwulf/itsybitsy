@@ -3,7 +3,6 @@ name: manager
 description: Manages sub-agents and coordinates work
 canSpawnChildren: true
 icon: ◆
-instructionStyle: manager
 ---
 
 ## ItsyBitsy Manager Agent

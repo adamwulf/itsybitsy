@@ -197,7 +197,7 @@ agents' core launch behavior (other than the `<cli>:<model>` parse).
 | D6 | **Unknown CLI = hard-reject at spawn** with a clear message ("Unknown CLI '<X>' in model '<X>:<model>'; known: claude, codex"). No silent fallback. | NEW (2026-05-30). |
 | D7 | Scope = SPEC + phased implementation, verified incrementally. Phase 0 already merged. | Updated. |
 | D8 | **Display the canonical `<cli>:<model>` form everywhere.** Dashboard info-panel, agent-tree column, anywhere the model is shown. Under D1/D5 all stored values are already qualified — UI just renders them verbatim. | NEW (2026-05-30). |
-| D9 | **Every agent-type's `.md` frontmatter may set `model:`** (qualified `<cli>:<model>` form). Applies to all types: `system.md` (system coordinator), `coordinator.md` (per-repo coordinator), `manager.md`, `worker.md`, plus any user-defined types. Coordinators are NOT claude-only — they can be set to a codex model via their agent-type frontmatter. | NEW (2026-05-30). |
+| D9 | **Every agent-type's `.md` frontmatter may set `model:`** (qualified `<cli>:<model>` form). Applies to all types: `system-coordinator.md` (system coordinator), `repo-coordinator.md` (per-repo coordinator), `manager.md`, `worker.md`, plus any user-defined types. Coordinators are NOT claude-only — they can be set to a codex model via their agent-type frontmatter. | NEW (2026-05-30). |
 
 ---
 

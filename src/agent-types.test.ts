@@ -14,7 +14,6 @@ name: test-type
 description: "A test agent type"
 canSpawnChildren: true
 model: sonnet
-instructionStyle: manager
 ---
 
 # Test Instructions
@@ -28,7 +27,6 @@ This is the markdown body.
   expect(frontmatter.description).toBe("A test agent type");
   expect(frontmatter.canSpawnChildren).toBe(true);
   expect(frontmatter.model).toBe("sonnet");
-  expect(frontmatter.instructionStyle).toBe("manager");
   expect(body).toContain("# Test Instructions");
   expect(body).toContain("This is the markdown body.");
 });
@@ -211,132 +209,142 @@ body`;
   expect(Object.keys(frontmatter).length).toBe(2);
 });
 
-test("loadAgentType: loads manager type from embedded file", async () => {
-  // Ensure types dir is populated first
-  const { ensureAgentTypesDir } = await import("./agent-types");
-  await ensureAgentTypesDir();
+// These tests exercise the EMBEDDED default type files, so they run against a
+// fresh temp home: the test preload does not redirect HOME, and without
+// setUserHome() they read (and ensureAgentTypesDir() would populate) the
+// developer's real ~/.itsybitsy/agent-types/.
+describe("embedded default types (isolated home)", () => {
+  let tempHome: string;
 
-  const type = await loadAgentType("manager");
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-embedded-types-"));
+    setUserHome(tempHome);
+  });
 
-  expect(type.name).toBe("manager");
-  expect(type.description).toBe("Manages sub-agents and coordinates work");
-  expect(type.canSpawnChildren).toBe(true);
-  expect(type.instructionStyle).toBe("manager");
-});
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
 
-test("loadAgentType: loads worker type from embedded file", async () => {
-  // Ensure types dir is populated first
-  const { ensureAgentTypesDir } = await import("./agent-types");
-  await ensureAgentTypesDir();
+  test("loadAgentType: loads manager type from embedded file", async () => {
+    await ensureAgentTypesDir();
 
-  const type = await loadAgentType("worker");
+    const type = await loadAgentType("manager");
 
-  expect(type.name).toBe("worker");
-  expect(type.description).toBe("Executes tasks assigned by a manager");
-  expect(type.canSpawnChildren).toBe(false);
-  expect(type.instructionStyle).toBe("worker");
-});
+    expect(type.name).toBe("manager");
+    expect(type.description).toBe("Manages sub-agents and coordinates work");
+    expect(type.canSpawnChildren).toBe(true);
+  });
 
-test("loadAgentType: loads coordinator type from embedded file", async () => {
-  // Ensure types dir is populated first
-  const { ensureAgentTypesDir } = await import("./agent-types");
-  await ensureAgentTypesDir();
+  test("loadAgentType: loads worker type from embedded file", async () => {
+    await ensureAgentTypesDir();
 
-  const type = await loadAgentType("coordinator");
+    const type = await loadAgentType("worker");
 
-  expect(type.name).toBe("coordinator");
-  expect(type.canSpawnChildren).toBe(true);
-  expect(type.permissions?.deny).toContain("Write");
-});
+    expect(type.name).toBe("worker");
+    expect(type.description).toBe("Executes tasks assigned by a manager");
+    expect(type.canSpawnChildren).toBe(false);
+  });
 
-test("loadAgentType: throws for unknown type", async () => {
-  // Ensure types dir is populated first
-  const { ensureAgentTypesDir } = await import("./agent-types");
-  await ensureAgentTypesDir();
+  test("loadAgentType: loads repo-coordinator type from embedded file", async () => {
+    await ensureAgentTypesDir();
 
-  let threw = false;
-  let errorMsg = "";
-  try {
-    await loadAgentType("nonexistent-type-xyz");
-  } catch (err) {
-    threw = true;
-    errorMsg = err instanceof Error ? err.message : String(err);
-  }
+    const type = await loadAgentType("repo-coordinator");
 
-  expect(threw).toBe(true);
-  expect(errorMsg).toContain("Unknown agent type");
-});
+    expect(type.name).toBe("repo-coordinator");
+    expect(type.canSpawnChildren).toBe(true);
+    expect(type.permissions?.deny).toContain("Write");
+  });
 
-test("listAgentTypes: includes all built-in types", async () => {
-  const types = await listAgentTypes();
+  test("loadAgentType: throws for unknown type", async () => {
+    await ensureAgentTypesDir();
 
-  const names = types.map((t) => t.name);
+    let threw = false;
+    let errorMsg = "";
+    try {
+      await loadAgentType("nonexistent-type-xyz");
+    } catch (err) {
+      threw = true;
+      errorMsg = err instanceof Error ? err.message : String(err);
+    }
 
-  expect(names).toContain("manager");
-  expect(names).toContain("worker");
-  expect(names).toContain("coordinator");
-});
+    expect(threw).toBe(true);
+    expect(errorMsg).toContain("Unknown agent type");
+  });
 
-test("listAgentTypes: returns array of AgentTypes", async () => {
-  const types = await listAgentTypes();
+  test("listAgentTypes: includes all built-in types", async () => {
+    await ensureAgentTypesDir();
+    const types = await listAgentTypes();
 
-  expect(Array.isArray(types)).toBe(true);
-  expect(types.length).toBeGreaterThanOrEqual(3);
+    const names = types.map((t) => t.name);
 
-  // Each type should have required fields
-  for (const type of types) {
-    expect(type.name).toBeDefined();
-    expect(typeof type.name).toBe("string");
-    expect(typeof type.canSpawnChildren).toBe("boolean");
-    expect(["manager", "worker", "coordinator"]).toContain(type.instructionStyle);
-  }
-});
+    expect(names).toContain("manager");
+    expect(names).toContain("worker");
+    expect(names).toContain("repo-coordinator");
+    expect(names).toContain("system-coordinator");
+  });
 
-test("ensureAgentTypesDir: creates directory and populates files", async () => {
-  // First call should create and populate
-  await ensureAgentTypesDir();
+  test("listAgentTypes: returns array of AgentTypes", async () => {
+    await ensureAgentTypesDir();
+    const types = await listAgentTypes();
 
-  // All three built-in types should now exist
-  const managerExists = await agentTypeExists("manager");
-  const workerExists = await agentTypeExists("worker");
-  const coordinatorExists = await agentTypeExists("coordinator");
+    expect(Array.isArray(types)).toBe(true);
+    expect(types.length).toBeGreaterThanOrEqual(3);
 
-  expect(managerExists).toBe(true);
-  expect(workerExists).toBe(true);
-  expect(coordinatorExists).toBe(true);
-});
+    // Each type should have required fields
+    for (const type of types) {
+      expect(type.name).toBeDefined();
+      expect(typeof type.name).toBe("string");
+      expect(typeof type.canSpawnChildren).toBe("boolean");
+    }
+  });
 
-test("ensureAgentTypesDir: does nothing when directory already exists", async () => {
-  // First call populates the directory
-  await ensureAgentTypesDir();
+  test("ensureAgentTypesDir: creates directory and populates files", async () => {
+    // First call should create and populate
+    await ensureAgentTypesDir();
 
-  // Second call should be idempotent and not fail
-  await ensureAgentTypesDir();
+    // All three built-in types should now exist
+    const managerExists = await agentTypeExists("manager");
+    const workerExists = await agentTypeExists("worker");
+    const coordinatorExists = await agentTypeExists("repo-coordinator");
 
-  // Files should still exist
-  const managerExists = await agentTypeExists("manager");
-  expect(managerExists).toBe(true);
-});
+    expect(managerExists).toBe(true);
+    expect(workerExists).toBe(true);
+    expect(coordinatorExists).toBe(true);
+  });
 
-test("agentTypeExists: returns true for existing type files", async () => {
-  // Ensure directory is populated
-  await ensureAgentTypesDir();
+  test("ensureAgentTypesDir: does nothing when directory already exists", async () => {
+    // First call populates the directory
+    await ensureAgentTypesDir();
 
-  const managerExists = await agentTypeExists("manager");
-  const workerExists = await agentTypeExists("worker");
-  const coordinatorExists = await agentTypeExists("coordinator");
+    // Second call should be idempotent and not fail
+    await ensureAgentTypesDir();
 
-  expect(managerExists).toBe(true);
-  expect(workerExists).toBe(true);
-  expect(coordinatorExists).toBe(true);
-});
+    // Files should still exist
+    const managerExists = await agentTypeExists("manager");
+    expect(managerExists).toBe(true);
+  });
 
-test("agentTypeExists: returns false for nonexistent types", async () => {
-  // Ensure directory is populated
-  await ensureAgentTypesDir();
+  test("agentTypeExists: returns true for existing type files", async () => {
+    // Ensure directory is populated
+    await ensureAgentTypesDir();
 
-  const nonexistentExists = await agentTypeExists("nonexistent-type-xyz");
-  expect(nonexistentExists).toBe(false);
+    const managerExists = await agentTypeExists("manager");
+    const workerExists = await agentTypeExists("worker");
+    const coordinatorExists = await agentTypeExists("repo-coordinator");
+
+    expect(managerExists).toBe(true);
+    expect(workerExists).toBe(true);
+    expect(coordinatorExists).toBe(true);
+  });
+
+  test("agentTypeExists: returns false for nonexistent types", async () => {
+    // Ensure directory is populated
+    await ensureAgentTypesDir();
+
+    const nonexistentExists = await agentTypeExists("nonexistent-type-xyz");
+    expect(nonexistentExists).toBe(false);
+  });
 });
 
 describe("initAgentTypes", () => {
@@ -355,11 +363,14 @@ describe("initAgentTypes", () => {
   test("creates directory and writes all embedded files when missing", async () => {
     const created = await initAgentTypes();
 
-    expect(created.sort()).toEqual(["_all.md", "_non_coordinator.md", "coordinator.md", "manager.md", "system.md", "worker.md"]);
+    expect(created.sort()).toEqual(["_all.md", "_non_coordinator.md", "manager.md", "repo-coordinator.md", "system-coordinator.md", "worker.md"]);
     expect(await agentTypeExists("manager")).toBe(true);
     expect(await agentTypeExists("worker")).toBe(true);
-    expect(await agentTypeExists("coordinator")).toBe(true);
-    expect(await agentTypeExists("system")).toBe(true);
+    expect(await agentTypeExists("repo-coordinator")).toBe(true);
+    expect(await agentTypeExists("system-coordinator")).toBe(true);
+    // The old type names are gone: no file is written under them.
+    expect(await agentTypeExists("coordinator")).toBe(false);
+    expect(await agentTypeExists("system")).toBe(false);
     expect(await agentTypeExists("_all")).toBe(true);
     expect(await agentTypeExists("_non_coordinator")).toBe(true);
   });
@@ -391,13 +402,13 @@ describe("initAgentTypes", () => {
     expect(created).toEqual([]);
   });
 
-  test("system.md is populated with spawnable: false", async () => {
+  test("system-coordinator.md is populated with spawnable: false", async () => {
     await initAgentTypes();
 
-    expect(await agentTypeExists("system")).toBe(true);
+    expect(await agentTypeExists("system-coordinator")).toBe(true);
 
-    const systemType = await loadAgentType("system");
-    expect(systemType.name).toBe("system");
+    const systemType = await loadAgentType("system-coordinator");
+    expect(systemType.name).toBe("system-coordinator");
     expect(systemType.spawnable).toBe(false);
   });
 });
@@ -520,14 +531,14 @@ describe("ensureAgentTypesDir: system layer", () => {
     await rm(tempHome, { recursive: true, force: true });
   });
 
-  test("auto-populates system.md alongside other layer files", async () => {
+  test("auto-populates system-coordinator.md alongside other layer files", async () => {
     await ensureAgentTypesDir();
 
-    expect(await agentTypeExists("system")).toBe(true);
+    expect(await agentTypeExists("system-coordinator")).toBe(true);
     expect(await agentTypeExists("_all")).toBe(true);
     expect(await agentTypeExists("_non_coordinator")).toBe(true);
 
-    const systemType = await loadAgentType("system");
+    const systemType = await loadAgentType("system-coordinator");
     expect(systemType.spawnable).toBe(false);
   });
 });
@@ -1525,8 +1536,8 @@ describe("metaCanSpawnChildren", () => {
     expect(await metaCanSpawnChildren({ agentType: "manager", worker: false, canSpawnChildren: false })).toBe(false);
   });
 
-  test("system layer type is treated as able to spawn (top-level)", async () => {
-    expect(await metaCanSpawnChildren({ agentType: "system" })).toBe(true);
+  test("system-coordinator layer type is treated as able to spawn (top-level)", async () => {
+    expect(await metaCanSpawnChildren({ agentType: "system-coordinator" })).toBe(true);
   });
 
   test("worker agentType (no override) cannot spawn", async () => {
@@ -1645,6 +1656,52 @@ body`);
       );
     } finally {
       warn.mockRestore();
+    }
+  });
+});
+
+describe("retired instructionStyle key", () => {
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-retired-style-"));
+    setUserHome(tempHome);
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  // Installed type files in ~/.itsybitsy/agent-types/ written by an older `ib`
+  // still carry `instructionStyle:`. The key was removed; it must be ignored
+  // like any other unknown frontmatter key — no error, no warning.
+  test("a type file that still declares instructionStyle loads and validates silently", async () => {
+    await Bun.write(join(typesDir, "legacy-style.md"), `---
+name: legacy-style
+description: Old type file
+canSpawnChildren: true
+instructionStyle: manager
+---
+Legacy body`);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const type = await loadAgentType("legacy-style");
+      expect(type.name).toBe("legacy-style");
+      expect(type.canSpawnChildren).toBe(true);
+      expect(type.markdownBody).toBe("Legacy body");
+      expect("instructionStyle" in type).toBe(false);
+
+      expect(await validateAllAgentTypes()).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
     }
   });
 });

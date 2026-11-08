@@ -1677,7 +1677,7 @@ describe("checkIbCommandAccess", () => {
       manager: "agent-manager1",
       spawned_by: { agent_id: "agent-spawner1", repo_path: tmpDir },
     });
-    await writeAgentMeta("itsy", { agentType: "coordinator" });
+    await writeAgentMeta("itsy", { agentType: "repo-coordinator" });
 
     expect(await checkIbCommandAccess("ib ack agent-target1", "agent-manager1", agentsDir)).toBeNull();
     for (const caller of ["agent-spawner1", "itsy", "agent-other111"]) {
@@ -1872,7 +1872,7 @@ describe("checkIbCommandAccess", () => {
     test("callerMeta replaces the read of the caller's own file", async () => {
       await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
       // On disk the caller claims to be a coordinator.
-      await writeAgentMeta("agent-other111", { id: "agent-other111", agentType: "coordinator" });
+      await writeAgentMeta("agent-other111", { id: "agent-other111", agentType: "repo-coordinator" });
       expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-other111", agentsDir)).toBeNull();
       const verified = await checkManagerCommandAccess("retire", "agent-target1", "agent-other111", agentsDir, {
         callerMeta: { id: "agent-other111", agentType: "worker" },
@@ -1880,7 +1880,7 @@ describe("checkIbCommandAccess", () => {
       expect(verified?.decision).toBe("deny");
       // And the reverse: a verified coordinator needs no file.
       expect(await checkManagerCommandAccess("retire", "agent-target1", "agent-nofile1", agentsDir, {
-        callerMeta: { id: "agent-nofile1", agentType: "coordinator" },
+        callerMeta: { id: "agent-nofile1", agentType: "repo-coordinator" },
       })).toBeNull();
     });
 
@@ -2016,14 +2016,14 @@ describe("checkIbCommandAccess", () => {
   // ── Per-repo coordinator bypass (SPEC §12.2) ──────────────────────────────
 
   test("per-repo coordinator CAN retire a non-child regular agent in its own repo", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib retire agent-target1", "itsybitsy", agentsDir);
     expect(result).toBeNull();
   });
 
   test("per-repo coordinator CAN rehire a retired non-child in its own repo", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     await writeRetiredMeta("agent-target1", { manager: "agent-someone" });
     const result = await checkIbCommandAccess(
       "ib rehire agent-target1",
@@ -2034,14 +2034,14 @@ describe("checkIbCommandAccess", () => {
   });
 
   test("per-repo coordinator CAN reassign a non-child regular agent in its own repo", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib reassign agent-target1 agent-newmgr1", "itsybitsy", agentsDir);
     expect(result).toBeNull();
   });
 
   test("per-repo coordinator CANNOT nuke any agent — nuke is user-only", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib nuke agent-target1", "itsybitsy", agentsDir);
     expect(result).not.toBeNull();
@@ -2050,7 +2050,7 @@ describe("checkIbCommandAccess", () => {
   });
 
   test("per-repo coordinator CANNOT send to Telegram — system coordinator only", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     for (const command of ["ib tgsend hello", "ib tgsendfile /tmp/a.txt", "ib tgreact 👍"]) {
       const result = await checkIbCommandAccess(command, "itsybitsy", agentsDir);
       expect(result?.decision).toBe("deny");
@@ -2059,7 +2059,7 @@ describe("checkIbCommandAccess", () => {
   });
 
   test("per-repo coordinator CANNOT merge a non-child regular agent", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
     const result = await checkIbCommandAccess("ib merge agent-target1", "itsybitsy", agentsDir);
     expect(result).not.toBeNull();
@@ -2067,8 +2067,8 @@ describe("checkIbCommandAccess", () => {
   });
 
   test("per-repo coordinator CANNOT retire another coordinator", async () => {
-    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "coordinator" });
-    await writeAgentMeta("other-repo", { id: "other-repo", agentType: "coordinator" });
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
+    await writeAgentMeta("other-repo", { id: "other-repo", agentType: "repo-coordinator" });
     const result = await checkIbCommandAccess("ib retire other-repo", "itsybitsy", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
@@ -3502,7 +3502,7 @@ describe("hookCheckPath — denied wait attempts point at WAITING", () => {
   });
 
   test("a per-repo coordinator gets the coordinator hint", async () => {
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test66", agentType: "coordinator" }));
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-test66", agentType: "repo-coordinator" }));
     const out = await run("Monitor", { description: "worker done", command: "until ib status agent-x; do sleep 5; done" });
     expect(out.permissionDecision).toBe("deny");
     expect(out.permissionDecisionReason).toContain("WAITING");

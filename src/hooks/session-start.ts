@@ -7,6 +7,7 @@ import { join, basename } from "path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
 import { loadAgentType } from "../agent-types";
+import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE, isCoordinatorType } from "../coordinator-type-names";
 import { writeAgentState } from "../agents";
 import { logAgent } from "../agent-lifecycle";
 import { listTeams } from "../teams";
@@ -78,12 +79,11 @@ export function detectRole(
   const agentType = (meta as Record<string, unknown>).agentType as string | undefined;
 
   // Derive role from agentType name (post-Phase-47 source of truth) or legacy
-  // worker boolean. NOTE: This role is ONLY used as a fallback in
-  // generateInstructions() for legacy agents that don't have agentType in
-  // meta.json. When agentType IS set, generateInstructions() loads the type
-  // definition and uses its instructionStyle field instead of this role.
+  // worker boolean. NOTE: generateInstructions() reads this role ONLY for
+  // legacy agents that don't have agentType in meta.json. When agentType IS
+  // set, it composes the instructions from the type files instead.
   let role: SessionRole;
-  if (agentType === "coordinator") {
+  if (agentType === REPO_COORDINATOR_TYPE) {
     role = "coordinator";
   } else if (agentType === "worker" || worker) {
     role = "worker";
@@ -307,46 +307,32 @@ export async function generateInstructions(ctx: SessionContext): Promise<string>
 }
 
 async function generateInstructionsInner(ctx: SessionContext): Promise<string> {
-  // If agentType is set, load it and check for a template body
+  // A typed agent's instructions are always composed from its type files: the
+  // prefix layers plus the (inheritance-merged) type body. An empty type body
+  // is simply an empty part — there is no hardcoded fallback for typed agents.
+  // The <itsybitsy> wrapper is added by the code so users don't need to include it.
   if (ctx.agentType) {
     const agentType = await loadAgentType(ctx.agentType);
 
-    // If the type definition has a markdown body, use it as the full template
-    // The <itsybitsy> wrapper is added by the code so users don't need to include it
-    if (agentType.markdownBody) {
-      // Prepend prefix layer bodies: _all (always) + _non_coordinator (when not
-      // coordinator and not system). The system coordinator is its own type
-      // ("system") — it gets _all but skips _non_coordinator (whose body covers
-      // commit-message etiquette and other things irrelevant to @system, which
-      // has no Write/Edit/git access).
-      const allPrefix = await loadPrefixLayerBody("_all", ctx);
-      const nonCoordPrefix =
-        ctx.agentType !== "coordinator" && ctx.agentType !== "system"
-          ? await loadPrefixLayerBody("_non_coordinator", ctx)
-          : "";
+    // Prepend prefix layer bodies: _all (always) + _non_coordinator (unless the
+    // type is one of the two coordinator types). The system coordinator is its
+    // own type (SYSTEM_COORDINATOR_TYPE) — it gets _all but skips
+    // _non_coordinator (whose body covers commit-message etiquette and other
+    // things irrelevant to @system, which has no Write/Edit/git access).
+    const allPrefix = await loadPrefixLayerBody("_all", ctx);
+    const nonCoordPrefix = !isCoordinatorType(ctx.agentType)
+      ? await loadPrefixLayerBody("_non_coordinator", ctx)
+      : "";
 
-      const typeBody = interpolateTemplate(agentType.markdownBody, ctx);
-      const parts = [allPrefix, nonCoordPrefix, typeBody].filter((p) => p.trim().length > 0);
-      const content = parts.join("\n\n");
-      return `<${runtimeNames.PROMPT_TAG}>\n${content}\n</${runtimeNames.PROMPT_TAG}>`;
-    }
-
-    // No body — fall back to hardcoded instructions based on instructionStyle.
-    // Prefix layers do NOT apply to the hardcoded fallback path.
-    switch (agentType.instructionStyle) {
-      case "manager":
-        return generateManagerInstructions(ctx);
-      case "worker":
-        return generateWorkerInstructions(ctx);
-      case "coordinator":
-        return generateCoordinatorInstructions(ctx);
-    }
+    const typeBody = agentType.markdownBody ? interpolateTemplate(agentType.markdownBody, ctx) : "";
+    const parts = [allPrefix, nonCoordPrefix, typeBody].filter((p) => p.trim().length > 0);
+    const content = parts.join("\n\n");
+    return `<${runtimeNames.PROMPT_TAG}>\n${content}\n</${runtimeNames.PROMPT_TAG}>`;
   }
 
-  // Fall back to current logic when agentType is not set (legacy agents)
-  if (ctx.role === "coordinator") {
-    return generateCoordinatorInstructions(ctx);
-  }
+  // Legacy agents (meta.json without agentType): detectRole() yields only
+  // primary, manager or worker here — the "coordinator" role is derived from
+  // the type name, so it always takes the typed path above.
   switch (ctx.role) {
     case "primary":
       return generatePrimaryInstructions();
@@ -710,84 +696,6 @@ To wait, just emit \`WAITING\` and stop — don't \`sleep\`, run \`Monitor\`, or
 </${runtimeNames.PROMPT_TAG}>`;
 }
 
-function generateCoordinatorInstructions(ctx: SessionContext): string {
-  const repoName = basename(ctx.rootRepoPath);
-
-  return `<${runtimeNames.PROMPT_TAG}>
-## ItsyBitsy Per-Repo Coordinator
-
-You are a per-repo coordinator for the \`${repoName}\` repository. You work directly in the repo directory (no git worktree). You can read files and code using Read, Glob, Grep, and Bash(ls:*). You coordinate work by spawning and managing worker agents using \`ib\` commands. You do NOT write code directly — instead, spawn worker agents with \`ib new-agent --type worker "task"\` to implement changes. Review their work with \`ib diff <id>\` and merge with \`ib merge <id>\`. To send messages to the system coordinator, use \`ib send @system "message"\`.
-
-IMPORTANT: Always use \`ib\` (not \`./ib\`) to ensure you use the current version from PATH.
-
-### Bash Rules
-
-Each Bash tool call must run exactly ONE command. Multi-command calls will be blocked.
-- NO piping: \`cmd1 | cmd2\` is not allowed
-- NO chaining: \`cmd1 && cmd2\` and \`cmd1 ; cmd2\` are not allowed
-- NO subshells or command substitution that runs multiple commands
-- If you need to run two commands, make two separate Bash tool calls
-
-${buildPathIsolationSection(ctx)}
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| \`ib new-agent --type worker "task"\` | Spawn a worker sub-agent |
-| \`ib list-types\` | List available agent types you can spawn |
-| \`ib list --manager ${ctx.agentId}\` | List your sub-agents |
-| \`ib look <id>\` | Read an agent's output |
-| \`ib send <id> "msg"\` | Send input to an agent |
-| \`ib send @system "msg"\` | Send message to system coordinator |
-| \`ib status <id>\` | Show agent's commits/changes |
-| \`ib diff <id>\` | Review agent's changes |
-| \`ib merge <id>\` | Merge agent's work and close it |
-| \`ib merge <id> --keep\` | Merge like \`ib merge\` (same checks, rebase and merge) but leave the agent running; repeat later for newer commits |
-| \`ib retire <id>\` | Stop and archive an agent without merging |
-| \`ib rehire <id>\` | Reconstruct and resume an explicitly retired agent |
-| \`ib ack <id>\` | Acknowledge a waiting/complete sub-agent: stops its automatic notices, keeps it open for the user to review |
-| \`ib ack\` | Acknowledge all waiting/complete direct sub-agents; skip other states |
-
-${SEND_LITERAL_STRINGS_SECTION}
-
-### State Management
-
-Whenever you stop working and are idle, end your message with one of:
-- \`WAITING\` - if waiting for workers or have nothing more to do
-- \`I HAVE COMPLETED THE GOAL\` - if you have completed your primary goal
-
-These phrases MUST be the LAST thing you output. Put summaries or status updates BEFORE them.
-
-To wait for a sub-agent, just emit \`WAITING\` and stop — don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait; they waste tokens, and the watchdog notifies you when there's something to do.
-
-### Workflow
-
-1. **Understand the codebase**: Use Read, Glob, Grep to understand the relevant code
-2. **Break down tasks**: Split work into independent units for worker agents
-3. **Spawn workers**: \`ib new-agent --type worker "task"\` with clear instructions
-4. **Monitor & review**: Check worker output with \`ib look <id>\`, review with \`ib diff <id>\`
-5. **Merge or redirect**: \`ib merge <id>\` for good work, \`ib send <id> "feedback"\` for corrections
-6. **Coordinate**: Report status to system coordinator via \`ib send @system "message"\`
-
-### Agent States
-
-| State | Meaning |
-|-------|---------|
-| \`creating\` | Starting up |
-| \`running\` | Actively working |
-| \`compacting\` | Summarizing context |
-| \`waiting\` | Idle, may need input |
-| \`complete\` | Signaled done |
-| \`rate_limited\` | Hit API rate limits |
-| \`merging\` | Being merged or merge-checked (a long-running op is in flight) |
-| \`restarting\` | Being restarted/resumed |
-| \`op_stuck\` | A long-running op (merge/restart) appears stuck; may need retire/nuke |
-| \`stopped\` | Session ended |
-
-</${runtimeNames.PROMPT_TAG}>`;
-}
-
 /**
  * Best-effort: persist Claude's real session id for the system coordinator to
  * `~/.itsybitsy/coordinator-session.json` (shape: `{ session_id, captured_at }`).
@@ -885,9 +793,10 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // System coordinator: deliver the prompt via additionalContext, same as
   // every other agent type. @system has no worktree, no meta.json, and no
-  // manager/spawner — build a SessionContext inline with agentType: "system"
-  // and let generateInstructions load `system.md` (merged with `_all.md`,
-  // skipping `_non_coordinator.md`).
+  // manager/spawner — build a SessionContext inline with agentType
+  // SYSTEM_COORDINATOR_TYPE and let generateInstructions load
+  // `system-coordinator.md` (merged with `_all.md`, skipping
+  // `_non_coordinator.md`).
   if (agentIdArg === SYSTEM_AGENT_ID) {
     // Best-effort: record Claude's real session id so the coordinator resume
     // path can cross-check its transcript-scan choice. Must not change the
@@ -901,7 +810,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
       branchName: "",
       worktreePath: "",
       rootRepoPath: "",
-      agentType: "system",
+      agentType: SYSTEM_COORDINATOR_TYPE,
     };
     const instructions = await generateInstructions(systemCtx);
     const output = {
@@ -916,7 +825,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
 
   // Detect role - read meta.json from filesystem if in an agent directory
   const match = AGENT_CWD_PATTERN.exec(cwd);
-  let metaJson: { id?: string; manager?: string | null; worker?: boolean; coordinator?: boolean; agentType?: string; model?: string; sandbox?: unknown; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
+  let metaJson: { id?: string; manager?: string | null; worker?: boolean; agentType?: string; model?: string; sandbox?: unknown; spawned_by?: { agent_id: string; repo_path: string | null }; state?: string } | undefined;
   let agentDirForState: string | undefined;
   let roleCwd = cwd;
 

@@ -525,7 +525,7 @@ describe("REPO mode with coordinator", () => {
   test("computeRepoCoordinatorSplit splits height when coordinator exists", () => {
     const rp = new RightPaneComponent();
     rp.displayHeight = 30;
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     const { repoHeight, coordinatorHeight } = rp.computeRepoCoordinatorSplit();
     expect(repoHeight + coordinatorHeight).toBe(30);
     expect(coordinatorHeight).toBeGreaterThanOrEqual(5);
@@ -535,7 +535,7 @@ describe("REPO mode with coordinator", () => {
   test("computeRepoCoordinatorSplit respects height offset", () => {
     const rp = new RightPaneComponent();
     rp.displayHeight = 30;
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHeightOffset = 3;
     const { repoHeight: rh1, coordinatorHeight: ch1 } = rp.computeRepoCoordinatorSplit();
 
@@ -550,7 +550,7 @@ describe("REPO mode with coordinator", () => {
   test("computeRepoCoordinatorSplit normalizes offset when it exceeds valid range (BUG-10)", () => {
     const rp = new RightPaneComponent();
     rp.displayHeight = 20;
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     // Set a grossly large offset that would push coordinator beyond available space
     rp.repoCoordinatorHeightOffset = 9999;
     const { repoHeight, coordinatorHeight } = rp.computeRepoCoordinatorSplit();
@@ -568,7 +568,7 @@ describe("REPO mode with coordinator", () => {
   test("computeRepoCoordinatorSplit normalizes large negative offset (BUG-10)", () => {
     const rp = new RightPaneComponent();
     rp.displayHeight = 20;
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     // Set a large negative offset that would shrink coordinator below minimum
     rp.repoCoordinatorHeightOffset = -9999;
     const { repoHeight, coordinatorHeight } = rp.computeRepoCoordinatorSplit();
@@ -593,7 +593,7 @@ describe("REPO mode with coordinator", () => {
 
   test("renderRepoCoordinatorSection shows stopped message when polled with no output", () => {
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     rp.repoCoordinatorOutput = null;
     const lines = rp.renderRepoCoordinatorSection(40, 10, false);
@@ -604,7 +604,7 @@ describe("REPO mode with coordinator", () => {
 
   test("renderRepoCoordinatorSection shows loading when not yet polled", () => {
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = false;
     const lines = rp.renderRepoCoordinatorSection(40, 10, false);
     const text = lines.map(stripAnsi).join("\n");
@@ -613,7 +613,7 @@ describe("REPO mode with coordinator", () => {
 
   test("renderRepoCoordinatorSection shows tmux output when available", () => {
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     rp.repoCoordinatorOutput = "coordinator output line 1\ncoordinator output line 2";
     const lines = rp.renderRepoCoordinatorSection(60, 10, false);
@@ -627,7 +627,7 @@ describe("REPO mode with coordinator", () => {
     // own input box is trimmed on the logical lines and its status bar is surfaced
     // via repoCoordinatorStatusLines — mirroring the system coordinator.
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     rp.repoCoordinatorOutput = [
       "⏺ coordinator finished a task",
@@ -647,7 +647,7 @@ describe("REPO mode with coordinator", () => {
 
   test("renderRepoCoordinatorSection closes a link cut from a status line", () => {
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     rp.repoCoordinatorOutput = [
       "⏺ coordinator finished a task",
@@ -668,7 +668,7 @@ describe("REPO mode with coordinator", () => {
     // the pane — the wrap-path separator-collapse rule handles it.
     const sep = "─".repeat(1000);
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     rp.repoCoordinatorOutput = ["coord line above", sep, "coord line below"].join("\n");
     const width = 50;
@@ -683,7 +683,7 @@ describe("REPO mode with coordinator", () => {
     // must break at spaces (word-wrap), matching the center pane — not char-wrap
     // that splits mid-word.
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     const width = 24;
     rp.repoCoordinatorOutput =
@@ -704,7 +704,7 @@ describe("REPO mode with coordinator", () => {
     // the cache is keyed on (raw, width) via the shared WordWrapCache by checking
     // that rendering twice with unchanged input is stable and correct.
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     rp.repoCoordinatorOutput = "a moderately long coordinator status line that will reflow at this width";
     const first = rp.renderRepoCoordinatorSection(30, 12, false).map(stripAnsi);
@@ -721,7 +721,7 @@ describe("REPO mode with coordinator", () => {
     // truncates the cached buffer in place, and a later render at the same width
     // sees a buffer that is already missing its trailing rows.
     const rp = new RightPaneComponent();
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     // Output with trailing blank rows (as tmux -E - pads the capture).
     rp.repoCoordinatorOutput = "coordinator line one\ncoordinator line two\n\n\n";
@@ -748,7 +748,7 @@ describe("REPO mode with coordinator", () => {
     const rp = new RightPaneComponent();
     rp.displayHeight = 20;
     rp.selectedRepoHeader = "my-repo";
-    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", repoName: "my-repo", meta: { agentType: "coordinator" } as any });
+    rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", repoName: "my-repo", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     rp.repoCoordinatorOutput = "coordinator output";
     rp.allAgents = [];
@@ -766,7 +766,7 @@ describe("formatAgentRow uses coordinator icon", () => {
   const { formatAgentRow: pmFormatAgentRow } = require("./pane-manager");
   test("coordinator agent gets ◇ icon", () => {
     const agent = makeAgent({ id: "coord-1" });
-    agent.meta.agentType = "coordinator";
+    agent.meta.agentType = "repo-coordinator";
     const row = pmFormatAgentRow(agent, "", 8);
     expect(row).toContain("◇");
   });

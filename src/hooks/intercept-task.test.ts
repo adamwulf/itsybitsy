@@ -21,7 +21,7 @@ import {
  * behind `processTaskIntercept` does not read that temp dir — `loadAgentType`
  * resolves `$HOME/.itsybitsy/agent-types/<name>.md`, and `ensureAgentTypesDir`
  * CREATES that tree when it is missing. Running this file against a fresh home
- * writes `agent-types/{_all,_non_coordinator,coordinator,manager,system,worker}.md`
+ * writes `agent-types/{_all,_non_coordinator,manager,repo-coordinator,system-coordinator,worker}.md`
  * plus `agents/agent-9c1b4a42` — i.e. unisolated, it was writing agent-type
  * files and an agent directory into the developer's real `~/.itsybitsy`.
  *
@@ -632,7 +632,7 @@ describe("no-worktree explicit identity", () => {
   test("validated coordinator keeps Bash restrictions from a nested cwd", async () => {
     const fs = await import("fs/promises");
     const agentId = "agent-nwcoord01";
-    const ctx = await setupNoWorktreeAgent(agentId, { agentType: "coordinator", worker: false });
+    const ctx = await setupNoWorktreeAgent(agentId, { agentType: "repo-coordinator", worker: false });
     try {
       const cwd = join(ctx.root, "packages", "app");
       await fs.mkdir(cwd, { recursive: true });
@@ -713,7 +713,7 @@ describe("coordinator Bash restrictions", () => {
     await fs.mkdir(agentDir, { recursive: true });
     await Bun.write(
       join(agentDir, "meta.json"),
-      JSON.stringify({ id: "coordinator", agentType: "coordinator" })
+      JSON.stringify({ id: "coordinator", agentType: "repo-coordinator" })
     );
     const repoDir = join(agentDir, "repo");
     await fs.mkdir(repoDir, { recursive: true });

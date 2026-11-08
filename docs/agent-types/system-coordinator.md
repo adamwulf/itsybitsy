@@ -1,6 +1,6 @@
 ---
-name: system
-description: System coordinator layer (permissions only)
+name: system-coordinator
+description: System coordinator layer (permissions, prompt and optional model for @system)
 spawnable: false
 permissions:
   allow:

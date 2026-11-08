@@ -313,8 +313,8 @@ describe("buildSystemAccessTable", () => {
       "---\nname: _all\ndescription: shared\nspawnable: false\npaths:\n  allowRead:\n    - \"~/shared\"\n---\n",
     );
     await writeFile(
-      join(typesDir, "system.md"),
-      "---\nname: system\ndescription: system coord\nspawnable: false\n---\n",
+      join(typesDir, "system-coordinator.md"),
+      "---\nname: system-coordinator\ndescription: system coord\nspawnable: false\n---\n",
     );
   });
   afterEach(async () => { resetUserHome(); await rm(home, { recursive: true, force: true }); });

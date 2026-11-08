@@ -25,7 +25,7 @@ import {
   effectiveSpawnCapability, handleAnswerQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
   handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam,
-  handleFolderBrowser, newRepoPrompt,
+  handleFolderBrowser, newRepoPrompt, newAgentFormTypeOrder,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
@@ -762,7 +762,7 @@ describe("handleSend", () => {
   });
 
   test("shows textarea dialog for per-repo coordinator when repo header selected", () => {
-    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
@@ -772,7 +772,7 @@ describe("handleSend", () => {
   });
 
   test("per-repo coordinator send calls sendMessage", async () => {
-    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir, meta: { agentType: "coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir, meta: { agentType: "repo-coordinator" } as any });
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
@@ -790,7 +790,7 @@ describe("handleSend", () => {
   });
 
   test("shows notice and no dialog when repo coordinator is stopped", () => {
-    const coordAgent = makeAgent({ id: "coord-1", state: "stopped", meta: { agentType: "coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", state: "stopped", meta: { agentType: "repo-coordinator" } as any });
     const { ctx, dialogs, notices } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
@@ -1078,6 +1078,22 @@ describe("handleFuzzyAgent nickname search", () => {
     handleFuzzyAgent(ctx);
     const d = assertDialog(dialogs[0]!, "fuzzy");
     expect(d.allItems.some((s) => s.includes("agent-fuzz2"))).toBe(true);
+  });
+});
+
+describe("newAgentFormTypeOrder", () => {
+  test("moves repo-coordinator to the end and keeps the rest in order", () => {
+    expect(newAgentFormTypeOrder(["manager", "repo-coordinator", "worker"])).toEqual(["manager", "worker", "repo-coordinator"]);
+  });
+
+  test("repo-coordinator stays last even when custom types sort after it", () => {
+    expect(newAgentFormTypeOrder(["assistant", "manager", "repo-coordinator", "researcher", "worker", "zeta"]))
+      .toEqual(["assistant", "manager", "researcher", "worker", "zeta", "repo-coordinator"]);
+  });
+
+  test("leaves a list without repo-coordinator unchanged", () => {
+    expect(newAgentFormTypeOrder(["manager", "worker"])).toEqual(["manager", "worker"]);
+    expect(newAgentFormTypeOrder([])).toEqual([]);
   });
 });
 
@@ -1436,7 +1452,7 @@ describe("agentSettingsLocalPath", () => {
     const agent = makeAgent({
       id: "coord-1",
       repoPath: "/tmp/myrepo",
-      meta: { agentType: "coordinator" } as any,
+      meta: { agentType: "repo-coordinator" } as any,
     });
     expect(agentSettingsLocalPath(agent)).toBe(
       "/tmp/myrepo/.itsybitsy/agents/coord-1/.claude/settings.local.json",
@@ -1598,7 +1614,7 @@ describe("handleAddPermission", () => {
   });
 
   test("repo header with coordinator routes to coordinator", async () => {
-    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", meta: { agentType: "repo-coordinator" } as any });
     const { ctx, dialogs } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleAddPermission(ctx);

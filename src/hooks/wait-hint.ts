@@ -20,7 +20,7 @@ export const WAIT_HINT =
  * The coordinator variant (per-repo coordinators and @system). The watchdog
  * notifies a coordinator about its own subtasks, but not about an agent it
  * started in another repo, so coordinators schedule their own check-ins with
- * ScheduleWakeup / CronCreate (coordinator.md, system.md). Other agent types
+ * ScheduleWakeup / CronCreate (repo-coordinator.md, system-coordinator.md). Other agent types
  * are denied ScheduleWakeup, so only coordinators get this text.
  */
 export const COORDINATOR_WAIT_HINT =

@@ -78,6 +78,7 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome, classifyClaudeStartupPrompt } from "./coordinator";
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
+import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { isCodexBackedCli, parseModel, mapEffortForCodex, type AgentCli } from "./agent-cli";
 import { claudeProjectDirFor, claudeScratchpadDirFor, agyStateDirFor } from "./hooks/paths-table";
 import {
@@ -1563,11 +1564,11 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
  *
  * Tears down the existing coordinator and immediately spawns a fresh one.
  * The new coordinator's settings.local.json is rebuilt from current sources
- * (hardcoded constants + _all.md + coordinator.md), so any edits to those
+ * (hardcoded constants + _all.md + repo-coordinator.md), so any edits to those
  * files are picked up. Hooks block is rebuilt fresh too. Agent ID stays the
  * same (it's keyed to the repo basename).
  *
- * Caller must have already verified `agent.meta.agentType === "coordinator"`.
+ * Caller must have already verified `agent.meta.agentType === REPO_COORDINATOR_TYPE`.
  */
 async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
   // Tear down the existing coordinator: kill tmux session, claude process,
@@ -1586,7 +1587,7 @@ async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
   const spawnResult = await newAgent(
     agent.repoPath,
     "You are the per-repo coordinator. Await instructions.",
-    { type: "coordinator" },
+    { type: REPO_COORDINATOR_TYPE },
   );
   if (!spawnResult.ok) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Reset failed during respawn: ${spawnResult.stderr || spawnResult.stdout}` };
@@ -1665,7 +1666,7 @@ export async function resumeAgent(
   }
 
   const usesClaudePidBootstrap = resumeCli === "claude" &&
-    (agent.meta.worktree === false || agent.meta.agentType === "coordinator");
+    (agent.meta.worktree === false || agent.meta.agentType === REPO_COORDINATOR_TYPE);
   const trustedClaudeIbCommand = usesClaudePidBootstrap
     ? resolveTrustedIbCommandArgs()
     : null;
@@ -1695,12 +1696,12 @@ export async function resumeAgent(
   try {
     // Per-repo coordinators: R triggers a full reset rather than a session resume.
     // The coordinator's settings.local.json is assembled from three sources at
-    // spawn time (hardcoded constants, _all.md, coordinator.md), and its hooks
+    // spawn time (hardcoded constants, _all.md, repo-coordinator.md), and its hooks
     // template is rebuilt then. Resuming the existing session would reuse stale
     // permissions and hooks, so we tear the coordinator down and respawn it
     // — fresher, simpler, and matches the user's mental model of "R to reset".
     if (
-      agent.meta.agentType === "coordinator" &&
+      agent.meta.agentType === REPO_COORDINATOR_TYPE &&
       opts?.resetCoordinator !== false
     ) {
       return await resetCoordinator(agent);
@@ -2189,7 +2190,7 @@ export async function resumeAgent(
       // Worktree:false Claude agents cannot safely install agent-specific hooks
       // in the shared repository settings. Their isolated settings file is
       // passed explicitly on every spawn/resume (including coordinator rehire).
-      if (agent.meta.worktree === false || agent.meta.agentType === "coordinator") {
+      if (agent.meta.worktree === false || agent.meta.agentType === REPO_COORDINATOR_TYPE) {
         let isolatedSettings: string;
         try {
           isolatedSettings = await ensureIsolatedClaudeSettings(
@@ -2333,7 +2334,7 @@ ${qAbsExitScript}
     // Route through getTmuxWidthForAgent so all agent-tmux sizing flows through
     // one helper.
     const resumeTmuxWidth = await getTmuxWidthForAgent(
-      agent.meta.agentType === "coordinator",
+      agent.meta.agentType === REPO_COORDINATOR_TYPE,
     );
     const tmuxResult = await nukeResumeSpawnCtx.run([
       "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
@@ -2475,9 +2476,9 @@ export function resetRespawnDetachRunner(): void {
  * torn down, performs the kill-and-restart, then exits.
  *
  * For coordinators: the worker calls the existing reset path (full nuke +
- * `newAgent` with `type: "coordinator"`). The new coordinator's
+ * `newAgent` with `type: REPO_COORDINATOR_TYPE`). The new coordinator's
  * `settings.local.json` is rebuilt from current sources (hardcoded constants
- * + `_all.md` + `coordinator.md`), so edits to those files take effect.
+ * + `_all.md` + `repo-coordinator.md`), so edits to those files take effect.
  *
  * For non-coordinator agents: the worker calls `pauseAgent` (which kills
  * the existing claude process and tmux session) then `resumeAgent` (which
@@ -2573,8 +2574,8 @@ export async function respawnSelf(agent: Agent): Promise<IbCommandResult> {
 
   // Per-repo coordinator: full reset. resetCoordinator() handles teardown
   // and respawn via newAgent, which rebuilds settings.local.json from
-  // current `_all.md` + `coordinator.md` sources.
-  if (agent.meta.agentType === "coordinator") {
+  // current `_all.md` + `repo-coordinator.md` sources.
+  if (agent.meta.agentType === REPO_COORDINATOR_TYPE) {
     const result = await resetCoordinator(agent);
     await logAgent(agentDir, `[respawn-self] coordinator reset complete: ${result.ok ? "ok" : "failed: " + result.stderr}`);
     if (result.ok) {
@@ -2718,7 +2719,7 @@ async function restoreSealSnapshot(
  *
  * Refusals:
  *  - A coordinator: its reset path differs (resetCoordinator rebuilds
- *    settings.local.json + hooks from `_all.md` + `coordinator.md`), which a
+ *    settings.local.json + hooks from `_all.md` + `repo-coordinator.md`), which a
  *    sandbox refresh cannot express. Point the caller at the reset path instead.
  *  - A missing agent-type file (the error names the type).
  *
@@ -2735,7 +2736,7 @@ export async function refreshAgentSandbox(agent: Agent): Promise<IbCommandResult
   // Coordinators reset through resetCoordinator, not the resume sandbox block —
   // a sandbox refresh cannot rebuild their settings/hooks, so refuse and point
   // at the reset path (say so, per the spec).
-  if (agent.meta.agentType === "coordinator") {
+  if (agent.meta.agentType === REPO_COORDINATOR_TYPE) {
     return {
       ok: false,
       exitCode: 1,
@@ -5721,7 +5722,7 @@ export async function refreshAgentsSandbox(
   const lines: string[] = [];
   let anyFailed = false;
   for (const agent of agents) {
-    if (agent.meta.agentType === "coordinator") {
+    if (agent.meta.agentType === REPO_COORDINATOR_TYPE) {
       lines.push(`${agent.id}: skipped (coordinator — reset with the dashboard R key)`);
       continue;
     }
@@ -5924,7 +5925,7 @@ async function ensureIsolatedClaudeSettings(
   if (await Bun.file(settingsPath).exists().catch(() => false)) return settingsPath;
 
   let settingsContent: string;
-  if (meta.agentType === "coordinator") {
+  if (meta.agentType === REPO_COORDINATOR_TYPE) {
     const coordinatorSettings = await buildPerRepoCoordinatorSettings();
     settingsContent = JSON.stringify({
       ...coordinatorSettings,
@@ -5941,7 +5942,7 @@ async function ensureIsolatedClaudeSettings(
   } else {
     // This is the same legacy fallback used by detectRole/metaCanSpawnChildren:
     // worker:true is a leaf, while false/absent is the historical manager
-    // shape. Coordinators have always carried agentType:"coordinator" and were
+    // shape. Coordinators always carry their type name in agentType and were
     // handled above, so guessing coordinator from worker:false would be unsafe.
     const typeName = typeof meta.agentType === "string" && meta.agentType.length > 0
       ? meta.agentType
@@ -6285,7 +6286,7 @@ export async function newAgent(
     }
   }
 
-  const coordinatorMode = typeName === "coordinator";
+  const coordinatorMode = typeName === REPO_COORDINATOR_TYPE;
 
   // Coordinators never use worktrees (SPEC §12.2.3)
   if (coordinatorMode) {
@@ -6331,7 +6332,7 @@ export async function newAgent(
       typeof callerContext.meta.id === "string"
     ) {
       spawnedBy = {
-        agent_id: callerContext.meta.agentType === "coordinator"
+        agent_id: callerContext.meta.agentType === REPO_COORDINATOR_TYPE
           ? `@${basename(callerContext.repoPath)}`
           : callerContext.meta.id,
         repo_path: callerContext.repoPath,

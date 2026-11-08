@@ -2856,7 +2856,6 @@ export async function main() {
         if (type.description) console.log(`DESCRIPTION: ${type.description}`);
         console.log(`SPAWNABLE: ${spawnable}`);
         console.log(`SPAWNS CHILDREN: ${spawnsChildren}`);
-        console.log(`INSTRUCTION STYLE: ${type.instructionStyle}`);
         if (type.model) console.log(`MODEL: ${type.model}`);
         if (type.icon) console.log(`ICON: ${type.icon}`);
         if (type.paths) {

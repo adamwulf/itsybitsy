@@ -1182,7 +1182,8 @@ describe("list-types CLI command", () => {
     expect(stdout).toContain("DESCRIPTION");
     expect(stdout).toContain("manager");
     expect(stdout).toContain("worker");
-    expect(stdout).toContain("coordinator");
+    expect(stdout).toContain("repo-coordinator");
+    expect(stdout).toContain("system-coordinator");
     expect(stdout).toContain("_all");
     expect(stdout).toContain("_non_coordinator");
     // Layer-only types should be marked non-spawnable with "-" for spawns-children
@@ -1198,7 +1199,7 @@ describe("list-types CLI command", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain("manager");
     expect(stdout).toContain("worker");
-    expect(stdout).toContain("coordinator");
+    expect(stdout).toContain("repo-coordinator");
   });
 
   test("list-types output is sorted alphabetically", async () => {
@@ -1229,7 +1230,7 @@ describe("show-type CLI command", () => {
     expect(stdout).toContain("DESCRIPTION:");
     expect(stdout).toContain("SPAWNABLE: yes");
     expect(stdout).toContain("SPAWNS CHILDREN: yes");
-    expect(stdout).toContain("INSTRUCTION STYLE: manager");
+    expect(stdout).not.toContain("INSTRUCTION STYLE");
     expect(stdout).toContain("PERMISSIONS ALLOW");
     expect(stdout).toContain("PERMISSIONS DENY");
     expect(stdout).toContain("PROMPT BODY");
@@ -1244,7 +1245,6 @@ describe("show-type CLI command", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed.name).toBe("worker");
     expect(typeof parsed.description).toBe("string");
-    expect(parsed.instructionStyle).toBe("worker");
     expect(typeof parsed.canSpawnChildren).toBe("boolean");
     expect(typeof parsed.markdownBody).toBe("string");
   });
@@ -1809,7 +1809,7 @@ describe("CLI entry points", () => {
       expect(exitCode).toBe(0);
       // A known row from the agent-type table — proves the command actually ran
       // rather than the process merely exiting 0 with no output.
-      expect(stdout).toContain("coordinator");
+      expect(stdout).toContain("repo-coordinator");
     },
   );
 

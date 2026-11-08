@@ -8,20 +8,21 @@ import { readdirSync, readFileSync } from "fs";
 import { Glob } from "bun";
 import managerMd from '../docs/agent-types/manager.md' with { type: 'text' };
 import workerMd from '../docs/agent-types/worker.md' with { type: 'text' };
-import coordinatorMd from '../docs/agent-types/coordinator.md' with { type: 'text' };
-import systemLayerMd from '../docs/agent-types/system.md' with { type: 'text' };
+import repoCoordinatorMd from '../docs/agent-types/repo-coordinator.md' with { type: 'text' };
+import systemCoordinatorLayerMd from '../docs/agent-types/system-coordinator.md' with { type: 'text' };
 import allLayerMd from '../docs/agent-types/_all.md' with { type: 'text' };
 import nonCoordinatorLayerMd from '../docs/agent-types/_non_coordinator.md' with { type: 'text' };
 import { parseModel } from './agent-cli';
 import { isValidEffort } from './validation';
 import type { PathsConfig, SandboxConfigInput } from './sandbox';
 import { validatePathsFrontmatter, validateSandboxFrontmatter } from './sandbox';
+import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from './coordinator-type-names';
 
 const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
   'worker': workerMd,
-  'coordinator': coordinatorMd,
-  'system': systemLayerMd,
+  [REPO_COORDINATOR_TYPE]: repoCoordinatorMd,
+  [SYSTEM_COORDINATOR_TYPE]: systemCoordinatorLayerMd,
   '_all': allLayerMd,
   '_non_coordinator': nonCoordinatorLayerMd,
 };
@@ -76,7 +77,6 @@ export interface AgentType {
    * allocation. Absent → no restriction (type works in any repo).
    */
   repos?: string[];
-  instructionStyle: "manager" | "worker" | "coordinator";
   markdownBody?: string;
 }
 
@@ -219,15 +219,6 @@ export function parseAgentTypeFile(content: string): {
   const body = lines.slice(endIdx + 1).join("\n").trim();
 
   return { frontmatter, body };
-}
-
-const VALID_INSTRUCTION_STYLES = new Set<AgentType["instructionStyle"]>(["manager", "worker", "coordinator"]);
-
-function validateInstructionStyle(value: string): AgentType["instructionStyle"] {
-  if (VALID_INSTRUCTION_STYLES.has(value as AgentType["instructionStyle"])) {
-    return value as AgentType["instructionStyle"];
-  }
-  return "manager";
 }
 
 /**
@@ -534,7 +525,6 @@ function mergeRawFrontmatters(
     "icon",
     "model",
     "effort",
-    "instructionStyle",
     "repos",
   ]);
 
@@ -544,8 +534,7 @@ function mergeRawFrontmatters(
   // Without this, a child that declares `icon:`, `model:`, or `effort:` with no
   // value silently wipes the parent's value to undefined. `effort` follows
   // `model`'s convention so a child declaring a blank `effort:` inherits the
-  // parent's value. description and instructionStyle keep the strict
-  // "present → replace" rule.
+  // parent's value. description keeps the strict "present → replace" rule.
   const EMPTY_STRING_INHERITS = new Set(["icon", "model", "effort"]);
 
   // Accumulated permission lists (unioned across the chain, deduped below).
@@ -753,7 +742,6 @@ function buildAgentTypeFromFrontmatter(
         }
       : undefined,
     repos,
-    instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
     markdownBody: body || undefined,
   };
 }
@@ -787,7 +775,7 @@ export async function loadAgentType(name: string): Promise<AgentType> {
  * Precedence (highest first):
  *   1. Per-agent `canSpawnChildren` override (the `ib watch` 'b' dialog toggle):
  *      an explicit boolean wins over everything.
- *   2. The `system` layer type is top-level and spawns via
+ *   2. The `system-coordinator` layer type is top-level and spawns via
  *      `ib new-agent --repo <name>`, so it counts as able to spawn. (The
  *      Task/Agent hook still denies @system with a specific message BEFORE
  *      calling this — Task is the wrong mechanism, not a permission denial — so
@@ -801,7 +789,7 @@ export async function loadAgentType(name: string): Promise<AgentType> {
  */
 export async function metaCanSpawnChildren(meta: Record<string, unknown>): Promise<boolean> {
   if (typeof meta.canSpawnChildren === "boolean") return meta.canSpawnChildren;
-  if (meta.agentType === "system") return true;
+  if (meta.agentType === SYSTEM_COORDINATOR_TYPE) return true;
   if (typeof meta.agentType === "string" && meta.agentType.length > 0) {
     try {
       const type = await loadAgentType(meta.agentType);
@@ -958,15 +946,6 @@ export async function validateAllAgentTypes(): Promise<string[]> {
 
         if (frontmatter.spawnable !== undefined && typeof frontmatter.spawnable !== "boolean") {
           errors.push(`${file}: spawnable must be true or false, got "${frontmatter.spawnable}"`);
-        }
-
-        // Validate instructionStyle if present
-        if (frontmatter.instructionStyle !== undefined) {
-          if (typeof frontmatter.instructionStyle !== "string") {
-            errors.push(`${file}: instructionStyle must be a string, got ${typeof frontmatter.instructionStyle}`);
-          } else if (!VALID_INSTRUCTION_STYLES.has(frontmatter.instructionStyle as AgentType["instructionStyle"])) {
-            errors.push(`${file}: instructionStyle must be "manager", "worker", or "coordinator", got "${frontmatter.instructionStyle}"`);
-          }
         }
 
         // Validate permissions structure

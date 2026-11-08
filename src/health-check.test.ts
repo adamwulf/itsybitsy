@@ -336,7 +336,7 @@ describe("checkOrphanedWorktrees", () => {
     const repoId = "a3f2b1c0";
     const agentDir = join(tmpDir, ".itsybitsy", "agents", coordinatorId);
     await mkdir(agentDir, { recursive: true });
-    await writeFile(join(agentDir, "meta.json"), JSON.stringify({ agentType: "coordinator" }));
+    await writeFile(join(agentDir, "meta.json"), JSON.stringify({ agentType: "repo-coordinator" }));
 
     const worktreePath = join(tmpDir, ".itsybitsy", "agents", coordinatorId, "repo");
     healthSpawnCtx.set((cmd: string[]) => {

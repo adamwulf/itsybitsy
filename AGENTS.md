@@ -132,7 +132,7 @@ The interesting modules and their entry points:
 | Message-delivery queue | `src/outbox.ts`, `src/watchdog.ts` |
 | State detection | `src/agents.ts` (`detectAgentStates`, `writeAgentState`), `src/parse-state.ts` (legacy) |
 | Hooks | `src/hooks/` (path-isolation access table: `src/hooks/paths-table.ts`) |
-| Agent types | `src/agent-types.ts`, `docs/agent-types/*.md` (embedded) |
+| Agent types | `src/agent-types.ts`, `docs/agent-types/*.md` (embedded); the two coordinator type names are constants in `src/coordinator-type-names.ts` |
 | Codex CLI | `src/codex-spawn.ts`, `src/codex-config.ts`, `src/hooks/codex-*.ts` |
 | Antigravity CLI (`agy`) | `src/agy-spawn.ts`, `src/agy-config.ts`, `src/agy-version.ts`, `src/hooks/agy-*.ts` |
 | Mutations | `src/ib-commands.ts`, `src/agent-lifecycle.ts` |

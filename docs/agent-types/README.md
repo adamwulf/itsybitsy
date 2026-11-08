@@ -1,6 +1,6 @@
 # Agent Type Definitions
 
-These `.md` files are the canonical agent type definitions for itsybitsy's built-in types (`manager`, `worker`, `coordinator`). They are embedded in the itsybitsy binary at build time and auto-populated to `~/.itsybitsy/agent-types/` on first run.
+These `.md` files are the canonical agent type definitions for itsybitsy's built-in types (`manager`, `worker`, `repo-coordinator`) and layer files (`_all`, `_non_coordinator`, `system-coordinator`). They are embedded in the itsybitsy binary at build time and auto-populated to `~/.itsybitsy/agent-types/` on first run.
 
 ## How it works
 
@@ -93,7 +93,7 @@ Rules:
 - **Bare-string `repos: muse-ios` is rejected.** Use `repos: [muse-ios]` or a multi-line list.
 - **Case-sensitive** matching. Entries are trimmed of surrounding whitespace.
 - Inheritable via `inherits:` — the child's `repos:` replaces the parent's list entirely. To undo a parent's restriction, either remove `inherits:` or use an intermediate parent without `repos`. There is no sentinel-string escape hatch in v1.
-- The check runs after `loadAgentType` so inherited restrictions are honored, and before the coordinator idempotency check so a restricted `coordinator.md` fails loudly in the wrong repo rather than silently succeeding.
+- The check runs after `loadAgentType` so inherited restrictions are honored, and before the coordinator idempotency check so a restricted `repo-coordinator.md` fails loudly in the wrong repo rather than silently succeeding.
 
 ## Sandboxing defaults to enabled (`sandbox:` / `paths:`)
 

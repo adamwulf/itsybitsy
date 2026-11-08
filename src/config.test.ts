@@ -44,7 +44,7 @@ describe("readConfig", () => {
     // enabled implicitly.
     expect(result["coordinator.remoteControl"]).toEqual({ value: false, source: "default" });
     // Permission list keys have all been removed from CONFIG_KEYS; they now live in
-    // ~/.itsybitsy/agent-types/*.md frontmatter (coordinator.md, _all.md, _non_coordinator.md).
+    // ~/.itsybitsy/agent-types/*.md frontmatter (repo-coordinator.md, _all.md, _non_coordinator.md).
     expect(result["permissions.all.allow"]).toBeUndefined();
     expect(result["permissions.all.deny"]).toBeUndefined();
     expect(result["permissions.repo.allow"]).toBeUndefined();
@@ -352,7 +352,7 @@ describe("checkDeprecatedConfigKeys", () => {
     const warnings = await checkDeprecatedConfigKeys();
     expect(warnings.length).toBe(1);
     expect(warnings[0]).toContain("permissions.coordinator.allow");
-    expect(warnings[0]).toContain("coordinator.md");
+    expect(warnings[0]).toContain("repo-coordinator.md");
   });
 
   test("warns when permissions.coordinator.deny is set", async () => {
@@ -363,10 +363,10 @@ describe("checkDeprecatedConfigKeys", () => {
     const warnings = await checkDeprecatedConfigKeys();
     expect(warnings.length).toBe(1);
     expect(warnings[0]).toContain("permissions.coordinator.deny");
-    expect(warnings[0]).toContain("coordinator.md");
+    expect(warnings[0]).toContain("repo-coordinator.md");
   });
 
-  test("warns when coordinator.model is set and points to coordinator.md", async () => {
+  test("warns when coordinator.model is set and points to the coordinator type files", async () => {
     await Bun.write(
       userCfgPath,
       JSON.stringify({ coordinator: { model: "claude:sonnet" } })
@@ -374,7 +374,8 @@ describe("checkDeprecatedConfigKeys", () => {
     const warnings = await checkDeprecatedConfigKeys();
     expect(warnings.length).toBe(1);
     expect(warnings[0]).toContain("coordinator.model");
-    expect(warnings[0]).toContain("coordinator.md");
+    expect(warnings[0]).toContain("system-coordinator.md");
+    expect(warnings[0]).toContain("repo-coordinator.md");
   });
 
   test("warns for both coordinator and legacy manager/worker keys", async () => {

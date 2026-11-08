@@ -1951,7 +1951,7 @@ clears the stale pid exactly as an ordinary resume does.
 
 - **Refusals.** A **coordinator** is refused (its reset path differs —
   `resetCoordinator` rebuilds `settings.local.json` + hooks from `_all.md` +
-  `coordinator.md`, which a sandbox refresh cannot express; the caller is
+  `repo-coordinator.md`, which a sandbox refresh cannot express; the caller is
   pointed at the dashboard R key / `ib resume`). A **missing agent-type file**
   is refused with the type named.
 - **`--all`.** Refreshes every agent of the **current repo** whose state is not

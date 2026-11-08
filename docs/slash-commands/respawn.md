@@ -3,7 +3,7 @@ description: "Stop this agent's Claude session and start a fresh one in the same
 allowed-tools: ["Bash(ib:*)"]
 ---
 
-You have been asked to respawn this agent's Claude session. Use this when you've edited your own agent-type markdown file (e.g. `~/.itsybitsy/agent-types/coordinator.md`, `worker.md`, `manager.md`, `_all.md`, or `_non_coordinator.md`) and want the changes to take effect.
+You have been asked to respawn this agent's Claude session. Use this when you've edited your own agent-type markdown file (e.g. `~/.itsybitsy/agent-types/repo-coordinator.md`, `worker.md`, `manager.md`, `_all.md`, or `_non_coordinator.md`) and want the changes to take effect.
 
 Run `ib respawn` once. It will:
 

@@ -214,8 +214,11 @@ After the rename, a repo registered at `$HOME` would put its runtime dir at
 `~/.itsybitsy/`, colliding with the user-wide home (the registry, and the
 per-agent dirs under `~/.itsybitsy/agents/`). In `addRepo`
 (`src/registry.ts:142`), refuse a path whose real path equals the real path of
-`userHome()`, with a clear message. This takes about 3 lines, plus a test in
-`src/registry.test.ts`. The script also refuses such a repo (§2.3).
+`userHome()`, with a clear message. The updated base extracted registration
+validation into `checkNewRepoEntry`; the refusal lives there so `addRepo` and
+the New Repo action's `createRepo` preflight share it. Tests cover registration
+and creation, including refusing HOME before any mkdir or git command. The
+script also refuses such a repo (§2.3).
 
 ### 1.5 `.gitignore` and docs
 
@@ -1016,13 +1019,19 @@ Refs are not moved by the script; §1.3 retains the new-first, legacy-only-if-mi
 
 ## Appendix A — Baseline test failures
 
-Measured before any implementation changes or commits:
+Re-measured on the untouched updated base in detached HEAD after rebasing the
+implementation, before applying any implementation changes to that baseline:
 
-- Commit: `3222f9536d598efcee60ead3272ef8a3e891f46b`.
+- Commit: `abe00ccb130c44d8dbee992907d5dd9cc4b547e4` (`agent/ittybitty-paths`).
 - Agent: `agent-8606c130`, type `codex`, `canSpawnChildren: true` (confirmed with `ib show-type codex`).
-- `bun test`: **7,282 pass, 11 skip, 48 fail**, 37,899 assertions; 7,341 tests across 144 files.
+- `bun test`: **7,349 pass, 11 skip, 48 fail**, 38,110 assertions; 7,408 tests across 146 files.
 - Measured in the existing `.ittybitty` worktree on 2026-11-07.
 - Runbook step 8 compares a new `--type codex` agent against this failure set.
+
+The original pre-implementation baseline was recorded before the first code
+commit at `3222f9536d598efcee60ead3272ef8a3e891f46b`: 7,282 pass, 11 skip,
+48 fail, 37,899 assertions, 7,341 tests across 144 files. The updated base adds
+67 passing tests; the failing file/test pairs below are unchanged.
 
 - `src/sandbox.test.ts` — canonicalization without reading what the agent may not read > kernelSandboxed: a component refused by a typed-case deny gets its on-disk case (b)
 - `src/sandbox.test.ts` — canonicalization without reading what the agent may not read > kernelSandboxed: a component refused by a typed-case deny gets its on-disk case (c)

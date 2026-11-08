@@ -5887,6 +5887,9 @@ async function buildAgentSettings(
 
   const result = {
     ...baseSettings,
+    // Remote Control belongs to the system coordinator alone (SPEC.md §15).
+    // Set after the project settings spread so they cannot turn it back on.
+    disableRemoteControl: true,
     spinnerTipsEnabled: false,
     permissions: {
       allow: allAllow,
@@ -5929,6 +5932,8 @@ async function ensureIsolatedClaudeSettings(
     const coordinatorSettings = await buildPerRepoCoordinatorSettings();
     settingsContent = JSON.stringify({
       ...coordinatorSettings,
+      // Remote Control belongs to the system coordinator alone (SPEC.md §15).
+      disableRemoteControl: true,
       spinnerTipsEnabled: false,
       hooks: buildHooksBlock({
         agentId,
@@ -7443,6 +7448,8 @@ export async function newAgent(
       const coordSettings = await buildPerRepoCoordinatorSettings();
       const coordSettingsObj = {
         ...coordSettings,
+        // Remote Control belongs to the system coordinator alone (SPEC.md §15).
+        disableRemoteControl: true,
         spinnerTipsEnabled: false,
         hooks: buildHooksBlock({
           agentId: id,

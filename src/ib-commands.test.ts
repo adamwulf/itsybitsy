@@ -6677,6 +6677,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolated.permissions.deny).toContain("EnterPlanMode");
     expect(JSON.stringify(isolated.hooks)).toContain(`hook-check-path ${id}`);
     expect(isolated.statusLine.command).toBe(`ib hooks statusline ${id}`);
+    expect(isolated.disableRemoteControl).toBe(true);
 
     // Simulate a legacy worktree:false agent created before isolated settings.
     await rm(isolatedSettingsPath);
@@ -6710,6 +6711,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(migrated.hooks.PostToolUse[0].hooks[0].command).toBe(`ib hooks inject-timestamp ${id}`);
     expect(JSON.stringify(migrated.hooks.PreToolUse)).toContain(`ib hooks intercept-task ${id}`);
     expect(JSON.stringify(migrated.hooks)).toContain(`hook-check-path ${id}`);
+    expect(migrated.disableRemoteControl).toBe(true);
   });
 
   for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
@@ -7042,6 +7044,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const settings = await Bun.file(join(agentDir, ".claude", "settings.local.json")).json();
     expect(JSON.stringify(settings.hooks)).toContain(`hook-check-path ${id}`);
     expect(settings.statusLine.command).toBe(`ib hooks statusline ${id}`);
+    // Per-repo coordinators never run Remote Control (SPEC.md §15).
+    expect(settings.disableRemoteControl).toBe(true);
   });
 
   test("sandbox-enabled Codex spawn uses danger-full-access inside our wrapper and proxy", async () => {
@@ -11072,7 +11076,29 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(settings.hooks.SessionStart).toBeDefined();
     expect(settings.hooks.PreToolUse).toBeDefined();
     expect(settings.spinnerTipsEnabled).toBe(false);
+    // Remote Control belongs to the system coordinator alone (SPEC.md §15).
+    expect(settings.disableRemoteControl).toBe(true);
   });
+
+  for (const type of ["manager", "worker"] as const) {
+    test(`${type} settings keep Remote Control off even when the project's settings.json enables it`, async () => {
+      // buildAgentSettings spreads the project's settings.json first; the
+      // disable key must be applied after it so a project cannot turn Remote
+      // Control back on for an agent.
+      await mkdir(join(tempDir, ".claude"), { recursive: true });
+      await Bun.write(join(tempDir, ".claude", "settings.json"), JSON.stringify({
+        disableRemoteControl: false,
+      }));
+
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const name = `test-rc-${type}`;
+      const result = await callNewAgent("task", { name, type });
+      expect(result.ok).toBe(true);
+
+      const settings = await Bun.file(join(agentsDir, name, "repo", ".claude", "settings.local.json")).json();
+      expect(settings.disableRemoteControl).toBe(true);
+    });
+  }
 
   test("wraps the project's statusLine in ib's statusline command", async () => {
     // `ib hooks statusline <id>` records Claude Code's rate_limits for the
@@ -11470,6 +11496,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(isolatedSettings.hooks.PermissionRequest[0].hooks[0].command).toBe(`ib hook-permission-denied ${coordId}`);
     expect(isolatedSettings.permissions.allow).toContain("Read");
     expect(isolatedSettings.permissions.allow).toContain("Bash(ib:*)");
+    // Per-repo coordinators never run Remote Control (SPEC.md §15).
+    expect(isolatedSettings.disableRemoteControl).toBe(true);
 
     // start.sh must launch claude with --settings pointing at the isolated file.
     const startSh = await Bun.file(join(coordRepo, ".itsybitsy", "agents", coordId, "start.sh")).text();

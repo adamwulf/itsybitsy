@@ -1,7 +1,11 @@
 ---
 name: system-coordinator
-description: System coordinator layer (permissions, prompt and optional model for @system)
+description: System coordinator layer (permissions, prompt, optional model and Remote Control for @system)
 spawnable: false
+# true launches @system with Claude Code Remote Control (claude.ai/code and
+# the Claude mobile app). Allowed in this file only. Restart the system
+# coordinator after changing it.
+remoteControl: false
 permissions:
   allow:
     - "ScheduleWakeup"

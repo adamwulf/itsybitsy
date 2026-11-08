@@ -321,9 +321,13 @@ scripts/update-repos.sh [--apply] [REPO_PATH ...]
 - `--apply` makes the changes and tees its output to
   `~/.itsybitsy/migrations/update-repos-<YYYYMMDD-HHMMSS>.log`.
 - `REPO_PATH ...` limits the repo steps to those repos. The default is every
-  `path` in `~/.itsybitsy/repos.json`. Each path is also resolved to its git
-  toplevel, because `newAgent` puts the runtime dir at
-  `resolveGitRoot(repoPath)`. Duplicates are dropped by real path.
+  `path` in `~/.itsybitsy/repos.json`. Each `REPO_PATH` is used as given, whether
+  or not it is registered, and gets every step, the transcript rename included.
+  Internally the script also resolves each path to its git toplevel, because
+  `newAgent` puts the runtime dir at `resolveGitRoot(repoPath)`, and drops
+  duplicates by real path. But every message and printed command quotes the path
+  as given or as registered, never the toplevel or the real path, so it can be
+  pasted back as is.
 
 ### 2.2 Preflight
 
@@ -361,40 +365,48 @@ it is a repo error before step 1.
 |---|---|
 | The repo path is absent (`ENOENT`) | Warn "missing — skipped", with the unmigrated-repo advice below. Not an error |
 | Any stat of the repo path, OLD or NEW fails other than `ENOENT` | Error naming the errno; skip the repo |
-| The repo path is `$HOME` | Error; skip the repo. The message says to `ib remove` that entry before the deploy: `addRepo`'s new refusal (§1.4) only stops new entries and doesn't clean up existing ones |
+| The repo path is `$HOME` | Error; skip the repo. The message says to `ib remove` that entry before the deploy. This is a real removal, not the temporary kind ruled out below: `addRepo`'s new refusal (§1.4) only stops new entries and doesn't clean up existing ones |
 | Both OLD and NEW exist | Error; skip the repo; other repos continue. The likely cause is a repo skipped earlier as missing, in which the new `ib` then wrote a fresh `.itsybitsy/repo-id` (`getRepoId` and `askQuestion`, `src/ib-commands.ts:5825, 8545`; also `ib sandbox seal --repo-id`, `src/index.ts:2193-2196`). If NEW holds nothing but `repo-id` and empty dirs, the error tells Adam to remove it (`rm -rf '<repo>/.itsybitsy'`) and re-run; the real `repo-id` is the one in OLD. Otherwise it prints what NEW holds (counts of `agents/*`, `archive/*` and `prompts/*`, and whether `user-questions.json` exists) and the merge steps below. A plain copy of NEW into OLD won't work: agents created under NEW carry `tmux_session` `itsybitsy-<NEW repo-id>-…` and seal records keyed by NEW's `repo-id` (`src/ib-commands.ts:5612`), so whichever `repo-id` is kept breaks the other side's agents and rehire's tmux check (`src/ib-commands.ts:744-746`) |
 | OLD is a symlink | Error; skip the repo |
 | OLD only | Migrate: every step |
 | NEW only | Already moved. Run steps 3 to 8, which find nothing to do in a finished repo, and print "already migrated — nothing to do". This is also how an interrupted run finishes |
 | Neither | "no runtime dir"; skip the repo |
 
-**Merging "both exist" when NEW holds real data.** The error text prints these
-steps:
+**Merging "both exist" when NEW holds real data.** NEW can only hold agents if
+the new `ib` already ran there, so this only comes up in a single-repo re-run
+after the deploy. The error text prints these steps, in this order:
 
 1. Keep OLD's `repo-id`. OLD's agents, archives and refs are keyed by it.
-2. With the new `ib`, merge or retire every agent created under NEW first. Their
-   archives won't be rehirable afterwards, because their `tmux_session` names
+2. Keep the repo registered: `ib merge` and `ib retire` only find agents in
+   registered repos. With `ib watch` quit, use the new `ib` CLI to merge or retire
+   every agent created under NEW. Don't press `f` on this repo. The archives of
+   those agents won't be rehirable afterwards, because their `tmux_session` names
    NEW's `repo-id`.
 3. Set NEW's `prompts/` and `user-questions.json` aside, `rm -rf
-   '<repo>/.itsybitsy'`, and re-run. After the migration, copy back what is still
-   needed.
+   '<repo>/.itsybitsy'`, and run `scripts/update-repos.sh --apply '<repo>'`.
+   After the migration, copy back what is still needed.
 
 **An unmigrated repo can lose its agents' work.** The new `ib watch`
 health-checks every registered repo. In a repo that still has OLD, it finds no
 `<repo>/.itsybitsy/agents/<id>/meta.json` for any agent worktree, so it flags each
 one as orphaned (`checkOrphanedWorktrees`, `src/health-check.ts:300-336`). Its
 fix runs `git worktree remove --force` and then a repo-wide prune (:683-686).
-Using no ib in that repo doesn't help, because the check covers every registered
-repo. So every repo the run leaves with OLD in place gets the same advice line:
+So every repo the run leaves with OLD in place gets the same advice line:
 "missing", a stat error, a step 1 or 2 failure, a symlinked OLD, "both exist".
-The line says: "`ib remove` this repo until it is migrated; after a clean
-`scripts/update-repos.sh --apply '<repo>'`, `ib add` it back."
+The line says: "Keep this repo registered. Until it is migrated, don't press `f`
+on it in `ib watch`, and don't spawn, ask or rehire there. Fix the cause and
+re-run `scripts/update-repos.sh --apply '<repo>'`."
 
-Use the CLI `ib remove`: the dashboard's remove refuses while live agent dirs
-exist (`src/tui/agent-actions.ts:2777`). Re-adding keeps only the path and name.
-The entry's `nickname`, `notes` and `defaultAgentType` (for example
-`personal-assistant`'s `defaultAgentType: assistant`) are lost. Restore them by
-hand from the `repos.json` copy saved in runbook step 2, with `ib watch` quit.
+Removing the repo from the registry instead is not offered, for four reasons:
+
+- The CLI `ib add` takes only a path, and it refuses basenames with spaces or
+  dots (`src/validation.ts:102`), such as `Rice Teaching`, `Filing Cabinet` or
+  `milestonemade.com`.
+- The dashboard lowercases the names it adds, so a re-add changes the name.
+- A hand-edited `repos.json` that fails to parse reads as empty
+  (`src/registry.ts:121-134`), and the next save wipes every other entry.
+- `ib merge` and `ib retire` only find agents in registered repos, which the
+  "both exist" steps need.
 
 **A file tracked inside OLD** (`git ls-files -- .ittybitty` is not empty) does
 not stop the repo; it is migrated like the rest. After the move the script warns
@@ -453,7 +465,9 @@ Later, `git worktree remove --force` refuses the locked worktree, so teardown
 falls back to `rm -rf` (`src/agent-lifecycle.ts:890-894`) and leaves the admin
 entry, and `git branch -D` is refused because the branch still looks checked
 out. So on every run, step 3 also looks at each entry whose `locked` file holds
-exactly the script's reason and whose `gitdir` already names a path under NEW:
+exactly the script's reason and whose `gitdir` already names a path under NEW.
+`git worktree lock --reason` writes the reason followed by a newline, so strip
+exactly one trailing newline before comparing:
 
 - If the link passes both of step 3's real-path checks, `--apply` unlocks it
   (`git -C '<repo>' worktree unlock '<new dir>'`) and reports "unlocked (repaired
@@ -537,13 +551,15 @@ Preflight: ok (no agent tmux sessions, no ib processes, no cwd under a runtime d
       remove it (rm -rf '/…/foo/.itsybitsy') and re-run
 [bar] ERROR both .ittybitty and .itsybitsy exist; .itsybitsy holds 1 agent,
       0 archives, user-questions.json. To merge: (1) keep .ittybitty's repo-id;
-      (2) with the new ib, merge or retire the agents under .itsybitsy;
-      (3) set aside its prompts/ and user-questions.json, rm -rf it, re-run
-[rice-teaching] ERROR lstat '…/Rice Teaching/.ittybitty': Operation not permitted — skipped
+      (2) keep the repo registered; with ib watch quit and no f, merge or retire
+      the agents under .itsybitsy with the ib CLI; (3) set aside its prompts/ and
+      user-questions.json, rm -rf it, run --apply '/…/bar'
+[rice-teaching] ERROR lstat '/Users/adamwulf/Documents/Filing Cabinet/Rice Teaching/.ittybitty': Operation not permitted — skipped
 [some-offline-repo] missing — skipped
-  ib remove this repo until it is migrated; after a clean
-  scripts/update-repos.sh --apply '/…/some-offline-repo', ib add it back
-  (the same advice line follows each ERROR above)
+  Keep this repo registered. Until it is migrated, don't press f on it in
+  ib watch, and don't spawn, ask or rehire there. Fix the cause and re-run
+  scripts/update-repos.sh --apply '/…/some-offline-repo'
+  (the same advice line follows each skipped ERROR above)
 User-wide
   would rewrite 9 files in ~/.itsybitsy/agent-types
 Summary: 35 to migrate, 1 already migrated, 20 no runtime dir, 1 missing, 3 errors
@@ -590,10 +606,9 @@ below starts after all agents have stopped.
    ```
    Close any terminal or Claude, codex or agy session inside an agent worktree, and
    any editor or IDE (Xcode, VS Code) open on one.
-2. **Save the old binary and the registry, then merge (old `ib`; don't build).**
+2. **Save the old binary, then merge (old `ib`; don't build).**
    ```sh
    cp "$(command -v ib)" ~/ib.pre-itsybitsy
-   cp ~/.itsybitsy/repos.json ~/repos.json.pre-itsybitsy
    cd ~/Developer/bun/itsybitsy
    ib merge ittybitty-paths --force
    ```
@@ -609,11 +624,10 @@ below starts after all agents have stopped.
    scripts/update-repos.sh | tee ~/update-repos-dry-run.txt
    ```
    Clear every blocker and repo error, then repeat until it is clean:
-   - **"both exist":** follow the error text. If the new `.itsybitsy/` holds
-     nothing but `repo-id`, remove it. Otherwise follow the merge steps in §2.3:
-     keep the old `repo-id`; with the new `ib`, merge or retire the agents created
-     under `.itsybitsy/`; set its `prompts/` and `user-questions.json` aside;
-     remove it; and re-run.
+   - **"both exist":** before the deploy this is unexpected, because the new `ib`
+     hasn't run yet. If the new `.itsybitsy/` holds only `repo-id`, remove it as
+     the error text says. Otherwise stop and find out what created it. A new dir
+     holding agents is the post-deploy case at the end of step 4.
    - **A repo registered at `$HOME`:** `ib remove` it now, with the old `ib`.
 4. **Apply.**
    ```sh
@@ -628,24 +642,28 @@ below starts after all agents have stopped.
    - **A repo left unmigrated:** "missing", a stat error, a failed write in step 1
      or 2 (for example `EPERM` moving the `~/Library/Containers/…` repo), "both
      exist", a symlinked `.ittybitty`. Its old dir is still in place, and the new
-     `ib watch` would flag every agent worktree there as orphaned (§2.3). Before
-     step 6, do one of these:
-     - Fix the cause (for example, give the terminal access to that app's data)
-       and re-run with that path: `scripts/update-repos.sh --apply '<repo>'`.
-     - `ib remove` the repo until it is migrated. After a clean
-       `scripts/update-repos.sh --apply '<repo>'`, `ib add` it back, and restore
-       its nickname, notes and default type from `~/repos.json.pre-itsybitsy`.
+     `ib watch` would flag every agent worktree there as orphaned (§2.3). Keep it
+     registered. Fix the cause (for example, give the terminal access to that
+     app's data) and re-run with that path: `scripts/update-repos.sh --apply
+     '<repo>'`, ideally before step 6. Until it is migrated, don't press `f` on it
+     in `ib watch`, and don't spawn, ask or rehire there.
    - **A failure in steps 4 to 7:** these happen after the move, so the repo is
-     already in the new layout. Fix the cause and re-run; `ib remove` doesn't
-     apply.
-
-   A later single-repo run, even after the deploy, again needs every agent stopped
-   and `ib watch` quit, because P2 and P3 check every repo.
+     already in the new layout. Fix the cause and re-run.
    - Until a repo's failures are fixed, run no git writes and no `ib` in that repo:
      the next spawn, rehire or `ib watch` fix runs `git worktree prune`.
    - Stale entries reported as "gone" need nothing.
    - For each repo with a tracked-file warning, run the printed `git rm -r
      --cached` and commit, before using ib there.
+
+   **Re-running one repo after the deploy** (for example, a volume that was
+   offline) again needs every agent stopped and `ib watch` quit, because P2 and P3
+   check every repo. If that run reports "both exist" and the new `.itsybitsy/`
+   holds agents, follow the error text's steps in order:
+   1. Keep the old `repo-id`.
+   2. Keep the repo registered. With `ib watch` quit and no `f`, use the `ib` CLI
+      to merge or retire every agent created under `.itsybitsy/`.
+   3. Set its `prompts/` and `user-questions.json` aside, `rm -rf
+      '<repo>/.itsybitsy'`, and run `scripts/update-repos.sh --apply '<repo>'`.
 5. **Check.**
    - For a few repos, `git -C <repo> worktree list` shows the agent worktrees under
      `.itsybitsy/`, with nothing `prunable` except the stale entries the script
@@ -676,7 +694,7 @@ below starts after all agents have stopped.
      resumed;
    - every agent worktree in a repo still left unmigrated, flagged as orphaned
      worktrees (the fix runs `git worktree remove --force` and a repo-wide
-     prune). `ib remove` such a repo instead (step 4);
+     prune). Never press `f` on such a repo; migrate it first (step 4);
    - entries from step 4 that aren't repaired yet.
 
    Then check each of these with `ib look <id>`:
@@ -693,9 +711,17 @@ below starts after all agents have stopped.
    - **New worker — the real new-layout test run:** `ib new-agent --type worker
      "Print your working directory, which must contain .itsybitsy. Run bun test
      and bunx tsc --noEmit, and compare the failing tests with the baseline in
-     PLAN-ITSYBITSY-PATHS.md (Appendix A). Report any test that fails now but not
-     in the baseline. Change nothing."` Any new failure: stop and fix it before
-     resuming the rest.
+     PLAN-ITSYBITSY-PATHS.md (Appendix A). Re-run any test that fails now but not
+     in the baseline once, alone, before counting it. For each that still fails,
+     run git log <Appendix A commit>..HEAD -- <its test file> and report whether
+     later commits changed it. Change nothing."`
+
+     It must be a worker, like the agent that measured Appendix A: the two
+     dashboard caller-gate tests depend on the measuring agent's
+     `canSpawnChildren`. A failure that survives the re-run, and that isn't
+     explained by a test file changed since the baseline commit (the baseline goes
+     stale once `ib merge` rebases onto a newer `main`), means stop and fix it
+     before resuming the rest.
 
    Then resume the rest with `ib resume <id>`. Leave per-repo coordinators
    stopped: `ib resume` or `R` on one resets it (`src/ib-commands.ts:1698-1709`).
@@ -774,17 +800,24 @@ the script, repair worktrees by hand, or fix the new code.
   fixture (43 test files) and give each test a separate HOME and repo.
 - **CLI tests** keep using `runIsolatedCli` and `createCliFixture`
   (`src/test-cli-runner.ts`), never a direct `Bun.spawn` of an entry point.
-- **Gate:** `bun test` and `bunx tsc --noEmit` from the implementer's worktree
-  (still under `.ittybitty/`). For the entry-point check, build to a scratch
-  `--outfile` (never over the `ib` on PATH) and confirm that `<scratch>/ib
-  list-types` prints a table.
 - **Baseline failure set, recorded before the first commit.** The implementer
   runs `bun test` once on `main`'s code in its own worktree, before it changes
-  anything. It records each failing test (file and test name), the pass/fail
-  totals, and the commit it measured, in **Appendix A** of this file, committed
-  with its first commit. Some tests fail in any agent worktree; for example, the
-  two dashboard new-agent tests fail because of the cwd-based caller gate. Runbook
-  step 8 compares against this list.
+  anything. It records in **Appendix A** of this file, committed with its first
+  commit:
+  - the commit it measured;
+  - its own agent type, which must be `worker` (below);
+  - the pass/fail totals;
+  - each failing test, by file and test name.
+
+  Some tests fail in any agent worktree. For example, the two dashboard
+  new-agent tests fail because of the cwd-based caller gate, and their result
+  depends on the measuring agent's `canSpawnChildren`. So the baseline is
+  measured by a worker, and runbook step 8 compares a worker's run against it.
+- **The implementer's gate:** `bun test` from its own worktree (still under
+  `.ittybitty/`) fails exactly the Appendix A tests, no more and no fewer, and
+  `bunx tsc --noEmit` is clean. The entry-point check (`ib list-types` on a
+  freshly built binary) is not part of this gate, because no agent type may run
+  a built binary. It happens at runbook step 6.
 - **No test run in a `.itsybitsy`-shaped worktree before the deploy.** It would
   need `git worktree add`/`remove` and `ln -s`, which are on no agent's allow list,
   and permissions won't be widened for it. Two other things cover it:
@@ -860,8 +893,12 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
    written (killed after step 1), a re-run migrates it.
 5. **Both dirs in one repo:** with NEW holding only `repo-id`, the error gives
    the removal hint. With NEW holding an agent dir, it gives the counts and the
-   three merge steps, with no bare removal hint. In both, it prints the `ib
-   remove` advice, the other repo migrates, and the exit is 1.
+   three merge steps in order: keep OLD's `repo-id`; keep the repo registered and
+   merge or retire NEW's agents with the CLI, with `ib watch` quit and no `f`;
+   then set aside `prompts/` and `user-questions.json`, `rm -rf` NEW and run
+   `--apply '<repo>'`. There is no bare removal hint, and no advice anywhere says
+   to `ib remove` the repo. In both cases the keep-registered advice is printed,
+   the other repo migrates, and the exit is 1.
 6. **Repair failure** (a worktree whose `.git` names a missing admin dir): exit 1;
    the printed diagnostics and the `git -C '<repo>'` repair and unlock commands;
    the entry still present and locked; the other repo migrated; no prune. A
@@ -884,15 +921,15 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
      repository".
 
    And the positive controls, so the checks don't fail open the other way:
-   - An absent repo path gives "missing — skipped" with the `ib remove` advice,
-     and exits 0.
+   - An absent repo path gives "missing — skipped" with the keep-registered
+     advice, quoting the path as registered, and exits 0.
    - A registered non-git dir with OLD but no worktree is migrated, with steps
      1, 3 and 4 skipped.
    - A git repo without OLD gives "no runtime dir".
 9. **A repo registered at `$HOME`:** a repo error whose message says to `ib
-   remove` it.
+   remove` it. This is the only message that ever suggests `ib remove`.
 10. **Move failure** (repo root made read-only, so step 2 fails): that repo's
-    transcripts and records are unchanged, the `ib remove` advice is printed,
+    transcripts and records are unchanged, the keep-registered advice is printed,
     exit 1.
 11. **Each preflight blocker** exits 2 with nothing written: tmux showing
     `ittybitty-…`, `itsybitsy-…` or `ib-coordinator`, an unexpected tmux error,
@@ -914,6 +951,13 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
     `start.sh` stays executable). No `.update-repos-tmp` file is left behind.
     With a stale temp file planted next to a target, a re-run still ends in the
     same final state.
+17. **Unregistered `REPO_PATH`:** `--apply '<path>'` on a fixture repo that
+    isn't in `repos.json` migrates it fully: the dir is moved, worktrees are
+    repaired, records are rewritten, and its transcript dirs are renamed. Its
+    messages quote the path exactly as given, not its git toplevel or real path.
+18. **Unlock reason:** the reason compare strips exactly one trailing newline.
+    An entry the script locked (reason plus newline, as `git worktree lock
+    --reason` writes it) is recognized; a reason with extra text is not.
 
 ## Part 5 — Cross-cutting checklist
 
@@ -941,8 +985,8 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
    `user-questions.json`. Debug-log paths, health checks and orphan detection use
    the module. No layout or input change. Its health fixes can delete or prune, so
    the runbook never presses `f` in a repo whose fix list includes an agent worth
-   keeping, and has every unmigrated repo removed from the registry (steps 4
-   and 8, §2.3).
+   keeping, and keeps `f` away from every repo still unmigrated (steps 4 and 8,
+   §2.3).
 
 ## Risks
 
@@ -951,8 +995,8 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
 | Claude `--resume` can't find the session at the new cwd | Step 7 renames the transcript dirs; runbook step 8 checks that one agent remembers |
 | agy resume from a moved dir is unverified | Runbook step 8 checks one agy agent; the fallback is a fresh agent (decision 7) |
 | A repair fails, and a later prune drops that worktree's admin dir and index | The script never prunes, locks the entry, exits 1 naming each failure, and runbook step 4 fixes them before anything can spawn |
-| A repo is left unmigrated (offline, stat error, failed move), and the new `ib watch` flags its agent worktrees as orphaned, where one `f` removes them | The script prints "`ib remove` until migrated" for every such repo, runbook step 4 does that before the build, and step 8 forbids `f` in a repo whose list includes a kept agent |
-| A repo is offline during the run, then the new `ib` writes `.itsybitsy/repo-id` there | `ib remove` prevents this. If it happens anyway, re-running for that repo hits "both exist", and the error text gives the merge steps |
+| A repo is left unmigrated (offline, stat error, failed move), and the new `ib watch` flags its agent worktrees as orphaned, where one `f` removes them | The script prints "keep it registered; no `f`, spawn, ask or rehire there; fix and re-run `--apply '<repo>'`" for every such repo. Runbook step 4 re-runs it, ideally before the build, and step 8 forbids `f` in a repo whose list includes a kept agent |
+| A repo is offline during the run, then the new `ib` writes `.itsybitsy/repo-id` there (for example a spawn or ask, despite the advice) | Re-running for that repo hits "both exist". If NEW holds only `repo-id`, remove it; otherwise the error text gives the merge steps, done after the deploy with the repo still registered |
 | Gitignored build output in a worktree holds old absolute paths (`.build`, `DerivedData`, virtualenvs) | Not scanned. If a resumed agent's build errors mention `.ittybitty`, do a clean build in that worktree |
 | Another branch adds old names after this lands | The guard test fails on rebase |
 
@@ -965,7 +1009,11 @@ prune` and `worktree remove`, and otherwise execs `/usr/bin/git`.
 
 ## Appendix A — Baseline test failures
 
-*To be filled in by the implementer before its first commit (§4.1):* the `main`
-commit measured, the pass/fail totals of `bun test` in its own agent worktree,
-and each failing test by file and name. Runbook step 8 compares the new worker's
-run against this list.
+*To be filled in by the implementer before its first commit (§4.1):*
+
+- the `main` commit measured;
+- the measuring agent's type, which must be `worker`;
+- the pass/fail totals of `bun test` in its own agent worktree;
+- each failing test, by file and name.
+
+Runbook step 8 compares a new worker's run against this list.

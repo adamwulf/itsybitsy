@@ -6290,7 +6290,7 @@ describe("newAgent (native)", () => {
    * `modelLine` is inserted verbatim into the frontmatter, so callers can pass
    * "model: claude:claude-opus-4-7" (real value), "model:" (blank → inherit), or ""
    * (omit the key entirely). `spawnable` defaults to true; layer files
-   * (`_all`, `_non_coordinator`, `system`) must pass `spawnable: false`.
+   * (`_all`, `_non_coordinator`, `system-coordinator`) must pass `spawnable: false`.
    */
   async function writeLayerModel(
     name: string,
@@ -10596,6 +10596,42 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const coordId = result.stdout.trim();
     const meta = await Bun.file(join(coordRepo, ".itsybitsy", "agents", coordId, "meta.json")).json();
     // _all.md wins; _non_coordinator.md ignored for coordinators.
+    expect(meta.model).toBe("claude:claude-opus-4-7");
+
+    await rm(coordRepoDir, { recursive: true, force: true });
+  });
+
+  test("model precedence C3c: a per-repo coordinator takes repo-coordinator.md's model and ignores system-coordinator.md's", async () => {
+    // system-coordinator.md belongs to the global @system coordinator. A model
+    // there must not reach a per-repo coordinator, whose own file decides.
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-model-own-"));
+    const coordRepo = join(coordRepoDir, "myrepo");
+    await mkdir(join(coordRepo, ".itsybitsy", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".itsybitsy", "repo-id"), "c00d0002\n");
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({}, null, 2));
+
+    await writeLayerModel("_all", "", { spawnable: false });
+    await writeLayerModel("system-coordinator", "model: claude:claude-sonnet-4-6", { spawnable: false });
+    await writeLayerModel("repo-coordinator", "model: claude:claude-opus-4-7", { canSpawnChildren: true });
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await newAgent(coordRepo, "start", { type: "repo-coordinator", _cwd: coordRepo });
+    expect(result.ok).toBe(true);
+
+    const coordId = result.stdout.trim();
+    const meta = await Bun.file(join(coordRepo, ".itsybitsy", "agents", coordId, "meta.json")).json();
+    expect(meta.agentType).toBe("repo-coordinator");
     expect(meta.model).toBe("claude:claude-opus-4-7");
 
     await rm(coordRepoDir, { recursive: true, force: true });

@@ -6388,6 +6388,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   rawAllow: ["(allow process*)"]
   domains: ["api.anthropic.com", "*.anthropic.com"]
 ---
+
+{{pathIsolation}}
 `);
   }
 
@@ -6518,7 +6520,6 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       name,
       description: "",
       canSpawnChildren: false,
-      instructionStyle: "worker",
       paths: { allowRead, allowWrite, deny },
     });
     const forward = mergeSandboxLayerConfigs([
@@ -6553,7 +6554,6 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
       name,
       description: "",
       canSpawnChildren: false,
-      instructionStyle: "worker",
       sandbox: {
         ...(enabled === undefined ? {} : { enabled }),
         rawAllow: [],
@@ -6573,7 +6573,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   test("sandbox layer without enabled preserves inherited false while adding lists", () => {
-    const base = { description: "", canSpawnChildren: false, instructionStyle: "worker" as const };
+    const base = { description: "", canSpawnChildren: false };
     const merged = mergeSandboxLayerConfigs([
       { name: "_all", ...base, sandbox: { enabled: false, rawAllow: [], domains: ["all.example"] } },
       { name: "leaf", ...base, sandbox: { rawAllow: ["(allow process-fork)"], domains: ["leaf.example"] } },
@@ -6592,7 +6592,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     // permissive. mergeSandboxLayerConfigs drops undefined layer.paths, so
     // "no layer declares paths" yields empty lists, exactly like an explicit
     // empty block. A missing block must never become an allow.
-    const base = { description: "", canSpawnChildren: false, instructionStyle: "worker" as const };
+    const base = { description: "", canSpawnChildren: false };
     const noPaths = (name: string): import("./agent-types").AgentType => ({ name, ...base });
     const emptyPaths = (name: string): import("./agent-types").AgentType => ({
       name, ...base, paths: { allowRead: [], allowWrite: [], deny: [] },
@@ -12421,7 +12421,6 @@ body`,
 name: agy-instructions
 description: agy path instructions test
 canSpawnChildren: false
-instructionStyle: worker
 model: agy:gemini-3.7-flash-low
 paths:
   allowRead: [${JSON.stringify(readPath)}]
@@ -12430,6 +12429,8 @@ paths:
 sandbox:
   enabled: false
 ---
+
+{{pathIsolation}}
 `);
       setNewAgentSpawnRunner(agyRunner());
       const result = await callNewAgent("task", {

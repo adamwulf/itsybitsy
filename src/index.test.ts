@@ -1229,7 +1229,7 @@ describe("show-type CLI command", () => {
     expect(stdout).toContain("DESCRIPTION:");
     expect(stdout).toContain("SPAWNABLE: yes");
     expect(stdout).toContain("SPAWNS CHILDREN: yes");
-    expect(stdout).toContain("INSTRUCTION STYLE: manager");
+    expect(stdout).not.toContain("INSTRUCTION STYLE");
     expect(stdout).toContain("PERMISSIONS ALLOW");
     expect(stdout).toContain("PERMISSIONS DENY");
     expect(stdout).toContain("PROMPT BODY");
@@ -1244,7 +1244,6 @@ describe("show-type CLI command", () => {
     const parsed = JSON.parse(stdout);
     expect(parsed.name).toBe("worker");
     expect(typeof parsed.description).toBe("string");
-    expect(parsed.instructionStyle).toBe("worker");
     expect(typeof parsed.canSpawnChildren).toBe("boolean");
     expect(typeof parsed.markdownBody).toBe("string");
   });

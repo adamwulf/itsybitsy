@@ -14,7 +14,6 @@ name: test-type
 description: "A test agent type"
 canSpawnChildren: true
 model: sonnet
-instructionStyle: manager
 ---
 
 # Test Instructions
@@ -28,7 +27,6 @@ This is the markdown body.
   expect(frontmatter.description).toBe("A test agent type");
   expect(frontmatter.canSpawnChildren).toBe(true);
   expect(frontmatter.model).toBe("sonnet");
-  expect(frontmatter.instructionStyle).toBe("manager");
   expect(body).toContain("# Test Instructions");
   expect(body).toContain("This is the markdown body.");
 });
@@ -221,7 +219,6 @@ test("loadAgentType: loads manager type from embedded file", async () => {
   expect(type.name).toBe("manager");
   expect(type.description).toBe("Manages sub-agents and coordinates work");
   expect(type.canSpawnChildren).toBe(true);
-  expect(type.instructionStyle).toBe("manager");
 });
 
 test("loadAgentType: loads worker type from embedded file", async () => {
@@ -234,7 +231,6 @@ test("loadAgentType: loads worker type from embedded file", async () => {
   expect(type.name).toBe("worker");
   expect(type.description).toBe("Executes tasks assigned by a manager");
   expect(type.canSpawnChildren).toBe(false);
-  expect(type.instructionStyle).toBe("worker");
 });
 
 test("loadAgentType: loads coordinator type from embedded file", async () => {
@@ -288,7 +284,6 @@ test("listAgentTypes: returns array of AgentTypes", async () => {
     expect(type.name).toBeDefined();
     expect(typeof type.name).toBe("string");
     expect(typeof type.canSpawnChildren).toBe("boolean");
-    expect(["manager", "worker", "coordinator"]).toContain(type.instructionStyle);
   }
 });
 
@@ -1645,6 +1640,52 @@ body`);
       );
     } finally {
       warn.mockRestore();
+    }
+  });
+});
+
+describe("retired instructionStyle key", () => {
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-retired-style-"));
+    setUserHome(tempHome);
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  // Installed type files in ~/.itsybitsy/agent-types/ written by an older `ib`
+  // still carry `instructionStyle:`. The key was removed; it must be ignored
+  // like any other unknown frontmatter key — no error, no warning.
+  test("a type file that still declares instructionStyle loads and validates silently", async () => {
+    await Bun.write(join(typesDir, "legacy-style.md"), `---
+name: legacy-style
+description: Old type file
+canSpawnChildren: true
+instructionStyle: manager
+---
+Legacy body`);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const type = await loadAgentType("legacy-style");
+      expect(type.name).toBe("legacy-style");
+      expect(type.canSpawnChildren).toBe(true);
+      expect(type.markdownBody).toBe("Legacy body");
+      expect("instructionStyle" in type).toBe(false);
+
+      expect(await validateAllAgentTypes()).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
     }
   });
 });

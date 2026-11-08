@@ -223,6 +223,7 @@ describe("session-start", () => {
       branchName: "agent/coordinator",
       worktreePath: "/Users/me/project/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/project",
+      agentType: "coordinator",
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).not.toContain("Primary Claude");
@@ -241,6 +242,7 @@ describe("session-start", () => {
       branchName: "agent/coordinator",
       worktreePath: "/Users/me/muse-ios/.itsybitsy/agents/coordinator/repo",
       rootRepoPath: "/Users/me/muse-ios",
+      agentType: "coordinator",
     };
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("Read");
@@ -278,24 +280,6 @@ describe("session-start", () => {
     // A worker has no sub-agents — it's resumed by its manager's `ib send`,
     // not its own watchdog. Framing must reference the manager (ISSUE 5).
     expect(instructions).toContain("your manager will message you when there's something to do");
-    expect(instructions).not.toContain("Those are blocked");
-  });
-
-  test("coordinator State Management warns against sleep/Monitor/poll loops (SPEC §8.5)", async () => {
-    const ctx: SessionContext = {
-      role: "coordinator",
-      agentId: "coordinator",
-      agentManager: "",
-      parentBranch: "main",
-      branchName: "agent/coordinator",
-      worktreePath: "/Users/me/project/.itsybitsy/agents/coordinator/repo",
-      rootRepoPath: "/Users/me/project",
-    };
-    const instructions = await generateInstructions(ctx);
-    expect(instructions).toContain("Per-Repo Coordinator");
-    expect(instructions).toContain("don't \`sleep\`, run \`Monitor\`, or write a \`while\`/\`until\` polling loop to wait");
-    // Coordinator has sub-agents → watchdog framing. Advisory, not "blocked".
-    expect(instructions).toContain("the watchdog notifies you when there's something to do");
     expect(instructions).not.toContain("Those are blocked");
   });
 
@@ -337,8 +321,7 @@ describe("session-start", () => {
     expect(ctx.agentType).toBeUndefined();
   });
 
-  test("agent type with manager instructionStyle uses manager base instructions", async () => {
-    // Built-in manager type uses manager instructionStyle
+  test("built-in manager type renders its manager body", async () => {
     const ctx: SessionContext = {
       role: "manager",
       agentId: "agent-abc12345",
@@ -354,8 +337,7 @@ describe("session-start", () => {
     expect(instructions).toContain("ib new-agent --type worker");
   });
 
-  test("agent type with worker instructionStyle uses worker base instructions", async () => {
-    // Built-in worker type uses worker instructionStyle
+  test("built-in worker type renders its worker body", async () => {
     const ctx: SessionContext = {
       role: "worker",
       agentId: "agent-def67890",
@@ -372,8 +354,7 @@ describe("session-start", () => {
   });
 
   test("agent type markdown body is appended before closing itsybitsy tag", async () => {
-    // This test uses the built-in coordinator type which has no body,
-    // but we test the mechanism by verifying basic structure is intact
+    // Uses the built-in coordinator type and verifies the wrapper is intact.
     const ctx: SessionContext = {
       role: "coordinator",
       agentId: "coordinator",
@@ -697,6 +678,69 @@ describe("buildPathIsolationSection", () => {
     const instructions = await generateInstructions(ctx);
     expect(instructions).toContain("### Path Isolation");
     expect(instructions).toContain("ask your manager for help");
+  });
+});
+
+describe("generateInstructions — typed agent with an empty body", () => {
+  // A typed agent is composed from its type files exactly as when it has a
+  // body: _all, then _non_coordinator where it applies, then the type body —
+  // which is simply empty. No hardcoded manager/worker/coordinator text.
+  let tempHome: string;
+  let typesDir: string;
+
+  const ctxFor = (agentType: string, agentManager = ""): SessionContext => ({
+    role: "manager",
+    agentId: "agent-empty01",
+    agentManager,
+    parentBranch: agentManager ? `agent/${agentManager}` : "main",
+    branchName: "agent/agent-empty01",
+    worktreePath: "/repo/.itsybitsy/agents/agent-empty01/repo",
+    rootRepoPath: "/repo",
+    agentType,
+  });
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-empty-body-"));
+    setUserHome(tempHome);
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await Bun.write(join(typesDir, "_all.md"), "---\nname: _all\nspawnable: false\n---\nALL_LAYER_MARKER");
+    await Bun.write(
+      join(typesDir, "_non_coordinator.md"),
+      "---\nname: _non_coordinator\nspawnable: false\n---\nNON_COORDINATOR_LAYER_MARKER",
+    );
+  });
+
+  afterEach(async () => {
+    // Restore the file-wide isolated home (see the note in the availableTypes
+    // describe above).
+    setUserHome(testHome);
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  test.each([true, false])(
+    "a bodyless type (canSpawnChildren: %s) gets only the layer bodies, no hardcoded fallback",
+    async (canSpawnChildren) => {
+      await Bun.write(
+        join(typesDir, "bodyless.md"),
+        `---\nname: bodyless\ndescription: no body\ncanSpawnChildren: ${canSpawnChildren}\n---\n`,
+      );
+      const instructions = await generateInstructions(ctxFor("bodyless", canSpawnChildren ? "" : "agent-parent"));
+      expect(instructions).toBe("<itsybitsy>\nALL_LAYER_MARKER\n\nNON_COORDINATOR_LAYER_MARKER\n</itsybitsy>");
+      expect(instructions).not.toContain("Manager Agent");
+      expect(instructions).not.toContain("Worker Agent");
+      expect(instructions).not.toContain("Primary Claude");
+    },
+  );
+
+  test("a bodyless coordinator type skips _non_coordinator", async () => {
+    await Bun.write(
+      join(typesDir, "coordinator.md"),
+      "---\nname: coordinator\ndescription: no body\ncanSpawnChildren: true\n---\n",
+    );
+    const instructions = await generateInstructions(ctxFor("coordinator"));
+    expect(instructions).toBe("<itsybitsy>\nALL_LAYER_MARKER\n</itsybitsy>");
+    expect(instructions).not.toContain("Per-Repo Coordinator");
   });
 });
 

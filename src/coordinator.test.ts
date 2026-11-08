@@ -701,7 +701,6 @@ describe("ensureSystemCoordinator", () => {
         "name: coordinator",
         "description: test coordinator",
         "canSpawnChildren: true",
-        "instructionStyle: coordinator",
         "model: claude:sonnet",
         "---",
         "",
@@ -2815,7 +2814,6 @@ name: coordinator
 description: Read-only coordinator that manages agents without writing code
 canSpawnChildren: true
 icon: ◇
-instructionStyle: coordinator
 permissions:
   allow:
     - "Bash(echo:*)"
@@ -2840,7 +2838,6 @@ name: coordinator
 description: Read-only coordinator that manages agents without writing code
 canSpawnChildren: true
 icon: ◇
-instructionStyle: coordinator
 permissions:
   allow: []
   deny:
@@ -2865,7 +2862,6 @@ name: coordinator
 description: Read-only coordinator that manages agents without writing code
 canSpawnChildren: true
 icon: ◇
-instructionStyle: coordinator
 permissions:
   allow:
     - Write

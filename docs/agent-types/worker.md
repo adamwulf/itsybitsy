@@ -3,7 +3,6 @@ name: worker
 description: Executes tasks assigned by a manager
 canSpawnChildren: false
 icon: ⚙
-instructionStyle: worker
 ---
 
 ## ItsyBitsy Worker Agent

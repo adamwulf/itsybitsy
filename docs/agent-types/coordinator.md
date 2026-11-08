@@ -3,7 +3,6 @@ name: coordinator
 description: Read-only coordinator that manages agents without writing code
 canSpawnChildren: true
 icon: ◇
-instructionStyle: coordinator
 model: claude:opus
 permissions:
   allow:

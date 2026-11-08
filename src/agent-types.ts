@@ -76,7 +76,6 @@ export interface AgentType {
    * allocation. Absent → no restriction (type works in any repo).
    */
   repos?: string[];
-  instructionStyle: "manager" | "worker" | "coordinator";
   markdownBody?: string;
 }
 
@@ -219,15 +218,6 @@ export function parseAgentTypeFile(content: string): {
   const body = lines.slice(endIdx + 1).join("\n").trim();
 
   return { frontmatter, body };
-}
-
-const VALID_INSTRUCTION_STYLES = new Set<AgentType["instructionStyle"]>(["manager", "worker", "coordinator"]);
-
-function validateInstructionStyle(value: string): AgentType["instructionStyle"] {
-  if (VALID_INSTRUCTION_STYLES.has(value as AgentType["instructionStyle"])) {
-    return value as AgentType["instructionStyle"];
-  }
-  return "manager";
 }
 
 /**
@@ -534,7 +524,6 @@ function mergeRawFrontmatters(
     "icon",
     "model",
     "effort",
-    "instructionStyle",
     "repos",
   ]);
 
@@ -544,8 +533,7 @@ function mergeRawFrontmatters(
   // Without this, a child that declares `icon:`, `model:`, or `effort:` with no
   // value silently wipes the parent's value to undefined. `effort` follows
   // `model`'s convention so a child declaring a blank `effort:` inherits the
-  // parent's value. description and instructionStyle keep the strict
-  // "present → replace" rule.
+  // parent's value. description keeps the strict "present → replace" rule.
   const EMPTY_STRING_INHERITS = new Set(["icon", "model", "effort"]);
 
   // Accumulated permission lists (unioned across the chain, deduped below).
@@ -753,7 +741,6 @@ function buildAgentTypeFromFrontmatter(
         }
       : undefined,
     repos,
-    instructionStyle: validateInstructionStyle(getString(frontmatter.instructionStyle, "")),
     markdownBody: body || undefined,
   };
 }
@@ -958,15 +945,6 @@ export async function validateAllAgentTypes(): Promise<string[]> {
 
         if (frontmatter.spawnable !== undefined && typeof frontmatter.spawnable !== "boolean") {
           errors.push(`${file}: spawnable must be true or false, got "${frontmatter.spawnable}"`);
-        }
-
-        // Validate instructionStyle if present
-        if (frontmatter.instructionStyle !== undefined) {
-          if (typeof frontmatter.instructionStyle !== "string") {
-            errors.push(`${file}: instructionStyle must be a string, got ${typeof frontmatter.instructionStyle}`);
-          } else if (!VALID_INSTRUCTION_STYLES.has(frontmatter.instructionStyle as AgentType["instructionStyle"])) {
-            errors.push(`${file}: instructionStyle must be "manager", "worker", or "coordinator", got "${frontmatter.instructionStyle}"`);
-          }
         }
 
         // Validate permissions structure

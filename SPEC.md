@@ -352,11 +352,11 @@ Agents are assigned a **type** at creation time that determines their behavior, 
 
 **Three default types** are provided via embedded templates that are auto-populated on first run (see §2.7):
 
-| Type | `canSpawnChildren` | Icon | `instructionStyle` | Description |
-|------|-------------------|------|-------------------|-------------|
-| `manager` | `true` | `◆` | `manager` | Manages sub-agents and coordinates work |
-| `worker` | `false` | `⚙` | `worker` | Executes tasks assigned by a manager |
-| `coordinator` | `true` | `◇` | `coordinator` | Read-only coordinator that manages agents without writing code |
+| Type | `canSpawnChildren` | Icon | Description |
+|------|-------------------|------|-------------|
+| `manager` | `true` | `◆` | Manages sub-agents and coordinates work |
+| `worker` | `false` | `⚙` | Executes tasks assigned by a manager |
+| `coordinator` | `true` | `◇` | Read-only coordinator that manages agents without writing code |
 
 **All types** are defined as `.md` files in `~/.itsybitsy/agent-types/<name>.md` with YAML frontmatter and an optional markdown body for instructions. The `.md` file on disk is the sole source of truth — there is no hardcoded fallback. Users can edit the default type files, create custom types, or delete the manager/worker files (coordinator types auto-regenerate; see §2.7). See §2.6 for the file format.
 
@@ -378,7 +378,6 @@ The `AgentType` interface defines these properties:
 | `paths` | object | No | Filesystem policy: `allowRead`, `allowWrite`, and `deny` lists. Each entry is an absolute path, a home path (`~` or `~/x`), a relative path (`./x` or `../x`, anchored at the **main repo root** the worktree was spawned from), or a glob (a relative glob is anchored first, then compiled). Bare names are rejected. Inheritable — each list **unions** across the layers (`_all.md` → `_non_coordinator.md` → the `inherits:` chain → the leaf). `deny` wins over any allow at any depth; otherwise the **most specific** matching entry decides (`allowWrite` grants read+write, `allowRead` grants read-only), and the same path in both lists **writes**. A **missing** `paths` key equals empty lists equals **strict**: the worktree plus the runtime roots only. Resolved to absolute paths at spawn and frozen in `meta.json`. See §6.1 for enforcement. (Replaced the retired `allowedPaths` field — SPEC-PATH-ALLOWLIST.md §6.11.) |
 | `sandbox` | boolean or object | No | Kernel sandbox switch and rules. Boolean shorthand sets enablement; object form accepts boolean `enabled` plus `rawAllow` and `domains` lists. Most specific explicit enablement wins across applicable layers and ancestors; omission inherits and final resolution defaults to `true`. Lists union independently. Frozen in metadata at spawn; refresh applies updated type settings. Hooks enforce `paths` even when kernel sandboxing is disabled. |
 | `repos` | string[] | No | If defined, this type can only be spawned in repos whose basename or registered nickname matches an entry. Checked by `ib new-agent` before any worktree/tmux/agent-dir allocation. `undefined` = no restriction. **Empty list is rejected at validation** (an unspawnable type is almost always a YAML typo). Inheritable — **replaces** (not merges) when the child declares it. |
-| `instructionStyle` | `"manager"` \| `"worker"` \| `"coordinator"` | Yes | Maps to base instruction set for session-start (defaults to `"manager"`). Inheritable (child replaces when present). |
 | `markdownBody` | string | No | Template body for custom instructions (see §6.3.1). Inheritable — the final body is the **concatenation of every non-empty body in the inheritance chain, root-first, joined by blank lines**. Root-first means the oldest ancestor's body appears first and the leaf (child) appears last. Example: `C inherits B inherits A` yields `A_body\n\nB_body\n\nC_body`. Empty bodies in the chain are skipped so a missing-body ancestor doesn't leave stray blank lines. |
 
 The key behavioral distinction is `canSpawnChildren`:
@@ -437,7 +436,6 @@ name: researcher
 description: Specialized research agent
 canSpawnChildren: false
 icon: 🔍
-instructionStyle: worker
 model: sonnet
 permissions:
   allow:
@@ -463,7 +461,7 @@ You are research agent `{{agentId}}`...
 
 **Frontmatter fields**: See §2.2 for the full list.
 
-**Template body**: If present, the markdown body below the frontmatter is used as the instruction template at session start (see §6.3.1). If absent, the hardcoded instructions for the `instructionStyle` are used.
+**Template body**: If present, the markdown body below the frontmatter is used as the instruction template at session start (see §6.3.1). If absent, the type adds no text of its own: the agent receives only the layer bodies (`_all.md`, plus `_non_coordinator.md` where it applies).
 
 **Icon resolution**: The `icon` field's first non-whitespace character is extracted and stored in `meta.json` as `agentIcon`. This icon is displayed in the TUI agent tree, CLI output (`ib list`), and status injection.
 
@@ -485,7 +483,7 @@ You are research agent `{{agentId}}`...
 
 ### 2.8 Startup Validation
 
-When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), invalid `instructionStyle` values, a **retired `allowedPaths:` key** (now itself an error — it was replaced by the top-level `paths:` block; see §2.2 and SPEC-PATH-ALLOWLIST.md §6.11), an invalid `paths:` block (each of `allowRead`/`allowWrite`/`deny` must be a list of grammar-valid entries — absolute, `~`, repo-anchored relative, or glob; bare names are rejected), a non-string `inherits:` value, `inherits:` on a layer file (`spawnable: false`), a malformed `repos:` value (must be a list of strings; empty lists and bare strings are rejected), a **circular inheritance chain** (`A → B → A`), or a **missing parent** in an inheritance chain, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions — inheritance-chain errors in particular surface at startup rather than at spawn time.
+When `ib watch` launches, it validates all agent type files in `~/.itsybitsy/agent-types/` before starting the dashboard (after auto-population). If any file has YAML parsing errors, invalid field types (e.g., `canSpawnChildren` is not a boolean), a **retired `allowedPaths:` key** (now itself an error — it was replaced by the top-level `paths:` block; see §2.2 and SPEC-PATH-ALLOWLIST.md §6.11), an invalid `paths:` block (each of `allowRead`/`allowWrite`/`deny` must be a list of grammar-valid entries — absolute, `~`, repo-anchored relative, or glob; bare names are rejected), a non-string `inherits:` value, `inherits:` on a layer file (`spawnable: false`), a malformed `repos:` value (must be a list of strings; empty lists and bare strings are rejected), a **circular inheritance chain** (`A → B → A`), or a **missing parent** in an inheritance chain, the dashboard exits immediately with error messages describing each issue. This prevents runtime failures from malformed type definitions — inheritance-chain errors in particular surface at startup rather than at spawn time.
 
 ### 2.9 Backward Compatibility
 
@@ -926,8 +924,8 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 **Role detection** based on CWD and `meta.json`:
 - If CWD does not match `/.itsybitsy/agents/<id>/repo` → **primary** (user-level Claude)
 - If CWD matches → reads `meta.json` and checks `agentType`, then falls back to legacy booleans:
-  - `agentType` is set → role is derived from the type name (`"coordinator"` → coordinator, `"worker"` → worker, else → manager). However, this role is only used as a fallback — the actual instruction generation uses the type's `instructionStyle` field.
-  - `agentType` is not set (legacy agent) → `coordinator: true` → coordinator, `worker: true` → worker, else → manager
+  - `agentType` is set → role is derived from the type name (`"coordinator"` → coordinator, `"worker"` → worker, else → manager). Instruction generation does not use this role: it composes the text from the type files (§6.3.1).
+  - `agentType` is not set (legacy agent) → `worker: true` → worker, else → manager
 
 **Output**: JSON with `hookSpecificOutput.additionalContext` containing role-appropriate instructions wrapped in `<itsybitsy>` tags.
 
@@ -935,9 +933,9 @@ The stop hook does **not** parse tmux output for state detection. It relies sole
 
 Instructions are generated based on the agent's type definition:
 
-1. **If `agentType` is set in meta.json**: Load the type definition via `loadAgentType()`. If the type has a `markdownBody` (template body from the `.md` file), interpolate it with the session context variables and wrap in `<itsybitsy>` tags. If no body, fall back to the hardcoded instructions matching the type's `instructionStyle` field (`"manager"`, `"worker"`, or `"coordinator"`).
+1. **If `agentType` is set in meta.json**: Load the type definition via `loadAgentType()`. Join the `_all.md` layer body, then the `_non_coordinator.md` layer body (skipped for coordinators), then the type's `markdownBody` (the inheritance-merged template body), each interpolated with the session context variables, and wrap the result in `<itsybitsy>` tags. Empty parts are skipped. A type with no body contributes nothing of its own, so its agent receives only the layer bodies. There is no hardcoded fallback for a typed agent.
 
-2. **If `agentType` is not set (legacy agent)**: Use the detected role (from legacy `worker`/`coordinator` booleans) to select hardcoded instructions.
+2. **If `agentType` is not set (legacy agent)**: Use the detected role (from the legacy `worker` boolean) to select hardcoded manager or worker instructions.
 
 **Template interpolation**: Template bodies support `{{variable}}` placeholders and `{{#if condition}}...{{/if}}` conditional blocks:
 
@@ -1902,15 +1900,16 @@ When a repo header is selected, the dashboard locates the per-repo coordinator (
 
 #### 12.2.6 Session Start Context
 
-Per-repo coordinators use a custom session-start context (injected via the session-start hook, which detects the `coordinator: true` flag in meta.json). The `generateCoordinatorInstructions()` function produces a full `<itsybitsy>` block including:
+Per-repo coordinators are typed agents (`agentType: "coordinator"` in meta.json), so the session-start hook composes their `<itsybitsy>` block from the type files like any other typed agent (§6.3.1): the `_all.md` layer body, then the `coordinator.md` body. The `_non_coordinator.md` layer is skipped. The stock `coordinator.md` body covers:
 
 - Role identification and purpose (read code, coordinate workers, don't write code directly)
 - Bash rules (single-command enforcement)
 - Path isolation (worktree boundaries)
 - Git worktree context (branch name, parent branch)
-- Command table (`ib new-agent --type worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib send @coordinator "msg"`, `ib status`, `ib diff`, `ib merge`, `ib retire`, `ib rehire`)
+- Command table (`ib new-agent --type worker`, `ib list --manager`, `ib look`, `ib send`, `ib send @system "msg"`, `ib status`, `ib diff`, `ib merge`, `ib merge --keep`, `ib retire`, `ib rehire`, `ib ack`)
 - State management (`WAITING` / `I HAVE COMPLETED THE GOAL`)
 - Workflow steps (understand codebase → break down tasks → spawn workers → monitor → merge → coordinate)
+- Following up on agents (`ScheduleWakeup`, `CronCreate`, `/loop`)
 - Agent state reference table
 
 The coordinator is told to send messages to the system coordinator via `ib send @system "message"`. Workers can reach their repo's coordinator via `ib send @coordinator "message"`, or reach the coordinator directly via `ib send <repo-basename> "message"` (standard agent ID resolution).
@@ -2048,7 +2047,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/coordinator.ts` | **Implemented** | System coordinator lifecycle (`ensureSystemCoordinator()`, `releaseSystemCoordinator()`, `restartSystemCoordinator()`), PID-based reference counting, system coordinator permissions/prompt, `sanitizeTmuxInput()`, per-repo coordinator permissions (`buildPerRepoCoordinatorSettings()`), per-repo coordinator prompt (`perRepoCoordinatorPrompt()`), coordinator existence check (`checkCoordinatorExists()`), agent ID generation (`getCoordinatorAgentId()` — returns repo basename). No separate `coordinator-settings.ts` — per-repo settings are in this file. |
 | `src/agents.ts` | **Implemented** | `coordinator?: boolean` in `AgentMeta`. `{ kind: "system-coordinator" }` in `FlatEntry`. `flattenAgentTree()` prepends system coordinator entry and filters out per-repo coordinators (`!a.meta.coordinator`) so they do not appear as tree rows under their repo header. |
 | `src/ib-commands.ts` | **Implemented** | `newAgent()` extended with `--type coordinator`: uses repo basename as ID (via `getCoordinatorAgentId()`), sets `coordinator: true` in meta.json, one-per-repo validation via `checkCoordinatorExists()`, model sourced from `coordinator.md` agent-type frontmatter, max-agents bypass, coordinator-specific `settings.local.json` with hooks. No special `ib send` routing — standard agent ID resolution handles everything. |
-| `src/hooks/session-start.ts` | **Implemented** | Detects `coordinator: true` in meta.json. `generateCoordinatorInstructions()` injects coordinator-specific prompt. Worker instructions correctly use manager's agent ID (repo basename) for `ib send`. |
+| `src/hooks/session-start.ts` | **Implemented** | Composes the coordinator's prompt from `_all.md` + `coordinator.md`, skipping `_non_coordinator.md` (keyed on the type name). Worker instructions correctly use manager's agent ID (repo basename) for `ib send`. |
 | `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators via `coordinator: true` in meta.json. |
 | `src/hooks/agent-path.ts` | **No changes needed** | Per-repo coordinators use standard path isolation. |
 | `src/hooks/agent-status.ts` | **No changes needed** | Stop hook writes state normally. |

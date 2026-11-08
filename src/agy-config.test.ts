@@ -17,7 +17,7 @@ import { setUserHome, resetUserHome } from "./home";
 // ── buildAgyHooksJson ────────────────────────────────────────────────────────
 
 describe("buildAgyHooksJson", () => {
-  test("parses as JSON and registers the ittybitty named hook with the three events", () => {
+  test("parses as JSON and registers the itsybitsy named hook with the three events", () => {
     const text = buildAgyHooksJson({
       ibBinaryPath: "/usr/local/bin/ib",
       agentId: "agent-abc123",

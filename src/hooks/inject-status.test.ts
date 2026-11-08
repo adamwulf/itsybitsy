@@ -72,7 +72,7 @@ describe("shouldInjectStatus", () => {
     expect(shouldInjectStatus({ cwd: "/Users/test/project" })).toBe(true);
   });
 
-  test("inject-ittybitty-dir-not-repo: cwd at agent dir (not /repo) returns true", () => {
+  test("inject-itsybitsy-dir-not-repo: cwd at agent dir (not /repo) returns true", () => {
     expect(
       shouldInjectStatus({ cwd: "/Users/test/project/.itsybitsy/agents/abc123" })
     ).toBe(true);

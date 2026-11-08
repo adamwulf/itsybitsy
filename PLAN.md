@@ -1,5 +1,8 @@
 # itsybitsy — Plan
 
+Runtime names in this historical plan are superseded: use `.itsybitsy/` and
+`itsybitsy-` tmux sessions, as specified in [PLAN-ITSYBITSY-PATHS.md](PLAN-ITSYBITSY-PATHS.md).
+
 A cross-repo agent management dashboard for [ittybitty (`ib`)](https://github.com/anthropics/ittybitty), built with Bun and pi-tui.
 
 ## Problem

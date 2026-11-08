@@ -204,6 +204,10 @@ The root `index.ts`, `test-preload.ts`, `build.sh`, `package.json` and
 | `prepareAgentRetirement` catch (:350) and `cleanupPreparedRetirement` (:362) | No change: they delete the ref this run created, which always has the new name |
 | `rehireAgent` (`ib-commands.ts:842-880`) | New `resolveRetainedHeadRef(repoPath, archiveKey)` in `agent-lifecycle.ts`. It runs `git rev-parse --verify --quiet <ref>^{commit}` on `retiredHeadRef(key)`, then on `legacyRetiredHeadRef(key)`, and the first that resolves wins. The order is fixed: it ignores which name the manifest recorded. If the found ref's object differs from `manifest.gitHead`, fail as corrupt with no fallback, because the fallback is only for "not found". If neither resolves, fail with an error naming both refs. `git worktree add` uses the ref that was found |
 
+For `rev-parse --verify --quiet`, only exit 1 means not found. Any other
+nonzero exit stops resolution and reports Git's stderr; it must not cause a
+legacy fallback.
+
 Nothing else creates, moves or deletes retired refs (checked with a grep for
 `update-ref` and `retired/`). The sandboxed path (`src/lifecycle-broker.ts:281`,
 `ownArchiveOnly`) calls the same functions.
@@ -723,17 +727,20 @@ below starts after all agents have stopped.
      fresh agent instead.
    - **Rehire:** rehire one old retired agent (legacy ref), if you have one you
      don't mind restoring.
-   - **New codex agent — the real new-layout test run:** `ib new-agent --type codex
+   - **New Claude worker — the real new-layout test run:** `ib new-agent --type worker
      "Print your working directory, which must contain .itsybitsy. Run bun test
-     and bunx tsc --noEmit, and compare the failing tests with the baseline in
-     PLAN-ITSYBITSY-PATHS.md (Appendix A). Re-run any test that fails now but not
-     in the baseline once, alone, before counting it. For each that still fails,
+     and bunx tsc --noEmit. Expect zero failures, matching the authoritative
+     Claude-worker baseline in PLAN-ITSYBITSY-PATHS.md (Appendix A). Re-run any
+     failing test file once, alone, to check for flakes. For each that still fails,
      run git log <Appendix A commit>..HEAD -- <its test file> and report whether
      later commits changed it. Change nothing."`
 
-     It must be a codex agent, like the agent that measured Appendix A: the two
-     dashboard caller-gate tests depend on the measuring agent's
-     `canSpawnChildren`. A failure that survives the re-run, and that isn't
+     It must be a Claude worker, matching the Claude-worker baseline in
+     Appendix A. The codex
+     sandbox hides 48 tests behind existing failures, so its baseline cannot
+     validate those tests. The dashboard caller-gate tests also depend on
+     `canSpawnChildren`; do not compare different agent types. A failure that
+     survives the re-run, and that isn't
      explained by a test file changed since the baseline commit (the baseline goes
      stale once `ib merge` rebases onto a newer `main`), means stop and fix it
      before resuming the rest.
@@ -824,13 +831,15 @@ the script, repair worktrees by hand, or fix the new code.
   - the pass/fail totals;
   - each failing test, by file and test name.
 
-  Some tests fail in any agent worktree. For example, the two dashboard
-  new-agent tests fail because of the cwd-based caller gate, and their result
-  depends on the measuring agent's `canSpawnChildren`. So the baseline is
-  measured by a codex agent that can spawn children; runbook step 8 uses the same type.
+  Results depend on the agent environment: the codex sandbox causes 48 tests
+  to fail before exercising changed behavior, while dashboard caller-gate
+  results depend on `canSpawnChildren`. A separate Claude-worker base/tip run
+  is required to validate the tests hidden by the codex baseline. Runbook step
+  8 uses a Claude worker and compares against that same-type baseline.
 - **The implementer's gate:** `bun test` from its own worktree (still under
-  `.ittybitty/`) fails exactly the Appendix A tests, no more and no fewer, and
-  `bunx tsc --noEmit` is clean. The entry-point check (`ib list-types` on a
+  `.ittybitty/`) fails exactly the Appendix A codex tests, no more and no fewer,
+  and `bunx tsc --noEmit` is clean. This is necessary but insufficient: the
+  manager's Claude-worker base/tip comparison must also pass. The entry-point check (`ib list-types` on a
   freshly built binary) is not part of this gate, because no agent type may run
   a built binary. It happens at runbook step 6.
 - **No test run in a `.itsybitsy`-shaped worktree before the deploy.** It would
@@ -839,8 +848,8 @@ the script, repair worktrees by hand, or fix the new code.
   - The cwd parsers are covered by unit tests with explicit new-name paths
     (`src/runtime-names.test.ts`).
   - The real in-worktree shape is checked once, at runbook step 8, while
-    everything else is still stopped. The new codex agent there runs `bun test` in a
-    real `.itsybitsy` worktree and compares against Appendix A.
+    everything else is still stopped. The new Claude worker there runs `bun test`
+    in a real `.itsybitsy` worktree and compares against Appendix A's Claude-worker baseline.
 
 ### 4.2 The script: `src/update-repos-script.test.ts`
 
@@ -1019,6 +1028,27 @@ Refs are not moved by the script; §1.3 retains the new-first, legacy-only-if-mi
 
 ## Appendix A — Baseline test failures
 
+### Authoritative Claude-worker baseline
+
+Reported by the manager from Claude worker `agent-c1361af1` on 2026-11-07:
+
+- Commit: `abe00ccb130c44d8dbee992907d5dd9cc4b547e4`.
+- Agent type: `worker` (Claude), `canSpawnChildren: false` (type capability
+  confirmed with `ib show-type worker`).
+- `bun test`: **7,397 pass, 11 skip, 0 fail**. All skips are LIVE-gated.
+- Failing tests: **none**. Runbook step 8 uses `--type worker` and expects
+  zero failures; re-run a failing file once for flakes, then inspect its history
+  with `git log` against this baseline commit.
+- A Claude-worker full-suite run on the implementation tip is still required;
+  the manager will arrange it after these review fixes are committed.
+
+### Codex baseline (context only)
+
+**Validation limitation:** the codex sandbox causes the 48 failures below on
+the base and prevents those tests from exercising the edited behavior. Matching
+this list does not validate those edits. The authoritative Claude-worker base
+above passes them; a non-codex implementation-tip run is required as well.
+
 Re-measured on the untouched updated base in detached HEAD after rebasing the
 implementation, before applying any implementation changes to that baseline:
 
@@ -1026,7 +1056,8 @@ implementation, before applying any implementation changes to that baseline:
 - Agent: `agent-8606c130`, type `codex`, `canSpawnChildren: true` (confirmed with `ib show-type codex`).
 - `bun test`: **7,349 pass, 11 skip, 48 fail**, 38,110 assertions; 7,408 tests across 146 files.
 - Measured in the existing `.ittybitty` worktree on 2026-11-07.
-- Runbook step 8 compares a new `--type codex` agent against this failure set.
+- This failure set is only the codex implementer's gate; runbook step 8 uses
+  the authoritative Claude-worker baseline above.
 
 The original pre-implementation baseline was recorded before the first code
 commit at `3222f9536d598efcee60ead3272ef8a3e891f46b`: 7,282 pass, 11 skip,

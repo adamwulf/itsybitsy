@@ -4,6 +4,8 @@
 
 Field guide for finding code. SPEC.md is the authoritative behavioral spec; this file points at modules and calls out non-obvious wiring. When a section overlaps SPEC.md, that section is the source of truth.
 
+Runtime paths, tmux names, retained refs, prompt tags and agy names are centralized in `src/runtime-names.ts`.
+
 ## Per-agent message-delivery queue (`src/outbox.ts`)
 
 Serializes tmux writes to a single agent so two near-simultaneous sends don't interleave their `send-keys -l` chunks + `Enter` into one merged prompt. See SPEC.md §4.1.1 and §8.5.

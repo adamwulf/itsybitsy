@@ -48,6 +48,9 @@ export async function resolveRetainedHeadRef(
   for (const ref of refs) {
     const result = await context.run(["git", "-C", repoPath, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
     if (result.exitCode === 0) return { ref, gitHead: result.stdout.trim() };
+    if (result.exitCode !== 1) {
+      throw new Error(`Cannot resolve retained HEAD ${ref}: ${result.stderr.trim() || `git exited ${result.exitCode}`}`);
+    }
   }
   throw new Error(`Retained HEAD not found: neither ${refs[0]} nor ${refs[1]}`);
 }

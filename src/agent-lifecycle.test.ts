@@ -9,6 +9,7 @@ import {
   getDescendantsRecursive,
   isRunningAsAgent,
   resolveGitRoot,
+  resolveRetainedHeadRef,
   _formatTimestamp,
   _formatArchiveTimestamp,
   spawnCtx,
@@ -35,6 +36,20 @@ describe("agent-lifecycle", () => {
   });
 
   // ── logAgent ───────────────────────────────────────────────────────────
+
+  test.each([2, 128])("retained HEAD lookup propagates git exit %p without trying the legacy ref", async (exitCode) => {
+    const calls: string[][] = [];
+    spawnCtx.set((cmd) => {
+      calls.push(cmd);
+      return {
+        stdout: new Response("").body,
+        stderr: new Response("fatal: cannot read repository").body,
+        exited: Promise.resolve(exitCode),
+      };
+    });
+    await expect(resolveRetainedHeadRef("/repo", "archive-key")).rejects.toThrow("fatal: cannot read repository");
+    expect(calls).toEqual([["git", "-C", "/repo", "rev-parse", "--verify", "--quiet", "refs/itsybitsy/retired/archive-key/head^{commit}"]]);
+  });
 
   describe("logAgent", () => {
     test("creates agent.log with timestamped entry", async () => {

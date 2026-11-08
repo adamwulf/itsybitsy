@@ -77,7 +77,7 @@ describe("orphaned tmux session detection", () => {
     expect(orphanedTmuxSessions).toEqual(["itsybitsy-repo1-agent-deleted"]);
   });
 
-  test("non-ittybitty tmux sessions are ignored", async () => {
+  test("non-itsybitsy tmux sessions are ignored", async () => {
     mockListTmuxSessions.mockResolvedValue([
       "my-dev-session",
       "other-project",
@@ -94,14 +94,14 @@ describe("orphaned tmux session detection", () => {
       "itsybitsy-repo1-agent-a",
       "itsybitsy-repo1-stale1",
       "itsybitsy-repo2-stale2",
-      "not-ittybitty-session",
+      "not-itsybitsy-session",
     ]);
 
     const { orphanedTmuxSessions } = await readAllAgents([{ path: tempDir, name: "test" }], false);
     expect(orphanedTmuxSessions).toEqual(["itsybitsy-repo1-stale1", "itsybitsy-repo2-stale2"]);
   });
 
-  test("no agents at all — all ittybitty sessions are orphans", async () => {
+  test("no agents at all — all itsybitsy sessions are orphans", async () => {
     // Create agents dir but no agents
     await mkdir(join(tempDir, ".itsybitsy", "agents"), { recursive: true });
     mockListTmuxSessions.mockResolvedValue([

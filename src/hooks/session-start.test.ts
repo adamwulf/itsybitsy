@@ -371,7 +371,7 @@ describe("session-start", () => {
     expect(instructions).toContain("ib send agent-abc12345");
   });
 
-  test("agent type markdown body is appended before closing ittybitty tag", async () => {
+  test("agent type markdown body is appended before closing itsybitsy tag", async () => {
     // This test uses the built-in coordinator type which has no body,
     // but we test the mechanism by verifying basic structure is intact
     const ctx: SessionContext = {

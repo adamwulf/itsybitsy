@@ -20,6 +20,7 @@ test("tmux names preserve agent ids and accept only the new prefix", () => {
   expect(names.agentIdFromTmuxSession(session)).toBe("ittybitty-agent");
   expect(names.isAgentTmuxSession(session)).toBe(true);
   expect(names.isAgentTmuxSession("ittybitty-1234abcd-a")).toBe(false);
+  expect(names.agentIdFromTmuxSession("ittybitty-abc12345-agent-abc")).toBeNull();
   expect(names.agentIdFromTmuxSession("itsybitsy-invalid-a")).toBeNull();
 });
 
@@ -58,6 +59,10 @@ describe("path parser shapes", () => {
       expect(names.matchWorktreeCaller(path)).toBeNull();
       expect(names.matchWorktreeRepo(path)).toBeNull();
       expect(names.matchExactWorktree(path)).toBeNull();
+      if (path === "/r/Xitsybitsy/agents/a/repo") {
+        expect(names.matchAgentsPrefix(path)).toBeNull();
+        expect(names.matchAgentPrefix(path)).toBeNull();
+      }
     });
   }
   test("user-wide agent files are not worktrees and system resolution runs first", () => {

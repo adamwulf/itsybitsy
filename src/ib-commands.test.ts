@@ -14675,7 +14675,7 @@ describe("resolveAgentId", () => {
     expect(result).toEqual({ resolved: "agent-abc123" });
   });
 
-  test("ignores non-ittybitty tmux sessions", async () => {
+  test("ignores non-itsybitsy tmux sessions", async () => {
     const result = await resolveAgentId(agentsDir, "agent-abc123", async () => [
       "my-other-session",
       "random-session-agent-abc123",
@@ -14683,7 +14683,7 @@ describe("resolveAgentId", () => {
     expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
 
-  test("extracts default agent ID from ittybitty tmux session", async () => {
+  test("extracts default agent ID from itsybitsy tmux session", async () => {
     const result = await resolveAgentId(agentsDir, "agent-deadbeef", async () => [
       "itsybitsy-abc12345-agent-deadbeef",
     ]);
@@ -14711,9 +14711,9 @@ describe("resolveAgentId", () => {
     expect(result).toEqual({ resolved: "my-long-custom-name" });
   });
 
-  test("rejects malformed tmux session without ittybitty prefix", async () => {
+  test("rejects malformed tmux session without itsybitsy prefix", async () => {
     const result = await resolveAgentId(agentsDir, "agent-abc", async () => [
-      "notittybitty-abc12345-agent-abc",
+      "notitsybitsy-abc12345-agent-abc",
     ]);
     expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });
@@ -14722,6 +14722,13 @@ describe("resolveAgentId", () => {
     const result = await resolveAgentId(agentsDir, "agent-abc", async () => [
       "itsybitsy-abc123-agent-abc",
       "itsybitsy-abc123456789-agent-abc",
+    ]);
+    expect(result).toEqual({ error: "No matching agent found", matches: [] });
+  });
+
+  test("rejects the legacy ittybitty tmux prefix", async () => {
+    const result = await resolveAgentId(agentsDir, "agent-abc", async () => [
+      "ittybitty-abc12345-agent-abc",
     ]);
     expect(result).toEqual({ error: "No matching agent found", matches: [] });
   });

@@ -3942,7 +3942,7 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
       await writeFile(join(agentsDirHere, "other", "f"), "x");
       await writeFile(join(created, "work", "repo", "src", "main.ts"), "x");
       const prepared = await access({ allowRead: [], allowWrite: ["**/*.ts"], deny: [] }, true);
-      const typedAgents = join(created, "WORK", "REPO", ".ITTYBITTY", "AGENTS");
+      const typedAgents = join(created, "WORK", "REPO", ".ITSYBITSY", "AGENTS");
       const OTHER_AGENT_DENY = { decision: "deny" as const, reason: "Access denied: cannot access other agents' files" };
       const spy = refuseAll();
       try {
@@ -3968,7 +3968,7 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
       await writeFile(join(worktreeHere, "x.ts"), "x");
       await writeFile(join(agentDirHere, "agent.log"), "x");
       const prepared = await access({ allowRead: [], allowWrite: ["**/*.ts"], deny: [] }, true);
-      const typedAgentDir = join(created, "WORK", "REPO", ".ITTYBITTY", "AGENTS", "AGENT-ABC123");
+      const typedAgentDir = join(created, "WORK", "REPO", ".ITSYBITSY", "AGENTS", "AGENT-ABC123");
       const typedWorktreeFile = join(typedAgentDir, "REPO", "x.ts"); // the leaf as the **/*.ts entry spells it
       // Every open refused: only identity places it in the worktree.
       let spy = refuseAll();

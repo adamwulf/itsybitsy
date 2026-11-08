@@ -422,6 +422,56 @@ describe("parseGeminiUsage", () => {
     expect(result.weeklyReset).toBe("7d 4h");
   });
 
+  test("keeps the shared Gemini quota separate from Argon in agy 1.5.3 output", () => {
+    // Captured from agy -p /usage. Unlike the interactive UI, it prints integer
+    // percentages, so 99.99% remaining arrives here as 99% remaining (1% used).
+    const output = [
+      "Quota:",
+      "Gemini Models          Weekly Limit Remaining       99%   2026-11-14 20:27 CST",
+      "Gemini Models          Five Hour Limit Remaining    99%   2026-11-08 01:27 CST",
+      "Claude and GPT models  Weekly Limit Remaining       100%  2026-11-14 20:32 CST",
+      "Claude and GPT models  Five Hour Limit Remaining    100%  2026-11-08 01:32 CST",
+      "Gemini 4 Argon         Gemini 4 Argon Weekly Limit  99%   2026-11-14 20:27 CST",
+    ].join("\n");
+
+    expect(parseGeminiUsage(output, new Date("2026-11-08T02:32:00Z"))).toEqual({
+      sessionPct: 1,
+      weeklyPct: 1,
+      sessionReset: "4h 55m",
+      weeklyReset: "6d 23h",
+    });
+  });
+
+  test("unused Argon quota cannot replace unused shared Gemini quota", () => {
+    const output = [
+      "Gemini Models Weekly Limit Remaining 100% 2026-11-14 20:27 CST",
+      "Gemini 4 Argon Gemini 4 Argon Weekly Limit 100% 2026-11-14 20:27 CST",
+    ].join("\n");
+    expect(parseGeminiUsage(output).weeklyPct).toBe(0);
+  });
+
+  test("does not combine an Argon-only weekly limit with the shared Gemini session", () => {
+    const output = [
+      "Gemini Models Five Hour Limit Remaining 99% 2026-11-08 01:27 CST",
+      "Gemini 4 Argon Gemini 4 Argon Weekly Limit 99% 2026-11-14 20:27 CST",
+    ].join("\n");
+    const result = parseGeminiUsage(output);
+    expect(result.sessionPct).toBe(1);
+    expect(result.weeklyPct).toBeNull();
+    expect(result.weeklyReset).toBeNull();
+  });
+
+  test("parses reset timestamps with a daylight-saving zone", () => {
+    const output = "Gemini Models Weekly Limit Remaining 75% 2026-07-14 20:27 CDT";
+    expect(parseGeminiUsage(output, new Date("2026-07-14T00:27:00Z")).weeklyReset).toBe("1d 1h");
+  });
+
+  test("keeps usage when the reset zone cannot be parsed", () => {
+    const result = parseGeminiUsage("Gemini Models Weekly Limit Remaining 75% 2026-11-14 20:27 XYZ");
+    expect(result.weeklyPct).toBe(25);
+    expect(result.weeklyReset).toBeNull();
+  });
+
   test("parses 0% remaining as 100% used", () => {
     const output = "Gemini Models   Five Hour Limit Remaining   0%   2026-09-03T09:38:29Z";
     const result = parseGeminiUsage(output, now);

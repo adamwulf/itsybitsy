@@ -242,6 +242,9 @@ export function passedCodexResets(reading: CodexUsageReading | null, nowMs: numb
  * Weekly window is "Weekly".
  * Note that the table reports "Limit Remaining X%". Usage percentage is 100 - remaining.
  * If the user does not have a session limit, sessionPct will remain null.
+ * Only the shared "Gemini Models" bucket belongs here; model-specific buckets
+ * such as Gemini 4 Argon must not overwrite it. Newer agy versions print reset
+ * dates as local timestamps with a zone, e.g. "2026-11-14 20:27 CST".
  */
 export function parseGeminiUsage(output: string, now?: Date): UsageData {
   const data: UsageData = {
@@ -256,20 +259,21 @@ export function parseGeminiUsage(output: string, now?: Date): UsageData {
   const plain = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 
   const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/;
+  const zonedDateRegex = /\d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z]+\b/;
   const pctRegex = /(\d+(?:\.\d+)?)\s*%/;
 
   for (const line of plain.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    // We only process Gemini lines
-    if (!/gemini/i.test(trimmed)) continue;
+    // Argon has its own quota, also expressed as remaining despite its label.
+    if (!/^Gemini\s+Models\s+/i.test(trimmed)) continue;
 
     const isWeekly = /weekly/i.test(trimmed);
     const isSession = /five\s*hour|session|\bhour\b/i.test(trimmed);
     if (!isWeekly && !isSession) continue;
 
     const pctMatch = trimmed.match(pctRegex);
-    const isoMatch = trimmed.match(isoRegex);
+    const resetMatch = trimmed.match(isoRegex) ?? trimmed.match(zonedDateRegex);
 
     let pct: number | null = null;
     if (pctMatch && pctMatch[1] !== undefined) {
@@ -283,7 +287,9 @@ export function parseGeminiUsage(output: string, now?: Date): UsageData {
       }
     }
 
-    const reset = isoMatch && isoMatch[0] ? formatResetTime(isoMatch[0], now) : null;
+    const reset = resetMatch && Number.isFinite(Date.parse(resetMatch[0]))
+      ? formatResetTime(resetMatch[0], now)
+      : null;
 
     if (isSession) {
       data.sessionPct = pct;

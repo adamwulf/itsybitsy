@@ -113,6 +113,19 @@ export function metadataCli(model: unknown): AgentCli | undefined {
 }
 
 /**
+ * Human-readable name of the CLI program an agent runs, for display (the info
+ * panel's process stoplight). `fugu` is Codex-backed, so its process is Codex.
+ */
+export function cliDisplayName(cli: AgentCli): string {
+  switch (cli) {
+    case "claude": return "Claude";
+    case "codex":
+    case "fugu": return "Codex";
+    case "agy": return "Antigravity";
+  }
+}
+
+/**
  * Describe the frozen itsybitsy kernel-sandbox toggle for display. Every known
  * CLI supports either state; disabled agents retain their CLI's native
  * protections plus itsybitsy's hooks. An unknown CLI has no wrapper.

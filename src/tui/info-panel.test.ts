@@ -53,6 +53,42 @@ describe("InfoPanelComponent", () => {
     expect(lines.length).toBe(10);
   });
 
+  describe("CLI process stoplight label", () => {
+    function firstLine(model: string): string {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      const agent = makeAgent({ id: "agent-cli" });
+      agent.meta.model = model;
+      panel.agent = agent;
+      return stripAnsi(panel.render(60)[0]!);
+    }
+
+    test.each([
+      ["claude:opus", "● Claude"],
+      ["codex:gpt-5.5", "● Codex"],
+      ["fugu:fugu", "● Codex"],
+      ["agy:default", "● Antigravity"],
+      // Legacy bare model names belong to Claude (metadataCli).
+      ["sonnet", "● Claude"],
+      // An unknown CLI has no name to show.
+      ["gemini:pro", "● Agent"],
+    ])("model %p labels the stoplight %p", (model, expected) => {
+      expect(firstLine(model)).toBe(expected);
+    });
+
+    test("coordinator stoplight in repo info follows the coordinator's CLI", () => {
+      const panel = new InfoPanelComponent();
+      panel.displayHeight = 10;
+      panel.selectedRepoHeader = "my-repo";
+      const coord = makeAgent({ id: "agent-coord", repoName: "my-repo" });
+      coord.meta.model = "codex:gpt-5.5";
+      panel.repoCoordinatorAgent = coord;
+      const text = panel.render(60).map(stripAnsi).join("\n");
+      expect(text).toContain("Coord Codex");
+      expect(text).not.toContain("Coord Claude");
+    });
+  });
+
   describe("Git Status stoplight", () => {
     function agentPanel(): { panel: InfoPanelComponent; gitLine: () => string } {
       const panel = new InfoPanelComponent();

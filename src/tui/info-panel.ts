@@ -17,7 +17,7 @@ import type { WorktreeCleanliness } from "../git-status";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import { NotesEditorComponent } from "./notes-editor";
 import { _formatTimestamp } from "../agent-lifecycle";
-import { kernelSandboxStatus } from "../agent-cli";
+import { cliDisplayName, kernelSandboxStatus, metadataCli } from "../agent-cli";
 import { resolvePathsConfig } from "../sandbox";
 
 /**
@@ -113,7 +113,12 @@ export class InfoPanelComponent implements Component {
     const claudeAlive = !isNaN(claudePid) &&
       isPidAliveSinceCtx.fn(claudePid, agent.meta.claude_pid_epoch);
     const claudeColor = claudeAlive ? GREEN : RED;
-    lines.push(truncateToWidth(`${claudeColor}●${RESET} ${labelPrefix}Claude`, width, ""));
+    // `claude_pid` holds the agent CLI's PID whichever CLI it is (codex and agy
+    // spawns write it too), so only the label follows the model's CLI. An
+    // unparseable model has no known CLI and gets a generic label.
+    const cli = metadataCli(agent.meta.model);
+    const cliLabel = cli ? cliDisplayName(cli) : "Agent";
+    lines.push(truncateToWidth(`${claudeColor}●${RESET} ${labelPrefix}${cliLabel}`, width, ""));
 
     // Watchdogs launched through the unsandboxed tmux server do not expose an
     // immediate child PID to the invoking process. Their self-written
@@ -295,7 +300,7 @@ export class InfoPanelComponent implements Component {
   private renderRepoInfo(width: number): string[] {
     const lines: string[] = [];
 
-    // Coordinator stoplights — Claude/Watchdog/Tmux for the repo's coordinator agent
+    // Coordinator stoplights — CLI/Watchdog/Tmux for the repo's coordinator agent
     if (this.repoCoordinatorAgent) {
       lines.push(...this.renderStoplights(this.repoCoordinatorAgent, width, "Coord "));
     }

@@ -1172,7 +1172,7 @@ Lists all known config keys with their current values and sources.
 
 1. Each line shows the key, its effective value, and a source label: `(user)` or `(default)`.
 2. **Unset keys**: Keys with no value and no default display as `(unset)`.
-3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.imessage`. (Permission list keys have moved out of `config.json` into agent type layer files — see §2.3. The former `coordinator.model` key now lives in `~/.itsybitsy/agent-types/system-coordinator.md` and `repo-coordinator.md` as `model:`. The system coordinator's Remote Control is the `remoteControl:` field of `system-coordinator.md`, not a config key — see §15.4.)
+3. **All known keys are listed**, including those not present in the config file. The full key list matches `CONFIG_KEYS` in `config.ts`: `maxAgents`, `model`, `createPullRequests`, `allowAgentQuestions`, `autoCompactThreshold`, `externalDiffTool`, `hooks.injectStatus`, `hooks.statusVisible`, `coordinator.imessage`, `coordinator.remoteControlName`. (Permission list keys have moved out of `config.json` into agent type layer files — see §2.3. The former `coordinator.model` key now lives in `~/.itsybitsy/agent-types/system-coordinator.md` and `repo-coordinator.md` as `model:`. The system coordinator's Remote Control enablement is the `remoteControl:` field of `system-coordinator.md`, not a config key — see §15.4.)
 4. A legend line is printed after the list explaining the source labels.
 5. Aliases: `ib config ls` is accepted as an alias for `list`.
 
@@ -1645,7 +1645,7 @@ The system coordinator is a Claude Code session that runs from `~/.itsybitsy/` w
 1. Ensure `~/.itsybitsy/` exists and is a git repository (`git init` — a standard repo, not `git init --bare`). This is required because Claude Code only loads `<cwd>/.claude/settings.local.json` when the CWD is inside a git repo. Add a `.gitignore` with `*` to prevent accidental commits of coordinator data files.
 2. Write `~/.itsybitsy/.claude/settings.local.json` with system coordinator permissions (§12.1.3), plus `disableRemoteControl: true` unless `system-coordinator.md` sets `remoteControl: true` (§15.3.2)
 3. Create a tmux session named `ib-coordinator` with working directory `~/.itsybitsy/`
-4. Start Claude Code inside the session in interactive mode (`claude --model <model>` on fresh, `claude --resume <id> --model <model>` on resume — where `<model>` is resolved by walking the precedence chain `~/.itsybitsy/agent-types/system-coordinator.md` `model:` > `~/.itsybitsy/agent-types/_all.md` `model:` > `claude:opus` (see §12.5)). Both lines gain `--remote-control 'itsybitsy coordinator'` when `system-coordinator.md` sets `remoteControl: true` (§15.3.2). The tmux session is launched with `bash` as its command (i.e. `tmux new-session -d -s ib-coordinator -c <home> bash`) so the pane always runs bash regardless of the user's default `$SHELL`. The single `tmux send-keys` call carries the full launch line, run via `Bun.spawn(["tmux", "send-keys", "-t", "ib-coordinator", "<launch-line>", "Enter"])`. All tmux interactions use `Bun.spawn` with array arguments — never shell strings. **Note**: The `-p` flag is NOT used because it runs Claude in non-interactive print mode (exits after one response). The system coordinator must run as an interactive session to accept ongoing input. No positional prompt arg is passed — the prompt body is delivered by the SessionStart hook (§12.1.5).
+4. Start Claude Code inside the session in interactive mode (`claude --model <model>` on fresh, `claude --resume <id> --model <model>` on resume — where `<model>` is resolved by walking the precedence chain `~/.itsybitsy/agent-types/system-coordinator.md` `model:` > `~/.itsybitsy/agent-types/_all.md` `model:` > `claude:opus` (see §12.5)). Both lines gain `--remote-control <name>` (configured by `coordinator.remoteControlName`, defaulting to `itsybitsy coordinator`) when `system-coordinator.md` sets `remoteControl: true` (§15.3.2). The tmux session is launched with `bash` as its command (i.e. `tmux new-session -d -s ib-coordinator -c <home> bash`) so the pane always runs bash regardless of the user's default `$SHELL`. The single `tmux send-keys` call carries the full launch line, run via `Bun.spawn(["tmux", "send-keys", "-t", "ib-coordinator", "<launch-line>", "Enter"])`. All tmux interactions use `Bun.spawn` with array arguments — never shell strings. **Note**: The `-p` flag is NOT used because it runs Claude in non-interactive print mode (exits after one response). The system coordinator must run as an interactive session to accept ongoing input. No positional prompt arg is passed — the prompt body is delivered by the SessionStart hook (§12.1.5).
 
 **Shared across instances**: Multiple `ib watch` instances share the same `ib-coordinator` tmux session. On startup, check if the session already exists (`tmux has-session -t ib-coordinator`). If it does, just display its output — do not create a new one. **TOCTOU note**: There is a race window between the `has-session` check and `new-session` creation. If two `ib watch` instances start simultaneously, both may see no session and attempt to create. Mitigation: `tmux new-session` fails if the session already exists — catch the error and fall through to the "session already exists" path.
 
@@ -2051,7 +2051,7 @@ The coordinator system touches many modules. This section catalogs the current i
 | `src/hooks/intercept-task.ts` | **Implemented** | `checkCoordinatorBashRestrictions()` blocks shell metacharacters and `--output` in git commands for coordinator sessions. Detects coordinators by type name (`isCoordinatorType()`): `agentType: "repo-coordinator"` in meta.json, or the `system-coordinator` type in `@system`'s synthetic meta. |
 | `src/hooks/agent-path.ts` | **No changes needed** | Per-repo coordinators use standard path isolation. |
 | `src/hooks/agent-status.ts` | **No changes needed** | Stop hook writes state normally. |
-| `src/config.ts` | **Implemented** | Config key: `coordinator.imessage`. (Remote Control for the system coordinator is the `remoteControl:` field of `~/.itsybitsy/agent-types/system-coordinator.md`, not a config key — see §15.) (`coordinator.model` removed — coordinator models live in `~/.itsybitsy/agent-types/system-coordinator.md` and `repo-coordinator.md` frontmatter. `permissions.coordinator.*` removed — per-repo coordinator permissions live in `~/.itsybitsy/agent-types/repo-coordinator.md` frontmatter.) |
+| `src/config.ts` | **Implemented** | Config keys: `coordinator.imessage`, `coordinator.remoteControlName`. (Remote Control enablement for the system coordinator is the `remoteControl:` field of `~/.itsybitsy/agent-types/system-coordinator.md`, not a config key — see §15.) (`coordinator.model` removed — coordinator models live in `~/.itsybitsy/agent-types/system-coordinator.md` and `repo-coordinator.md` frontmatter. `permissions.coordinator.*` removed — per-repo coordinator permissions live in `~/.itsybitsy/agent-types/repo-coordinator.md` frontmatter.) |
 | `src/watchdog.ts` | **Not yet modified** | Does NOT have coordinator-specific behavior. Treats coordinators identically to regular agents. See §12.2.7. |
 | `src/tui/dashboard.ts` | **Implemented** | System coordinator full-width view with TMUX/DASHBOARD toggle, coordinator lifecycle on startup/shutdown, coordinator restart on `R`, input field routing, per-repo coordinator pausing on exit. |
 | `src/tui/agent-tree.ts` | **Implemented** | System coordinator as first entry with `◆` icon. Per-repo coordinators are not rendered as tree rows — they are surfaced via the repo header (REPO mode, §8.11, §12.2.5). |
@@ -2478,7 +2478,7 @@ The system coordinator's Remote Control is set by the `remoteControl` frontmatte
 
 | `remoteControl` | `~/.itsybitsy/.claude/settings.local.json` | Launch line |
 |-----------------|--------------------------------------------|-------------|
-| `true` | `disableRemoteControl` omitted | `--remote-control 'itsybitsy coordinator'` added |
+| `true` | `disableRemoteControl` omitted | `--remote-control <name>` added (name from §15.3.4) |
 | `false`, absent, or the layer fails to load | `disableRemoteControl: true` | no flag |
 
 Both parts are needed when it is on. The flag is what turns Remote Control on, because auto-start without it depends on a server-side gate. Omitting `disableRemoteControl` keeps the settings key from blocking the flag.
@@ -2490,7 +2490,7 @@ claude --model <model> --remote-control 'itsybitsy coordinator' [--channels ...]
 claude --resume <id> --model <model> --remote-control 'itsybitsy coordinator' [--channels ...]
 ```
 
-It comes before any imessage `--channels` value. The session name is a fixed constant (`COORDINATOR_REMOTE_CONTROL_NAME` in `src/coordinator.ts`), single-quoted with `shellQuote()` because the line is typed into the coordinator's bash pane. Prompt delivery is unaffected: the SessionStart hook delivers the prompt (§12.1.5), and the session is reachable locally (via tmux) and, when on, remotely (via claude.ai/code).
+It comes before any imessage `--channels` value. The session name comes from `coordinator.remoteControlName`, falling back to `COORDINATOR_REMOTE_CONTROL_NAME` in `src/coordinator.ts` when empty. The examples above show that fallback. The name is single-quoted with `shellQuote()` because the line is typed into the coordinator's bash pane. Prompt delivery is unaffected: the SessionStart hook delivers the prompt (§12.1.5), and the session is reachable locally (via tmux) and, when on, remotely (via claude.ai/code).
 
 Server mode (`claude remote-control`) is not used. It waits for remote connections before accepting input, so prompt delivery would have to change from the SessionStart hook and `tmux send-keys` to a `CLAUDE.md` file.
 
@@ -2504,7 +2504,7 @@ Remote Control requires claude.ai authentication (`/login`), not API keys. This 
 
 #### 15.3.4 Session Naming
 
-The session is named by the `--remote-control` flag's argument, the fixed string `itsybitsy coordinator`. It appears under that name in the claude.ai/code session list and the Claude mobile app. There is no setting for the name.
+The session is named by the `--remote-control` flag's argument. Set `coordinator.remoteControlName` with `ib config set coordinator.remoteControlName "My coordinator"` or in the setup dialog’s Config tab. This string config key defaults to empty; an empty or missing value uses `itsybitsy coordinator`. It appears under that name in the claude.ai/code session list and the Claude mobile app. Changes apply on the next system coordinator launch, including resume-based restarts. Setting the name does not enable Remote Control; the `remoteControl:` frontmatter field still controls that.
 
 ### 15.4 Configuration
 
@@ -2520,7 +2520,7 @@ remoteControl: false
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `remoteControl` | boolean | `false` | Enable Remote Control for the system coordinator. `true` omits `disableRemoteControl` from the coordinator's `settings.local.json` and adds `--remote-control 'itsybitsy coordinator'` to its fresh and resume launch lines. `false` or absent writes `disableRemoteControl: true` and passes no flag. Requires claude.ai authentication. |
+| `remoteControl` | boolean | `false` | Enable Remote Control for the system coordinator. `true` omits `disableRemoteControl` from the coordinator's `settings.local.json` and adds `--remote-control <name>` to its fresh and resume launch lines (name from §15.3.4). `false` or absent writes `disableRemoteControl: true` and passes no flag. Requires claude.ai authentication. |
 
 Rules for the field:
 
@@ -2535,7 +2535,7 @@ Rules for the field:
 
 #### 15.5.1 Changing the Setting
 
-There is no toggle in the setup dialog or the settings list. To change it, edit `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md`, then restart the system coordinator, for example with `R` (a resume-based restart) or `/restart` in the coordinator chat box (a fresh restart; §4, §12.1). The value is read only at launch: it decides the `settings.local.json` contents and the launch line, so a running session keeps the mode it started with, and the header indicator is yellow until a restart (§15.5.2). Either restart applies the new value, because the fresh and the resume launch lines both carry the flag when it is on.
+The session name (`coordinator.remoteControlName`) is editable in the setup dialog’s Config tab (§15.3.4). There is no enablement toggle in the setup dialog or the settings list. To enable or disable Remote Control, edit `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md`, then restart the system coordinator, for example with `R` (a resume-based restart) or `/restart` in the coordinator chat box (a fresh restart; §4, §12.1). The value is read only at launch: it decides the `settings.local.json` contents and the launch line, so a running session keeps the mode it started with, and the header indicator is yellow until a restart (§15.5.2). Either restart applies the new value, because the fresh and the resume launch lines both carry the flag when it is on.
 
 #### 15.5.2 Status Indicator
 
@@ -2562,7 +2562,7 @@ The indicator does not show the live connection to claude.ai (connected or recon
 
 #### 15.5.3 Session Access Information
 
-The session URL and QR code are displayed in the coordinator's tmux output (visible in the coordinator sidebar panel). itsybitsy does not need to parse or extract them — the user can read them directly from the tmux output or find the session in their claude.ai/code session list under the name `itsybitsy coordinator`.
+The session URL and QR code are displayed in the coordinator's tmux output (visible in the coordinator sidebar panel). itsybitsy does not need to parse or extract them — the user can read them directly from the tmux output or find the session in their claude.ai/code session list under its configured name (§15.3.4; default `itsybitsy coordinator`).
 
 ### 15.6 CLI Integration
 
@@ -2570,8 +2570,9 @@ No new `ib` commands are needed. Remote Control is managed through:
 
 1. **Agent-type file**: `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md` (§15.4)
 2. **System coordinator lifecycle**: `ensureSystemCoordinator()` loads that layer at every launch, passes the value to `writeCoordinatorFiles()` for the `disableRemoteControl` settings key, and adds the `--remote-control` flag to the launch line when it is `true` (§15.3.2)
+3. **Session name**: set `coordinator.remoteControlName` through `ib config set` or the setup dialog’s Config tab, then restart the system coordinator (§15.3.4)
 
-The existing `ib` command pattern (`ib hooks install/uninstall`) is not appropriate here because Remote Control is not a hook — it is a launch flag plus a settings key, both decided when the system coordinator starts. Edit the file, then restart.
+The existing `ib` command pattern (`ib hooks install/uninstall`) is not appropriate here because Remote Control is not a hook — it is a launch flag plus a settings key, both decided when the system coordinator starts. Change the relevant setting, then restart.
 
 ### 15.7 Health Check Integration
 
@@ -2639,7 +2640,7 @@ The Remote Control session lives as long as the system coordinator's tmux sessio
 |--------|------|
 | `src/agent-types.ts` | `remoteControl` frontmatter field on `AgentType` (leaf-only, `true` only for a literal `true`). `validateAllAgentTypes()` rejects it outside `system-coordinator.md` and rejects a non-boolean value there. |
 | `docs/agent-types/system-coordinator.md` | The embedded default declares `remoteControl: false`. |
-| `src/coordinator.ts` | `ensureSystemCoordinator()` loads the `system-coordinator` layer before `writeCoordinatorFiles(remoteControl)`, which writes `disableRemoteControl: true` into `systemCoordinatorSettingsPath()` unless the value is `true`. The fresh and resume launch lines add `--remote-control` with the shell-quoted `COORDINATOR_REMOTE_CONTROL_NAME` when it is `true`. |
+| `src/coordinator.ts` | `ensureSystemCoordinator()` loads the `system-coordinator` layer before `writeCoordinatorFiles(remoteControl)`, which writes `disableRemoteControl: true` into `systemCoordinatorSettingsPath()` unless the value is `true`. The fresh and resume launch lines add `--remote-control` with the shell-quoted `coordinator.remoteControlName` config value (falling back to `COORDINATOR_REMOTE_CONTROL_NAME` when empty) when it is `true`. |
 | `src/ib-commands.ts` | Writes `disableRemoteControl: true` into every other Claude `settings.local.json`: `buildAgentSettings()` (worktree and `--no-worktree` agents), the `coordinatorMode` branch of `newAgent()`, and the `repo-coordinator` branch of `ensureIsolatedClaudeSettings()`. |
 | `src/remote-control-light.ts` | `readRemoteControlFiles()` reads the two files; `remoteControlStatus()` combines them with the coordinator's stopped state into the header light (§15.5.2). `remoteControlDetail()` gives its help-panel text. |
 | `src/tui/dashboard.ts` | Draws the `● Remote Control` header indicator. `refreshRemoteControlStatus()` runs at startup, when the startup launch ends, and on every 5-second `statusLightTimer` tick. `onUpdate` passes the watcher's system coordinator state on (`isSystemCoordinatorStopped()`). `setRemoteControlStatus()` re-renders only when the light changes. |

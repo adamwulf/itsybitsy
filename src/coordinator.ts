@@ -40,9 +40,9 @@ function encodeClaudeProjectPath(p: string): string {
 export const IB_COORDINATOR_SESSION = "ib-coordinator";
 
 /**
- * Session name passed with `--remote-control` when `system-coordinator.md`
+ * Default session name passed with `--remote-control` when `system-coordinator.md`
  * sets `remoteControl: true` — the name the session is listed under in
- * claude.ai/code and the Claude mobile app. Fixed, not configurable. It is
+ * claude.ai/code and the Claude mobile app. Used when coordinator.remoteControlName is empty. It is
  * shell-quoted on the launch line, which bash interprets in the tmux pane.
  */
 export const COORDINATOR_REMOTE_CONTROL_NAME = "itsybitsy coordinator";
@@ -1004,8 +1004,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // the resume line so a resumed session keeps it, ahead of the variadic
   // --channels list so that list stays last. writeCoordinatorFiles() left
   // `disableRemoteControl` out of the settings so nothing blocks it.
+  const remoteControlName = (config["coordinator.remoteControlName"]?.value as string)
+    || COORDINATOR_REMOTE_CONTROL_NAME;
   const remoteControlArg = remoteControl
-    ? ` --remote-control ${shellQuote(COORDINATOR_REMOTE_CONTROL_NAME)}`
+    ? ` --remote-control ${shellQuote(remoteControlName)}`
     : "";
   const channelsArg = channels.length > 0
     ? ` --channels ${channels.join(" ")}`

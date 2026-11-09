@@ -36,7 +36,6 @@ import {
   sanitizeTmuxInput,
   isCoordinatorRestartCommand,
   restartSystemCoordinatorFresh,
-  systemCoordinatorLaunchEpoch,
 } from "../coordinator";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import { agentWorktreePath } from "../agents";
@@ -801,10 +800,9 @@ export class DashboardComponent implements Component {
   /** A read in flight, and whether another was asked for meanwhile. */
   private remoteControlInFlight = false;
   private remoteControlQueued = false;
-  /** Watcher updates in a row that reported the system coordinator stopped,
-   *  and the launch epoch at the latest update (see isSystemCoordinatorStopped). */
+  /** Watcher updates in a row that reported the system coordinator stopped
+   *  (see isSystemCoordinatorStopped). */
   private coordinatorStoppedUpdates = 0;
-  private lastUpdateLaunchEpoch: number | null = null;
   /** The 5s tick that refreshes the Collector and Remote Control lights. */
   statusLightTimer: ReturnType<typeof setInterval> | null = null;
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
@@ -1667,27 +1665,23 @@ export class DashboardComponent implements Component {
 
   /** Feed one watcher update's system coordinator state to the light. */
   private noteSystemCoordinatorState(state: string | undefined): void {
-    const epoch = systemCoordinatorLaunchEpoch();
-    if (state !== "stopped" || epoch === null) this.coordinatorStoppedUpdates = 0;
-    else if (epoch === this.lastUpdateLaunchEpoch) this.coordinatorStoppedUpdates++;
-    else this.coordinatorStoppedUpdates = 1;
-    this.lastUpdateLaunchEpoch = epoch;
+    this.coordinatorStoppedUpdates = state === "stopped" ? this.coordinatorStoppedUpdates + 1 : 0;
     this.applyRemoteControlStatus();
   }
 
   /**
    * Whether the Remote Control light treats the system coordinator as
-   * stopped. Only an explicit "stopped" counts (no tmux session; an absent
-   * watcher entry or any other state does not), and only once two watcher
-   * updates in a row reported it with no launch from this process starting,
-   * running or ending since the first of them (`systemCoordinatorLaunchEpoch`).
-   * A launch kills the session, or has not created it yet, for a moment, and a
-   * watcher pass that captured the pane then can finish after the launch.
-   * Passes run one at a time, so the second update's capture began after the
-   * first update arrived and cannot predate a launch that ended before it.
+   * stopped: two watcher updates in a row reported it "stopped" (no tmux
+   * session). An absent watcher entry or any other state resets the count.
+   * A launch leaves no session for well under a second (a restart kills the
+   * old one first; a first launch has not created it yet), and watcher passes
+   * run on a 2 s tick, so two stopped updates in a row mean it really is stopped.
+   * A stale stopped pass that finishes after a launch is followed by a running
+   * pass, which resets the count. This holds for a launch from any process,
+   * `ib respawn @system` included.
    */
   isSystemCoordinatorStopped(): boolean {
-    return this.coordinatorStoppedUpdates >= 2 && systemCoordinatorLaunchEpoch() === this.lastUpdateLaunchEpoch;
+    return this.coordinatorStoppedUpdates >= 2;
   }
 
   /** Add an error to the errors list (called from watcher onError).

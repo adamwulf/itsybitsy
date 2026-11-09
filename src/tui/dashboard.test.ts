@@ -16,7 +16,7 @@ import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, rese
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { gitStatusSpawnCtx } from "../git-status";
-import { IB_COORDINATOR_SESSION, coordinatorSpawnCtx, ensureSystemCoordinator, systemCoordinatorLaunchEpoch } from "../coordinator";
+import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
 import type { SpawnResult } from "../types";
@@ -6945,7 +6945,6 @@ describe("Remote Control light inputs", () => {
   });
 
   afterEach(async () => {
-    coordinatorSpawnCtx.reset();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -7012,34 +7011,6 @@ describe("Remote Control light inputs", () => {
       expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
       watcherUpdate("running");
     }
-  });
-
-  test("stopped updates during a launch from this process do not count, nor does the first one after it", async () => {
-    await launchedWith(true);
-    await dashboard.refreshRemoteControlStatus();
-    // Hold a launch in flight: ensureSystemCoordinator waits on `tmux has-session`.
-    let finishHasSession: ((code: number) => void) | undefined;
-    coordinatorSpawnCtx.set(() => ({
-      ...makeSpawnResult(0),
-      exited: new Promise<number>((resolve) => { finishHasSession = resolve; }),
-    }));
-    const launch = ensureSystemCoordinator();
-    await waitFor(() => finishHasSession !== undefined, { message: "has-session spawned" });
-    expect(systemCoordinatorLaunchEpoch()).toBeNull();
-    watcherUpdate("stopped");
-    watcherUpdate("stopped");
-    watcherUpdate("stopped");
-    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
-
-    // The session exists, so the launch ends at once ("existing").
-    finishHasSession!(0);
-    await launch;
-    // A pass that captured the pane during the launch can arrive after it ends.
-    watcherUpdate("stopped");
-    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
-    // The next pass's capture began after that update arrived, so it is current.
-    watcherUpdate("stopped");
-    expect(dashboard.remoteControlStatus).toEqual(remoteControl("stopped"));
   });
 
   test("refreshRemoteControlAfterLaunch re-reads once the startup launch ends, even a failed one", async () => {

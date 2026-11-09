@@ -833,38 +833,6 @@ export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
 }
 
 /**
- * In-process launch tracking for the `ib watch` Remote Control light. A launch
- * kills or has not yet created the tmux session for a moment, so the watcher
- * can report the coordinator "stopped" while it is starting.
- * `ensureSystemCoordinator`, `restartSystemCoordinator` and
- * `restartSystemCoordinatorFresh` bump the epoch when they start and again
- * when they end; see {@link systemCoordinatorLaunchEpoch}.
- */
-let launchEpoch = 0;
-let launchesInFlight = 0;
-
-async function trackLaunch<T>(launch: () => Promise<T>): Promise<T> {
-  launchEpoch++;
-  launchesInFlight++;
-  try {
-    return await launch();
-  } finally {
-    launchesInFlight--;
-    launchEpoch++;
-  }
-}
-
-/**
- * null while a launch from this process is in flight; otherwise a number that
- * changes whenever one starts or ends. Two equal readings mean no launch from
- * this process started, ran or ended between them. A launch from another
- * process (`ib respawn @system`) is not seen here.
- */
-export function systemCoordinatorLaunchEpoch(): number | null {
-  return launchesInFlight > 0 ? null : launchEpoch;
-}
-
-/**
  * Ensure the system coordinator tmux session is running. If alive, returns
  * immediately. Otherwise launches Claude — resuming the newest non-cleared
  * transcript when one exists, falling back to a fresh launch otherwise.
@@ -880,7 +848,7 @@ export function systemCoordinatorLaunchEpoch(): number | null {
  * fresh-launch retry runs.
  */
 export async function ensureSystemCoordinator(): Promise<string> {
-  return await trackLaunch(() => ensureSystemCoordinatorImpl(false));
+  return await ensureSystemCoordinatorImpl(false);
 }
 
 async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Promise<string> {
@@ -1175,12 +1143,10 @@ export async function releaseSystemCoordinator(
 
 /** Restart the system coordinator — kill the tmux session and re-create. */
 export async function restartSystemCoordinator(): Promise<void> {
-  await trackLaunch(async () => {
-    await coordinatorSpawnCtx.run([
-      "tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
-    ]);
-    await ensureSystemCoordinator();
-  });
+  await coordinatorSpawnCtx.run([
+    "tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
+  ]);
+  await ensureSystemCoordinator();
 }
 
 /**
@@ -1210,11 +1176,9 @@ export async function discardSystemCoordinator(): Promise<void> {
  *  coordinator chat box / `s`-dialog so both produce identical FRESH restarts.
  *  Contrast `restartSystemCoordinator`, which RESUMES the prior transcript. */
 export async function restartSystemCoordinatorFresh(): Promise<boolean> {
-  return await trackLaunch(async () => {
-    await discardSystemCoordinator();
-    await ensureSystemCoordinator();
-    return await waitForCoordinatorReady();
-  });
+  await discardSystemCoordinator();
+  await ensureSystemCoordinator();
+  return await waitForCoordinatorReady();
 }
 
 /** Slash commands that must tear down and rebuild the system coordinator

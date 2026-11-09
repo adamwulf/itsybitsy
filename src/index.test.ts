@@ -375,6 +375,16 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(0);
   });
 
+  test("help lists bounce only from the system coordinator's cwd", async () => {
+    const elsewhere = await runCli(["help"]);
+    expect(elsewhere.stdout).not.toContain("bounce");
+
+    const fromCoordinator = await runCli(["help"], { cwd: join(cli.home, ".itsybitsy") });
+    expect(fromCoordinator.stdout).toContain("System coordinator:");
+    expect(fromCoordinator.stdout).toContain("  bounce ");
+    expect(fromCoordinator.exitCode).toBe(0);
+  });
+
   test("list-models prints grouped selectors for both CLIs", async () => {
     const { stdout, exitCode } = await runCli(["list-models"]);
     expect(stdout).toContain("CLAUDE");

@@ -1251,6 +1251,55 @@ describe("hookSessionStart with @system", () => {
 
     expect(withId).toBe(withoutId);
   });
+
+  const bounceMarkerPath = () => join(tempHome, ".itsybitsy", "coordinator-bounce.json");
+
+  // The note compares the hook's own binary (process.execPath — bun, under
+  // test) with bounced_at, so a bounce at epoch 0 reads as "rebuilt" and one in
+  // the far future as "not rebuilt".
+  test("a bounce marker appends a one-shot bounce note and is deleted", async () => {
+    await seedSystemType();
+    await Bun.write(bounceMarkerPath(), JSON.stringify({ bounced_at: 0 }));
+
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp", source: "resume" }), "@system");
+    const ctx: string = JSON.parse(captured).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain("SYSTEM_BODY_MARKER");
+    expect(ctx).toContain("ib watch was bounced at 1970-01-01T00:00:00.000Z");
+    expect(ctx).toContain("bounce.sh rebuilt ib and relaunched ib watch");
+    expect(await Bun.file(bounceMarkerPath()).exists()).toBe(false);
+
+    captured = "";
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp", source: "resume" }), "@system");
+    expect(JSON.parse(captured).hookSpecificOutput.additionalContext).not.toContain("bounced");
+  });
+
+  test("the bounce note says when the ib on PATH was not rebuilt after the bounce", async () => {
+    await seedSystemType();
+    await Bun.write(bounceMarkerPath(), JSON.stringify({ bounced_at: Date.now() + 365 * 24 * 3600_000 }));
+
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp", source: "startup" }), "@system");
+    const ctx: string = JSON.parse(captured).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain(`the ib on PATH (${process.execPath}) was not rebuilt after the bounce`);
+    expect(ctx).not.toContain("bounce.sh rebuilt ib");
+  });
+
+  test("a compact leaves the bounce marker for the restart it belongs to", async () => {
+    await seedSystemType();
+    await Bun.write(bounceMarkerPath(), JSON.stringify({ bounced_at: 0 }));
+
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp", source: "compact" }), "@system");
+    expect(JSON.parse(captured).hookSpecificOutput.additionalContext).not.toContain("bounced");
+    expect(await Bun.file(bounceMarkerPath()).exists()).toBe(true);
+  });
+
+  test("an unreadable bounce marker adds no note and is deleted", async () => {
+    await seedSystemType();
+    await Bun.write(bounceMarkerPath(), "not json");
+
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp" }), "@system");
+    expect(JSON.parse(captured).hookSpecificOutput.additionalContext).not.toContain("bounced");
+    expect(await Bun.file(bounceMarkerPath()).exists()).toBe(false);
+  });
 });
 
 describe("session-start team awareness (§16.6)", () => {

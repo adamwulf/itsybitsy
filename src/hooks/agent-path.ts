@@ -1367,19 +1367,25 @@ function containsInternalIbInvocation(command: string): boolean {
 const IB_TELEGRAM_OUTBOUND_COMMANDS = new Set(["tgsend", "tgsendfile", "tgreact"]);
 
 /**
- * Detect an `ib tgsend` / `ib tgsendfile` / `ib tgreact` invocation. Same
- * token scan as containsInternalIbInvocation: quoted words and heredoc bodies
- * are data, so a message that only mentions `ib tgsend` is not a match. An
- * untokenizable command never gets here — containsInternalIbInvocation has
- * already denied it.
+ * `ib bounce` quits `ib watch` and restarts the system coordinator. Only the
+ * system coordinator may ask for that.
  */
-function containsIbTelegramOutboundInvocation(command: string): boolean {
+const IB_BOUNCE_COMMANDS = new Set(["bounce"]);
+
+/**
+ * Detect an `ib <subcommand>` invocation for any subcommand in `subcommands`.
+ * Same token scan as containsInternalIbInvocation: quoted words and heredoc
+ * bodies are data, so a message that only mentions `ib tgsend` is not a
+ * match. An untokenizable command never gets here —
+ * containsInternalIbInvocation has already denied it.
+ */
+function containsIbSubcommandInvocation(command: string, subcommands: ReadonlySet<string>): boolean {
   const tokens = tokenizeBashPaths(maskHeredocBodies(command));
   if (!tokens) return false;
   for (let i = 0; i + 1 < tokens.length; i++) {
     const executable = stripBashSurroundingQuotes(tokens[i]!);
     if (basename(executable) !== "ib") continue;
-    if (IB_TELEGRAM_OUTBOUND_COMMANDS.has(stripBashSurroundingQuotes(tokens[i + 1]!))) return true;
+    if (subcommands.has(stripBashSurroundingQuotes(tokens[i + 1]!))) return true;
   }
   return false;
 }
@@ -1473,10 +1479,16 @@ export async function checkIbCommandAccess(
   // Outbound Telegram belongs to @system alone: it is the only agent that
   // receives Telegram messages, so it is the only one that replies. Every
   // other agent — worker, manager, per-repo coordinator — is denied here.
-  if (containsIbTelegramOutboundInvocation(normalizedCommand)) {
+  if (containsIbSubcommandInvocation(normalizedCommand, IB_TELEGRAM_OUTBOUND_COMMANDS)) {
     return {
       decision: "deny",
       reason: "Access denied: 'ib tgsend', 'ib tgsendfile' and 'ib tgreact' are for the system coordinator only — it is the only agent that receives Telegram messages. Report to your manager (or to the user, if you have no manager) instead",
+    };
+  }
+  if (containsIbSubcommandInvocation(normalizedCommand, IB_BOUNCE_COMMANDS)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: 'ib bounce' is for the system coordinator only — it quits ib watch and restarts the system coordinator. Report to your manager (or to the user, if you have no manager) instead",
     };
   }
 

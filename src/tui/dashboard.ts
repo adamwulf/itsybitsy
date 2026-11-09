@@ -29,6 +29,7 @@ import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow, expandTabs } from "../tmux-poller";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
 import {
+  BOUNCE_SIGNAL,
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
   ensureSystemCoordinator,
@@ -3954,71 +3955,89 @@ export async function launchDashboard(): Promise<void> {
     typePickerKeyboard.stop();
     tui.stop();
   });
+  // Ctrl+C and `ib bounce` (BOUNCE_SIGNAL) both quit through here. bounce.sh
+  // relaunches ib watch within seconds, so a bounce leaves per-repo
+  // coordinators running instead of pausing them. The flag keeps a signal
+  // that arrives during shutdown from starting a second one.
+  let quitting = false;
+  const quitDashboard = (pauseRepoCoordinators: boolean): void => {
+    if (quitting) return;
+    quitting = true;
+    // Re-enable stderr-bound warnings — TUI is going down.
+    setWatchRunning(false);
+    agentActions.killActiveDiffProc();
+    colorDetection.cleanup();
+    dashboard.stopPolling();
+    watcher.stop();
+    stopTerminal();
+    // stopTerminal() restored cooked mode and dropped the SIGINT handler, so
+    // another Ctrl-C now arrives as SIGINT. Under bounce.sh that is the
+    // natural way to stop the loop, but dying here would skip the release
+    // below and orphan the coordinator. Ignore it; bounce.sh stops at its
+    // countdown, and SIGTERM still ends a stuck shutdown.
+    process.on("SIGINT", () => {});
+    dashboard.setTerminalTitle("");
+    process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[2J\x1b[H");
+    process.stdout.write("Quitting ib watch…\n");
+    // Unsubscribe the state-change listener before stopping so a stop()
+    // transition doesn't fire one final logToWatchLog call after we've
+    // already torn down the TUI write paths.
+    if (telegramStateUnsub) {
+      telegramStateUnsub();
+      telegramStateUnsub = null;
+    }
+    // Stop the Telegram dispatcher if it was started. Race against a 2s
+    // timeout so a hung getUpdates abort cannot block exit. We don't
+    // process.exit() synchronously — give shutdown a chance to flush.
+    // The race is a safety net, not a kill: the dispatcher loop is
+    // supposed to unwind via AbortController within ~1s, and the timeout
+    // just keeps a misbehaving loop from blocking the TUI exit. If the
+    // loop somehow ignored the AbortSignal it will keep running until
+    // the process actually exits below — but the TUI gets out of the way.
+    const stopTelegram = telegramDispatcher
+      ? Promise.race([
+          telegramDispatcher.stop(),
+          new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+        ])
+      : Promise.resolve();
+    const stopOutbox = telegramOutbox
+      ? Promise.race([
+          telegramOutbox.stop(),
+          new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+        ])
+      : Promise.resolve();
+    // If the user hits Ctrl+C before the background boot resolves, race it
+    // out with a short timeout so the dashboard exits promptly even when
+    // the Telegram API is hung. After this race resolves the boot promise
+    // is "released" — any handlers it has chained will still run, but they
+    // won't block process exit because of the .finally(process.exit) below.
+    const finishBoot = Promise.race([
+      telegramBootPromise,
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+    // Flush layout save to disk before exiting, then release coordinator
+    Promise.all([
+      flushPendingSave().catch(() => { /* ignore write errors on exit */ }),
+      stopTelegram.catch(() => { /* ignore — already raced */ }),
+      stopOutbox.catch(() => { /* ignore — already raced */ }),
+      finishBoot.catch(() => { /* ignore — boot was best effort */ }),
+    ]).then(() => {
+      // Release coordinator ref — if last ref, kills the tmux session
+      // and pauses all per-repo coordinators
+      return releaseSystemCoordinator(pauseRepoCoordinators ? async () => {
+        // Pause all per-repo coordinators when last watcher exits
+        const agents = dashboard.watcher?.lastAgents ?? [];
+        const coordinators = agents.filter(a => a.meta.agentType === REPO_COORDINATOR_TYPE);
+        await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
+      } : undefined);
+    }).finally(() => {
+      process.exit(0);
+    });
+  };
+  process.on(BOUNCE_SIGNAL, () => quitDashboard(false));
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
-      // Re-enable stderr-bound warnings — TUI is going down.
-      setWatchRunning(false);
-      agentActions.killActiveDiffProc();
-      colorDetection.cleanup();
-      dashboard.stopPolling();
-      watcher.stop();
-      stopTerminal();
-      dashboard.setTerminalTitle("");
-      process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[2J\x1b[H");
-      // Unsubscribe the state-change listener before stopping so a stop()
-      // transition doesn't fire one final logToWatchLog call after we've
-      // already torn down the TUI write paths.
-      if (telegramStateUnsub) {
-        telegramStateUnsub();
-        telegramStateUnsub = null;
-      }
-      // Stop the Telegram dispatcher if it was started. Race against a 2s
-      // timeout so a hung getUpdates abort cannot block exit. We don't
-      // process.exit() synchronously — give shutdown a chance to flush.
-      // The race is a safety net, not a kill: the dispatcher loop is
-      // supposed to unwind via AbortController within ~1s, and the timeout
-      // just keeps a misbehaving loop from blocking the TUI exit. If the
-      // loop somehow ignored the AbortSignal it will keep running until
-      // the process actually exits below — but the TUI gets out of the way.
-      const stopTelegram = telegramDispatcher
-        ? Promise.race([
-            telegramDispatcher.stop(),
-            new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-          ])
-        : Promise.resolve();
-      const stopOutbox = telegramOutbox
-        ? Promise.race([
-            telegramOutbox.stop(),
-            new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-          ])
-        : Promise.resolve();
-      // If the user hits Ctrl+C before the background boot resolves, race it
-      // out with a short timeout so the dashboard exits promptly even when
-      // the Telegram API is hung. After this race resolves the boot promise
-      // is "released" — any handlers it has chained will still run, but they
-      // won't block process exit because of the .finally(process.exit) below.
-      const finishBoot = Promise.race([
-        telegramBootPromise,
-        new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-      ]);
-      // Flush layout save to disk before exiting, then release coordinator
-      Promise.all([
-        flushPendingSave().catch(() => { /* ignore write errors on exit */ }),
-        stopTelegram.catch(() => { /* ignore — already raced */ }),
-        stopOutbox.catch(() => { /* ignore — already raced */ }),
-        finishBoot.catch(() => { /* ignore — boot was best effort */ }),
-      ]).then(() => {
-        // Release coordinator ref — if last ref, kills the tmux session
-        // and pauses all per-repo coordinators
-        return releaseSystemCoordinator(async () => {
-          // Pause all per-repo coordinators when last watcher exits
-          const agents = dashboard.watcher?.lastAgents ?? [];
-          const coordinators = agents.filter(a => a.meta.agentType === REPO_COORDINATOR_TYPE);
-          await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
-        });
-      }).finally(() => {
-        process.exit(0);
-      });
+      quitDashboard(true);
       return undefined;
     }
     if (colorDetection.inputFilter(data)) return undefined;

@@ -1,6 +1,8 @@
 /** Restore terminal modes on normal exit and catchable termination signals.
  * Return the same idempotent cleanup for the dashboard's graceful Ctrl+C path.
- * Removing the listeners also lets a second signal terminate a slow shutdown.
+ * Removing the listeners also lets a second SIGTERM or SIGHUP terminate a slow
+ * shutdown. The dashboard ignores a second SIGINT during its shutdown, so that
+ * a second Ctrl-C cannot skip releasing the coordinator.
  */
 export function installTerminalCleanup(stop: () => void): () => void {
   let stopped = false;

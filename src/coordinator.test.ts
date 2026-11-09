@@ -3,6 +3,8 @@ import { join } from "path";
 import { mkdtemp, rm, readFile, readdir, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import {
+  BOUNCE_SIGNAL,
+  bounceWatch,
   IB_COORDINATOR_SESSION,
   COORDINATOR_REMOTE_CONTROL_NAME,
   buildSystemCoordinatorSettings,
@@ -1819,6 +1821,142 @@ describe("acquireSystemCoordinator / releaseSystemCoordinator", () => {
       resetWatchLogPath();
       await rm(logDir, { recursive: true, force: true });
     }
+  });
+});
+
+// -------------------------------------------------------------------
+// bounceWatch (`ib bounce`)
+// -------------------------------------------------------------------
+describe("bounceWatch", () => {
+  let tmpDir: string;
+  let signalled: [number, NodeJS.Signals | number][];
+  const markerPath = () => join(tmpDir, "coordinator-bounce.json");
+
+  // `ps` answers from this table: `-o pid=,command= -A` lists every process,
+  // `-o <field>= -p <pid>` reads one; other PIDs are gone.
+  function stubPs(processes: Record<number, { command: string; ppid?: number }>): void {
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      let value: string | undefined;
+      if (cmd[0] === "ps" && cmd.includes("-A")) {
+        value = Object.entries(processes).map(([pid, proc]) => `${pid.padStart(5)} ${proc.command}`).join("\n");
+      } else if (cmd[0] === "ps") {
+        const proc = processes[Number(cmd[cmd.length - 1])];
+        value = proc === undefined ? undefined : cmd[2] === "ppid=" ? String(proc.ppid ?? 1) : proc.command;
+      }
+      return {
+        stdout: mockStream(value === undefined ? "" : value + "\n"),
+        stderr: emptyStream(),
+        exited: Promise.resolve(value === undefined ? 1 : 0),
+      };
+    });
+  }
+  const BOUNCE_SH = { command: "/bin/bash ./bounce.sh" };
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "coord-bounce-"));
+    setCoordinatorHome(tmpDir);
+    const { killPidCtx } = await import("./agents");
+    signalled = [];
+    killPidCtx.set((pid, signal) => {
+      signalled.push([pid, signal]);
+      return true;
+    });
+  });
+
+  afterEach(async () => {
+    const { killPidCtx } = await import("./agents");
+    killPidCtx.reset();
+    coordinatorSpawnCtx.reset();
+    resetCoordinatorHome();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  // No coordinator.refs is written here: the dashboard's own `x` and /restart
+  // drop its refs entry, so bounceWatch must find ib watch without it.
+  test("sends BOUNCE_SIGNAL to the ib watch bounce.sh started and writes the marker", async () => {
+    stubPs({
+      111: { command: "./ib watch", ppid: 100 },
+      100: BOUNCE_SH,
+      333: { command: "/usr/bin/vim notes.txt" },
+      // An agent whose spawn prompt mentions ib watch is not a dashboard.
+      444: { command: "claude --session-id x --model opus run ./ib watch, then quit ib watch" },
+      555: { command: "/Users/me/itsybitsy/ib watchdog agent-1" },
+    });
+
+    const before = Date.now();
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pid 111");
+    expect(signalled).toEqual([[111, BOUNCE_SIGNAL]]);
+    const marker = await Bun.file(markerPath()).json();
+    expect(marker.bounced_at).toBeGreaterThanOrEqual(before);
+  });
+
+  test("fails without signalling or writing the marker when no ib watch is running", async () => {
+    stubPs({ 333: { command: "ib watchdog agent-1" }, 100: BOUNCE_SH });
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("ib watch is not running");
+    expect(signalled).toEqual([]);
+    expect(await Bun.file(markerPath()).exists()).toBe(false);
+  });
+
+  test("refuses when more than one ib watch is running", async () => {
+    stubPs({ 111: { command: "./ib watch", ppid: 100 }, 100: BOUNCE_SH, 222: { command: "/usr/local/bin/ib watch", ppid: 200 } });
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("needs exactly one ib watch, but 2 are running (pid 111, 222)");
+    expect(signalled).toEqual([]);
+    expect(await Bun.file(markerPath()).exists()).toBe(false);
+  });
+
+  test("refuses when bounce.sh did not start ib watch, since nothing would relaunch it", async () => {
+    stubPs({ 111: { command: "ib watch", ppid: 200 }, 200: { command: "-zsh" } });
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("ib watch (pid 111) was not started by bounce.sh");
+    expect(signalled).toEqual([]);
+    expect(await Bun.file(markerPath()).exists()).toBe(false);
+  });
+
+  test("removes the marker when ib watch could not be signalled", async () => {
+    stubPs({ 111: { command: "ib watch", ppid: 100 }, 100: BOUNCE_SH });
+    const { killPidCtx } = await import("./agents");
+    killPidCtx.set(() => false);
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Could not signal ib watch (pid 111)");
+    expect(await Bun.file(markerPath()).exists()).toBe(false);
+  });
+
+  // The signal is only half of the contract: without this handler, SIGUSR2
+  // kills ib watch outright, the coordinator is never restarted, and the
+  // marker stays behind.
+  test("ib watch quits on BOUNCE_SIGNAL without pausing per-repo coordinators; Ctrl+C still pauses them", async () => {
+    const source = await Bun.file(join(import.meta.dir, "tui", "dashboard.ts")).text();
+    expect(source).toContain("process.on(BOUNCE_SIGNAL, () => quitDashboard(false));");
+    expect(source).toContain("quitDashboard(true);");
+  });
+
+  // A second Ctrl-C during shutdown (natural under bounce.sh) must not kill
+  // ib watch before it releases the coordinator.
+  test("ib watch ignores SIGINT once quitDashboard has stopped the terminal", async () => {
+    const source = await Bun.file(join(import.meta.dir, "tui", "dashboard.ts")).text();
+    const body = source.slice(source.indexOf("const quitDashboard = "));
+    const stop = body.indexOf("stopTerminal();");
+    const ignore = body.indexOf('process.on("SIGINT", () => {});');
+    expect(stop).toBeGreaterThan(0);
+    expect(ignore).toBeGreaterThan(stop);
+    expect(ignore).toBeLessThan(body.indexOf("releaseSystemCoordinator("));
   });
 });
 

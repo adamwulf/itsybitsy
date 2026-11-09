@@ -38,13 +38,16 @@ Instead of copying the binary, you can add the project directory to your `PATH`.
 
 ```sh
 cd ~/code/myproject
-ib add                 # register this repo
-ib hooks install       # install the Claude Code safety hooks (recommended)
+ib add                      # register this repo
+ib hooks install            # install the safety hooks
+ib hooks intercept-install  # install the Task interception hook
 
 ib new-agent --type worker "Fix the flaky test in src/foo.test.ts"
 
-ib watch               # open the dashboard
+ib watch                    # open the dashboard
 ```
+
+Install both hook sets before you start. They are not installed for you. You can also install them from the dashboard with `h`; see [Hooks](#hooks).
 
 The spawn creates a worktree on branch `agent/<id>`, writes the prompt, and starts an interactive Claude Code session in a detached tmux session. From the dashboard (or the CLI) you can then:
 
@@ -210,14 +213,49 @@ Press `?` in the dashboard for this list.
 
 ## Hooks
 
-Claude Code hooks are the steering layer. Two installs affect **your own** Claude session, via `~/.claude/settings.json`:
+Claude Code hooks are how itsybitsy steers Claude. There are two groups: the hooks for **your own** Claude session, which you install once, and the hooks for **agent** sessions, which itsybitsy writes for you.
 
-- **Safety hooks** (`ib hooks install`) keep your primary Claude session out of agent worktrees and inject a brief agents-status summary into its context.
-- **The intercept hook** (`ib hooks intercept-install`) redirects Claude's built-in `Task` sub-agent tool to spawn real `ib` agents instead — so delegation lands in the same observable tmux + worktree world.
+### Your own Claude session: install both
 
-Each **agent's** hooks need no install step: they are written into the agent's `settings.local.json` at spawn, and enforce path isolation, report state changes, inject the agent-type instructions at session start, and gate sub-agent spawning.
+Enable both hook sets. Neither is installed automatically. Both are written to `~/.claude/settings.json`, so they apply to every Claude Code session you start, in every repo.
 
-`ib hooks status` / `ib hooks intercept-status` show what is installed; the matching `uninstall` commands remove it cleanly.
+| Hook set | What it does | Install with |
+|---|---|---|
+| **Safety hooks** | Stops your Claude from `cd`-ing into agent worktrees. Adds a summary of agent status to its context on each prompt, and after a `Bash` or `Task` call when the status has changed. At session start, tells it how to use `ib`. | `ib hooks install` |
+| **Task interception** | Makes Claude's built-in sub-agent tools (`Task`, `Agent`, `TaskCreate`) spawn real `ib` manager agents, so delegated work runs in its own tmux session and worktree where you can see it. Also denies `AskUserQuestion` (Claude is told to use `ib ask`) and `sleep` polling loops. | `ib hooks intercept-install` |
+
+**From the dashboard:**
+
+1. Register at least one repo (`ib add`, or `+` in the dashboard). Until a repo is registered, the dialog cannot install hooks.
+2. Run `ib watch` and press `h`. The setup dialog opens on its **Hooks** tab, which lists **Safety hooks** and **Task interception**: `[x]` installed, `[~]` partly installed, `[ ]` not installed.
+3. Select each row with `j`/`k` and press `Enter` to install it. Do this for both rows until both show `[x]`. (`Enter` on a row that is already installed uninstalls it.)
+4. Press `Esc` to close.
+
+**From the command line:**
+
+```sh
+ib hooks install            # safety hooks
+ib hooks intercept-install  # Task interception
+```
+
+Both commands are safe to run again: they only add what is missing.
+
+**Check that both are installed:**
+
+```sh
+ib hooks status             # prints: installed | partial | not-installed
+ib hooks intercept-status   # prints: installed | not-installed
+```
+
+`partial` means that some of the safety hooks are missing from `~/.claude/settings.json`, for example after a hand edit. Run `ib hooks install` again (or press `Enter` on the row) to add them back.
+
+After installing, start a new Claude session (or restart the ones that are open) so that it loads the hooks. The hooks call `ib` by name, so `ib` must stay on your `PATH`.
+
+To remove them, run `ib hooks uninstall` and `ib hooks intercept-uninstall`, or press `Enter` on an installed row in the `h` dialog. Only itsybitsy's entries are removed. Your other settings stay as they are.
+
+### Agent sessions: nothing to install
+
+Each agent's hooks are written into its `settings.local.json` when it is spawned. They enforce path isolation, report state changes, inject the agent-type instructions at session start, and gate sub-agent spawning.
 
 ## Slash commands
 

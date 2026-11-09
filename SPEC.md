@@ -2535,18 +2535,27 @@ Rules for the field:
 
 #### 15.5.1 Changing the Setting
 
-There is no toggle in the setup dialog or the settings list. To change it, edit `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md`, then restart the system coordinator, for example with `R` (a resume-based restart) or `/restart` in the coordinator chat box (a fresh restart; §4, §12.1). The value is read only at launch: it decides the `settings.local.json` contents and the launch line, so a running session keeps the mode it started with. Either restart applies the new value, because the fresh and the resume launch lines both carry the flag when it is on.
+There is no toggle in the setup dialog or the settings list. To change it, edit `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md`, then restart the system coordinator, for example with `R` (a resume-based restart) or `/restart` in the coordinator chat box (a fresh restart; §4, §12.1). The value is read only at launch: it decides the `settings.local.json` contents and the launch line, so a running session keeps the mode it started with, and the header indicator is yellow until a restart (§15.5.2). Either restart applies the new value, because the fresh and the resume launch lines both carry the flag when it is on.
 
 #### 15.5.2 Status Indicator
 
-**Not yet implemented.** The design:
+The `ib watch` top header shows a `● Remote Control` indicator between `● Collector` and `● Telegram`, with the same spacing and colors. It compares two inputs:
 
-Remote Control status is shown in two places (both visible when the system coordinator is selected, since the info panel is hidden per §12.1.4):
+- **Configured**: `system-coordinator.md` has `remoteControl: true` now. It is resolved with `loadAgentType()`, as the launch resolves it, so a layer that fails to load counts as not configured.
+- **Launched**: the coordinator's `~/.itsybitsy/.claude/settings.local.json` exists, parses to a JSON object, and does not contain `disableRemoteControl: true`. A missing or unreadable file counts as not launched. `ensureSystemCoordinator()` writes this file at every launch and does not rewrite it while the tmux session exists (§15.3.2), so it records how the running coordinator was launched.
 
-1. **Coordinator panel header** in the sidebar: `──── System Coordinator (remote) ────` when enabled, or the standard `──── System Coordinator ────` when disabled.
-2. **System dashboard header**: `"ib — agent dashboard (remote control enabled)"` when active.
+| Configured | Launched | Indicator | `?` help row (Status section, after Collector) |
+|------------|----------|-----------|------------------------------------------------|
+| no | no | hidden | none |
+| yes | yes | green | `on` |
+| yes | no | yellow | `turned on in system-coordinator.md; restart the coordinator (R) to apply` |
+| no | yes | yellow | `turned off in system-coordinator.md; still on until the coordinator restarts (R)` |
 
-The agent tree row for the system coordinator is unchanged — it already shows state and age, and adding a remote indicator would clutter the compact format.
+Yellow means a restart is needed to apply the change (§15.5.1). The help text is wrapped onto two rows to fit the help panel.
+
+Both files are read in process, never by spawning a process, once when `ib watch` starts and then on every 5-second tick of the timer that also refreshes the Collector light. Each tick reads both files again, so the first tick after a coordinator restart (`R`, `/restart`) shows the settings file that relaunch wrote. The header re-renders only when the light changes.
+
+The indicator does not show the live connection to claude.ai (connected or reconnecting), because Claude Code does not expose it outside the session. The sidebar's coordinator panel and the system coordinator's agent tree row have no Remote Control indicator.
 
 #### 15.5.3 Session Access Information
 
@@ -2627,10 +2636,11 @@ The Remote Control session lives as long as the system coordinator's tmux sessio
 |--------|------|
 | `src/agent-types.ts` | `remoteControl` frontmatter field on `AgentType` (leaf-only, `true` only for a literal `true`). `validateAllAgentTypes()` rejects it outside `system-coordinator.md` and rejects a non-boolean value there. |
 | `docs/agent-types/system-coordinator.md` | The embedded default declares `remoteControl: false`. |
-| `src/coordinator.ts` | `ensureSystemCoordinator()` loads the `system-coordinator` layer before `writeCoordinatorFiles(remoteControl)`, which writes `disableRemoteControl: true` unless the value is `true`. The fresh and resume launch lines add `--remote-control` with the shell-quoted `COORDINATOR_REMOTE_CONTROL_NAME` when it is `true`. |
+| `src/coordinator.ts` | `ensureSystemCoordinator()` loads the `system-coordinator` layer before `writeCoordinatorFiles(remoteControl)`, which writes `disableRemoteControl: true` into `systemCoordinatorSettingsPath()` unless the value is `true`. The fresh and resume launch lines add `--remote-control` with the shell-quoted `COORDINATOR_REMOTE_CONTROL_NAME` when it is `true`. |
 | `src/ib-commands.ts` | Writes `disableRemoteControl: true` into every other Claude `settings.local.json`: `buildAgentSettings()` (worktree and `--no-worktree` agents), the `coordinatorMode` branch of `newAgent()`, and the `repo-coordinator` branch of `ensureIsolatedClaudeSettings()`. |
-| `src/tui/dashboard.ts` | Not yet implemented: system dashboard header shows "(remote control enabled)" when active. |
-| `src/tui/sidebar.ts` | Not yet implemented: coordinator panel header shows "(remote)" suffix when Remote Control is enabled. |
+| `src/remote-control-light.ts` | `readRemoteControlStatus()` computes the header light from the configured and launched inputs (§15.5.2). `remoteControlDetail()` gives its help-panel text. |
+| `src/tui/dashboard.ts` | Draws the `● Remote Control` header indicator. `refreshRemoteControlStatus()` runs at startup and on every 5-second `statusLightTimer` tick. `setRemoteControlStatus()` re-renders only when the light changes. |
+| `src/tui/agent-actions.ts` | `handleHelp()` adds the Remote Control row to the help panel's Status section while the indicator is shown. |
 | `src/health-check.ts` | Not yet implemented: remote control prerequisite check (version, §15.7). |
 
 ### 15.10 Limitations and Future Work

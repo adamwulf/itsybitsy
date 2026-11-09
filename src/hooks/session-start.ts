@@ -4,7 +4,7 @@ import * as runtimeNames from "../runtime-names";
  */
 
 import { join, basename } from "path";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
 import { loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE, isCoordinatorType } from "../coordinator-type-names";
@@ -732,9 +732,16 @@ function recordCoordinatorSessionId(data: Record<string, unknown>): void {
  * to quit (`bounceWatch` in src/coordinator.ts). Returns a note that tells
  * the system coordinator it was bounced, or "" when there is no usable
  * marker. Deleting the marker makes the note one-shot: only the first session
- * start after a bounce carries it.
+ * start after a bounce carries it. A compact or `/clear` inside a running
+ * session is not the restart a bounce causes, so it leaves the marker alone.
+ *
+ * The note also says whether the `ib` running this hook (the one on PATH) was
+ * built after the bounce. It was not when the build failed, or when PATH's
+ * `ib` is not the `./ib` that bounce.sh builds; either way, merged ib work is
+ * not live.
  */
-function consumeBounceNote(): string {
+function consumeBounceNote(source: unknown): string {
+  if (source === "compact" || source === "clear") return "";
   const path = join(systemCoordinatorHome(), "coordinator-bounce.json");
   let bouncedAt: unknown;
   try {
@@ -748,7 +755,16 @@ function consumeBounceNote(): string {
     /* swallow — a leftover marker must never affect the hook */
   }
   if (typeof bouncedAt !== "number" || !Number.isFinite(bouncedAt)) return "";
-  return `\n\nib watch was bounced at ${new Date(bouncedAt).toISOString()}: \`ib bounce\` asked it to quit, which stopped this session, and the relaunched ib watch started it again. If the conversation above ends with that \`ib bounce\` call, the turn was cut off there.`;
+  let rebuilt = false;
+  try {
+    rebuilt = statSync(process.execPath).mtimeMs >= bouncedAt;
+  } catch {
+    /* unknown — report it as not rebuilt */
+  }
+  const build = rebuilt
+    ? "bounce.sh rebuilt ib and relaunched ib watch, which started this session again."
+    : `the relaunched ib watch started this session again, but the ib on PATH (${process.execPath}) was not rebuilt after the bounce, so ib changes merged before it are not live: the build failed, or that ib is not the ./ib bounce.sh builds. Tell the user.`;
+  return `\n\nib watch was bounced at ${new Date(bouncedAt).toISOString()}: \`ib bounce\` asked it to quit, which stopped this session; ${build} If the conversation above ends with that \`ib bounce\` call, the turn was cut off there.`;
 }
 
 /**
@@ -841,7 +857,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
     const output = {
       hookSpecificOutput: {
         hookEventName: "SessionStart",
-        additionalContext: instructions + consumeBounceNote(),
+        additionalContext: instructions + consumeBounceNote(data.source),
       },
     };
     process.stdout.write(JSON.stringify(output));

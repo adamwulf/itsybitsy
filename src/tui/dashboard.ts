@@ -3955,10 +3955,12 @@ export async function launchDashboard(): Promise<void> {
     typePickerKeyboard.stop();
     tui.stop();
   });
-  // Ctrl+C and `ib bounce` (BOUNCE_SIGNAL) both quit through here. The flag
-  // keeps a signal that arrives during shutdown from starting a second one.
+  // Ctrl+C and `ib bounce` (BOUNCE_SIGNAL) both quit through here. bounce.sh
+  // relaunches ib watch within seconds, so a bounce leaves per-repo
+  // coordinators running instead of pausing them. The flag keeps a signal
+  // that arrives during shutdown from starting a second one.
   let quitting = false;
-  const quitDashboard = (): void => {
+  const quitDashboard = (pauseRepoCoordinators: boolean): void => {
     if (quitting) return;
     quitting = true;
     // Re-enable stderr-bound warnings — TUI is going down.
@@ -4015,20 +4017,20 @@ export async function launchDashboard(): Promise<void> {
     ]).then(() => {
       // Release coordinator ref — if last ref, kills the tmux session
       // and pauses all per-repo coordinators
-      return releaseSystemCoordinator(async () => {
+      return releaseSystemCoordinator(pauseRepoCoordinators ? async () => {
         // Pause all per-repo coordinators when last watcher exits
         const agents = dashboard.watcher?.lastAgents ?? [];
         const coordinators = agents.filter(a => a.meta.agentType === REPO_COORDINATOR_TYPE);
         await Promise.all(coordinators.map(a => pauseAgent(a).catch(() => {})));
-      });
+      } : undefined);
     }).finally(() => {
       process.exit(0);
     });
   };
-  process.on(BOUNCE_SIGNAL, quitDashboard);
+  process.on(BOUNCE_SIGNAL, () => quitDashboard(false));
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
-      quitDashboard();
+      quitDashboard(true);
       return undefined;
     }
     if (colorDetection.inputFilter(data)) return undefined;

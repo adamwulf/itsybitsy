@@ -1832,17 +1832,19 @@ describe("bounceWatch", () => {
   let signalled: [number, NodeJS.Signals | number][];
   const markerPath = () => join(tmpDir, "coordinator-bounce.json");
 
-  // `ps -o command= -p <pid>` answers from this table; other PIDs are gone.
-  function stubPs(commands: Record<number, string>): void {
+  // `ps -o <field>= -p <pid>` answers from this table; other PIDs are gone.
+  function stubPs(processes: Record<number, { command: string; ppid?: number }>): void {
     coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
-      const command = cmd[0] === "ps" ? commands[Number(cmd[cmd.length - 1])] : undefined;
+      const proc = cmd[0] === "ps" ? processes[Number(cmd[cmd.length - 1])] : undefined;
+      const value = proc === undefined ? undefined : cmd[2] === "ppid=" ? String(proc.ppid ?? 1) : proc.command;
       return {
-        stdout: mockStream(command === undefined ? "" : command + "\n"),
+        stdout: mockStream(value === undefined ? "" : value + "\n"),
         stderr: emptyStream(),
-        exited: Promise.resolve(command === undefined ? 1 : 0),
+        exited: Promise.resolve(value === undefined ? 1 : 0),
       };
     });
   }
+  const BOUNCE_SH = { command: "/bin/bash ./bounce.sh" };
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "coord-bounce-"));
@@ -1867,23 +1869,23 @@ describe("bounceWatch", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  test("sends BOUNCE_SIGNAL to each ib watch in coordinator.refs and writes the marker", async () => {
-    await Bun.write(join(tmpDir, "coordinator.refs"), "111\n222\n");
-    stubPs({ 111: "./ib watch", 222: "/usr/local/bin/ib watch" });
+  test("sends BOUNCE_SIGNAL to the ib watch bounce.sh started and writes the marker", async () => {
+    await Bun.write(join(tmpDir, "coordinator.refs"), "111\n");
+    stubPs({ 111: { command: "./ib watch", ppid: 100 }, 100: BOUNCE_SH });
 
     const before = Date.now();
     const result = await bounceWatch();
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("111, 222");
-    expect(signalled).toEqual([[111, BOUNCE_SIGNAL], [222, BOUNCE_SIGNAL]]);
+    expect(result.stdout).toContain("pid 111");
+    expect(signalled).toEqual([[111, BOUNCE_SIGNAL]]);
     const marker = await Bun.file(markerPath()).json();
     expect(marker.bounced_at).toBeGreaterThanOrEqual(before);
   });
 
   test("skips a refs PID that ps no longer shows as ib watch", async () => {
     await Bun.write(join(tmpDir, "coordinator.refs"), "111\n333\n");
-    stubPs({ 111: "ib watch", 333: "/usr/bin/vim notes.txt" });
+    stubPs({ 111: { command: "ib watch", ppid: 100 }, 100: BOUNCE_SH, 333: { command: "/usr/bin/vim notes.txt" } });
 
     const result = await bounceWatch();
 
@@ -1893,7 +1895,7 @@ describe("bounceWatch", () => {
 
   test("fails without signalling or writing the marker when no ib watch is running", async () => {
     await Bun.write(join(tmpDir, "coordinator.refs"), "333\n444\n");
-    stubPs({ 333: "ib watchdog agent-1" });
+    stubPs({ 333: { command: "ib watchdog agent-1" } });
 
     const result = await bounceWatch();
 
@@ -1903,9 +1905,33 @@ describe("bounceWatch", () => {
     expect(await Bun.file(markerPath()).exists()).toBe(false);
   });
 
-  test("removes the marker when no watcher could be signalled", async () => {
+  test("refuses when more than one ib watch is running", async () => {
+    await Bun.write(join(tmpDir, "coordinator.refs"), "111\n222\n");
+    stubPs({ 111: { command: "./ib watch", ppid: 100 }, 100: BOUNCE_SH, 222: { command: "ib watch", ppid: 200 } });
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("needs exactly one ib watch, but 2 are running (pid 111, 222)");
+    expect(signalled).toEqual([]);
+    expect(await Bun.file(markerPath()).exists()).toBe(false);
+  });
+
+  test("refuses when bounce.sh did not start ib watch, since nothing would relaunch it", async () => {
     await Bun.write(join(tmpDir, "coordinator.refs"), "111\n");
-    stubPs({ 111: "ib watch" });
+    stubPs({ 111: { command: "ib watch", ppid: 200 }, 200: { command: "-zsh" } });
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("ib watch (pid 111) was not started by bounce.sh");
+    expect(signalled).toEqual([]);
+    expect(await Bun.file(markerPath()).exists()).toBe(false);
+  });
+
+  test("removes the marker when ib watch could not be signalled", async () => {
+    await Bun.write(join(tmpDir, "coordinator.refs"), "111\n");
+    stubPs({ 111: { command: "ib watch", ppid: 100 }, 100: BOUNCE_SH });
     const { killPidCtx } = await import("./agents");
     killPidCtx.set(() => false);
 
@@ -1914,6 +1940,14 @@ describe("bounceWatch", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Could not signal ib watch (pid 111)");
     expect(await Bun.file(markerPath()).exists()).toBe(false);
+  });
+
+  // The signal is only half of the contract: without this handler, SIGUSR2
+  // kills ib watch outright, the coordinator is never restarted, and the
+  // marker stays behind.
+  test("ib watch quits on BOUNCE_SIGNAL without pausing per-repo coordinators", async () => {
+    const source = await Bun.file(join(import.meta.dir, "tui", "dashboard.ts")).text();
+    expect(source).toContain("process.on(BOUNCE_SIGNAL, () => quitDashboard(false));");
   });
 });
 

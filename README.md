@@ -304,4 +304,6 @@ bun run build          # rebuild the `ib` binary
 
 After rebuilding, confirm the binary dispatches: `ib list-types` should print a table.
 
-`./bounce.sh` runs `./build.sh` and then `./ib watch` in a loop: each time `ib watch` quits, it counts down 5 seconds, rebuilds, and relaunches, so merged ib work takes effect on the next quit. Press Ctrl-C during the countdown to stop the loop. The system coordinator can start a bounce itself with `ib bounce`, which quits `ib watch`; the relaunched `ib watch` resumes the coordinator's session and tells it when the bounce happened.
+`./bounce.sh` runs `./build.sh` and then `./ib watch` in a loop: each time `ib watch` quits, it counts down 5 seconds, rebuilds, and relaunches. Press Ctrl-C during the countdown to stop the loop. It rebuilds only this checkout's `./ib`, so merged ib work reaches hooks and agents only when the `ib` on your `PATH` is that file: add the project directory to `PATH` (or symlink `ib` to it) rather than copying the binary to `/usr/local/bin`.
+
+The system coordinator can start a bounce itself with `ib bounce`, which quits `ib watch`; the relaunched `ib watch` resumes the coordinator's session and tells it when the bounce happened, and whether `ib` was rebuilt. `ib bounce` refuses unless exactly one `ib watch` is running and `bounce.sh` started it. A bounce leaves per-repo coordinators running.

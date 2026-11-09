@@ -1151,43 +1151,61 @@ export async function releaseSystemCoordinator(
 /** The signal `ib bounce` sends to make a running `ib watch` quit the way Ctrl+C does. */
 export const BOUNCE_SIGNAL = "SIGUSR2";
 
+/** True when a `ps` command line is the bash process running bounce.sh. */
+function isBounceScriptProcess(command: string): boolean {
+  return /(?:^|[\s/])bounce\.sh(?:\s|$)/.test(command);
+}
+
 /**
- * `ib bounce`: ask every running `ib watch` to quit the way Ctrl+C does. The
- * last one to quit stops the system coordinator as usual, and the next
- * `ib watch` resumes its newest transcript; under bounce.sh that next
- * `ib watch` is a fresh build. Writes `coordinator-bounce.json` first so the
- * resumed session's SessionStart hook can tell the coordinator it was bounced.
+ * `ib bounce`: ask the running `ib watch` to quit the way Ctrl+C does, so
+ * bounce.sh rebuilds ib and relaunches it. Quitting stops the system
+ * coordinator as usual, and the relaunched `ib watch` resumes its newest
+ * transcript. Writes `coordinator-bounce.json` first so the resumed session's
+ * SessionStart hook can tell the coordinator it was bounced.
  *
- * The watchers come from coordinator.refs, but a PID is signalled only while
- * `ps` still shows it as `ib watch`: the refs file keeps the PID of a watcher
- * that died without releasing it, and SIGUSR2 terminates a process that does
- * not handle it.
+ * The watchers come from coordinator.refs, but a PID counts only while `ps`
+ * still shows it as `ib watch`: the refs file keeps the PID of a watcher that
+ * died without releasing it, and SIGUSR2 terminates a process that does not
+ * handle it. Refuses unless there is exactly one watcher and bounce.sh is its
+ * parent. Two watchers releasing coordinator.refs at once can each write back
+ * the other's PID, so neither stops the coordinator and the bounce never
+ * restarts it. And nothing relaunches an `ib watch` that bounce.sh did not
+ * start, so a bounce would leave it, the coordinator and Telegram down.
  */
 export async function bounceWatch(): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
+  const refuse = (stderr: string) => ({ ok: false, exitCode: 1, stdout: "", stderr });
+  const ps = async (field: string, pid: number): Promise<string> => {
+    const result = await coordinatorSpawnCtx.run(["ps", "-o", `${field}=`, "-p", String(pid)]);
+    return result.exitCode === 0 ? result.stdout.trim() : "";
+  };
   // Dynamic: state-command imports this module.
   const { isIbWatchProcess } = await import("./state-command");
   const watchers: number[] = [];
   for (const pid of await readLivePids()) {
-    const ps = await coordinatorSpawnCtx.run(["ps", "-o", "command=", "-p", String(pid)]);
-    if (ps.exitCode === 0 && isIbWatchProcess(ps.stdout.trim())) watchers.push(pid);
+    if (isIbWatchProcess(await ps("command", pid))) watchers.push(pid);
   }
-  if (watchers.length === 0) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: "ib watch is not running" };
+  if (watchers.length === 0) return refuse("ib watch is not running");
+  if (watchers.length > 1) {
+    return refuse(`ib bounce needs exactly one ib watch, but ${watchers.length} are running (pid ${watchers.join(", ")}). Quit the others first.`);
+  }
+  const pid = watchers[0]!;
+  const parent = parseInt(await ps("ppid", pid), 10);
+  if (!Number.isInteger(parent) || !isBounceScriptProcess(await ps("command", parent))) {
+    return refuse(`ib watch (pid ${pid}) was not started by bounce.sh, so nothing would relaunch it. Start ib watch with ./bounce.sh to use ib bounce.`);
   }
 
   await Bun.write(bounceMarkerPath(), JSON.stringify({ bounced_at: Date.now() }));
-  const signalled = watchers.filter((pid) => killPidCtx.fn(pid, BOUNCE_SIGNAL));
-  if (signalled.length === 0) {
+  if (!killPidCtx.fn(pid, BOUNCE_SIGNAL)) {
     const { rm } = await import("fs/promises");
     await rm(bounceMarkerPath(), { force: true });
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Could not signal ib watch (pid ${watchers.join(", ")})` };
+    return refuse(`Could not signal ib watch (pid ${pid})`);
   }
   return {
     ok: true,
     exitCode: 0,
     stdout:
-      `Asked ib watch (pid ${signalled.join(", ")}) to quit. Quitting stops the system coordinator. ` +
-      `If bounce.sh is running ib watch, it rebuilds ib and relaunches ib watch, which resumes the coordinator.`,
+      `Asked ib watch (pid ${pid}) to quit. That stops the system coordinator; bounce.sh then rebuilds ib ` +
+      `and relaunches ib watch, which resumes it. Per-repo coordinators keep running.`,
     stderr: "",
   };
 }

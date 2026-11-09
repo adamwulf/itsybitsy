@@ -1157,6 +1157,15 @@ function isBounceScriptProcess(command: string): boolean {
 }
 
 /**
+ * True when a `ps` command line runs an `ib` binary as `ib watch`. Anchored
+ * at the start: an agent's claude process carries its whole spawn prompt in
+ * argv, and a prompt that mentions "ib watch" must not count as a dashboard.
+ */
+function isIbWatchCommand(command: string): boolean {
+  return /^(?:\S*\/)?ib\s+watch(?:\s|$)/.test(command);
+}
+
+/**
  * `ib bounce`: ask the running `ib watch` to quit the way Ctrl+C does, so
  * bounce.sh rebuilds ib and relaunches it. Quitting stops the system
  * coordinator as usual, and the relaunched `ib watch` resumes its newest
@@ -1179,10 +1188,10 @@ export async function bounceWatch(): Promise<{ ok: boolean; exitCode: number; st
     return result.exitCode === 0 ? result.stdout.trim() : "";
   };
   // Dynamic: state-command imports this module.
-  const { isIbWatchProcess, parsePsLines } = await import("./state-command");
+  const { parsePsLines } = await import("./state-command");
   const table = await coordinatorSpawnCtx.run(["ps", "-o", "pid=,command=", "-A"]);
   const watchers = (table.exitCode === 0 ? parsePsLines(table.stdout) : [])
-    .filter((proc) => isIbWatchProcess(proc.command))
+    .filter((proc) => isIbWatchCommand(proc.command))
     .map((proc) => proc.pid);
   if (watchers.length === 0) return refuse("ib watch is not running");
   if (watchers.length > 1) {

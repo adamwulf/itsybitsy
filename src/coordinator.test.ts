@@ -1874,7 +1874,14 @@ describe("bounceWatch", () => {
   // No coordinator.refs is written here: the dashboard's own `x` and /restart
   // drop its refs entry, so bounceWatch must find ib watch without it.
   test("sends BOUNCE_SIGNAL to the ib watch bounce.sh started and writes the marker", async () => {
-    stubPs({ 111: { command: "./ib watch", ppid: 100 }, 100: BOUNCE_SH, 333: { command: "/usr/bin/vim notes.txt" } });
+    stubPs({
+      111: { command: "./ib watch", ppid: 100 },
+      100: BOUNCE_SH,
+      333: { command: "/usr/bin/vim notes.txt" },
+      // An agent whose spawn prompt mentions ib watch is not a dashboard.
+      444: { command: "claude --session-id x --model opus run ./ib watch, then quit ib watch" },
+      555: { command: "/Users/me/itsybitsy/ib watchdog agent-1" },
+    });
 
     const before = Date.now();
     const result = await bounceWatch();
@@ -1898,7 +1905,7 @@ describe("bounceWatch", () => {
   });
 
   test("refuses when more than one ib watch is running", async () => {
-    stubPs({ 111: { command: "./ib watch", ppid: 100 }, 100: BOUNCE_SH, 222: { command: "ib watch", ppid: 200 } });
+    stubPs({ 111: { command: "./ib watch", ppid: 100 }, 100: BOUNCE_SH, 222: { command: "/usr/local/bin/ib watch", ppid: 200 } });
 
     const result = await bounceWatch();
 
@@ -1938,6 +1945,18 @@ describe("bounceWatch", () => {
     const source = await Bun.file(join(import.meta.dir, "tui", "dashboard.ts")).text();
     expect(source).toContain("process.on(BOUNCE_SIGNAL, () => quitDashboard(false));");
     expect(source).toContain("quitDashboard(true);");
+  });
+
+  // A second Ctrl-C during shutdown (natural under bounce.sh) must not kill
+  // ib watch before it releases the coordinator.
+  test("ib watch ignores SIGINT once quitDashboard has stopped the terminal", async () => {
+    const source = await Bun.file(join(import.meta.dir, "tui", "dashboard.ts")).text();
+    const body = source.slice(source.indexOf("const quitDashboard = "));
+    const stop = body.indexOf("stopTerminal();");
+    const ignore = body.indexOf('process.on("SIGINT", () => {});');
+    expect(stop).toBeGreaterThan(0);
+    expect(ignore).toBeGreaterThan(stop);
+    expect(ignore).toBeLessThan(body.indexOf("releaseSystemCoordinator("));
   });
 });
 

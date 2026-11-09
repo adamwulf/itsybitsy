@@ -96,6 +96,7 @@ import { getResolvableWarnings } from "../health-check";
 import { logToWatchLog, logWarning, setWatchRunning } from "../watch-log";
 import { sandboxCollectorHealth, type CollectorHealth } from "../sandbox-collector-light";
 import { SANDBOX_DENIAL_COLLECTOR_ENABLED } from "../sandbox-log-launch";
+import { readRemoteControlStatus, type RemoteControlStatus, type RemoteControlStatusOptions } from "../remote-control-light";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -787,7 +788,12 @@ export class DashboardComponent implements Component {
   telegramStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** Latest shared sandbox denial collector probe (top bar + help panel). */
   collectorStatus: CollectorHealth | null = null;
-  collectorStatusTimer: ReturnType<typeof setInterval> | null = null;
+  /** Latest system coordinator Remote Control probe (top bar + help panel). */
+  remoteControlStatus: RemoteControlStatus | null = null;
+  /** In-flight guard so a slow agent-type read never stacks up behind itself. */
+  private remoteControlInFlight = false;
+  /** The 5s tick that refreshes the Collector and Remote Control lights. */
+  statusLightTimer: ReturnType<typeof setInterval> | null = null;
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
   private _pendingActions: Set<Promise<void>> = new Set();
   pendingSelectNewestInRepo: string | null = null;
@@ -1286,9 +1292,9 @@ export class DashboardComponent implements Component {
       clearInterval(this.telegramStatusTimer);
       this.telegramStatusTimer = null;
     }
-    if (this.collectorStatusTimer) {
-      clearInterval(this.collectorStatusTimer);
-      this.collectorStatusTimer = null;
+    if (this.statusLightTimer) {
+      clearInterval(this.statusLightTimer);
+      this.statusLightTimer = null;
     }
     // Watchdog runs as standalone process — do NOT stop it when TUI closes
   }
@@ -1598,6 +1604,30 @@ export class DashboardComponent implements Component {
     const changed = this.collectorStatus?.light !== status.light;
     this.collectorStatus = status;
     if (changed) this.tui?.requestRender();
+  }
+
+  setRemoteControlStatus(status: RemoteControlStatus): void {
+    // The 5s probe re-sends the same light; only a new color, or the indicator
+    // appearing or disappearing, needs a render. Before the first probe the
+    // indicator is hidden, the same as a hidden light.
+    const changed = (this.remoteControlStatus?.light ?? null) !== status.light;
+    this.remoteControlStatus = status;
+    if (changed) this.tui?.requestRender();
+  }
+
+  /** Re-read the Remote Control light (src/remote-control-light.ts) and apply
+   *  it. Every call reads the files again, so the tick after a coordinator
+   *  restart shows the settings file that relaunch wrote. `opts` is a test seam. */
+  async refreshRemoteControlStatus(opts?: RemoteControlStatusOptions): Promise<void> {
+    if (this.remoteControlInFlight) return;
+    this.remoteControlInFlight = true;
+    let status: RemoteControlStatus;
+    try {
+      status = await readRemoteControlStatus(opts);
+    } finally {
+      this.remoteControlInFlight = false;
+    }
+    this.setRemoteControlStatus(status);
   }
 
   /** Add an error to the errors list (called from watcher onError).
@@ -3195,6 +3225,12 @@ export class DashboardComponent implements Component {
         ? `${DIM_GRAY}●${RESET} ${DIM}Collector${RESET}`
         : `${light === "green" ? GREEN : light === "yellow" ? YELLOW : RED}●${RESET} Collector`);
     }
+    if (this.remoteControlStatus?.light) {
+      // System coordinator Remote Control (src/remote-control-light.ts): green
+      // when on, yellow when system-coordinator.md and the running coordinator
+      // disagree until a restart, hidden when both are off.
+      indicators.push(`${this.remoteControlStatus.light === "green" ? GREEN : YELLOW}●${RESET} Remote Control`);
+    }
     if (this.telegramStatus) {
       const tgColor =
         this.telegramStatus === "green" ? GREEN
@@ -3758,16 +3794,22 @@ export async function launchDashboard(): Promise<void> {
       }
     }, 5_000);
   }
-  // Shared sandbox denial collector stoplight: in-process lock probes and a
-  // heartbeat read (src/sandbox-collector-light.ts), never a spawned
-  // `ib sandbox-collector status`. While collection is switched off in this
-  // build nothing can change, so it stays grey with no timer.
+  // Top-bar status lights, both read in process, never by spawning:
+  // - the shared sandbox denial collector: lock probes and a heartbeat read
+  //   (src/sandbox-collector-light.ts), not `ib sandbox-collector status`.
+  //   While collection is switched off in this build nothing can change, so it
+  //   stays grey and the tick skips it.
+  // - the system coordinator's Remote Control: system-coordinator.md and the
+  //   coordinator's settings.local.json (src/remote-control-light.ts), re-read
+  //   every tick so a coordinator restart shows on the next one.
   dashboard.setCollectorStatus(sandboxCollectorHealth());
-  if (SANDBOX_DENIAL_COLLECTOR_ENABLED) {
-    dashboard.collectorStatusTimer = setInterval(() => {
+  void dashboard.refreshRemoteControlStatus();
+  dashboard.statusLightTimer = setInterval(() => {
+    if (SANDBOX_DENIAL_COLLECTOR_ENABLED) {
       dashboard.setCollectorStatus(sandboxCollectorHealth({ previous: dashboard.collectorStatus }));
-    }, 5_000);
-  }
+    }
+    void dashboard.refreshRemoteControlStatus();
+  }, 5_000);
   tui.addChild(dashboard);
 
   const watcher = new AgentWatcher(repos, {

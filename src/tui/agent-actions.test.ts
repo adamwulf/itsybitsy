@@ -1056,6 +1056,42 @@ describe("handleHelp", () => {
     expect(lines[1]).toContain("Collector");
     expect(lines[1]).toContain("ok: pid 4242, heartbeat 2s ago, 1 launch");
   });
+
+  test("help shows a Remote Control row next to Collector only while its light is shown", () => {
+    const { ctx, dialogs } = makeMockCtx();
+    const helpLines = () => {
+      handleHelp(ctx);
+      return assertDialog(dialogs[dialogs.length - 1]!, "help").lines.map(stripAnsi);
+    };
+
+    ctx.remoteControlStatus = { light: null, state: "off" };
+    expect(helpLines().join("\n")).not.toContain("Remote Control");
+
+    // Without a Collector probe the Status section still opens the panel.
+    ctx.remoteControlStatus = { light: "green", state: "on" };
+    let lines = helpLines();
+    expect(lines[0]).toBe("Status");
+    expect(lines[1]).toBe(`  ${"Remote Control".padEnd(18)}on`);
+    expect(lines[2]).toBe("");
+
+    ctx.collectorStatus = { light: "green", state: "ok", pid: 4242, heartbeatAgeMs: 2000, launches: 1 };
+    ctx.remoteControlStatus = { light: "yellow", state: "pending-on" };
+    lines = helpLines();
+    expect(lines.slice(0, 5)).toEqual([
+      "Status",
+      `  ${"Collector".padEnd(18)}ok: pid 4242, heartbeat 2s ago, 1 launch`,
+      `  ${"Remote Control".padEnd(18)}turned on in system-coordinator.md;`,
+      `  ${"".padEnd(18)}restart the coordinator (R) to apply`,
+      "",
+    ]);
+
+    ctx.remoteControlStatus = { light: "yellow", state: "pending-off" };
+    lines = helpLines();
+    expect(lines.slice(2, 4)).toEqual([
+      `  ${"Remote Control".padEnd(18)}turned off in system-coordinator.md;`,
+      `  ${"".padEnd(18)}still on until the coordinator restarts (R)`,
+    ]);
+  });
 });
 
 describe("handleFuzzyAgent nickname search", () => {

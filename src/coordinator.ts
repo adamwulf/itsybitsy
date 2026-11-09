@@ -86,6 +86,18 @@ export function getCoordinatorHome(): string {
   return itsybitsyHome();
 }
 
+/**
+ * The system coordinator's Claude settings file,
+ * `~/.itsybitsy/.claude/settings.local.json`. Written at every launch by
+ * `writeCoordinatorFiles()` and left alone while the session is alive, so it
+ * records how the running coordinator was launched. The `ib watch` Remote
+ * Control light reads it (src/remote-control-light.ts). Honors the test
+ * override set via `setCoordinatorHome`.
+ */
+export function systemCoordinatorSettingsPath(): string {
+  return join(itsybitsyHome(), ".claude", "settings.local.json");
+}
+
 function refsPath(): string {
   return join(itsybitsyHome(), "coordinator.refs");
 }
@@ -772,9 +784,8 @@ async function writeCoordinatorFiles(remoteControl: boolean): Promise<void> {
   const { mkdir } = await import("fs/promises");
 
   // Write .claude/settings.local.json
-  const claudeDir = join(home, ".claude");
-  await mkdir(claudeDir, { recursive: true });
-  const settingsPath = join(claudeDir, "settings.local.json");
+  const settingsPath = systemCoordinatorSettingsPath();
+  await mkdir(dirname(settingsPath), { recursive: true });
   const baseSettings = await buildSystemCoordinatorSettings();
   // The literal "@system" appears in the hook command strings on purpose: the
   // settings file is consumed by Claude Code (which invokes these as

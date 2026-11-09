@@ -61,6 +61,7 @@ import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, re
 import { isValidToolList } from "../validation";
 import { listTeams, getTeam } from "../teams";
 import { collectorHealthDetail, type CollectorHealth } from "../sandbox-collector-light";
+import { remoteControlDetail, type RemoteControlStatus } from "../remote-control-light";
 
 const SCROLL_STEP = 10;
 
@@ -284,6 +285,8 @@ export interface ActionCtx {
   onConfigChange?: (key: string, value: unknown) => void;
   /** Latest shared sandbox denial collector probe; the help panel shows it. */
   collectorStatus?: CollectorHealth | null;
+  /** Latest system coordinator Remote Control probe; the help panel shows it. */
+  remoteControlStatus?: RemoteControlStatus | null;
   pendingSelectNewestInRepo: string | null;
   showDialog(dialog: NonNullable<DialogState>): void;
   closeDialog(): void;
@@ -2131,13 +2134,19 @@ export function handleHelp(ctx: ActionCtx) {
   const kw = 18;
   const row = (key: string, desc: string) => `  ${BOLD}${pad(key, kw)}${RESET}${desc}`;
   const header = (title: string) => `${BOLD}${title}${RESET}`;
+  // The top-bar lights' details, first so a short terminal never clips them.
+  // Remote Control has a row only while its indicator is shown; a long detail
+  // continues on rows with an empty key.
+  const statusRows = [
+    ...(ctx.collectorStatus ? [row("Collector", collectorHealthDetail(ctx.collectorStatus))] : []),
+    ...(ctx.remoteControlStatus
+      ? remoteControlDetail(ctx.remoteControlStatus).map((line, i) => row(i === 0 ? "Remote Control" : "", line))
+      : []),
+  ];
   ctx.showDialog({
     type: "help",
     lines: [
-      // The top-bar Collector light's details, first so a short terminal never clips them.
-      ...(ctx.collectorStatus
-        ? [header("Status"), row("Collector", collectorHealthDetail(ctx.collectorStatus)), ""]
-        : []),
+      ...(statusRows.length > 0 ? [header("Status"), ...statusRows, ""] : []),
       header("Navigation"),
       row("j / k / ↑↓", "select agent"),
       row("1 / 2 / 3", "switch sidebar (Agents / Teams / Favorites)"),

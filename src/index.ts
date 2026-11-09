@@ -493,6 +493,11 @@ const COMMAND_HELP: Record<string, string> = {
   watch:
     "Usage: ib watch\n" +
     "  Launch the interactive TUI dashboard. Requires tmux.",
+  bounce:
+    "Usage: ib bounce\n" +
+    "  Ask every running ib watch to quit the way Ctrl+C does. Under bounce.sh,\n" +
+    "  ib is rebuilt and ib watch relaunches; the system coordinator is stopped\n" +
+    "  and then resumed, and its next session is told it was bounced.",
   watchdog:
     "Usage: ib watchdog <agent-id>\n" +
     "  Run the per-agent watchdog loop for an agent. Internal — used by the\n" +
@@ -969,6 +974,13 @@ function printUsage(): void {
   console.log("  tgreact <emoji>     React to the latest Telegram message (--message-id <id>, --clear)");
   console.log("  tgsendfile <path>   Send a local file to Telegram (--photo | --document, default document)");
   console.log("  tgtyping            Send Telegram typing indicator (for hook use)");
+  // `ib bounce` restarts everyone's dashboard, so only the system
+  // coordinator's help lists it (the PreToolUse hook denies it to other agents).
+  if (resolveAgentFromCwd(process.cwd())?.agentId === SYSTEM_AGENT_ID) {
+    console.log("");
+    console.log("System coordinator:");
+    console.log("  bounce              Quit ib watch so bounce.sh rebuilds and relaunches it; resumes this session");
+  }
 }
 
 type IbCommands = typeof import("./ib-commands");
@@ -1629,6 +1641,11 @@ export async function main() {
       }
       const { launchDashboard } = await import("./tui/dashboard");
       await launchDashboard();
+      break;
+    }
+    case "bounce": {
+      const { bounceWatch } = await import("./coordinator");
+      await printAndExit(await bounceWatch());
       break;
     }
     case "agents":

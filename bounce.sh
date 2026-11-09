@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Rebuild ib and run `ib watch`; when it exits, count down and do it again.
-# Work merged into this checkout takes effect the next time `ib watch` quits.
+# Work merged into this checkout takes effect the next time `ib watch` quits,
+# for example when the system coordinator runs `ib bounce`.
 # Ctrl-C during the countdown stops the loop.
 #
 # A failed build keeps the previous ./ib binary, so a broken merge still

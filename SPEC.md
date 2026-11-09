@@ -1653,6 +1653,8 @@ The system coordinator is a Claude Code session that runs from `~/.itsybitsy/` w
 
 **Persistence across restarts**: Killing and restarting `ib watch` preserves the tmux session if references remain. The session is long-lived — it is not killed when the last agent completes.
 
+**Bounce**: `ib bounce` asks every running `ib watch` to quit through the same shutdown path as Ctrl-C, so the last one out kills the coordinator session and pauses per-repo coordinators as above. It reads the watcher PIDs from `coordinator.refs` and sends `SIGUSR2` only to a PID that `ps` still shows as `ib watch`. A PID left behind by a watcher that died without cleanup may have been reused, and `SIGUSR2` terminates a process that does not handle it. Before signalling, it writes `~/.itsybitsy/coordinator-bounce.json` (`{ bounced_at }`, ms epoch). The repo's `bounce.sh` runs `./build.sh` and `./ib watch` in a loop, with a 5-second countdown after each exit, so under it the relaunched `ib watch` is a fresh build. That relaunch resumes the coordinator's newest transcript, and the `@system` SessionStart hook (§12.1.5) reads and deletes the marker and appends a note to `additionalContext` saying when the bounce happened. Only the first session start after a bounce carries the note. `ib help` lists `bounce` only when run from the system coordinator's cwd, and §12.1.3 denies it to every other agent. A human at the CLI can still run it.
+
 #### 12.1.3 Permissions
 
 The system coordinator runs from `~/.itsybitsy/`, which is not initially a git repository — it is initialized as one during coordinator startup (§12.1.2 step 1) so that Claude Code loads `settings.local.json`. Claude Code reads `settings.local.json` from `<cwd>/.claude/settings.local.json`. Therefore, the coordinator's permissions file is written to `~/.itsybitsy/.claude/settings.local.json` before spawning:
@@ -1671,6 +1673,8 @@ The system coordinator runs from `~/.itsybitsy/`, which is not initially a git r
 This ensures the system coordinator can only run `ib` commands (e.g., `ib list`, `ib send`, `ib merge`, `ib new-agent`, `ib retire`, `ib rehire`, `ib status`, `ib diff`), use `ToolSearch` to discover available deferred tools, and schedule its own check-ins. It cannot access files, browse the web, or spawn sub-agents directly. `Bash(ib:*)` and `ToolSearch` are the hardcoded floor in `src/coordinator.ts`. The scheduling tools (`ScheduleWakeup`, `CronCreate`, `CronDelete`, `CronList`) come from the `system-coordinator.md` layer, which is read from `~/.itsybitsy/agent-types/system-coordinator.md`. The shipped default (`docs/agent-types/system-coordinator.md`) allows them. §2.7 never overwrites an existing installed copy, so an older install has these tools only if its own copy allows them. The watchdog does not notify `@system` about agents it starts in other repos, so it needs these tools to follow up on them, and the coordinator wait hint (§6.1) tells it to use them.
 
 **Outbound Telegram is system-coordinator-only.** The system coordinator is the only agent that receives Telegram messages, so it is the only agent that may run `ib tgsend`, `ib tgsendfile`, or `ib tgreact`. Every other agent — worker, manager, and per-repo coordinator — still has `Bash(ib:*)`, but the PreToolUse hook (`checkIbCommandAccess`, `src/hooks/agent-path.ts`) denies these three commands for any caller that is not `@system`. Claude, codex, and agy agents all use this check. The check reads shell words, so a quoted message or a heredoc body that only mentions `ib tgsend` is not denied. A human at the CLI is not affected.
+
+**`ib bounce` is system-coordinator-only.** It quits every running `ib watch` (§12.1.2), so the same check denies it to every caller that is not `@system`.
 
 #### 12.1.4 Display
 
@@ -1758,6 +1762,8 @@ The `ib hooks session-start @system` hook (§12.1.7) builds a `SessionContext` w
 - Skips `_non_coordinator.md` (whose body covers commit-message etiquette and other things irrelevant to `@system`, which has no Write/Edit/git access).
 - Wraps the resulting content in `<itsybitsy>…</itsybitsy>` (the wrapper is added by `generateInstructions`, not by the markdown file).
 
+After the wrapped instructions, the hook appends a one-line bounce note when `~/.itsybitsy/coordinator-bounce.json` exists (§12.1.2), and deletes the file.
+
 Users can customize the prompt by editing `~/.itsybitsy/agent-types/system-coordinator.md`. The change takes effect on the next coordinator session start.
 
 The default prompt content (from `docs/agent-types/system-coordinator.md`):
@@ -1765,6 +1771,8 @@ The default prompt content (from `docs/agent-types/system-coordinator.md`):
 > You are the itsybitsy system coordinator. You manage agents across all registered repos using `ib` commands. You can list agents (`ib list`), send messages to agents (`ib send <agent-id> "message"`), merge (`ib merge`, or `ib merge <id> --keep` to land an agent's commits so far without closing it), retire and rehire (`ib retire`, `ib rehire`), create agents (`ib new-agent`), and check status (`ib status`, `ib diff`). You do NOT have access to Read, Write, Edit, or any file tools — only `ib` Bash commands, plus `ScheduleWakeup` and `CronCreate`/`CronDelete`/`CronList` to schedule your own check-ins. You coordinate work at the system level — for repo-specific coordination, delegate to per-repo coordinators. To send messages to per-repo coordinators, use `ib send @<repo-name> "message"` (e.g., `ib send @itsybitsy "review the latest PR"`). Do NOT use `ib send @system` — that routes back to you.
 >
 > The watchdog tells you when one of your own subtasks completes or needs input, but not about an agent you started in another repo. For those, schedule a check-in with `ScheduleWakeup` or `CronCreate` before you go `WAITING`, and when it fires, follow up with `ib list` and `ib look <id>`. Do not poll with `sleep` or loops.
+>
+> When the user asks you to bounce `ib watch`, or to pick up ib changes you merged, run `ib bounce`. It quits `ib watch`, which stops this session; when `ib watch` runs under bounce.sh, it rebuilds ib, relaunches, and resumes this session, and that session's context says when the bounce happened. Send any reply before you run it: your turn ends when `ib watch` quits.
 
 #### 12.1.6 Watchdog Behavior
 

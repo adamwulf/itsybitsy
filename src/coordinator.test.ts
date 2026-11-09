@@ -3,6 +3,8 @@ import { join } from "path";
 import { mkdtemp, rm, readFile, readdir, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import {
+  BOUNCE_SIGNAL,
+  bounceWatch,
   IB_COORDINATOR_SESSION,
   COORDINATOR_REMOTE_CONTROL_NAME,
   buildSystemCoordinatorSettings,
@@ -1819,6 +1821,99 @@ describe("acquireSystemCoordinator / releaseSystemCoordinator", () => {
       resetWatchLogPath();
       await rm(logDir, { recursive: true, force: true });
     }
+  });
+});
+
+// -------------------------------------------------------------------
+// bounceWatch (`ib bounce`)
+// -------------------------------------------------------------------
+describe("bounceWatch", () => {
+  let tmpDir: string;
+  let signalled: [number, NodeJS.Signals | number][];
+  const markerPath = () => join(tmpDir, "coordinator-bounce.json");
+
+  // `ps -o command= -p <pid>` answers from this table; other PIDs are gone.
+  function stubPs(commands: Record<number, string>): void {
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      const command = cmd[0] === "ps" ? commands[Number(cmd[cmd.length - 1])] : undefined;
+      return {
+        stdout: mockStream(command === undefined ? "" : command + "\n"),
+        stderr: emptyStream(),
+        exited: Promise.resolve(command === undefined ? 1 : 0),
+      };
+    });
+  }
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "coord-bounce-"));
+    setCoordinatorHome(tmpDir);
+    setWatchLogPath(join(tmpDir, "watch.log"));
+    const { isPidAliveCtx, killPidCtx } = await import("./agents");
+    isPidAliveCtx.set(() => true);
+    signalled = [];
+    killPidCtx.set((pid, signal) => {
+      signalled.push([pid, signal]);
+      return true;
+    });
+  });
+
+  afterEach(async () => {
+    const { isPidAliveCtx, killPidCtx } = await import("./agents");
+    isPidAliveCtx.reset();
+    killPidCtx.reset();
+    coordinatorSpawnCtx.reset();
+    resetCoordinatorHome();
+    resetWatchLogPath();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("sends BOUNCE_SIGNAL to each ib watch in coordinator.refs and writes the marker", async () => {
+    await Bun.write(join(tmpDir, "coordinator.refs"), "111\n222\n");
+    stubPs({ 111: "./ib watch", 222: "/usr/local/bin/ib watch" });
+
+    const before = Date.now();
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("111, 222");
+    expect(signalled).toEqual([[111, BOUNCE_SIGNAL], [222, BOUNCE_SIGNAL]]);
+    const marker = await Bun.file(markerPath()).json();
+    expect(marker.bounced_at).toBeGreaterThanOrEqual(before);
+  });
+
+  test("skips a refs PID that ps no longer shows as ib watch", async () => {
+    await Bun.write(join(tmpDir, "coordinator.refs"), "111\n333\n");
+    stubPs({ 111: "ib watch", 333: "/usr/bin/vim notes.txt" });
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(0);
+    expect(signalled).toEqual([[111, BOUNCE_SIGNAL]]);
+  });
+
+  test("fails without signalling or writing the marker when no ib watch is running", async () => {
+    await Bun.write(join(tmpDir, "coordinator.refs"), "333\n444\n");
+    stubPs({ 333: "ib watchdog agent-1" });
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("ib watch is not running");
+    expect(signalled).toEqual([]);
+    expect(await Bun.file(markerPath()).exists()).toBe(false);
+  });
+
+  test("removes the marker when no watcher could be signalled", async () => {
+    await Bun.write(join(tmpDir, "coordinator.refs"), "111\n");
+    stubPs({ 111: "ib watch" });
+    const { killPidCtx } = await import("./agents");
+    killPidCtx.set(() => false);
+
+    const result = await bounceWatch();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Could not signal ib watch (pid 111)");
+    expect(await Bun.file(markerPath()).exists()).toBe(false);
   });
 });
 

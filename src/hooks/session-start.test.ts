@@ -1251,6 +1251,33 @@ describe("hookSessionStart with @system", () => {
 
     expect(withId).toBe(withoutId);
   });
+
+  const bounceMarkerPath = () => join(tempHome, ".itsybitsy", "coordinator-bounce.json");
+
+  test("a bounce marker appends a one-shot bounce note and is deleted", async () => {
+    await seedSystemType();
+    const bouncedAt = Date.UTC(2026, 10, 8, 14, 3, 12);
+    await Bun.write(bounceMarkerPath(), JSON.stringify({ bounced_at: bouncedAt }));
+
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp" }), "@system");
+    const ctx: string = JSON.parse(captured).hookSpecificOutput.additionalContext;
+    expect(ctx).toContain("SYSTEM_BODY_MARKER");
+    expect(ctx).toContain("ib watch was bounced at 2026-11-08T14:03:12.000Z");
+    expect(await Bun.file(bounceMarkerPath()).exists()).toBe(false);
+
+    captured = "";
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp" }), "@system");
+    expect(JSON.parse(captured).hookSpecificOutput.additionalContext).not.toContain("bounced");
+  });
+
+  test("an unreadable bounce marker adds no note and is deleted", async () => {
+    await seedSystemType();
+    await Bun.write(bounceMarkerPath(), "not json");
+
+    await hookSessionStart(JSON.stringify({ cwd: "/tmp" }), "@system");
+    expect(JSON.parse(captured).hookSpecificOutput.additionalContext).not.toContain("bounced");
+    expect(await Bun.file(bounceMarkerPath()).exists()).toBe(false);
+  });
 });
 
 describe("session-start team awareness (§16.6)", () => {

@@ -4,7 +4,7 @@ import * as runtimeNames from "../runtime-names";
  */
 
 import { join, basename } from "path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { AGENT_CWD_PATTERN, SYSTEM_AGENT_ID, systemCoordinatorHome } from "./shared";
 import { loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE, isCoordinatorType } from "../coordinator-type-names";
@@ -727,6 +727,31 @@ function recordCoordinatorSessionId(data: Record<string, unknown>): void {
 }
 
 /**
+ * Best-effort: read and delete `~/.itsybitsy/coordinator-bounce.json` (shape:
+ * `{ bounced_at }`), which `ib bounce` writes just before it asks `ib watch`
+ * to quit (`bounceWatch` in src/coordinator.ts). Returns a note that tells
+ * the system coordinator it was bounced, or "" when there is no usable
+ * marker. Deleting the marker makes the note one-shot: only the first session
+ * start after a bounce carries it.
+ */
+function consumeBounceNote(): string {
+  const path = join(systemCoordinatorHome(), "coordinator-bounce.json");
+  let bouncedAt: unknown;
+  try {
+    bouncedAt = JSON.parse(readFileSync(path, "utf8")).bounced_at;
+  } catch {
+    /* no marker, or unreadable — nothing to report */
+  }
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    /* swallow — a leftover marker must never affect the hook */
+  }
+  if (typeof bouncedAt !== "number" || !Number.isFinite(bouncedAt)) return "";
+  return `\n\nib watch was bounced at ${new Date(bouncedAt).toISOString()}: \`ib bounce\` asked it to quit, which stopped this session, and the relaunched ib watch started it again. If the conversation above ends with that \`ib bounce\` call, the turn was cut off there.`;
+}
+
+/**
  * Claude Code caps a hook's `additionalContext` at 10,000 characters. Above
  * that it saves the text to a file and gives the agent the file path and a
  * preview of the first 2,000 characters, so most of the instructions never
@@ -816,7 +841,7 @@ export async function hookSessionStart(rawStdin?: string, agentIdArg?: string): 
     const output = {
       hookSpecificOutput: {
         hookEventName: "SessionStart",
-        additionalContext: instructions,
+        additionalContext: instructions + consumeBounceNote(),
       },
     };
     process.stdout.write(JSON.stringify(output));

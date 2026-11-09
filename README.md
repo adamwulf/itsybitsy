@@ -304,4 +304,4 @@ bun run build          # rebuild the `ib` binary
 
 After rebuilding, confirm the binary dispatches: `ib list-types` should print a table.
 
-`./bounce.sh` runs `./build.sh` and then `./ib watch` in a loop: each time `ib watch` quits, it counts down 5 seconds, rebuilds, and relaunches, so merged ib work takes effect on the next quit. Press Ctrl-C during the countdown to stop the loop.
+`./bounce.sh` runs `./build.sh` and then `./ib watch` in a loop: each time `ib watch` quits, it counts down 5 seconds, rebuilds, and relaunches, so merged ib work takes effect on the next quit. Press Ctrl-C during the countdown to stop the loop. The system coordinator can start a bounce itself with `ib bounce`, which quits `ib watch`; the relaunched `ib watch` resumes the coordinator's session and tells it when the bounce happened.

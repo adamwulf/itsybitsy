@@ -1970,6 +1970,19 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess("ib send agent-target1 <<'EOF'\nib tgsend hello\nEOF", "agent-manager1", agentsDir)).toBeNull();
   });
 
+  test("denies ib bounce to a regular agent — system coordinator only", async () => {
+    for (const command of ["ib bounce", "/usr/local/bin/ib bounce"]) {
+      const result = await checkIbCommandAccess(command, "agent-manager1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib bounce' is for the system coordinator only");
+    }
+  });
+
+  test("a message that only mentions ib bounce is not a bounce", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    expect(await checkIbCommandAccess('ib send agent-target1 "ask @system to run ib bounce"', "agent-manager1", agentsDir)).toBeNull();
+  });
+
   test("merge-check is unrestricted — returns null even for non-manager", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     const result = await checkIbCommandAccess("ib merge-check agent-target1", "agent-other111", agentsDir);
@@ -2058,6 +2071,13 @@ describe("checkIbCommandAccess", () => {
     }
   });
 
+  test("per-repo coordinator CANNOT bounce ib watch — system coordinator only", async () => {
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
+    const result = await checkIbCommandAccess("ib bounce", "itsybitsy", agentsDir);
+    expect(result?.decision).toBe("deny");
+    expect(result!.reason).toContain("'ib bounce' is for the system coordinator only");
+  });
+
   test("per-repo coordinator CANNOT merge a non-child regular agent", async () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
@@ -2109,6 +2129,10 @@ describe("checkIbCommandAccess", () => {
     for (const command of ["ib tgsend hello", "ib tgsendfile /tmp/a.txt", "ib tgreact 👍", "ib tgreact --clear"]) {
       expect(await checkIbCommandAccess(command, "@system", agentsDir)).toBeNull();
     }
+  });
+
+  test("@system can bounce ib watch", async () => {
+    expect(await checkIbCommandAccess("ib bounce", "@system", agentsDir)).toBeNull();
   });
 
   test("@system is also denied nuke — nuke is user-only, not even @system may run it", async () => {

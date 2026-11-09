@@ -10,7 +10,7 @@ import { userHome } from "./home";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
 import { captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
-import { isCompacting, isRateLimited, isPidAliveCtx, isApiError, isApiSafeguard } from "./agents";
+import { isCompacting, isRateLimited, isPidAliveCtx, killPidCtx, isApiError, isApiSafeguard } from "./agents";
 import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog, getWatchLogPath } from "./watch-log";
 import { SpawnContext } from "./types";
@@ -107,6 +107,11 @@ function refsPath(): string {
 
 function clearedMarkerPath(): string {
   return join(itsybitsyHome(), "coordinator-session.cleared");
+}
+
+/** Read and deleted by the @system SessionStart hook (src/hooks/session-start.ts). */
+function bounceMarkerPath(): string {
+  return join(itsybitsyHome(), "coordinator-bounce.json");
 }
 
 function coordinatorTranscriptDir(): string {
@@ -1141,6 +1146,50 @@ export async function releaseSystemCoordinator(
       "tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
     ]);
   }
+}
+
+/** The signal `ib bounce` sends to make a running `ib watch` quit the way Ctrl+C does. */
+export const BOUNCE_SIGNAL = "SIGUSR2";
+
+/**
+ * `ib bounce`: ask every running `ib watch` to quit the way Ctrl+C does. The
+ * last one to quit stops the system coordinator as usual, and the next
+ * `ib watch` resumes its newest transcript; under bounce.sh that next
+ * `ib watch` is a fresh build. Writes `coordinator-bounce.json` first so the
+ * resumed session's SessionStart hook can tell the coordinator it was bounced.
+ *
+ * The watchers come from coordinator.refs, but a PID is signalled only while
+ * `ps` still shows it as `ib watch`: the refs file keeps the PID of a watcher
+ * that died without releasing it, and SIGUSR2 terminates a process that does
+ * not handle it.
+ */
+export async function bounceWatch(): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
+  // Dynamic: state-command imports this module.
+  const { isIbWatchProcess } = await import("./state-command");
+  const watchers: number[] = [];
+  for (const pid of await readLivePids()) {
+    const ps = await coordinatorSpawnCtx.run(["ps", "-o", "command=", "-p", String(pid)]);
+    if (ps.exitCode === 0 && isIbWatchProcess(ps.stdout.trim())) watchers.push(pid);
+  }
+  if (watchers.length === 0) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: "ib watch is not running" };
+  }
+
+  await Bun.write(bounceMarkerPath(), JSON.stringify({ bounced_at: Date.now() }));
+  const signalled = watchers.filter((pid) => killPidCtx.fn(pid, BOUNCE_SIGNAL));
+  if (signalled.length === 0) {
+    const { rm } = await import("fs/promises");
+    await rm(bounceMarkerPath(), { force: true });
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Could not signal ib watch (pid ${watchers.join(", ")})` };
+  }
+  return {
+    ok: true,
+    exitCode: 0,
+    stdout:
+      `Asked ib watch (pid ${signalled.join(", ")}) to quit. Quitting stops the system coordinator. ` +
+      `If bounce.sh is running ib watch, it rebuilds ib and relaunches ib watch, which resumes the coordinator.`,
+    stderr: "",
+  };
 }
 
 /** Restart the system coordinator — kill the tmux session and re-create. */

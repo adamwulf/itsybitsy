@@ -35,6 +35,7 @@ import {
   pollSystemCoordinator,
   classifyCoordinatorState,
   resetCoordinatorPollLogState,
+  systemCoordinatorLaunchEpoch,
 } from "./coordinator";
 import { encodeClaudeProjectPath } from "./auto-compact";
 import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
@@ -1984,6 +1985,46 @@ describe("restartSystemCoordinatorFresh", () => {
 
     const ready = await restartSystemCoordinatorFresh();
     expect(ready).toBe(false);
+  });
+
+  test("every launch entry point reports a launch in flight, then a new epoch", async () => {
+    const seen: (number | null)[] = [];
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      seen.push(systemCoordinatorLaunchEpoch());
+      const exitCode = cmd.join(" ").includes("has-session") ? 1 : 0;
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(exitCode) };
+    });
+    const launches: [string, () => Promise<unknown>][] = [
+      ["ensureSystemCoordinator", ensureSystemCoordinator],
+      ["restartSystemCoordinator", restartSystemCoordinator],
+      ["restartSystemCoordinatorFresh", restartSystemCoordinatorFresh],
+    ];
+    for (const [name, launch] of launches) {
+      const before = systemCoordinatorLaunchEpoch();
+      expect(before, name).not.toBeNull();
+      seen.length = 0;
+      await launch();
+      // Every tmux call, the kill included, ran while the launch was in flight.
+      expect(seen.length, name).toBeGreaterThan(0);
+      expect(seen.every((epoch) => epoch === null), name).toBe(true);
+      const after = systemCoordinatorLaunchEpoch();
+      expect(after, name).not.toBeNull();
+      expect(after, name).not.toBe(before);
+    }
+  });
+
+  test("a failed launch still ends the in-flight state", async () => {
+    // has-session and new-session both fail: ensure throws.
+    coordinatorSpawnCtx.set((cmd: string[], _opts?: any) => {
+      const cmdStr = cmd.join(" ");
+      const exitCode = cmdStr.includes("has-session") || cmdStr.includes("new-session") ? 1 : 0;
+      return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(exitCode) };
+    });
+    const before = systemCoordinatorLaunchEpoch();
+    await expect(ensureSystemCoordinator()).rejects.toThrow("Failed to create system coordinator tmux session");
+    const after = systemCoordinatorLaunchEpoch();
+    expect(after).not.toBeNull();
+    expect(after).not.toBe(before);
   });
 });
 

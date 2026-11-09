@@ -1091,6 +1091,14 @@ describe("handleHelp", () => {
       `  ${"Remote Control".padEnd(18)}turned off in system-coordinator.md;`,
       `  ${"".padEnd(18)}still on until the coordinator restarts (R)`,
     ]);
+
+    ctx.remoteControlStatus = { light: "yellow", state: "stopped" };
+    lines = helpLines();
+    expect(lines.slice(2, 5)).toEqual([
+      `  ${"Remote Control".padEnd(18)}on in system-coordinator.md;`,
+      `  ${"".padEnd(18)}coordinator stopped: start it (R)`,
+      "",
+    ]);
   });
 });
 

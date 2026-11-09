@@ -16,7 +16,7 @@ import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, rese
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { gitStatusSpawnCtx } from "../git-status";
-import { IB_COORDINATOR_SESSION } from "../coordinator";
+import { IB_COORDINATOR_SESSION, coordinatorSpawnCtx, ensureSystemCoordinator, systemCoordinatorLaunchEpoch } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
 import type { SpawnResult } from "../types";
@@ -6864,8 +6864,8 @@ describe("Collector header indicator", () => {
 });
 
 function remoteControl(state: RemoteControlStatus["state"]): RemoteControlStatus {
-  const light = ({ off: null, on: "green", "pending-on": "yellow", "pending-off": "yellow" } as const)[state];
-  return { light, state };
+  const lights = { off: null, on: "green", "pending-on": "yellow", "pending-off": "yellow", stopped: "yellow" } as const;
+  return { light: lights[state], state };
 }
 
 describe("Remote Control header indicator", () => {
@@ -6923,6 +6923,165 @@ describe("Remote Control header indicator", () => {
     const header = dashboard.render(140)[0]!;
     expect(visibleWidth(header)).toBeLessThanOrEqual(140);
     expect(stripAnsi(header).trimEnd().endsWith("● Collector  ● Remote Control  ● Telegram")).toBe(true);
+  });
+});
+
+describe("Remote Control light inputs", () => {
+  let dir: string;
+  let settingsPath: string;
+  let configured: boolean;
+  let dashboard: DashboardComponent;
+  let counter: ReturnType<typeof countingTui>;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "itsybitsy-remote-control-"));
+    settingsPath = join(dir, "settings.local.json");
+    configured = true;
+    dashboard = makeDashboard();
+    counter = countingTui();
+    dashboard.setTui(counter.tui);
+    // Temp files only; never the real system-coordinator.md or settings file.
+    dashboard.remoteControlProbe = { settingsPath, loadSystemCoordinatorType: async () => ({ remoteControl: configured }) };
+  });
+
+  afterEach(async () => {
+    coordinatorSpawnCtx.reset();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** The settings file a launch writes. */
+  const launchedWith = (on: boolean) =>
+    writeFile(settingsPath, JSON.stringify(on ? { spinnerTipsEnabled: false } : { disableRemoteControl: true }));
+  /** One watcher update with the system coordinator in `state` (undefined: no entry). */
+  const watcherUpdate = (state?: string) =>
+    dashboard.onUpdate([], state === undefined ? [] : [makeFlatSystemCoordinator(state)], []);
+
+  test("refreshRemoteControlStatus picks up a coordinator restart on the next tick", async () => {
+    // Turned on in system-coordinator.md; the running coordinator was launched with it off.
+    await launchedWith(false);
+    await dashboard.refreshRemoteControlStatus();
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
+    expect(counter.renders()).toBe(1);
+
+    // The restart's relaunch rewrites the settings file without the key.
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+    expect(counter.renders()).toBe(2);
+  });
+
+  test("a stopped coordinator turns green to yellow once two watcher updates in a row say so", async () => {
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+
+    watcherUpdate("stopped");
+    expect(dashboard.isSystemCoordinatorStopped()).toBe(false);
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+    watcherUpdate("stopped");
+    expect(dashboard.isSystemCoordinatorStopped()).toBe(true);
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("stopped"));
+    // The stop left the settings file in place; the next tick's read keeps it yellow.
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("stopped"));
+
+    // Started again: green on the next update.
+    watcherUpdate("running");
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+  });
+
+  test("not configured and stopped: hidden, although the last launch had it on", async () => {
+    configured = false;
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-off"));
+    watcherUpdate("stopped");
+    watcherUpdate("stopped");
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("off"));
+  });
+
+  test("only an explicit stopped counts: any other state or a missing entry starts the count over", async () => {
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    for (const between of ["running", "compacting", "rate_limited", undefined]) {
+      watcherUpdate("stopped");
+      watcherUpdate(between);
+      watcherUpdate("stopped");
+      expect(dashboard.isSystemCoordinatorStopped(), String(between)).toBe(false);
+      expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+      watcherUpdate("running");
+    }
+  });
+
+  test("stopped updates during a launch from this process do not count, nor does the first one after it", async () => {
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    // Hold a launch in flight: ensureSystemCoordinator waits on `tmux has-session`.
+    let finishHasSession: ((code: number) => void) | undefined;
+    coordinatorSpawnCtx.set(() => ({
+      ...makeSpawnResult(0),
+      exited: new Promise<number>((resolve) => { finishHasSession = resolve; }),
+    }));
+    const launch = ensureSystemCoordinator();
+    await waitFor(() => finishHasSession !== undefined, { message: "has-session spawned" });
+    expect(systemCoordinatorLaunchEpoch()).toBeNull();
+    watcherUpdate("stopped");
+    watcherUpdate("stopped");
+    watcherUpdate("stopped");
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+
+    // The session exists, so the launch ends at once ("existing").
+    finishHasSession!(0);
+    await launch;
+    // A pass that captured the pane during the launch can arrive after it ends.
+    watcherUpdate("stopped");
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+    // The next pass's capture began after that update arrived, so it is current.
+    watcherUpdate("stopped");
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("stopped"));
+  });
+
+  test("refreshRemoteControlAfterLaunch re-reads once the startup launch ends, even a failed one", async () => {
+    await launchedWith(false); // the previous run's file
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
+
+    let endLaunch!: () => void;
+    const startup = new Promise<void>((resolve) => { endLaunch = resolve; });
+    const refreshed = dashboard.refreshRemoteControlAfterLaunch(startup);
+    await launchedWith(true); // the startup launch writes the new file
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
+    endLaunch();
+    await refreshed;
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+
+    await launchedWith(false);
+    await dashboard.refreshRemoteControlAfterLaunch(Promise.reject(new Error("launch failed")));
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
+  });
+
+  test("a refresh asked for while a read is in flight runs once more after it", async () => {
+    await launchedWith(true);
+    configured = false;
+    let releaseFirstRead: (() => void) | undefined;
+    let reads = 0;
+    dashboard.remoteControlProbe = {
+      settingsPath,
+      loadSystemCoordinatorType: async () => {
+        const value = configured; // what the file says when this read looks
+        if (++reads === 1) await new Promise<void>((resolve) => { releaseFirstRead = resolve; });
+        return { remoteControl: value };
+      },
+    };
+    const first = dashboard.refreshRemoteControlStatus();
+    await waitFor(() => releaseFirstRead !== undefined, { message: "first read started" });
+    configured = true; // changed after the first read looked
+    await dashboard.refreshRemoteControlStatus(); // queued behind the first read
+    releaseFirstRead!();
+    await first;
+    expect(reads).toBe(2);
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
   });
 });
 
@@ -8059,32 +8218,6 @@ describe("idle render checks", () => {
     expect(counter.renders()).toBe(2);
     dashboard.setRemoteControlStatus(remoteControl("off"));
     expect(counter.renders()).toBe(3);
-  });
-
-  test("refreshRemoteControlStatus picks up a coordinator restart on the next tick", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "itsybitsy-remote-control-"));
-    try {
-      const settingsPath = join(dir, "settings.local.json");
-      const opts = { settingsPath, loadSystemCoordinatorType: async () => ({ remoteControl: true }) };
-      const dashboard = makeDashboard();
-      const counter = countingTui();
-      dashboard.setTui(counter.tui);
-
-      // Turned on in system-coordinator.md; the running coordinator was launched with it off.
-      await writeFile(settingsPath, JSON.stringify({ disableRemoteControl: true }));
-      await dashboard.refreshRemoteControlStatus(opts);
-      await dashboard.refreshRemoteControlStatus(opts);
-      expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
-      expect(counter.renders()).toBe(1);
-
-      // The restart's relaunch rewrites the settings file without the key.
-      await writeFile(settingsPath, JSON.stringify({ spinnerTipsEnabled: false }));
-      await dashboard.refreshRemoteControlStatus(opts);
-      expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
-      expect(counter.renders()).toBe(2);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
   });
 
   test("a refreshed Teams tree renders only when the Teams tree can be on screen", async () => {

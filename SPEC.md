@@ -2562,7 +2562,7 @@ The indicator does not show the live connection to claude.ai (connected or recon
 
 #### 15.5.3 Session Access Information
 
-The session URL and QR code are displayed in the coordinator's tmux output (visible in the coordinator sidebar panel). itsybitsy does not need to parse or extract them — the user can read them directly from the tmux output or find the session in their claude.ai/code session list under the name `itsybitsy coordinator`.
+The session URL and QR code are displayed in the coordinator's tmux output (visible in the coordinator sidebar panel). itsybitsy does not need to parse or extract them — the user can read them directly from the tmux output or find the session in their claude.ai/code session list under its configured name (§15.3.4; default `itsybitsy coordinator`).
 
 ### 15.6 CLI Integration
 
@@ -2570,8 +2570,9 @@ No new `ib` commands are needed. Remote Control is managed through:
 
 1. **Agent-type file**: `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md` (§15.4)
 2. **System coordinator lifecycle**: `ensureSystemCoordinator()` loads that layer at every launch, passes the value to `writeCoordinatorFiles()` for the `disableRemoteControl` settings key, and adds the `--remote-control` flag to the launch line when it is `true` (§15.3.2)
+3. **Session name**: set `coordinator.remoteControlName` through `ib config set` or the settings list, then restart the system coordinator (§15.3.4)
 
-The existing `ib` command pattern (`ib hooks install/uninstall`) is not appropriate here because Remote Control is not a hook — it is a launch flag plus a settings key, both decided when the system coordinator starts. Edit the file, then restart.
+The existing `ib` command pattern (`ib hooks install/uninstall`) is not appropriate here because Remote Control is not a hook — it is a launch flag plus a settings key, both decided when the system coordinator starts. Change the relevant setting, then restart.
 
 ### 15.7 Health Check Integration
 

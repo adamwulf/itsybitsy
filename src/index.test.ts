@@ -1581,6 +1581,27 @@ describe("sendToSystemCoordinator", () => {
     expect(sendKeysLiteral).toBeDefined();
     expect(sendKeysLiteral![6]).toBe("[sent by user]: plain text");
   });
+
+  // Sent by the relaunched `ib watch` after `ib bounce` (ensureSystemCoordinator).
+  test("the bounce restart notice is labelled [sent by watchdog]", async () => {
+    setSystemCoordinatorHasSessionFn(async () => true);
+    const { BOUNCE_RESTART_NOTICE, bounceNoticeCtx } = await import("./coordinator");
+
+    const result = await bounceNoticeCtx.fn(BOUNCE_RESTART_NOTICE);
+
+    expect(result.ok).toBe(true);
+    const sendKeysLiteral = spawnCalls.find(
+      (c) =>
+        c[0] === "tmux" &&
+        c[1] === "send-keys" &&
+        c.length === 7 &&
+        c[3] === "=" + IB_COORDINATOR_SESSION + ":" &&
+        c[4] === "-l" &&
+        c[5] === "--",
+    );
+    expect(sendKeysLiteral).toBeDefined();
+    expect(sendKeysLiteral![6]).toBe("[sent by watchdog]: ib watch has restarted after a bounce");
+  });
 });
 
 // ─── merge-check case ───────────────────────────────────────────────────────

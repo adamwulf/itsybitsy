@@ -6202,15 +6202,16 @@ describe("coordinator lifecycle (Phase 47f)", () => {
     //
     // The fix pins the vector two ways: inject a coordinator spawn mock so no
     // real tmux runs and ensureSystemCoordinator short-circuits (has-session → 0)
-    // before it ever resolves the home dir, and AWAIT flushPendingActions so the
+    // before it writes anything in the home dir, and AWAIT flushPendingActions so the
     // full kill-then-recreate completes inside this test instead of escaping.
     const dashboard = makeDashboard();
     const { coordinatorSpawnCtx } = await import("../coordinator");
     const coordCommands: string[][] = [];
     // Exit 0 for every command: `tmux has-session` → 0 makes
     // ensureSystemCoordinator believe the session is already live and return
-    // immediately, so it never resolves the home dir or writes coordinator
-    // files; `tmux kill-session` → 0 is a recorded no-op instead of a real kill.
+    // immediately, so it only checks the home dir for a bounce marker and never
+    // writes coordinator files; `tmux kill-session` → 0 is a recorded no-op
+    // instead of a real kill.
     coordinatorSpawnCtx.set((cmd: string[]) => {
       coordCommands.push([...cmd]);
       return makeSpawnResult(0);

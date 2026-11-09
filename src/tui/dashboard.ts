@@ -29,6 +29,7 @@ import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow, expandTabs } from "../tmux-poller";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
 import {
+  BOUNCE_QUIT_DELAY_MS,
   BOUNCE_SIGNAL,
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
@@ -4034,7 +4035,13 @@ export async function launchDashboard(): Promise<void> {
       process.exit(0);
     });
   };
-  process.on(BOUNCE_SIGNAL, () => quitDashboard(false));
+  // `ib bounce` is a tool call in the coordinator's Claude session. Waiting
+  // lets it return and Claude Code record the result before quitting kills
+  // that session.
+  process.on(BOUNCE_SIGNAL, () => {
+    logToWatchLog(`[bounce] quitting ib watch in ${BOUNCE_QUIT_DELAY_MS}ms`);
+    setTimeout(() => quitDashboard(false), BOUNCE_QUIT_DELAY_MS);
+  });
   tui.addInputListener((data) => {
     if (matchesKey(data, Key.ctrl("c"))) {
       quitDashboard(true);

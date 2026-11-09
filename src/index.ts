@@ -495,10 +495,11 @@ const COMMAND_HELP: Record<string, string> = {
     "  Launch the interactive TUI dashboard. Requires tmux.",
   bounce:
     "Usage: ib bounce\n" +
-    "  Ask ib watch to quit the way Ctrl+C does, so bounce.sh rebuilds ib and\n" +
-    "  relaunches it. Refuses unless exactly one ib watch is running and\n" +
-    "  bounce.sh started it. The system coordinator is stopped and then resumed,\n" +
-    "  and its next session is told it was bounced. Per-repo coordinators keep\n" +
+    "  Ask ib watch to quit the way Ctrl+C does, 5 seconds later, so bounce.sh\n" +
+    "  rebuilds ib and relaunches it. Refuses unless exactly one ib watch is\n" +
+    "  running and bounce.sh started it. The system coordinator is stopped and\n" +
+    "  then resumed; its next session is told it was bounced and is sent\n" +
+    "  \"ib watch has restarted after a bounce\". Per-repo coordinators keep\n" +
     "  running.",
   watchdog:
     "Usage: ib watchdog <agent-id>\n" +

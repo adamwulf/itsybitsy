@@ -13,7 +13,7 @@ import { captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx, killPidCtx, isApiError, isApiSafeguard } from "./agents";
 import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog, getWatchLogPath } from "./watch-log";
-import { SpawnContext } from "./types";
+import { InjectionContext, SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
 import { isValidSessionId, isValidModel, tmuxSessionTarget, shellQuote } from "./validation";
 import { parseModel } from "./agent-cli";
@@ -851,9 +851,19 @@ export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
  * If `--resume` is attempted but Claude's UI never reaches the ready marker,
  * the session is killed, the cleared-marker is written, and a single
  * fresh-launch retry runs.
+ *
+ * When `ib bounce` left its marker, a launched session is sent
+ * {@link BOUNCE_RESTART_NOTICE} once it is ready.
  */
 export async function ensureSystemCoordinator(): Promise<string> {
-  return await ensureSystemCoordinatorImpl(false);
+  // Read before the launch: the launched session's SessionStart hook deletes it.
+  const bounced = existsSync(bounceMarkerPath());
+  const session = await ensureSystemCoordinatorImpl(false);
+  if (bounced && lastSpawnMode !== "existing") {
+    const result = await bounceNoticeCtx.fn(BOUNCE_RESTART_NOTICE);
+    if (!result.ok) logToWatchLog(`[coordinator] bounce restart notice not sent: ${result.stderr}`);
+  }
+  return session;
 }
 
 async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Promise<string> {
@@ -1151,6 +1161,27 @@ export async function releaseSystemCoordinator(
 /** The signal `ib bounce` sends to make a running `ib watch` quit the way Ctrl+C does. */
 export const BOUNCE_SIGNAL = "SIGUSR2";
 
+/**
+ * How long `ib watch` waits after BOUNCE_SIGNAL before it quits and stops the
+ * system coordinator. `ib bounce` is a tool call in the coordinator's Claude
+ * session, and Claude Code records its result only after it returns; quitting
+ * at once killed the session before that reached the transcript.
+ */
+export const BOUNCE_QUIT_DELAY_MS = 5_000;
+
+/** Sent to the system coordinator once the relaunched `ib watch` has resumed it. */
+export const BOUNCE_RESTART_NOTICE = "ib watch has restarted after a bounce";
+
+/** Sends {@link BOUNCE_RESTART_NOTICE}: the `ib send @system` path, labelled as the watchdog. */
+export const bounceNoticeCtx = new InjectionContext<(message: string) => Promise<{ ok: boolean; stderr: string }>>(
+  async (message) => {
+    // Dynamic: index and watchdog import this module.
+    const { sendToSystemCoordinator } = await import("./index");
+    const { WATCHDOG_SENTINEL } = await import("./watchdog");
+    return sendToSystemCoordinator(message, { fromAgent: WATCHDOG_SENTINEL });
+  },
+);
+
 /** True when a `ps` command line is the bash process running bounce.sh. */
 function isBounceScriptProcess(command: string): boolean {
   return /(?:^|[\s/])bounce\.sh(?:\s|$)/.test(command);
@@ -1167,10 +1198,12 @@ function isIbWatchCommand(command: string): boolean {
 
 /**
  * `ib bounce`: ask the running `ib watch` to quit the way Ctrl+C does, so
- * bounce.sh rebuilds ib and relaunches it. Quitting stops the system
- * coordinator as usual, and the relaunched `ib watch` resumes its newest
- * transcript. Writes `coordinator-bounce.json` first so the resumed session's
- * SessionStart hook can tell the coordinator it was bounced.
+ * bounce.sh rebuilds ib and relaunches it. `ib watch` quits
+ * BOUNCE_QUIT_DELAY_MS after the signal, which stops the system coordinator
+ * as usual, and the relaunched `ib watch` resumes its newest transcript.
+ * Writes `coordinator-bounce.json` first so the resumed session's
+ * SessionStart hook can tell the coordinator it was bounced, and the relaunch
+ * sends it BOUNCE_RESTART_NOTICE.
  *
  * The watchers come from the process table, not coordinator.refs: the
  * dashboard's own `x` and /restart (discardSystemCoordinator) drop its refs
@@ -1213,8 +1246,9 @@ export async function bounceWatch(): Promise<{ ok: boolean; exitCode: number; st
     ok: true,
     exitCode: 0,
     stdout:
-      `Asked ib watch (pid ${pid}) to quit. That stops the system coordinator; bounce.sh then rebuilds ib ` +
-      `and relaunches ib watch, which resumes it. Per-repo coordinators keep running.`,
+      `Asked ib watch (pid ${pid}) to quit in ${BOUNCE_QUIT_DELAY_MS / 1000} seconds. That stops the system ` +
+      `coordinator; bounce.sh then rebuilds ib and relaunches ib watch, which resumes it and sends ` +
+      `"${BOUNCE_RESTART_NOTICE}". Per-repo coordinators keep running.`,
     stderr: "",
   };
 }

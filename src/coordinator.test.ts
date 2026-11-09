@@ -2,8 +2,11 @@ import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from
 import { join } from "path";
 import { mkdtemp, rm, readFile, readdir, mkdir } from "fs/promises";
 import { tmpdir } from "os";
+import { rmSync } from "node:fs";
 import {
+  BOUNCE_RESTART_NOTICE,
   BOUNCE_SIGNAL,
+  bounceNoticeCtx,
   bounceWatch,
   IB_COORDINATOR_SESSION,
   COORDINATOR_REMOTE_CONTROL_NAME,
@@ -411,6 +414,56 @@ describe("ensureSystemCoordinator", () => {
 
     const result = await ensureSystemCoordinator();
     expect(result).toBe("ib-coordinator");
+  });
+
+  describe("after ib bounce", () => {
+    let events: string[];
+    const markerPath = () => join(tmpDir, "coordinator-bounce.json");
+
+    beforeEach(async () => {
+      events = [];
+      tmuxSpawnCtx.set((_cmd: string[], _opts?: any) => {
+        events.push("ready poll");
+        return { stdout: mockStream("Claude Code v1.0.0"), stderr: emptyStream(), exited: Promise.resolve(0) };
+      });
+      bounceNoticeCtx.set(async (message) => {
+        events.push(message);
+        return { ok: true, stderr: "" };
+      });
+      await Bun.write(markerPath(), JSON.stringify({ bounced_at: 0 }));
+    });
+
+    afterEach(() => {
+      bounceNoticeCtx.reset();
+    });
+
+    test("sends the restart notice once the launched session is ready", async () => {
+      const router = createCommandRouter({ "has-session": { exitCode: 1 } });
+      coordinatorSpawnCtx.set((cmd: string[], opts?: any) => {
+        // The launched session's SessionStart hook deletes the marker.
+        if (cmd.includes("send-keys") && cmd.some((arg) => arg.startsWith("claude "))) rmSync(markerPath());
+        return router(cmd, opts);
+      });
+
+      await ensureSystemCoordinator();
+
+      expect(events.filter((e) => e === BOUNCE_RESTART_NOTICE)).toHaveLength(1);
+      expect(events.at(-1)).toBe(BOUNCE_RESTART_NOTICE);
+      expect(events).toContain("ready poll");
+    });
+
+    test("sends nothing when the coordinator session was already running", async () => {
+      coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 0 } }));
+      await ensureSystemCoordinator();
+      expect(events).not.toContain(BOUNCE_RESTART_NOTICE);
+    });
+
+    test("sends nothing on a launch without the marker", async () => {
+      rmSync(markerPath());
+      coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 1 } }));
+      await ensureSystemCoordinator();
+      expect(events).not.toContain(BOUNCE_RESTART_NOTICE);
+    });
   });
 
   test("creates session when none exists", async () => {
@@ -1887,7 +1940,7 @@ describe("bounceWatch", () => {
     const result = await bounceWatch();
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pid 111");
+    expect(result.stdout).toContain("Asked ib watch (pid 111) to quit in 5 seconds.");
     expect(signalled).toEqual([[111, BOUNCE_SIGNAL]]);
     const marker = await Bun.file(markerPath()).json();
     expect(marker.bounced_at).toBeGreaterThanOrEqual(before);
@@ -1940,10 +1993,14 @@ describe("bounceWatch", () => {
 
   // The signal is only half of the contract: without this handler, SIGUSR2
   // kills ib watch outright, the coordinator is never restarted, and the
-  // marker stays behind.
-  test("ib watch quits on BOUNCE_SIGNAL without pausing per-repo coordinators; Ctrl+C still pauses them", async () => {
+  // marker stays behind. Quitting at once would kill the coordinator before
+  // Claude Code records the `ib bounce` result, so the handler waits.
+  test("ib watch quits BOUNCE_QUIT_DELAY_MS after BOUNCE_SIGNAL without pausing per-repo coordinators; Ctrl+C still pauses them", async () => {
     const source = await Bun.file(join(import.meta.dir, "tui", "dashboard.ts")).text();
-    expect(source).toContain("process.on(BOUNCE_SIGNAL, () => quitDashboard(false));");
+    const handler = source.slice(source.indexOf("process.on(BOUNCE_SIGNAL, () => {"));
+    expect(handler.slice(0, handler.indexOf("\n  });"))).toContain(
+      "setTimeout(() => quitDashboard(false), BOUNCE_QUIT_DELAY_MS);",
+    );
     expect(source).toContain("quitDashboard(true);");
   });
 

@@ -2504,7 +2504,7 @@ Remote Control requires claude.ai authentication (`/login`), not API keys. This 
 
 #### 15.3.4 Session Naming
 
-The session is named by the `--remote-control` flag's argument. Set `coordinator.remoteControlName` with `ib config set coordinator.remoteControlName "My coordinator"`. This string config key defaults to empty; an empty or missing value uses `itsybitsy coordinator`. It appears under that name in the claude.ai/code session list and the Claude mobile app. Changes apply on the next system coordinator launch, including resume-based restarts. Setting the name does not enable Remote Control; the `remoteControl:` frontmatter field still controls that.
+The session is named by the `--remote-control` flag's argument. Set `coordinator.remoteControlName` with `ib config set coordinator.remoteControlName "My coordinator"` or in the setup dialog’s Config tab. This string config key defaults to empty; an empty or missing value uses `itsybitsy coordinator`. It appears under that name in the claude.ai/code session list and the Claude mobile app. Changes apply on the next system coordinator launch, including resume-based restarts. Setting the name does not enable Remote Control; the `remoteControl:` frontmatter field still controls that.
 
 ### 15.4 Configuration
 
@@ -2535,7 +2535,7 @@ Rules for the field:
 
 #### 15.5.1 Changing the Setting
 
-There is no toggle in the setup dialog or the settings list. To change it, edit `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md`, then restart the system coordinator, for example with `R` (a resume-based restart) or `/restart` in the coordinator chat box (a fresh restart; §4, §12.1). The value is read only at launch: it decides the `settings.local.json` contents and the launch line, so a running session keeps the mode it started with, and the header indicator is yellow until a restart (§15.5.2). Either restart applies the new value, because the fresh and the resume launch lines both carry the flag when it is on.
+The session name (`coordinator.remoteControlName`) is editable in the setup dialog’s Config tab (§15.3.4). There is no enablement toggle in the setup dialog or the settings list. To enable or disable Remote Control, edit `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md`, then restart the system coordinator, for example with `R` (a resume-based restart) or `/restart` in the coordinator chat box (a fresh restart; §4, §12.1). The value is read only at launch: it decides the `settings.local.json` contents and the launch line, so a running session keeps the mode it started with, and the header indicator is yellow until a restart (§15.5.2). Either restart applies the new value, because the fresh and the resume launch lines both carry the flag when it is on.
 
 #### 15.5.2 Status Indicator
 
@@ -2570,7 +2570,7 @@ No new `ib` commands are needed. Remote Control is managed through:
 
 1. **Agent-type file**: `remoteControl:` in `~/.itsybitsy/agent-types/system-coordinator.md` (§15.4)
 2. **System coordinator lifecycle**: `ensureSystemCoordinator()` loads that layer at every launch, passes the value to `writeCoordinatorFiles()` for the `disableRemoteControl` settings key, and adds the `--remote-control` flag to the launch line when it is `true` (§15.3.2)
-3. **Session name**: set `coordinator.remoteControlName` through `ib config set` or the settings list, then restart the system coordinator (§15.3.4)
+3. **Session name**: set `coordinator.remoteControlName` through `ib config set` or the setup dialog’s Config tab, then restart the system coordinator (§15.3.4)
 
 The existing `ib` command pattern (`ib hooks install/uninstall`) is not appropriate here because Remote Control is not a hook — it is a launch flag plus a settings key, both decided when the system coordinator starts. Change the relevant setting, then restart.
 

@@ -1163,14 +1163,14 @@ function isBounceScriptProcess(command: string): boolean {
  * transcript. Writes `coordinator-bounce.json` first so the resumed session's
  * SessionStart hook can tell the coordinator it was bounced.
  *
- * The watchers come from coordinator.refs, but a PID counts only while `ps`
- * still shows it as `ib watch`: the refs file keeps the PID of a watcher that
- * died without releasing it, and SIGUSR2 terminates a process that does not
- * handle it. Refuses unless there is exactly one watcher and bounce.sh is its
- * parent. Two watchers releasing coordinator.refs at once can each write back
- * the other's PID, so neither stops the coordinator and the bounce never
- * restarts it. And nothing relaunches an `ib watch` that bounce.sh did not
- * start, so a bounce would leave it, the coordinator and Telegram down.
+ * The watchers come from the process table, not coordinator.refs: the
+ * dashboard's own `x` and /restart (discardSystemCoordinator) drop its refs
+ * entry, so the refs file can miss a running `ib watch`. Refuses unless there
+ * is exactly one watcher and bounce.sh is its parent. Two watchers releasing
+ * coordinator.refs at once can each write back the other's PID, so neither
+ * stops the coordinator and the bounce never restarts it. And nothing
+ * relaunches an `ib watch` that bounce.sh did not start, so a bounce would
+ * leave it, the coordinator and Telegram down.
  */
 export async function bounceWatch(): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   const refuse = (stderr: string) => ({ ok: false, exitCode: 1, stdout: "", stderr });
@@ -1179,11 +1179,11 @@ export async function bounceWatch(): Promise<{ ok: boolean; exitCode: number; st
     return result.exitCode === 0 ? result.stdout.trim() : "";
   };
   // Dynamic: state-command imports this module.
-  const { isIbWatchProcess } = await import("./state-command");
-  const watchers: number[] = [];
-  for (const pid of await readLivePids()) {
-    if (isIbWatchProcess(await ps("command", pid))) watchers.push(pid);
-  }
+  const { isIbWatchProcess, parsePsLines } = await import("./state-command");
+  const table = await coordinatorSpawnCtx.run(["ps", "-o", "pid=,command=", "-A"]);
+  const watchers = (table.exitCode === 0 ? parsePsLines(table.stdout) : [])
+    .filter((proc) => isIbWatchProcess(proc.command))
+    .map((proc) => proc.pid);
   if (watchers.length === 0) return refuse("ib watch is not running");
   if (watchers.length > 1) {
     return refuse(`ib bounce needs exactly one ib watch, but ${watchers.length} are running (pid ${watchers.join(", ")}). Quit the others first.`);

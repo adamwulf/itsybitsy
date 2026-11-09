@@ -219,7 +219,7 @@ export function sanitizeForDisplay(s: string): string {
  * entries. Each line has the pid (possibly left-padded by `ps`), one or more
  * spaces, then the command tail. Blank or unparseable lines are skipped.
  */
-function parsePsLines(stdout: string): OrphanProcess[] {
+export function parsePsLines(stdout: string): OrphanProcess[] {
   const out: OrphanProcess[] = [];
   for (const raw of stdout.split("\n")) {
     const line = raw.replace(/^\s+/, "");

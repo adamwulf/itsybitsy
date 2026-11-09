@@ -976,8 +976,8 @@ function printUsage(): void {
   console.log("  tgreact <emoji>     React to the latest Telegram message (--message-id <id>, --clear)");
   console.log("  tgsendfile <path>   Send a local file to Telegram (--photo | --document, default document)");
   console.log("  tgtyping            Send Telegram typing indicator (for hook use)");
-  // `ib bounce` restarts everyone's dashboard, so only the system
-  // coordinator's help lists it (the PreToolUse hook denies it to other agents).
+  // `ib bounce` quits ib watch and restarts the system coordinator, so only
+  // the coordinator's help lists it (the PreToolUse hook denies it to other agents).
   if (resolveAgentFromCwd(process.cwd())?.agentId === SYSTEM_AGENT_ID) {
     console.log("");
     console.log("System coordinator:");

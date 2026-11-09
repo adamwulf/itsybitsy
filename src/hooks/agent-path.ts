@@ -1367,8 +1367,8 @@ function containsInternalIbInvocation(command: string): boolean {
 const IB_TELEGRAM_OUTBOUND_COMMANDS = new Set(["tgsend", "tgsendfile", "tgreact"]);
 
 /**
- * `ib bounce` quits every running `ib watch` and restarts the system
- * coordinator. Only the system coordinator may ask for that.
+ * `ib bounce` quits `ib watch` and restarts the system coordinator. Only the
+ * system coordinator may ask for that.
  */
 const IB_BOUNCE_COMMANDS = new Set(["bounce"]);
 
@@ -1488,7 +1488,7 @@ export async function checkIbCommandAccess(
   if (containsIbSubcommandInvocation(normalizedCommand, IB_BOUNCE_COMMANDS)) {
     return {
       decision: "deny",
-      reason: "Access denied: 'ib bounce' is for the system coordinator only — it quits every running ib watch. Report to your manager (or to the user, if you have no manager) instead",
+      reason: "Access denied: 'ib bounce' is for the system coordinator only — it quits ib watch and restarts the system coordinator. Report to your manager (or to the user, if you have no manager) instead",
     };
   }
 

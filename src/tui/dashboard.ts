@@ -3970,8 +3970,15 @@ export async function launchDashboard(): Promise<void> {
     dashboard.stopPolling();
     watcher.stop();
     stopTerminal();
+    // stopTerminal() restored cooked mode and dropped the SIGINT handler, so
+    // another Ctrl-C now arrives as SIGINT. Under bounce.sh that is the
+    // natural way to stop the loop, but dying here would skip the release
+    // below and orphan the coordinator. Ignore it; bounce.sh stops at its
+    // countdown, and SIGTERM still ends a stuck shutdown.
+    process.on("SIGINT", () => {});
     dashboard.setTerminalTitle("");
     process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[2J\x1b[H");
+    process.stdout.write("Quitting ib watch…\n");
     // Unsubscribe the state-change listener before stopping so a stop()
     // transition doesn't fire one final logToWatchLog call after we've
     // already torn down the TUI write paths.

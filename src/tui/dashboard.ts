@@ -96,6 +96,10 @@ import { getResolvableWarnings } from "../health-check";
 import { logToWatchLog, logWarning, setWatchRunning } from "../watch-log";
 import { sandboxCollectorHealth, type CollectorHealth } from "../sandbox-collector-light";
 import { SANDBOX_DENIAL_COLLECTOR_ENABLED } from "../sandbox-log-launch";
+import {
+  readRemoteControlFiles, remoteControlStatus,
+  type RemoteControlFiles, type RemoteControlFilesOptions, type RemoteControlStatus,
+} from "../remote-control-light";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -787,7 +791,20 @@ export class DashboardComponent implements Component {
   telegramStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** Latest shared sandbox denial collector probe (top bar + help panel). */
   collectorStatus: CollectorHealth | null = null;
-  collectorStatusTimer: ReturnType<typeof setInterval> | null = null;
+  /** Latest system coordinator Remote Control light (top bar + help panel). */
+  remoteControlStatus: RemoteControlStatus | null = null;
+  /** The last read of the Remote Control files; null until the first read. */
+  private remoteControlFiles: RemoteControlFiles | null = null;
+  /** Where `refreshRemoteControlStatus` reads the files; a test seam. */
+  remoteControlProbe: RemoteControlFilesOptions = {};
+  /** A read in flight, and whether another was asked for meanwhile. */
+  private remoteControlInFlight = false;
+  private remoteControlQueued = false;
+  /** Watcher updates in a row that reported the system coordinator stopped
+   *  (see isSystemCoordinatorStopped). */
+  private coordinatorStoppedUpdates = 0;
+  /** The 5s tick that refreshes the Collector and Remote Control lights. */
+  statusLightTimer: ReturnType<typeof setInterval> | null = null;
   /** Tracks in-flight executeAndRefresh promises — used by tests to await completion */
   private _pendingActions: Set<Promise<void>> = new Set();
   pendingSelectNewestInRepo: string | null = null;
@@ -1286,9 +1303,9 @@ export class DashboardComponent implements Component {
       clearInterval(this.telegramStatusTimer);
       this.telegramStatusTimer = null;
     }
-    if (this.collectorStatusTimer) {
-      clearInterval(this.collectorStatusTimer);
-      this.collectorStatusTimer = null;
+    if (this.statusLightTimer) {
+      clearInterval(this.statusLightTimer);
+      this.statusLightTimer = null;
     }
     // Watchdog runs as standalone process — do NOT stop it when TUI closes
   }
@@ -1600,6 +1617,73 @@ export class DashboardComponent implements Component {
     if (changed) this.tui?.requestRender();
   }
 
+  setRemoteControlStatus(status: RemoteControlStatus): void {
+    // The 5s probe re-sends the same light; only a new color, or the indicator
+    // appearing or disappearing, needs a render. Before the first probe the
+    // indicator is hidden, the same as a hidden light.
+    const changed = (this.remoteControlStatus?.light ?? null) !== status.light;
+    this.remoteControlStatus = status;
+    if (changed) this.tui?.requestRender();
+  }
+
+  /** Re-read the Remote Control files (src/remote-control-light.ts) and apply
+   *  the light. Every call reads them again, so the tick after a coordinator
+   *  restart shows the settings file that relaunch wrote. A call while a read
+   *  is in flight makes that read run once more when it ends, so a read that
+   *  began before a settings rewrite is never the last one. */
+  async refreshRemoteControlStatus(): Promise<void> {
+    if (this.remoteControlInFlight) {
+      this.remoteControlQueued = true;
+      return;
+    }
+    this.remoteControlInFlight = true;
+    try {
+      do {
+        this.remoteControlQueued = false;
+        this.remoteControlFiles = await readRemoteControlFiles(this.remoteControlProbe);
+      } while (this.remoteControlQueued);
+    } finally {
+      this.remoteControlInFlight = false;
+    }
+    this.applyRemoteControlStatus();
+  }
+
+  /** Refresh the light once `launch` (the not-awaited startup
+   *  `ensureSystemCoordinator()`) settles: a launch rewrites the settings file,
+   *  and the first read may have run before it did. */
+  async refreshRemoteControlAfterLaunch(launch: Promise<unknown>): Promise<void> {
+    await launch.catch(() => {});
+    await this.refreshRemoteControlStatus();
+  }
+
+  /** Combine the last file read with the coordinator's state. No IO, so every
+   *  watcher update can run it; a no-op before the first read. */
+  private applyRemoteControlStatus(): void {
+    if (!this.remoteControlFiles) return;
+    this.setRemoteControlStatus(remoteControlStatus(this.remoteControlFiles, this.isSystemCoordinatorStopped()));
+  }
+
+  /** Feed one watcher update's system coordinator state to the light. */
+  private noteSystemCoordinatorState(state: string | undefined): void {
+    this.coordinatorStoppedUpdates = state === "stopped" ? this.coordinatorStoppedUpdates + 1 : 0;
+    this.applyRemoteControlStatus();
+  }
+
+  /**
+   * Whether the Remote Control light treats the system coordinator as
+   * stopped: two watcher updates in a row reported it "stopped" (no tmux
+   * session). An absent watcher entry or any other state resets the count.
+   * A launch leaves no session for well under a second (a restart kills the
+   * old one first; a first launch has not created it yet), and watcher passes
+   * run on a 2 s tick, so two stopped updates in a row mean it really is stopped.
+   * A stale stopped pass that finishes after a launch is followed by a running
+   * pass, which resets the count. This holds for a launch from any process,
+   * `ib respawn @system` included.
+   */
+  isSystemCoordinatorStopped(): boolean {
+    return this.coordinatorStoppedUpdates >= 2;
+  }
+
   /** Add an error to the errors list (called from watcher onError).
    *  Deduplicates: if the same message already exists, updates its timestamp instead of adding a new entry. */
   addError(message: string) {
@@ -1809,6 +1893,9 @@ export class DashboardComponent implements Component {
       );
     }
     this.agentTree.setFlatList(flatList);
+    this.noteSystemCoordinatorState(
+      flatList.find((e): e is Extract<FlatEntry, { kind: "system-coordinator" }> => e.kind === "system-coordinator")?.state,
+    );
     // §17.1 (user-confirmed startup behavior): on the VERY FIRST populate with a
     // non-empty list, auto-select the first row — the old `ib watch` default.
     // One-time guard: after it fires, later refreshes preserve the user's
@@ -3195,6 +3282,13 @@ export class DashboardComponent implements Component {
         ? `${DIM_GRAY}●${RESET} ${DIM}Collector${RESET}`
         : `${light === "green" ? GREEN : light === "yellow" ? YELLOW : RED}●${RESET} Collector`);
     }
+    if (this.remoteControlStatus?.light) {
+      // System coordinator Remote Control (src/remote-control-light.ts): green
+      // when on, yellow when system-coordinator.md and the coordinator disagree
+      // (launched the other way, or stopped) until it is (re)started, hidden
+      // when both are off.
+      indicators.push(`${this.remoteControlStatus.light === "green" ? GREEN : YELLOW}●${RESET} Remote Control`);
+    }
     if (this.telegramStatus) {
       const tgColor =
         this.telegramStatus === "green" ? GREEN
@@ -3644,7 +3738,8 @@ export async function launchDashboard(): Promise<void> {
   await acquireSystemCoordinator();
   // agent-types dir must exist before ensureSystemCoordinator() — it reads system-coordinator.md to resolve its model.
   await ensureAgentTypesDir();
-  ensureSystemCoordinator().catch((err) => {
+  // Kept so the Remote Control light can re-read the settings file this launch writes.
+  const coordinatorStartup = ensureSystemCoordinator().catch((err) => {
     // Fires asynchronously — may resolve after the TUI has mounted, so
     // route through logWarning to avoid corrupting the dashboard.
     logWarning(`System coordinator startup failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3758,16 +3853,26 @@ export async function launchDashboard(): Promise<void> {
       }
     }, 5_000);
   }
-  // Shared sandbox denial collector stoplight: in-process lock probes and a
-  // heartbeat read (src/sandbox-collector-light.ts), never a spawned
-  // `ib sandbox-collector status`. While collection is switched off in this
-  // build nothing can change, so it stays grey with no timer.
+  // Top-bar status lights, both read in process, never by spawning:
+  // - the shared sandbox denial collector: lock probes and a heartbeat read
+  //   (src/sandbox-collector-light.ts), not `ib sandbox-collector status`.
+  //   While collection is switched off in this build nothing can change, so it
+  //   stays grey and the tick skips it.
+  // - the system coordinator's Remote Control: system-coordinator.md and the
+  //   coordinator's settings.local.json (src/remote-control-light.ts), re-read
+  //   every tick so a coordinator restart shows on the next one, and again as
+  //   soon as the startup launch above ends, since it may rewrite the settings
+  //   file after the first read. Watcher updates add the coordinator's stopped
+  //   state (onUpdate).
   dashboard.setCollectorStatus(sandboxCollectorHealth());
-  if (SANDBOX_DENIAL_COLLECTOR_ENABLED) {
-    dashboard.collectorStatusTimer = setInterval(() => {
+  void dashboard.refreshRemoteControlStatus();
+  void dashboard.refreshRemoteControlAfterLaunch(coordinatorStartup);
+  dashboard.statusLightTimer = setInterval(() => {
+    if (SANDBOX_DENIAL_COLLECTOR_ENABLED) {
       dashboard.setCollectorStatus(sandboxCollectorHealth({ previous: dashboard.collectorStatus }));
-    }, 5_000);
-  }
+    }
+    void dashboard.refreshRemoteControlStatus();
+  }, 5_000);
   tui.addChild(dashboard);
 
   const watcher = new AgentWatcher(repos, {

@@ -1706,6 +1706,95 @@ Legacy body`);
   });
 });
 
+describe("remoteControl frontmatter (system-coordinator.md only)", () => {
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-remote-control-"));
+    setUserHome(tempHome);
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, extra: string, opts: { spawnable?: boolean } = {}): Promise<void> {
+    const spawnableLine = opts.spawnable === false ? "spawnable: false\n" : "";
+    await Bun.write(join(typesDir, `${name}.md`), `---\nname: ${name}\n${spawnableLine}${extra}---\nbody\n`);
+  }
+
+  test("parseAgentTypeFile reads remoteControl as a boolean", () => {
+    const { frontmatter } = parseAgentTypeFile("---\nname: system-coordinator\nremoteControl: true\n---\n");
+    expect(frontmatter.remoteControl).toBe(true);
+  });
+
+  test("loadAgentType: true, false and absent", async () => {
+    await writeType("system-coordinator", "remoteControl: true\n", { spawnable: false });
+    expect((await loadAgentType("system-coordinator")).remoteControl).toBe(true);
+
+    await writeType("system-coordinator", "remoteControl: false\n", { spawnable: false });
+    expect((await loadAgentType("system-coordinator")).remoteControl).toBe(false);
+
+    await writeType("system-coordinator", "", { spawnable: false });
+    expect((await loadAgentType("system-coordinator")).remoteControl).toBe(false);
+  });
+
+  test("loadAgentType: a non-boolean value is off", async () => {
+    await writeType("system-coordinator", "remoteControl: yes\n", { spawnable: false });
+    expect((await loadAgentType("system-coordinator")).remoteControl).toBe(false);
+  });
+
+  test("loadAgentType: remoteControl is never inherited", async () => {
+    await writeType("parent", "remoteControl: true\n");
+    await writeType("child", "inherits: parent\n");
+    expect((await loadAgentType("child")).remoteControl).toBe(false);
+  });
+
+  test("validation accepts a boolean in system-coordinator.md", async () => {
+    await writeType("system-coordinator", "remoteControl: true\n", { spawnable: false });
+    expect(await validateAllAgentTypes()).toEqual([]);
+
+    await writeType("system-coordinator", "remoteControl: false\n", { spawnable: false });
+    expect(await validateAllAgentTypes()).toEqual([]);
+  });
+
+  test("validation rejects a non-boolean in system-coordinator.md", async () => {
+    await writeType("system-coordinator", "remoteControl: yes\n", { spawnable: false });
+    expect(await validateAllAgentTypes()).toEqual([
+      'system-coordinator.md: remoteControl must be true or false, got "yes"',
+    ]);
+  });
+
+  for (const [name, spawnable] of [
+    ["worker", true],
+    ["manager", true],
+    ["repo-coordinator", true],
+    ["_all", false],
+    ["_non_coordinator", false],
+  ] as const) {
+    test(`validation rejects remoteControl in ${name}.md, even when false`, async () => {
+      for (const value of ["true", "false"]) {
+        await writeType(name, `remoteControl: ${value}\n`, { spawnable });
+        expect(await validateAllAgentTypes()).toEqual([
+          `${name}.md: remoteControl is only allowed in system-coordinator.md — Remote Control is a system coordinator setting, and every other agent always runs with it disabled. Remove the key from this file.`,
+        ]);
+      }
+    });
+  }
+
+  test("the embedded system-coordinator.md declares remoteControl: false and validates clean", async () => {
+    await rm(typesDir, { recursive: true, force: true });
+    await ensureAgentTypesDir();
+    expect((await loadAgentType("system-coordinator")).remoteControl).toBe(false);
+    expect(parseAgentTypeFile(await Bun.file(join(typesDir, "system-coordinator.md")).text()).frontmatter.remoteControl).toBe(false);
+    expect(await validateAllAgentTypes()).toEqual([]);
+  });
+});
+
 describe("validateAllAgentTypes: paths", () => {
   let tempHome: string;
   let typesDir: string;

@@ -53,6 +53,15 @@ export interface AgentType {
    * and markdown body merge into every spawned agent.
    */
   spawnable?: boolean;
+  /**
+   * Claude Code Remote Control for the system coordinator. Only meaningful in
+   * `system-coordinator.md`: validation rejects the key in every other file.
+   * `true` launches the system coordinator with `--remote-control`; `false`
+   * (the value when absent) writes `disableRemoteControl: true` into its
+   * settings instead (SPEC.md §15). Like `spawnable`, read from the target
+   * file's own frontmatter only, never inherited.
+   */
+  remoteControl?: boolean;
   model?: string;
   /**
    * Reasoning-effort level threaded to the underlying CLI (Claude's
@@ -509,9 +518,10 @@ async function resolveChain(
  * inherits the ancestor value, defaulting to true only after the full merge.
  * `repos` is replaced (not merged) when the descendant declares it.
  *
- * The `name` and `spawnable` keys are intentionally not set here — the caller
- * (`buildAgentTypeFromFrontmatter`) is responsible for the final `name` (from
- * the filename) and `spawnable` (read from the leaf file only).
+ * The `name`, `spawnable` and `remoteControl` keys are intentionally not set
+ * here — the caller (`buildAgentTypeFromFrontmatter`) is responsible for the
+ * final `name` (from the filename), and `spawnable` and `remoteControl` (both
+ * read from the leaf file only).
  */
 function mergeRawFrontmatters(
   chain: Array<{ name: string; frontmatter: Record<string, unknown>; body: string }>,
@@ -668,12 +678,15 @@ function mergeRawFrontmatters(
  *
  * The `spawnable` flag is supplied separately so it can be read from the leaf
  * file only. See §Why `spawnable` is not inherited in PLAN-INHERITS.md.
+ * `remoteControl` is supplied the same way: it belongs to
+ * `system-coordinator.md` alone, so no other file can hand it down.
  */
 function buildAgentTypeFromFrontmatter(
   frontmatter: Record<string, unknown>,
   body: string,
   name: string,
   leafSpawnable: boolean,
+  leafRemoteControl: boolean,
 ): AgentType {
   const getString = (val: unknown, fallback: string): string =>
     typeof val === "string" ? val : fallback;
@@ -718,6 +731,7 @@ function buildAgentTypeFromFrontmatter(
     description: getString(frontmatter.description, ""),
     canSpawnChildren: frontmatter.canSpawnChildren === true,
     spawnable: leafSpawnable,
+    remoteControl: leafRemoteControl,
     icon: iconChar,
     model: getString(frontmatter.model, "") || undefined,
     effort: getString(frontmatter.effort, "") || undefined,
@@ -760,8 +774,10 @@ export async function loadAgentType(name: string): Promise<AgentType> {
   // `spawnable` is read from the leaf file only — see PLAN-INHERITS.md
   // §"Why `spawnable` is not inherited".
   const leafSpawnable = leaf.frontmatter.spawnable === false ? false : true;
+  // `remoteControl` is leaf-only too, and anything but a literal `true` is off.
+  const leafRemoteControl = leaf.frontmatter.remoteControl === true;
   const { frontmatter, body } = mergeRawFrontmatters(chain);
-  return buildAgentTypeFromFrontmatter(frontmatter, body, name, leafSpawnable);
+  return buildAgentTypeFromFrontmatter(frontmatter, body, name, leafSpawnable, leafRemoteControl);
 }
 
 /**
@@ -946,6 +962,19 @@ export async function validateAllAgentTypes(): Promise<string[]> {
 
         if (frontmatter.spawnable !== undefined && typeof frontmatter.spawnable !== "boolean") {
           errors.push(`${file}: spawnable must be true or false, got "${frontmatter.spawnable}"`);
+        }
+
+        // `remoteControl` belongs to the system coordinator alone (SPEC.md
+        // §15): every other agent always runs with Remote Control disabled, so
+        // the key anywhere else is an error rather than a silently ignored line.
+        if (frontmatter.remoteControl !== undefined) {
+          if (basename !== SYSTEM_COORDINATOR_TYPE) {
+            errors.push(
+              `${file}: remoteControl is only allowed in ${SYSTEM_COORDINATOR_TYPE}.md — Remote Control is a system coordinator setting, and every other agent always runs with it disabled. Remove the key from this file.`,
+            );
+          } else if (typeof frontmatter.remoteControl !== "boolean") {
+            errors.push(`${file}: remoteControl must be true or false, got "${frontmatter.remoteControl}"`);
+          }
         }
 
         // Validate permissions structure

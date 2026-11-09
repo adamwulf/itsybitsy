@@ -40,9 +40,8 @@ describe("readConfig", () => {
     expect(result["externalDiffTool"]).toEqual({ value: undefined, source: "default" });
     expect(result["hooks.injectStatus"]).toEqual({ value: true, source: "default" });
     expect(result["hooks.statusVisible"]).toEqual({ value: true, source: "default" });
-    // Remote-control for the system coordinator must default OFF — it is never
-    // enabled implicitly.
-    expect(result["coordinator.remoteControl"]).toEqual({ value: false, source: "default" });
+    // Remote Control is set in system-coordinator.md frontmatter, not config.
+    expect(result["coordinator.remoteControl"]).toBeUndefined();
     // Permission list keys have all been removed from CONFIG_KEYS; they now live in
     // ~/.itsybitsy/agent-types/*.md frontmatter (repo-coordinator.md, _all.md, _non_coordinator.md).
     expect(result["permissions.all.allow"]).toBeUndefined();
@@ -472,31 +471,29 @@ describe("channels.telegram config keys", () => {
   });
 });
 
-describe("coordinator.remoteControl config key", () => {
-  test("CONFIG_KEYS contains coordinator.remoteControl as a boolean", () => {
-    const def = CONFIG_KEYS.find((d) => d.key === "coordinator.remoteControl");
-    expect(def).toBeDefined();
-    expect(def!.type).toBe("boolean");
-    expect(def!.default).toBe(false);
+describe("no coordinator.remoteControl config key", () => {
+  // Remote Control is set by `remoteControl:` in system-coordinator.md
+  // frontmatter (SPEC.md §15), so config.json has no key for it.
+  test("CONFIG_KEYS does not contain coordinator.remoteControl", () => {
+    const keys = CONFIG_KEYS.map((def) => def.key);
+    expect(keys).not.toContain("coordinator.remoteControl");
   });
 
-  test("default value is false", async () => {
+  test("a leftover coordinator.remoteControl in config.json is harmless", async () => {
+    await Bun.write(
+      userCfgPath,
+      JSON.stringify({ coordinator: { remoteControl: true, imessage: true } }),
+    );
+
+    // Reading ignores it, and the sibling coordinator.imessage key still reads.
     const result = await readConfig(opts());
-    expect(result["coordinator.remoteControl"]).toEqual({ value: false, source: "default" });
-  });
+    expect(result["coordinator.remoteControl"]).toBeUndefined();
+    expect(result["coordinator.imessage"]).toEqual({ value: true, source: "user" });
 
-  test("round-trips through write/read under a nested coordinator.* path", async () => {
-    await writeConfig(userCfgPath, "coordinator.remoteControl", true);
+    // Writing another key leaves it in place rather than failing or dropping it.
+    await writeConfig(userCfgPath, "maxAgents", 5);
     const raw = await Bun.file(userCfgPath).json();
-    expect(raw).toEqual({ coordinator: { remoteControl: true } });
-
-    const result = await readConfig(opts());
-    expect(result["coordinator.remoteControl"]).toEqual({ value: true, source: "user" });
-
-    // Toggle back off and confirm it round-trips again.
-    await writeConfig(userCfgPath, "coordinator.remoteControl", false);
-    const result2 = await readConfig(opts());
-    expect(result2["coordinator.remoteControl"]).toEqual({ value: false, source: "user" });
+    expect(raw).toEqual({ coordinator: { remoteControl: true, imessage: true }, maxAgents: 5 });
   });
 });
 

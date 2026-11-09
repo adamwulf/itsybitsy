@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentFileWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
@@ -11,6 +11,7 @@ import type { CodexUsageReading, GeminiUsageResult } from "../usage";
 import type { CodexLiveUsageResult } from "../codex-live-usage";
 import { TUI, visibleWidth } from "@mariozechner/pi-tui";
 import type { CollectorHealth } from "../sandbox-collector-light";
+import type { RemoteControlStatus } from "../remote-control-light";
 import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, resetNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
@@ -6862,6 +6863,199 @@ describe("Collector header indicator", () => {
   });
 });
 
+function remoteControl(state: RemoteControlStatus["state"]): RemoteControlStatus {
+  const lights = { off: null, on: "green", "pending-on": "yellow", "pending-off": "yellow", stopped: "yellow" } as const;
+  return { light: lights[state], state };
+}
+
+describe("Remote Control header indicator", () => {
+  let dashboard: DashboardComponent;
+  let origRows: number | undefined;
+
+  beforeEach(() => {
+    dashboard = makeDashboard();
+    origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 30, writable: true, configurable: true });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+  });
+
+  test("hidden before the first probe and while both are off", () => {
+    expect(stripAnsi(dashboard.render(160)[0]!)).not.toContain("Remote Control");
+    dashboard.setRemoteControlStatus(remoteControl("off"));
+    expect(stripAnsi(dashboard.render(160)[0]!)).not.toContain("Remote Control");
+  });
+
+  test("green when on; yellow in both mismatch directions", () => {
+    const header = (state: RemoteControlStatus["state"]) => {
+      dashboard.setRemoteControlStatus(remoteControl(state));
+      return dashboard.render(160)[0]!;
+    };
+    expect(header("on")).toContain("\x1b[32m●\x1b[0m Remote Control");
+    expect(header("pending-on")).toContain("\x1b[33m●\x1b[0m Remote Control");
+    expect(header("pending-off")).toContain("\x1b[33m●\x1b[0m Remote Control");
+  });
+
+  test("sits between Collector and Telegram, right-aligned with the same spacing", () => {
+    dashboard.setCollectorStatus(collectorHealth("green"));
+    dashboard.setRemoteControlStatus(remoteControl("on"));
+    dashboard.setTelegramStatus("green");
+    const width = 160;
+    const header = dashboard.render(width)[0]!;
+    expect(stripAnsi(header).trimEnd().endsWith("● Collector  ● Remote Control  ● Telegram")).toBe(true);
+    expect(visibleWidth(header)).toBe(width - 1);
+  });
+
+  test("follows Collector when Telegram is not configured", () => {
+    dashboard.setCollectorStatus(collectorHealth("green"));
+    dashboard.setRemoteControlStatus(remoteControl("pending-on"));
+    const header = dashboard.render(160)[0]!;
+    expect(stripAnsi(header).trimEnd().endsWith("● Collector  ● Remote Control")).toBe(true);
+    expect(visibleWidth(header)).toBe(159);
+  });
+
+  test("narrow width keeps all three indicators inside the line", () => {
+    dashboard.setCollectorStatus(collectorHealth("yellow"));
+    dashboard.setRemoteControlStatus(remoteControl("pending-off"));
+    dashboard.setTelegramStatus("green");
+    const header = dashboard.render(140)[0]!;
+    expect(visibleWidth(header)).toBeLessThanOrEqual(140);
+    expect(stripAnsi(header).trimEnd().endsWith("● Collector  ● Remote Control  ● Telegram")).toBe(true);
+  });
+});
+
+describe("Remote Control light inputs", () => {
+  let dir: string;
+  let settingsPath: string;
+  let configured: boolean;
+  let dashboard: DashboardComponent;
+  let counter: ReturnType<typeof countingTui>;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "itsybitsy-remote-control-"));
+    settingsPath = join(dir, "settings.local.json");
+    configured = true;
+    dashboard = makeDashboard();
+    counter = countingTui();
+    dashboard.setTui(counter.tui);
+    // Temp files only; never the real system-coordinator.md or settings file.
+    dashboard.remoteControlProbe = { settingsPath, loadSystemCoordinatorType: async () => ({ remoteControl: configured }) };
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** The settings file a launch writes. */
+  const launchedWith = (on: boolean) =>
+    writeFile(settingsPath, JSON.stringify(on ? { spinnerTipsEnabled: false } : { disableRemoteControl: true }));
+  /** One watcher update with the system coordinator in `state` (undefined: no entry). */
+  const watcherUpdate = (state?: string) =>
+    dashboard.onUpdate([], state === undefined ? [] : [makeFlatSystemCoordinator(state)], []);
+
+  test("refreshRemoteControlStatus picks up a coordinator restart on the next tick", async () => {
+    // Turned on in system-coordinator.md; the running coordinator was launched with it off.
+    await launchedWith(false);
+    await dashboard.refreshRemoteControlStatus();
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
+    expect(counter.renders()).toBe(1);
+
+    // The restart's relaunch rewrites the settings file without the key.
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+    expect(counter.renders()).toBe(2);
+  });
+
+  test("a stopped coordinator turns green to yellow once two watcher updates in a row say so", async () => {
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+
+    watcherUpdate("stopped");
+    expect(dashboard.isSystemCoordinatorStopped()).toBe(false);
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+    watcherUpdate("stopped");
+    expect(dashboard.isSystemCoordinatorStopped()).toBe(true);
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("stopped"));
+    // The stop left the settings file in place; the next tick's read keeps it yellow.
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("stopped"));
+
+    // Started again: green on the next update.
+    watcherUpdate("running");
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+  });
+
+  test("not configured and stopped: hidden, although the last launch had it on", async () => {
+    configured = false;
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-off"));
+    watcherUpdate("stopped");
+    watcherUpdate("stopped");
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("off"));
+  });
+
+  test("only an explicit stopped counts: any other state or a missing entry starts the count over", async () => {
+    await launchedWith(true);
+    await dashboard.refreshRemoteControlStatus();
+    for (const between of ["running", "compacting", "rate_limited", undefined]) {
+      watcherUpdate("stopped");
+      watcherUpdate(between);
+      watcherUpdate("stopped");
+      expect(dashboard.isSystemCoordinatorStopped(), String(between)).toBe(false);
+      expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+      watcherUpdate("running");
+    }
+  });
+
+  test("refreshRemoteControlAfterLaunch re-reads once the startup launch ends, even a failed one", async () => {
+    await launchedWith(false); // the previous run's file
+    await dashboard.refreshRemoteControlStatus();
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
+
+    let endLaunch!: () => void;
+    const startup = new Promise<void>((resolve) => { endLaunch = resolve; });
+    const refreshed = dashboard.refreshRemoteControlAfterLaunch(startup);
+    await launchedWith(true); // the startup launch writes the new file
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
+    endLaunch();
+    await refreshed;
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+
+    await launchedWith(false);
+    await dashboard.refreshRemoteControlAfterLaunch(Promise.reject(new Error("launch failed")));
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("pending-on"));
+  });
+
+  test("a refresh asked for while a read is in flight runs once more after it", async () => {
+    await launchedWith(true);
+    configured = false;
+    let releaseFirstRead: (() => void) | undefined;
+    let reads = 0;
+    dashboard.remoteControlProbe = {
+      settingsPath,
+      loadSystemCoordinatorType: async () => {
+        const value = configured; // what the file says when this read looks
+        if (++reads === 1) await new Promise<void>((resolve) => { releaseFirstRead = resolve; });
+        return { remoteControl: value };
+      },
+    };
+    const first = dashboard.refreshRemoteControlStatus();
+    await waitFor(() => releaseFirstRead !== undefined, { message: "first read started" });
+    configured = true; // changed after the first read looked
+    await dashboard.refreshRemoteControlStatus(); // queued behind the first read
+    releaseFirstRead!();
+    await first;
+    expect(reads).toBe(2);
+    expect(dashboard.remoteControlStatus).toEqual(remoteControl("on"));
+  });
+});
+
 describe("DashboardComponent — §17 Teams panel wiring", () => {
   let coordHome: string;
 
@@ -7971,6 +8165,30 @@ describe("idle render checks", () => {
 
     dashboard.setCollectorStatus(collectorHealth("yellow", 12_000));
     expect(counter.renders()).toBe(2);
+  });
+
+  test("setRemoteControlStatus renders only when the light changes", () => {
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+
+    // Hidden before the first probe and hidden after it: nothing to draw.
+    dashboard.setRemoteControlStatus(remoteControl("off"));
+    dashboard.setRemoteControlStatus(remoteControl("off"));
+    expect(counter.renders()).toBe(0);
+
+    dashboard.setRemoteControlStatus(remoteControl("pending-on"));
+    expect(counter.renders()).toBe(1);
+    // Still yellow; the newest probe is kept for the help panel without a render.
+    dashboard.setRemoteControlStatus(remoteControl("pending-on"));
+    dashboard.setRemoteControlStatus(remoteControl("pending-off"));
+    expect(counter.renders()).toBe(1);
+    expect(dashboard.remoteControlStatus?.state).toBe("pending-off");
+
+    dashboard.setRemoteControlStatus(remoteControl("on"));
+    expect(counter.renders()).toBe(2);
+    dashboard.setRemoteControlStatus(remoteControl("off"));
+    expect(counter.renders()).toBe(3);
   });
 
   test("a refreshed Teams tree renders only when the Teams tree can be on screen", async () => {

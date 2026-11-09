@@ -15,9 +15,9 @@ import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog, getWatchLogPath } from "./watch-log";
 import { SpawnContext } from "./types";
 import { getTmuxWidthForAgent } from "./tui/widths";
-import { isValidSessionId, isValidModel, tmuxSessionTarget } from "./validation";
+import { isValidSessionId, isValidModel, tmuxSessionTarget, shellQuote } from "./validation";
 import { parseModel } from "./agent-cli";
-import { loadAgentType } from "./agent-types";
+import { ensureAgentTypesDir, loadAgentType, type AgentType } from "./agent-types";
 import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "./coordinator-type-names";
 import {
   buildHooksBlock,
@@ -38,6 +38,14 @@ function encodeClaudeProjectPath(p: string): string {
 }
 
 export const IB_COORDINATOR_SESSION = "ib-coordinator";
+
+/**
+ * Session name passed with `--remote-control` when `system-coordinator.md`
+ * sets `remoteControl: true` — the name the session is listed under in
+ * claude.ai/code and the Claude mobile app. Fixed, not configurable. It is
+ * shell-quoted on the launch line, which bash interprets in the tmux pane.
+ */
+export const COORDINATOR_REMOTE_CONTROL_NAME = "itsybitsy coordinator";
 
 /** Spawn context for coordinator operations — injectable for testing. */
 export const coordinatorSpawnCtx = new SpawnContext();
@@ -76,6 +84,21 @@ function itsybitsyHome(): string {
  */
 export function getCoordinatorHome(): string {
   return itsybitsyHome();
+}
+
+/**
+ * The system coordinator's Claude settings file,
+ * `~/.itsybitsy/.claude/settings.local.json`. Written at every launch by
+ * `writeCoordinatorFiles()` and left alone while the session is alive, so it
+ * records how the LAST launch was configured. It is also left in place when
+ * the coordinator stops (`x`, an external `tmux kill-session`), so it says
+ * nothing about whether a coordinator is running now. The `ib watch` Remote
+ * Control light reads it and combines it with the coordinator's watcher state
+ * (src/remote-control-light.ts). Honors the test override set via
+ * `setCoordinatorHome`.
+ */
+export function systemCoordinatorSettingsPath(): string {
+  return join(itsybitsyHome(), ".claude", "settings.local.json");
 }
 
 function refsPath(): string {
@@ -747,41 +770,26 @@ async function ensureHomeRepo(): Promise<void> {
  * `spinnerTipsEnabled: false` matches per-repo coordinators (see
  * `src/ib-commands.ts`, the `coordinatorMode` branch).
  *
- * Claude Code 2.1.258+ AUTO-STARTS Remote Control (claude.ai/code) by default;
- * there is no CLI flag or env var to turn it off. The only kill switch is the
- * `disableRemoteControl` settings key — the installed claude binary reads the
- * merged `settings.disableRemoteControl` value and blocks remote control when
- * it is `true`. Because it is a restrictive setting, a `true` value written
- * into the coordinator's `settings.local.json` reliably disables it. The
- * user-facing opt-in has inverted semantics: `coordinator.remoteControl`
- * defaults to `false` (remote control OFF), so the DEFAULT path WRITES
- * `disableRemoteControl: true`; only when the user opts in
- * (`coordinator.remoteControl === true`) is the key OMITTED so auto-start runs.
- * The config value is read here rather than passed in because
- * `writeCoordinatorFiles` runs before `ensureSystemCoordinatorImpl` reads the
- * config for model/channels — reading it locally keeps the settings assembly
- * self-contained.
+ * `remoteControl` is `system-coordinator.md`'s `remoteControl` frontmatter
+ * value, resolved by the caller (SPEC.md §15). `false` writes
+ * `disableRemoteControl: true`, the settings key that reliably keeps Claude
+ * Code Remote Control off. `true` omits the key so it cannot block the
+ * `--remote-control` launch flag the caller adds; omitting it alone would not
+ * turn Remote Control on, because auto-start without the flag depends on a
+ * server-side gate.
  *
  * The system coordinator's prompt body is delivered via the SessionStart hook
  * (see `src/hooks/session-start.ts`'s `@system` branch), same as every other
  * agent type. No prompt file is written.
  */
-async function writeCoordinatorFiles(): Promise<void> {
+async function writeCoordinatorFiles(remoteControl: boolean): Promise<void> {
   const home = itsybitsyHome();
   const { mkdir } = await import("fs/promises");
 
   // Write .claude/settings.local.json
-  const claudeDir = join(home, ".claude");
-  await mkdir(claudeDir, { recursive: true });
-  const settingsPath = join(claudeDir, "settings.local.json");
+  const settingsPath = systemCoordinatorSettingsPath();
+  await mkdir(dirname(settingsPath), { recursive: true });
   const baseSettings = await buildSystemCoordinatorSettings();
-  // Remote Control (claude.ai/code) auto-starts by default in claude 2.1.258+;
-  // `disableRemoteControl: true` is the only way to stop it. Write the key
-  // UNLESS the user has explicitly opted in via `coordinator.remoteControl`.
-  // See this function's docstring for the inverted-semantics rationale and why
-  // the config is read here rather than threaded in from ensureSystemCoordinator.
-  const config = await readConfig();
-  const remoteControl = config["coordinator.remoteControl"]?.value === true;
   // The literal "@system" appears in the hook command strings on purpose: the
   // settings file is consumed by Claude Code (which invokes these as
   // command-line args), not by TS code that could read SYSTEM_AGENT_ID. Both
@@ -790,7 +798,7 @@ async function writeCoordinatorFiles(): Promise<void> {
   // and `src/hooks/session-start.ts` (agentIdArg branch).
   const settings = {
     ...baseSettings,
-    // Omitted only when the user opts in — otherwise remote control is disabled.
+    // Omitted only when system-coordinator.md turns Remote Control on.
     ...(remoteControl ? {} : { disableRemoteControl: true }),
     spinnerTipsEnabled: false,
     hooks: buildHooksBlock({
@@ -854,7 +862,36 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const home = itsybitsyHome();
 
   await ensureHomeRepo();
-  await writeCoordinatorFiles();
+
+  // Load the agent-type layers before writing settings: system-coordinator.md's
+  // `remoteControl` decides both the settings file written next and the launch
+  // flag below, and its `model` (falling back to _all.md) picks the model.
+  // ensureAgentTypesDir() runs first so a first run reads the embedded default
+  // files it writes. Errors are routed through logToWatchLog rather than
+  // console.error (unlike ib-commands.ts) to avoid corrupting the TUI.
+  try {
+    await ensureAgentTypesDir();
+  } catch (err) {
+    logToWatchLog(`[coordinator] failed to ensure the agent-types dir: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let systemLayer: AgentType | undefined;
+  let allLayer: AgentType | undefined;
+  try {
+    systemLayer = await loadAgentType(SYSTEM_COORDINATOR_TYPE);
+  } catch (err) {
+    logToWatchLog(`[coordinator] failed to load ${SYSTEM_COORDINATOR_TYPE} agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    allLayer = await loadAgentType("_all");
+  } catch (err) {
+    logToWatchLog(`[coordinator] failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Remote Control is on only for an explicit `remoteControl: true` in
+  // system-coordinator.md. Absent, false, or a layer that failed to load all
+  // keep it off. Never read from _all.md.
+  const remoteControl = systemLayer?.remoteControl === true;
+
+  await writeCoordinatorFiles(remoteControl);
 
   // One-shot cleanup of the old file-based inbox directory (now unused).
   await (await import("fs/promises")).rm(join(home, "coordinator-inbox"), { recursive: true, force: true }).catch(() => {});
@@ -888,22 +925,9 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const config = await readConfig();
   // Model precedence (most-specific wins, first non-empty value wins):
   //   system-coordinator.md > _all.md > "claude:opus"
-  // config.model is intentionally skipped — it would let a user's global
-  // setting clobber the coordinator agent-type. _non_coordinator.md is by
-  // definition not consulted. Errors are routed through logToWatchLog rather
-  // than console.error (unlike ib-commands.ts) to avoid corrupting the TUI.
-  let systemLayer: { model?: string } | undefined;
-  let allLayer: { model?: string } | undefined;
-  try {
-    systemLayer = await loadAgentType(SYSTEM_COORDINATOR_TYPE);
-  } catch (err) {
-    logToWatchLog(`[coordinator] failed to load ${SYSTEM_COORDINATOR_TYPE} agent type layer: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  try {
-    allLayer = await loadAgentType("_all");
-  } catch (err) {
-    logToWatchLog(`[coordinator] failed to load _all agent type layer: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  // using the layers loaded above. config.model is intentionally skipped — it
+  // would let a user's global setting clobber the coordinator agent-type.
+  // _non_coordinator.md is by definition not consulted.
   // Track which layer actually supplied the model so the log below reveals when
   // the value FELL BACK off system-coordinator.md — that fall-through (to
   // _all.md, or to the hardcoded default) is exactly how an unexpected model
@@ -939,10 +963,6 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   }
   const model = parsed.model;
   const imessage = config["coordinator.imessage"]?.value === true;
-  // Remote Control is NOT a launch flag — it is driven by the
-  // `disableRemoteControl` settings key written in writeCoordinatorFiles()
-  // (claude 2.1.258+ auto-starts it and offers no disable flag). See that
-  // function for the `coordinator.remoteControl` → settings mapping.
 
   // Resume the newest non-cleared, non-stub transcript. Skip the scan on the
   // post-failure retry so a single bad transcript can't trap us in a loop.
@@ -979,10 +999,18 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const baseCmd = resumeId
     ? `claude --resume ${resumeId} --model ${model}`
     : `claude --model ${model}`;
+  // `--remote-control <name>` is what turns Remote Control on: without the
+  // flag, auto-start depends on a server-side gate. It goes on the fresh AND
+  // the resume line so a resumed session keeps it, ahead of the variadic
+  // --channels list so that list stays last. writeCoordinatorFiles() left
+  // `disableRemoteControl` out of the settings so nothing blocks it.
+  const remoteControlArg = remoteControl
+    ? ` --remote-control ${shellQuote(COORDINATOR_REMOTE_CONTROL_NAME)}`
+    : "";
   const channelsArg = channels.length > 0
     ? ` --channels ${channels.join(" ")}`
     : "";
-  const claudeCmd = `${baseCmd}${channelsArg}`;
+  const claudeCmd = `${baseCmd}${remoteControlArg}${channelsArg}`;
   logToWatchLog(
     `[coordinator] launch cmd (${resumeId ? "resume" : "fresh"}): ${claudeCmd}`,
   );

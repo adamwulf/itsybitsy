@@ -2542,18 +2542,21 @@ There is no toggle in the setup dialog or the settings list. To change it, edit 
 The `ib watch` top header shows a `● Remote Control` indicator between `● Collector` and `● Telegram`, with the same spacing and colors. It compares two inputs:
 
 - **Configured**: `system-coordinator.md` has `remoteControl: true` now. It is resolved with `loadAgentType()`, as the launch resolves it, so a layer that fails to load counts as not configured.
-- **Launched**: the coordinator's `~/.itsybitsy/.claude/settings.local.json` exists, parses to a JSON object, and does not contain `disableRemoteControl: true`. A missing or unreadable file counts as not launched. `ensureSystemCoordinator()` writes this file at every launch and does not rewrite it while the tmux session exists (§15.3.2), so it records how the running coordinator was launched.
+- **Launched**: the system coordinator is not stopped, and its `~/.itsybitsy/.claude/settings.local.json` exists, parses to a JSON object, and does not contain `disableRemoteControl: true`. A missing or unreadable file counts as not launched. `ensureSystemCoordinator()` writes this file at every launch and does not rewrite it while the tmux session exists (§15.3.2), so it records how the last launch was configured. A stop (`x`, or the tmux session killed outside itsybitsy) leaves the file in place, so the coordinator's state is checked separately.
+
+"Stopped" is the system coordinator's state in the agent tree (no tmux session, §12.1.6), taken from the dashboard's watcher updates, not from a new probe. Only an explicit `stopped` counts: a missing state or any other state does not. A launch has no tmux session for a moment (a restart kills the old one first; a first launch has not created it yet), so `stopped` counts only after two watcher updates in a row report it and no launch from this `ib watch` started, ran or ended since the first of them. A launch from another process (`ib respawn @system`) is not tracked this way; two watcher updates rarely both land in its brief gap.
 
 | Configured | Launched | Indicator | `?` help row (Status section, after Collector) |
 |------------|----------|-----------|------------------------------------------------|
 | no | no | hidden | none |
 | yes | yes | green | `on` |
-| yes | no | yellow | `turned on in system-coordinator.md; restart the coordinator (R) to apply` |
+| yes | no (coordinator stopped) | yellow | `on in system-coordinator.md; coordinator stopped: start it (R)` |
+| yes | no (launched without it) | yellow | `turned on in system-coordinator.md; restart the coordinator (R) to apply` |
 | no | yes | yellow | `turned off in system-coordinator.md; still on until the coordinator restarts (R)` |
 
-Yellow means a restart is needed to apply the change (§15.5.1). The help text is wrapped onto two rows to fit the help panel.
+Yellow means the coordinator must be started or restarted to match `system-coordinator.md` (§15.5.1); `R` on the system coordinator does both. The help text is wrapped onto two rows to fit the help panel.
 
-Both files are read in process, never by spawning a process, once when `ib watch` starts and then on every 5-second tick of the timer that also refreshes the Collector light. Each tick reads both files again, so the first tick after a coordinator restart (`R`, `/restart`) shows the settings file that relaunch wrote. The header re-renders only when the light changes.
+Both files are read in process, never by spawning a process: when `ib watch` starts, again as soon as its startup launch of the coordinator ends (that launch may rewrite the settings file after the first read), and on every 5-second tick of the timer that also refreshes the Collector light. Each read takes both files fresh, so the first tick after a coordinator restart (`R`, `/restart`) shows the settings file that relaunch wrote. Every watcher update re-applies the coordinator's state to the last read, so a stop shows within two watcher updates. The header re-renders only when the light changes.
 
 The indicator does not show the live connection to claude.ai (connected or reconnecting), because Claude Code does not expose it outside the session. The sidebar's coordinator panel and the system coordinator's agent tree row have no Remote Control indicator.
 
@@ -2636,10 +2639,10 @@ The Remote Control session lives as long as the system coordinator's tmux sessio
 |--------|------|
 | `src/agent-types.ts` | `remoteControl` frontmatter field on `AgentType` (leaf-only, `true` only for a literal `true`). `validateAllAgentTypes()` rejects it outside `system-coordinator.md` and rejects a non-boolean value there. |
 | `docs/agent-types/system-coordinator.md` | The embedded default declares `remoteControl: false`. |
-| `src/coordinator.ts` | `ensureSystemCoordinator()` loads the `system-coordinator` layer before `writeCoordinatorFiles(remoteControl)`, which writes `disableRemoteControl: true` into `systemCoordinatorSettingsPath()` unless the value is `true`. The fresh and resume launch lines add `--remote-control` with the shell-quoted `COORDINATOR_REMOTE_CONTROL_NAME` when it is `true`. |
+| `src/coordinator.ts` | `ensureSystemCoordinator()` loads the `system-coordinator` layer before `writeCoordinatorFiles(remoteControl)`, which writes `disableRemoteControl: true` into `systemCoordinatorSettingsPath()` unless the value is `true`. The fresh and resume launch lines add `--remote-control` with the shell-quoted `COORDINATOR_REMOTE_CONTROL_NAME` when it is `true`. `systemCoordinatorLaunchEpoch()` tells the header light when a launch from this process is in flight or has ended (§15.5.2). |
 | `src/ib-commands.ts` | Writes `disableRemoteControl: true` into every other Claude `settings.local.json`: `buildAgentSettings()` (worktree and `--no-worktree` agents), the `coordinatorMode` branch of `newAgent()`, and the `repo-coordinator` branch of `ensureIsolatedClaudeSettings()`. |
-| `src/remote-control-light.ts` | `readRemoteControlStatus()` computes the header light from the configured and launched inputs (§15.5.2). `remoteControlDetail()` gives its help-panel text. |
-| `src/tui/dashboard.ts` | Draws the `● Remote Control` header indicator. `refreshRemoteControlStatus()` runs at startup and on every 5-second `statusLightTimer` tick. `setRemoteControlStatus()` re-renders only when the light changes. |
+| `src/remote-control-light.ts` | `readRemoteControlFiles()` reads the two files; `remoteControlStatus()` combines them with the coordinator's stopped state into the header light (§15.5.2). `remoteControlDetail()` gives its help-panel text. |
+| `src/tui/dashboard.ts` | Draws the `● Remote Control` header indicator. `refreshRemoteControlStatus()` runs at startup, when the startup launch ends, and on every 5-second `statusLightTimer` tick. `onUpdate` passes the watcher's system coordinator state on (`isSystemCoordinatorStopped()`). `setRemoteControlStatus()` re-renders only when the light changes. |
 | `src/tui/agent-actions.ts` | `handleHelp()` adds the Remote Control row to the help panel's Status section while the indicator is shown. |
 | `src/health-check.ts` | Not yet implemented: remote control prerequisite check (version, §15.7). |
 

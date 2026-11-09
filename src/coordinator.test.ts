@@ -990,12 +990,31 @@ describe("ensureSystemCoordinator", () => {
       expect(claudeCmd).toBe(`claude --resume ${sessionId} --model opus`);
     });
 
-    test("the session name is shell-quoted as one argument", () => {
-      // The launch line is typed into a bash pane; the space in the name must
-      // not split it into two argv entries.
-      expect(COORDINATOR_REMOTE_CONTROL_NAME).toContain(" ");
-      expect(REMOTE_CONTROL_ARG).toBe("--remote-control 'itsybitsy coordinator'");
-    });
+    for (const resume of [false, true]) {
+      for (const name of ["Adam's $(hostname) `whoami` coordinator", "", 42]) {
+        test(`configured name ${JSON.stringify(name)} on ${resume ? "resume" : "fresh"} launch`, async () => {
+          const configPath = join(tmpDir, "config.json");
+          await Bun.write(configPath, JSON.stringify({ coordinator: { remoteControlName: name } }));
+          const { setUserConfigPath, resetUserConfigPath } = await import("./config");
+          setUserConfigPath(configPath);
+          try {
+            const sessionId = "deadbeef-1234-5678-90ab-cdef00004444";
+            if (resume) await seedResumeTranscript(sessionId);
+            await writeTypeFile("system-coordinator", ["remoteControl: true"]);
+            const { claudeCmd, settings } = await launch();
+            const expectedName = typeof name === "string" && name
+              ? "'Adam'\\''s $(hostname) `whoami` coordinator'"
+              : "'itsybitsy coordinator'";
+            expect(claudeCmd).toBe(
+              `claude${resume ? ` --resume ${sessionId}` : ""} --model opus --remote-control ${expectedName}`,
+            );
+            expect("disableRemoteControl" in settings).toBe(false);
+          } finally {
+            resetUserConfigPath();
+          }
+        });
+      }
+    }
 
     test("remoteControl: true in _all.md does not turn it on", async () => {
       await writeTypeFile("system-coordinator", []);
@@ -1019,7 +1038,7 @@ describe("ensureSystemCoordinator", () => {
     test("a leftover coordinator.remoteControl key in config.json is ignored", async () => {
       await mkdir(tmpDir, { recursive: true });
       const configPath = join(tmpDir, "config.json");
-      await Bun.write(configPath, JSON.stringify({ coordinator: { remoteControl: true } }));
+      await Bun.write(configPath, JSON.stringify({ coordinator: { remoteControl: true, remoteControlName: "My coordinator" } }));
       const { setUserConfigPath, resetUserConfigPath } = await import("./config");
       setUserConfigPath(configPath);
       try {

@@ -2400,11 +2400,11 @@ describe("handleCreateTeam", () => {
     expect(reg.teams["ephemeral"]).toBeUndefined();
   });
 
-  test("wizard pre-checks the selected agent when alsoAddSelectedAgent is true", async () => {
-    // T-flow path: alsoAddSelectedAgent=false; t-flow: true.
-    // handleCreateTeam uses alsoAddSelectedAgent=false, so the pre-check only
-    // fires via handleAddAgentToTeam's empty-teams branch. We exercise it by
-    // submitting through the empty-teams path.
+  test("wizard pre-checks the agent 't' was pressed on", async () => {
+    // runCreateTeam's preCheckAgent is null in the T flow (handleCreateTeam)
+    // and the picker's agent in the t flow, so the pre-check only fires via
+    // handleAddAgentToTeam. We exercise it by submitting through the
+    // empty-teams path.
     await plantTestAgent(fx.repoDir, "agent-pre");
     await plantTestAgent(fx.repoDir, "agent-other");
     const preChecked = makeAgent({ id: "agent-pre", repoPath: fx.repoDir });

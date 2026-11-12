@@ -727,12 +727,14 @@ export function handleAddAgentToTeam(ctx: ActionCtx, memberRowAgent?: Agent) {
  *
  * `team.members` holds BARE agent ids (§16.2), and an id is unique only inside
  * its repo, so two repos can each have an agent with the same id. A roster
- * cannot tell those two apart. Every reader resolves a member id to ONE live
- * agent through an `id → Agent` map in which the last agent with that id wins:
- * the Teams tree (`refreshTeamsTree`), `handleManageTeam`'s labels, and the
- * `ib send @<team>` resolver. This uses the same rule over the same list the
+ * cannot tell those two apart. The Teams tree (`refreshTeamsTree`),
+ * `handleManageTeam`'s labels and the `ib send @<team>` resolver each resolve
+ * a member id to ONE live agent through an `id → Agent` map in which the last
+ * agent with that id wins. This uses the same rule over the same list the
  * Teams tree is built from, so the picker calls an agent a member exactly when
- * the Teams tree shows it under that team.
+ * the Teams tree shows it under that team. (`handleManageRoster` and the
+ * create wizard's pre-check do NOT follow that rule: they match the bare id,
+ * so they check every live agent that has it.)
  *
  * When the id is not in `live` at all (no watcher update yet), the bare id is
  * all there is to go by.

@@ -278,6 +278,19 @@ export class TeamsTreeComponent implements Component {
   }
 
   /**
+   * The selected team-member row with the team it sits under, or null when no
+   * team-member row is selected. `selection` reports a member row as a plain
+   * `{ kind: "agent" }` (§17.3), which drops the team; an agent on several
+   * teams has one row per team, so the `x` member picker reads the row's own
+   * team from here.
+   */
+  get selectedMember(): { teamName: string; agent: Agent } | null {
+    if (!this.hasSelection) return null;
+    const item = this._flatList[this.selectedIndex];
+    return item?.kind === "team-member" ? { teamName: item.teamName, agent: item.agent } : null;
+  }
+
+  /**
    * j/k: move ONE row at a time over the flat list (team header -> its first
    * member -> ... -> next team header -> ...). From no-selection, j (delta>0)
    * selects the FIRST row, k (delta<0) the LAST (§17.1). Subsequent moves wrap.

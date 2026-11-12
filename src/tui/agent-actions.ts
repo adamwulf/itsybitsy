@@ -60,6 +60,7 @@ import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, restartSystemCoordinatorFresh, isCoordinatorRestartCommand, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
 import { isValidToolList } from "../validation";
 import { listTeams, getTeam } from "../teams";
+import type { Team } from "../teams";
 import { collectorHealthDetail, type CollectorHealth } from "../sandbox-collector-light";
 import { remoteControlDetail, type RemoteControlStatus } from "../remote-control-light";
 
@@ -316,6 +317,15 @@ export function handleRetire(ctx: ActionCtx) {
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
+  confirmRetire(ctx, agent);
+}
+
+/**
+ * The retire flow for one agent: a confirm dialog, then `retireAgent`. Shared
+ * by `x` on an agent (`handleRetire`) and the "Retire" row of the team-member
+ * picker (`handleManageTeamMember`).
+ */
+function confirmRetire(ctx: ActionCtx, agent: Agent) {
   ctx.showDialog({
     type: "confirm",
     prompt: `Retire agent ${agent.id}?`,
@@ -683,15 +693,20 @@ export function handleCreateTeam(ctx: ActionCtx) {
 }
 
 /**
- * 't' — add the selected agent to a team. If teams exist, open a picker with
- * an extra "+ Create new team…" entry at the bottom. If no teams exist, skip
- * the picker and go straight to the create-team input dialog (which will also
- * add the selected agent to the new team on success). Coordinator-selected and
+ * 't' — add the selected agent to a team, or remove it from one. If teams
+ * exist, open the team picker (`showTeamPicker`). If no teams exist, skip the
+ * picker and go straight to the create-team input dialog (which will also add
+ * the selected agent to the new team on success). Coordinator-selected and
  * no-agent states are both no-ops.
+ *
+ * `memberRowAgent` is the agent of the team-member row selected in the Teams
+ * tree, passed by the dashboard when that tree owns the selection. The picker
+ * is then for that row's agent, even when the Agents tree has no row for it.
+ * Without it, the agent is the Agents tree's selection.
  */
-export function handleAddAgentToTeam(ctx: ActionCtx) {
-  if (ctx.agentTree.isSystemCoordinatorSelected) return;
-  const agent = ctx.agentTree.selectedAgent;
+export function handleAddAgentToTeam(ctx: ActionCtx, memberRowAgent?: Agent) {
+  if (!memberRowAgent && ctx.agentTree.isSystemCoordinatorSelected) return;
+  const agent = memberRowAgent ?? ctx.agentTree.selectedAgent;
   if (!agent) return;
   // Load teams asynchronously, then show the appropriate dialog. Errors here
   // are non-fatal — fall back to the create-team flow so the user still has a
@@ -701,28 +716,64 @@ export function handleAddAgentToTeam(ctx: ActionCtx) {
       runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true);
       return;
     }
-    showTeamPicker(ctx, agent, teams.map((t) => t.name));
+    showTeamPicker(ctx, agent, teams);
   }).catch((err) => {
     ctx.setNotice(`Failed to list teams: ${(err as Error).message}`, "error");
   });
 }
 
 /**
- * Show a fuzzy picker for an existing team, with a trailing "+ Create new
- * team…" entry that transitions into the same input dialog used by 'T'. On
- * selecting an existing team, calls `addMember` and shows a notice. On
- * selecting "+ Create new team…", opens the create dialog and joins the
- * agent to the new team on success.
+ * Whether `agent` is the agent a team's roster entry stands for.
+ *
+ * `team.members` holds BARE agent ids (§16.2), and an id is unique only inside
+ * its repo, so two repos can each have an agent with the same id. A roster
+ * cannot tell those two apart. Every reader resolves a member id to ONE live
+ * agent through an `id → Agent` map in which the last agent with that id wins:
+ * the Teams tree (`refreshTeamsTree`), `handleManageTeam`'s labels, and the
+ * `ib send @<team>` resolver. This uses the same rule over the same list the
+ * Teams tree is built from, so the picker calls an agent a member exactly when
+ * the Teams tree shows it under that team.
+ *
+ * When the id is not in `live` at all (no watcher update yet), the bare id is
+ * all there is to go by.
  */
-function showTeamPicker(ctx: ActionCtx, agent: Agent, teamNames: string[]) {
-  const CREATE_LABEL = "+ Create new team…";
-  // Distinct trailing entry: the picker is fuzzy-filterable, but the create
-  // entry is always selectable (its label is unique enough to survive any
-  // partial query unless the user types `+` or `Create`, which is fine).
-  const items = [...teamNames, CREATE_LABEL];
+function isRosterMember(team: Team, agent: Agent, live: Agent[]): boolean {
+  if (!team.members.includes(agent.id)) return false;
+  let resolved: Agent | undefined;
+  for (const a of live) {
+    if (a.id === agent.id) resolved = a;
+  }
+  return !resolved || resolved.repoPath === agent.repoPath;
+}
+
+/**
+ * The fuzzy team picker for one agent. Its entries, in order:
+ *   1. each team the agent is NOT on — selecting one adds the agent (`teamAdd`);
+ *   2. "Remove from @<team>" for each team the agent IS on — selecting one
+ *      opens a confirm dialog, then removes the agent (`teamRemove`);
+ *   3. "+ Create new team…" — the same input dialog 'T' uses, which joins the
+ *      agent to the new team on success.
+ * Teams keep their registry order inside each group.
+ */
+function showTeamPicker(ctx: ActionCtx, agent: Agent, teams: Array<{ name: string } & Team>) {
+  const live = ctx.watcher?.lastAgents ?? [];
+  const joined = teams.filter((t) => isRosterMember(t, agent, live));
+  const joinable = teams.filter((t) => !joined.includes(t));
+  // Each entry carries its own action, so a choice is never matched by its
+  // label. The picker is fuzzy-filterable: typing a team name narrows to that
+  // team's one entry (a team is in exactly one of the first two groups).
+  const entries: Array<{ label: string; run: () => void }> = [
+    ...joinable.map((t) => ({ label: t.name, run: () => runAddMember(ctx, agent, t.name) })),
+    ...joined.map((t) => ({
+      label: `Remove from @${t.name}`,
+      run: () => confirmRemoveMember(ctx, t.name, agent.id, `${agent.repoName}/${agent.id}`),
+    })),
+    { label: "+ Create new team…", run: () => runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true) },
+  ];
+  const items = entries.map((e) => e.label);
   ctx.showDialog({
     type: "fuzzy",
-    prompt: `Add ${agent.id} to team:`,
+    prompt: `Team for ${agent.id}:`,
     query: "",
     allItems: items,
     filteredIndices: items.map((_, i) => i),
@@ -730,13 +781,33 @@ function showTeamPicker(ctx: ActionCtx, agent: Agent, teamNames: string[]) {
     selectedIndex: 0,
     onSelect: (originalIndex: number) => {
       ctx.closeDialog();
-      const choice = items[originalIndex];
-      if (choice === undefined) return;
-      if (choice === CREATE_LABEL) {
-        runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true);
-        return;
-      }
-      runAddMember(ctx, agent, choice);
+      entries[originalIndex]?.run();
+    },
+  });
+}
+
+/**
+ * Confirm, then remove one member from a team via `teamRemove` (the CLI path),
+ * so the audit log, the channel record and the "left the team" notices match
+ * `ib team remove <name> <agent-id>` exactly (§16.4.2). `label` is the
+ * `<repo>/<id>` form shown to the user; `memberId` is the bare roster id.
+ * Shared by the manage-team picker, the agent's team picker and the
+ * team-member picker.
+ */
+function confirmRemoveMember(ctx: ActionCtx, teamName: string, memberId: string, label: string) {
+  ctx.showDialog({
+    type: "confirm",
+    prompt: `Remove ${label} from @${teamName}?`,
+    confirmLabel: "Remove",
+    focusedButton: "cancel",
+    confirmColor: RED,
+    onYes: () => {
+      ctx.closeDialog();
+      ctx.executeAndRefresh(async () => {
+        const result = await teamRemove(teamName, memberId, ctx.repos);
+        if (result.ok) ctx.setNotice(result.stdout || `Removed ${label} from @${teamName}`, "info");
+        else ctx.setNotice(result.stderr || result.stdout || `Remove failed`, "error");
+      });
     },
   });
 }
@@ -1065,9 +1136,8 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
  * exactly as if it had vanished mid-`x`.
  *
  * Note on `x` on a team MEMBER row in the Teams tree: that path is NOT routed
- * here. The dashboard's selection-sync makes a team-member look just like an
- * Agents-panel agent selection, so it falls through to `handleRetire` (retire
- * the agent), matching `x` behavior in the Agents tree exactly.
+ * here. It opens the team-member picker (`handleManageTeamMember`), which
+ * offers removing that member from the row's team or retiring the agent.
  */
 export function handleManageTeam(ctx: ActionCtx, teamName: string) {
   ctx.executeAndRefresh(async () => {
@@ -1099,23 +1169,37 @@ export function handleManageTeam(ctx: ActionCtx, teamName: string) {
           return;
         }
         const member = memberItems[index - 1]!;
-        ctx.showDialog({
-          type: "confirm",
-          prompt: `Remove ${member.label} from @${teamName}?`,
-          confirmLabel: "Remove",
-          focusedButton: "cancel",
-          confirmColor: RED,
-          onYes: () => {
-            ctx.closeDialog();
-            ctx.executeAndRefresh(async () => {
-              const result = await teamRemove(teamName, member.memberId, ctx.repos);
-              if (result.ok) ctx.setNotice(result.stdout || `Removed ${member.label} from @${teamName}`, "info");
-              else ctx.setNotice(result.stderr || result.stdout || `Remove failed`, "error");
-            });
-          },
-        });
+        confirmRemoveMember(ctx, teamName, member.memberId, member.label);
       },
     });
+  });
+}
+
+/**
+ * 'x' on a team MEMBER row in the Teams tab — show the team-member picker.
+ * The first option removes the agent from the team its row sits under (an
+ * agent on several teams has one row per team; `teamName` is that row's
+ * team), behind a confirm dialog. The second option goes into the retire flow
+ * `x` uses on an agent, with its own confirm dialog. Before this picker, `x`
+ * here opened the retire confirm straight away, one key press from retiring an
+ * agent the user meant to drop from a team.
+ *
+ * Synchronous (no registry read): the row already names the team and the
+ * agent. If the team or the membership is gone by the time the user confirms,
+ * `teamRemove` reports it.
+ */
+export function handleManageTeamMember(ctx: ActionCtx, teamName: string, agent: Agent) {
+  const label = `${agent.repoName}/${agent.id}`;
+  ctx.showDialog({
+    type: "select",
+    prompt: `${label} in @${teamName}`,
+    items: [`Remove ${label} from @${teamName}`, `Retire ${label}…`],
+    selectedIndex: 0,
+    onSelect: (index: number) => {
+      ctx.closeDialog();
+      if (index === 0) confirmRemoveMember(ctx, teamName, agent.id, label);
+      else if (index === 1) confirmRetire(ctx, agent);
+    },
   });
 }
 
@@ -2166,7 +2250,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("s", "send message"),
       row("E", "cross-repo send"),
       row("T", "create team"),
-      row("t", "add agent to team"),
+      row("t", "add agent to team / remove from team"),
       row("b", "add permission / toggle sub-agent spawning (Tab)"),
       row("m", "merge"),
       row("x / !", "retire / nuke (all if none selected)"),
@@ -2176,6 +2260,11 @@ export function handleHelp(ctx: ActionCtx) {
       row("N", "nickname agent"),
       row(".", "favorite/unfavorite agent (★, Favorites tab)"),
       row("a", "new agent"),
+      "",
+      header("Team (Teams tab)"),
+      row("t", "edit roster (on a team)"),
+      row("x", "disband / remove a member (on a team)"),
+      row("x", "remove from team / retire (on a member)"),
       "",
       header("Repo"),
       row("+ / A", "add repo"),

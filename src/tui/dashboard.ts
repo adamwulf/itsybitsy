@@ -3064,17 +3064,26 @@ export class DashboardComponent implements Component {
     else if (data === "x") {
       // §17.3 manage-team: when a team ANCHOR is the GLOBAL selection
       // (active source = teams), `x` opens the manage-team picker (disband or
-      // remove a single member, each gated by a second confirm dialog). A
-      // team MEMBER selection (kind:"agent") falls through to the agent-retire
-      // path so retiring a team member from the Teams tree behaves identically
-      // to retiring from the Agents tree (child-agent-indistinguishable).
+      // remove a single member, each gated by a second confirm dialog).
       // Phase 2 (§17.1) keys this off `activeSelectionSource` — the same
       // source of truth as syncSelectedAgent — so the effective selection
       // stays consistent.
+      //
+      // §17.3 team-member picker: when the Teams tab is SHOWING and a team
+      // MEMBER row is selected in it, `x` opens a picker (remove the agent
+      // from that row's team, or retire it) instead of the retire confirm.
+      // This one is keyed off the visible tab, not the active source: it
+      // exists so that `x` on a row the user sees under a team never goes
+      // straight to retire, and the row is highlighted the same way whether
+      // j/k selected it or the mirror did (§17.1). With the Agents or
+      // Favorites tab showing, `x` on an agent is the retire confirm as ever.
       const teamsActive = this.activeSelectionSource === "teams";
       const teamSel = teamsActive ? this.teamsTree.selection : null;
+      const memberRow = this.sidebarMode === "teams" ? this.teamsTree.selectedMember : null;
       if (teamSel?.kind === "team") {
         agentActions.handleManageTeam(this, teamSel.teamName);
+      } else if (memberRow) {
+        agentActions.handleManageTeamMember(this, memberRow.teamName, memberRow.agent);
       } else if (this.agentTree.isSystemCoordinatorSelected) {
         agentActions.handleKillSystemCoordinator(this);
       } else if (!this.agentTree.selectedAgent && this.agentTree.selectedRepoHeader) {
@@ -3097,20 +3106,22 @@ export class DashboardComponent implements Component {
     else if (data === "N") { agentActions.handleRename(this); }
     else if (data === "m") { agentActions.handleMerge(this); }
     else if (data === "s") { agentActions.handleSend(this); }
-    // Team actions: T = create a new team, t = add selected agent to a team
-    // (or manage roster when a team anchor in the Teams tree is the active
-    // selection). Phase 2 (§17.1): keyed off `activeSelectionSource` — the
-    // same source-of-truth the `x`-on-team-anchor dispatch uses (line ~2349)
-    // — so a visible-but-not-active Teams panel doesn't mis-fire the roster
-    // path. The Teams panel must own the global selection for `t` to route
-    // to the manage-roster dialog.
+    // Team actions: T = create a new team, t = add the selected agent to a
+    // team or remove it from one (or manage roster when a team anchor in the
+    // Teams tree is the active selection). Phase 2 (§17.1): keyed off
+    // `activeSelectionSource` — the same source-of-truth the
+    // `x`-on-team-anchor dispatch uses — so a visible-but-not-active Teams
+    // panel doesn't mis-fire the roster path. The Teams panel must own the
+    // global selection for `t` to route to the manage-roster dialog. A team
+    // MEMBER row that owns the selection hands its own agent to the picker,
+    // so the picker does not depend on the Agents tree having a row for it.
     else if (data === "T") { agentActions.handleCreateTeam(this); }
     else if (data === "t") {
       const teamSel = this.activeSelectionSource === "teams" ? this.teamsTree.selection : null;
       if (teamSel?.kind === "team") {
         agentActions.handleManageRoster(this, teamSel.teamName);
       } else {
-        agentActions.handleAddAgentToTeam(this);
+        agentActions.handleAddAgentToTeam(this, teamSel?.kind === "agent" ? teamSel.agent : undefined);
       }
     }
     // Add permission to selected agent's settings.local.json allow list

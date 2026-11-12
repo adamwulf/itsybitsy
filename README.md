@@ -182,8 +182,11 @@ Press `?` in the dashboard for this list.
 | | `R` / `P` | Resume / pause |
 | | `r` / `N` | Reassign manager / nickname |
 | | `b` | Add permission; `Tab` toggles sub-agent spawning |
-| | `T` / `t` | Create team / add agent to team |
+| | `T` / `t` | Create team / add agent to a team or remove it from one |
 | | `.` | Favorite / unfavorite agent (★, Favorites tab) |
+| Teams tab | `t` | Edit roster (on a team) |
+| | `x` | Disband team / remove a member (on a team) |
+| | `x` | Remove from team / retire (on a member; asks which) |
 | Repos | `+` / `A` | Add repo |
 | | `x` / `D` | Remove repo (on a repo header) |
 | | `r` | Rename repo (on a repo header) |

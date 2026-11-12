@@ -689,7 +689,7 @@ export function handleRename(ctx: ActionCtx) {
  * `"user"` to match how the CLI's audit log records human creations.
  */
 export function handleCreateTeam(ctx: ActionCtx) {
-  runCreateTeam(ctx, /*initialValue*/ "", /*alsoAddSelectedAgent*/ false);
+  runCreateTeam(ctx, /*initialValue*/ "", /*preCheckAgent*/ null);
 }
 
 /**
@@ -713,7 +713,7 @@ export function handleAddAgentToTeam(ctx: ActionCtx, memberRowAgent?: Agent) {
   // path forward without first having to debug `teams.json`.
   listTeams().then((teams) => {
     if (teams.length === 0) {
-      runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true);
+      runCreateTeam(ctx, "", agent);
       return;
     }
     showTeamPicker(ctx, agent, teams);
@@ -768,7 +768,7 @@ function showTeamPicker(ctx: ActionCtx, agent: Agent, teams: Array<{ name: strin
       label: `Remove from @${t.name}`,
       run: () => confirmRemoveMember(ctx, t.name, agent.id, `${agent.repoName}/${agent.id}`),
     })),
-    { label: "+ Create new team…", run: () => runCreateTeam(ctx, "", /*alsoAddSelectedAgent*/ true) },
+    { label: "+ Create new team…", run: () => runCreateTeam(ctx, "", agent) },
   ];
   const items = entries.map((e) => e.label);
   ctx.showDialog({
@@ -822,8 +822,8 @@ function confirmRemoveMember(ctx: ActionCtx, teamName: string, memberId: string,
  *   silently aborts. Routes through `teamCreate` so the audit log + channel
  *   system record fire exactly as the CLI does.
  * Step 2 (members): a `multi-select` dialog over the watcher's live agents
- *   formatted as `<repo>/<id> (<state>)`. The currently-selected agent (if
- *   `alsoAddSelectedAgent` is true) is pre-checked. Each checked member is
+ *   formatted as `<repo>/<id> (<state>)`. `preCheckAgent` (the agent 't' was
+ *   pressed on; null for 'T') is pre-checked. Each checked member is
  *   added via `teamAdd` with `suppressJoinNotice: true` so members do NOT
  *   receive an inbound "joined the team" message — the audit + channel
  *   system records still fire. Esc rolls back step 1 via `teamDelete`. If
@@ -832,14 +832,13 @@ function confirmRemoveMember(ctx: ActionCtx, teamName: string, memberId: string,
  *   buffer fans out via `ctx.teamSend` to every live member. Esc here does
  *   NOT roll back — the team and its members persist with no inbound message.
  */
-function runCreateTeam(ctx: ActionCtx, initialValue: string, alsoAddSelectedAgent: boolean) {
-  // Capture the selected agent at dialog-open time so step 2's pre-check
-  // targets the agent the user intended at the start of the wizard, even if
-  // they navigate the tree between steps.
-  const preCheckAgent = alsoAddSelectedAgent && !ctx.agentTree.isSystemCoordinatorSelected
-    ? ctx.agentTree.selectedAgent
-    : null;
-  const createdBy = ctx.agentTree.selectedAgent?.id ?? "user";
+function runCreateTeam(ctx: ActionCtx, initialValue: string, preCheckAgent: Agent | null) {
+  // `preCheckAgent` is the agent 't' was pressed on (null for 'T'). The caller
+  // captured it at key time, so step 2's pre-check targets the agent the user
+  // intended at the start of the wizard, even if they navigate the tree
+  // between steps — and it is the Teams-tree member row's agent when 't' came
+  // from one, which the Agents tree may have no row for.
+  const createdBy = preCheckAgent?.id ?? ctx.agentTree.selectedAgent?.id ?? "user";
 
   ctx.showDialog({
     type: "input",

@@ -2362,6 +2362,26 @@ export class DashboardComponent implements Component {
   }
 
   /**
+   * The team-member row `x` opens the team-member picker for (§17.3): the
+   * member row selected in the Teams tree, while the Teams tab is showing.
+   *
+   * When the Teams tree owns the selection, that row IS the selection. When
+   * the Agents tree owns it, the row is only the mirror's highlight, and the
+   * mirror matches by bare id (`selectMemberByAgentId`) — with the same id in
+   * two repos it can highlight the other repo's agent. So a mirrored row
+   * counts only when it is the very agent the Agents tree has selected (same
+   * id AND repo). Otherwise this returns null and `x` acts on the Agents-tree
+   * selection, as it did before the picker existed.
+   */
+  private teamMemberRowForX(): { teamName: string; agent: Agent } | null {
+    if (this.sidebarMode !== "teams") return null;
+    const row = this.teamsTree.selectedMember;
+    if (!row || this.activeSelectionSource === "teams") return row;
+    const active = this.agentTree.selectedAgent;
+    return active && active.id === row.agent.id && active.repoPath === row.agent.repoPath ? row : null;
+  }
+
+  /**
    * §17.2: rebuild the Teams tree from the team registry + the already-state-
    * detected agents passed to onUpdate (no second detect pass — the watcher
    * already ran it). listTeams() is async, so this is fire-and-forget; on
@@ -3079,7 +3099,7 @@ export class DashboardComponent implements Component {
       // Favorites tab showing, `x` on an agent is the retire confirm as ever.
       const teamsActive = this.activeSelectionSource === "teams";
       const teamSel = teamsActive ? this.teamsTree.selection : null;
-      const memberRow = this.sidebarMode === "teams" ? this.teamsTree.selectedMember : null;
+      const memberRow = this.teamMemberRowForX();
       if (teamSel?.kind === "team") {
         agentActions.handleManageTeam(this, teamSel.teamName);
       } else if (memberRow) {

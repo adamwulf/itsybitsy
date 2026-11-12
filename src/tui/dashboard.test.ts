@@ -7917,6 +7917,39 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       expect(assertDialog(dashboard.dialog, "select").items[0]).toBe(`Remove ${a.repoName}/agent-tm1 from @backend`);
     });
 
+    test("'x' on a mirrored row that is ANOTHER repo's same-id agent acts on the selected agent, not the row", () => {
+      // api/review is selected in the Agents tab and is on no team; the
+      // roster's "review" is web/review. The mirror matches by bare id.
+      const selected = makeAgent("review", "/tmp/repo-api");
+      selected.repoName = "api";
+      const twin = makeAgent("review", "/tmp/repo-web");
+      twin.repoName = "web";
+      const dashboard = dashboardWith([selected], [header("backend"), member("backend", twin)]);
+      dashboard.handleInput("j"); // select api/review in the Agents tab
+      dashboard.handleInput("2"); // the mirror highlights web/review's row
+      expect(dashboard.activeSelectionSource).toBe("agents");
+      expect(dashboard.agentTree.selectedAgent).toBe(selected);
+      expect(dashboard.teamsTree.selectedMember?.agent).toBe(twin);
+
+      // No picker offering to remove or retire web/review: `x` is the retire
+      // confirm for the Agents-tree selection, as before the picker existed.
+      dashboard.handleInput("x");
+      expect(assertDialog(dashboard.dialog, "confirm").prompt).toBe("Retire agent review?");
+      dashboard.handleInput("\x1b");
+
+      // Once j/k puts the selection on the row itself, the row is the
+      // selection and the picker is for web/review.
+      dashboard.handleInput("j");
+      dashboard.handleInput("j");
+      expect(dashboard.activeSelectionSource).toBe("teams");
+      expect(dashboard.teamsTree.selectedMember?.agent).toBe(twin);
+      dashboard.handleInput("x");
+      expect(assertDialog(dashboard.dialog, "select").items).toEqual([
+        "Remove web/review from @backend",
+        "Retire web/review…",
+      ]);
+    });
+
     test("'x' with the Agents or Favorites tab showing is the retire confirm, as before", () => {
       const a = makeAgent("agent-tm1", "/tmp/repo-x");
       for (const tab of ["1", "3"]) {

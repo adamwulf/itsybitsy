@@ -2855,6 +2855,59 @@ describe("handleAddAgentToTeam", () => {
     expect((await openPicker(withNone.ctx, withNone.dialogs, rowAgent)).allItems)
       .toEqual(["Remove from @backend", "+ Create new team…"]);
   });
+
+  test("'+ Create new team…' from a member row's picker pre-checks the ROW's agent and records it as creator", async () => {
+    await createTeam("existing", "user", 1700000000);
+    await plantTestAgent(fx.repoDir, "agent-row");
+    const rowAgent = makeAgent({ id: "agent-row", repoPath: fx.repoDir, repoName: "api" });
+    const other = makeAgent({ id: "agent-other", repoPath: fx.repoDir, repoName: "api" });
+    // The Agents tree points at ANOTHER agent; the wizard must not pick it up.
+    const { ctx, dialogs, flushActions } = makeMockCtx({ agent: other, repos: [fx.repoEntry], lastAgents: [other, rowAgent] });
+    const d = await openPicker(ctx, dialogs, rowAgent);
+    d.onSelect(d.allItems.length - 1); // + Create new team…
+    assertDialog(dialogs[1]!, "input").onSubmit("brand-new");
+    await flushActions();
+    const members = assertDialog(dialogs[2]!, "multi-select");
+    expect(members.items.map((i) => i.split(" ")[0])).toEqual(["api/agent-other", "api/agent-row"]);
+    expect(members.checked).toEqual([false, true]);
+    members.onSubmit([1]);
+    await flushActions();
+    assertDialog(dialogs[3]!, "textarea").onSubmit("");
+    await flushActions();
+    const team = (await readTeams()).teams["brand-new"]!;
+    expect(team.members).toEqual(["agent-row"]);
+    expect(team.created_by).toBe("agent-row");
+  });
+
+  test("no teams: a member row's agent is the one the create wizard pre-checks", async () => {
+    const rowAgent = makeAgent({ id: "agent-row", repoPath: fx.repoDir, repoName: "api" });
+    // No Agents-tree selection at all (as for a per-repo coordinator's row).
+    const { ctx, dialogs, flushActions } = makeMockCtx({ agent: null, repos: [fx.repoEntry], lastAgents: [rowAgent] });
+    handleAddAgentToTeam(ctx, rowAgent);
+    await waitForDialog(dialogs, "handleAddAgentToTeam to open the create-team input");
+    assertDialog(dialogs[0]!, "input").onSubmit("first-team");
+    await flushActions();
+    expect(assertDialog(dialogs[1]!, "multi-select").checked).toEqual([true]);
+  });
+
+  test("same id in two repos: adding the twin that is not the member reports 'already in' and changes nothing", async () => {
+    // The roster holds the bare id once and cannot hold both twins, so the add
+    // entry offered to the non-member twin is a reported no-op.
+    await plantTestAgent(fx.repoDir, "agent-twin");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-twin");
+    const twinA = makeAgent({ id: "agent-twin", repoPath: fx.repoDir, repoName: "api" });
+    const twinB = makeAgent({ id: "agent-twin", repoPath: "/repos/web", repoName: "web" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: twinA, repos: [fx.repoEntry], lastAgents: [twinA, twinB] });
+    const d = await openPicker(ctx, dialogs);
+    expect(d.allItems).toEqual(["backend", "+ Create new team…"]);
+    d.onSelect(0);
+    await flushActions();
+    expect(notices).toEqual(["agent agent-twin is already in @backend"]);
+    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-twin"]);
+    // No second join was logged.
+    expect(await readTeamAuditLog("backend")).not.toContain("joined");
+  });
 });
 
 describe("handleDisbandTeam", () => {

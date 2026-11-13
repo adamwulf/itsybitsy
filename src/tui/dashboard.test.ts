@@ -20,6 +20,7 @@ import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
 import type { SpawnResult } from "../types";
+import type { TeamFlatEntry } from "./teams-tree";
 import { PANE_MODES, FULL_WIDTH_MODES, type PaneMode } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
@@ -7766,6 +7767,248 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       if (dlg.type === "multi-select") {
         expect(dlg.prompt).not.toContain("Manage roster:");
       }
+    });
+  });
+
+  describe("team-member picker ('x' / 't' on a member row)", () => {
+    // Same isolation as the manage-roster tests above: a private home for
+    // repos.json, and a stubbed send runner so teamRemove's leave notices
+    // never reach tmux.
+    let homeTmp: string;
+    beforeEach(async () => {
+      homeTmp = await mkdtemp(join(tmpdir(), "dash-member-home-"));
+      setUserHome(homeTmp);
+      setSendSpawnRunner(() => makeSpawnResult());
+    });
+    afterEach(async () => {
+      resetSendSpawnRunner();
+      resetUserHome();
+      await rm(homeTmp, { recursive: true, force: true });
+    });
+
+    const header = (teamName: string): TeamFlatEntry =>
+      ({ kind: "team-header", teamName, memberCount: 1, createdEpoch: 1700000000, createdBy: "user" });
+    const member = (teamName: string, agent: Agent): TeamFlatEntry =>
+      ({ kind: "team-member", teamName, agent, connector: "  " });
+
+    /**
+     * A dashboard whose Agents tree holds `agents` and whose Teams tree holds
+     * `rows`. Both lists are set directly: onUpdate would start an async
+     * rebuild of the Teams tree from teams.json that lands mid-test.
+     */
+    function dashboardWith(agents: Agent[], rows: TeamFlatEntry[]): DashboardComponent {
+      const dashboard = makeDashboard();
+      dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
+      dashboard.teamsTree.setFlatList(rows);
+      return dashboard;
+    }
+
+    test("'x' on a member row opens the picker and does NOT open the retire confirm", () => {
+      const a = makeAgent("agent-tm1", "/tmp/repo-x");
+      const dashboard = dashboardWith([a], [header("backend"), member("backend", a)]);
+      dashboard.handleInput("2"); // Teams tab
+      dashboard.handleInput("j"); // @backend
+      dashboard.handleInput("j"); // its member row
+      expect(dashboard.activeSelectionSource).toBe("teams");
+      expect(dashboard.teamsTree.selectedMember).toEqual({ teamName: "backend", agent: a });
+
+      dashboard.handleInput("x");
+      const d = assertDialog(dashboard.dialog, "select");
+      expect(d.prompt).toBe(`${a.repoName}/agent-tm1 in @backend`);
+      expect(d.items).toEqual([
+        `Remove ${a.repoName}/agent-tm1 from @backend`,
+        `Retire ${a.repoName}/agent-tm1…`,
+      ]);
+      expect(d.selectedIndex).toBe(0);
+
+      // A second 'x' is swallowed by the picker, and Esc closes it: nothing ran.
+      dashboard.handleInput("x");
+      expect(assertDialog(dashboard.dialog, "select")).toBe(d);
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+    });
+
+    test("'x' then the Retire row reaches the retire confirm, still unconfirmed", () => {
+      const a = makeAgent("agent-tm1", "/tmp/repo-x");
+      const dashboard = dashboardWith([a], [header("backend"), member("backend", a)]);
+      dashboard.handleInput("2");
+      dashboard.handleInput("j");
+      dashboard.handleInput("j");
+      dashboard.handleInput("x");
+      dashboard.handleInput("j");  // down to "Retire …"
+      dashboard.handleInput("\r");
+      const d = assertDialog(dashboard.dialog, "confirm");
+      expect(d.prompt).toBe("Retire agent agent-tm1?");
+      expect(d.confirmLabel).toBe("Retire");
+      expect(d.focusedButton).toBe("cancel");
+      // Enter on the default Cancel button dismisses without retiring.
+      dashboard.handleInput("\r");
+      expect(dashboard.dialog).toBeNull();
+    });
+
+    test("'x' then the Remove row removes the agent from the team its ROW is under, and keeps the agent", async () => {
+      const { createTeam, addMember, readTeams } = await import("../teams");
+      const { saveRegistry } = await import("../registry");
+      const { writeAgentTransient } = await import("../agents");
+      const repoTmp = await mkdtemp(join(tmpdir(), "dash-member-repo-"));
+      try {
+        // A real agent dir: teamRemove resolves the id from disk.
+        const agentDir = join(repoTmp, ".itsybitsy", "agents", "agent-two");
+        await mkdir(agentDir, { recursive: true });
+        await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-two", tmux_session: "t-agent-two" }));
+        await writeAgentTransient(agentDir, {
+          tmux_compacting: false,
+          tmux_rate_limited: false,
+          tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
+          has_background_tasks: false,
+          updated_at_ms: Date.now(),
+          watchdog_pid: 4242,
+        });
+        const repoEntry = { path: repoTmp, name: "repo-a" };
+        await saveRegistry({ repos: [repoEntry] });
+        // The agent is on TWO teams, so it has two rows.
+        await createTeam("alpha", "user", 1700000000);
+        await createTeam("beta", "user", 1700000000);
+        await addMember("alpha", "agent-two");
+        await addMember("beta", "agent-two");
+
+        const a = makeAgent("agent-two", repoTmp);
+        const dashboard = dashboardWith([a], [
+          header("alpha"), member("alpha", a),
+          header("beta"), member("beta", a),
+        ]);
+        dashboard.repos = [repoEntry];
+        dashboard.handleInput("2");
+        for (let i = 0; i < 4; i++) dashboard.handleInput("j"); // the row under @beta
+        expect(dashboard.teamsTree.selectedMember?.teamName).toBe("beta");
+
+        dashboard.handleInput("x");
+        dashboard.handleInput("\r"); // "Remove … from @beta" is the default row
+        const confirm = assertDialog(dashboard.dialog, "confirm");
+        expect(confirm.prompt).toBe(`Remove ${a.repoName}/agent-two from @beta?`);
+        expect(confirm.focusedButton).toBe("cancel");
+        // Still nothing removed.
+        expect((await readTeams()).teams["beta"]!.members).toEqual(["agent-two"]);
+
+        dashboard.handleInput("\t"); // to [ Remove ]
+        dashboard.handleInput("\r");
+        await dashboard.flushPendingActions();
+
+        const reg = await readTeams();
+        expect(reg.teams["beta"]!.members).toEqual([]);
+        expect(reg.teams["alpha"]!.members).toEqual(["agent-two"]);
+        // Removed from a team, not retired.
+        expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+        expect(dashboard.dialog).toBeNull();
+      } finally {
+        await rm(repoTmp, { recursive: true, force: true });
+      }
+    });
+
+    test("'x' on a member row the mirror highlighted (Agents tree owns the selection) opens the picker too", () => {
+      const a = makeAgent("agent-tm1", "/tmp/repo-x");
+      const dashboard = dashboardWith([a], [header("backend"), member("backend", a)]);
+      dashboard.handleInput("j"); // select the agent in the Agents tab
+      dashboard.handleInput("2"); // show Teams: the mirror highlights its member row
+      expect(dashboard.activeSelectionSource).toBe("agents");
+      expect(dashboard.teamsTree.selectedMember?.teamName).toBe("backend");
+
+      dashboard.handleInput("x");
+      expect(assertDialog(dashboard.dialog, "select").items[0]).toBe(`Remove ${a.repoName}/agent-tm1 from @backend`);
+    });
+
+    test("'x' on a mirrored row that is ANOTHER repo's same-id agent acts on the selected agent, not the row", () => {
+      // api/review is selected in the Agents tab and is on no team; the
+      // roster's "review" is web/review. The mirror matches by bare id.
+      const selected = makeAgent("review", "/tmp/repo-api");
+      selected.repoName = "api";
+      const twin = makeAgent("review", "/tmp/repo-web");
+      twin.repoName = "web";
+      const dashboard = dashboardWith([selected], [header("backend"), member("backend", twin)]);
+      dashboard.handleInput("j"); // select api/review in the Agents tab
+      dashboard.handleInput("2"); // the mirror highlights web/review's row
+      expect(dashboard.activeSelectionSource).toBe("agents");
+      expect(dashboard.agentTree.selectedAgent).toBe(selected);
+      expect(dashboard.teamsTree.selectedMember?.agent).toBe(twin);
+
+      // No picker offering to remove or retire web/review: `x` is the retire
+      // confirm for the Agents-tree selection, as before the picker existed.
+      dashboard.handleInput("x");
+      expect(assertDialog(dashboard.dialog, "confirm").prompt).toBe("Retire agent review?");
+      dashboard.handleInput("\x1b");
+
+      // Once j/k puts the selection on the row itself, the row is the
+      // selection and the picker is for web/review.
+      dashboard.handleInput("j");
+      dashboard.handleInput("j");
+      expect(dashboard.activeSelectionSource).toBe("teams");
+      expect(dashboard.teamsTree.selectedMember?.agent).toBe(twin);
+      dashboard.handleInput("x");
+      expect(assertDialog(dashboard.dialog, "select").items).toEqual([
+        "Remove web/review from @backend",
+        "Retire web/review…",
+      ]);
+    });
+
+    test("'x' with the Agents or Favorites tab showing is the retire confirm, as before", () => {
+      const a = makeAgent("agent-tm1", "/tmp/repo-x");
+      for (const tab of ["1", "3"]) {
+        // The Teams tree owns the member selection, but its tab is not showing.
+        const dashboard = dashboardWith([a], [header("backend"), member("backend", a)]);
+        dashboard.handleInput("2");
+        dashboard.handleInput("j");
+        dashboard.handleInput("j");
+        dashboard.handleInput(tab);
+        expect(dashboard.activeSelectionSource).toBe("teams");
+        dashboard.handleInput("x");
+        expect(assertDialog(dashboard.dialog, "confirm").prompt).toBe("Retire agent agent-tm1?");
+      }
+
+      // And the plain case: an agent selected in the Agents tab that happens
+      // to be on a team.
+      const dashboard = dashboardWith([a], [header("backend"), member("backend", a)]);
+      dashboard.handleInput("j");
+      expect(dashboard.teamsTree.selectedMember?.teamName).toBe("backend"); // mirrored, not showing
+      dashboard.handleInput("x");
+      expect(assertDialog(dashboard.dialog, "confirm").prompt).toBe("Retire agent agent-tm1?");
+    });
+
+    test("'x' on a team anchor still opens the manage-team picker", async () => {
+      const { createTeam, addMember } = await import("../teams");
+      await createTeam("backend", "user", 1700000000);
+      await addMember("backend", "agent-tm1");
+      const a = makeAgent("agent-tm1", "/tmp/repo-x");
+      const dashboard = dashboardWith([a], [header("backend"), member("backend", a)]);
+      dashboard.handleInput("2");
+      dashboard.handleInput("j"); // the @backend anchor
+      dashboard.handleInput("x");
+      await dashboard.flushPendingActions();
+      const d = assertDialog(dashboard.dialog, "select");
+      expect(d.prompt).toBe("Manage team @backend");
+      expect(d.items[0]).toBe("Disband team @backend");
+    });
+
+    test("'t' on a member row offers 'Remove from @<team>' for the ROW's agent, without an Agents-tree row", async () => {
+      const { createTeam, addMember } = await import("../teams");
+      await createTeam("alpha", "user", 1700000000);
+      await createTeam("beta", "user", 1700000000);
+      await addMember("beta", "agent-tm1");
+      const a = makeAgent("agent-tm1", "/tmp/repo-x");
+      // No Agents-tree row for the agent (as for a per-repo coordinator).
+      const dashboard = dashboardWith([], [header("alpha"), header("beta"), member("beta", a)]);
+      dashboard.handleInput("2");
+      for (let i = 0; i < 3; i++) dashboard.handleInput("j");
+      expect(dashboard.agentTree.selectedAgent).toBeNull();
+
+      dashboard.handleInput("t");
+      // The picker opens in a .then off listTeams(), not via executeAndRefresh.
+      await waitFor(() => dashboard.dialog !== null, {
+        timeoutMs: WAIT_TIMEOUT_MS,
+        message: "the team picker dialog to open",
+      });
+      const d = assertDialog(dashboard.dialog, "fuzzy");
+      expect(d.prompt).toBe("Team for agent-tm1:");
+      expect(d.allItems).toEqual(["alpha", "Remove from @beta", "+ Create new team…"]);
     });
   });
 });

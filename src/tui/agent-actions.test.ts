@@ -24,10 +24,11 @@ import {
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
   effectiveSpawnCapability, handleAnswerQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
-  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam,
+  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam, handleManageTeamMember,
   handleFolderBrowser, newRepoPrompt, newAgentFormTypeOrder,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
 import { teamLogPath, channelPath, appendChannelMessage, appendTeamLog } from "../team-channel";
 import { existsSync } from "node:fs";
@@ -1042,6 +1043,22 @@ describe("handleHelp", () => {
     const d = assertDialog(dialogs[0]!, "help");
     const text = d.lines.join("\n");
     expect(text).toContain("nickname agent");
+  });
+
+  test("help legend lists the team keys, in the Actions and Team sections", () => {
+    const { ctx, dialogs } = makeMockCtx();
+    handleHelp(ctx);
+    const lines = assertDialog(dialogs[0]!, "help").lines.map(stripAnsi);
+    const row = (key: string, desc: string) => `  ${key.padEnd(18)}${desc}`;
+    expect(lines).toContain(row("t", "add agent to team / remove from team"));
+    const team = lines.indexOf("Team (Teams tab)");
+    expect(lines.slice(team, team + 5)).toEqual([
+      "Team (Teams tab)",
+      row("t", "edit roster (on a team)"),
+      row("x", "disband / remove a member (on a team)"),
+      row("x", "remove from team / retire (on a member)"),
+      "",
+    ]);
   });
 
   test("help shows the collector light's details first, only when probed", () => {
@@ -2384,11 +2401,11 @@ describe("handleCreateTeam", () => {
     expect(reg.teams["ephemeral"]).toBeUndefined();
   });
 
-  test("wizard pre-checks the selected agent when alsoAddSelectedAgent is true", async () => {
-    // T-flow path: alsoAddSelectedAgent=false; t-flow: true.
-    // handleCreateTeam uses alsoAddSelectedAgent=false, so the pre-check only
-    // fires via handleAddAgentToTeam's empty-teams branch. We exercise it by
-    // submitting through the empty-teams path.
+  test("wizard pre-checks the agent 't' was pressed on", async () => {
+    // runCreateTeam's preCheckAgent is null in the T flow (handleCreateTeam)
+    // and the picker's agent in the t flow, so the pre-check only fires via
+    // handleAddAgentToTeam. We exercise it by submitting through the
+    // empty-teams path.
     await plantTestAgent(fx.repoDir, "agent-pre");
     await plantTestAgent(fx.repoDir, "agent-other");
     const preChecked = makeAgent({ id: "agent-pre", repoPath: fx.repoDir });
@@ -2649,21 +2666,248 @@ describe("handleAddAgentToTeam", () => {
     expect(reg.teams["brand-new"]!.members).toContain("agent-ddd");
   });
 
-  test("already-a-member: picking the same team reports it without re-adding", async () => {
-    await createTeam("backend", "user", 1700000000);
-    await addMember("backend", "agent-eee");
-    await plantTestAgent(fx.repoDir, "agent-eee");
-    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir });
-    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
-    handleAddAgentToTeam(ctx);
+  /** Open the picker for `ctx`'s agent and return its fuzzy dialog. */
+  async function openPicker(
+    ctx: ActionCtx,
+    dialogs: NonNullable<DialogState>[],
+    memberRowAgent?: Agent,
+  ): Promise<Extract<NonNullable<DialogState>, { type: "fuzzy" }>> {
+    handleAddAgentToTeam(ctx, memberRowAgent);
     await waitForDialog(dialogs, "handleAddAgentToTeam to open the team picker");
-    const d = assertDialog(dialogs[0]!, "fuzzy");
-    d.onSelect(0);
+    return assertDialog(dialogs[0]!, "fuzzy");
+  }
+
+  test("picker for an agent on NO team: every team is an add entry, then Create", async () => {
+    await createTeam("alpha", "user", 1700000000);
+    await createTeam("beta", "user", 1700000000);
+    await addMember("beta", "agent-other");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs } = makeMockCtx({ agent, repos: [fx.repoEntry], lastAgents: [agent] });
+    const d = await openPicker(ctx, dialogs);
+    expect(d.prompt).toBe("Team for agent-eee:");
+    expect(d.allItems).toEqual(["alpha", "beta", "+ Create new team…"]);
+    expect(d.filteredItems).toEqual(d.allItems);
+  });
+
+  test("picker for an agent on ONE team: other teams first, then 'Remove from @<team>', then Create", async () => {
+    // The joined team is FIRST in the registry, so the list below proves the
+    // order is by group and not by registry position.
+    await createTeam("alpha", "user", 1700000000);
+    await createTeam("beta", "user", 1700000000);
+    await createTeam("gamma", "user", 1700000000);
+    await addMember("alpha", "agent-eee");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs } = makeMockCtx({ agent, repos: [fx.repoEntry], lastAgents: [agent] });
+    const d = await openPicker(ctx, dialogs);
+    expect(d.allItems).toEqual(["beta", "gamma", "Remove from @alpha", "+ Create new team…"]);
+  });
+
+  test("picker for an agent on TWO teams: one 'Remove from @<team>' entry per team", async () => {
+    await createTeam("alpha", "user", 1700000000);
+    await createTeam("beta", "user", 1700000000);
+    await createTeam("gamma", "user", 1700000000);
+    await addMember("alpha", "agent-eee");
+    await addMember("gamma", "agent-eee");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs } = makeMockCtx({ agent, repos: [fx.repoEntry], lastAgents: [agent] });
+    const d = await openPicker(ctx, dialogs);
+    expect(d.allItems).toEqual(["beta", "Remove from @alpha", "Remove from @gamma", "+ Create new team…"]);
+  });
+
+  test("picker for an agent on EVERY team: only Remove entries and Create", async () => {
+    await createTeam("alpha", "user", 1700000000);
+    await addMember("alpha", "agent-eee");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs } = makeMockCtx({ agent, repos: [fx.repoEntry], lastAgents: [agent] });
+    const d = await openPicker(ctx, dialogs);
+    expect(d.allItems).toEqual(["Remove from @alpha", "+ Create new team…"]);
+  });
+
+  test("membership falls back to the bare roster id when the watcher has no agents yet", async () => {
+    await createTeam("alpha", "user", 1700000000);
+    await addMember("alpha", "agent-eee");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir, repoName: "api" });
+    // No lastAgents: nothing to resolve the roster id against.
+    const { ctx, dialogs } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    const d = await openPicker(ctx, dialogs);
+    expect(d.allItems).toEqual(["Remove from @alpha", "+ Create new team…"]);
+  });
+
+  test("'Remove from @<team>': confirm, then teamRemove on THAT team with the agent's id", async () => {
+    await plantTestAgent(fx.repoDir, "agent-eee");
+    await plantTestAgent(fx.repoDir, "agent-peer");
+    await createTeam("backend", "user", 1700000000);
+    await createTeam("frontend", "user", 1700000000);
+    await addMember("backend", "agent-eee");
+    await addMember("backend", "agent-peer");
+    await addMember("frontend", "agent-eee");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry], lastAgents: [agent] });
+    const d = await openPicker(ctx, dialogs);
+    expect(d.allItems).toEqual(["Remove from @backend", "Remove from @frontend", "+ Create new team…"]);
+    d.onSelect(0); // Remove from @backend
+
+    // Nothing is removed before the confirm.
+    const confirm = assertDialog(dialogs[1]!, "confirm");
+    expect(confirm.prompt).toBe("Remove api/agent-eee from @backend?");
+    expect(confirm.confirmLabel).toBe("Remove");
+    expect(confirm.focusedButton).toBe("cancel");
+    await flushActions();
+    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-eee", "agent-peer"]);
+
+    confirm.onYes();
     await flushActions();
     const reg = await readTeams();
-    // Roster is unchanged.
-    expect(reg.teams["backend"]!.members.filter((m) => m === "agent-eee")).toHaveLength(1);
-    expect(notices.some((n) => n.includes("already in @backend"))).toBe(true);
+    // Only this agent left, and only the chosen team changed.
+    expect(reg.teams["backend"]!.members).toEqual(["agent-peer"]);
+    expect(reg.teams["frontend"]!.members).toEqual(["agent-eee"]);
+    // The notice is teamRemove's own stdout, as for `ib team remove`.
+    expect(notices).toEqual(["Removed agent-eee from @backend"]);
+    // teamRemove → fireRemoveLeaveNotice: the audit-log line and the channel
+    // SYSTEM record. A bare registry removeMember would write neither.
+    expect(await readTeamAuditLog("backend")).toContain("agent agent-eee left");
+    expect(await Bun.file(channelPath("backend")).text()).toContain("left the team");
+    expect(await readTeamAuditLog("frontend")).not.toContain("left");
+  });
+
+  test("cancelling the Remove confirm changes nothing", async () => {
+    await plantTestAgent(fx.repoDir, "agent-eee");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-eee");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry], lastAgents: [agent] });
+    const d = await openPicker(ctx, dialogs);
+    d.onSelect(0); // Remove from @backend
+    assertDialog(dialogs[1]!, "confirm");
+    // Never call onYes: Esc / Cancel just close the dialog.
+    await flushActions();
+    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-eee"]);
+    expect(notices).toEqual([]);
+    expect(await readTeamAuditLog("backend")).not.toContain("left");
+    expect(dialogs).toHaveLength(2);
+  });
+
+  test("Remove on a team deleted in the meantime shows teamRemove's error", async () => {
+    await plantTestAgent(fx.repoDir, "agent-eee");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-eee");
+    const agent = makeAgent({ id: "agent-eee", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry], lastAgents: [agent] });
+    const d = await openPicker(ctx, dialogs);
+    d.onSelect(0);
+    await deleteTeam("backend");
+    assertDialog(dialogs[1]!, "confirm").onYes();
+    await flushActions();
+    expect(notices).toEqual(["Error: team @backend not found"]);
+  });
+
+  test("same id in two repos: only the agent the roster id resolves to is offered Remove", async () => {
+    // team.members holds the BARE id, so "agent-twin" cannot say which repo it
+    // means. Readers resolve it to the LAST live agent with that id (the Teams
+    // tree's id → Agent map), so that agent is the member and its twin is not.
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-twin");
+    const twinA = makeAgent({ id: "agent-twin", repoPath: "/repos/api", repoName: "api" });
+    const twinB = makeAgent({ id: "agent-twin", repoPath: "/repos/web", repoName: "web" });
+
+    const forB = makeMockCtx({ agent: twinB, repos: [fx.repoEntry], lastAgents: [twinA, twinB] });
+    expect((await openPicker(forB.ctx, forB.dialogs)).allItems).toEqual(["Remove from @backend", "+ Create new team…"]);
+
+    const forA = makeMockCtx({ agent: twinA, repos: [fx.repoEntry], lastAgents: [twinA, twinB] });
+    expect((await openPicker(forA.ctx, forA.dialogs)).allItems).toEqual(["backend", "+ Create new team…"]);
+
+    // The rule follows the live list, not the agent: with the order swapped,
+    // the roster id resolves to the other twin.
+    const swapped = makeMockCtx({ agent: twinA, repos: [fx.repoEntry], lastAgents: [twinB, twinA] });
+    expect((await openPicker(swapped.ctx, swapped.dialogs)).allItems).toEqual(["Remove from @backend", "+ Create new team…"]);
+  });
+
+  test("same id in two repos: the member twin's confirm names its own repo", async () => {
+    await plantTestAgent(fx.repoDir, "agent-twin");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-twin");
+    const twinA = makeAgent({ id: "agent-twin", repoPath: "/repos/api", repoName: "api" });
+    const twinB = makeAgent({ id: "agent-twin", repoPath: fx.repoDir, repoName: "web" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: twinB, repos: [fx.repoEntry], lastAgents: [twinA, twinB] });
+    const d = await openPicker(ctx, dialogs);
+    d.onSelect(0);
+    const confirm = assertDialog(dialogs[1]!, "confirm");
+    expect(confirm.prompt).toBe("Remove web/agent-twin from @backend?");
+    confirm.onYes();
+    await flushActions();
+    expect((await readTeams()).teams["backend"]!.members).toEqual([]);
+    expect(notices).toEqual(["Removed agent-twin from @backend"]);
+  });
+
+  test("a Teams-tree member row's agent is used instead of the Agents tree's selection", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-row");
+    const rowAgent = makeAgent({ id: "agent-row", repoPath: fx.repoDir, repoName: "api" });
+    const other = makeAgent({ id: "agent-other", repoPath: fx.repoDir, repoName: "api" });
+
+    // The Agents tree points at another agent: the row's agent still wins.
+    const withOther = makeMockCtx({ agent: other, repos: [fx.repoEntry], lastAgents: [rowAgent, other] });
+    const d = await openPicker(withOther.ctx, withOther.dialogs, rowAgent);
+    expect(d.prompt).toBe("Team for agent-row:");
+    expect(d.allItems).toEqual(["Remove from @backend", "+ Create new team…"]);
+
+    // The Agents tree has no row for it at all (e.g. a per-repo coordinator).
+    const withNone = makeMockCtx({ agent: null, repos: [fx.repoEntry], lastAgents: [rowAgent] });
+    expect((await openPicker(withNone.ctx, withNone.dialogs, rowAgent)).allItems)
+      .toEqual(["Remove from @backend", "+ Create new team…"]);
+  });
+
+  test("'+ Create new team…' from a member row's picker pre-checks the ROW's agent and records it as creator", async () => {
+    await createTeam("existing", "user", 1700000000);
+    await plantTestAgent(fx.repoDir, "agent-row");
+    const rowAgent = makeAgent({ id: "agent-row", repoPath: fx.repoDir, repoName: "api" });
+    const other = makeAgent({ id: "agent-other", repoPath: fx.repoDir, repoName: "api" });
+    // The Agents tree points at ANOTHER agent; the wizard must not pick it up.
+    const { ctx, dialogs, flushActions } = makeMockCtx({ agent: other, repos: [fx.repoEntry], lastAgents: [other, rowAgent] });
+    const d = await openPicker(ctx, dialogs, rowAgent);
+    d.onSelect(d.allItems.length - 1); // + Create new team…
+    assertDialog(dialogs[1]!, "input").onSubmit("brand-new");
+    await flushActions();
+    const members = assertDialog(dialogs[2]!, "multi-select");
+    expect(members.items.map((i) => i.split(" ")[0])).toEqual(["api/agent-other", "api/agent-row"]);
+    expect(members.checked).toEqual([false, true]);
+    members.onSubmit([1]);
+    await flushActions();
+    assertDialog(dialogs[3]!, "textarea").onSubmit("");
+    await flushActions();
+    const team = (await readTeams()).teams["brand-new"]!;
+    expect(team.members).toEqual(["agent-row"]);
+    expect(team.created_by).toBe("agent-row");
+  });
+
+  test("no teams: a member row's agent is the one the create wizard pre-checks", async () => {
+    const rowAgent = makeAgent({ id: "agent-row", repoPath: fx.repoDir, repoName: "api" });
+    // No Agents-tree selection at all (as for a per-repo coordinator's row).
+    const { ctx, dialogs, flushActions } = makeMockCtx({ agent: null, repos: [fx.repoEntry], lastAgents: [rowAgent] });
+    handleAddAgentToTeam(ctx, rowAgent);
+    await waitForDialog(dialogs, "handleAddAgentToTeam to open the create-team input");
+    assertDialog(dialogs[0]!, "input").onSubmit("first-team");
+    await flushActions();
+    expect(assertDialog(dialogs[1]!, "multi-select").checked).toEqual([true]);
+  });
+
+  test("same id in two repos: adding the twin that is not the member reports 'already in' and changes nothing", async () => {
+    // The roster holds the bare id once and cannot hold both twins, so the add
+    // entry offered to the non-member twin is a reported no-op.
+    await plantTestAgent(fx.repoDir, "agent-twin");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-twin");
+    const twinA = makeAgent({ id: "agent-twin", repoPath: fx.repoDir, repoName: "api" });
+    const twinB = makeAgent({ id: "agent-twin", repoPath: "/repos/web", repoName: "web" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: twinA, repos: [fx.repoEntry], lastAgents: [twinA, twinB] });
+    const d = await openPicker(ctx, dialogs);
+    expect(d.allItems).toEqual(["backend", "+ Create new team…"]);
+    d.onSelect(0);
+    await flushActions();
+    expect(notices).toEqual(["agent agent-twin is already in @backend"]);
+    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-twin"]);
+    // No second join was logged.
+    expect(await readTeamAuditLog("backend")).not.toContain("joined");
   });
 });
 
@@ -2932,6 +3176,165 @@ describe("handleManageTeam", () => {
     await flushActions();
     expect(dialogs).toHaveLength(0);
     expect(notices.some((n) => n.includes("team @ghost no longer exists"))).toBe(true);
+  });
+});
+
+// --- handleManageTeamMember (§17.3 team-member picker — x-on-member-row) ----
+//
+// `x` on a team-member row opens a `select` dialog instead of the retire
+// confirm: "Remove <repo>/<id> from @<team>" first, "Retire <repo>/<id>…"
+// second. Each choice has its own confirm dialog before any state change.
+// A per-repo coordinator's row has no Retire option (Remove only).
+
+describe("handleManageTeamMember", () => {
+  let fx: Awaited<ReturnType<typeof setupTeamsFixture>>;
+
+  beforeEach(async () => { fx = await setupTeamsFixture(); });
+  afterEach(async () => { await teardownTeamsFixture(fx); });
+
+  test("opens a select dialog: Remove from the row's team first, Retire second", () => {
+    const agent = makeAgent({ id: "agent-aaa", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "backend", agent);
+    expect(dialogs).toHaveLength(1);
+    const d = assertDialog(dialogs[0]!, "select");
+    expect(d.prompt).toBe("api/agent-aaa in @backend");
+    expect(d.items).toEqual(["Remove api/agent-aaa from @backend", "Retire api/agent-aaa…"]);
+    // The safe choice is the default.
+    expect(d.selectedIndex).toBe(0);
+  });
+
+  test("Remove: confirm, then teamRemove on the ROW's team only", async () => {
+    // The agent is on two teams; the row under @frontend was the one selected.
+    await plantTestAgent(fx.repoDir, "agent-aaa");
+    await createTeam("backend", "user", 1700000000);
+    await createTeam("frontend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    await addMember("frontend", "agent-aaa");
+    const agent = makeAgent({ id: "agent-aaa", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "frontend", agent);
+    assertDialog(dialogs[0]!, "select").onSelect(0);
+
+    const confirm = assertDialog(dialogs[1]!, "confirm");
+    expect(confirm.prompt).toBe("Remove api/agent-aaa from @frontend?");
+    expect(confirm.confirmLabel).toBe("Remove");
+    expect(confirm.focusedButton).toBe("cancel");
+    confirm.onYes();
+    await flushActions();
+
+    const reg = await readTeams();
+    expect(reg.teams["frontend"]!.members).toEqual([]);
+    expect(reg.teams["backend"]!.members).toEqual(["agent-aaa"]);
+    expect(notices).toEqual(["Removed agent-aaa from @frontend"]);
+    expect(await readTeamAuditLog("frontend")).toContain("agent agent-aaa left");
+    // The agent itself is untouched: removing from a team is not a retire.
+    expect(existsSync(join(fx.repoDir, ".itsybitsy", "agents", "agent-aaa", "meta.json"))).toBe(true);
+  });
+
+  test("Remove: cancelling the confirm changes nothing", async () => {
+    await plantTestAgent(fx.repoDir, "agent-aaa");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    const agent = makeAgent({ id: "agent-aaa", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "backend", agent);
+    assertDialog(dialogs[0]!, "select").onSelect(0);
+    assertDialog(dialogs[1]!, "confirm");
+    await flushActions();
+    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-aaa"]);
+    expect(notices).toEqual([]);
+  });
+
+  test("opening the picker alone neither removes nor retires", async () => {
+    await plantTestAgent(fx.repoDir, "agent-aaa");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-aaa");
+    const agent = makeAgent({ id: "agent-aaa", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "backend", agent);
+    await flushActions();
+    expect(dialogs).toHaveLength(1);
+    expect(dialogs[0]!.type).toBe("select");
+    expect(notices).toEqual([]);
+    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-aaa"]);
+    expect(existsSync(join(fx.repoDir, ".itsybitsy", "agents", "agent-aaa", "meta.json"))).toBe(true);
+  });
+
+  test("Retire: opens the same retire confirm `x` opens on an agent, for the ROW's agent", async () => {
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "agent-row");
+    // The Agents tree points at ANOTHER agent: the picker still retires the
+    // agent its row names.
+    const rowAgent = makeAgent({ id: "agent-row", repoPath: fx.repoDir, repoName: "api" });
+    const other = makeAgent({ id: "agent-other", repoPath: fx.repoDir, repoName: "api" });
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: other, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "backend", rowAgent);
+    assertDialog(dialogs[0]!, "select").onSelect(1);
+
+    const viaPicker = assertDialog(dialogs[1]!, "confirm");
+    // Byte-for-byte the dialog handleRetire opens for that agent.
+    const direct = makeMockCtx({ agent: rowAgent, repos: [fx.repoEntry] });
+    handleRetire(direct.ctx);
+    const viaX = assertDialog(direct.dialogs[0]!, "confirm");
+    expect(viaPicker.prompt).toBe("Retire agent agent-row?");
+    expect({ ...viaPicker, onYes: undefined }).toEqual({ ...viaX, onYes: undefined });
+
+    // Nothing ran yet, and the team roster is not touched by this branch.
+    await flushActions();
+    expect(notices).toEqual([]);
+    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-row"]);
+
+    // Confirm: retireAgent runs for the row's agent. It has no agent dir and
+    // `tmux has-session` reports no session, so retireAgent stops at its
+    // not-found check — which names the agent it was called with.
+    setKillPauseSpawnRunner(() => makeSpawnResult(1));
+    viaPicker.onYes();
+    await flushActions();
+    expect(notices).toEqual(["Retire failed: Agent 'agent-row' not found"]);
+  });
+
+  test("a per-repo coordinator's row: the picker offers Remove only, and it opens the remove confirm", async () => {
+    await plantTestAgent(fx.repoDir, "coord-1");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "coord-1");
+    const base = makeAgent({ id: "coord-1", repoPath: fx.repoDir, repoName: "api" });
+    const coord: Agent = { ...base, meta: { ...base.meta, agentType: REPO_COORDINATOR_TYPE } };
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: coord, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "backend", coord);
+
+    // Still a picker (not a straight-to-confirm), with exactly one item.
+    expect(dialogs).toHaveLength(1);
+    const picker = assertDialog(dialogs[0]!, "select");
+    expect(picker.prompt).toBe("api/coord-1 in @backend");
+    expect(picker.items).toEqual(["Remove api/coord-1 from @backend"]);
+    expect(picker.selectedIndex).toBe(0);
+
+    picker.onSelect(0);
+    expect(dialogs).toHaveLength(2);
+    const confirm = assertDialog(dialogs[1]!, "confirm");
+    expect(confirm.prompt).toBe("Remove api/coord-1 from @backend?");
+    expect(confirm.confirmLabel).toBe("Remove");
+    expect(confirm.focusedButton).toBe("cancel");
+    confirm.onYes();
+    await flushActions();
+
+    expect((await readTeams()).teams["backend"]!.members).toEqual([]);
+    expect(notices).toEqual(["Removed coord-1 from @backend"]);
+    // Removing from a team does not retire the coordinator.
+    expect(existsSync(join(fx.repoDir, ".itsybitsy", "agents", "coord-1", "meta.json"))).toBe(true);
+  });
+
+  test("a non-coordinator typed agent's row still offers Remove and Retire", () => {
+    const base = makeAgent({ id: "agent-aaa", repoPath: fx.repoDir, repoName: "api" });
+    const worker: Agent = { ...base, meta: { ...base.meta, agentType: "worker" } };
+    const { ctx, dialogs } = makeMockCtx({ agent: worker, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "backend", worker);
+    expect(dialogs).toHaveLength(1);
+    expect(assertDialog(dialogs[0]!, "select").items).toEqual([
+      "Remove api/agent-aaa from @backend",
+      "Retire api/agent-aaa…",
+    ]);
   });
 });
 

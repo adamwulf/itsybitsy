@@ -128,6 +128,24 @@ describe("TeamsTreeComponent selection", () => {
     expect(tree.selection).toBeNull();
     expect(tree.selectedTeamName).toBeNull();
     expect(tree.selectedMemberAgent).toBeNull();
+    expect(tree.selectedMember).toBeNull();
+  });
+
+  test("selectedMember names the team of the selected member ROW (an agent on two teams has two rows)", () => {
+    const a = makeAgent("a1", "api");
+    const tree = new TeamsTreeComponent();
+    tree.setFlatList(flattenTeamsTree([makeTeam("alpha", ["a1"]), makeTeam("beta", ["a1"])], byId([a])));
+    tree.navigate(1); // alpha header: a team anchor, not a member row
+    expect(tree.selectedMember).toBeNull();
+    tree.navigate(1); // a1 under alpha
+    expect(tree.selectedMember).toEqual({ teamName: "alpha", agent: a });
+    tree.navigate(1); // beta header
+    tree.navigate(1); // a1 under beta — same agent, other team
+    expect(tree.selectedMember).toEqual({ teamName: "beta", agent: a });
+    // `selection` reports both rows identically; only selectedMember tells them apart.
+    expect(tree.selection).toEqual({ kind: "agent", agent: a });
+    tree.deselect();
+    expect(tree.selectedMember).toBeNull();
   });
 
   test("navigate(1) from no-selection selects the first row (§17.1)", () => {

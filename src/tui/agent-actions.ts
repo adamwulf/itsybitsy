@@ -1138,7 +1138,8 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
  *
  * Note on `x` on a team MEMBER row in the Teams tree: that path is NOT routed
  * here. It opens the team-member picker (`handleManageTeamMember`), which
- * offers removing that member from the row's team or retiring the agent.
+ * offers removing that member from the row's team or retiring the agent (no
+ * retire for a per-repo coordinator).
  */
 export function handleManageTeam(ctx: ActionCtx, teamName: string) {
   ctx.executeAndRefresh(async () => {
@@ -1185,21 +1186,28 @@ export function handleManageTeam(ctx: ActionCtx, teamName: string) {
  * here opened the retire confirm straight away, one key press from retiring an
  * agent the user meant to drop from a team.
  *
+ * A per-repo coordinator's row gets no Retire option: retiring a repo
+ * coordinator is not reachable from a team-member row. Its picker still opens,
+ * with the Remove option alone, so `x` behaves the same on every member row.
+ *
  * Synchronous (no registry read): the row already names the team and the
  * agent. If the team or the membership is gone by the time the user confirms,
  * `teamRemove` reports it.
  */
 export function handleManageTeamMember(ctx: ActionCtx, teamName: string, agent: Agent) {
   const label = `${agent.repoName}/${agent.id}`;
+  const canRetire = agent.meta.agentType !== REPO_COORDINATOR_TYPE;
   ctx.showDialog({
     type: "select",
     prompt: `${label} in @${teamName}`,
-    items: [`Remove ${label} from @${teamName}`, `Retire ${label}…`],
+    items: canRetire
+      ? [`Remove ${label} from @${teamName}`, `Retire ${label}…`]
+      : [`Remove ${label} from @${teamName}`],
     selectedIndex: 0,
     onSelect: (index: number) => {
       ctx.closeDialog();
       if (index === 0) confirmRemoveMember(ctx, teamName, agent.id, label);
-      else if (index === 1) confirmRetire(ctx, agent);
+      else if (index === 1 && canRetire) confirmRetire(ctx, agent);
     },
   });
 }

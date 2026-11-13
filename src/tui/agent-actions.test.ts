@@ -28,6 +28,7 @@ import {
   handleFolderBrowser, newRepoPrompt, newAgentFormTypeOrder,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
 import { teamLogPath, channelPath, appendChannelMessage, appendTeamLog } from "../team-channel";
 import { existsSync } from "node:fs";
@@ -3183,6 +3184,7 @@ describe("handleManageTeam", () => {
 // `x` on a team-member row opens a `select` dialog instead of the retire
 // confirm: "Remove <repo>/<id> from @<team>" first, "Retire <repo>/<id>…"
 // second. Each choice has its own confirm dialog before any state change.
+// A per-repo coordinator's row has no Retire option (Remove only).
 
 describe("handleManageTeamMember", () => {
   let fx: Awaited<ReturnType<typeof setupTeamsFixture>>;
@@ -3290,6 +3292,49 @@ describe("handleManageTeamMember", () => {
     viaPicker.onYes();
     await flushActions();
     expect(notices).toEqual(["Retire failed: Agent 'agent-row' not found"]);
+  });
+
+  test("a per-repo coordinator's row: the picker offers Remove only, and it opens the remove confirm", async () => {
+    await plantTestAgent(fx.repoDir, "coord-1");
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", "coord-1");
+    const base = makeAgent({ id: "coord-1", repoPath: fx.repoDir, repoName: "api" });
+    const coord: Agent = { ...base, meta: { ...base.meta, agentType: REPO_COORDINATOR_TYPE } };
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: coord, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "backend", coord);
+
+    // Still a picker (not a straight-to-confirm), with exactly one item.
+    expect(dialogs).toHaveLength(1);
+    const picker = assertDialog(dialogs[0]!, "select");
+    expect(picker.prompt).toBe("api/coord-1 in @backend");
+    expect(picker.items).toEqual(["Remove api/coord-1 from @backend"]);
+    expect(picker.selectedIndex).toBe(0);
+
+    picker.onSelect(0);
+    expect(dialogs).toHaveLength(2);
+    const confirm = assertDialog(dialogs[1]!, "confirm");
+    expect(confirm.prompt).toBe("Remove api/coord-1 from @backend?");
+    expect(confirm.confirmLabel).toBe("Remove");
+    expect(confirm.focusedButton).toBe("cancel");
+    confirm.onYes();
+    await flushActions();
+
+    expect((await readTeams()).teams["backend"]!.members).toEqual([]);
+    expect(notices).toEqual(["Removed coord-1 from @backend"]);
+    // Removing from a team does not retire the coordinator.
+    expect(existsSync(join(fx.repoDir, ".itsybitsy", "agents", "coord-1", "meta.json"))).toBe(true);
+  });
+
+  test("a non-coordinator typed agent's row still offers Remove and Retire", () => {
+    const base = makeAgent({ id: "agent-aaa", repoPath: fx.repoDir, repoName: "api" });
+    const worker: Agent = { ...base, meta: { ...base.meta, agentType: "worker" } };
+    const { ctx, dialogs } = makeMockCtx({ agent: worker, repos: [fx.repoEntry] });
+    handleManageTeamMember(ctx, "backend", worker);
+    expect(dialogs).toHaveLength(1);
+    expect(assertDialog(dialogs[0]!, "select").items).toEqual([
+      "Remove api/agent-aaa from @backend",
+      "Retire api/agent-aaa…",
+    ]);
   });
 });
 

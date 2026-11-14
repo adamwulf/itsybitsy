@@ -1500,6 +1500,8 @@ Each entry is an object with `path` (absolute path to the git repository root), 
 | `ib add [path]` | Add a repo to the registry. Defaults to `git rev-parse --show-toplevel` in the current directory if no path is given. Errors if the path is not a git repository or is already registered. Rejects repos whose basename is `coordinator` (reserved for system coordinator addressing, §12.3.1). |
 | `ib remove [path]` | Remove a repo from the registry. Defaults to CWD git root. Errors if the path is not currently registered. |
 | `ib list` | List all registered repos and their agents. |
+| `ib push <repo-id>` | Push the repo's `main` (or `master`) branch to every configured remote. Each remote is attempted independently and gets one status line (`✓ <remote>: pushed main` or `✗ <remote>: <git error>`); exits non-zero if any remote failed. |
+| `ib pull <repo-id>` | Fast-forward the repo's `main` (or `master`) branch from every configured remote: for each remote, `git fetch <remote>` then `git merge --ff-only <remote>/main`. Never creates a merge commit, never rebases, never forces. The branch must be checked out in the repo, otherwise the command errors without fetching. Each remote is attempted independently and gets one status line in the same format as `ib push` (`✓ <remote>: pulled main` or `✗ <remote>: <git error>`). A remote that cannot be fast-forwarded (diverged history, local changes the update would overwrite, a failed fetch) leaves the branch as it was, and the command exits non-zero. |
 
 The `ib watch` TUI reads this registry at startup and monitors all registered repos simultaneously.
 

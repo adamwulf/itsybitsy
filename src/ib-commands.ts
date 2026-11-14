@@ -9170,31 +9170,46 @@ export function resetPushSpawnRunner(): void {
 }
 
 /**
+ * The main branch and remotes that `ib push` and `ib pull` act on, or the
+ * error result to return when the repo has neither "main" nor "master", or no
+ * remotes.
+ */
+async function mainBranchAndRemotes(
+  ctx: SpawnContext,
+  repoPath: string,
+): Promise<{ ok: true; branch: string; remotes: string[] } | { ok: false; result: IbCommandResult }> {
+  // Detect the local main-branch ref (prefer "main", fall back to "master").
+  const mainRef = await ctx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/main"]);
+  let branch = "main";
+  if (mainRef.exitCode !== 0) {
+    const masterRef = await ctx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/master"]);
+    if (masterRef.exitCode !== 0) {
+      return { ok: false, result: { ok: false, exitCode: 1, stdout: "", stderr: `No 'main' or 'master' branch in ${repoPath}` } };
+    }
+    branch = "master";
+  }
+
+  const remotesResult = await ctx.run(["git", "-C", repoPath, "remote"]);
+  if (remotesResult.exitCode !== 0) {
+    return { ok: false, result: { ok: false, exitCode: remotesResult.exitCode, stdout: "", stderr: `Failed to list remotes: ${remotesResult.stderr}` } };
+  }
+  const remotes = remotesResult.stdout.split("\n").map((r) => r.trim()).filter(Boolean);
+  if (remotes.length === 0) {
+    return { ok: false, result: { ok: false, exitCode: 1, stdout: "", stderr: `No remotes configured in ${repoPath}` } };
+  }
+  return { ok: true, branch, remotes };
+}
+
+/**
  * Push the repo's main branch to every remote it has. A remote is "writable"
  * iff `git push` succeeds against it; we attempt every remote independently
  * and report per-remote success/failure rather than aborting on the first
  * read-only origin.
  */
 export async function pushRepo(repoPath: string): Promise<IbCommandResult> {
-  // Detect the local main-branch ref (prefer "main", fall back to "master").
-  const mainRef = await pushSpawnCtx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/main"]);
-  let branch = "main";
-  if (mainRef.exitCode !== 0) {
-    const masterRef = await pushSpawnCtx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/master"]);
-    if (masterRef.exitCode !== 0) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `No 'main' or 'master' branch in ${repoPath}` };
-    }
-    branch = "master";
-  }
-
-  const remotesResult = await pushSpawnCtx.run(["git", "-C", repoPath, "remote"]);
-  if (remotesResult.exitCode !== 0) {
-    return { ok: false, exitCode: remotesResult.exitCode, stdout: "", stderr: `Failed to list remotes: ${remotesResult.stderr}` };
-  }
-  const remotes = remotesResult.stdout.split("\n").map((r) => r.trim()).filter(Boolean);
-  if (remotes.length === 0) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `No remotes configured in ${repoPath}` };
-  }
+  const target = await mainBranchAndRemotes(pushSpawnCtx, repoPath);
+  if (!target.ok) return target.result;
+  const { branch, remotes } = target;
 
   const lines: string[] = [];
   let anyFailed = false;
@@ -9208,6 +9223,53 @@ export async function pushRepo(repoPath: string): Promise<IbCommandResult> {
     } else {
       anyFailed = true;
       const err = push.stderr || push.stdout || `exit ${push.exitCode}`;
+      lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
+    }
+  }
+
+  return {
+    ok: anySucceeded && !anyFailed,
+    exitCode: anyFailed ? 1 : 0,
+    stdout: lines.join("\n"),
+    stderr: "",
+  };
+}
+
+/** Spawn context for `ib pull` — defaults to Bun.spawn, overridable for tests. */
+export const pullSpawnCtx = new SpawnContext();
+
+/**
+ * Fetch every remote the repo has and fast-forward its checked-out main branch
+ * to `<remote>/main` with `git merge --ff-only`. Never creates a merge commit,
+ * never rebases, never forces. Like `ib push`, every remote is attempted
+ * independently, and one that cannot fast-forward is reported and leaves main
+ * as it was.
+ */
+export async function pullRepo(repoPath: string): Promise<IbCommandResult> {
+  const target = await mainBranchAndRemotes(pullSpawnCtx, repoPath);
+  if (!target.ok) return target.result;
+  const { branch, remotes } = target;
+
+  const head = await pullSpawnCtx.run(["git", "-C", repoPath, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (head.exitCode !== 0 || head.stdout !== branch) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `'${branch}' is not checked out in ${repoPath}` };
+  }
+
+  const lines: string[] = [];
+  let anyFailed = false;
+  let anySucceeded = false;
+  for (const remote of remotes) {
+    const fetch = await pullSpawnCtx.run(["git", "-C", repoPath, "fetch", remote]);
+    const merge = fetch.exitCode === 0
+      ? await pullSpawnCtx.run(["git", "-C", repoPath, "merge", "--ff-only", `${remote}/${branch}`])
+      : fetch;
+    if (merge.exitCode === 0) {
+      anySucceeded = true;
+      const detail = merge.stdout || merge.stderr;
+      lines.push(`✓ ${remote}: pulled ${branch}${detail ? `\n  ${detail.replace(/\n/g, "\n  ")}` : ""}`);
+    } else {
+      anyFailed = true;
+      const err = merge.stderr || merge.stdout || `exit ${merge.exitCode}`;
       lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
     }
   }

@@ -200,7 +200,7 @@ Press `?` in the dashboard for this list.
 
 | Group | Commands |
 |---|---|
-| Repos | `add`, `remove`, `list`, `push` |
+| Repos | `add`, `remove`, `list`, `push`, `pull` |
 | Spawning | `new-agent` (`new`), `list-types`, `show-type`, `init-types`, `list-models` |
 | Monitoring | `watch`, `agents` (`tree`), `look`, `status`, `diff`, `info`, `state`, `questions` |
 | Messaging | `send`, `ask`, `acknowledge`, `log` |

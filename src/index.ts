@@ -805,6 +805,12 @@ const COMMAND_HELP: Record<string, string> = {
     "  Each remote is attempted independently — read-only remotes are\n" +
     "  reported but do not stop pushes to the others.\n" +
     "  <repo-id>       Registered repo name, nickname, or absolute path",
+  pull:
+    "Usage: ib pull <repo-id>\n" +
+    "  Fetch every configured remote and fast-forward the repo's checked-out\n" +
+    "  main (or master) branch to it. Never merges, rebases or forces: a remote\n" +
+    "  that cannot be fast-forwarded is reported and leaves the branch as it was.\n" +
+    "  <repo-id>       Registered repo name, nickname, or absolute path",
   tgallow:
     "Usage: ib tgallow <chat_id>\n" +
     "  Allow a Telegram chat id to interact with itsybitsy.",
@@ -911,6 +917,7 @@ function printUsage(): void {
   console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
   console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
   console.log("  push <repo-id>      Push the repo's main branch to every configured remote");
+  console.log("  pull <repo-id>      Fast-forward the repo's main branch from every configured remote");
   console.log("");
   console.log("Monitoring:");
   console.log("  watch               Launch TUI dashboard");
@@ -1084,6 +1091,22 @@ export async function main() {
       }
       const { pushRepo } = await import("./ib-commands");
       await printAndExit(await pushRepo(resolved.repo.path));
+      break;
+    }
+    case "pull": {
+      const repoId = args[1];
+      if (!repoId) {
+        console.error("Usage: ib pull <repo-id>");
+        process.exit(1);
+      }
+      const repos = await listRepos();
+      const resolved = resolveRepo(repoId, repos);
+      if (!resolved.ok) {
+        console.error(repoResolutionError(repoId, resolved));
+        process.exit(1);
+      }
+      const { pullRepo } = await import("./ib-commands");
+      await printAndExit(await pullRepo(resolved.repo.path));
       break;
     }
     case "list":
@@ -3322,7 +3345,7 @@ export async function main() {
 // with no filter lands on the default branch and merely prints usage into the
 // test output, but `bun test watchdog` would start the real watchdog loop in
 // the test process, and `bun test state` / `list` / `status` / `diff` / `send`
-// / `merge` / `push` / `nuke` / `remove` would run those commands for real
+// / `merge` / `push` / `pull` / `nuke` / `remove` would run those commands for real
 // against the developer's actual repos. main() is also async and can call
 // process.exit(), so it raced the tests it was running alongside.
 if (import.meta.main) {

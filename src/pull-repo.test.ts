@@ -195,6 +195,31 @@ describe("pullRepo", () => {
     expect(await git(local, "log", "-1", "--format=%s", "main")).toBe("mine");
   });
 
+  test("a remote branch that merely ends in /main does not count as a remote's main", async () => {
+    await commitFile(other, "b.txt", "theirs\n", "theirs");
+    await git(other, "push", "-q", "origin", "main");
+    await commitFile(local, "c.txt", "mine\n", "mine");
+    await git(local, "push", "-q", "origin", "main:feature/main");
+
+    const result = await pullRepo(local);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toStartWith("✓ origin: rebased main onto origin/main");
+  });
+
+  test("a remote with no main is reported with git's own error, not as an aborted rebase", async () => {
+    await git(root, "init", "-q", "--bare", "-b", "main", join(root, "empty.git"));
+    await git(local, "remote", "add", "empty", join(root, "empty.git"));
+    await commitFile(local, "c.txt", "mine\n", "mine");
+
+    const result = await pullRepo(local);
+
+    expect(result.exitCode).toBe(1);
+    const statusLines = result.stdout.split("\n").filter((line) => !line.startsWith("  "));
+    expect(statusLines).toEqual([expect.stringMatching(/^✗ empty: .*empty\/main/), "✓ origin: pulled main"]);
+    expect(result.stdout).not.toContain("aborted");
+  });
+
   test("never rebases away commits another remote's main already has", async () => {
     // origin is the user's fork, upstream the project it was forked from.
     const upstreamRepo = join(root, "upstream.git");

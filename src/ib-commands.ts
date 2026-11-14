@@ -9298,9 +9298,16 @@ export async function pullRepo(repoPath: string, interactive = false): Promise<I
     // A commit another remote's main already has would come out of the rebase
     // with a new SHA, and ib push, which never forces, could no longer update
     // that remote. A fork (origin) plus the project it was forked from
-    // (upstream) does this, as does a remote with unrelated history.
+    // (upstream) does this, as does a remote with unrelated history. In a ref
+    // glob `*` matches "/", so the exclude keeps out branches like
+    // origin/feature/main. Both counts fail when the remote has no main.
     const replayed = await git("rev-list", "--count", `${upstream}..HEAD`);
-    const unpublished = await git("rev-list", "--count", `${upstream}..HEAD`, "--not", `--remotes=*/${branch}`);
+    const unpublished = await git("rev-list", "--count", `${upstream}..HEAD`,
+      "--not", `--exclude=*/*/${branch}`, `--remotes=*/${branch}`);
+    if (replayed.exitCode !== 0 || unpublished.exitCode !== 0) {
+      fail(remote, merge.stderr || merge.stdout || `exit ${merge.exitCode}`);
+      continue;
+    }
     if (replayed.stdout !== unpublished.stdout) {
       fail(remote, `${branch} has diverged from ${upstream}, and rebasing onto it would rewrite commits already on another remote's ${branch}; not rebasing`);
       continue;

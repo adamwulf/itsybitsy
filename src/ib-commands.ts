@@ -19,7 +19,7 @@ import {
   readlink,
   symlink,
 } from "fs/promises";
-import { mkdirSync, realpathSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "fs";
 import { userHome } from "./home";
 import type { Agent, AgentAck, AgentMeta, SpawnedBy, AgentOperationKind } from "./agents";
 import {
@@ -9243,13 +9243,14 @@ export const pullSpawnCtx = new SpawnContext();
  * `<remote>/main`: a fast-forward when possible (`git merge --ff-only`),
  * otherwise `git rebase --rebase-merges`, which replays local commits —
  * merge commits included — on top. Never creates a merge commit of its own,
- * never flattens merges, never forces. Does nothing when the working tree has
+ * never flattens merges, never forces, and never rebases away a commit that
+ * another remote's main already has. Does nothing when the working tree has
  * uncommitted changes.
  *
  * A rebase that hits conflicts is aborted, leaving main as it was. With
- * `interactive`, it is left in progress instead, for the caller (a repo
- * coordinator) to resolve, and no further remote is attempted. Like `ib push`,
- * every remote otherwise gets its own attempt and status line.
+ * `interactive`, it is left in progress instead, for the caller to resolve,
+ * and no further remote is attempted. Like `ib push`, every remote otherwise
+ * gets its own attempt and status line.
  */
 export async function pullRepo(repoPath: string, interactive = false): Promise<IbCommandResult> {
   const target = await mainBranchAndRemotes(pullSpawnCtx, repoPath);
@@ -9259,6 +9260,11 @@ export async function pullRepo(repoPath: string, interactive = false): Promise<I
 
   const head = await git("symbolic-ref", "--quiet", "--short", "HEAD");
   if (head.exitCode !== 0 || head.stdout !== branch) {
+    // A rebase left by --interactive detaches HEAD until it is finished.
+    const rebaseDir = (await git("rev-parse", "--git-path", "rebase-merge")).stdout;
+    if (rebaseDir && existsSync(resolve(repoPath, rebaseDir))) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `A rebase is already in progress in ${repoPath}; finish it with git rebase --continue or git rebase --abort` };
+    }
     return { ok: false, exitCode: 1, stdout: "", stderr: `'${branch}' is not checked out in ${repoPath}` };
   }
   const status = await git("status", "--porcelain", "--untracked-files=no");
@@ -9289,6 +9295,16 @@ export async function pullRepo(repoPath: string, interactive = false): Promise<I
       succeed(remote, `pulled ${branch}`, merge.stdout || merge.stderr);
       continue;
     }
+    // A commit another remote's main already has would come out of the rebase
+    // with a new SHA, and ib push, which never forces, could no longer update
+    // that remote. A fork (origin) plus the project it was forked from
+    // (upstream) does this, as does a remote with unrelated history.
+    const replayed = await git("rev-list", "--count", `${upstream}..HEAD`);
+    const unpublished = await git("rev-list", "--count", `${upstream}..HEAD`, "--not", `--remotes=*/${branch}`);
+    if (replayed.stdout !== unpublished.stdout) {
+      fail(remote, `${branch} has diverged from ${upstream}, and rebasing onto it would rewrite commits already on another remote's ${branch}; not rebasing`);
+      continue;
+    }
     const rebase = await git("rebase", "--rebase-merges", upstream);
     if (rebase.exitCode === 0) {
       succeed(remote, `rebased ${branch} onto ${upstream}`, rebase.stdout || rebase.stderr);
@@ -9305,7 +9321,7 @@ export async function pullRepo(repoPath: string, interactive = false): Promise<I
     await git("rebase", "--abort");
     fail(remote, conflicts !== ""
       ? `rebase of ${branch} onto ${upstream} hit conflicts, aborted; ${branch} left as it was. Conflicted:\n${conflicts}`
-      : rebase.stderr || rebase.stdout || `exit ${rebase.exitCode}`);
+      : `rebase of ${branch} onto ${upstream} failed, aborted; ${branch} left as it was:\n${rebase.stderr || rebase.stdout || `exit ${rebase.exitCode}`}`);
   }
 
   return {

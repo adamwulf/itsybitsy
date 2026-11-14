@@ -3,24 +3,19 @@ import { existsSync } from "fs";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { pullRepo } from "./ib-commands";
+import { pullRepo, pullSpawnCtx } from "./ib-commands";
 import { runIsolatedCli } from "./test-cli-runner";
+import { makeGitIdentity, type GitIdentity } from "./test-git-identity";
 
 // These tests run REAL git against throwaway repos: a bare "origin", the clone
 // `ib pull` updates ("local"), and a second clone ("other") standing in for
-// whoever else pushes to origin. Setup commands ignore the developer's global
-// git config; pullRepo's own git calls see it, so each clone pins the settings
-// a commit needs in its local config.
-const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+// whoever else pushes to origin. Both the setup commands and pullRepo's own
+// git calls use a throwaway identity from makeGitIdentity, never the
+// developer's git config.
+let identity: GitIdentity;
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
-  return (await Bun.$`git ${args}`.cwd(cwd).env(GIT_ENV).quiet().text()).trim();
-}
-
-async function configure(repo: string): Promise<void> {
-  await git(repo, "config", "user.name", "Test");
-  await git(repo, "config", "user.email", "test@example.com");
-  await git(repo, "config", "commit.gpgsign", "false");
+  return (await Bun.$`git ${args}`.cwd(cwd).env(identity.env).quiet().text()).trim();
 }
 
 async function commitFile(repo: string, name: string, content: string, message: string): Promise<string> {
@@ -37,20 +32,21 @@ let other: string;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "ib-pull-"));
+  identity = await makeGitIdentity(root);
+  pullSpawnCtx.set(identity.spawn);
   origin = join(root, "origin.git");
   local = join(root, "local");
   other = join(root, "other");
   await git(root, "init", "-q", "--bare", "-b", "main", origin);
   await git(root, "init", "-q", "-b", "main", other);
-  await configure(other);
   await commitFile(other, "a.txt", "one\n", "first");
   await git(other, "remote", "add", "origin", origin);
   await git(other, "push", "-q", "origin", "main");
   await git(root, "clone", "-q", origin, local);
-  await configure(local);
 });
 
 afterEach(async () => {
+  pullSpawnCtx.reset();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -149,7 +145,54 @@ describe("pullRepo", () => {
     expect(existsSync(join(local, ".git", "rebase-merge"))).toBe(true);
     expect(await git(local, "diff", "--name-only", "--diff-filter=U")).toBe("a.txt");
 
+    const rerun = await pullRepo(local, true);
+    expect(rerun.exitCode).toBe(1);
+    expect(rerun.stderr).toBe(
+      `A rebase is already in progress in ${local}; finish it with git rebase --continue or git rebase --abort`,
+    );
+
     await git(local, "rebase", "--abort");
+    expect(await git(local, "rev-parse", "main")).toBe(mine);
+  });
+
+  test("a rebase that fails without conflicts is aborted, even with --interactive", async () => {
+    await commitFile(other, "u.txt", "theirs\n", "theirs");
+    await git(other, "push", "-q", "origin", "main");
+    const mine = await commitFile(local, "c.txt", "mine\n", "mine");
+    // Untracked, so not "uncommitted changes", but in the way of the rebase.
+    await Bun.write(join(local, "u.txt"), "untracked\n");
+
+    const result = await pullRepo(local, true);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toStartWith(
+      "✗ origin: rebase of main onto origin/main failed, aborted; main left as it was:\n  ",
+    );
+    expect(result.stdout).toContain("u.txt");
+    expect(await git(local, "rev-parse", "HEAD")).toBe(mine);
+    expect(await git(local, "symbolic-ref", "--short", "HEAD")).toBe("main");
+    expect(existsSync(join(local, ".git", "rebase-merge"))).toBe(false);
+    expect(await Bun.file(join(local, "u.txt")).text()).toBe("untracked\n");
+  });
+
+  test("never rebases away commits another remote's main already has", async () => {
+    // origin is the user's fork, upstream the project it was forked from.
+    const upstreamRepo = join(root, "upstream.git");
+    await git(root, "clone", "-q", "--bare", origin, upstreamRepo);
+    await git(local, "remote", "add", "upstream", upstreamRepo);
+    const mine = await commitFile(local, "c.txt", "mine\n", "mine");
+    await git(local, "push", "-q", "origin", "main");
+    await git(other, "remote", "add", "upstream", upstreamRepo);
+    await commitFile(other, "b.txt", "theirs\n", "theirs");
+    await git(other, "push", "-q", "upstream", "main");
+
+    const result = await pullRepo(local);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe(
+      "✓ origin: pulled main\n  Already up to date.\n" +
+      "✗ upstream: main has diverged from upstream/main, and rebasing onto it would rewrite commits already on another remote's main; not rebasing",
+    );
     expect(await git(local, "rev-parse", "main")).toBe(mine);
   });
 
@@ -220,7 +263,6 @@ describe("pullRepo", () => {
   test("a repo with no remotes is an error", async () => {
     const lonely = join(root, "lonely");
     await git(root, "init", "-q", "-b", "main", lonely);
-    await configure(lonely);
     await commitFile(lonely, "a.txt", "one\n", "first");
 
     const result = await pullRepo(lonely);

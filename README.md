@@ -211,6 +211,8 @@ Press `?` in the dashboard for this list.
 
 `ib state --cleanup` finds and kills orphaned tmux sessions and processes; add `--dry-run` to preview.
 
+`ib pull <repo>` fast-forwards main from each remote, or rebases it with `--rebase-merges` when it has diverged. It never forces and does nothing with uncommitted changes. A conflicted rebase is aborted; add `--interactive` to leave it in progress, with the conflicted files and next steps printed.
+
 ## Hooks
 
 Claude Code hooks are how itsybitsy steers Claude. There are two groups: the hooks for **your own** Claude session, which you install once, and the hooks for **agent** sessions, which itsybitsy writes for you.

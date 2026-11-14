@@ -9239,39 +9239,73 @@ export async function pushRepo(repoPath: string): Promise<IbCommandResult> {
 export const pullSpawnCtx = new SpawnContext();
 
 /**
- * Fetch every remote the repo has and fast-forward its checked-out main branch
- * to `<remote>/main` with `git merge --ff-only`. Never creates a merge commit,
- * never rebases, never forces. Like `ib push`, every remote is attempted
- * independently, and one that cannot fast-forward is reported and leaves main
- * as it was.
+ * Fetch every remote the repo has and bring its checked-out main branch up to
+ * `<remote>/main`: a fast-forward when possible (`git merge --ff-only`),
+ * otherwise `git rebase --rebase-merges`, which replays local commits —
+ * merge commits included — on top. Never creates a merge commit of its own,
+ * never flattens merges, never forces. Does nothing when the working tree has
+ * uncommitted changes.
+ *
+ * A rebase that hits conflicts is aborted, leaving main as it was. With
+ * `interactive`, it is left in progress instead, for the caller (a repo
+ * coordinator) to resolve, and no further remote is attempted. Like `ib push`,
+ * every remote otherwise gets its own attempt and status line.
  */
-export async function pullRepo(repoPath: string): Promise<IbCommandResult> {
+export async function pullRepo(repoPath: string, interactive = false): Promise<IbCommandResult> {
   const target = await mainBranchAndRemotes(pullSpawnCtx, repoPath);
   if (!target.ok) return target.result;
   const { branch, remotes } = target;
+  const git = (...args: string[]) => pullSpawnCtx.run(["git", "-C", repoPath, ...args]);
 
-  const head = await pullSpawnCtx.run(["git", "-C", repoPath, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const head = await git("symbolic-ref", "--quiet", "--short", "HEAD");
   if (head.exitCode !== 0 || head.stdout !== branch) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `'${branch}' is not checked out in ${repoPath}` };
+  }
+  const status = await git("status", "--porcelain", "--untracked-files=no");
+  if (status.exitCode !== 0 || status.stdout !== "") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Uncommitted changes in ${repoPath}; commit or stash them before pulling` };
   }
 
   const lines: string[] = [];
   let anyFailed = false;
   let anySucceeded = false;
+  const succeed = (remote: string, what: string, detail: string) => {
+    anySucceeded = true;
+    lines.push(`✓ ${remote}: ${what}${detail ? `\n  ${detail.replace(/\n/g, "\n  ")}` : ""}`);
+  };
+  const fail = (remote: string, err: string) => {
+    anyFailed = true;
+    lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
+  };
   for (const remote of remotes) {
-    const fetch = await pullSpawnCtx.run(["git", "-C", repoPath, "fetch", remote]);
-    const merge = fetch.exitCode === 0
-      ? await pullSpawnCtx.run(["git", "-C", repoPath, "merge", "--ff-only", `${remote}/${branch}`])
-      : fetch;
-    if (merge.exitCode === 0) {
-      anySucceeded = true;
-      const detail = merge.stdout || merge.stderr;
-      lines.push(`✓ ${remote}: pulled ${branch}${detail ? `\n  ${detail.replace(/\n/g, "\n  ")}` : ""}`);
-    } else {
-      anyFailed = true;
-      const err = merge.stderr || merge.stdout || `exit ${merge.exitCode}`;
-      lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
+    const upstream = `${remote}/${branch}`;
+    const fetch = await git("fetch", remote);
+    if (fetch.exitCode !== 0) {
+      fail(remote, fetch.stderr || fetch.stdout || `exit ${fetch.exitCode}`);
+      continue;
     }
+    const merge = await git("merge", "--ff-only", upstream);
+    if (merge.exitCode === 0) {
+      succeed(remote, `pulled ${branch}`, merge.stdout || merge.stderr);
+      continue;
+    }
+    const rebase = await git("rebase", "--rebase-merges", upstream);
+    if (rebase.exitCode === 0) {
+      succeed(remote, `rebased ${branch} onto ${upstream}`, rebase.stdout || rebase.stderr);
+      continue;
+    }
+    const conflicts = (await git("diff", "--name-only", "--diff-filter=U")).stdout;
+    if (interactive && conflicts !== "") {
+      fail(remote,
+        `rebase of ${branch} onto ${upstream} stopped on conflicts, left in progress:\n` +
+        `${conflicts}\n` +
+        "Resolve each file, git add it, then git rebase --continue (or git rebase --abort to give up).");
+      break;
+    }
+    await git("rebase", "--abort");
+    fail(remote, conflicts !== ""
+      ? `rebase of ${branch} onto ${upstream} hit conflicts, aborted; ${branch} left as it was. Conflicted:\n${conflicts}`
+      : rebase.stderr || rebase.stdout || `exit ${rebase.exitCode}`);
   }
 
   return {

@@ -19,7 +19,7 @@ import {
   readlink,
   symlink,
 } from "fs/promises";
-import { mkdirSync, realpathSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "fs";
 import { userHome } from "./home";
 import type { Agent, AgentAck, AgentMeta, SpawnedBy, AgentOperationKind } from "./agents";
 import {
@@ -9170,31 +9170,46 @@ export function resetPushSpawnRunner(): void {
 }
 
 /**
+ * The main branch and remotes that `ib push` and `ib pull` act on, or the
+ * error result to return when the repo has neither "main" nor "master", or no
+ * remotes.
+ */
+async function mainBranchAndRemotes(
+  ctx: SpawnContext,
+  repoPath: string,
+): Promise<{ ok: true; branch: string; remotes: string[] } | { ok: false; result: IbCommandResult }> {
+  // Detect the local main-branch ref (prefer "main", fall back to "master").
+  const mainRef = await ctx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/main"]);
+  let branch = "main";
+  if (mainRef.exitCode !== 0) {
+    const masterRef = await ctx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/master"]);
+    if (masterRef.exitCode !== 0) {
+      return { ok: false, result: { ok: false, exitCode: 1, stdout: "", stderr: `No 'main' or 'master' branch in ${repoPath}` } };
+    }
+    branch = "master";
+  }
+
+  const remotesResult = await ctx.run(["git", "-C", repoPath, "remote"]);
+  if (remotesResult.exitCode !== 0) {
+    return { ok: false, result: { ok: false, exitCode: remotesResult.exitCode, stdout: "", stderr: `Failed to list remotes: ${remotesResult.stderr}` } };
+  }
+  const remotes = remotesResult.stdout.split("\n").map((r) => r.trim()).filter(Boolean);
+  if (remotes.length === 0) {
+    return { ok: false, result: { ok: false, exitCode: 1, stdout: "", stderr: `No remotes configured in ${repoPath}` } };
+  }
+  return { ok: true, branch, remotes };
+}
+
+/**
  * Push the repo's main branch to every remote it has. A remote is "writable"
  * iff `git push` succeeds against it; we attempt every remote independently
  * and report per-remote success/failure rather than aborting on the first
  * read-only origin.
  */
 export async function pushRepo(repoPath: string): Promise<IbCommandResult> {
-  // Detect the local main-branch ref (prefer "main", fall back to "master").
-  const mainRef = await pushSpawnCtx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/main"]);
-  let branch = "main";
-  if (mainRef.exitCode !== 0) {
-    const masterRef = await pushSpawnCtx.run(["git", "-C", repoPath, "show-ref", "--verify", "refs/heads/master"]);
-    if (masterRef.exitCode !== 0) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: `No 'main' or 'master' branch in ${repoPath}` };
-    }
-    branch = "master";
-  }
-
-  const remotesResult = await pushSpawnCtx.run(["git", "-C", repoPath, "remote"]);
-  if (remotesResult.exitCode !== 0) {
-    return { ok: false, exitCode: remotesResult.exitCode, stdout: "", stderr: `Failed to list remotes: ${remotesResult.stderr}` };
-  }
-  const remotes = remotesResult.stdout.split("\n").map((r) => r.trim()).filter(Boolean);
-  if (remotes.length === 0) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `No remotes configured in ${repoPath}` };
-  }
+  const target = await mainBranchAndRemotes(pushSpawnCtx, repoPath);
+  if (!target.ok) return target.result;
+  const { branch, remotes } = target;
 
   const lines: string[] = [];
   let anyFailed = false;
@@ -9210,6 +9225,110 @@ export async function pushRepo(repoPath: string): Promise<IbCommandResult> {
       const err = push.stderr || push.stdout || `exit ${push.exitCode}`;
       lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
     }
+  }
+
+  return {
+    ok: anySucceeded && !anyFailed,
+    exitCode: anyFailed ? 1 : 0,
+    stdout: lines.join("\n"),
+    stderr: "",
+  };
+}
+
+/** Spawn context for `ib pull` — defaults to Bun.spawn, overridable for tests. */
+export const pullSpawnCtx = new SpawnContext();
+
+/**
+ * Fetch every remote the repo has and bring its checked-out main branch up to
+ * `<remote>/main`: a fast-forward when possible (`git merge --ff-only`),
+ * otherwise `git rebase --rebase-merges`, which replays local commits —
+ * merge commits included — on top. Never creates a merge commit of its own,
+ * never flattens merges, never forces, and never rebases away a commit that
+ * another remote's main already has. Does nothing when the working tree has
+ * uncommitted changes.
+ *
+ * A rebase that hits conflicts is aborted, leaving main as it was. With
+ * `interactive`, it is left in progress instead, for the caller to resolve,
+ * and no further remote is attempted. Like `ib push`, every remote otherwise
+ * gets its own attempt and status line.
+ */
+export async function pullRepo(repoPath: string, interactive = false): Promise<IbCommandResult> {
+  const target = await mainBranchAndRemotes(pullSpawnCtx, repoPath);
+  if (!target.ok) return target.result;
+  const { branch, remotes } = target;
+  const git = (...args: string[]) => pullSpawnCtx.run(["git", "-C", repoPath, ...args]);
+
+  const head = await git("symbolic-ref", "--quiet", "--short", "HEAD");
+  if (head.exitCode !== 0 || head.stdout !== branch) {
+    // A rebase left by --interactive detaches HEAD until it is finished.
+    const rebaseDir = (await git("rev-parse", "--git-path", "rebase-merge")).stdout;
+    if (rebaseDir && existsSync(resolve(repoPath, rebaseDir))) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: `A rebase is already in progress in ${repoPath}; finish it with git rebase --continue or git rebase --abort` };
+    }
+    return { ok: false, exitCode: 1, stdout: "", stderr: `'${branch}' is not checked out in ${repoPath}` };
+  }
+  const status = await git("status", "--porcelain", "--untracked-files=no");
+  if (status.exitCode !== 0 || status.stdout !== "") {
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Uncommitted changes in ${repoPath}; commit or stash them before pulling` };
+  }
+
+  const lines: string[] = [];
+  let anyFailed = false;
+  let anySucceeded = false;
+  const succeed = (remote: string, what: string, detail: string) => {
+    anySucceeded = true;
+    lines.push(`✓ ${remote}: ${what}${detail ? `\n  ${detail.replace(/\n/g, "\n  ")}` : ""}`);
+  };
+  const fail = (remote: string, err: string) => {
+    anyFailed = true;
+    lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
+  };
+  for (const remote of remotes) {
+    const upstream = `${remote}/${branch}`;
+    const fetch = await git("fetch", remote);
+    if (fetch.exitCode !== 0) {
+      fail(remote, fetch.stderr || fetch.stdout || `exit ${fetch.exitCode}`);
+      continue;
+    }
+    const merge = await git("merge", "--ff-only", upstream);
+    if (merge.exitCode === 0) {
+      succeed(remote, `pulled ${branch}`, merge.stdout || merge.stderr);
+      continue;
+    }
+    // A commit another remote's main already has would come out of the rebase
+    // with a new SHA, and ib push, which never forces, could no longer update
+    // that remote. A fork (origin) plus the project it was forked from
+    // (upstream) does this, as does a remote with unrelated history. In a ref
+    // glob `*` matches "/", so the exclude keeps out branches like
+    // origin/feature/main. Both counts fail when the remote has no main.
+    const replayed = await git("rev-list", "--count", `${upstream}..HEAD`);
+    const unpublished = await git("rev-list", "--count", `${upstream}..HEAD`,
+      "--not", `--exclude=*/*/${branch}`, `--remotes=*/${branch}`);
+    if (replayed.exitCode !== 0 || unpublished.exitCode !== 0) {
+      fail(remote, merge.stderr || merge.stdout || `exit ${merge.exitCode}`);
+      continue;
+    }
+    if (replayed.stdout !== unpublished.stdout) {
+      fail(remote, `${branch} has diverged from ${upstream}, and rebasing onto it would rewrite commits already on another remote's ${branch}; not rebasing`);
+      continue;
+    }
+    const rebase = await git("rebase", "--rebase-merges", upstream);
+    if (rebase.exitCode === 0) {
+      succeed(remote, `rebased ${branch} onto ${upstream}`, rebase.stdout || rebase.stderr);
+      continue;
+    }
+    const conflicts = (await git("diff", "--name-only", "--diff-filter=U")).stdout;
+    if (interactive && conflicts !== "") {
+      fail(remote,
+        `rebase of ${branch} onto ${upstream} stopped on conflicts, left in progress:\n` +
+        `${conflicts}\n` +
+        "Resolve each file, git add it, then git rebase --continue (or git rebase --abort to give up).");
+      break;
+    }
+    await git("rebase", "--abort");
+    fail(remote, conflicts !== ""
+      ? `rebase of ${branch} onto ${upstream} hit conflicts, aborted; ${branch} left as it was. Conflicted:\n${conflicts}`
+      : `rebase of ${branch} onto ${upstream} failed, aborted; ${branch} left as it was:\n${rebase.stderr || rebase.stdout || `exit ${rebase.exitCode}`}`);
   }
 
   return {

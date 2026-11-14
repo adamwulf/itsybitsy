@@ -805,6 +805,17 @@ const COMMAND_HELP: Record<string, string> = {
     "  Each remote is attempted independently — read-only remotes are\n" +
     "  reported but do not stop pushes to the others.\n" +
     "  <repo-id>       Registered repo name, nickname, or absolute path",
+  pull:
+    "Usage: ib pull <repo-id> [--interactive]\n" +
+    "  Fetch every configured remote and bring the repo's checked-out main (or\n" +
+    "  master) branch up to it: fast-forward when possible, otherwise\n" +
+    "  git rebase --rebase-merges, which keeps merge commits. Never forces, and\n" +
+    "  never rebases away commits another remote's main already has.\n" +
+    "  Does nothing if the working tree has uncommitted changes. A rebase that\n" +
+    "  hits conflicts is aborted and the branch left as it was.\n" +
+    "  <repo-id>       Registered repo name, nickname, or absolute path\n" +
+    "  --interactive   On conflicts, leave the rebase in progress, list the\n" +
+    "                  conflicted files and print the steps to finish it",
   tgallow:
     "Usage: ib tgallow <chat_id>\n" +
     "  Allow a Telegram chat id to interact with itsybitsy.",
@@ -911,6 +922,7 @@ function printUsage(): void {
   console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
   console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
   console.log("  push <repo-id>      Push the repo's main branch to every configured remote");
+  console.log("  pull <repo-id>      Update the repo's main branch from every configured remote (fast-forward, else rebase; --interactive)");
   console.log("");
   console.log("Monitoring:");
   console.log("  watch               Launch TUI dashboard");
@@ -1084,6 +1096,23 @@ export async function main() {
       }
       const { pushRepo } = await import("./ib-commands");
       await printAndExit(await pushRepo(resolved.repo.path));
+      break;
+    }
+    case "pull": {
+      const interactive = args.includes("--interactive");
+      const repoId = args.slice(1).find((a) => a !== "--interactive");
+      if (!repoId) {
+        console.error("Usage: ib pull <repo-id> [--interactive]");
+        process.exit(1);
+      }
+      const repos = await listRepos();
+      const resolved = resolveRepo(repoId, repos);
+      if (!resolved.ok) {
+        console.error(repoResolutionError(repoId, resolved));
+        process.exit(1);
+      }
+      const { pullRepo } = await import("./ib-commands");
+      await printAndExit(await pullRepo(resolved.repo.path, interactive));
       break;
     }
     case "list":
@@ -3322,7 +3351,7 @@ export async function main() {
 // with no filter lands on the default branch and merely prints usage into the
 // test output, but `bun test watchdog` would start the real watchdog loop in
 // the test process, and `bun test state` / `list` / `status` / `diff` / `send`
-// / `merge` / `push` / `nuke` / `remove` would run those commands for real
+// / `merge` / `push` / `pull` / `nuke` / `remove` would run those commands for real
 // against the developer's actual repos. main() is also async and can call
 // process.exit(), so it raced the tests it was running alongside.
 if (import.meta.main) {

@@ -157,6 +157,13 @@ describe("CLI --help end-to-end", () => {
     expect(exitCode).toBe(0);
   });
 
+  test("pull --help prints usage and exits 0 without pulling", async () => {
+    const { stdout, exitCode } = await runCli(["pull", "--help"]);
+    expect(stdout).toContain("Usage: ib pull <repo-id>");
+    expect(stdout).toContain("fast-forward");
+    expect(exitCode).toBe(0);
+  });
+
   test("normal commands still work — `models` lists models", async () => {
     // Regression guard: no help flag means the command runs normally.
     const { stdout, exitCode } = await runCli(["list-models"]);

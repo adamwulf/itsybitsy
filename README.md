@@ -200,7 +200,7 @@ Press `?` in the dashboard for this list.
 
 | Group | Commands |
 |---|---|
-| Repos | `add`, `remove`, `list`, `push` |
+| Repos | `add`, `remove`, `list`, `push`, `pull` |
 | Spawning | `new-agent` (`new`), `list-types`, `show-type`, `init-types`, `list-models` |
 | Monitoring | `watch`, `agents` (`tree`), `look`, `status`, `diff`, `info`, `state`, `questions` |
 | Messaging | `send`, `ask`, `acknowledge`, `log` |
@@ -210,6 +210,8 @@ Press `?` in the dashboard for this list.
 | Telegram | `tgallow`, `tgdeny`, `tgsend`, `tgreact`, `tgsendfile` |
 
 `ib state --cleanup` finds and kills orphaned tmux sessions and processes; add `--dry-run` to preview.
+
+`ib pull <repo>` fast-forwards main from each remote, or rebases it with `--rebase-merges` when it has diverged. It never forces, never rebases away commits another remote's main already has, and does nothing with uncommitted changes. A conflicted rebase is aborted; add `--interactive` to leave it in progress, with the conflicted files and next steps printed.
 
 ## Hooks
 

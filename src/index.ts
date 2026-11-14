@@ -809,7 +809,8 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib pull <repo-id> [--interactive]\n" +
     "  Fetch every configured remote and bring the repo's checked-out main (or\n" +
     "  master) branch up to it: fast-forward when possible, otherwise\n" +
-    "  git rebase --rebase-merges, which keeps merge commits. Never forces.\n" +
+    "  git rebase --rebase-merges, which keeps merge commits. Never forces, and\n" +
+    "  never rebases away commits another remote's main already has.\n" +
     "  Does nothing if the working tree has uncommitted changes. A rebase that\n" +
     "  hits conflicts is aborted and the branch left as it was.\n" +
     "  <repo-id>       Registered repo name, nickname, or absolute path\n" +

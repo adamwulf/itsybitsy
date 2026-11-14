@@ -156,11 +156,13 @@ describe("pullRepo", () => {
   });
 
   test("a rebase that fails without conflicts is aborted, even with --interactive", async () => {
-    await commitFile(other, "u.txt", "theirs\n", "theirs");
+    await commitFile(other, "b.txt", "theirs\n", "theirs");
     await git(other, "push", "-q", "origin", "main");
     const mine = await commitFile(local, "c.txt", "mine\n", "mine");
-    // Untracked, so not "uncommitted changes", but in the way of the rebase.
-    await Bun.write(join(local, "u.txt"), "untracked\n");
+    // Signing fails when the rebase replays "mine", which stops it mid-way with
+    // no unmerged files, as a missing pinentry does in an agent's session.
+    await git(local, "config", "commit.gpgsign", "true");
+    await git(local, "config", "gpg.program", "false");
 
     const result = await pullRepo(local, true);
 
@@ -168,11 +170,29 @@ describe("pullRepo", () => {
     expect(result.stdout).toStartWith(
       "✗ origin: rebase of main onto origin/main failed, aborted; main left as it was:\n  ",
     );
-    expect(result.stdout).toContain("u.txt");
+    expect(result.stdout).toContain("sign");
     expect(await git(local, "rev-parse", "HEAD")).toBe(mine);
     expect(await git(local, "symbolic-ref", "--short", "HEAD")).toBe("main");
     expect(existsSync(join(local, ".git", "rebase-merge"))).toBe(false);
-    expect(await Bun.file(join(local, "u.txt")).text()).toBe("untracked\n");
+  });
+
+  test("with a fork and its upstream, unpublished commits are rebased onto upstream", async () => {
+    // origin is the user's fork, upstream the project it was forked from.
+    const upstreamRepo = join(root, "upstream.git");
+    await git(root, "clone", "-q", "--bare", origin, upstreamRepo);
+    await git(local, "remote", "add", "upstream", upstreamRepo);
+    await commitFile(local, "c.txt", "mine\n", "mine");
+    await git(other, "remote", "add", "upstream", upstreamRepo);
+    const theirs = await commitFile(other, "b.txt", "theirs\n", "theirs");
+    await git(other, "push", "-q", "upstream", "main");
+
+    const result = await pullRepo(local);
+
+    expect(result.exitCode).toBe(0);
+    const statusLines = result.stdout.split("\n").filter((line) => !line.startsWith("  "));
+    expect(statusLines).toEqual(["✓ origin: pulled main", "✓ upstream: rebased main onto upstream/main"]);
+    expect(await git(local, "rev-parse", "main~1")).toBe(theirs);
+    expect(await git(local, "log", "-1", "--format=%s", "main")).toBe("mine");
   });
 
   test("never rebases away commits another remote's main already has", async () => {

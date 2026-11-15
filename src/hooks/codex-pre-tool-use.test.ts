@@ -13,6 +13,7 @@ import type { PathCheckContext } from "./agent-path";
 import { agentProtectedWritePaths } from "./agent-path";
 import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable } from "./paths-table";
+import { loadMergedAgentTypePermissions } from "./shared";
 
 /**
  * Build a prepared access table for the fixture agent. Empty paths lists by
@@ -665,6 +666,49 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
       expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
       expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe("tool denied by agent-type deny list");
     });
+  });
+});
+
+// The codex hook takes toolsIgnoringPaths from loadMergedAgentTypePermissions,
+// beside its allow list.
+describe("loadMergedAgentTypePermissions — toolsIgnoringPaths layer union", () => {
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "codex-tools-ignoring-paths-merge-"));
+    setUserHome(tempHome);
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, entries: string[], extra = ""): Promise<void> {
+    const list = entries.map((entry) => `  - "${entry}"\n`).join("");
+    await writeFile(join(typesDir, `${name}.md`), `---\nname: ${name}\n${extra}toolsIgnoringPaths:\n${list}---\nbody`);
+  }
+
+  test("unions _all, _non_coordinator and the type's inherits chain, deduplicated", async () => {
+    await writeType("_all", ["mcp__sosumi__*"], "spawnable: false\n");
+    await writeType("_non_coordinator", ["mcp__docs__read"], "spawnable: false\n");
+    await writeType("base", ["mcp__sosumi__*", "mcp__web__get"]);
+    await writeFile(join(typesDir, "leaf.md"), "---\nname: leaf\ninherits: base\n---\nbody");
+
+    const merged = await loadMergedAgentTypePermissions("leaf");
+    expect(merged.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__docs__read", "mcp__web__get"]);
+  });
+
+  test("for a coordinator type the union skips _non_coordinator", async () => {
+    await writeType("_all", ["mcp__sosumi__*"], "spawnable: false\n");
+    await writeType("_non_coordinator", ["mcp__workers__x"], "spawnable: false\n");
+    await writeType("repo-coordinator", ["mcp__coord__y"], "canSpawnChildren: true\n");
+
+    const merged = await loadMergedAgentTypePermissions("repo-coordinator");
+    expect(merged.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__coord__y"]);
   });
 });
 

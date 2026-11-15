@@ -1994,25 +1994,4 @@ describe("toolsIgnoringPaths frontmatter", () => {
     const type = await loadAgentType("child");
     expect(type.toolsIgnoringPaths).toEqual(["mcp__sosumi__*"]);
   });
-
-  test("the hook layer merge unions _all, _non_coordinator and the type chain", async () => {
-    const { loadMergedAgentTypePermissions } = await import("./hooks/shared");
-    await writeType("_all", typeWithEntries("_all", ["mcp__sosumi__*"], "spawnable: false\n"));
-    await writeType("_non_coordinator", typeWithEntries("_non_coordinator", ["mcp__docs__read"], "spawnable: false\n"));
-    await writeType("base", typeWithEntries("base", ["mcp__sosumi__*", "mcp__web__get"]));
-    await writeType("leaf", `---\nname: leaf\ninherits: base\n---\nbody`);
-
-    const merged = await loadMergedAgentTypePermissions("leaf");
-    expect(merged.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__docs__read", "mcp__web__get"]);
-  });
-
-  test("the @system layer merge is _all ∪ system-coordinator, without _non_coordinator", async () => {
-    const { loadMergedAgentTypePermissions } = await import("./hooks/shared");
-    await writeType("_all", typeWithEntries("_all", ["mcp__sosumi__*"], "spawnable: false\n"));
-    await writeType("_non_coordinator", typeWithEntries("_non_coordinator", ["mcp__workers__x"], "spawnable: false\n"));
-    await writeType("system-coordinator", typeWithEntries("system-coordinator", ["mcp__sys__y"], "spawnable: false\n"));
-
-    const merged = await loadMergedAgentTypePermissions("system-coordinator");
-    expect(merged.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__sys__y"]);
-  });
 });

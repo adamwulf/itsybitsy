@@ -6798,9 +6798,12 @@ export async function newAgent(
   const configAllow = [...new Set([...allLayerAllow, ...nonCoordAllow, ...typeAllow])];
   const configDeny = [...new Set([...allLayerDeny, ...nonCoordDeny, ...typeDeny])];
   // The loader drops invalid toolsIgnoringPaths entries (fail closed), and
-  // validateAllAgentTypes reports them only at `ib watch` startup. Say so here
-  // too, so an edit made while ib watch runs (say `mcp__sosumi`, Claude Code's
-  // own server-wide spelling) does not leave the tool silently path-checked.
+  // validateAllAgentTypes reports them only at `ib watch` startup. Warn here
+  // too, for an edit made after startup (say `mcp__sosumi`, Claude Code's own
+  // server-wide spelling). logWarning, like newAgent's other spawn warnings,
+  // lands on stderr for a CLI `ib new-agent`, in ~/.itsybitsy/watch.log for a
+  // spawn from the ib watch dashboard (n, R), and nowhere visible for a
+  // brokered (sandboxed) spawn.
   for (const message of new Set([allLayer, nonCoordLayer, agentTypeDef].flatMap(
     (layer) => layer?.toolsIgnoringPathsErrors ?? [],
   ))) {

@@ -254,8 +254,9 @@ function unionLayerPaths(layers: Array<AgentType | undefined>): PathsConfig {
 /** What the `@system` hook resolves live from its two layers on every call. */
 export interface SystemHookPolicy {
   /**
-   * The prepared access table: `_all.md` ∪ `system-coordinator.md` paths plus
-   * the runtime roots, all rooted at `<home>/.itsybitsy`.
+   * The prepared access table: the `_all.md` ∪ `system-coordinator.md`
+   * `paths:` entries, wherever they point (e.g. `~/shared`), plus the runtime
+   * roots, which are rooted at `<home>/.itsybitsy`.
    */
   access: PreparedAccessTable;
   /** `_all.md` ∪ `system-coordinator.md` `toolsIgnoringPaths` (valid entries only). */
@@ -267,8 +268,9 @@ export interface SystemHookPolicy {
  * its access table and its `toolsIgnoringPaths`, both from `_all.md` ∪
  * `system-coordinator.md`, resolved live at hook time (the agent-types dir is
  * read-only in the floor). Each layer is loaded ONCE per call for both, since
- * this runs on every @system PreToolUse. Everything is rooted at
- * `<home>/.itsybitsy`. If a layer fails to load it contributes nothing: the
+ * this runs on every @system PreToolUse. The runtime roots are rooted at
+ * `<home>/.itsybitsy`; `paths:` entries point wherever they say. If a layer
+ * fails to load it contributes nothing: the
  * table is empty lists plus the runtime roots and nothing skips path checks —
  * strict, NEVER permissive.
  */

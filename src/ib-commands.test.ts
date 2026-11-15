@@ -2755,6 +2755,23 @@ describe("retire → rehire recovery", () => {
     expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(resume).toContain(`--settings '${join(restoredDir, ".claude", "settings.local.json")}'`);
   });
+
+  test("rehire keeps the archived meta.toolsIgnoringPaths (the spawn-time list)", async () => {
+    const agentId = "agent-sosumi-return";
+    const { archiveDir } = await plantRehirableArchive(agentId);
+    const archivedMeta = await Bun.file(join(archiveDir, "meta.json")).json() as AgentMeta;
+    archivedMeta.toolsIgnoringPaths = ["mcp__sosumi__*"];
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(archivedMeta, null, 2));
+
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(true);
+    const restored = await Bun.file(join(tempDir, ".itsybitsy", "agents", agentId, "meta.json")).json();
+    expect(restored.toolsIgnoringPaths).toEqual(["mcp__sosumi__*"]);
+  });
 });
 
 describe("pauseAgent (native)", () => {
@@ -10645,6 +10662,108 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     await rm(coordRepoDir, { recursive: true, force: true });
   });
 
+  // ── toolsIgnoringPaths frozen into meta at spawn ────────────────────────────
+
+  /** Write a layer/type file whose frontmatter declares `toolsIgnoringPaths:`. */
+  async function writeToolsIgnoringPathsLayer(
+    name: string,
+    entries: string[],
+    opts?: { spawnable?: boolean; canSpawnChildren?: boolean },
+  ) {
+    const path = join(process.env.HOME!, ".itsybitsy", "agent-types", `${name}.md`);
+    const spawnableLine = opts?.spawnable === false ? "spawnable: false\n" : "";
+    const canSpawnLine = opts?.canSpawnChildren ? "canSpawnChildren: true\n" : "";
+    const list = entries.map((entry) => `  - "${entry}"\n`).join("");
+    await Bun.write(
+      path,
+      `---\nname: ${name}\ndescription: Test ${name} layer\n${spawnableLine}${canSpawnLine}toolsIgnoringPaths:\n${list}---\n`,
+    );
+  }
+
+  test("toolsIgnoringPaths: a Claude agent freezes the union of _all, _non_coordinator and its type into meta", async () => {
+    await writeToolsIgnoringPathsLayer("_all", ["mcp__sosumi__*"], { spawnable: false });
+    await writeToolsIgnoringPathsLayer("_non_coordinator", ["mcp__docs__fetch"], { spawnable: false });
+    // A duplicate of the _all entry plus one of its own; "Read" is invalid and
+    // must be dropped, never frozen.
+    await writeToolsIgnoringPathsLayer("worker", ["mcp__sosumi__*", "mcp__web__get", "Read"]);
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-tools-ignoring-paths", type: "worker" });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-tools-ignoring-paths", "meta.json")).json();
+    expect(meta.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__docs__fetch", "mcp__web__get"]);
+  });
+
+  test("toolsIgnoringPaths: spawn warns about each dropped entry, naming the file and the accepted shapes", async () => {
+    // `mcp__sosumi` is Claude Code's own server-wide spelling; the hook accepts
+    // only `mcp__sosumi__*`, so the entry is dropped and the spawn says so.
+    await writeToolsIgnoringPathsLayer("_all", ["mcp__sosumi"], { spawnable: false });
+    await writeToolsIgnoringPathsLayer("worker", ["mcp__web__get", "Read"]);
+    const { setWatchLogPath, resetWatchLogPath, setWatchRunning } = await import("./watch-log");
+    const logPath = join(tempDir, "watch.log");
+    setWatchLogPath(logPath);
+    setWatchRunning(true);
+    try {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "test-dropped-entry", type: "worker" });
+      expect(result.ok).toBe(true);
+    } finally {
+      setWatchRunning(false);
+      resetWatchLogPath();
+    }
+
+    const log = await Bun.file(logPath).text();
+    expect(log).toContain(
+      `Warning: _all.md: toolsIgnoringPaths: "mcp__sosumi" is not mcp__<server>__<tool> or mcp__<server>__*; ignored`,
+    );
+    expect(log).toContain(`Warning: worker.md: toolsIgnoringPaths: "Read" is not an MCP tool`);
+    expect(log).not.toContain("mcp__web__get");
+    const meta = await Bun.file(join(agentsDir, "test-dropped-entry", "meta.json")).json();
+    expect(meta.toolsIgnoringPaths).toEqual(["mcp__web__get"]);
+  });
+
+  test("toolsIgnoringPaths: an agent whose layers declare none freezes an empty list", async () => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "test-no-tools-ignoring-paths", type: "worker" });
+    expect(result.ok).toBe(true);
+
+    const meta = await Bun.file(join(agentsDir, "test-no-tools-ignoring-paths", "meta.json")).json();
+    expect(meta.toolsIgnoringPaths).toEqual([]);
+  });
+
+  test("toolsIgnoringPaths: a per-repo coordinator freezes _all ∪ repo-coordinator, not _non_coordinator", async () => {
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-tools-ignoring-paths-"));
+    const coordRepo = join(coordRepoDir, "myrepo");
+    await mkdir(join(coordRepo, ".itsybitsy", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".itsybitsy", "repo-id"), "c00d0003\n");
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({}, null, 2));
+
+    await writeToolsIgnoringPathsLayer("_all", ["mcp__sosumi__*"], { spawnable: false });
+    await writeToolsIgnoringPathsLayer("_non_coordinator", ["mcp__workers_only__x"], { spawnable: false });
+    await writeToolsIgnoringPathsLayer("repo-coordinator", ["mcp__coord__read"], { canSpawnChildren: true });
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
+      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      return makeSpawnResult("", 0);
+    });
+
+    try {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await newAgent(coordRepo, "start", { type: "repo-coordinator", _cwd: coordRepo });
+      expect(result.ok).toBe(true);
+      const coordId = result.stdout.trim();
+      const meta = await Bun.file(join(coordRepo, ".itsybitsy", "agents", coordId, "meta.json")).json();
+      expect(meta.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__coord__read"]);
+    } finally {
+      await rm(coordRepoDir, { recursive: true, force: true });
+    }
+  });
+
   test("model precedence C4: blank model in a more-specific file does NOT clobber a real model in a less-specific file", async () => {
     // _all.md sets a real model; worker.md declares `model:` blank (= inherit).
     // The blank worker model must not override _all.md's real value.
@@ -12088,6 +12207,18 @@ body`,
       expect(startSh).not.toMatch(/setsid claude/);
       expect(startSh).not.toContain("--session-id");
       expect(startSh).not.toContain("--model");
+    });
+
+    test("a codex agent freezes no toolsIgnoringPaths into meta (its hook resolves the list live)", async () => {
+      await writeToolsIgnoringPathsLayer("_all", ["mcp__sosumi__*"], { spawnable: false });
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("read README", {
+        name: "codex-no-frozen-list",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(true);
+      const meta = await Bun.file(join(agentsDir, "codex-no-frozen-list", "meta.json")).json();
+      expect("toolsIgnoringPaths" in meta).toBe(false);
     });
 
     test("codex start.sh includes -c model_reasoning_effort with the mapped effort", async () => {

@@ -35,7 +35,7 @@ ib init-types
 
 ## Inheriting from another type (`inherits:`)
 
-A type can build on top of another by declaring `inherits: <parent-type>` in its frontmatter. The parent name is a filename (no `.md`) in the same `~/.itsybitsy/agent-types/` directory. The chain is resolved parent-first; scalar fields declared in the child **override** the parent, while `permissions.allow` and `permissions.deny` lists are **unioned** across the entire chain (deduplicated via `Set`). The `paths:` (`allowRead` / `allowWrite` / `deny`) and `sandbox:` list fields are likewise **unioned** across the chain; `repos` **replaces** (not merge) when the child declares it. The markdown bodies **concatenate** root-first: oldest ancestor body first, each descendant's body appended below, joined by blank lines. Empty bodies in the chain are skipped, so a middle ancestor that only customizes frontmatter doesn't introduce stray whitespace.
+A type can build on top of another by declaring `inherits: <parent-type>` in its frontmatter. The parent name is a filename (no `.md`) in the same `~/.itsybitsy/agent-types/` directory. The chain is resolved parent-first; scalar fields declared in the child **override** the parent, while `permissions.allow` and `permissions.deny` lists are **unioned** across the entire chain (deduplicated via `Set`). The `paths:` (`allowRead` / `allowWrite` / `deny`) and `sandbox:` list fields and the `toolsIgnoringPaths:` list are likewise **unioned** across the chain; `repos` **replaces** (not merge) when the child declares it. The markdown bodies **concatenate** root-first: oldest ancestor body first, each descendant's body appended below, joined by blank lines. Empty bodies in the chain are skipped, so a middle ancestor that only customizes frontmatter doesn't introduce stray whitespace.
 
 **Multi-level chains** are fully supported. Given `researcher inherits assistant` and `assistant inherits manager`, `loadAgentType("researcher")` walks all three files and produces a merged type with: permissions unioned across manager + assistant + researcher, scalar fields taking the nearest-present value (descendants winning), and a body of `manager body \n\n assistant body \n\n researcher body`. Cycles at any depth (`A → B → C → A`) and missing parents are detected at `ib watch` startup.
 
@@ -114,6 +114,31 @@ When enabled, repository agents and per-repository coordinators run inside the i
 CLI details are fixed by that contract: Codex/Fugu always use `-a never`, with `-s danger-full-access` under the itsybitsy wrapper. When the wrapper is off they use no `-s` but an inline `itsybitsy_agent` Codex permission profile. It extends `:workspace`, enables network, and adds a write grant for the worktree's exact Git admin dir so `git commit` works. It replaces the earlier `-s workspace-write`. The existing `--add-dir` grants, including the whole common Git dir, are unchanged. No Codex config file is written, and live checks of this profile have not passed yet (see [SPEC-CODEX-MODEL.md](../../SPEC-CODEX-MODEL.md)). Agy always uses `--dangerously-skip-permissions --mode=accept-edits`, retaining its fail-closed hooks in both modes. Claude adds `--dangerously-skip-permissions` only when the kernel is enabled; when disabled it emits neither that flag nor `--permission-mode`. Claude PreToolUse explicitly allows or denies before native permission resolution, checking `permissions.deny` first, so neither mode prompts. The global `@system` coordinator remains outside this rollout.
 
 New agents freeze the resolved value in `meta.json`; resume uses that frozen policy. After editing a type, use `ib sandbox refresh <id>` from an unsandboxed operator session to apply the current policy and restart an existing agent. Non-boolean enablement values are validation errors; valid overrides are accepted by `ib init-types --check`.
+
+## MCP tools that skip path checks (`toolsIgnoringPaths:`)
+
+The PreToolUse hooks treat a `path`, `file_path` or `notebook_path` argument on any tool as a local file and check it against `paths:`. Some MCP tools use those names for something else: sosumi's `fetchAppleDocumentation` takes `path: "/documentation/xcode/..."`, a page on Apple's site, and is denied as a local path. List such tools under `toolsIgnoringPaths:` to skip the path checks for their calls:
+
+```yaml
+permissions:
+  allow:
+    - mcp__sosumi__fetchAppleDocumentation
+toolsIgnoringPaths:
+  - "mcp__sosumi__*"
+```
+
+- **Entries** are an exact MCP tool name, `mcp__<server>__<tool>`, or a whole server, `mcp__<server>__*` (one trailing `*` only). Anything else is a validation error, including built-in tools (`Read`, `Bash`, `Write`, `Glob`, ...), a bare `*`, `mcp__*`, an empty server name, and a `*` anywhere but the end. Built-in tools can never skip path checks. The loader drops invalid entries instead of honoring them. A spawn logs a warning for each dropped entry ([docs/implementation-notes.md](../implementation-notes.md) says where it appears), and `ib watch` lists the errors at startup.
+- **Only the path checks are skipped.** The tool must still be in `permissions.allow`, and a matching `permissions.deny` entry still denies it. The hooks match `permissions.allow` and `permissions.deny` by exact tool name, so name each MCP tool exactly in both. To deny a whole server, list each of its tools. The `mcp__<server>__*` form is honored only in `toolsIgnoringPaths`.
+- **Merging:** unioned across `inherits:` and across `_all.md`, `_non_coordinator.md` (except coordinators) and the type, like `permissions.allow`.
+- **When a change applies:** Claude agents freeze the list in `meta.json` at spawn, at the same moment their allow list is written to `settings.local.json`.
+  - For non-coordinator Claude agents, `/respawn` (`ib respawn`), `ib resume`, `ib rehire` and `ib sandbox refresh` keep the spawn-time list. (`/respawn` on such an agent is a pause plus resume: it re-reads the type's instructions but keeps `meta.json`.) Only a new spawn applies an edit.
+  - A repo coordinator picks it up on a reset (`R` in `ib watch`, `ib resume`, or `/respawn` on the coordinator). Rehiring a coordinator keeps its archived list.
+  - Codex agents pick it up on their next tool call: they resolve it from the type files the way they resolve their allow list.
+  - `@system` reads it live from `_all.md` and `system-coordinator.md`, like its `paths:`, so removing a tool takes effect on its next tool call. Its allow list, though, is written only when `@system` launches: a tool that is not yet in that launch-time allow list stays denied ("Tool not in allow list") until `@system` restarts.
+  - Claude agents that were running before this feature have no list and need a new spawn.
+  - Agy needs no entry: it passes an MCP call to the path check without its arguments.
+
+See SPEC-PATH-ALLOWLIST.md, "Tools that skip path checks", for the hook order.
 
 ## Backward compatibility with older `ib` binaries
 

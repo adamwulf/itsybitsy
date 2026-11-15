@@ -78,6 +78,7 @@ import { getTmuxWidthForAgent } from "./tui/widths";
 import { buildPerRepoCoordinatorSettings, checkCoordinatorExists, getCoordinatorAgentId, getCoordinatorHome, classifyClaudeStartupPrompt } from "./coordinator";
 import { loadAgentType, agentTypeExists, metaCanSpawnChildren } from "./agent-types";
 import type { AgentType } from "./agent-types";
+import { unionToolsIgnoringPaths } from "./tools-ignoring-paths";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { isCodexBackedCli, parseModel, mapEffortForCodex, type AgentCli } from "./agent-cli";
 import { claudeProjectDirFor, claudeScratchpadDirFor, agyStateDirFor } from "./hooks/paths-table";
@@ -6796,6 +6797,17 @@ export async function newAgent(
   const typeDeny = agentTypeDef.permissions?.deny ?? [];
   const configAllow = [...new Set([...allLayerAllow, ...nonCoordAllow, ...typeAllow])];
   const configDeny = [...new Set([...allLayerDeny, ...nonCoordDeny, ...typeDeny])];
+  // The loader drops invalid toolsIgnoringPaths entries (fail closed), and
+  // validateAllAgentTypes reports them only at `ib watch` startup. Warn here
+  // too, for an edit made after startup (say `mcp__sosumi`, Claude Code's own
+  // server-wide spelling). Where logWarning output lands depends on the caller
+  // (stderr, watch.log, the requester's watchdog.log, or nowhere); see
+  // docs/implementation-notes.md, "Agent types".
+  for (const message of new Set([allLayer, nonCoordLayer, agentTypeDef].flatMap(
+    (layer) => layer?.toolsIgnoringPathsErrors ?? [],
+  ))) {
+    logWarning(`Warning: ${message}; ignored, so the tools it meant to name keep their path checks`);
+  }
   const mergedSandboxLayers = mergeSandboxLayerConfigs([
     allLayer,
     nonCoordLayer,
@@ -7031,6 +7043,22 @@ export async function newAgent(
   // a later bug report can be pinned to a release (SPEC §6 risk 1).
   if (agentCli === "agy") {
     initialMetaJson.agy_version = agyVersion;
+  }
+  // Claude agents freeze the MCP tools that skip path checks from the same
+  // layers as their allow list (`_all` ∪ `_non_coordinator` for non-coordinators
+  // ∪ the type chain), at the same moment the allow list is rendered into
+  // settings.local.json. The Claude PreToolUse hook reads it from here, a file
+  // the agent cannot write. For non-coordinators, resume and rehire keep it;
+  // rehire keeps a coordinator's too; a coordinator reset (R, `ib resume`,
+  // /respawn) respawns through here and re-derives it. Codex resolves the list live from
+  // the type files, as it does its allow list; agy needs none (an MCP call
+  // reaches the path check with no path key).
+  if (agentCli === "claude") {
+    initialMetaJson.toolsIgnoringPaths = unionToolsIgnoringPaths([
+      allLayer?.toolsIgnoringPaths,
+      nonCoordLayer?.toolsIgnoringPaths,
+      agentTypeDef.toolsIgnoringPaths,
+    ]);
   }
   await timed("new-agent", "meta-write", () => writeMetaJsonAtomic(agentDir, initialMetaJson));
 

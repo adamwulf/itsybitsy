@@ -8,7 +8,7 @@ import {
   agentPathAccessTable,
   agyStateDirFor,
   buildAgentAccessTable,
-  buildSystemAccessTable,
+  buildSystemHookPolicy,
   claudeProjectDirFor,
   claudeScratchpadDirFor,
   pathDenialReason,
@@ -299,9 +299,9 @@ describe("buildAgentAccessTable", () => {
   });
 });
 
-// ── buildSystemAccessTable (@system, no meta.json) ───────────────────────────
+// ── buildSystemHookPolicy access table (@system, no meta.json) ───────────────
 
-describe("buildSystemAccessTable", () => {
+describe("buildSystemHookPolicy — access table", () => {
   let home: string;
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "paths-sys-"));
@@ -320,7 +320,7 @@ describe("buildSystemAccessTable", () => {
   afterEach(async () => { resetUserHome(); await rm(home, { recursive: true, force: true }); });
 
   test("roots at <home>/.itsybitsy and honors the merged _all layer paths", async () => {
-    const prepared = await buildSystemAccessTable(home);
+    const prepared = (await buildSystemHookPolicy(home)).access;
     // WORKTREE root = <home>/.itsybitsy
     expect(resolvePreparedAccess(prepared, join(home, ".itsybitsy", "teams.json"), "write")).toBe("allow");
     // _all.md allowRead ~/shared → read allowed, write denied
@@ -333,10 +333,64 @@ describe("buildSystemAccessTable", () => {
   test("a layer that fails to load yields a strict table, never permissive", async () => {
     // Remove the agent-types dir so loadAgentType cannot find the files.
     await rm(join(home, ".itsybitsy", "agent-types"), { recursive: true, force: true });
-    const prepared = await buildSystemAccessTable(home);
+    const prepared = (await buildSystemHookPolicy(home)).access;
     expect(resolvePreparedAccess(prepared, "/etc/passwd", "read")).toBe("deny");
     // Its own home root still resolves (a runtime root, not a paths entry).
     expect(resolvePreparedAccess(prepared, join(home, ".itsybitsy", "x"), "write")).toBe("allow");
+  });
+});
+
+// ── buildSystemHookPolicy (@system: access table + toolsIgnoringPaths) ───────
+
+describe("buildSystemHookPolicy", () => {
+  let home: string;
+  let typesDir: string;
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "paths-sys-policy-"));
+    setUserHome(home);
+    typesDir = join(home, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+    await writeFile(
+      join(typesDir, "_all.md"),
+      "---\nname: _all\nspawnable: false\npaths:\n  allowRead:\n    - \"~/shared\"\ntoolsIgnoringPaths:\n  - \"mcp__sosumi__*\"\n  - \"Read\"\n---\n",
+    );
+    await writeFile(
+      join(typesDir, "system-coordinator.md"),
+      "---\nname: system-coordinator\nspawnable: false\ntoolsIgnoringPaths:\n  - \"mcp__sys__get\"\n  - \"mcp__sosumi__*\"\n---\n",
+    );
+    // _non_coordinator.md does not apply to @system.
+    await writeFile(
+      join(typesDir, "_non_coordinator.md"),
+      "---\nname: _non_coordinator\nspawnable: false\ntoolsIgnoringPaths:\n  - \"mcp__workers__x\"\n---\n",
+    );
+  });
+  afterEach(async () => { resetUserHome(); await rm(home, { recursive: true, force: true }); });
+
+  test("resolves the access table and _all ∪ system-coordinator toolsIgnoringPaths together", async () => {
+    const policy = await buildSystemHookPolicy(home);
+    expect(resolvePreparedAccess(policy.access, join(home, "shared", "f"), "read")).toBe("allow");
+    expect(resolvePreparedAccess(policy.access, "/etc/passwd", "read")).toBe("deny");
+    // Deduplicated, invalid "Read" dropped, _non_coordinator ignored.
+    expect(policy.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__sys__get"]);
+  });
+
+  test("reads each layer file once per call", async () => {
+    const fileSpy = spyOn(Bun, "file");
+    try {
+      await buildSystemHookPolicy(home);
+      const opened = fileSpy.mock.calls.map((call) => String(call[0]));
+      expect(opened.filter((path) => path.endsWith("/_all.md"))).toHaveLength(1);
+      expect(opened.filter((path) => path.endsWith("/system-coordinator.md"))).toHaveLength(1);
+    } finally {
+      fileSpy.mockRestore();
+    }
+  });
+
+  test("missing layers give an empty list and a strict table, never permissive", async () => {
+    await rm(typesDir, { recursive: true, force: true });
+    const policy = await buildSystemHookPolicy(home);
+    expect(policy.toolsIgnoringPaths).toEqual([]);
+    expect(resolvePreparedAccess(policy.access, "/etc/passwd", "read")).toBe("deny");
   });
 });
 

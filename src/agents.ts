@@ -117,6 +117,14 @@ export interface AgentMeta {
   agentIcon?: string;
   /** Fully-resolved filesystem policy frozen at spawn time for resume parity. */
   paths?: PathsConfig;
+  /**
+   * MCP tools whose calls skip the PreToolUse path checks, frozen at spawn
+   * from the agent-type layers (`toolsIgnoringPaths:`), for Claude agents only.
+   * Same lifecycle as the Claude allow list in settings.local.json: kept on
+   * resume and rehire, re-derived when a coordinator is reset. Read by the
+   * Claude PreToolUse hook (src/hooks/agent-path.ts).
+   */
+  toolsIgnoringPaths?: string[];
   /** Fully-resolved sandbox policy frozen at spawn time for resume parity. */
   sandbox?: SandboxConfig;
   /** Fresh per-launch localhost proxy port (reallocated on every resume). */
@@ -1702,6 +1710,9 @@ function copyAgentMeta(meta: AgentMeta): AgentMeta {
           rawAllow: [...meta.sandbox.rawAllow],
           domains: [...meta.sandbox.domains],
         }
+      : undefined,
+    toolsIgnoringPaths: Array.isArray(meta.toolsIgnoringPaths)
+      ? [...meta.toolsIgnoringPaths]
       : undefined,
   };
 }

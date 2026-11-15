@@ -191,10 +191,17 @@ export async function captureCodexSessionId(
   });
 }
 
+/**
+ * The codex agent's allow/deny lists and `toolsIgnoringPaths`, resolved live
+ * from the agent-type layers on every call. The dynamic grant file adds allow
+ * and deny entries only; `toolsIgnoringPaths` comes from the type files alone
+ * (codex sends MCP tools as `mcp__<server>__<tool>`, the same name Claude uses,
+ * so one entry covers both CLIs).
+ */
 async function loadCodexEffectivePermissions(
   agentType: string | undefined,
   worktreePath: string,
-): Promise<{ allow: string[]; deny: string[] }> {
+): Promise<{ allow: string[]; deny: string[]; toolsIgnoringPaths: string[] }> {
   const permissions = await loadMergedAgentTypePermissions(agentType);
   permissions.allow.unshift(...REGULAR_AGENT_DEFAULT_ALLOW);
   permissions.deny.unshift(...REGULAR_AGENT_DEFAULT_DENY);
@@ -218,6 +225,7 @@ async function loadCodexEffectivePermissions(
   return {
     allow: [...new Set(permissions.allow)],
     deny: [...new Set(permissions.deny)],
+    toolsIgnoringPaths: permissions.toolsIgnoringPaths,
   };
 }
 
@@ -347,6 +355,7 @@ export async function hookCodexPreToolUse(
       agentsDir: ctxResolved.agentsDir,
       rootRepo: ctxResolved.rootRepo,
       allowList: permissions.allow,
+      toolsIgnoringPaths: permissions.toolsIgnoringPaths,
       access,
       protectedWritePaths: agentProtectedWritePaths(ctxResolved.agentDir),
     };

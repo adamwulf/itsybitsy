@@ -238,18 +238,28 @@ export function buildCodexAllowOutput(originalToolInput: Record<string, unknown>
  *
  * Each layer is loaded defensively; a missing layer contributes nothing rather
  * than throwing. Allow + deny are deduplicated via Set.
+ *
+ * `toolsIgnoringPaths` is the union of the same layers' `toolsIgnoringPaths:`
+ * lists (MCP tools that skip the path checks; invalid entries were already
+ * dropped by the loader). The codex hook resolves it here, live, exactly as it
+ * resolves its allow list. (@system resolves its list in
+ * `buildSystemHookPolicy`, paths-table.ts, from the layers it already loads
+ * for its paths.) A missing layer contributes nothing, so a load failure only
+ * narrows the list.
  */
 export async function loadMergedAgentTypePermissions(
   agentType: string | undefined,
-): Promise<{ allow: string[]; deny: string[] }> {
+): Promise<{ allow: string[]; deny: string[]; toolsIgnoringPaths: string[] }> {
   const allowSet = new Set<string>();
   const denySet = new Set<string>();
+  const toolsIgnoringPathsSet = new Set<string>();
 
   async function addLayer(name: string): Promise<{ ok: boolean; isCoordinator: boolean }> {
     try {
       const layer = await loadAgentType(name);
       for (const a of layer.permissions?.allow ?? []) allowSet.add(a);
       for (const d of layer.permissions?.deny ?? []) denySet.add(d);
+      for (const t of layer.toolsIgnoringPaths ?? []) toolsIgnoringPathsSet.add(t);
       return { ok: true, isCoordinator: isCoordinatorType(layer.name) };
     } catch {
       return { ok: false, isCoordinator: false };
@@ -266,5 +276,9 @@ export async function loadMergedAgentTypePermissions(
     await addLayer(agentType);
   }
 
-  return { allow: [...allowSet], deny: [...denySet] };
+  return {
+    allow: [...allowSet],
+    deny: [...denySet],
+    toolsIgnoringPaths: [...toolsIgnoringPathsSet],
+  };
 }

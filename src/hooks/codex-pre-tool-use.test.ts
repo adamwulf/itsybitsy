@@ -13,6 +13,7 @@ import type { PathCheckContext } from "./agent-path";
 import { agentProtectedWritePaths } from "./agent-path";
 import { prepareAccessTable, type PathsConfig, type PreparedAccessTable } from "../sandbox";
 import { agentPathAccessTable } from "./paths-table";
+import { loadMergedAgentTypePermissions } from "./shared";
 
 /**
  * Build a prepared access table for the fixture agent. Empty paths lists by
@@ -605,6 +606,129 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     const parsed = JSON.parse(captured);
     expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
     expect(parsed.hookSpecificOutput.updatedInput).toEqual(toolInput);
+  });
+
+  // Codex sends an MCP tool as `mcp__<server>__<tool>`, the same name Claude
+  // uses, so one toolsIgnoringPaths entry covers both CLIs. Codex resolves the
+  // list live from the type layers, like its allow list.
+  describe("toolsIgnoringPaths (sosumi)", () => {
+    const SOSUMI = "mcp__sosumi__fetchAppleDocumentation";
+    const sosumiInput = { path: "/documentation/xcode/environment-variable-reference" };
+
+    async function writeWorker(extraFrontmatter: string): Promise<void> {
+      await writeFile(
+        join(tempHome, ".itsybitsy", "agent-types", "worker.md"),
+        `---\nname: worker\ndescription: test\npermissions:\n  allow:\n    - ${SOSUMI}\n${extraFrontmatter}---\n`,
+      );
+    }
+
+    test("the sosumi page path is denied as a local path without an entry", async () => {
+      await writeWorker("");
+      const parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe(
+        "Access denied: read /documentation/xcode/environment-variable-reference is not in paths.allowRead/allowWrite",
+      );
+    });
+
+    test("mcp__sosumi__* in the type file allows it, echoing the input back", async () => {
+      await writeWorker("toolsIgnoringPaths:\n  - \"mcp__sosumi__*\"\n");
+      const parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+      expect(parsed.hookSpecificOutput.updatedInput).toEqual(sosumiInput);
+    });
+
+    test("an entry in _all.md applies too, and an edit applies on the next call", async () => {
+      await writeWorker("");
+      const allLayer = join(tempHome, ".itsybitsy", "agent-types", "_all.md");
+      await writeFile(allLayer, "---\nname: _all\ndescription: shared\ntoolsIgnoringPaths:\n  - \"mcp__sosumi__*\"\n---\n");
+      let parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+
+      await writeFile(allLayer, "---\nname: _all\ndescription: shared\n---\n");
+      parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    });
+
+    test("a listed tool missing from the allow list is still denied", async () => {
+      await writeFile(
+        join(tempHome, ".itsybitsy", "agent-types", "worker.md"),
+        "---\nname: worker\ndescription: test\ntoolsIgnoringPaths:\n  - \"mcp__sosumi__*\"\n---\n",
+      );
+      const parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe("Tool not in allow list");
+    });
+
+    test("a listed tool in the deny list is still denied", async () => {
+      await writeWorker(`  deny:\n    - ${SOSUMI}\ntoolsIgnoringPaths:\n  - "mcp__sosumi__*"\n`);
+      const parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe("tool denied by agent-type deny list");
+    });
+  });
+});
+
+// The codex hook takes toolsIgnoringPaths from loadMergedAgentTypePermissions,
+// beside its allow list.
+describe("loadMergedAgentTypePermissions — toolsIgnoringPaths layer union", () => {
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "codex-tools-ignoring-paths-merge-"));
+    setUserHome(tempHome);
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, entries: string[], extra = ""): Promise<void> {
+    const list = entries.map((entry) => `  - "${entry}"\n`).join("");
+    await writeFile(join(typesDir, `${name}.md`), `---\nname: ${name}\n${extra}toolsIgnoringPaths:\n${list}---\nbody`);
+  }
+
+  test("unions _all, _non_coordinator and the type's inherits chain, deduplicated", async () => {
+    await writeType("_all", ["mcp__sosumi__*"], "spawnable: false\n");
+    await writeType("_non_coordinator", ["mcp__docs__read"], "spawnable: false\n");
+    await writeType("base", ["mcp__sosumi__*", "mcp__web__get"]);
+    await writeFile(join(typesDir, "leaf.md"), "---\nname: leaf\ninherits: base\n---\nbody");
+
+    const merged = await loadMergedAgentTypePermissions("leaf");
+    expect(merged.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__docs__read", "mcp__web__get"]);
+  });
+
+  test("for a coordinator type the union skips _non_coordinator", async () => {
+    await writeType("_all", ["mcp__sosumi__*"], "spawnable: false\n");
+    await writeType("_non_coordinator", ["mcp__workers__x"], "spawnable: false\n");
+    await writeType("repo-coordinator", ["mcp__coord__y"], "canSpawnChildren: true\n");
+
+    const merged = await loadMergedAgentTypePermissions("repo-coordinator");
+    expect(merged.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__coord__y"]);
+  });
+});
+
+describe("checkCodexPreToolUse — toolsIgnoringPaths never widens built-in tools", () => {
+  test("apply_patch targets and Bash keep their path checks even with hostile entries in the context", () => {
+    const ctx = makeCtx({ toolsIgnoringPaths: ["*", "apply_patch", "Write", "Bash", "mcp__*"] });
+    const patch = checkCodexPreToolUse(
+      {
+        toolName: "apply_patch",
+        toolInput: { command: "*** Begin Patch\n*** Add File: /repo/src/forbidden.ts\n+x\n*** End Patch\n" },
+        cwd: ctx.worktreePath,
+      },
+      ctx,
+    );
+    expect(patch.decision).toBe("deny");
+    const bash = checkCodexPreToolUse(
+      { toolName: "Bash", toolInput: { command: "cd /repo/.itsybitsy/agents/agent-other/repo" }, cwd: ctx.worktreePath },
+      ctx,
+    );
+    expect(bash.decision).toBe("deny");
   });
 });
 

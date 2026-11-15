@@ -15,7 +15,12 @@ import { logAgent } from "../agent-lifecycle";
 import { isSandboxedProcess } from "../sandbox-detect";
 import { writeAgentState } from "../agents";
 import { isValidAgentId } from "../validation";
-import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
+import {
+  checkGitDirectoryFlags,
+  loadMergedAgentTypePermissions,
+  resolveAgentFromCwd,
+  SYSTEM_AGENT_ID,
+} from "./shared";
 import { AGY_WORKTREE_FILES } from "../agy-worktree-files";
 import { heredocBodyRanges } from "./shell-metachar";
 import {
@@ -34,7 +39,8 @@ import {
 import { findShellMetachar } from "./shell-metachar";
 import { resolveBoundHookAgent } from "./agent-context";
 import { metaCanSpawnChildren } from "../agent-types";
-import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { metaToolsIgnoringPaths, toolIgnoresPaths } from "../tools-ignoring-paths";
 import { withWaitHint } from "./wait-hint";
 
 // Re-exported for existing callers/tests that import it from this module; the
@@ -91,6 +97,15 @@ export interface PathCheckContext {
   denyList?: string[];
   /** Frozen/dynamically resolved spawn capability for direct `ib new-agent`. */
   canSpawnChildren?: boolean;
+  /**
+   * MCP tools whose calls skip the path checks (`toolsIgnoringPaths:`; exact
+   * `mcp__<server>__<tool>` names or `mcp__<server>__*` prefixes). Consulted
+   * only after the deny and allow lists, and only for MCP tool names, so Bash
+   * and the built-in tools always keep their path checks. Claude agents read it
+   * from `meta.toolsIgnoringPaths` (frozen at spawn); @system and codex resolve
+   * it live from the type layers. Absent means no tool skips path checks.
+   */
+  toolsIgnoringPaths?: string[];
   /**
    * The prepared filesystem access table (meta.paths ∪ the spawn-keyed runtime
    * roots, plus the tmux-socket deny), built once per hook invocation by
@@ -470,7 +485,16 @@ export function checkPathAccess(
     return { decision: "allow", reason: "Tool in allow list" };
   }
 
-  // 3. Extract file_path / path / notebook_path without coercion. A present
+  // 3. An MCP tool listed in toolsIgnoringPaths skips path extraction: its
+  // `path`-like arguments are not local files (e.g. sosumi's documentation page
+  // path). It already passed the deny and allow lists above. toolIgnoresPaths
+  // matches only MCP tool names, so Bash (handled above) and the built-in file
+  // tools below can never take this branch.
+  if (toolIgnoresPaths(toolName, ctx.toolsIgnoringPaths)) {
+    return { decision: "allow", reason: "Tool in allow list; path checks skipped (toolsIgnoringPaths)" };
+  }
+
+  // 4. Extract file_path / path / notebook_path without coercion. A present
   // malformed field fails closed; required-path tools also deny when none is
   // present. Glob/Grep deliberately support their schemas' cwd fallback, but
   // still run that fallback through the same structural/resolver checks.
@@ -1860,6 +1884,9 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
   let access!: PreparedAccessTable;
   // Files/dirs whose writes are denied structurally (reads untouched).
   let protectedWritePaths: ProtectedWritePath[] = [];
+  // MCP tools that skip the path checks. Empty (nothing skips) unless resolved
+  // below from a store the agent cannot write.
+  let toolsIgnoringPaths: string[] = [];
 
   if (agentId === SYSTEM_AGENT_ID) {
     // System coordinator: it owns its own directory entirely. There is no
@@ -1889,6 +1916,9 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       }, isCoordinator);
       return;
     }
+    // Live from _all.md ∪ system-coordinator.md, like its path lists above. A
+    // layer that fails to load contributes nothing, so failure only narrows it.
+    toolsIgnoringPaths = (await loadMergedAgentTypePermissions(SYSTEM_COORDINATOR_TYPE)).toolsIgnoringPaths;
   } else {
     // Authenticate the explicit id against an operator-registered record and
     // either its canonical worktree cwd or its live shared-repo Claude process.
@@ -1926,6 +1956,9 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     }
     canSpawnChildren = await metaCanSpawnChildren(meta);
     isCoordinator = meta.agentType === REPO_COORDINATOR_TYPE;
+    // Frozen at spawn alongside the allow list; the agent cannot write its own
+    // meta.json (META_WRITE_DENY_REASON). Invalid entries are dropped.
+    toolsIgnoringPaths = metaToolsIgnoringPaths(meta);
 
     // For non-worktree agents (e.g., coordinators), worktreePath is the repo root
     if (isNoWorktree) {
@@ -2005,7 +2038,19 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
   } catch { /* ignore */ }
 
   // Check ib manager-only command access before path checks
-  const ctx: PathCheckContext = { agentId, agentDir, worktreePath, agentsDir, rootRepo, allowList, denyList, canSpawnChildren, access, protectedWritePaths };
+  const ctx: PathCheckContext = {
+    agentId,
+    agentDir,
+    worktreePath,
+    agentsDir,
+    rootRepo,
+    allowList,
+    denyList,
+    canSpawnChildren,
+    toolsIgnoringPaths,
+    access,
+    protectedWritePaths,
+  };
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");

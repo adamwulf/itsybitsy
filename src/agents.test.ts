@@ -7399,6 +7399,7 @@ describe("readAgentMeta mtime cache", () => {
       spawned_by: true,
       paths: true,
       sandbox: true,
+      toolsIgnoringPaths: true,
     };
 
     // Construct a meta with every known nested mutable field populated.
@@ -7417,6 +7418,7 @@ describe("readAgentMeta mtime cache", () => {
         rawAllow: ["(allow process*)"],
         domains: ["example.com"],
       },
+      toolsIgnoringPaths: ["mcp__sosumi__*"],
     }));
 
     // First read = cache miss (populates the canonical cache entry).
@@ -7450,6 +7452,7 @@ describe("readAgentMeta mtime cache", () => {
       first.meta.sandbox.rawAllow.push("(allow default)");
       first.meta.sandbox.domains.push("evil.example");
     }
+    first.meta?.toolsIgnoringPaths?.push("mcp__polluted__*");
 
     // A fresh read must see the original canonical values — no leak.
     const second = await readAgentMeta(tempDir);
@@ -7465,6 +7468,7 @@ describe("readAgentMeta mtime cache", () => {
       allowWrite: ["/original/write"],
       deny: ["**/.env"],
     });
+    expect(second.meta?.toolsIgnoringPaths).toEqual(["mcp__sosumi__*"]);
   });
 
   test("invalidates cache after .tmp + rename write pattern", async () => {

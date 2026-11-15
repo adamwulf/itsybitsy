@@ -17,6 +17,7 @@ import { isValidEffort } from './validation';
 import type { PathsConfig, SandboxConfigInput } from './sandbox';
 import { validatePathsFrontmatter, validateSandboxFrontmatter } from './sandbox';
 import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from './coordinator-type-names';
+import { sanitizeToolsIgnoringPaths, toolsIgnoringPathsEntryError } from './tools-ignoring-paths';
 
 const EMBEDDED_TYPES: Record<string, string> = {
   'manager': managerMd,
@@ -78,6 +79,14 @@ export interface AgentType {
   icon?: string;
   /** Resolved, inheritance-merged filesystem policy. */
   paths?: PathsConfig;
+  /**
+   * MCP tools whose calls skip the PreToolUse path checks (exact
+   * `mcp__<server>__<tool>` names or `mcp__<server>__*` prefixes). Unioned
+   * across the `inherits:` chain like `permissions.allow`; invalid entries are
+   * dropped here, never honored (src/tools-ignoring-paths.ts). Undefined when no
+   * file in the chain declares a valid entry.
+   */
+  toolsIgnoringPaths?: string[];
   /** Inheritance-merged sandbox policy; omitted enablement inherits from layers. */
   sandbox?: SandboxConfigInput;
   /**
@@ -516,7 +525,9 @@ async function resolveChain(
  * list fields are likewise unioned. Sandbox enablement takes the most specific
  * explicit boolean (`sandbox: false` or `sandbox.enabled: false`); omission
  * inherits the ancestor value, defaulting to true only after the full merge.
- * `repos` is replaced (not merged) when the descendant declares it.
+ * `toolsIgnoringPaths` is unioned the same way as `permissions.allow`, keeping
+ * only valid entries. `repos` is replaced (not merged) when the descendant
+ * declares it.
  *
  * The `name`, `spawnable` and `remoteControl` keys are intentionally not set
  * here — the caller (`buildAgentTypeFromFrontmatter`) is responsible for the
@@ -550,6 +561,8 @@ function mergeRawFrontmatters(
   // Accumulated permission lists (unioned across the chain, deduped below).
   const allAllow: string[] = [];
   const allDeny: string[] = [];
+  // MCP tools that skip path checks, unioned like permissions.allow.
+  const allToolsIgnoringPaths: string[] = [];
 
   // Union lists independently of the most specific explicit enablement value.
   let sawSandbox = false;
@@ -600,6 +613,10 @@ function mergeRawFrontmatters(
       }
     }
 
+    // toolsIgnoringPaths — union across the chain. Invalid entries are dropped
+    // so a bad file can only narrow the list (validateAllAgentTypes reports them).
+    allToolsIgnoringPaths.push(...sanitizeToolsIgnoringPaths(fm.toolsIgnoringPaths));
+
     // A shorthand boolean changes only enablement; inherited lists survive.
     if (typeof fm.sandbox === "boolean") {
       sawSandbox = true;
@@ -645,6 +662,10 @@ function mergeRawFrontmatters(
     if (allAllow.length > 0) permsOut.allow = Array.from(new Set(allAllow));
     if (allDeny.length > 0) permsOut.deny = Array.from(new Set(allDeny));
     merged.permissions = permsOut;
+  }
+
+  if (allToolsIgnoringPaths.length > 0) {
+    merged.toolsIgnoringPaths = Array.from(new Set(allToolsIgnoringPaths));
   }
 
   if (sawSandbox) {
@@ -747,6 +768,11 @@ function buildAgentTypeFromFrontmatter(
           allowWrite: stringList(paths.allowWrite),
           deny: stringList(paths.deny),
         }
+      : undefined,
+    // mergeRawFrontmatters already kept only valid entries; sanitize again so
+    // this builder never trusts its input shape.
+    toolsIgnoringPaths: "toolsIgnoringPaths" in frontmatter
+      ? sanitizeToolsIgnoringPaths(frontmatter.toolsIgnoringPaths)
       : undefined,
     sandbox: sandbox
       ? {
@@ -988,6 +1014,23 @@ export async function validateAllAgentTypes(): Promise<string[]> {
             }
             if (perms.deny !== undefined && !Array.isArray(perms.deny)) {
               errors.push(`${file}: permissions.deny must be a list`);
+            }
+          }
+        }
+
+        // Validate `toolsIgnoringPaths:` — MCP tools that skip the path checks.
+        // Only exact `mcp__<server>__<tool>` names and `mcp__<server>__*`
+        // prefixes are accepted, so a built-in tool can never skip path checks.
+        // The loader drops the same invalid entries (it never honors them).
+        if (frontmatter.toolsIgnoringPaths !== undefined) {
+          if (!Array.isArray(frontmatter.toolsIgnoringPaths)) {
+            errors.push(
+              `${file}: toolsIgnoringPaths must be a YAML list of MCP tool names (mcp__<server>__<tool> or mcp__<server>__*)`,
+            );
+          } else {
+            for (const entry of frontmatter.toolsIgnoringPaths) {
+              const entryError = toolsIgnoringPathsEntryError(entry);
+              if (entryError) errors.push(`${file}: toolsIgnoringPaths: ${entryError}`);
             }
           }
         }

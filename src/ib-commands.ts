@@ -7048,8 +7048,9 @@ export async function newAgent(
   // layers as their allow list (`_all` ∪ `_non_coordinator` for non-coordinators
   // ∪ the type chain), at the same moment the allow list is rendered into
   // settings.local.json. The Claude PreToolUse hook reads it from here, a file
-  // the agent cannot write. Resume and rehire keep it; a coordinator reset
-  // respawns through here and re-derives it. Codex resolves the list live from
+  // the agent cannot write. For non-coordinators, resume and rehire keep it;
+  // rehire keeps a coordinator's too; a coordinator reset (R, `ib resume`,
+  // /respawn) respawns through here and re-derives it. Codex resolves the list live from
   // the type files, as it does its allow list; agy needs none (an MCP call
   // reaches the path check with no path key).
   if (agentCli === "claude") {

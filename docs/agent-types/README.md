@@ -130,7 +130,12 @@ toolsIgnoringPaths:
 - **Entries** are an exact MCP tool name, `mcp__<server>__<tool>`, or a whole server, `mcp__<server>__*` (one trailing `*` only). Anything else is a validation error, including built-in tools (`Read`, `Bash`, `Write`, `Glob`, ...), a bare `*`, `mcp__*`, an empty server name, and a `*` anywhere but the end. Built-in tools can never skip path checks. The loader drops invalid entries instead of honoring them.
 - **Only the path checks are skipped.** The tool must still be in `permissions.allow`, and a matching `permissions.deny` entry still denies it. The hooks match `permissions.allow` and `permissions.deny` by exact tool name, so name each MCP tool exactly in both. To deny a whole server, list each of its tools. The `mcp__<server>__*` form is honored only in `toolsIgnoringPaths`.
 - **Merging:** unioned across `inherits:` and across `_all.md`, `_non_coordinator.md` (except coordinators) and the type, like `permissions.allow`.
-- **When a change applies:** Claude agents freeze the list in `meta.json` at spawn, at the same moment their allow list is written to `settings.local.json`, so a running or resumed agent keeps its spawn-time list; spawn a new agent (or reset a repo coordinator) to pick up an edit. Codex agents resolve it from the type files on every tool call, the way they resolve their allow list, and `@system` does the same from `_all.md` and `system-coordinator.md`, the way it resolves its `paths:`. Agy needs no entry: it passes an MCP call to the path check without its arguments.
+- **When a change applies:** Claude agents freeze the list in `meta.json` at spawn, at the same moment their allow list is written to `settings.local.json`.
+  - For non-coordinator Claude agents, `/respawn` (`ib respawn`), `ib resume`, `ib rehire` and `ib sandbox refresh` keep the spawn-time list. (`/respawn` on such an agent is a pause plus resume: it re-reads the type's instructions but keeps `meta.json`.) Only a new spawn applies an edit.
+  - A repo coordinator picks it up on a reset (`R` in `ib watch`, or `/respawn` on the coordinator).
+  - `@system` and codex agents pick it up on their next tool call: codex resolves it from the type files the way it resolves its allow list, and `@system` from `_all.md` and `system-coordinator.md` the way it resolves its `paths:`.
+  - Claude agents that were running before this feature have no list and need a new spawn.
+  - Agy needs no entry: it passes an MCP call to the path check without its arguments.
 
 See SPEC-PATH-ALLOWLIST.md, "Tools that skip path checks", for the hook order.
 

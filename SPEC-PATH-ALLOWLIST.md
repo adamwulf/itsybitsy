@@ -17,6 +17,21 @@
   - **Live checks have NOT passed yet** (docs/SANDBOX-ROLLOUT.md). Details: SPEC-CODEX-MODEL.md permission-profile addendum.
 - Spawn freezes policy in metadata; resume preserves it. Metadata readers and displays treat only literal false as an opt-out. `ib sandbox refresh` applies current type settings in either direction, and Codex/Fugu instructions are regenerated to match the policy.
 
+### Tools that skip path checks (`toolsIgnoringPaths:`)
+
+The hooks read a `file_path`, `path` or `notebook_path` argument on ANY tool as a local path. Some MCP tools use those names for something else (sosumi's `mcp__sosumi__fetchAppleDocumentation` takes `path: "/documentation/xcode/environment-variable-reference"`, a page path on Apple's site), and the hook denied them with `Access denied: read /documentation/... is not in paths.allowRead/allowWrite`. The top-level `toolsIgnoringPaths:` list names MCP tools whose calls skip the path checks.
+
+- **Grammar.** An entry is an exact MCP tool name, `mcp__<server>__<tool>`, or a server-wide prefix, `mcp__<server>__*` (one trailing `*`). The server name is `[A-Za-z0-9_-]+` (Claude Code's normalized spelling); the tool name is any run without whitespace or `*`. `validateAllAgentTypes` rejects everything else: built-in tool names (`Read`, `Bash`, `Write`, `Glob`, ...), a bare `*`, `mcp__*`, an empty server name, a `*` anywhere but the end, and a non-list value. Code: `src/tools-ignoring-paths.ts`.
+- **Fail closed.** The loader drops invalid entries rather than honoring them, readers of `meta.toolsIgnoringPaths` drop them again, and the matcher re-checks both the entry and the tool name: a tool name that is not `mcp__<server>__<tool>` never matches. A bad file, a corrupt meta.json, or an entry such as `Read` or `*` that somehow reached the hook cannot give a built-in tool or Bash a path-check bypass.
+- **Merging.** Unioned and deduplicated across the `inherits:` chain, and across `_all.md`, `_non_coordinator.md` (non-coordinators only) and the type, exactly like `permissions.allow`. `@system` uses `_all.md` ∪ `system-coordinator.md`.
+- **Hook order (`checkPathAccess`).** (1) `permissions.deny` → deny; (2) not in `permissions.allow` → deny; (3) the Bash branch, unchanged; (4) a tool that matches `toolsIgnoringPaths` → allow, with no path extraction; (5) path extraction and the resolver, unchanged. So a listed tool that is missing from the allow list or matches the deny list is still denied, and only MCP tools can take step 4.
+- **Store and lifecycle.** The hook reads the list only from stores the agent cannot write, with the same lifecycle as the allow list for each CLI:
+  - **Claude agents** (worktree, `--no-worktree`, per-repo coordinators): `newAgent` freezes the union into `meta.toolsIgnoringPaths` when it renders the allow list into `settings.local.json`. The Claude hook reads it from meta.json (the agent cannot write its own meta.json, `META_WRITE_DENY_REASON`). Resume keeps it, rehire restores it with the archived meta, and a repo-coordinator reset re-derives it through `newAgent`. `ib sandbox refresh` does not rewrite the allow list, so it does not touch this list either. A running agent picks up an edit only when respawned as a new agent. An agent spawned before this key existed has no list, so nothing skips its path checks.
+  - **`@system`:** resolved live on every call from `_all.md` ∪ `system-coordinator.md`, as `buildSystemAccessTable` does for its paths.
+  - **Codex agents:** resolved live on every call from the type layers by `loadMergedAgentTypePermissions`, the same source as their allow list. Codex names an MCP tool `mcp__<server>__<tool>` in the PreToolUse `tool_name`, the same as Claude, so one entry covers both.
+  - **Agy agents:** no wiring. `translateAgyTool` hands an allow-listed unknown tool (an MCP tool) to `checkPathAccess` with an empty input, so there is no path key to check.
+- **Not sealed.** The sealed record covers the kernel-profile inputs (`agentType`, `canSpawnChildren`, `paths`, `sandbox`); this list does not change the profile. Under the kernel sandbox the MCP server process still runs inside the agent's profile.
+
 ---
 
 ## 0. Historical summary (pre-Phase-B baseline)

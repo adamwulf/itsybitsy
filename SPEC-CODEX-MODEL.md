@@ -372,7 +372,7 @@ At spawn (Phase 3), `buildCodexLaunchArgs()`:
 New `src/hooks/codex-pre-tool-use.ts`, dispatched from `src/index.ts` via `ib hooks codex-pre-tool-use <agentId>`:
 
 **Inputs (stdin JSON, verified empirically in Phase 2):**
-- `tool_name` — `"Bash"`, `"apply_patch"`, MCP tool names, etc.
+- `tool_name` — `"Bash"`, `"apply_patch"`, MCP tool names, etc. An MCP tool is named `mcp__<server>__<tool>` (codex hooks docs: "an MCP name like `mcp__fs__read`"), the same form Claude Code uses, so one `toolsIgnoringPaths:` entry matches both CLIs (SPEC-PATH-ALLOWLIST.md, "Tools that skip path checks").
 - `tool_input.command` — for Bash, the shell command string; for `apply_patch`, the full patch body including `*** Begin Patch` / `*** Add File: <path>` / `*** Update File: <path>` / `*** Delete File: <path>` / `*** End Patch` directives with target paths.
 - `cwd` — the agent's worktree (already canonicalized; use directly for path comparisons, no symlink resolution needed).
 - `session_id` — the codex rollout id (snake_case on v0.135.0). **Capture this into `meta.codex_session_id` on first hook firing** if the field is empty (Phase 7 resume support). **Defensively read both `session_id` AND `sessionId`** in case a future codex version renames the field (per reviewer #2 #7).

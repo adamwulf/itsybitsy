@@ -6800,10 +6800,9 @@ export async function newAgent(
   // The loader drops invalid toolsIgnoringPaths entries (fail closed), and
   // validateAllAgentTypes reports them only at `ib watch` startup. Warn here
   // too, for an edit made after startup (say `mcp__sosumi`, Claude Code's own
-  // server-wide spelling). logWarning, like newAgent's other spawn warnings,
-  // lands on stderr for a CLI `ib new-agent`, in ~/.itsybitsy/watch.log for a
-  // spawn from the ib watch dashboard (n, R), and nowhere visible for a
-  // brokered (sandboxed) spawn.
+  // server-wide spelling). Where logWarning output lands depends on the caller
+  // (stderr, watch.log, the requester's watchdog.log, or nowhere); see
+  // docs/implementation-notes.md, "Agent types".
   for (const message of new Set([allLayer, nonCoordLayer, agentTypeDef].flatMap(
     (layer) => layer?.toolsIgnoringPathsErrors ?? [],
   ))) {

@@ -2755,6 +2755,23 @@ describe("retire → rehire recovery", () => {
     expect(resume).not.toContain("--dangerously-skip-permissions");
     expect(resume).toContain(`--settings '${join(restoredDir, ".claude", "settings.local.json")}'`);
   });
+
+  test("rehire keeps the archived meta.toolsIgnoringPaths (the spawn-time list)", async () => {
+    const agentId = "agent-sosumi-return";
+    const { archiveDir } = await plantRehirableArchive(agentId);
+    const archivedMeta = await Bun.file(join(archiveDir, "meta.json")).json() as AgentMeta;
+    archivedMeta.toolsIgnoringPaths = ["mcp__sosumi__*"];
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify(archivedMeta, null, 2));
+
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+    const result = await rehireAgent(agentId);
+
+    expect(result.ok).toBe(true);
+    const restored = await Bun.file(join(tempDir, ".itsybitsy", "agents", agentId, "meta.json")).json();
+    expect(restored.toolsIgnoringPaths).toEqual(["mcp__sosumi__*"]);
+  });
 });
 
 describe("pauseAgent (native)", () => {
@@ -12190,6 +12207,18 @@ body`,
       expect(startSh).not.toMatch(/setsid claude/);
       expect(startSh).not.toContain("--session-id");
       expect(startSh).not.toContain("--model");
+    });
+
+    test("a codex agent freezes no toolsIgnoringPaths into meta (its hook resolves the list live)", async () => {
+      await writeToolsIgnoringPathsLayer("_all", ["mcp__sosumi__*"], { spawnable: false });
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("read README", {
+        name: "codex-no-frozen-list",
+        model: "codex:gpt-5.4-mini",
+      });
+      expect(result.ok).toBe(true);
+      const meta = await Bun.file(join(agentsDir, "codex-no-frozen-list", "meta.json")).json();
+      expect("toolsIgnoringPaths" in meta).toBe(false);
     });
 
     test("codex start.sh includes -c model_reasoning_effort with the mapped effort", async () => {

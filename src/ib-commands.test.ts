@@ -10677,6 +10677,34 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(meta.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__docs__fetch", "mcp__web__get"]);
   });
 
+  test("toolsIgnoringPaths: spawn warns about each dropped entry, naming the file and the accepted shapes", async () => {
+    // `mcp__sosumi` is Claude Code's own server-wide spelling; the hook accepts
+    // only `mcp__sosumi__*`, so the entry is dropped and the spawn says so.
+    await writeToolsIgnoringPathsLayer("_all", ["mcp__sosumi"], { spawnable: false });
+    await writeToolsIgnoringPathsLayer("worker", ["mcp__web__get", "Read"]);
+    const { setWatchLogPath, resetWatchLogPath, setWatchRunning } = await import("./watch-log");
+    const logPath = join(tempDir, "watch.log");
+    setWatchLogPath(logPath);
+    setWatchRunning(true);
+    try {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "test-dropped-entry", type: "worker" });
+      expect(result.ok).toBe(true);
+    } finally {
+      setWatchRunning(false);
+      resetWatchLogPath();
+    }
+
+    const log = await Bun.file(logPath).text();
+    expect(log).toContain(
+      `Warning: _all.md: toolsIgnoringPaths: "mcp__sosumi" is not mcp__<server>__<tool> or mcp__<server>__*; ignored`,
+    );
+    expect(log).toContain(`Warning: worker.md: toolsIgnoringPaths: "Read" is not an MCP tool`);
+    expect(log).not.toContain("mcp__web__get");
+    const meta = await Bun.file(join(agentsDir, "test-dropped-entry", "meta.json")).json();
+    expect(meta.toolsIgnoringPaths).toEqual(["mcp__web__get"]);
+  });
+
   test("toolsIgnoringPaths: an agent whose layers declare none freezes an empty list", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("task", { name: "test-no-tools-ignoring-paths", type: "worker" });

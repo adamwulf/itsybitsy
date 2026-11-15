@@ -72,6 +72,25 @@ export function toolsIgnoringPathsEntryError(entry: unknown): string | null {
   return `${shown} is not ${ACCEPTED_SHAPES}`;
 }
 
+/**
+ * Every problem with a file's `toolsIgnoringPaths:` value, each starting with
+ * `toolsIgnoringPaths`, ready for a `<file>: ` prefix: a non-list value, or one
+ * message per invalid entry. Empty when the value is valid. Shared by
+ * `validateAllAgentTypes` (startup errors) and the loader (spawn warnings for
+ * the entries it drops).
+ */
+export function toolsIgnoringPathsValueErrors(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [`toolsIgnoringPaths must be a YAML list of MCP tool names (${ACCEPTED_SHAPES})`];
+  }
+  const errors: string[] = [];
+  for (const entry of value) {
+    const entryError = toolsIgnoringPathsEntryError(entry);
+    if (entryError) errors.push(`toolsIgnoringPaths: ${entryError}`);
+  }
+  return errors;
+}
+
 /** True when `entry` is an exact MCP tool name or a `mcp__<server>__*` prefix. */
 export function isValidToolsIgnoringPathsEntry(entry: unknown): entry is string {
   return toolsIgnoringPathsEntryError(entry) === null;

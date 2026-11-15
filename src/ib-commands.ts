@@ -6797,6 +6797,15 @@ export async function newAgent(
   const typeDeny = agentTypeDef.permissions?.deny ?? [];
   const configAllow = [...new Set([...allLayerAllow, ...nonCoordAllow, ...typeAllow])];
   const configDeny = [...new Set([...allLayerDeny, ...nonCoordDeny, ...typeDeny])];
+  // The loader drops invalid toolsIgnoringPaths entries (fail closed), and
+  // validateAllAgentTypes reports them only at `ib watch` startup. Say so here
+  // too, so an edit made while ib watch runs (say `mcp__sosumi`, Claude Code's
+  // own server-wide spelling) does not leave the tool silently path-checked.
+  for (const message of new Set([allLayer, nonCoordLayer, agentTypeDef].flatMap(
+    (layer) => layer?.toolsIgnoringPathsErrors ?? [],
+  ))) {
+    logWarning(`Warning: ${message}; ignored, so the tools it meant to name keep their path checks`);
+  }
   const mergedSandboxLayers = mergeSandboxLayerConfigs([
     allLayer,
     nonCoordLayer,

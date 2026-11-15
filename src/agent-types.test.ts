@@ -1958,6 +1958,22 @@ describe("toolsIgnoringPaths frontmatter", () => {
     expect(type.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__docs__read"]);
   });
 
+  test("the loader reports each dropped entry against the file in the chain that declared it", async () => {
+    await writeType("parent", typeWithEntries("parent", ["mcp__sosumi"]));
+    await writeType("child", typeWithEntries("child", ["mcp__docs__read", "*"], "inherits: parent\n"));
+    const type = await loadAgentType("child");
+    expect(type.toolsIgnoringPaths).toEqual(["mcp__docs__read"]);
+    expect(type.toolsIgnoringPathsErrors).toEqual([
+      `parent.md: toolsIgnoringPaths: "mcp__sosumi" is not mcp__<server>__<tool> or mcp__<server>__*`,
+      `child.md: toolsIgnoringPaths: "*" would skip path checks for every tool; list MCP tools only (mcp__<server>__<tool> or mcp__<server>__*)`,
+    ]);
+  });
+
+  test("a valid list reports nothing dropped", async () => {
+    await writeType("good", typeWithEntries("good", ["mcp__sosumi__*"]));
+    expect((await loadAgentType("good")).toolsIgnoringPathsErrors).toBeUndefined();
+  });
+
   test("a non-list value loads as no entries", async () => {
     await writeType("scalar", `---\nname: scalar\ntoolsIgnoringPaths: mcp__sosumi__*\n---\nbody`);
     const type = await loadAgentType("scalar");

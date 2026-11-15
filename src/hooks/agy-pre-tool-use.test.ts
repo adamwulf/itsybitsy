@@ -198,6 +198,19 @@ describe("checkAgyPreToolUse — path isolation", () => {
     expect(d.reason).toContain("not in allow list");
   });
 
+  test("an allow-listed MCP tool with a path argument needs no toolsIgnoringPaths entry", () => {
+    // agy hands an unknown tool to the path check with an EMPTY input, so a
+    // `path` argument (sosumi's documentation page path) is never treated as a
+    // local file, and toolsIgnoringPaths needs no agy wiring.
+    const sosumi = "mcp__sosumi__fetchAppleDocumentation";
+    const ctx = makeCtx({ allowList: [...makeCtx().allowList, sosumi] });
+    const d = checkAgyPreToolUse(
+      { toolName: sosumi, toolArgs: { path: "/documentation/xcode/environment-variable-reference" } },
+      ctx,
+    );
+    expect(d.decision).toBe("allow");
+  });
+
   test("a required-path file tool with no path is denied", () => {
     const ctx = makeCtx();
     const d = checkAgyPreToolUse({ toolName: "view_file", toolArgs: {} }, ctx);

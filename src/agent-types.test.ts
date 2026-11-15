@@ -1863,3 +1863,140 @@ body`);
     );
   });
 });
+
+describe("toolsIgnoringPaths frontmatter", () => {
+  let tempHome: string;
+  let typesDir: string;
+
+  beforeEach(async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "itsybitsy-tools-ignoring-paths-"));
+    // Production home seam, never process.env.HOME (see the paths block above).
+    setUserHome(tempHome);
+    typesDir = join(tempHome, ".itsybitsy", "agent-types");
+    await mkdir(typesDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    resetUserHome();
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  async function writeType(name: string, content: string): Promise<void> {
+    await Bun.write(join(typesDir, `${name}.md`), content);
+  }
+
+  /** A type file whose only interesting key is a toolsIgnoringPaths list. */
+  function typeWithEntries(name: string, entries: string[], extra = ""): string {
+    const list = entries.map((entry) => `  - "${entry}"`).join("\n");
+    return `---\nname: ${name}\n${extra}toolsIgnoringPaths:\n${list}\n---\nbody`;
+  }
+
+  test("accepts exact MCP tool names and server prefix globs", async () => {
+    await writeType("good", typeWithEntries("good", [
+      "mcp__sosumi__*",
+      "mcp__sosumi__fetchAppleDocumentation",
+      "mcp__claude-in-chrome__tabs_context_mcp",
+    ]));
+    const errors = await validateAllAgentTypes();
+    expect(errors.filter((error) => error.startsWith("good.md:"))).toEqual([]);
+  });
+
+  test("rejects every built-in tool name", async () => {
+    await writeType("builtins", typeWithEntries("builtins", ["Read", "Bash", "Write", "Glob"]));
+    const errors = (await validateAllAgentTypes()).filter((error) => error.startsWith("builtins.md:"));
+    for (const tool of ["Read", "Bash", "Write", "Glob"]) {
+      expect(errors).toContain(
+        `builtins.md: toolsIgnoringPaths: "${tool}" is not an MCP tool; built-in tools always get path checks, so only mcp__<server>__<tool> or mcp__<server>__* is allowed`,
+      );
+    }
+  });
+
+  test("rejects a bare *", async () => {
+    await writeType("star", typeWithEntries("star", ["*"]));
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain(
+      `star.md: toolsIgnoringPaths: "*" would skip path checks for every tool; list MCP tools only (mcp__<server>__<tool> or mcp__<server>__*)`,
+    );
+  });
+
+  test("rejects mcp__* and an empty server name", async () => {
+    await writeType("noserver", typeWithEntries("noserver", ["mcp__*", "mcp____fetch", "mcp____*"]));
+    const errors = await validateAllAgentTypes();
+    for (const entry of ["mcp__*", "mcp____fetch", "mcp____*"]) {
+      expect(errors).toContain(
+        `noserver.md: toolsIgnoringPaths: "${entry}" has no server name; use mcp__<server>__<tool> or mcp__<server>__*`,
+      );
+    }
+  });
+
+  test("rejects a * anywhere but the end after mcp__<server>__", async () => {
+    await writeType("midstar", typeWithEntries("midstar", ["mcp__sosumi__fetch*", "mcp__so*__*", "mcp__*__fetch"]));
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain(
+      `midstar.md: toolsIgnoringPaths: "mcp__sosumi__fetch*" has a * in the wrong place; * is allowed only as the whole tool name, mcp__<server>__*`,
+    );
+    expect(errors).toContain(
+      `midstar.md: toolsIgnoringPaths: "mcp__so*__*" has a * in the wrong place; * is allowed only as the whole tool name, mcp__<server>__*`,
+    );
+    // `mcp__*__fetch` has no server name before its *.
+    expect(errors).toContain(
+      `midstar.md: toolsIgnoringPaths: "mcp__*__fetch" has no server name; use mcp__<server>__<tool> or mcp__<server>__*`,
+    );
+  });
+
+  test("rejects a value that is not a list", async () => {
+    await writeType("scalar", `---\nname: scalar\ntoolsIgnoringPaths: mcp__sosumi__*\n---\nbody`);
+    const errors = await validateAllAgentTypes();
+    expect(errors).toContain(
+      "scalar.md: toolsIgnoringPaths must be a YAML list of MCP tool names (mcp__<server>__<tool> or mcp__<server>__*)",
+    );
+  });
+
+  test("the loader drops invalid entries rather than honoring them", async () => {
+    await writeType("mixed", typeWithEntries("mixed", ["Read", "mcp__sosumi__*", "*", "mcp__*", "mcp__docs__read"]));
+    const type = await loadAgentType("mixed");
+    expect(type.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__docs__read"]);
+  });
+
+  test("a non-list value loads as no entries", async () => {
+    await writeType("scalar", `---\nname: scalar\ntoolsIgnoringPaths: mcp__sosumi__*\n---\nbody`);
+    const type = await loadAgentType("scalar");
+    expect(type.toolsIgnoringPaths ?? []).toEqual([]);
+  });
+
+  test("inherits: unions the list across the chain, deduplicated", async () => {
+    await writeType("grandparent", typeWithEntries("grandparent", ["mcp__a__*", "mcp__b__read"]));
+    await writeType("parent", typeWithEntries("parent", ["mcp__b__read", "mcp__c__*"], "inherits: grandparent\n"));
+    await writeType("child", typeWithEntries("child", ["mcp__a__*", "mcp__d__get"], "inherits: parent\n"));
+    const type = await loadAgentType("child");
+    expect(type.toolsIgnoringPaths).toEqual(["mcp__a__*", "mcp__b__read", "mcp__c__*", "mcp__d__get"]);
+  });
+
+  test("inherits: a child that declares nothing keeps the parent's list", async () => {
+    await writeType("parent", typeWithEntries("parent", ["mcp__sosumi__*"]));
+    await writeType("child", `---\nname: child\ninherits: parent\n---\nbody`);
+    const type = await loadAgentType("child");
+    expect(type.toolsIgnoringPaths).toEqual(["mcp__sosumi__*"]);
+  });
+
+  test("the hook layer merge unions _all, _non_coordinator and the type chain", async () => {
+    const { loadMergedAgentTypePermissions } = await import("./hooks/shared");
+    await writeType("_all", typeWithEntries("_all", ["mcp__sosumi__*"], "spawnable: false\n"));
+    await writeType("_non_coordinator", typeWithEntries("_non_coordinator", ["mcp__docs__read"], "spawnable: false\n"));
+    await writeType("base", typeWithEntries("base", ["mcp__sosumi__*", "mcp__web__get"]));
+    await writeType("leaf", `---\nname: leaf\ninherits: base\n---\nbody`);
+
+    const merged = await loadMergedAgentTypePermissions("leaf");
+    expect(merged.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__docs__read", "mcp__web__get"]);
+  });
+
+  test("the @system layer merge is _all ∪ system-coordinator, without _non_coordinator", async () => {
+    const { loadMergedAgentTypePermissions } = await import("./hooks/shared");
+    await writeType("_all", typeWithEntries("_all", ["mcp__sosumi__*"], "spawnable: false\n"));
+    await writeType("_non_coordinator", typeWithEntries("_non_coordinator", ["mcp__workers__x"], "spawnable: false\n"));
+    await writeType("system-coordinator", typeWithEntries("system-coordinator", ["mcp__sys__y"], "spawnable: false\n"));
+
+    const merged = await loadMergedAgentTypePermissions("system-coordinator");
+    expect(merged.toolsIgnoringPaths).toEqual(["mcp__sosumi__*", "mcp__sys__y"]);
+  });
+});

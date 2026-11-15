@@ -866,6 +866,78 @@ describe("checkPathAccess", () => {
   });
 });
 
+// ── toolsIgnoringPaths: MCP tools that skip the path checks ─────────────────
+
+describe("checkPathAccess — toolsIgnoringPaths", () => {
+  const SOSUMI = "mcp__sosumi__fetchAppleDocumentation";
+  const sosumiCall = makeInput({
+    toolName: SOSUMI,
+    toolInput: { path: "/documentation/xcode/environment-variable-reference" },
+  });
+
+  test("reproduces the sosumi denial: a documentation page path is checked as a local file without an entry", () => {
+    const ctx = makeCtx({ allowList: [SOSUMI] });
+    const result = checkPathAccess(sosumiCall, ctx);
+    expect(result).toEqual({
+      decision: "deny",
+      reason: "Access denied: read /documentation/xcode/environment-variable-reference is not in paths.allowRead/allowWrite",
+    });
+  });
+
+  test("mcp__sosumi__* lets the sosumi call through without a path check", () => {
+    const ctx = makeCtx({ allowList: [SOSUMI], toolsIgnoringPaths: ["mcp__sosumi__*"] });
+    expect(checkPathAccess(sosumiCall, ctx)).toEqual({
+      decision: "allow",
+      reason: "Tool in allow list; path checks skipped (toolsIgnoringPaths)",
+    });
+  });
+
+  test("an exact entry works the same way", () => {
+    const ctx = makeCtx({ allowList: [SOSUMI], toolsIgnoringPaths: [SOSUMI] });
+    expect(checkPathAccess(sosumiCall, ctx).decision).toBe("allow");
+  });
+
+  test("an entry for another server does not skip the path check", () => {
+    const ctx = makeCtx({ allowList: [SOSUMI], toolsIgnoringPaths: ["mcp__other__*"] });
+    expect(checkPathAccess(sosumiCall, ctx).decision).toBe("deny");
+  });
+
+  test("a listed tool missing from permissions.allow is still denied", () => {
+    const ctx = makeCtx({ allowList: ["Read"], toolsIgnoringPaths: ["mcp__sosumi__*"] });
+    expect(checkPathAccess(sosumiCall, ctx)).toEqual({ decision: "deny", reason: "Tool not in allow list" });
+  });
+
+  test("a listed tool that matches permissions.deny is still denied", () => {
+    const ctx = makeCtx({
+      allowList: [SOSUMI],
+      denyList: [SOSUMI],
+      toolsIgnoringPaths: ["mcp__sosumi__*"],
+    });
+    expect(checkPathAccess(sosumiCall, ctx)).toEqual({ decision: "deny", reason: "Tool in deny list" });
+  });
+
+  test("built-in file tools keep their path checks even if invalid entries reached the context", () => {
+    // Read/Write/Glob/"*" can never pass validation or the loader; the matcher
+    // must refuse them anyway.
+    const ctx = makeCtx({ toolsIgnoringPaths: ["Read", "Write", "Glob", "*", "mcp__*"] });
+    for (const toolName of ["Read", "Write", "Glob"]) {
+      const result = checkPathAccess(makeInput({ toolName, toolInput: { file_path: "/tmp/foo/bar.txt", path: "/tmp/foo" } }), ctx);
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toContain("is not in paths.allowRead/allowWrite");
+    }
+  });
+
+  test("Bash keeps its path checks even if Bash reached the context", () => {
+    const ctx = makeCtx({ toolsIgnoringPaths: ["Bash", "*"] });
+    const result = checkPathAccess(makeInput({
+      toolName: "Bash",
+      toolInput: { command: "cd /repo/.itsybitsy/agents/agent-other/repo" },
+    }), ctx);
+    expect(result.decision).toBe("deny");
+    expect(result.reason).toContain("cannot cd into other agents");
+  });
+});
+
 // ── advisory Bash path scanner ───────────────────────────────────────────────
 
 describe("checkPathAccess — advisory Bash path scanner", () => {
@@ -3108,6 +3180,141 @@ describe("hookCheckPath writes state='running' to meta.json", () => {
 
     const meta = JSON.parse(await readFile(join(agentDir, "meta.json"), "utf-8"));
     expect(meta.state).toBe("running");
+  });
+});
+
+// ── hookCheckPath: where toolsIgnoringPaths comes from ───────────────────────
+
+describe("hookCheckPath — toolsIgnoringPaths sources", () => {
+  const SOSUMI = "mcp__sosumi__fetchAppleDocumentation";
+  const DOC_PATH = "/documentation/xcode/environment-variable-reference";
+  let logged: string[] = [];
+  const originalLog = console.log;
+
+  function lastDecision(): { permissionDecision: string; permissionDecisionReason: string } {
+    return JSON.parse(logged[logged.length - 1]!).hookSpecificOutput;
+  }
+
+  describe("a Claude worktree agent reads meta.toolsIgnoringPaths", () => {
+    let tempDir: string;
+    let agentDir: string;
+    let worktreeCwd: string;
+
+    beforeEach(async () => {
+      tempDir = await mkdtemp(join(tmpdir(), "tools-ignoring-paths-hook-"));
+      agentDir = join(tempDir, ".itsybitsy", "agents", "agent-sosumi1");
+      worktreeCwd = join(agentDir, "repo");
+      await mkdir(join(worktreeCwd, ".claude"), { recursive: true });
+      await writeFile(
+        join(worktreeCwd, ".claude", "settings.local.json"),
+        JSON.stringify({ permissions: { allow: [SOSUMI], deny: [] } }),
+      );
+      setNoWorktreeRepoRootsLoader(async () => [tempDir]);
+      logged = [];
+      console.log = (msg: string) => { logged.push(msg); };
+    });
+
+    afterEach(async () => {
+      console.log = originalLog;
+      resetNoWorktreeRepoRootsLoader();
+      await rm(tempDir, { recursive: true, force: true });
+    });
+
+    async function callSosumi(meta: Record<string, unknown>): Promise<void> {
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+        id: "agent-sosumi1", state: "running", worker: true, worktree: true, ...meta,
+      }));
+      await hookCheckPath("agent-sosumi1", JSON.stringify({
+        tool_name: SOSUMI,
+        tool_input: { path: DOC_PATH },
+        cwd: worktreeCwd,
+      }));
+    }
+
+    test("allows the sosumi call when meta lists mcp__sosumi__*", async () => {
+      await callSosumi({ toolsIgnoringPaths: ["mcp__sosumi__*"] });
+      expect(lastDecision().permissionDecision).toBe("allow");
+    });
+
+    test("denies it as a local path when meta has no list", async () => {
+      await callSosumi({});
+      expect(lastDecision().permissionDecision).toBe("deny");
+      expect(lastDecision().permissionDecisionReason).toContain(`read ${DOC_PATH} is not in paths.allowRead/allowWrite`);
+    });
+
+    test("ignores invalid entries in meta (a bare * does not skip anything)", async () => {
+      await callSosumi({ toolsIgnoringPaths: ["*", "mcp__*", "Read"] });
+      expect(lastDecision().permissionDecision).toBe("deny");
+    });
+  });
+
+  describe("@system resolves it live from _all.md and system-coordinator.md", () => {
+    let tempHome: string;
+    let itsyHome: string;
+
+    beforeEach(async () => {
+      tempHome = await mkdtemp(join(tmpdir(), "tools-ignoring-paths-system-"));
+      setUserHome(tempHome);
+      itsyHome = join(tempHome, ".itsybitsy");
+      await mkdir(join(itsyHome, ".claude"), { recursive: true });
+      await mkdir(join(itsyHome, "agent-types"), { recursive: true });
+      await writeFile(
+        join(itsyHome, ".claude", "settings.local.json"),
+        JSON.stringify({ permissions: { allow: [SOSUMI], deny: [] } }),
+      );
+      logged = [];
+      console.log = (msg: string) => { logged.push(msg); };
+    });
+
+    afterEach(async () => {
+      console.log = originalLog;
+      resetUserHome();
+      await rm(tempHome, { recursive: true, force: true });
+    });
+
+    async function writeLayer(name: string, entries: string[]): Promise<void> {
+      const list = entries.map((entry) => `  - "${entry}"\n`).join("");
+      await writeFile(
+        join(itsyHome, "agent-types", `${name}.md`),
+        `---\nname: ${name}\nspawnable: false\ntoolsIgnoringPaths:\n${list}---\n`,
+      );
+    }
+
+    async function callSosumi(): Promise<void> {
+      await hookCheckPath("@system", JSON.stringify({
+        tool_name: SOSUMI,
+        tool_input: { path: DOC_PATH },
+        cwd: itsyHome,
+      }));
+    }
+
+    test("denies the sosumi call when no layer lists it", async () => {
+      await callSosumi();
+      expect(lastDecision().permissionDecision).toBe("deny");
+      expect(lastDecision().permissionDecisionReason).toContain("is not in paths.allowRead/allowWrite");
+    });
+
+    test("allows it from _all.md, and picks up an edit on the next call", async () => {
+      await writeLayer("_all", ["mcp__sosumi__*"]);
+      await callSosumi();
+      expect(lastDecision().permissionDecision).toBe("allow");
+
+      await writeLayer("_all", ["mcp__other__*"]);
+      await callSosumi();
+      expect(lastDecision().permissionDecision).toBe("deny");
+    });
+
+    test("allows it from system-coordinator.md", async () => {
+      await writeLayer("system-coordinator", [SOSUMI]);
+      await callSosumi();
+      expect(lastDecision().permissionDecision).toBe("allow");
+    });
+
+    test("ignores _non_coordinator.md, which does not apply to @system", async () => {
+      await writeLayer("_non_coordinator", ["mcp__sosumi__*"]);
+      await callSosumi();
+      expect(lastDecision().permissionDecision).toBe("deny");
+    });
   });
 });
 

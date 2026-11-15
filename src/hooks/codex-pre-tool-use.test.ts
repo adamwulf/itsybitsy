@@ -606,6 +606,86 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
     expect(parsed.hookSpecificOutput.updatedInput).toEqual(toolInput);
   });
+
+  // Codex sends an MCP tool as `mcp__<server>__<tool>`, the same name Claude
+  // uses, so one toolsIgnoringPaths entry covers both CLIs. Codex resolves the
+  // list live from the type layers, like its allow list.
+  describe("toolsIgnoringPaths (sosumi)", () => {
+    const SOSUMI = "mcp__sosumi__fetchAppleDocumentation";
+    const sosumiInput = { path: "/documentation/xcode/environment-variable-reference" };
+
+    async function writeWorker(extraFrontmatter: string): Promise<void> {
+      await writeFile(
+        join(tempHome, ".itsybitsy", "agent-types", "worker.md"),
+        `---\nname: worker\ndescription: test\npermissions:\n  allow:\n    - ${SOSUMI}\n${extraFrontmatter}---\n`,
+      );
+    }
+
+    test("the sosumi page path is denied as a local path without an entry", async () => {
+      await writeWorker("");
+      const parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe(
+        "Access denied: read /documentation/xcode/environment-variable-reference is not in paths.allowRead/allowWrite",
+      );
+    });
+
+    test("mcp__sosumi__* in the type file allows it, echoing the input back", async () => {
+      await writeWorker("toolsIgnoringPaths:\n  - \"mcp__sosumi__*\"\n");
+      const parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+      expect(parsed.hookSpecificOutput.updatedInput).toEqual(sosumiInput);
+    });
+
+    test("an entry in _all.md applies too, and an edit applies on the next call", async () => {
+      await writeWorker("");
+      const allLayer = join(tempHome, ".itsybitsy", "agent-types", "_all.md");
+      await writeFile(allLayer, "---\nname: _all\ndescription: shared\ntoolsIgnoringPaths:\n  - \"mcp__sosumi__*\"\n---\n");
+      let parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("allow");
+
+      await writeFile(allLayer, "---\nname: _all\ndescription: shared\n---\n");
+      parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    });
+
+    test("a listed tool missing from the allow list is still denied", async () => {
+      await writeFile(
+        join(tempHome, ".itsybitsy", "agent-types", "worker.md"),
+        "---\nname: worker\ndescription: test\ntoolsIgnoringPaths:\n  - \"mcp__sosumi__*\"\n---\n",
+      );
+      const parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe("Tool not in allow list");
+    });
+
+    test("a listed tool in the deny list is still denied", async () => {
+      await writeWorker(`  deny:\n    - ${SOSUMI}\ntoolsIgnoringPaths:\n  - "mcp__sosumi__*"\n`);
+      const parsed = await runPayload({ tool_name: SOSUMI, tool_input: sosumiInput, cwd: join(agentDir, "repo") });
+      expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe("tool denied by agent-type deny list");
+    });
+  });
+});
+
+describe("checkCodexPreToolUse — toolsIgnoringPaths never widens built-in tools", () => {
+  test("apply_patch targets and Bash keep their path checks even with hostile entries in the context", () => {
+    const ctx = makeCtx({ toolsIgnoringPaths: ["*", "apply_patch", "Write", "Bash", "mcp__*"] });
+    const patch = checkCodexPreToolUse(
+      {
+        toolName: "apply_patch",
+        toolInput: { command: "*** Begin Patch\n*** Add File: /repo/src/forbidden.ts\n+x\n*** End Patch\n" },
+        cwd: ctx.worktreePath,
+      },
+      ctx,
+    );
+    expect(patch.decision).toBe("deny");
+    const bash = checkCodexPreToolUse(
+      { toolName: "Bash", toolInput: { command: "cd /repo/.itsybitsy/agents/agent-other/repo" }, cwd: ctx.worktreePath },
+      ctx,
+    );
+    expect(bash.decision).toBe("deny");
+  });
 });
 
 // ── (e) deny on uncaught exception (fail-OPEN mitigation) ────────────────────

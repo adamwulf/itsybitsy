@@ -132,7 +132,7 @@ toolsIgnoringPaths:
 - **Merging:** unioned across `inherits:` and across `_all.md`, `_non_coordinator.md` (except coordinators) and the type, like `permissions.allow`.
 - **When a change applies:** Claude agents freeze the list in `meta.json` at spawn, at the same moment their allow list is written to `settings.local.json`.
   - For non-coordinator Claude agents, `/respawn` (`ib respawn`), `ib resume`, `ib rehire` and `ib sandbox refresh` keep the spawn-time list. (`/respawn` on such an agent is a pause plus resume: it re-reads the type's instructions but keeps `meta.json`.) Only a new spawn applies an edit.
-  - A repo coordinator picks it up on a reset (`R` in `ib watch`, or `/respawn` on the coordinator).
+  - A repo coordinator picks it up on a reset (`R` in `ib watch`, `ib resume`, or `/respawn` on the coordinator). Rehiring a coordinator keeps its archived list.
   - Codex agents pick it up on their next tool call: they resolve it from the type files the way they resolve their allow list.
   - `@system` reads it live from `_all.md` and `system-coordinator.md`, like its `paths:`, so removing a tool takes effect on its next tool call. Its allow list, though, is written only when `@system` launches: a tool that is not yet in that launch-time allow list stays denied ("Tool not in allow list") until `@system` restarts.
   - Claude agents that were running before this feature have no list and need a new spawn.

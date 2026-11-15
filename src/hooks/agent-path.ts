@@ -104,7 +104,8 @@ export interface PathCheckContext {
   /**
    * The prepared filesystem access table (meta.paths ∪ the spawn-keyed runtime
    * roots, plus the tmux-socket deny), built once per hook invocation by
-   * buildAgentAccessTable / buildSystemAccessTable. A missing paths block
+   * buildAgentAccessTable, or for @system by buildSystemHookPolicy (.access).
+   * A missing paths block
    * produces empty allow lists — so anything outside the runtime roots is
    * denied. There is no "undefined means allow" mode: the field is required.
    */

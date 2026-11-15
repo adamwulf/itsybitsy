@@ -8,7 +8,6 @@ import {
   agentPathAccessTable,
   agyStateDirFor,
   buildAgentAccessTable,
-  buildSystemAccessTable,
   buildSystemHookPolicy,
   claudeProjectDirFor,
   claudeScratchpadDirFor,
@@ -300,9 +299,9 @@ describe("buildAgentAccessTable", () => {
   });
 });
 
-// ── buildSystemAccessTable (@system, no meta.json) ───────────────────────────
+// ── buildSystemHookPolicy access table (@system, no meta.json) ───────────────
 
-describe("buildSystemAccessTable", () => {
+describe("buildSystemHookPolicy — access table", () => {
   let home: string;
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "paths-sys-"));
@@ -321,7 +320,7 @@ describe("buildSystemAccessTable", () => {
   afterEach(async () => { resetUserHome(); await rm(home, { recursive: true, force: true }); });
 
   test("roots at <home>/.itsybitsy and honors the merged _all layer paths", async () => {
-    const prepared = await buildSystemAccessTable(home);
+    const prepared = (await buildSystemHookPolicy(home)).access;
     // WORKTREE root = <home>/.itsybitsy
     expect(resolvePreparedAccess(prepared, join(home, ".itsybitsy", "teams.json"), "write")).toBe("allow");
     // _all.md allowRead ~/shared → read allowed, write denied
@@ -334,7 +333,7 @@ describe("buildSystemAccessTable", () => {
   test("a layer that fails to load yields a strict table, never permissive", async () => {
     // Remove the agent-types dir so loadAgentType cannot find the files.
     await rm(join(home, ".itsybitsy", "agent-types"), { recursive: true, force: true });
-    const prepared = await buildSystemAccessTable(home);
+    const prepared = (await buildSystemHookPolicy(home)).access;
     expect(resolvePreparedAccess(prepared, "/etc/passwd", "read")).toBe("deny");
     // Its own home root still resolves (a runtime root, not a paths entry).
     expect(resolvePreparedAccess(prepared, join(home, ".itsybitsy", "x"), "write")).toBe("allow");

@@ -253,7 +253,10 @@ function unionLayerPaths(layers: Array<AgentType | undefined>): PathsConfig {
 
 /** What the `@system` hook resolves live from its two layers on every call. */
 export interface SystemHookPolicy {
-  /** The prepared access table (see {@link buildSystemAccessTable}). */
+  /**
+   * The prepared access table: `_all.md` ∪ `system-coordinator.md` paths plus
+   * the runtime roots, all rooted at `<home>/.itsybitsy`.
+   */
   access: PreparedAccessTable;
   /** `_all.md` ∪ `system-coordinator.md` `toolsIgnoringPaths` (valid entries only). */
   toolsIgnoringPaths: string[];
@@ -293,15 +296,6 @@ export async function buildSystemHookPolicy(home: string): Promise<SystemHookPol
     access: prepareAccessTable(table),
     toolsIgnoringPaths: unionToolsIgnoringPaths([allLayer?.toolsIgnoringPaths, systemLayer?.toolsIgnoringPaths]),
   };
-}
-
-/**
- * Build (and prepare) the access table for the `@system` coordinator from
- * `_all.md` ∪ `system-coordinator.md`; the access half of
- * {@link buildSystemHookPolicy}, which the hook calls instead.
- */
-export async function buildSystemAccessTable(home: string): Promise<PreparedAccessTable> {
-  return (await buildSystemHookPolicy(home)).access;
 }
 
 // ── Denial-reason classification (message only) ──────────────────────────────

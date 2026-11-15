@@ -15,17 +15,12 @@ import { logAgent } from "../agent-lifecycle";
 import { isSandboxedProcess } from "../sandbox-detect";
 import { writeAgentState } from "../agents";
 import { isValidAgentId } from "../validation";
-import {
-  checkGitDirectoryFlags,
-  loadMergedAgentTypePermissions,
-  resolveAgentFromCwd,
-  SYSTEM_AGENT_ID,
-} from "./shared";
+import { checkGitDirectoryFlags, resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./shared";
 import { AGY_WORKTREE_FILES } from "../agy-worktree-files";
 import { heredocBodyRanges } from "./shell-metachar";
 import {
   buildAgentAccessTable,
-  buildSystemAccessTable,
+  buildSystemHookPolicy,
   claudeProjectDirFor,
   pathDenialReason,
 } from "./paths-table";
@@ -39,7 +34,7 @@ import {
 import { findShellMetachar } from "./shell-metachar";
 import { resolveBoundHookAgent } from "./agent-context";
 import { metaCanSpawnChildren } from "../agent-types";
-import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { metaToolsIgnoringPaths, toolIgnoresPaths } from "../tools-ignoring-paths";
 import { withWaitHint } from "./wait-hint";
 
@@ -1893,7 +1888,8 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     // outer agents-dir to isolate against and no main-repo to block.
     //   - agentsDir = ""     → cross-agent blocks never fire.
     //   - rootRepo = worktree → main-repo block never fires.
-    // Its path lists come from _all.md ∪ system-coordinator.md (buildSystemAccessTable),
+    // Its path lists and toolsIgnoringPaths come from _all.md ∪
+    // system-coordinator.md (buildSystemHookPolicy, which loads each layer once),
     // resolved live; a missing list there is strict (deny), never permissive.
     const resolved = resolveAgentFromCwd(cwd);
     // Prefer the resolved home (handles symlinked HOME) when available.
@@ -1907,7 +1903,10 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     // deny those writes structurally so @system cannot widen itself.
     protectedWritePaths = systemProtectedWritePaths(home);
     try {
-      access = await buildSystemAccessTable(userHome());
+      const policy = await buildSystemHookPolicy(userHome());
+      access = policy.access;
+      // A layer that fails to load contributes nothing, so failure only narrows it.
+      toolsIgnoringPaths = policy.toolsIgnoringPaths;
     } catch {
       // Even a layer-load failure must not fail open.
       await emitPathDecision(agentDir, toolName, toolInput, {
@@ -1916,9 +1915,6 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
       }, isCoordinator);
       return;
     }
-    // Live from _all.md ∪ system-coordinator.md, like its path lists above. A
-    // layer that fails to load contributes nothing, so failure only narrows it.
-    toolsIgnoringPaths = (await loadMergedAgentTypePermissions(SYSTEM_COORDINATOR_TYPE)).toolsIgnoringPaths;
   } else {
     // Authenticate the explicit id against an operator-registered record and
     // either its canonical worktree cwd or its live shared-repo Claude process.

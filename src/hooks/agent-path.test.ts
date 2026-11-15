@@ -3315,6 +3315,21 @@ describe("hookCheckPath — toolsIgnoringPaths sources", () => {
       await callSosumi();
       expect(lastDecision().permissionDecision).toBe("deny");
     });
+
+    test("reads each layer once per tool call (paths and toolsIgnoringPaths share one load)", async () => {
+      await writeLayer("_all", ["mcp__sosumi__*"]);
+      await writeLayer("system-coordinator", [SOSUMI]);
+      const fileSpy = spyOn(Bun, "file");
+      try {
+        await callSosumi();
+        const opened = fileSpy.mock.calls.map((call) => String(call[0]));
+        expect(opened.filter((path) => path.endsWith("/_all.md"))).toHaveLength(1);
+        expect(opened.filter((path) => path.endsWith("/system-coordinator.md"))).toHaveLength(1);
+      } finally {
+        fileSpy.mockRestore();
+      }
+      expect(lastDecision().permissionDecision).toBe("allow");
+    });
   });
 });
 

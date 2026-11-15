@@ -242,9 +242,10 @@ export function buildCodexAllowOutput(originalToolInput: Record<string, unknown>
  * `toolsIgnoringPaths` is the union of the same layers' `toolsIgnoringPaths:`
  * lists (MCP tools that skip the path checks; invalid entries were already
  * dropped by the loader). The codex hook resolves it here, live, exactly as it
- * resolves its allow list; @system resolves it here with the
- * system-coordinator type (`_all` ∪ `system-coordinator`). A missing layer
- * contributes nothing, so a load failure only narrows the list.
+ * resolves its allow list. (@system resolves its list in
+ * `buildSystemHookPolicy`, paths-table.ts, from the layers it already loads
+ * for its paths.) A missing layer contributes nothing, so a load failure only
+ * narrows the list.
  */
 export async function loadMergedAgentTypePermissions(
   agentType: string | undefined,

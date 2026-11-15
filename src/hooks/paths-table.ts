@@ -27,6 +27,7 @@ import { metadataCli, type AgentCli } from "../agent-cli";
 import { encodeClaudeProjectPath } from "../auto-compact";
 import { metaCanSpawnChildren, loadAgentType, type AgentType } from "../agent-types";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { unionToolsIgnoringPaths } from "../tools-ignoring-paths";
 import {
   canonicalizeAccessPath,
   canonicalizeSandboxPath,
@@ -250,21 +251,31 @@ function unionLayerPaths(layers: Array<AgentType | undefined>): PathsConfig {
   });
 }
 
+/** What the `@system` hook resolves live from its two layers on every call. */
+export interface SystemHookPolicy {
+  /** The prepared access table (see {@link buildSystemAccessTable}). */
+  access: PreparedAccessTable;
+  /** `_all.md` ∪ `system-coordinator.md` `toolsIgnoringPaths` (valid entries only). */
+  toolsIgnoringPaths: string[];
+}
+
 /**
- * Build (and prepare) the access table for the `@system` coordinator, which has
- * no `meta.json`. Its lists come from `_all.md` ∪ `system-coordinator.md`, resolved live at
- * hook time (the agent-types dir is read-only in the floor). Everything is
- * rooted at `<home>/.itsybitsy`. If a layer fails to load the table is empty
- * lists plus the runtime roots — strict, NEVER permissive.
+ * Resolve the `@system` coordinator's hook policy, which has no `meta.json`:
+ * its access table and its `toolsIgnoringPaths`, both from `_all.md` ∪
+ * `system-coordinator.md`, resolved live at hook time (the agent-types dir is
+ * read-only in the floor). Each layer is loaded ONCE per call for both, since
+ * this runs on every @system PreToolUse. Everything is rooted at
+ * `<home>/.itsybitsy`. If a layer fails to load it contributes nothing: the
+ * table is empty lists plus the runtime roots and nothing skips path checks —
+ * strict, NEVER permissive.
  */
-export async function buildSystemAccessTable(home: string): Promise<PreparedAccessTable> {
+export async function buildSystemHookPolicy(home: string): Promise<SystemHookPolicy> {
   const itsyHome = join(home, ".itsybitsy");
-  let paths: PathsConfig = { allowRead: [], allowWrite: [], deny: [] };
   const [allLayer, systemLayer] = await Promise.all([
     loadAgentType("_all").catch(() => undefined),
     loadAgentType(SYSTEM_COORDINATOR_TYPE).catch(() => undefined),
   ]);
-  paths = unionLayerPaths([allLayer, systemLayer]);
+  const paths = unionLayerPaths([allLayer, systemLayer]);
 
   const uid = process.getuid?.() ?? 0;
   const table = agentPathAccessTable({
@@ -278,7 +289,19 @@ export async function buildSystemAccessTable(home: string): Promise<PreparedAcce
     canSpawnChildren: true,
     home,
   });
-  return prepareAccessTable(table);
+  return {
+    access: prepareAccessTable(table),
+    toolsIgnoringPaths: unionToolsIgnoringPaths([allLayer?.toolsIgnoringPaths, systemLayer?.toolsIgnoringPaths]),
+  };
+}
+
+/**
+ * Build (and prepare) the access table for the `@system` coordinator from
+ * `_all.md` ∪ `system-coordinator.md`; the access half of
+ * {@link buildSystemHookPolicy}, which the hook calls instead.
+ */
+export async function buildSystemAccessTable(home: string): Promise<PreparedAccessTable> {
+  return (await buildSystemHookPolicy(home)).access;
 }
 
 // ── Denial-reason classification (message only) ──────────────────────────────

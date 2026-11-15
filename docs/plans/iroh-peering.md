@@ -71,6 +71,20 @@ approval first.
   at least one peer, or when you open the Peers dialog.
 - An install that never pairs never touches the network.
 - Once bound, the endpoint stays up until `ib watch` exits.
+- Only one `ib watch` per machine owns the endpoint. Two endpoints with the
+  same key would fight: the relay keeps one connection per id, discovery
+  records overwrite each other, and requests could reach either process.
+- Before binding, `ib watch` creates `~/.itsybitsy/peer/endpoint.lock` with
+  `O_CREAT|O_EXCL` and writes its pid.
+- If the lock already exists and that pid is alive, this `ib watch` skips
+  peering. It logs "peering disabled: ib watch pid N owns the endpoint" to
+  `watch.log`, and its Peers dialog says the same.
+- A lock whose pid is dead gets taken over. The owner deletes the lock when it
+  exits.
+- A second `ib watch` tries for the lock only at the two bind moments above.
+  So after the owner exits, opening Peers or restarting moves peering over.
+- This matches Telegram today: the first poller wins, and a second `ib watch`
+  gets a 409 and turns its routing off.
 
 ### Key generation and storage
 
@@ -222,8 +236,8 @@ Pairing happens only in the watch window. There is no `ib peer add`.
 ## Out of scope for v1
 
 Messages to remote agents or the remote coordinator; any remote mutation;
-remote agent lists in the dashboard; a self-hosted relay; key rotation; two
-`ib watch` processes sharing one key; Intel Macs; migration code for existing
+remote agent lists in the dashboard; a self-hosted relay; key rotation; handing
+the endpoint to another `ib watch` while the owner is still running; Intel Macs; migration code for existing
 `_all.md` files; renaming peers.
 
 ## Open questions

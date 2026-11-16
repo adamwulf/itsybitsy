@@ -1,6 +1,6 @@
 /**
  * The iroh endpoint inside `ib watch` (docs/plans/iroh-peering.md, "Process
- * model"; SPEC.md §22.3), and the one pairing session it runs at a time.
+ * model"; SPEC.md §20.3), and the one pairing session it runs at a time.
  *
  * - Binding: Phase 2 binds when the Peers dialog opens (`openDialog`), never
  *   at boot, and only once. Before binding it takes the endpoint lock; when

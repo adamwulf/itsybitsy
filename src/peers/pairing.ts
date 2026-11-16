@@ -1,5 +1,5 @@
 /**
- * The pair protocol (docs/plans/iroh-peering.md, "Pairing"; SPEC.md §22.2).
+ * The pair protocol (docs/plans/iroh-peering.md, "Pairing"; SPEC.md §20.2).
  *
  * ALPN `itsybitsy/pair/1`, one connection per pairing. The initiator (A)
  * dialed the responder (B) by B's id, so QUIC has already proved the other end

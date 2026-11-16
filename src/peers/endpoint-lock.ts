@@ -14,8 +14,8 @@
  * process cannot read its own start time (`ps` denied), it writes the pid
  * alone, and such a lock counts as alive while the pid is.
  *
- * Nothing calls this yet. The first phase that binds the endpoint in `ib
- * watch` (Phase 2's Peers dialog) takes it.
+ * src/peers/service.ts takes it before binding (when the Peers dialog first
+ * opens) and releases it when `ib watch` exits.
  *
  * Taking over a dead owner's lock follows the outbox lock's steal: remove the
  * lock only while it still holds what we read, then retry the exclusive

@@ -1,5 +1,5 @@
 /**
- * The Peers dialog (`I` in `ib watch`; SPEC.md §22.1): this install's id, the
+ * The Peers dialog (`I` in `ib watch`; SPEC.md §20.1): this install's id, the
  * paired peers, a "Pair with id" input, and the pairing stages on either
  * side. The protocol and the endpoint live in src/peers/ (pairing.ts,
  * service.ts); this module only renders the service's view and maps keys to

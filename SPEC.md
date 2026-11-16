@@ -3571,3 +3571,90 @@ From `SPEC-ANTIGRAVITY-CLI.md` §6 (see there for the full list):
 The design source-of-truth is **`SPEC-ANTIGRAVITY-CLI.md`** in the repo root; `ANTIGRAVITY-CLI-NOTES.md` §17 carries the evidence (spike captures, payloads, TUI strings). Future agy SPEC changes update `SPEC-ANTIGRAVITY-CLI.md` first, then this §19 follows.
 
 ---
+
+## 20. Peering: Pairing in `ib watch`
+
+Two installs pair over [iroh](https://www.iroh.computer) so that each trusts the other's key. The design is `docs/plans/iroh-peering.md`; this section is the behavior as built through its Phase 2. The identity, `peers.json`, the endpoint lock and `ib peer` are in §12.1.3. Phases 3–4 (the trusted ALPN `itsybitsy/peer/1`, the `agents` op, the poller, binding at boot, and peer sections in the tree) are not built yet.
+
+Ids are ed25519 public keys written as 64 lowercase hex characters; the short id is the first 10.
+
+### 20.1 Peers Dialog
+
+`I` opens the Peers dialog (listed under App in `?` help). Opening it is the only thing that binds the endpoint (§20.3).
+
+**Idle view:**
+
+- this install's full id, from `secret.key` without loading the addon (the key is created if missing), wrapped when the dialog is narrow;
+- the endpoint status: `starting…` while the addon loads and binds, `accepting pairing requests while this dialog is open` once bound, `peering disabled: ib watch pid N owns the endpoint` when another live `ib watch` holds the lock, or `peering unavailable: <error>`;
+- the paired peers from `peers.json`, name and short id, up to 10 (the rest are counted), or the file's error when it is malformed;
+- a **Pair with id** input.
+
+**Pair with id.** Enter trims and lowercases the input and requires exactly 64 hex characters. Empty input, anything else, and this install's own id each show an error inline, under the input; typing clears it. Pairing also needs the endpoint bound, and no other pairing pending. The input uses the plain input dialog's editing rules, so a pasted id works whether it arrives as a bracketed paste (pi-tui reassembles one and delivers it as a single `\x1b[200~…\x1b[201~` chunk), a bracketed paste split across reads, or plain text.
+
+**Initiator (A) stages:**
+
+1. `Connecting to <B short id>…` while dialing and sending `pair-hello`.
+2. Code entry: `<B short id> is showing a pairing code. Type it here.`, then a **Code** input labelled with A's own short id, so it can be checked against B's screen. Enter normalizes the code (§20.2); a code that is not 8 alphabet characters shows an inline error and is not sent, so B's one attempt is not spent.
+3. `Checking the code with <B short id>…`.
+4. Name entry (§20.2), then the result.
+
+**Responder (B) stages:**
+
+1. `Pairing request from <A short id>…` for the moment B checks `peers.json`.
+2. `Pairing request from <A short id>. Code: XXXX-XXXX. Expires in 2 min.`
+3. Name entry, then the result.
+
+**Name entry.** After `pair-ok`, each side shows `Paired with <short id>.` and the prompt `Name for <short id>:`. Enter saves the typed name with `addPeer`, which replaces the entry by id and keeps its `pairedAt`; the name is sanitized (§12.1.3). Esc, or Enter on a blank input, keeps the saved name: the short id for a new peer, or the name A already gave B. Names are local and never sent. B skips name entry when A was already paired (§20.2): it keeps the name it has and shows `<A short id> was already paired, as "<name>".`
+
+**Results.** Success shows `Paired with "<name>" (<short id>).` Failures show one of: `Pairing refused: <id> does not have its Peers dialog open.`, `Pairing refused: <id> is busy with another pairing.`, `Wrong code. Pairing failed; start again from the install that dials.`, `The code expired. Pairing failed.`, `Pairing cancelled.`, `Connection failed: <detail>`, or `Pairing failed: <detail>` (a malformed message, or a save that failed). Any key leaves a result for the idle view.
+
+**Esc** cancels while the protocol runs (connecting, code entry, verifying, B's request and code), which closes the connection with the cancel code and returns to the idle view; the other side shows `Pairing cancelled.` At the name prompt it keeps the saved name, on a result it returns to the idle view, and in the idle view it closes the dialog. Once A has `pair-ok` or B has accepted the code, the pairing can no longer be cancelled. Every other key is consumed by the dialog while it is open.
+
+Closing the dialog, or another dialog replacing it, stops B from accepting requests and cancels a pairing still in progress. The endpoint stays bound.
+
+### 20.2 Pair Protocol
+
+ALPN `itsybitsy/pair/1`, one connection per pairing (`src/peers/pairing.ts`). Each request and its reply use their own bi stream: the initiator opens it, writes one JSON object and calls `finish`; the responder reads it with `readToEnd(4096)`, writes one JSON reply on the same stream and calls `finish`.
+
+| Direction | Message |
+|---|---|
+| A→B | `{"op":"pair-hello"}` |
+| B→A | `{"op":"pair-code-shown"}`, `{"op":"pair-refused","reason":"not-accepting"\|"busy"}`, or `{"op":"pair-ok"}` |
+| A→B | `{"op":"pair-code","code":"..."}` |
+| B→A | `{"op":"pair-ok"}` or `{"op":"pair-fail","reason":"wrong-code"\|"expired"}` |
+
+**B's rules:**
+
+1. Admit a `pair-hello` only while B's Peers dialog is open and no other pairing, incoming or outgoing, is pending (a session is pending until its result, name entry included). Otherwise reply `pair-refused` with `not-accepting` or `busy`. The check and the claim are one synchronous step, so two requests cannot both be admitted.
+2. If A's id (`remoteId`, authenticated by the handshake) is already in B's `peers.json`, reply `pair-ok` with no code: B already trusts that key. This also repairs a lost final reply.
+3. Otherwise generate a code, show it, and reply `pair-code-shown`.
+4. One attempt per code: whatever the next message, the code is discarded. A code that arrives at or after expiry gets `pair-fail expired`, even when right. A wrong code gets `pair-fail wrong-code`. A right code: B saves A with `addPeer` (name = A's short id) **before** replying `pair-ok`.
+5. At expiry (2 minutes) B discards the code and closes the connection with the expired code; A shows the expiry.
+
+A saves B when it reads `pair-ok`, keeping a name it already gave B, then closes.
+
+**Closing.** B always sends the last message, then waits for A to close (A closes as soon as it has read it), so a close cannot race the reply; B closes after 5 s at the latest. Other closes carry a code the other side maps to what it shows:
+
+| Code | Meaning | The other side shows |
+|---|---|---|
+| 0 | done, after the last message | — |
+| 1 | cancelled (Esc) | `Pairing cancelled.` |
+| 2 | expired (B's timer) | `The code expired. Pairing failed.` |
+| 3 | error; the reason says which | `Pairing failed: the other side reported: <reason>` |
+
+A connection that closes without one of these codes (a timeout, the other `ib watch` exiting) is a connection failure. Text from the other side is stripped of control characters and capped before it is shown.
+
+**Malformed input.** A message that is not UTF-8, not JSON, not an object, longer than 4096 bytes, has an unknown op or reason, or arrives out of turn closes the connection with code 3 and the reason (e.g. `message is not JSON`, `unknown op "x"`, `expected pair-hello, got pair-code`).
+
+**Code** (`src/peers/pair-code.ts`): 8 characters of Crockford base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`) from `crypto.getRandomValues`, each `byte & 31`, which is unbiased; 40 bits. Shown as `XXXX-XXXX`. Input is uppercased, dashes and spaces are dropped, O reads as 0, I and L as 1. Compared with `crypto.timingSafeEqual`; a length mismatch is not equal.
+
+### 20.3 Endpoint in `ib watch`
+
+`src/peers/service.ts`; `launchDashboard` creates it and loads nothing at boot.
+
+- **Binding.** The first `I` loads the identity, takes the endpoint lock (§12.1.3), and then loads the addon and binds with the n0 preset and the pair ALPN. This runs in the background: loading the addon costs 230–400 ms of wall time in the compiled binary, and the dialog shows `starting…` meanwhile. When another live `ib watch` holds the lock, nothing binds; the status says which pid, and `watch.log` gets `peering disabled: ib watch pid N owns the endpoint`. Each later dialog open retries the lock, so peering moves here once the owner exits. A bind that fails releases the lock and shows the error.
+- **Lifetime.** Once bound, the endpoint stays up until `ib watch` exits, whatever the dialog does. On exit it cancels any pairing, closes the endpoint (which resolves the pending `acceptNext`; until then it keeps Bun alive) and releases the lock, raced against a 2 s timeout like the Telegram shutdown.
+- **Accept loop.** Each incoming connection runs in its own task with its own error handling, so a failed handshake never stops the loop. Connections are dispatched by ALPN; only the pair ALPN exists so far, and any other is closed.
+- **Logging.** Bind, lock, refusal and pairing results go to `watch.log`, never to stderr.
+
+---

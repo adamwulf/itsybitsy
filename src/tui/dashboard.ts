@@ -3936,8 +3936,8 @@ export async function launchDashboard(): Promise<void> {
   // endpoint binds the first time the Peers dialog (`I`) opens, and stays up
   // until quitDashboard shuts it down. Logs go to watch.log. That first open
   // stalls the UI once, for about a third of a second, after the dialog has
-  // drawn "starting…": import("@number0/iroh") evaluates the napi addon
-  // synchronously on the event loop.
+  // drawn "starting…": the dynamic import in src/peers/iroh.ts evaluates the
+  // napi addon synchronously on the event loop.
   const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:

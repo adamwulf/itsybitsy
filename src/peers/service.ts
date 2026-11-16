@@ -8,9 +8,9 @@
  *   "peering disabled: ib watch pid N owns the endpoint". Each later dialog
  *   open retries, so peering moves here once the owner exits.
  * - Binding is async and the dialog shows "starting…" while it runs, but the
- *   first addon load is NOT off the event loop: `import("@number0/iroh")`
- *   evaluates the napi module synchronously, so the first open stalls the UI
- *   once, for about a third of a second (230-400 ms in the compiled binary),
+ *   first addon load is NOT off the event loop: iroh.ts's dynamic import of
+ *   the package evaluates the napi module synchronously, so the first open
+ *   stalls the UI once, for about a third of a second (230-400 ms compiled),
  *   after the dialog has drawn. The module stays loaded, so a later rebind
  *   does not stall.
  * - Once bound, the endpoint stays up until `shutdown()` (ib watch exit),

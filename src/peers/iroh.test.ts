@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { relative, resolve } from "node:path";
-import { IrohError, irohAddonLoaderCtx, loadIroh, shortIrohMessage } from "./iroh";
+import {
+  IrohError,
+  irohAddonLoaderCtx,
+  isIrohTooLong,
+  loadIroh,
+  parseIrohCloseReason,
+  shortIrohMessage,
+  type Iroh,
+  type IrohEndpoint,
+} from "./iroh";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -48,6 +57,151 @@ describe("loadIroh wrapper (real addon)", () => {
     expect(() => iroh.SecretKey.fromBytes(new Uint8Array(31))).toThrow(
       new IrohError("SecretKey.fromBytes", "SecretKey requires exactly 32 bytes"),
     );
+  });
+});
+
+describe("endpoints over a relay-disabled loopback (real addon, no network)", () => {
+  const ALPN = "itsybitsy/test/1";
+  const endpoints: IrohEndpoint[] = [];
+
+  afterEach(async () => {
+    for (const ep of endpoints.splice(0)) await ep.close();
+  });
+
+  async function bindLocal(iroh: Iroh, alpns: string[]): Promise<IrohEndpoint> {
+    const ep = await iroh.Endpoint.bind({
+      secretKey: iroh.SecretKey.generate().toBytes(),
+      alpns,
+      preset: { kind: "local", bindAddr: "127.0.0.1:0" },
+    });
+    endpoints.push(ep);
+    return ep;
+  }
+
+  test("binds with the given key, dials by id + direct addresses, and moves one message each way", async () => {
+    const iroh = await loadIroh();
+    const key = iroh.SecretKey.generate();
+    const server = await iroh.Endpoint.bind({ secretKey: key.toBytes(), alpns: [ALPN], preset: { kind: "local", bindAddr: "127.0.0.1:0" } });
+    endpoints.push(server);
+    expect(server.id().toString()).toBe(key.public().toString());
+    expect(server.directAddresses()[0]).toMatch(/^127\.0\.0\.1:\d+$/);
+    const client = await bindLocal(iroh, []);
+
+    const served = (async () => {
+      const incoming = await server.acceptNext();
+      if (!incoming) throw new Error("acceptNext returned null");
+      const conn = await incoming.accept();
+      const stream = await conn.acceptBi();
+      const request = new TextDecoder().decode(await stream.readToEnd(100));
+      await stream.writeAll(new TextEncoder().encode(`echo ${request}`));
+      await stream.finish();
+      return { remoteId: conn.remoteId().toString(), alpn: conn.alpn(), closed: await conn.closed() };
+    })();
+
+    const conn = await client.connect(server.id().toString(), ALPN, server.directAddresses());
+    expect(conn.remoteId().toString()).toBe(server.id().toString());
+    expect(conn.closeInfo()).toBeNull();
+    const stream = await conn.openBi();
+    await stream.writeAll(new TextEncoder().encode("hello"));
+    await stream.finish();
+    const reply = await stream.readToEnd(100);
+    expect(reply).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(reply)).toBe("echo hello");
+    conn.close(7, "bye (for now)");
+    expect(conn.closeInfo()).toEqual({ byPeer: false, reason: "closed" });
+
+    expect(await served).toEqual({
+      remoteId: client.id().toString(),
+      alpn: ALPN,
+      closed: { byPeer: true, code: 7, reason: "bye (for now)" },
+    });
+  });
+
+  test("a pending call on the other side fails, and closeInfo already says who closed and why", async () => {
+    const iroh = await loadIroh();
+    const server = await bindLocal(iroh, [ALPN]);
+    const client = await bindLocal(iroh, []);
+    const accepted = server.acceptNext().then((incoming) => incoming!.accept());
+    const conn = await client.connect(server.id().toString(), ALPN, server.directAddresses());
+    const serverConn = await accepted;
+    const pending = serverConn.acceptBi();
+    conn.close(2, "expired");
+    await expect(pending).rejects.toBeInstanceOf(IrohError);
+    expect(serverConn.closeInfo()).toEqual({ byPeer: true, code: 2, reason: "expired" });
+  });
+
+  test("readToEnd over the limit fails with the TooLong error", async () => {
+    const iroh = await loadIroh();
+    const server = await bindLocal(iroh, [ALPN]);
+    const client = await bindLocal(iroh, []);
+    const read = (async () => {
+      const conn = await (await server.acceptNext())!.accept();
+      const stream = await conn.acceptBi();
+      try {
+        await stream.readToEnd(10);
+        return null;
+      } catch (err) {
+        return err;
+      }
+    })();
+    const conn = await client.connect(server.id().toString(), ALPN, server.directAddresses());
+    const stream = await conn.openBi();
+    await stream.writeAll(new Uint8Array(50));
+    await stream.finish();
+    const err = await read;
+    expect(isIrohTooLong(err)).toBe(true);
+    expect(isIrohTooLong(new IrohError("RecvStream.readToEnd", "other"))).toBe(false);
+    conn.close(0, "done");
+  });
+
+  test("a dial on an ALPN the other side does not offer is a short IrohError", async () => {
+    const iroh = await loadIroh();
+    const server = await bindLocal(iroh, [ALPN]);
+    const client = await bindLocal(iroh, []);
+    // The server's side of the failed handshake rejects its accept().
+    const serverSide = server.acceptNext().then((incoming) => incoming!.accept()).then(
+      () => "accepted",
+      (err: unknown) => (err instanceof IrohError ? err.op : "other"),
+    );
+    let caught: unknown;
+    try {
+      await client.connect(server.id().toString(), "itsybitsy/other/1", server.directAddresses());
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(IrohError);
+    expect((caught as IrohError).op).toBe("Endpoint.connect");
+    expect((caught as IrohError).message).not.toContain("\n");
+    expect(await serverSide).toBe("Incoming.accept");
+  });
+
+  test("close() resolves a pending acceptNext with null", async () => {
+    const iroh = await loadIroh();
+    const ep = await iroh.Endpoint.bind({
+      secretKey: iroh.SecretKey.generate().toBytes(),
+      alpns: [ALPN],
+      preset: { kind: "local", bindAddr: "127.0.0.1:0" },
+    });
+    const pending = ep.acceptNext();
+    await ep.close();
+    expect(await pending).toBeNull();
+  });
+});
+
+describe("parseIrohCloseReason", () => {
+  test("a close by the other side carries its code and its own reason text", () => {
+    expect(parseIrohCloseReason("closed by peer: cancelled (code 1)")).toEqual({ byPeer: true, code: 1, reason: "cancelled" });
+    expect(parseIrohCloseReason("closed by peer: protocol error: bad (json) code 7 (code 3)")).toEqual({
+      byPeer: true,
+      code: 3,
+      reason: "protocol error: bad (json) code 7",
+    });
+    expect(parseIrohCloseReason("closed by peer:  (code 0)")).toEqual({ byPeer: true, code: 0, reason: "" });
+  });
+
+  test("anything else is not by the peer", () => {
+    expect(parseIrohCloseReason("closed")).toEqual({ byPeer: false, reason: "closed" });
+    expect(parseIrohCloseReason("timed out")).toEqual({ byPeer: false, reason: "timed out" });
   });
 });
 

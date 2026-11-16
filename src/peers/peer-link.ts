@@ -6,9 +6,10 @@
  *   - the responder re-reads `peers.json` for every accepted connection and
  *     closes any other id with {@link PEER_CLOSE.notPeer} before reading
  *     anything from it;
- *   - it re-reads the file again before EVERY request on a live connection, so
- *     `ib peer remove` takes effect on the next request rather than the next
- *     dial.
+ *   - it re-reads the file again for EVERY request on a live connection, both
+ *     when the request's stream is accepted and again right before it is
+ *     answered, so `ib peer remove` takes effect on the next answer (even for
+ *     a stream opened before the removal) rather than the next dial.
  *
  * Each request uses its own bi stream: the dialer writes one JSON object and
  * calls `finish`; the responder reads it with `readToEnd(4096)`, writes one
@@ -92,7 +93,8 @@ export function cleanRemoteText(text: string): string {
 }
 
 /**
- * The reply's agent list, from the watcher's latest snapshot: the seven
+ * The reply's agent list, from the watcher's last fully detected snapshot
+ * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the seven
  * allowed fields of each agent, and no system coordinator. (The system
  * coordinator has no agent directory, so the watcher never lists it; the
  * filter keeps it out even if that changes.)
@@ -254,7 +256,7 @@ export async function requestAgents(conn: PairConnection): Promise<RemoteAgent[]
 export interface PeerResponderDeps {
   /** Whether `id` is in `peers.json`, re-read on every call. A failed read must answer false. */
   isPeer(id: string): Promise<boolean>;
-  /** The agent list to send: built from the watcher's latest snapshot, with no IO. */
+  /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): RemoteAgent[];
   /** watch.log in `ib watch`. */
   log(line: string): void;
@@ -262,8 +264,9 @@ export interface PeerResponderDeps {
 
 /**
  * Serve one accepted trusted-ALPN connection until it closes. Checks the
- * allowlist before reading anything, and again before every request. Each
- * request runs in its own task with its own error handling. Never throws.
+ * allowlist before reading anything, again when each request's stream is
+ * accepted, and again right before each answer. Each request runs in its own
+ * task with its own error handling. Never throws.
  */
 export async function serveTrustedConnection(conn: PairConnection, deps: PeerResponderDeps): Promise<void> {
   const from = shortPeerId(conn.remoteId);
@@ -302,6 +305,15 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       closeQuietly(conn, PEER_CLOSE.error, reason);
     }
     // Anything else: the stream or the connection is gone; there is no one to answer.
+    return;
+  }
+
+  // Again now, right before answering: the stream was accepted on its first
+  // frame, and a client can hold it open across `ib peer remove` before it
+  // finishes the request. The answer reflects peers.json as of this moment.
+  if (!(await deps.isPeer(conn.remoteId))) {
+    deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
+    closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
     return;
   }
 

@@ -626,6 +626,51 @@ describe("AgentWatcher", () => {
       });
     });
 
+    test("lastDetectedAgents is the list last passed to onUpdate: read while detection is pending, it never shows 'unknown'", async () => {
+      // readAllAgents builds new Agent objects every pass, each starting as "unknown".
+      const first = makeAgent("agent-1");
+      first.state = "unknown";
+      const second = makeAgent("agent-1");
+      second.state = "unknown";
+      mockReadAllAgents
+        .mockResolvedValueOnce(readResult({ agents: [first] }))
+        .mockResolvedValue(readResult({ agents: [second] }));
+      let gate: Promise<void> | null = null;
+      mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
+        if (gate) await gate;
+        for (const a of agents) a.state = a === first ? "running" : "waiting";
+      });
+      mockBuildAgentTree.mockImplementation((agents) => agents);
+      mockFlattenAgentTree.mockImplementation((roots) => roots.map((a) => makeFlatAgent(a)));
+      mockReadPendingQuestions.mockResolvedValue([]);
+
+      const updates: Agent[][] = [];
+      const watcher = new AgentWatcher([{ path: tempDir, name: "test" }], { onUpdate: (agents) => updates.push(agents) });
+      expect(watcher.lastDetectedAgents).toEqual([]);
+      await watcher.start();
+      expect(watcher.lastDetectedAgents.map((a) => a.state)).toEqual(["running"]);
+
+      // A second pass blocks inside detection.
+      let release!: () => void;
+      gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const pass = watcher.refresh();
+      await waitFor(() => watcher.lastAgents[0] === second, { message: "second pass read its agents" });
+      await Bun.sleep(5);
+      // lastAgents already holds the undetected list; lastDetectedAgents does not.
+      expect(watcher.lastAgents.map((a) => a.state)).toEqual(["unknown"]);
+      expect(watcher.lastDetectedAgents).toEqual([first]);
+      expect(watcher.lastDetectedAgents.map((a) => a.state)).toEqual(["running"]);
+
+      release();
+      await pass;
+      expect(watcher.lastDetectedAgents).toEqual([second]);
+      expect(watcher.lastDetectedAgents.map((a) => a.state)).toEqual(["waiting"]);
+      expect(updates.at(-1)).toBe(watcher.lastDetectedAgents);
+      watcher.stop();
+    });
+
     test("detectAgentStates changes state between refreshes", async () => {
       const agent1 = makeAgent("agent-1");
 

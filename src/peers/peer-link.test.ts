@@ -146,6 +146,23 @@ describe("decodeAgentsReply", () => {
   });
 });
 
+describe("requestAgents", () => {
+  test("a reply over 1 MB rejects with a protocol error, not a parse", async () => {
+    const link = createMemoryLink(ID_A, ID_B);
+    // A responder that ignores the cap: it answers with more than 1 MB.
+    const responder = (async () => {
+      const stream = await link.b.acceptBi();
+      await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
+      const agents = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
+      await stream.writeAll(encode({ op: "agents", agents }));
+      await stream.finish();
+    })();
+    await expect(requestAgents(link.a)).rejects.toThrow(new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`));
+    await responder;
+    link.a.close(PEER_CLOSE.done, "done");
+  });
+});
+
 describe("serveTrustedConnection", () => {
   const snapshot = (): RemoteAgent[] => toRemoteAgents([fullAgent("agent-1")]);
 
@@ -154,8 +171,9 @@ describe("serveTrustedConnection", () => {
     expect(await requestAgents(side.a)).toEqual(snapshot());
     expect(await requestAgents(side.a)).toEqual(snapshot());
     expect(side.snapshots()).toBe(2);
-    // One check at accept, one per request.
-    expect(side.checks()).toBe(3);
+    // One check at the connection's accept, then two per request: when its
+    // stream is accepted and right before it is answered.
+    expect(side.checks()).toBe(5);
     expect(side.a.closeInfo()).toBeNull();
     side.a.close(PEER_CLOSE.done, "done");
     await side.done;
@@ -179,6 +197,22 @@ describe("serveTrustedConnection", () => {
     await expect(requestAgents(side.a)).rejects.toThrow();
     expect(side.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.notPeer, reason: "not a peer" });
     expect(side.snapshots()).toBe(1);
+    await side.done;
+    expect(side.logs).toContain(`peer link: refused a request from ${ID_A.slice(0, 10)}: no longer a peer; closing`);
+  });
+
+  test("a stream opened while trusted but finished after the removal gets no answer: closed as not a peer", async () => {
+    const side = serve({ snapshot });
+    const stream = await side.a.openBi();
+    // The connection's check and the stream's accept-time check both pass.
+    await waitFor(() => side.checks() === 2, { message: "stream accepted" });
+    side.peers.delete(ID_A); // `ib peer remove` while the request is still open
+    await stream.writeAll(encode({ op: "agents" }));
+    await stream.finish();
+    expect(await stream.readToEnd(PEER_MAX_REPLY_BYTES).catch((err: Error) => err)).toBeInstanceOf(Error);
+    expect(side.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.notPeer, reason: "not a peer" });
+    expect(side.snapshots()).toBe(0);
+    expect(side.checks()).toBe(3);
     await side.done;
     expect(side.logs).toContain(`peer link: refused a request from ${ID_A.slice(0, 10)}: no longer a peer; closing`);
   });

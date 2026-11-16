@@ -5,7 +5,7 @@
  *
  * - Binding happens at two moments, and only once: at boot when `peers.json`
  *   lists at least one peer (`bootIfPaired`, which `ib watch` starts in the
- *   background after the TUI has drawn), and when the Peers dialog opens
+ *   background once the watcher's first scan is done), and when the Peers dialog opens
  *   (`openDialog`) with nothing bound yet. An install with no peers that never
  *   opens the dialog never loads the addon or touches the network. Before
  *   binding it takes the endpoint lock; when another live `ib watch` holds it,
@@ -16,13 +16,14 @@
  *   iroh.ts's dynamic import of the package evaluates the napi module
  *   synchronously, so the first bind stalls the UI once, for about a third of
  *   a second (230-400 ms compiled). For a paired install that happens at boot,
- *   just after the TUI has drawn; otherwise on the first dialog open, after
+ *   just after the first agent tree has drawn; otherwise on the first dialog open, after
  *   the dialog has drawn "starting…". The module stays loaded, so a later
  *   rebind does not stall.
  * - The endpoint accepts two ALPNs: pair (pairing.ts) and peer (peer-link.ts,
  *   the trusted link). Once bound, the poller (poller.ts) runs and asks each
  *   peer in `peers.json` for its agents every 5 s; the trusted ALPN answers
- *   from the injected `agents()` snapshot (the watcher's latest agents).
+ *   from the injected `agents()` snapshot (the watcher's last fully detected
+ *   agents).
  * - Once bound, the endpoint stays up until `ib watch` exits (`shutdown()`)
  *   or until the accept loop fails. Either way the poller stops, then the
  *   endpoint is closed (which resolves a pending `acceptNext`, which otherwise
@@ -110,15 +111,16 @@ export interface PeerServiceDeps {
   setTimer(ms: number, fn: () => void): () => void;
   log(line: string): void;
   /**
-   * The agents the trusted ALPN reports: in `ib watch`, the watcher's latest
-   * snapshot (`watcher.lastAgents`), so an answer costs no extra IO.
+   * The agents the trusted ALPN reports: in `ib watch`, the watcher's last
+   * fully detected snapshot (`watcher.lastDetectedAgents`, never the
+   * mid-refresh `lastAgents`), so an answer costs no extra IO.
    */
   agents(): readonly Agent[];
 }
 
 /**
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
- * the n0 preset, and `agents` (the watcher's latest agents in `ib watch`).
+ * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
 export function defaultPeerServiceDeps(log: (line: string) => void, agents: () => readonly Agent[]): PeerServiceDeps {
   return {
@@ -263,6 +265,7 @@ export class PeerService {
    * Never throws.
    */
   async bootIfPaired(): Promise<void> {
+    if (this.shuttingDown) return;
     let peers: Peer[];
     try {
       peers = await this.deps.readPeers();

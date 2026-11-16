@@ -98,6 +98,7 @@ export class AgentWatcher {
   private refreshQueued = false;
   private hasCompletedInitialRefresh = false;
   private _lastAgents: Agent[] = [];
+  private _lastDetectedAgents: Agent[] = [];
   private _lastLiveTmuxSessions: Set<string> = new Set();
   /** Cached coordinator tmux session_created epoch — immutable for the session
    * lifetime, so we query tmux display-message once and reuse. Cleared when
@@ -123,6 +124,19 @@ export class AgentWatcher {
   /** Public read-only access to the most recently loaded agents list */
   get lastAgents(): Agent[] {
     return this._lastAgents;
+  }
+
+  /**
+   * The agents last passed to onUpdate: state detection has finished for every
+   * one of them, so none is still the placeholder "unknown" that readAllAgents
+   * starts with. `lastAgents` is replaced at the start of a refresh, before
+   * detection fills the states in over several awaits; this one only once the
+   * pass is done. Each refresh builds new Agent objects, so a later pass never
+   * rewrites these. Empty until the first refresh completes. The trusted peer
+   * link serves it (src/peers/peer-link.ts).
+   */
+  get lastDetectedAgents(): Agent[] {
+    return this._lastDetectedAgents;
   }
 
   /** Public read-only access to the most recent live tmux session set. */
@@ -454,6 +468,7 @@ export class AgentWatcher {
       this.runHealthChecks();
 
       if (!this.running) return;
+      this._lastDetectedAgents = agents;
       this.events.onUpdate(agents, flatList, questions, orphanedTmuxSessions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));

@@ -8904,6 +8904,37 @@ describe("Peers dialog", () => {
     expect(out).toContain("not a peer");
   });
 
+  test("a service change renders only while the Peers dialog is open", () => {
+    const dashboard = makeDashboard();
+    // Counts renders, and stands in for the overlay the dialog opens.
+    let renders = 0;
+    const counter = { renders: () => renders };
+    dashboard.setTui({
+      requestRender: () => {
+        renders++;
+      },
+      showOverlay: () => ({ hide: () => {} }),
+    } as unknown as TUI);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), lastError: null, agents: [] };
+
+    // Closed: the poller's background changes draw nothing.
+    service.set({ links: [link] });
+    service.set({ links: [{ ...link, connected: false, lastError: "timed out" }] });
+    expect(counter.renders()).toBe(0);
+
+    dashboard.handleInput("I");
+    const opened = counter.renders();
+    service.set({ links: [link] });
+    expect(counter.renders()).toBe(opened + 1);
+
+    dashboard.handleInput("\x1b"); // close it
+    const closed = counter.renders();
+    service.set({ links: [{ ...link, connected: false }] });
+    expect(counter.renders()).toBe(closed);
+  });
+
   test("formatSince picks the largest whole unit", () => {
     expect(formatSince(0)).toBe("0s");
     expect(formatSince(59_999)).toBe("59s");

@@ -1737,11 +1737,16 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
-  /** Attach the Peers dialog's service and re-render the dialog on its changes. */
+  /**
+   * Attach the Peers dialog's service and re-render the dialog on its changes.
+   * Only the dialog shows peer state so far, so a change while it is closed
+   * (the poller notifies in the background) requests no render.
+   */
   setPeerService(service: PeersDialogService): void {
     this.peerService = service;
     service.onChange(() => {
-      if (this._dialog?.type === "peers") syncPeersDialog(this._dialog);
+      if (this._dialog?.type !== "peers") return;
+      syncPeersDialog(this._dialog);
       this.tui?.requestRender();
     });
   }
@@ -3934,13 +3939,15 @@ export async function launchDashboard(): Promise<void> {
   }
   // Peering (src/peers/service.ts): nothing is loaded or bound here. The
   // endpoint binds at boot when peers.json lists a peer (bootIfPaired, started
-  // below once the TUI is up), or else the first time the Peers dialog (`I`)
-  // opens, and stays up until quitDashboard shuts it down. Logs go to
-  // watch.log. That first bind stalls the UI once, for about a third of a
-  // second: the dynamic import in src/peers/iroh.ts evaluates the napi addon
-  // synchronously on the event loop. The trusted link answers peers from the
-  // watcher's latest agents, so an answer costs no IO.
-  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () => dashboard.watcher?.lastAgents ?? []));
+  // at the end of this function once the watcher's first scan is done), or
+  // else the first time the Peers dialog (`I`) opens, and stays up until
+  // quitDashboard shuts it down. Logs go to watch.log. That first bind stalls
+  // the UI once, for about a third of a second: the dynamic import in
+  // src/peers/iroh.ts evaluates the napi addon synchronously on the event loop.
+  // The trusted link answers peers from the watcher's last fully detected
+  // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
+  // and never carries a state that detection has not filled in yet.
+  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () => dashboard.watcher?.lastDetectedAgents ?? []));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read
@@ -4198,11 +4205,14 @@ export async function launchDashboard(): Promise<void> {
   logToWatchLog(`[startup] tui.start() called (+${Date.now() - bootStart}ms)`);
   colorDetection.queryColorScheme();
   dashboard.startPolling();
-  // Peering at boot, in the background like Telegram, now that the TUI is up:
-  // a paired install binds the endpoint (taking the endpoint lock first) and
-  // starts polling its peers. It never throws; shutdown waits for the bind.
-  void peerService.bootIfPaired();
   logToWatchLog(`[startup] dashboard.startPolling() called, starting watcher (+${Date.now() - bootStart}ms)`);
   await watcher.start();
   logToWatchLog(`[startup] watcher.start() resolved (+${Date.now() - bootStart}ms)`);
+  // Peering at boot, in the background like Telegram, once the first agent
+  // tree has been drawn: a paired install binds the endpoint (taking the
+  // endpoint lock first) and starts polling its peers. Starting it here keeps
+  // the one-time addon-load stall out of the watcher's first scan, and means
+  // the trusted link never answers with the empty pre-scan list. It never
+  // throws; shutdown waits for the bind.
+  void peerService.bootIfPaired();
 }

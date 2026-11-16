@@ -257,8 +257,9 @@ trust B. Pairing again fixes it. B already trusts A's id, so step 3 replies
 **Protocol.**
 
 - On the trusted ALPN, the dialer sends `{"op":"agents"}`.
-- The responder answers from the watcher's latest list *after* state
-  detection, the list `onUpdate` receives, so the answer costs no extra IO.
+- The responder answers from `watcher.lastDetectedAgents`: the watcher's
+  latest list *after* state detection, which is the list `onUpdate`
+  receives. The answer costs no extra IO.
   It must not use `watcher.lastAgents`, which is assigned before detection and
   says "unknown" while detection runs.
 - For each agent, the answer carries `{id, nickname, repoName, repoPath,

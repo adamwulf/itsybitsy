@@ -181,13 +181,12 @@ This needs no framing code. B ties the pending code to the connection.
    it open. B accepts pairing only while that dialog is open.
 2. On A, paste B's id. A trims and lowercases it, checks it with
    `EndpointId.fromString`, dials B, and sends `pair-hello`.
-3. B accepts the request only if all of these hold:
-   - its Peers dialog is open;
-   - no other pairing is pending;
-   - A's id (from `conn.remoteId()`) is not already paired.
-
-   If any check fails, B replies `pair-refused {reason}` and closes, and A
-   shows the reason.
+3. B accepts the request only if its Peers dialog is open and no other
+   pairing is pending (incoming or outgoing). If either check fails, B replies
+   `pair-refused {reason}` and closes, and A shows the reason. If A's id (from
+   `conn.remoteId()`) is already in B's `peers.json`, B replies `pair-ok`
+   right away, with no code, because B already trusts that key. A then saves
+   B and goes to step 7.
 4. B generates a code and shows: "Pairing request from <A short id>. Code:
    XXXX-XXXX. Expires in 2 min." B replies `pair-code-shown`.
 5. A shows a code input, together with A's own short id so you can match it
@@ -227,9 +226,8 @@ attack.
   both screens keep a stranger who dials at the same moment from slipping in.
 
 **Lost final reply.** If A never receives `pair-ok`, B trusts A but A does not
-trust B. Pairing again fixes it. B accepts a re-pair from an id it already
-trusts and just replies `pair-ok`. This is the only exception to the "already
-paired" refusal in step 3.
+trust B. Pairing again fixes it. B already trusts A's id, so step 3 replies
+`pair-ok` without a code.
 
 ### Reconnection
 
@@ -324,7 +322,8 @@ Pairing happens only in the watch window. There is no `ib peer add`.
    - the Peers dialog on `I`, including name entry;
    - binding the endpoint in `ib watch` when the dialog opens. This takes the
      endpoint lock and calls `ep.close()` on exit. Phase 2 is the first phase
-     to bind the endpoint.
+     to bind the endpoint. Binding at boot when peers exist comes in Phase 3,
+     together with the trusted ALPN.
 
    Tests drive the protocol through the seam and the dialog through the
    existing dashboard test helpers. Real-endpoint tests use `presetMinimal`,

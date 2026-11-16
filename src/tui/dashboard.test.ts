@@ -8822,11 +8822,27 @@ describe("Peers dialog", () => {
     expect(dashboard.dialog).toBeNull();
   });
 
-  test("the help lists I", () => {
+  test("the help lists I, and its whole description fits the help dialog", () => {
     const dashboard = makeDashboard();
     dashboard.handleInput("?");
     const lines = assertDialog(dashboard.dialog, "help").lines.map(stripAnsi);
-    expect(lines.some((line) => /^\s+I\s+peers: /.test(line))).toBe(true);
+    expect(lines).toContain(`  ${"I".padEnd(18)}peers: this install's id, pairing`);
+    // The help dialog is 72 wide (68 inside), so the row is drawn uncut.
+    const drawn = stripAnsi(((dashboard as any).dialogOverlay.render(72) as string[]).join("\n"));
+    expect(drawn).toMatch(/│ {4}I {17}peers: this install's id, pairing +│/);
+  });
+
+  test("the / command palette has a peers entry that opens the dialog", () => {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    dashboard.handleInput("/");
+    const palette = assertDialog(dashboard.dialog, "fuzzy");
+    const index = palette.allItems.indexOf("peers — I");
+    expect(index).toBeGreaterThanOrEqual(0);
+    palette.onSelect(index);
+    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    expect(service.calls).toEqual(["open"]);
   });
 
   test("the idle view lists paired peers and every endpoint status", () => {

@@ -197,6 +197,7 @@ Press `?` in the dashboard for this list.
 | | `G` / `C` | Ghostty: repo worktree / agent's tmux session |
 | | `S` | Save debug snapshot |
 | App | `h` | Setup dialog (hooks + config) |
+| | `I` | Peers dialog: this install's id, paired peers, pairing with another install |
 | | `?` / `Ctrl-C` | Help / quit |
 
 ## CLI overview

@@ -1908,6 +1908,7 @@ export class DashboardComponent implements Component {
       { label: "remove repo — D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
       { label: "help — ?", action: () => agentActions.handleHelp(this) },
       { label: "setup — h", action: () => agentActions.handleSetup(this) },
+      { label: "peers — I", action: () => this.openPeersDialog() },
       { label: "scroll up — ;", action: () => agentActions.handleScrollUp(this) },
       { label: "scroll down — l", action: () => agentActions.handleScrollDown(this) },
     ];
@@ -3931,6 +3932,14 @@ export async function launchDashboard(): Promise<void> {
     telegramWake?.start();
     dashboard.telegramStatusTimer = setInterval(() => telegramMonitor.refresh(), 5_000);
   }
+  // Peering (src/peers/service.ts): nothing is loaded or bound here. The
+  // endpoint binds the first time the Peers dialog (`I`) opens, and stays up
+  // until quitDashboard shuts it down. Logs go to watch.log. That first open
+  // stalls the UI once, for about a third of a second, after the dialog has
+  // drawn "starting…": import("@number0/iroh") evaluates the napi addon
+  // synchronously on the event loop.
+  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog));
+  dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read
   //   (src/sandbox-collector-light.ts), not `ib sandbox-collector status`.
@@ -3942,11 +3951,6 @@ export async function launchDashboard(): Promise<void> {
   //   soon as the startup launch above ends, since it may rewrite the settings
   //   file after the first read. Watcher updates add the coordinator's stopped
   //   state (onUpdate).
-  // Peering (src/peers/service.ts): nothing is loaded or bound here. The
-  // endpoint binds, in the background, the first time the Peers dialog (`I`)
-  // opens, and stays up until quitDashboard shuts it down. Logs go to watch.log.
-  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog));
-  dashboard.setPeerService(peerService);
   dashboard.setCollectorStatus(sandboxCollectorHealth());
   void dashboard.refreshRemoteControlStatus();
   void dashboard.refreshRemoteControlAfterLaunch(coordinatorStartup);

@@ -2302,7 +2302,7 @@ export function handleHelp(ctx: ActionCtx) {
       header("App"),
       row("?", "help"),
       row("h", "setup"),
-      row("I", "peers: this install's id, pair with another install"),
+      row("I", "peers: this install's id, pairing"),
       row("Ctrl-C", "quit"),
       "",
       `${DIM}Press any key to dismiss${RESET}`,

@@ -292,8 +292,11 @@ install gets its own section:
 
 - `ib peer id` prints this install's id.
 - `ib peer list` prints paired peers (name and id).
-- `ib peer remove <name|id>` removes a peer. `checkIbCommandAccess` denies it
-  to agent sessions.
+- `ib peer remove <name|id>` removes a peer.
+- `checkIbCommandAccess` denies every `ib peer` command to agent sessions.
+  Peering is human-only in v1. This also avoids `ib peer id` behaving
+  differently depending on whether the agent sandbox, which denies
+  `secret.key`, is on.
 
 Pairing happens only in the watch window. There is no `ib peer add`.
 
@@ -330,8 +333,9 @@ Pairing happens only in the watch window. There is no `ib peer add`.
 
 - **Agent functionality:** not affected. No changes to `meta.json` or the
   agent lifecycle.
-- **Hooks:** one `_all.md` deny entry for `secret.key`, and a gate on
-  `ib peer remove` in `checkIbCommandAccess`.
+- **Hooks:** one `_all.md` deny entry for `secret.key`, and a gate in
+  `checkIbCommandAccess` that denies every `ib peer` command to agent
+  sessions.
 - **Watchdog:** not affected. Remote agents are never watched locally.
 - **`ib watch`:** the most affected area:
   - the Peers dialog on `I`, plus its help entry;

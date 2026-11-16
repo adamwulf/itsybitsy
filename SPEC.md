@@ -3681,7 +3681,7 @@ ALPN `itsybitsy/peer/1` (`src/peers/peer-link.ts`), served by the accept loop an
 
 | Close code | Meaning |
 |---|---|
-| 0 | a normal close: shutting down, or the peer was dropped from `peers.json` |
+| 0 | a normal close: shutting down, the peer was dropped from `peers.json`, or a request timed out |
 | 1 | `not a peer` |
 | 3 | a malformed request; the reason says which |
 
@@ -3690,7 +3690,8 @@ ALPN `itsybitsy/peer/1` (`src/peers/peer-link.ts`), served by the accept loop an
 - Each tick re-reads `peers.json`, so a newly paired peer is polled from the next tick, and a removed one is dropped: its connection is closed (code 0, `removed`) and its state forgotten. A `peers.json` that cannot be read keeps the known peers polled and is logged once per distinct error.
 - Each peer keeps one live connection between polls and is redialed only once that connection has closed.
 - A peer never has two dials or requests in flight at once. A dial can take up to 30 s to fail, so ticks that come while one is pending skip that peer; other peers are polled as usual. A failed dial or request is retried on the next tick.
-- Per-peer state, in memory only (nothing is written to disk): connected or not, `lastOkAt`, `lastError` (one short line: the dial's error such as `timed out`, `not a peer`, `closed by the other side`, `the other side reported: <reason>`, or a malformed reply), and the last agent list received, which is kept after the peer drops so Phase 4 can show it as last seen. The service exposes it as `view().links`, in `peers.json` order, and notifies its listeners when something visible changes (connected, the error, the list, a name, or the set of peers); a poll that changes nothing but `lastOkAt` does not notify.
+- Each `agents` request has 15 s to be answered. A peer can keep its connection alive and still never answer (its `ib watch` event loop wedged while the network side runs on), so on timeout the poller closes that connection (code 0, `request timed out`), records `request timed out`, and the next tick redials. Closing the connection is what ends the timed-out request, so it never overlaps the next one. Until the timeout, a peer that was connected still shows as connected.
+- Per-peer state, in memory only (nothing is written to disk): connected or not, `lastOkAt`, `lastError` (one short line: the dial's error such as `timed out`, `request timed out`, `not a peer`, `closed by the other side`, `the other side reported: <reason>`, or a malformed reply), and the last agent list received, which is kept after the peer drops so Phase 4 can show it as last seen. The service exposes it as `view().links`, in `peers.json` order, and notifies its listeners when something visible changes (connected, the error, the list, a name, or the set of peers); a poll that changes nothing but `lastOkAt` does not notify.
 - `watch.log` gets a line when a peer connects and when its error changes, not on every failed tick.
 - Stopping (on exit, or with the endpoint after an accept-loop failure) cancels the timer and closes every connection with code 0; a dial still in flight is closed when it lands. The state is kept, disconnected.
 

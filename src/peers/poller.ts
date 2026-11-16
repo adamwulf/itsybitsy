@@ -11,6 +11,12 @@
  * - A peer never has two dials or requests in flight at once. A dial can take
  *   up to 30 s to fail, so ticks that come while one is pending skip that
  *   peer. A failure is retried on the next tick.
+ * - Each request is bounded by {@link PEER_REQUEST_TIMEOUT_MS}. A peer can keep
+ *   its QUIC connection alive and still never answer (its `ib watch` event
+ *   loop wedged while the Rust side runs on), which would otherwise leave the
+ *   peer skipped forever. On timeout the connection is closed, `lastError` is
+ *   "request timed out", and the next tick redials. Closing the connection is
+ *   what ends the timed-out request, so it cannot overlap the next one.
  * - Per-peer state lives only in memory: connected or not, `lastOkAt`,
  *   `lastError`, and the last agent list received, which is kept after the
  *   peer drops (Phase 4 shows it dimmed as "last seen"). Nothing is written to
@@ -42,6 +48,16 @@ import { shortPeerId, type Peer } from "./store";
 import { IrohError } from "./iroh";
 
 export const PEER_POLL_INTERVAL_MS = 5_000;
+/** Longest an `agents` request may take on a live connection before it is closed. */
+export const PEER_REQUEST_TIMEOUT_MS = 15_000;
+
+/** A request that got no reply within {@link PEER_REQUEST_TIMEOUT_MS}. */
+class PeerRequestTimeout extends Error {
+  constructor() {
+    super("request timed out");
+    this.name = "PeerRequestTimeout";
+  }
+}
 
 /** One peer's link state, as the dashboard reads it. */
 export interface PeerLinkState {
@@ -85,6 +101,8 @@ interface Link {
 
 /** A failed dial or request, as one short line. */
 function describeFailure(err: unknown, conn: PairConnection | null): string {
+  // Checked first: the timeout closes the connection itself, so closeInfo is set.
+  if (err instanceof PeerRequestTimeout) return err.message;
   const info = conn?.closeInfo() ?? null;
   if (info !== null) return describePeerClose(info);
   if (err instanceof PeerErrorReply || err instanceof PeerProtocolError) return err.message;
@@ -259,7 +277,7 @@ export class PeerPoller {
         link.conn = dialed;
         this.watchClose(link, dialed, generation);
       }
-      const agents = await requestAgents(conn);
+      const agents = await this.requestWithTimeout(link, conn);
       if (!this.isCurrent(link, generation)) return;
       this.succeeded(link, agents);
     } catch (err) {
@@ -268,6 +286,39 @@ export class PeerPoller {
     } finally {
       this.inFlight.delete(link.id);
     }
+  }
+
+  /**
+   * {@link requestAgents} bounded by {@link PEER_REQUEST_TIMEOUT_MS}. On
+   * timeout it detaches `conn` from `link` (so the close is not reported as the
+   * other side's), closes it, which fails the pending request, and rejects
+   * with {@link PeerRequestTimeout}.
+   */
+  private requestWithTimeout(link: Link, conn: PairConnection): Promise<RemoteAgent[]> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
+        if (settled) return;
+        settled = true;
+        if (link.conn === conn) link.conn = null;
+        closeQuietly(conn, PEER_CLOSE.done, "request timed out");
+        reject(new PeerRequestTimeout());
+      });
+      requestAgents(conn).then(
+        (agents) => {
+          if (settled) return;
+          settled = true;
+          cancel();
+          resolve(agents);
+        },
+        (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          cancel();
+          reject(err);
+        },
+      );
+    });
   }
 
   /** When `conn` closes while it is still `link`'s connection: mark the peer disconnected, so the next tick redials. */

@@ -10,7 +10,7 @@ import { waitFor } from "../test-utils";
 import { IrohError, irohAddonLoaderCtx } from "./iroh";
 import { PEER_CLOSE, serveTrustedConnection, type RemoteAgent } from "./peer-link";
 import type { PairConnection } from "./pairing";
-import { PEER_POLL_INTERVAL_MS, PeerPoller } from "./poller";
+import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS, PeerPoller } from "./poller";
 import type { Peer } from "./store";
 import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test-pair-transport";
 
@@ -36,6 +36,10 @@ interface Remote {
   requests: number;
   /** The far (responder) end of each connection dialed to it. */
   served: MemoryConnection[];
+  /** Its event loop is wedged: requests are accepted but never answered. */
+  stalled: boolean;
+  /** Dials that arrived while an earlier connection from us was still open. */
+  overlaps: number;
 }
 
 function makeRig(initialPeers: Peer[]) {
@@ -49,7 +53,7 @@ function makeRig(initialPeers: Peer[]) {
   const remote = (id: string): Remote => {
     let r = remotes.get(id);
     if (r === undefined) {
-      r = { allowed: true, agents: [remoteAgent(`agent-of-${id.slice(0, 4)}`)], requests: 0, served: [] };
+      r = { allowed: true, agents: [remoteAgent(`agent-of-${id.slice(0, 4)}`)], requests: 0, served: [], stalled: false, overlaps: 0 };
       remotes.set(id, r);
     }
     return r;
@@ -58,10 +62,15 @@ function makeRig(initialPeers: Peer[]) {
   /** A working dial: an in-memory link served by the real responder. */
   const connect = async (id: string): Promise<PairConnection> => {
     const r = remote(id);
+    if (r.served.some((c) => c.closeInfo() === null)) r.overlaps++;
     const link = createMemoryLink(SELF, id);
     r.served.push(link.b);
     void serveTrustedConnection(link.b, {
-      isPeer: async () => r.allowed,
+      isPeer: async () => {
+        // A wedged remote: the per-request check never returns, so no reply is sent.
+        if (r.stalled) await new Promise(() => {});
+        return r.allowed;
+      },
       snapshot: () => {
         r.requests++;
         return r.agents;
@@ -215,7 +224,7 @@ describe("PeerPoller", () => {
     rig.poller.stop();
   });
 
-  test("a hung request is never doubled: ticks skip the peer until it settles", async () => {
+  test("a hung request is never doubled; after 15 s it times out, its connection is closed, and the next tick redials", async () => {
     const rig = makeRig([peer(P1, "B")]);
     // A connection whose far end never answers: no responder runs on it.
     const silent = createMemoryLink(SELF, P1);
@@ -231,21 +240,69 @@ describe("PeerPoller", () => {
       closed: () => silent.a.closed(),
       closeInfo: () => silent.a.closeInfo(),
     };
-    rig.setDial(async () => counting);
+    // The dial lands 2 s after start, so the request's 15 s timeout falls
+    // between ticks (at 17 s) rather than on one.
+    const dial = deferredDial();
+    rig.setDial(() => dial.promise);
     rig.poller.start();
+    await waitFor(() => rig.dials.length === 1, { message: "dialing" });
+    rig.clock.jump(2_000);
+    dial.resolve(counting);
     await waitFor(() => streams === 1, { message: "first request sent" });
-    for (let i = 0; i < 4; i++) rig.tick();
-    await Bun.sleep(10);
+    for (const ms of [3_000, 5_000, 5_000]) {
+      rig.clock.advance(ms); // ticks at 5, 10 and 15 s: the request is in flight, so P1 is skipped
+      await Bun.sleep(5);
+    }
     expect(streams).toBe(1);
     expect(rig.dials).toEqual([P1]);
+    expect(rig.state(P1)?.lastError).toBeNull();
+    expect(silent.a.closeInfo()).toBeNull();
 
-    // The far end gives up on the connection: the request fails, and the next tick redials.
-    silent.b.close(PEER_CLOSE.done, "bye");
-    await waitFor(() => rig.state(P1)?.lastError === "closed by the other side", { message: "failed" });
     rig.setDial(rig.connect);
-    rig.tick();
+    expect(PEER_REQUEST_TIMEOUT_MS).toBe(15_000);
+    rig.clock.advance(2_000); // t = 17 s: 15 s after the request started, between ticks
+    await waitFor(() => rig.state(P1)?.lastError === "request timed out", { message: "timed out" });
+    expect(rig.state(P1)?.connected).toBe(false);
+    expect(silent.b.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "request timed out" });
+    expect(streams).toBe(1);
+    expect(rig.dials).toEqual([P1]);
+    expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): request timed out`);
+
+    rig.clock.advance(3_000); // t = 20 s: the next tick redials
     await waitFor(() => rig.state(P1)?.connected === true, { message: "redialed" });
     expect(rig.dials).toEqual([P1, P1]);
+    expect(rig.remote(P1).overlaps).toBe(0);
+    rig.poller.stop();
+  });
+
+  test("a connected peer whose remote wedges: shown connected until its request times out, then redialed; the list stays", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    const list = rig.state(P1)!.agents;
+    expect(rig.clock.pending()).toBe(1); // an answered request leaves only the tick timer armed
+
+    rig.remote(P1).stalled = true;
+    rig.tick(); // t = 5 s: this request hangs
+    await Bun.sleep(5);
+    rig.tick(); // 10 s
+    rig.tick(); // 15 s
+    await Bun.sleep(5);
+    expect(rig.remote(P1).served.length).toBe(1);
+    expect(rig.state(P1)?.connected).toBe(true);
+
+    // t = 20 s: the timeout and a tick fall due together. Whichever order the
+    // fake clock runs them in, there is exactly one redial and no overlap.
+    rig.remote(P1).stalled = false;
+    rig.tick();
+    await waitFor(() => rig.state(P1)?.lastError === "request timed out" || rig.dials.length === 2, { message: "timed out" });
+    expect(rig.remote(P1).served[0]!.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "request timed out" });
+    rig.tick(); // 25 s
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "redialed" });
+    expect(rig.dials).toEqual([P1, P1]);
+    expect(rig.remote(P1).overlaps).toBe(0);
+    expect(rig.state(P1)).toMatchObject({ connected: true, lastError: null, agents: list });
+    expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): request timed out`);
     rig.poller.stop();
   });
 

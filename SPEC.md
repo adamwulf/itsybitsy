@@ -1696,7 +1696,23 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 - `ib peer list` prints each paired peer's name, full id and `pairedAt` from `~/.itsybitsy/peer/peers.json`, or `No paired peers.`
 - `ib peer remove <name|id>` removes one peer by exact full id or exact name. A name that several peers share removes nothing, fails, and lists their ids. Removal is one-sided.
 
-None of them load the iroh addon. `ib peer id` derives the id from the key with `node:crypto`. Pairing happens only in `ib watch`, so there is no `ib peer add`. The embedded `_all.md` denies `~/.itsybitsy/peer/secret.key` to every agent, `@system` included, at the hook layer, and at the kernel layer for a sandboxed agent. No agent can write under `~/.itsybitsy/peer/`, so none can add a trusted peer: no shipped agent type lists it in `paths.allowWrite`, and `@system`, whose worktree root is all of `~/.itsybitsy`, has `peer/` on its protected write list (`systemProtectedWritePaths`, `src/hooks/agent-path.ts`).
+None of them load the iroh addon. `ib peer id` derives the id from the key with `node:crypto`. Pairing happens only in `ib watch`, so there is no `ib peer add`.
+
+**Reading `secret.key`.** The embedded `_all.md` denies `~/.itsybitsy/peer/secret.key` to every agent, `@system` included. For a sandboxed agent, the kernel enforces this for every spelling of the path. The hook enforces it only for file tools and for the Bash spellings its advisory Bash scanner resolves: absolute paths, `~` and `$HOME`. That scanner never checks a relative token against `paths.deny`. So for an unsandboxed agent, a relative spelling passes the hook. `@system` runs unsandboxed with cwd `~/.itsybitsy`, and its `Bash(ib:*)` allows `ib tgsendfile`, so `ib tgsendfile peer/secret.key` is not denied by the hook. The same goes for `cat peer/secret.key` from that cwd, for an agent whose allow list has `cat`. This scanner gap predates peering and applies to every `paths.deny` entry, `sealed/` included.
+
+**Writing under `peer/`.** No shipped agent type lists `~/.itsybitsy/peer/` in `paths.allowWrite`, so a worktree agent cannot write there. `@system`'s worktree root is all of `~/.itsybitsy`, so for `@system` the protection is `peer/` on its protected write list (`systemProtectedWritePaths` in `src/hooks/agent-path.ts`, §6.1 step 6). A write there is denied with its own reason: `peer/` is managed by the human-only `ib peer` and by `ib watch`. That list stops:
+
+- file tools;
+- redirects with a space before the target, or at the start of the command;
+- `tee`;
+- `sed -i`.
+
+Two other forms are stopped only by the coordinator shell-metacharacter gate in the intercept-task hook (`findShellMetachar`, §12.2.4):
+
+- a redirect glued to the word before it, as in `ib list>~/.itsybitsy/peer/peers.json`;
+- a writer chained after an allowed command, as in `ib list; cp x ~/.itsybitsy/peer/peers.json`, or the same with `mv`, `touch` or `rm`.
+
+If that gate is ever relaxed, `@system` can write under `peer/` again, and so can add a trusted peer.
 
 #### 12.1.4 Display
 

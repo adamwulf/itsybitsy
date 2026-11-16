@@ -799,6 +799,24 @@ const COMMAND_HELP: Record<string, string> = {
   roster:
     "Usage: ib roster <name>\n" +
     "  List a team's members with their repo and current state.",
+  peer:
+    "Usage: ib peer <subcommand> [args...]\n" +
+    "  id                 Print this install's peer id\n" +
+    "  list               List paired peers\n" +
+    "  remove <name|id>   Remove a paired peer\n" +
+    "  Pairing happens in ib watch. Agents cannot run ib peer.",
+  "peer id":
+    "Usage: ib peer id\n" +
+    "  Print this install's peer id (64 hex characters) on one line. Creates the\n" +
+    "  key in ~/.itsybitsy/peer/secret.key if it is missing.",
+  "peer list":
+    "Usage: ib peer list\n" +
+    "  List paired peers: name, full id, and when the pairing completed.",
+  "peer remove":
+    "Usage: ib peer remove <name|id>\n" +
+    "  Remove a paired peer by its exact full id or exact name. A name that\n" +
+    "  several peers share removes nothing; their ids are listed instead.\n" +
+    "  Removal is one-sided: the other install keeps this one until it removes it.",
   push:
     "Usage: ib push <repo-id>\n" +
     "  Push the repo's main (or master) branch to every configured remote.\n" +
@@ -949,6 +967,11 @@ function printUsage(): void {
   console.log("  team delete <name>  Delete a team");
   console.log("  roster <name>       List a team's members with repo and state");
   console.log("");
+  console.log("Peering:");
+  console.log("  peer id             Print this install's peer id");
+  console.log("  peer list           List paired peers");
+  console.log("  peer remove <name|id>  Remove a paired peer");
+  console.log("");
   console.log("Agent Lifecycle:");
   console.log("  new-agent, new      Spawn a new agent");
   console.log("  retire <id>         Stop and archive an agent without merging");
@@ -1030,7 +1053,7 @@ export async function main() {
 
   // Per-command help dispatch: `ib <command> --help` (or -h). Handled BEFORE
   // the switch so each case body doesn't need its own help check. Nested
-  // subcommands (hooks / team / config) are checked at both layers — e.g.
+  // subcommands (hooks / team / config / peer) are checked at both layers — e.g.
   // `ib team add --help` resolves to the "team add" entry, while `ib team
   // --help` resolves to the "team" entry.
   if (command && hasHelpFlag(args)) {
@@ -1038,7 +1061,7 @@ export async function main() {
     // Only do this for the known sub-grouped commands; everywhere else, the
     // top-level command key is the only valid lookup.
     const sub = args[1];
-    if (sub && (command === "hooks" || command === "team" || command === "config")) {
+    if (sub && (command === "hooks" || command === "team" || command === "config" || command === "peer")) {
       const subKey = `${command} ${sub}`;
       if (COMMAND_HELP[subKey]) {
         console.log(COMMAND_HELP[subKey]);
@@ -3204,6 +3227,13 @@ export async function main() {
       const repos = await listRepos();
       const { roster } = await import("./ib-commands");
       await printAndExit(await roster(name, repos));
+      break;
+    }
+    case "peer": {
+      // Never loads the iroh addon (src/peers/peer-command.ts).
+      const { runPeerCommand } = await import("./peers/peer-command");
+      const code = await runPeerCommand(args.slice(1));
+      if (code !== 0) process.exit(code);
       break;
     }
     case "tgallow": {

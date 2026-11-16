@@ -29,7 +29,7 @@ import { newRepoPrompt } from "./agent-actions";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
-import type { PeersDialogService } from "./peers-dialog";
+import { formatSince, type PeersDialogService } from "./peers-dialog";
 import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
 
@@ -8866,6 +8866,54 @@ describe("Peers dialog", () => {
     expect(out).toContain("peers.json: not valid JSON");
   });
 
+  test("each paired peer shows its connection state: connected, last seen N ago with the error, or not connected yet", () => {
+    const { dashboard, service } = open();
+    const C = "1b".repeat(32);
+    const D = "2c".repeat(32);
+    const E = "3d".repeat(32);
+    service.set({
+      peers: [
+        { id: OTHER, name: "Laptop B", pairedAt: "x" },
+        { id: C, name: "C", pairedAt: "x" },
+        { id: D, name: "D", pairedAt: "x" },
+        { id: E, name: "E", pairedAt: "x" },
+      ],
+      // E has no link state yet: the poller has not reached it.
+      links: [
+        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), lastError: null, agents: [] },
+        { id: C, name: "C", connected: false, lastOkAt: Date.now() - 125_000, lastError: "closed by the other side", agents: [] },
+        { id: D, name: "D", connected: false, lastOkAt: null, lastError: "timed out", agents: null },
+      ],
+    });
+    const rows = rendered(dashboard).map(stripAnsi);
+    const row = (prefix: string) => rows.find((r) => r.includes(prefix)) ?? "";
+    expect(row(`Laptop B  ${OTHER_SHORT}`)).toContain(`Laptop B  ${OTHER_SHORT}  ● connected`);
+    expect(row(`C         ${"1b".repeat(5)}`)).toContain(`C         ${"1b".repeat(5)}  ● last seen 2m ago`);
+    expect(row(`D         ${"2c".repeat(5)}`)).toContain(`D         ${"2c".repeat(5)}  ● not connected yet`);
+    expect(row(`E         ${"3d".repeat(5)}`)).not.toContain("●");
+    // The last error sits on the line under its peer.
+    expect(rows[rows.findIndex((r) => r.includes("last seen 2m ago")) + 1]).toContain("    closed by the other side");
+    expect(rows[rows.findIndex((r) => r.includes("not connected yet")) + 1]).toContain("    timed out");
+    // A connected peer shows no error line.
+    expect(rows[rows.findIndex((r) => r.includes("● connected")) + 1]).toContain(`C         ${"1b".repeat(5)}`);
+
+    // A change from the service redraws the state.
+    service.set({ links: [{ id: OTHER, name: "Laptop B", connected: false, lastOkAt: Date.now() - 3_000, lastError: "not a peer", agents: [] }] });
+    const out = text(dashboard);
+    expect(out).toContain(`Laptop B  ${OTHER_SHORT}  ● last seen 3s ago`);
+    expect(out).toContain("not a peer");
+  });
+
+  test("formatSince picks the largest whole unit", () => {
+    expect(formatSince(0)).toBe("0s");
+    expect(formatSince(59_999)).toBe("59s");
+    expect(formatSince(60_000)).toBe("1m");
+    expect(formatSince(3_599_000)).toBe("59m");
+    expect(formatSince(7_200_000)).toBe("2h");
+    expect(formatSince(3 * 86_400_000)).toBe("3d");
+    expect(formatSince(-5)).toBe("0s");
+  });
+
   test("a narrow dialog wraps the full id instead of cutting it", () => {
     const { dashboard } = open();
     const narrow = stripAnsi(((dashboard as any).dialogOverlay.render(40) as string[]).join("\n"));
@@ -9039,7 +9087,10 @@ describe("Peers dialog", () => {
 
   test("every row fits the dialog in every stage", () => {
     const { dashboard, service } = open();
-    service.set({ peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }] });
+    service.set({
+      peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }],
+      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, lastError: "e".repeat(160), agents: null }],
+    });
     const stages: PairStage[] = [
       { stage: "connecting" },
       { stage: "code-entry" },

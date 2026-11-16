@@ -4,15 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx, resetProcessStartEpochSecondsCache } from "../agents";
 import { resetUserHome, setUserHome } from "../home";
-import { peerDir, peerEndpointLockFile } from "../runtime-names";
-import { waitFor } from "../test-utils";
+import { peerDir, peerEndpointLockFile, peersFile } from "../runtime-names";
+import { makeAgent, waitFor } from "../test-utils";
 import { acquireEndpointLock, releaseEndpointLock } from "./endpoint-lock";
 import { loadOrCreateIdentity } from "./identity";
 import { irohAddonLoaderCtx } from "./iroh";
 import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, decodePairMessage, encodePairMessage } from "./pairing";
-import { PEER_ALPN } from "./peer-link";
+import { PEER_ALPN, PEER_CLOSE, requestAgents, serveTrustedConnection, toRemoteAgents, type RemoteAgent } from "./peer-link";
 import {
   PeerService,
+  defaultPeerServiceDeps,
   type PeerServiceDeps,
   type ServiceConnection,
   type ServiceEndpoint,
@@ -451,6 +452,174 @@ describe("PeerService pairWith", () => {
     await rawRequest(again, encodePairMessage({ op: "pair-hello" }));
     expect(service.view().session!.id).toBeGreaterThan(firstId);
     expect(changes.length).toBeGreaterThan(0);
+    await service.shutdown();
+  });
+});
+
+/**
+ * Make `endpoint`'s dials reach a responder (the real one, over an in-memory
+ * link) that lists this install and reports `agents`. `events` records each
+ * close of a dialed connection, so a test can check what closed first.
+ */
+function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: string[] = []): MemoryConnection[] {
+  const served: MemoryConnection[] = [];
+  endpoint.connectImpl = async (id) => {
+    const link = createMemoryLink("00".repeat(32), id);
+    served.push(link.b);
+    void serveTrustedConnection(link.b, { isPeer: async () => true, snapshot: () => agents, log: () => {} });
+    const conn = serviceConnection(link.a, PEER_ALPN);
+    return {
+      ...conn,
+      close: (code, reason) => {
+        events.push(`conn.close ${code} ${reason}`);
+        conn.close(code, reason);
+      },
+    };
+  };
+  return served;
+}
+
+const REMOTE_AGENTS: RemoteAgent[] = [
+  { id: "agent-r1", nickname: null, repoName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null },
+];
+
+describe("PeerService at boot", () => {
+  test("binds when peers.json lists a peer, on both ALPNs, and starts polling it; a later dialog open does not rebind", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, binds, logs } = makeService();
+    answerDials(endpoint, REMOTE_AGENTS);
+    await service.bootIfPaired();
+    expect(service.view().status).toEqual({ kind: "listening" });
+    expect(binds).toEqual([[PAIR_ALPN, PEER_ALPN]]);
+    expect(await lockContents()).toBe(`${process.pid} ${ME_START}\n`);
+    expect(logs).toContain("peering: binding at boot for 1 paired peer");
+    expect(service.view().peers.map((p) => p.name)).toEqual(["Laptop C"]);
+
+    await waitFor(() => service.view().links[0]?.connected === true, { message: "peer polled" });
+    expect(service.view().links).toEqual([
+      { id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: expect.any(Number), lastError: null, agents: REMOTE_AGENTS },
+    ]);
+    expect(endpoint.connects).toEqual([ID_REMOTE]);
+
+    service.openDialog();
+    await Bun.sleep(10);
+    expect(binds.length).toBe(1);
+    await service.shutdown();
+  });
+
+  test("with no peers (no file, or an empty list) nothing binds and the addon is never loaded", async () => {
+    let loads = 0;
+    irohAddonLoaderCtx.set(async () => {
+      loads++;
+      throw new Error("loaded");
+    });
+    const realBind = defaultPeerServiceDeps(() => {}, () => []).bindEndpoint;
+    for (const setup of [async () => {}, async () => {
+      await mkdir(peerDir(), { recursive: true });
+      await writeFile(peersFile(), "[]\n");
+    }]) {
+      await setup();
+      const { service, logs } = makeService({ bindEndpoint: realBind });
+      await service.bootIfPaired();
+      expect(service.view().status).toEqual({ kind: "idle" });
+      expect(service.view().links).toEqual([]);
+      expect(await lockContents()).toBeNull();
+      expect(logs).toEqual([]);
+    }
+    expect(loads).toBe(0);
+  });
+
+  test("another live ib watch holds the lock: no bind, it is logged, and the status says so", async () => {
+    alive.add(OTHER.pid);
+    starts.set(OTHER.pid, OTHER.startEpoch);
+    await mkdir(peerDir(), { recursive: true });
+    await writeFile(peerEndpointLockFile(), `${OTHER.pid} ${OTHER.startEpoch}\n`);
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+
+    const { service, endpoint, binds, logs } = makeService();
+    await service.bootIfPaired();
+    expect(service.view().status).toEqual({ kind: "disabled", ownerPid: OTHER.pid });
+    expect(binds).toEqual([]);
+    expect(logs).toContain(`peering disabled: ib watch pid ${OTHER.pid} owns the endpoint`);
+    expect(await lockContents()).toBe(`${OTHER.pid} ${OTHER.startEpoch}\n`);
+    await Bun.sleep(10);
+    expect(endpoint.connects).toEqual([]);
+    expect(service.view().links).toEqual([]);
+    await service.shutdown();
+  });
+
+  test("a malformed peers.json binds nothing and shows its error", async () => {
+    await mkdir(peerDir(), { recursive: true });
+    await writeFile(peersFile(), "{");
+    const { service, binds, logs } = makeService();
+    await service.bootIfPaired();
+    expect(service.view().status).toEqual({ kind: "idle" });
+    expect(binds).toEqual([]);
+    expect(service.view().peersError).toContain("not valid JSON");
+    expect(logs.some((line) => line.startsWith("peering: not binding at boot:"))).toBe(true);
+  });
+
+  test("shutdown stops the poller before it closes the endpoint", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint } = makeService();
+    const events: string[] = [];
+    const served = answerDials(endpoint, REMOTE_AGENTS, events);
+    const close = endpoint.close.bind(endpoint);
+    endpoint.close = async () => {
+      events.push("endpoint.close");
+      await close();
+    };
+    await service.bootIfPaired();
+    await waitFor(() => service.view().links[0]?.connected === true, { message: "peer polled" });
+    await service.shutdown();
+    expect(events).toEqual([`conn.close ${PEER_CLOSE.done} shutting down`, "endpoint.close"]);
+    expect(served[0]!.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "shutting down" });
+    expect(service.view().links[0]).toMatchObject({ connected: false, agents: REMOTE_AGENTS });
+  });
+
+  test("a failed accept loop stops the poller with the endpoint", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint } = makeService();
+    const served = answerDials(endpoint, REMOTE_AGENTS);
+    await service.bootIfPaired();
+    await waitFor(() => service.view().links[0]?.connected === true && endpoint.accepting, { message: "polled and accepting" });
+    endpoint.failAccept(new Error("Endpoint.acceptNext: socket gone"));
+    await waitFor(() => service.view().status.kind === "error", { message: "loop failed" });
+    await waitFor(() => served[0]!.closeInfo() !== null, { message: "poller connection closed" });
+    expect(service.view().links[0]?.connected).toBe(false);
+    await service.shutdown();
+  });
+});
+
+describe("PeerService trusted ALPN", () => {
+  test("answers a listed peer from agents(), projected to the allowed fields, and closes anyone else unread", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const local = makeAgent({ id: "agent-1", repoName: "app", repoPath: "/repos/app", state: "waiting" });
+    Object.assign(local.meta, { prompt: "SECRET PROMPT", agentType: "worker", manager: "agent-0", nickname: "nick" });
+    let snapshots = 0;
+    const { service, endpoint } = makeService({
+      agents: () => {
+        snapshots++;
+        return [local];
+      },
+    });
+    endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
+    await service.bootIfPaired();
+    const selfId = service.view().selfId!;
+
+    const listed = incomingFrom(endpoint, selfId, PEER_ALPN);
+    const reply = await requestAgents(listed);
+    expect(reply).toEqual(toRemoteAgents([local]));
+    expect(JSON.stringify(reply)).not.toContain("SECRET");
+    expect(snapshots).toBe(1);
+
+    const strangerLink = createMemoryLink("d4".repeat(32), selfId);
+    endpoint.push({ accept: async () => serviceConnection(strangerLink.b, PEER_ALPN) });
+    await expect(requestAgents(strangerLink.a)).rejects.toThrow();
+    expect(strangerLink.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.notPeer, reason: "not a peer" });
+    expect(snapshots).toBe(1);
+
+    listed.close(PEER_CLOSE.done, "done");
     await service.shutdown();
   });
 });

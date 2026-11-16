@@ -695,6 +695,14 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
     expect(parsed.reason).toContain("manager or spawner");
   });
 
+  test("run_command 'ib peer id' is denied — ib peer is user-only (checkIbCommandAccess parity)", async () => {
+    const parsed = await run(JSON.stringify({
+      toolCall: { name: "run_command", args: { CommandLine: "ib peer id", Cwd: join(agentDir, "repo") } },
+    }));
+    expect(parsed.decision).toBe("deny");
+    expect(parsed.reason).toContain("'ib peer' is a user-only command");
+  });
+
   test("an agent-type deny (Write) is loaded and enforced end-to-end", async () => {
     // Re-declare _all so the merged deny list carries Write, then confirm the
     // full hook (which loads permissions.deny via loadAgyEffectivePermissions)

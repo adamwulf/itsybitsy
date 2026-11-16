@@ -13,9 +13,10 @@
  *   stalls the UI once, for about a third of a second (230-400 ms compiled),
  *   after the dialog has drawn. The module stays loaded, so a later rebind
  *   does not stall.
- * - Once bound, the endpoint stays up until `shutdown()` (ib watch exit),
- *   which closes it (resolving the pending `acceptNext`, which otherwise keeps
- *   Bun alive) and releases the lock.
+ * - Once bound, the endpoint stays up until `ib watch` exits (`shutdown()`)
+ *   or until the accept loop fails. Either way it is closed (which resolves a
+ *   pending `acceptNext`, which otherwise keeps Bun alive) and the lock is
+ *   released; after an accept-loop failure, the next dialog open binds again.
  * - The accept loop hands each connection to its own task and catches errors
  *   per connection: one failed handshake never stops it. It dispatches by
  *   ALPN; Phase 2 has only the pair ALPN. If `acceptNext` itself fails, the

@@ -1690,6 +1690,14 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 
 **`ib bounce` is system-coordinator-only.** It quits `ib watch` and restarts the system coordinator (§12.1.2), so the same check denies it to every caller that is not `@system`.
 
+**`ib peer` is user-only.** It manages this install's iroh peering identity and trusted peers (`docs/plans/iroh-peering.md`). The same check denies every `ib peer` invocation to every agent, `@system` included: like `nuke`, it runs before the `@system` bypass. It reads shell words the same way, so a message that only mentions `ib peer` is not denied. The subcommands:
+
+- `ib peer id` prints this install's id on one line: the ed25519 public key as 64 lowercase hex characters. The key is `~/.itsybitsy/peer/secret.key` (the 32 secret-key bytes as hex, mode 0600, in a 0700 directory). It is created with an exclusive create if missing and never overwritten.
+- `ib peer list` prints each paired peer's name, full id and `pairedAt` from `~/.itsybitsy/peer/peers.json`, or `No paired peers.`
+- `ib peer remove <name|id>` removes one peer by exact full id or exact name. A name that several peers share removes nothing, fails, and lists their ids. Removal is one-sided.
+
+None of them load the iroh addon. `ib peer id` derives the id from the key with `node:crypto`. Pairing happens only in `ib watch`, so there is no `ib peer add`. The embedded `_all.md` denies `~/.itsybitsy/peer/secret.key` to every agent at the hook and kernel layers. Nothing grants agents a write under `~/.itsybitsy/peer/`, so no agent can add a trusted peer.
+
 #### 12.1.4 Display
 
 **Agent tree**: The system coordinator appears as the **first entry** in the agent tree, before all repo headers. It uses a special icon (`◆`) and displays as:

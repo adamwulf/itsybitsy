@@ -1393,6 +1393,13 @@ const IB_TELEGRAM_OUTBOUND_COMMANDS = new Set(["tgsend", "tgsendfile", "tgreact"
 const IB_BOUNCE_COMMANDS = new Set(["bounce"]);
 
 /**
+ * `ib peer` reads and changes this install's peering identity and its trusted
+ * peers (docs/plans/iroh-peering.md). Every subcommand is human-only: no agent,
+ * not even @system, may run it.
+ */
+const IB_PEER_COMMANDS = new Set(["peer"]);
+
+/**
  * Detect an `ib <subcommand>` invocation for any subcommand in `subcommands`.
  * Same token scan as containsInternalIbInvocation: quoted words and heredoc
  * bodies are data, so a message that only mentions `ib tgsend` is not a
@@ -1489,6 +1496,16 @@ export async function checkIbCommandAccess(
   // policy handler before that handler can authenticate its process context.
   if (containsInternalIbInvocation(normalizedCommand)) {
     return { decision: "deny", reason: "Access denied: ib lifecycle dispatch is an internal operation" };
+  }
+
+  // `ib peer` is user-only, like nuke, so this sits ahead of the @system
+  // early-return. Same shell-word scan as the Telegram gate below: a quoted
+  // message or heredoc body that only mentions `ib peer` is not denied.
+  if (containsIbSubcommandInvocation(normalizedCommand, IB_PEER_COMMANDS)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: 'ib peer' is a user-only command — it manages this install's peering identity and trusted peers. Ask the user to run it",
+    };
   }
 
   // @system has system-wide relationship authority, but cannot invoke the

@@ -2055,6 +2055,36 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess('ib send agent-target1 "ask @system to run ib bounce"', "agent-manager1", agentsDir)).toBeNull();
   });
 
+  const PEER_COMMANDS = [
+    "ib peer",
+    "ib peer id",
+    "ib peer list",
+    "ib peer remove laptop-b",
+    `ib peer remove ${"a".repeat(64)}`,
+    "ib peer --help",
+    "/usr/local/bin/ib peer id",
+    "ib 'peer' list",
+  ];
+
+  test("denies every ib peer subcommand to a regular agent — user-only", async () => {
+    for (const command of PEER_COMMANDS) {
+      const result = await checkIbCommandAccess(command, "agent-manager1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib peer' is a user-only command");
+    }
+  });
+
+  test("a message that only mentions ib peer is not a peer command", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    expect(await checkIbCommandAccess('ib send agent-target1 "ask the user to run ib peer remove x"', "agent-manager1", agentsDir)).toBeNull();
+    expect(await checkIbCommandAccess("ib send agent-target1 <<'EOF'\nib peer id\nEOF", "agent-manager1", agentsDir)).toBeNull();
+  });
+
+  test("other ib commands whose names start with peer are not gated", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    expect(await checkIbCommandAccess("ib send agent-target1 peer", "agent-manager1", agentsDir)).toBeNull();
+  });
+
   test("merge-check is unrestricted — returns null even for non-manager", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     const result = await checkIbCommandAccess("ib merge-check agent-target1", "agent-other111", agentsDir);
@@ -2143,6 +2173,15 @@ describe("checkIbCommandAccess", () => {
     }
   });
 
+  test("per-repo coordinator CANNOT run ib peer — user-only", async () => {
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
+    for (const command of PEER_COMMANDS) {
+      const result = await checkIbCommandAccess(command, "itsybitsy", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib peer' is a user-only command");
+    }
+  });
+
   test("per-repo coordinator CANNOT bounce ib watch — system coordinator only", async () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     const result = await checkIbCommandAccess("ib bounce", "itsybitsy", agentsDir);
@@ -2205,6 +2244,14 @@ describe("checkIbCommandAccess", () => {
 
   test("@system can bounce ib watch", async () => {
     expect(await checkIbCommandAccess("ib bounce", "@system", agentsDir)).toBeNull();
+  });
+
+  test("@system is also denied ib peer — user-only, not even @system may run it", async () => {
+    for (const command of PEER_COMMANDS) {
+      const result = await checkIbCommandAccess(command, "@system", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib peer' is a user-only command");
+    }
   });
 
   test("@system is also denied nuke — nuke is user-only, not even @system may run it", async () => {

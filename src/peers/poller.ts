@@ -19,7 +19,8 @@
  *   what ends the timed-out request, so it cannot overlap the next one.
  * - Per-peer state lives only in memory: connected or not, `lastOkAt`,
  *   `lastError`, and the last agent list received, which is kept after the
- *   peer drops (Phase 4 shows it dimmed as "last seen"). Nothing is written to
+ *   peer drops (the tree's peer section, src/tui/peer-sections.ts, shows it
+ *   dimmed with "last seen"). Nothing is written to
  *   disk.
  * - {@link PeerPoller.onChange} fires when what a reader can see changes:
  *   connected, the error, the agent list, the name, or the set of peers. A

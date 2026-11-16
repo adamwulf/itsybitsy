@@ -1602,6 +1602,8 @@ Each row shows:
 
 Repo headers remain as-is: `▾ repo-name` or `▸ repo-name` (bold).
 
+**Peer sections.** In the Agents tab, below the local tree, each paired install has a read-only section: a `◆ <peer> · <state>` header, then its repos and agents as it last reported them (§20.5). The local rows, their columns and the V filter are unchanged by it; the sections align their own columns. While a peer-section row is selected, only an allowlist of keys works (navigation, focus, resizing, the tabs, pane cycling, help, the palette, Peers, quit) and every other key shows `Read-only remote agent` (§20.5).
+
 ### 11.4 Info Panel
 
 The info panel displays details for the currently selected item. It is read-only (no interactive elements). When focused via Tab cycling (see §13), `{`/`}` resize its height and `[`/`]` resize the sidebar width.
@@ -1621,6 +1623,8 @@ The info panel displays details for the currently selected item. It is read-only
 
 1. **Repo path**
 2. **Agent count** and per-state breakdown (e.g., `running: 2, waiting: 1`)
+
+**When a peer-section row is selected** (§20.5), the info panel shows only what the other install reported, marked `(read-only)`: for a remote agent, the peer, id, nickname, repo, path, state, type and manager; for a remote repo, the peer, repo, path and agent count; for a peer header, the name, short id, state, last error and counts. None of the agent rows above (stoplights, Git Status, Type, Sandbox, Paths, Model) show for it.
 
 **Process liveness check**: To determine if a PID is alive, use `process.kill(pid, 0)` (signal 0 checks existence without sending a signal). Wrap in try/catch — throws if the process doesn't exist or the user doesn't have permission. Check on each render cycle (the info panel re-renders when the watcher fires or the selection changes).
 
@@ -2992,6 +2996,7 @@ The legacy `"teams-tree"` focus target is retained in the `FocusTarget` union so
   - The system-coordinator row always shows, first, as in the Agents tab (also under V). It is not an agent, so it can never be a favorite (see the `.` key below).
   - A parent-header shows only while it still has a surviving repo header (`pruneEmptyParentHeaders`).
   - Connectors are rebuilt with `recomputeConnectorsForVisible`, as in running-only mode, because hidden managers and siblings break the precomputed ones.
+  - Peer sections (§20.5) do not show, except a selected peer-section row, with its peer header (and, for a remote agent, its repo header), until the selection moves away.
 - **Selected-row carve-out.** The selected row — a non-favorite agent, its repo header, or a favoriteless repo header — stays visible until the selection moves away (it is derived from the selected id on each `visibleList` read, like the running-only agent carve-out). So switching to the Favorites tab never changes the global selection, and unfavoriting the selected agent keeps it on screen until j/k moves on. Selection re-resolves when the flag flips (`setFavoritesOnly`) and when a favorite is toggled (`toggleFavorite`), as `setRepoFilter` / `togglePinnedRepo` do.
 - **Composition with V.** The favorites pass runs first, then the existing `repoFilter` pass; a repo header left with no shown agent after both passes is dropped (the selected header is kept).
 - **Empty view.** When no agent row shows, the tree renders a DIM hint: in an extra row under the rows that do show (the system coordinator, a selected repo header), or instead of `No agents found` when nothing shows at all. The sidebar and the `{`/`}` resize size the tree from `AgentTreeComponent.renderRowCount`, which counts that extra row, so the hint has room unless the user shrank the tree. The hint is `No favorites match the V filter` when any non-archived agent in the flat list passes the favorites rule above (a favorite, a same-repo descendant of one, or an orphan of a gone favorite manager) — only the V filter can have hidden it — and `No favorites — press . on an agent` otherwise (no favorites, or only ids of gone agents that left no agent behind).
@@ -3574,7 +3579,7 @@ The design source-of-truth is **`SPEC-ANTIGRAVITY-CLI.md`** in the repo root; `A
 
 ## 20. Peering: Pairing and the Trusted Link in `ib watch`
 
-Two installs pair over [iroh](https://www.iroh.computer) so that each trusts the other's key, and then poll each other's agents over a trusted link. The design is `docs/plans/iroh-peering.md`; this section is the behavior as built through its Phase 3. The identity, `peers.json`, the endpoint lock and `ib peer` are in §12.1.3. Phase 4 (peer sections in the sidebar tree and the read-only guard) is not built yet; nothing outside the Peers dialog shows the polled agents.
+Two installs pair over [iroh](https://www.iroh.computer) so that each trusts the other's key, and then poll each other's agents over a trusted link and show them, read-only, in the Agents tree. The design is `docs/plans/iroh-peering.md`; this section is the behavior as built through its Phase 4. The identity, `peers.json`, the endpoint lock and `ib peer` are in §12.1.3.
 
 Ids are ed25519 public keys written as 64 lowercase hex characters; the short id is the first 10.
 
@@ -3691,8 +3696,56 @@ ALPN `itsybitsy/peer/1` (`src/peers/peer-link.ts`), served by the accept loop an
 - Each peer keeps one live connection between polls and is redialed only once that connection has closed.
 - A peer never has two dials or requests in flight at once. A dial can take up to 30 s to fail, so ticks that come while one is pending skip that peer; other peers are polled as usual. A failed dial or request is retried on the next tick.
 - Each `agents` request has 15 s to be answered. A peer can keep its connection alive and still never answer (its `ib watch` event loop wedged while the network side runs on), so on timeout the poller closes that connection (code 0, `request timed out`), records `request timed out`, and the next tick redials. Closing the connection is what ends the timed-out request, so it never overlaps the next one. Until the timeout, a peer that was connected still shows as connected.
-- Per-peer state, in memory only (nothing is written to disk): connected or not, `lastOkAt`, `lastError` (one short line: the dial's error such as `timed out`, `request timed out`, `not a peer`, `closed by the other side`, `the other side reported: <reason>`, or a malformed reply), and the last agent list received, which is kept after the peer drops so Phase 4 can show it as last seen. The service exposes it as `view().links`, in `peers.json` order, and notifies its listeners when something visible changes (connected, the error, the list, a name, or the set of peers); a poll that changes nothing but `lastOkAt` does not notify.
+- Per-peer state, in memory only (nothing is written to disk): connected or not, `lastOkAt`, `lastError` (one short line: the dial's error such as `timed out`, `request timed out`, `not a peer`, `closed by the other side`, `the other side reported: <reason>`, or a malformed reply), and the last agent list received, which is kept after the peer drops so the tree's peer section can show it, dimmed, as last seen (§20.5). The service exposes it as `view().links`, in `peers.json` order, and notifies its listeners when something visible changes (connected, the error, the list, a name, or the set of peers); a poll that changes nothing but `lastOkAt` does not notify.
 - `watch.log` gets a line when a peer connects and when its error changes, not on every failed tick.
 - Stopping (on exit, or with the endpoint after an accept-loop failure) cancels the timer and closes every connection with code 0; a dial still in flight is closed when it lands. The state is kept, disconnected.
+
+### 20.5 Peer Sections in the Agents Tree
+
+The polled agents show in the sidebar's Agents tab (§11.3, §17.1), read-only. Built in `src/tui/peer-sections.ts` (the rows), `src/tui/agent-tree.ts` (the tree) and `src/tui/dashboard.ts` (selection, placeholders, the guard).
+
+**Rows.** The local tree is unchanged. Below it, each peer the poller lists (`view().links`, in `peers.json` order) gets a section:
+
+```
+◆ Laptop B · connected            ← peer-header
+  ▾ itsybitsy                     ← remote-repo-header
+  └── manager-def   waiting       ← remote-agent
+      └── worker-abc  running
+  ▾ other-repo
+  └── agent-123     complete
+◆ Laptop C · last seen 5m ago     ← unreachable: its last list, dimmed
+  ▾ app
+  └── agent-9       running
+◆ Laptop D · not connected yet    ← never answered: the header only
+```
+
+- The header shows the peer's local name and its state: `connected`, `last seen N ago` (as in §20.1), or `not connected yet`. A long name is cut so the state stays on the row. The age is recomputed whenever the screen renders.
+- Under it, the remote repos, one per `repoPath` (named by `repoName`, sorted by name, then path), and each repo's agents, nested by `manager` within the repo the way local agents nest: an agent whose manager is not in the same repo's list is a root, siblings keep the order received, and a list that is not a tree (a manager cycle, a duplicate id) still draws each agent exactly once. Nesting deeper than 8 levels is drawn at 8. A remote agent row is its nickname (else its id) and its state (`unknown` shows as `running`, as locally); there is no icon or age.
+- A peer that is not connected keeps the last list it received, dimmed (no state colors). A peer that has never answered has no list, so its section is the header alone; so is a peer that answered with no agents.
+- Before the endpoint binds (and while another `ib watch` owns it) the poller lists nobody, so there are no sections.
+- The V filter (§11.3) does not apply to peer sections, and the Teams tab never shows them. The Favorites tab shows none, except that a selected remote row stays visible there with its peer header (and, for an agent, its repo header), like that tab's other selected-row carve-out, so switching tabs never moves the selection. There is no collapsing.
+- Every remote field is cut to its column or the row width: the name column is capped so the state column (at most 16 wide) fits, a cut value ends in `…`, and the dialer has already stripped control characters (§20.4). A long remote value cannot change the layout.
+- Peer-section rows are their own `FlatEntry` kinds (`peer-header`, `remote-repo-header`, `remote-agent`) and their own `Selection` kind (`remote`); a remote agent is never an `Agent`. They live only in the Agents tree's peer sections, never in the watcher's flat list, so `ib list`, the system coordinator's dashboard table, the `@` jump list, favorites and teams never see one.
+
+**Keys of rows.** A remote agent is keyed by (peer id, agent id) and a remote repo by (peer id, repo path), never by a bare agent id. A remote id equal to a local id, or to an id on another peer, is a separate row: it is drawn, selected and kept selected across refreshes on its own.
+
+**Selection.** Every peer-section row (header, repo, agent) is selectable: j/k move across the local tree and the sections (wrapping as before), and J/K treat remote repo headers as anchors after the local ones, landing on a repo's first (or last) non-stopped agent. The scroll indicators cover the sections like any other rows. When a refresh drops the selected remote row, the selection moves to the row now at its index, as for a local row. With a remote row selected:
+
+- Nothing local is selected: no agent, repo header or coordinator. The tmux pollers get no session, no git probe runs, no right-pane loader runs, and the per-repo coordinator, favorites, teams and snapshots are never handed it.
+- The main area shows two placeholders on the split layout: the center pane `Remote agent on <peer name> (read-only)` (`Remote repo on <peer name> (read-only)` for a repo header, `Paired install <peer name> (read-only)` for a peer header), and the right pane `Not available for remote agents`, word-wrapped to the pane, in every right-pane mode. The title is ` <peer>/<agent or repo> ` over the center pane and the mode over the right. The one exception is TREE mode, which keeps drawing the tree in the main area (the sidebar hides its own tree in that mode, so it must stay on screen while j/k move through the sections). Selecting a remote row in REPO mode returns to the saved mode, as selecting an agent does.
+- The info panel shows `Remote agent (read-only)` and the agent's fields: peer, id, nickname, repo, path, state, type and manager (`—` when unset; the state is marked `(peer not connected)` when the list is stale). A remote repo header shows the peer, repo, path and agent count; a peer header shows the name, the short id, the state, the last error while not connected, and its agent and repo counts.
+
+**Read-only guard.** One check at the top of the dashboard's key dispatch (after an open dialog takes its keys): while the effective selection is a peer-section row, only an allowlist of keys works, and every other key is refused with the notice `Read-only remote agent`, so a key added later is refused by default. The allowlist:
+
+- navigation and focus: `j`/`k`, `J`/`K`, the arrow keys, Tab and Shift+Tab, `[` `]` `{` `}`;
+- the sidebar tabs `1`, `2` and `3`;
+- pane cycling: `p` and `n` (and ←/→);
+- help `?`, the command palette `/`, Peers `I`, and quit (Ctrl+C, which the TUI handles before the dashboard).
+
+The command palette goes through the same guard: on a remote row, a command whose key is not on the allowlist is refused with the same notice, and so is a mode jump (it has no key, like `d`/`e`/`q`/`g`), so only help and Peers run from it.
+
+**Rendering.** The dashboard rebuilds the sections when the poller's state changes in a way they show (the peers, their names, connection, error or list, and `lastOkAt` while not connected); the service's other notifications (the dialog's status and session) leave them alone. A rebuild renders only while the sections can be seen: the Agents tab (not Favorites), TREE mode (which draws the Agents tree), or a remote selection (which the info panel and main area show). The open Peers dialog still renders on every change (§20.1).
+
+Out of scope for v1: any action on a remote agent, its tmux, live updates beyond the 5 s poll, the remote system coordinator, remote rows in the Favorites and Teams tabs, the V filter on them, and collapsing sections.
 
 ---

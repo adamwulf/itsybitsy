@@ -169,6 +169,52 @@ describe("PeerPoller", () => {
     rig.poller.stop();
   });
 
+  test("a peer removed and paired again while its dial hangs still gets no second dial; the late dial is closed", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const hung = deferredDial();
+    rig.setDial((id) => (rig.dials.length === 1 ? hung.promise : rig.connect(id)));
+    rig.poller.start();
+    await waitFor(() => rig.dials.length === 1, { message: "first dial" });
+    rig.setPeers([]);
+    rig.tick();
+    await waitFor(() => rig.state(P1) === undefined, { message: "removed" });
+    rig.setPeers([peer(P1, "B again")]);
+    rig.tick();
+    await waitFor(() => rig.state(P1)?.name === "B again", { message: "re-added" });
+    rig.tick();
+    await Bun.sleep(10);
+    expect(rig.dials).toEqual([P1]);
+
+    const late = await rig.connect(P1);
+    hung.resolve(late);
+    await waitFor(() => late.closeInfo() !== null, { message: "the old dial is closed when it lands" });
+    rig.tick();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "the new link dials afresh" });
+    expect(rig.dials).toEqual([P1, P1]);
+    rig.poller.stop();
+  });
+
+  test("a dial started before stop() is not adopted after a restart, and blocks a second dial until it settles", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const hung = deferredDial();
+    rig.setDial((id) => (rig.dials.length === 1 ? hung.promise : rig.connect(id)));
+    rig.poller.start();
+    await waitFor(() => rig.dials.length === 1, { message: "first dial" });
+    rig.poller.stop();
+    rig.poller.start();
+    await Bun.sleep(10);
+    expect(rig.dials).toEqual([P1]);
+
+    const late = await rig.connect(P1);
+    hung.resolve(late);
+    await waitFor(() => late.closeInfo() !== null, { message: "the pre-stop dial is closed" });
+    expect(rig.state(P1)?.connected).toBe(false);
+    rig.tick();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "dialed afresh" });
+    expect(rig.dials).toEqual([P1, P1]);
+    rig.poller.stop();
+  });
+
   test("a hung request is never doubled: ticks skip the peer until it settles", async () => {
     const rig = makeRig([peer(P1, "B")]);
     // A connection whose far end never answers: no responder runs on it.

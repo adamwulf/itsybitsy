@@ -75,8 +75,6 @@ interface Link {
   id: string;
   name: string;
   conn: PairConnection | null;
-  /** A dial or request is in flight. */
-  busy: boolean;
   connected: boolean;
   lastOkAt: number | null;
   lastError: string | null;
@@ -96,6 +94,14 @@ function describeFailure(err: unknown, conn: PairConnection | null): string {
 
 export class PeerPoller {
   private links = new Map<string, Link>();
+  /**
+   * Peer ids with a dial or request in flight. Keyed by id rather than kept
+   * on the link, so a peer removed and paired again while its old dial hangs
+   * still never gets a second one.
+   */
+  private readonly inFlight = new Set<string>();
+  /** Bumped by every stop(): work started before a stop is ignored when it settles, even after a restart. */
+  private generation = 0;
   private running = false;
   private readingPeers = false;
   private cancelTimer: (() => void) | null = null;
@@ -140,6 +146,7 @@ export class PeerPoller {
   stop(): void {
     if (!this.running) return;
     this.running = false;
+    this.generation++;
     this.cancelTimer?.();
     this.cancelTimer = null;
     for (const link of this.links.values()) {
@@ -171,7 +178,7 @@ export class PeerPoller {
     if (!this.running) return;
     if (peers !== null) this.sync(peers);
     for (const link of this.links.values()) {
-      if (!link.busy) void this.poll(link);
+      if (!this.inFlight.has(link.id)) void this.poll(link);
     }
   }
 
@@ -198,7 +205,6 @@ export class PeerPoller {
           id: peer.id,
           name: peer.name,
           conn: null,
-          busy: false,
           connected: false,
           lastOkAt: null,
           lastError: null,
@@ -227,52 +233,53 @@ export class PeerPoller {
     if (changed || reordered) this.notify();
   }
 
-  /** This link is still polled: the poller runs and the peer is still listed. */
-  private isCurrent(link: Link): boolean {
-    return this.running && this.links.get(link.id) === link;
+  /**
+   * Work started in `generation` still counts: no stop() since, the poller
+   * runs, and the peer is still listed as this same link.
+   */
+  private isCurrent(link: Link, generation: number): boolean {
+    return this.running && generation === this.generation && this.links.get(link.id) === link;
   }
 
   /** One dial (if needed) and one request for `link`. Never throws. */
   private async poll(link: Link): Promise<void> {
-    link.busy = true;
+    const generation = this.generation;
+    this.inFlight.add(link.id);
     let conn: PairConnection | null = link.conn;
     try {
       if (conn === null || conn.closeInfo() !== null) {
         link.conn = null;
         conn = null;
         const dialed = await this.deps.dial(link.id);
-        if (!this.isCurrent(link)) {
+        if (!this.isCurrent(link, generation)) {
           closeQuietly(dialed, PEER_CLOSE.done, "shutting down");
           return;
         }
         conn = dialed;
         link.conn = dialed;
-        this.watchClose(link, dialed);
+        this.watchClose(link, dialed, generation);
       }
       const agents = await requestAgents(conn);
-      if (!this.isCurrent(link)) return;
+      if (!this.isCurrent(link, generation)) return;
       this.succeeded(link, agents);
     } catch (err) {
-      if (!this.isCurrent(link)) return;
+      if (!this.isCurrent(link, generation)) return;
       this.failed(link, describeFailure(err, conn));
     } finally {
-      link.busy = false;
+      this.inFlight.delete(link.id);
     }
   }
 
   /** When `conn` closes while it is still `link`'s connection: mark the peer disconnected, so the next tick redials. */
-  private watchClose(link: Link, conn: PairConnection): void {
+  private watchClose(link: Link, conn: PairConnection, generation: number): void {
+    const closed = (message: string) => {
+      if (link.conn !== conn) return; // replaced, or closed on purpose by this side
+      link.conn = null;
+      if (this.isCurrent(link, generation)) this.failed(link, message);
+    };
     conn.closed().then(
-      (info) => {
-        if (link.conn !== conn) return; // replaced, or closed on purpose by this side
-        link.conn = null;
-        if (this.isCurrent(link)) this.failed(link, describePeerClose(info));
-      },
-      () => {
-        if (link.conn !== conn) return;
-        link.conn = null;
-        if (this.isCurrent(link)) this.failed(link, "connection closed");
-      },
+      (info) => closed(describePeerClose(info)),
+      () => closed("connection closed"),
     );
   }
 

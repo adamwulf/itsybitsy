@@ -86,9 +86,13 @@ export class PeerErrorReply extends Error {
   }
 }
 
-/** Text from the other side, made safe to show: control characters dropped, one line, capped. */
+/**
+ * Text from the other side, made safe to show: control characters become
+ * spaces, format characters (bidi overrides, zero-width marks: \p{Cf}) are
+ * dropped, one line, capped.
+ */
 export function cleanRemoteText(text: string): string {
-  const flat = text.replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim();
+  const flat = text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
   return flat.length > MAX_REMOTE_TEXT ? `${flat.slice(0, MAX_REMOTE_TEXT - 1)}…` : flat;
 }
 
@@ -156,8 +160,12 @@ export function decodePeerRequest(bytes: Uint8Array): { op: string } {
   return { op: message.op };
 }
 
-/** Strip control characters from a field the other side sent, so it is safe to draw in the TUI. */
-const cleanField = (text: string): string => text.replace(/\p{Cc}/gu, "");
+/**
+ * Strip control and format characters from a field the other side sent, so it
+ * is safe to draw in the TUI: \p{Cc} (escape sequences, newlines, tabs) and
+ * \p{Cf} (bidi overrides that reorder the rest of the row, zero-width marks).
+ */
+const cleanField = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]/gu, "");
 
 function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
   const malformed = () => new PeerProtocolError(`agent ${index} in the reply is malformed`);

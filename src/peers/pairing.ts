@@ -243,9 +243,13 @@ export function parsePairTarget(input: string, selfId: string | null): { ok: tru
   return { ok: true, id };
 }
 
-/** Text from the other side, made safe to show: control characters dropped, one line, capped. */
+/**
+ * Text from the other side, made safe to show: control characters become
+ * spaces, format characters (bidi overrides, zero-width marks: \p{Cf}) are
+ * dropped, one line, capped.
+ */
 function cleanRemoteText(text: string): string {
-  const flat = text.replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim();
+  const flat = text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
   return flat.length > MAX_REMOTE_TEXT ? `${flat.slice(0, MAX_REMOTE_TEXT - 1)}…` : flat;
 }
 

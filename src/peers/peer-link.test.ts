@@ -125,6 +125,24 @@ describe("decodeAgentsReply", () => {
     expect(Object.keys(agents[0]!).sort()).toEqual(ALLOWED_KEYS);
   });
 
+  test("strips format characters too: bidi overrides and isolates, zero-width marks, the BOM", () => {
+    // U+202E RIGHT-TO-LEFT OVERRIDE, U+2066 LEFT-TO-RIGHT ISOLATE, U+200B ZERO WIDTH SPACE,
+    // U+200D ZERO WIDTH JOINER, U+FEFF BOM, U+00AD SOFT HYPHEN: all \p{Cf}.
+    const cf = "‮⁦​‍﻿­";
+    const [agent] = decodeAgentsReply(
+      encode({
+        op: "agents",
+        agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}` }],
+      }),
+    );
+    expect(agent).toEqual({ id: "agent-1", nickname: "nick", repoName: "app", repoPath: "/r", state: "running", agentType: "w", manager: "m" });
+    for (const value of Object.values(agent!)) expect(value).not.toMatch(/\p{Cf}/u);
+    // An error reply's reason is cleaned the same way.
+    expect(() => decodeAgentsReply(encode({ op: "error", reason: `bad‮reason` }))).toThrow(
+      new PeerErrorReply("the other side reported: badreason"),
+    );
+  });
+
   test("an error reply, and anything malformed, throw", () => {
     expect(() => decodeAgentsReply(encode({ op: "error", reason: "unknown op \"x\"" }))).toThrow(
       new PeerErrorReply('the other side reported: unknown op "x"'),

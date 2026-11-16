@@ -3647,7 +3647,7 @@ A saves B when it reads `pair-ok`, keeping a name it already gave B, then closes
 | 2 | expired (B's timer) | `The code expired. Pairing failed.` |
 | 3 | error; the reason says which | `Pairing failed: the other side reported: <reason>` |
 
-A connection that closes without one of these codes (a timeout, the other `ib watch` exiting) is a connection failure. Text from the other side is stripped of control characters and capped before it is shown.
+A connection that closes without one of these codes (a timeout, the other `ib watch` exiting) is a connection failure. Text from the other side is stripped of control and format characters (`\p{Cc}`, `\p{Cf}`: escapes, newlines, bidi overrides, zero-width marks) and capped before it is shown.
 
 **Malformed input.** A message that is not UTF-8, not JSON, not an object, longer than 4096 bytes, has an unknown op or reason, or arrives out of turn closes the connection with code 3 and the reason (e.g. `message is not JSON`, `unknown op "x"`, `expected pair-hello, got pair-code`).
 
@@ -3682,7 +3682,7 @@ ALPN `itsybitsy/peer/1` (`src/peers/peer-link.ts`), served by the accept loop an
 - The agent list comes from the watcher's last fully detected snapshot (`watcher.lastDetectedAgents`, injected into the service by `ib watch`): the list it last passed to `onUpdate`, which is what the local tree shows, so an answer costs no IO. Not `watcher.lastAgents`, which a refresh replaces before state detection has run, when every state is still the placeholder `unknown`. It is every agent the watcher lists (archived agents are never in it) except the system coordinator. Each entry carries exactly the seven fields above: `nickname`, `agentType` and `manager` are `null` when unset, and `state` is the agent's detected, displayed state. Prompts, logs, tmux output and every other field are never sent.
 - A list whose JSON is over 1 MB is replied as `{"op":"error","reason":"the agent list is over 1048576 bytes"}`; a snapshot that throws is replied as `internal error`.
 - A request that is over 4096 bytes, not UTF-8, not JSON, not an object or has no op closes the connection with code 3 and the reason (e.g. `request is not JSON`, `request longer than 4096 bytes`).
-- The dialer rebuilds each received entry from the seven fields only (anything else is dropped) and strips control characters from them; a reply that is not an agent list, or an entry with a missing or mistyped field, fails the request.
+- The dialer rebuilds each received entry from the seven fields only (anything else is dropped) and strips control and format characters (`\p{Cc}`, `\p{Cf}`, so no escape sequence or bidi override reaches the screen) from them, and from an error reply's reason; a reply that is not an agent list, or an entry with a missing or mistyped field, fails the request.
 
 | Close code | Meaning |
 |---|---|
@@ -3724,7 +3724,7 @@ The polled agents show in the sidebar's Agents tab (§11.3, §17.1), read-only. 
 - A peer that is not connected keeps the last list it received, dimmed (no state colors). A peer that has never answered has no list, so its section is the header alone; so is a peer that answered with no agents.
 - Before the endpoint binds (and while another `ib watch` owns it) the poller lists nobody, so there are no sections.
 - The V filter (§11.3) does not apply to peer sections, and the Teams tab never shows them. The Favorites tab shows none, except that a selected remote row stays visible there with its peer header (and, for an agent, its repo header), like that tab's other selected-row carve-out, so switching tabs never moves the selection. There is no collapsing.
-- Every remote field is cut to its column or the row width: the name column is capped so the state column (at most 16 wide) fits, a cut value ends in `…`, and the dialer has already stripped control characters (§20.4). A long remote value cannot change the layout.
+- Every remote field is cut to its column or the row width: the name column is capped so the state column (at most 16 wide) fits, a cut value ends in `…`, and the dialer has already stripped control and format characters (§20.4). A long remote value cannot change the layout.
 - Peer-section rows are their own `FlatEntry` kinds (`peer-header`, `remote-repo-header`, `remote-agent`) and their own `Selection` kind (`remote`); a remote agent is never an `Agent`. They live only in the Agents tree's peer sections, never in the watcher's flat list, so `ib list`, the system coordinator's dashboard table, the `@` jump list, favorites and teams never see one.
 
 **Keys of rows.** A remote agent is keyed by (peer id, agent id) and a remote repo by (peer id, repo path), never by a bare agent id. A remote id equal to a local id, or to an id on another peer, is a separate row: it is drawn, selected and kept selected across refreshes on its own.

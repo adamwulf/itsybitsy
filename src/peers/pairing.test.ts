@@ -606,6 +606,11 @@ describe("pair protocol: connection failures", () => {
     expect(detail).not.toMatch(/\p{Cc}/u);
     expect(detail.length).toBeLessThan(130);
   });
+
+  test("format characters (bidi overrides, zero-width marks) are dropped from the other side's text", () => {
+    const failure = failureFromClose({ byPeer: true, code: PAIR_CLOSE.error, reason: "bad‮⁦​thing" });
+    expect(failure).toEqual({ kind: "error", detail: "the other side reported: badthing" });
+  });
 });
 
 describe("messages", () => {

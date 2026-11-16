@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, spyOn } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -32,6 +32,14 @@ import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "
 import { formatSince, type PeersDialogService } from "./peers-dialog";
 import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
+import type { RemoteAgent } from "../peers/peer-link";
+import type { PeerLinkState } from "../peers/poller";
+import { peerEntryKey } from "./peer-sections";
+import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT } from "./dashboard";
+import { DIM } from "./colors";
+import { getStateColors } from "./color-scheme";
+import * as agentActions from "./agent-actions";
+import * as paneManager from "./pane-manager";
 
 // Many tests below simulate resize keystrokes, which call persistLayout() and
 // schedule debounced layout saves. Route them to a temp file so a test run can
@@ -8719,74 +8727,82 @@ describe("New Repo folder-name dialog title", () => {
   });
 });
 
+const PEERS_SELF = "5e".repeat(32);
+const PEERS_OTHER = "0a".repeat(32);
+
+/**
+ * A scripted stand-in for the peer service (src/peers/service.ts), for the
+ * Peers dialog and the tree's peer sections. `set` changes its view and
+ * notifies like the real one.
+ */
+class FakePeerService implements PeersDialogService {
+  state: PeerServiceView = {
+    status: { kind: "listening" },
+    selfId: PEERS_SELF,
+    identityError: null,
+    peers: [],
+    peersError: null,
+    session: null,
+    links: [],
+  };
+  calls: string[] = [];
+  private listeners = new Set<() => void>();
+  private nextId = 0;
+
+  view(): PeerServiceView {
+    return this.state;
+  }
+  openDialog(): void {
+    this.calls.push("open");
+  }
+  closeDialog(): void {
+    this.calls.push("close");
+  }
+  /** Validates with the real parsePairTarget, so inline errors are the real ones. */
+  pairWith(input: string): string | null {
+    this.calls.push(`pair:${input}`);
+    const target = parsePairTarget(input, this.state.selfId);
+    if (!target.ok) return target.error;
+    this.setSession("initiator", { stage: "connecting" });
+    return null;
+  }
+  submitCode(code: string): void {
+    this.calls.push(`code:${code}`);
+  }
+  submitName(name: string | null): void {
+    this.calls.push(`name:${name}`);
+  }
+  cancel(): void {
+    this.calls.push("cancel");
+  }
+  dismiss(): void {
+    this.calls.push("dismiss");
+  }
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  set(view: Partial<PeerServiceView>): void {
+    this.state = { ...this.state, ...view };
+    for (const listener of this.listeners) listener();
+  }
+  /** A new session (new id) in `stage`. */
+  setSession(role: "initiator" | "responder", stage: PairStage): void {
+    this.set({ session: { id: ++this.nextId, role, peerId: PEERS_OTHER, stage } });
+  }
+  /** The same session, moved to `stage`. */
+  setStage(stage: PairStage): void {
+    this.set({ session: { ...this.state.session!, stage } });
+  }
+}
+
 // The Peers dialog (`I`, src/tui/peers-dialog.ts). The dashboard gets a
 // scripted fake service, never the real one, so no test here binds an endpoint
 // or loads the iroh addon.
 describe("Peers dialog", () => {
-  const SELF = "5e".repeat(32);
-  const OTHER = "0a".repeat(32);
+  const SELF = PEERS_SELF;
+  const OTHER = PEERS_OTHER;
   const OTHER_SHORT = OTHER.slice(0, 10);
-
-  class FakePeerService implements PeersDialogService {
-    state: PeerServiceView = {
-      status: { kind: "listening" },
-      selfId: SELF,
-      identityError: null,
-      peers: [],
-      peersError: null,
-      session: null,
-      links: [],
-    };
-    calls: string[] = [];
-    private listeners = new Set<() => void>();
-    private nextId = 0;
-
-    view(): PeerServiceView {
-      return this.state;
-    }
-    openDialog(): void {
-      this.calls.push("open");
-    }
-    closeDialog(): void {
-      this.calls.push("close");
-    }
-    /** Validates with the real parsePairTarget, so inline errors are the real ones. */
-    pairWith(input: string): string | null {
-      this.calls.push(`pair:${input}`);
-      const target = parsePairTarget(input, this.state.selfId);
-      if (!target.ok) return target.error;
-      this.setSession("initiator", { stage: "connecting" });
-      return null;
-    }
-    submitCode(code: string): void {
-      this.calls.push(`code:${code}`);
-    }
-    submitName(name: string | null): void {
-      this.calls.push(`name:${name}`);
-    }
-    cancel(): void {
-      this.calls.push("cancel");
-    }
-    dismiss(): void {
-      this.calls.push("dismiss");
-    }
-    onChange(listener: () => void): () => void {
-      this.listeners.add(listener);
-      return () => this.listeners.delete(listener);
-    }
-    set(view: Partial<PeerServiceView>): void {
-      this.state = { ...this.state, ...view };
-      for (const listener of this.listeners) listener();
-    }
-    /** A new session (new id) in `stage`. */
-    setSession(role: "initiator" | "responder", stage: PairStage): void {
-      this.set({ session: { id: ++this.nextId, role, peerId: OTHER, stage } });
-    }
-    /** The same session, moved to `stage`. */
-    setStage(stage: PairStage): void {
-      this.set({ session: { ...this.state.session!, stage } });
-    }
-  }
 
   function open(): { dashboard: DashboardComponent; service: FakePeerService } {
     const dashboard = makeDashboard();
@@ -9145,5 +9161,482 @@ describe("Peers dialog", () => {
         expect(rows.filter((row) => visibleWidth(row) !== width)).toEqual([]);
       }
     }
+  });
+});
+
+// The Agents tree's peer sections and the read-only guard (SPEC §20.5). The
+// poller's state comes from the scripted FakePeerService; tmux and git go
+// through recording fakes, so nothing here reaches a real session or worktree.
+describe("Peer sections in the Agents tree", () => {
+  const PEER_B = "0b".repeat(32);
+  const PEER_C = "0c".repeat(32);
+  const PEER_D = "0d".repeat(32);
+  const WIDTH = 160;
+  const WORKER_KEY = `remote:${PEER_B}:worker-abc`;
+
+  let origRows: number;
+  let spawns: string[][];
+  beforeEach(() => {
+    origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 40, writable: true, configurable: true });
+    const recorded: string[][] = [];
+    spawns = recorded;
+    tmuxPollerSpawnCtx.set((cmd: string[]) => {
+      recorded.push(cmd);
+      return makeSpawnResult(1);
+    });
+    gitStatusSpawnCtx.set((cmd: string[]) => {
+      recorded.push(cmd);
+      return makeSpawnResult(1);
+    });
+  });
+  afterEach(() => {
+    Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    tmuxPollerSpawnCtx.reset();
+    gitStatusSpawnCtx.reset();
+  });
+
+  function remote(id: string, repoName: string, overrides: Partial<RemoteAgent> = {}): RemoteAgent {
+    return { id, nickname: null, repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
+  }
+
+  /** Laptop B connected; Laptop C unreachable, last seen 2m ago; Laptop D never answered. */
+  function links(): PeerLinkState[] {
+    const now = Date.now();
+    return [
+      {
+        id: PEER_B, name: "Laptop B", connected: true, lastOkAt: now, lastError: null,
+        agents: [
+          remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
+          remote("manager-def", "itsybitsy", { state: "waiting", agentType: "manager" }),
+          remote("agent-1", "other-repo", { state: "complete" }),
+        ],
+      },
+      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, lastError: "timed out", agents: [remote("agent-1", "app")] },
+      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, lastError: "timed out", agents: null },
+    ];
+  }
+
+  /** A dashboard whose one local agent is `agent-1` (selected), with `links()` as the poller's state. */
+  function setup(): { dashboard: DashboardComponent; service: FakePeerService; local: Agent } {
+    const dashboard = makeDashboard();
+    const local = makeAgent("agent-1", "/repos/local");
+    dashboard.onUpdate([local], [makeFlatAgent(local)], []);
+    const service = new FakePeerService();
+    service.state = { ...service.state, links: links() };
+    dashboard.setPeerService(service);
+    return { dashboard, service, local };
+  }
+
+  const keyOf = (dashboard: DashboardComponent): string | null => {
+    const row = dashboard.agentTree.selectedRemote;
+    return row ? peerEntryKey(row) : null;
+  };
+
+  /** Press j until the selected row is `key`: real navigation, through the guard. */
+  function selectByKey(dashboard: DashboardComponent, key: string): void {
+    for (let i = 0; i < 30 && keyOf(dashboard) !== key; i++) dashboard.handleInput("j");
+    expect(keyOf(dashboard)).toBe(key);
+  }
+
+  /** Every row of the Agents tree at `width`, uncut by the sidebar's height. */
+  function treeRows(dashboard: DashboardComponent, width = 60): string[] {
+    dashboard.agentTree.maxHeight = 100;
+    return dashboard.agentTree.render(width);
+  }
+
+  const resetNotice = (dashboard: DashboardComponent) => {
+    (dashboard as any).lastSentNotice = null;
+  };
+
+  /**
+   * The text of the main area's center (`pane` 2) or right (`pane` 1) pane in
+   * rendered `lines`, its wrapped lines joined: the cells after the sidebar's
+   * seam, split on the panes' seam.
+   */
+  function paneText(lines: string[], pane: 1 | 2): string {
+    return lines
+      .map((line) => stripAnsi(line).split("│"))
+      .filter((cells) => cells.length >= 3)
+      .map((cells) => cells[cells.length - pane]!.trim())
+      .filter((cell) => cell !== "")
+      .join(" ");
+  }
+
+  test("below the unchanged local tree: one section per install — connected, unreachable (dimmed, last seen), never answered (header only) — nested by manager", () => {
+    const { dashboard, local } = setup();
+    const raw = treeRows(dashboard);
+    const rows = raw.map((r) => stripAnsi(r).trimEnd());
+    // The local tree is exactly what it is without peers.
+    const alone = makeDashboard();
+    alone.onUpdate([local], [makeFlatAgent(local)], []);
+    expect(rows[0]).toBe(stripAnsi(treeRows(alone)[0]!).trimEnd());
+    expect(rows.slice(1)).toEqual([
+      "◆ Laptop B · connected",
+      "  ▾ itsybitsy",
+      "  └── manager-def   waiting",
+      "      └── abc-nick  running",
+      "  ▾ other-repo",
+      "  └── agent-1       complete",
+      "◆ Laptop C · last seen 2m ago",
+      "  ▾ app",
+      "  └── agent-1       running",
+      "◆ Laptop D · not connected yet",
+    ]);
+    // Connected rows carry their state color; the unreachable peer's list is dimmed.
+    expect(raw[3]).toContain(`${getStateColors().waiting}waiting`);
+    expect(raw[8]!.startsWith(`  ${DIM}`)).toBe(true);
+    expect(raw[9]!.startsWith(DIM)).toBe(true);
+    expect(raw[9]).not.toContain(getStateColors().running!);
+  });
+
+  test("the V filter does not apply to peer sections", () => {
+    const { dashboard, service } = setup();
+    service.set({ links: [{ ...links()[0]!, agents: [remote("old", "app", { state: "stopped" })] }] });
+    dashboard.agentTree.setRepoFilter("running-only");
+    expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("old") && r.includes("stopped"))).toBe(true);
+  });
+
+  for (const width of [40, 80]) {
+    test(`at ${width} columns every row fits, long remote values are cut, and short states stay on screen`, () => {
+      const { dashboard, service } = setup();
+      const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
+      const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
+      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), lastError: null, agents: [long, short] }] });
+      const rows = treeRows(dashboard, width);
+      expect(rows.filter((r) => visibleWidth(r) > width)).toEqual([]);
+      const text = rows.map(stripAnsi);
+      expect(text.find((r) => r.includes("short"))).toContain("running");
+      expect(text.find((r) => r.includes("nnn"))).toContain("…");
+      // The 32-character peer name is cut at 40 columns so its state still shows.
+      const header = text.find((r) => r.startsWith("◆ PPP"))!.trimEnd();
+      expect(header).toEndWith(width === 40 ? "P… · connected" : `${"P".repeat(32)} · connected`);
+
+      // The info panel and the whole screen fit too, with the long row selected.
+      selectByKey(dashboard, `remote:${PEER_B}:${"n".repeat(100)}`);
+      dashboard.infoPanel.displayHeight = 20;
+      expect(dashboard.infoPanel.render(width).filter((r) => visibleWidth(r) > width)).toEqual([]);
+      dashboard.sidebarWidth = width;
+      expect(dashboard.render(WIDTH).filter((r) => visibleWidth(r) > WIDTH)).toEqual([]);
+    });
+  }
+
+  test("a remote id equal to the local one, and the same id on two peers, are three rows that select on their own", () => {
+    const { dashboard, service, local } = setup();
+    expect(treeRows(dashboard).map(stripAnsi).filter((r) => /\bagent-1\b/.test(r))).toHaveLength(3);
+    expect(dashboard.selectedAgent).toBe(local);
+
+    selectByKey(dashboard, `remote:${PEER_B}:agent-1`);
+    expect(dashboard.selectedAgent).toBeNull();
+    expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", peerId: PEER_B });
+    expect(treeRows(dashboard).filter((r) => r.includes("\x1b[7m")).map(stripAnsi)).toEqual([expect.stringContaining("complete")]);
+
+    selectByKey(dashboard, `remote:${PEER_C}:agent-1`);
+    expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", peerId: PEER_C });
+    // A poller change that reorders the peers keeps the selection on C's row.
+    const [b, c, d] = service.state.links;
+    service.set({ links: [c!, b!, d!] });
+    expect(keyOf(dashboard)).toBe(`remote:${PEER_C}:agent-1`);
+    expect(dashboard.selectedAgent).toBeNull();
+
+    // Back to the local agent-1: k until it is selected again.
+    for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
+    expect(dashboard.selectedAgent).toBe(local);
+    expect(keyOf(dashboard)).toBeNull();
+  });
+
+  test("the @ jump lists only local rows", () => {
+    const { dashboard } = setup();
+    dashboard.handleInput("@");
+    const items = assertDialog(dashboard.dialog, "fuzzy").allItems.map(stripAnsi);
+    expect(items.filter((item) => item.includes("agent-1"))).toHaveLength(1);
+    expect(items.some((item) => /Laptop|worker-abc|manager-def|itsybitsy|other-repo/.test(item))).toBe(false);
+  });
+
+  test("a selected remote agent: center and right placeholders in every mode but TREE, and its fields in the info panel", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
+      dashboard.jumpToMode(mode);
+      const lines = dashboard.render(WIDTH);
+      expect(paneText(lines, 2)).toBe("Remote agent on Laptop B (read-only)");
+      // The right pane is narrow at this width: the placeholder wraps rather than being cut.
+      expect(paneText(lines, 1)).toBe(REMOTE_RIGHT_PANE_TEXT);
+      expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
+      expect(stripAnsi(lines[1]!)).toContain(` ${mode} `);
+    }
+    dashboard.infoPanel.displayHeight = 20;
+    const info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd()).filter((r) => r !== "");
+    expect(info).toEqual([
+      "Remote agent (read-only)",
+      "Peer: Laptop B",
+      "Id: worker-abc",
+      "Nickname: abc-nick",
+      "Repo: itsybitsy",
+      "Path: /remote/itsybitsy",
+      "State: running",
+      "Type: worker",
+      "Manager: manager-def",
+    ]);
+
+    // TREE mode draws the tree itself in the main area, so it stays on screen
+    // while j/k move through the sections.
+    dashboard.jumpToMode("TREE");
+    const tree = stripAnsi(dashboard.render(WIDTH).join("\n"));
+    expect(tree).toContain("◆ Laptop B · connected");
+    expect(tree).not.toContain(REMOTE_RIGHT_PANE_TEXT);
+  });
+
+  test("a selected peer header or remote repo header shows its own placeholder and fields", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, `remoterepo:${PEER_B}:/remote/itsybitsy`);
+    expect(paneText(dashboard.render(WIDTH), 2)).toBe("Remote repo on Laptop B (read-only)");
+    dashboard.infoPanel.displayHeight = 20;
+    let info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd());
+    expect(info).toContain("Path: /remote/itsybitsy");
+    expect(info).toContain("Agents: 2");
+
+    selectByKey(dashboard, `peer:${PEER_C}`);
+    expect(paneText(dashboard.render(WIDTH), 2)).toBe("Paired install Laptop C (read-only)");
+    info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd());
+    expect(info).toContain("State: last seen 2m ago");
+    expect(info).toContain("Error: timed out");
+    expect(info).toContain("Agents: 1 in 1 repo");
+  });
+
+  test("on a remote row no local path runs: no tmux setAgent, no git probe, no right-pane loader", async () => {
+    const { dashboard } = setup();
+    // Let the local agent's first git probe finish before recording.
+    await waitFor(() => !(dashboard as any).gitStatusInFlight, { timeoutMs: WAIT_TIMEOUT_MS, message: "the local git probe" });
+    const sessions: (string | null)[] = [];
+    for (const name of ["tmuxPoller", "coordinatorPoller", "repoCoordinatorPoller"]) {
+      const poller = (dashboard as any)[name];
+      const setAgent = poller.setAgent.bind(poller);
+      poller.setAgent = (session: string | null) => {
+        sessions.push(session);
+        setAgent(session);
+      };
+    }
+    const realTrigger = paneManager.triggerAsyncLoadIfNeeded;
+    const triggeredWith: unknown[] = [];
+    const loaders = [
+      spyOn(paneManager, "loadAgentLog"),
+      spyOn(paneManager, "loadTailLog"),
+      spyOn(paneManager, "loadAgentPrompt"),
+    ];
+    const trigger = spyOn(paneManager, "triggerAsyncLoadIfNeeded").mockImplementation((ctx, force) => {
+      triggeredWith.push(ctx.agentTree.selectedAgent);
+      realTrigger(ctx, force);
+    });
+    try {
+      spawns.length = 0;
+      selectByKey(dashboard, WORKER_KEY);
+      for (const mode of PANE_MODES) dashboard.jumpToMode(mode);
+      dashboard.jumpToMode("AGENT LOG");
+      for (const key of ["p", "n", "j", "k"]) dashboard.handleInput(key);
+      dashboard.loadTailLogIfNeeded("WATCHDOG LOG");
+      await (dashboard as any).refreshGitStatus();
+      dashboard.render(WIDTH);
+      await Bun.sleep(5);
+
+      expect(sessions.length).toBeGreaterThan(0);
+      expect(sessions.every((s) => s === null)).toBe(true);
+      for (const loader of loaders) expect(loader).not.toHaveBeenCalled();
+      expect(triggeredWith.length).toBeGreaterThan(0);
+      expect(triggeredWith.every((agent) => agent === null)).toBe(true);
+      expect(spawns).toEqual([]);
+      expect(dashboard.rightPane.agent).toBeNull();
+      expect(dashboard.tmuxPane.agent).toBeNull();
+      expect(dashboard.infoPanel.agent).toBeNull();
+    } finally {
+      for (const loader of loaders) loader.mockRestore();
+      trigger.mockRestore();
+    }
+  });
+
+  test("the guard refuses action keys on a remote row with the notice, and none of their handlers run", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const favorites = [...dashboard.agentTree.favoriteAgentIds];
+    const handlers = Object.keys(agentActions)
+      .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
+      .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
+    try {
+      for (const key of ["x", "m", "s", "R", "a", ".", "t", "!", "S", "o"]) {
+        resetNotice(dashboard);
+        dashboard.handleInput(key);
+        expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+        expect(dashboard.dialog).toBeNull();
+      }
+      for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
+      expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(favorites);
+      expect(keyOf(dashboard)).toBe(WORKER_KEY);
+    } finally {
+      for (const handler of handlers) handler.mockRestore();
+    }
+  });
+
+  test("every allowlisted key still works on a remote row", () => {
+    const onRemote = (): DashboardComponent => {
+      const { dashboard } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      resetNotice(dashboard);
+      return dashboard;
+    };
+    const notRefused = (dashboard: DashboardComponent) => expect(dashboard.notice).not.toBe(REMOTE_READ_ONLY_NOTICE);
+
+    // j / k / ↓ / ↑ move one row; J / K jump between repo anchors, remote ones included.
+    let d = onRemote();
+    d.handleInput("j");
+    expect(keyOf(d)).toBe(`remoterepo:${PEER_B}:/remote/other-repo`);
+    d.handleInput("k");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    d.handleInput("\x1b[B");
+    expect(keyOf(d)).toBe(`remoterepo:${PEER_B}:/remote/other-repo`);
+    d.handleInput("\x1b[A");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    d.handleInput("J");
+    expect(keyOf(d)).toBe(`remote:${PEER_B}:agent-1`);
+    d.handleInput("J");
+    expect(keyOf(d)).toBe(`remote:${PEER_C}:agent-1`);
+    d.handleInput("K");
+    expect(keyOf(d)).toBe(`remote:${PEER_B}:agent-1`);
+    notRefused(d);
+
+    // Tab / Shift+Tab move the focus; [ ] { } resize the sidebar.
+    d = onRemote();
+    d.handleInput("\t");
+    expect(d.focus).toBe("info");
+    d.handleInput("\x1b[Z");
+    expect(d.focus).toBe("agent-tree");
+    const width = d.sidebarWidth;
+    d.handleInput("]");
+    expect(d.sidebarWidth).toBe(width + 5);
+    d.handleInput("[");
+    expect(d.sidebarWidth).toBe(width);
+    d.handleInput("}");
+    expect(d.sidebar.heightOffsets.tree).toBe(1);
+    d.handleInput("{");
+    expect(d.sidebar.heightOffsets.tree).toBe(0);
+    notRefused(d);
+
+    // 1 / 2 / 3 switch the tab; the remote row stays the global selection.
+    d = onRemote();
+    d.handleInput("2");
+    expect(d.sidebarMode).toBe("teams");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    d.handleInput("3");
+    expect(d.sidebarMode).toBe("favorites");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    d.handleInput("1");
+    expect(d.sidebarMode).toBe("agents");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    notRefused(d);
+
+    // p / n and ← / → cycle the right pane's mode.
+    d = onRemote();
+    for (const key of ["p", "n", "\x1b[D", "\x1b[C"]) {
+      const before = d.currentMode;
+      d.handleInput(key);
+      expect(d.currentMode).not.toBe(before);
+    }
+    notRefused(d);
+
+    // ? / / / I open their dialogs; Ctrl+C (handled before the dashboard) is never refused.
+    d = onRemote();
+    d.setPeerService(new FakePeerService());
+    for (const [key, type] of [["?", "help"], ["/", "fuzzy"], ["I", "peers"]] as const) {
+      d.handleInput(key);
+      expect(d.dialog?.type).toBe(type);
+      d.closeDialog();
+    }
+    d.handleInput("\x03");
+    notRefused(d);
+  });
+
+  test("the command palette goes through the same guard", () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const retire = spyOn(agentActions, "handleRetire").mockImplementation(() => {});
+    try {
+      const pick = (label: string) => {
+        dashboard.handleInput("/");
+        const palette = assertDialog(dashboard.dialog, "fuzzy");
+        palette.onSelect(palette.allItems.indexOf(label));
+      };
+      resetNotice(dashboard);
+      pick("retire agent — x");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(retire).not.toHaveBeenCalled();
+      resetNotice(dashboard);
+      pick("DIFF — run ib diff");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(dashboard.currentMode).not.toBe("DIFF");
+      pick("peers — I");
+      expect(dashboard.dialog?.type).toBe("peers");
+      expect(service.calls).toContain("open");
+    } finally {
+      retire.mockRestore();
+    }
+  });
+
+  test("the Favorites tab shows no peer rows, except the selected one with its headers", () => {
+    const { dashboard } = setup();
+    dashboard.handleInput("3");
+    expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("Laptop"))).toBe(false);
+    dashboard.handleInput("1");
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("3");
+    const rows = treeRows(dashboard).map((r) => stripAnsi(r).trimEnd());
+    expect(rows.filter((r) => /Laptop|▾|└──/.test(r))).toEqual([
+      "◆ Laptop B · connected",
+      "  ▾ itsybitsy",
+      "      └── abc-nick  running",
+    ]);
+    expect(keyOf(dashboard)).toBe(WORKER_KEY);
+  });
+
+  test("a poller change re-renders while the Agents tab shows the sections; other changes do not", () => {
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+    const local = makeAgent("agent-1", "/repos/local");
+    dashboard.onUpdate([local], [makeFlatAgent(local)], []);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+
+    let renders = counter.renders();
+    service.set({ links: links() });
+    expect(counter.renders()).toBe(renders + 1);
+    expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("Laptop B"))).toBe(true);
+
+    // Nothing the sections show: the same peers and lists, a dialog-only change.
+    renders = counter.renders();
+    service.set({ links: [...service.state.links] });
+    service.set({ status: { kind: "starting" } });
+    const connectedB = service.state.links[0]!;
+    service.set({ links: [{ ...connectedB, lastOkAt: connectedB.lastOkAt! + 5_000 }, ...service.state.links.slice(1)] });
+    expect(counter.renders()).toBe(renders);
+
+    // The Teams tab draws no section: rebuilt, but no render.
+    dashboard.setSidebarMode("teams");
+    service.set({ links: [{ ...service.state.links[0]!, connected: false }, ...service.state.links.slice(1)] });
+    expect(counter.renders()).toBe(renders);
+    expect(dashboard.agentTree.peerList[0]).toMatchObject({ kind: "peer-header", connected: false });
+    // TREE mode draws the Agents tree in the main area, whatever the tab.
+    dashboard.jumpToMode("TREE");
+    renders = counter.renders();
+    service.set({ links: [{ ...service.state.links[0]!, connected: true }, ...service.state.links.slice(1)] });
+    expect(counter.renders()).toBe(renders + 1);
+  });
+
+  test("a selected remote row that its peer drops moves the selection, and the panes follow", () => {
+    const { dashboard, service, local } = setup();
+    selectByKey(dashboard, `peer:${PEER_D}`);
+    service.set({ links: [] });
+    expect(keyOf(dashboard)).toBeNull();
+    expect(dashboard.selectedAgent).toBe(local);
+    expect(dashboard.infoPanel.remote).toBeNull();
+    expect(dashboard.infoPanel.agent).toBe(local);
   });
 });

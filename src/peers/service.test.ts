@@ -8,16 +8,27 @@ import { peerDir, peerEndpointLockFile, peersFile } from "../runtime-names";
 import { makeAgent, waitFor } from "../test-utils";
 import { acquireEndpointLock, releaseEndpointLock } from "./endpoint-lock";
 import { loadOrCreateIdentity } from "./identity";
-import { irohAddonLoaderCtx } from "./iroh";
-import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, decodePairMessage, encodePairMessage } from "./pairing";
-import { PEER_ALPN, PEER_CLOSE, requestAgents, serveTrustedConnection, toRemoteAgents, type RemoteAgent } from "./peer-link";
+import { IrohError, irohAddonLoaderCtx } from "./iroh";
+import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, PairProtocolError, decodePairMessage, encodePairMessage } from "./pairing";
+import {
+  PEER_ALPN,
+  PEER_CLOSE,
+  PEER_MAX_REQUEST_BYTES,
+  encodePeerRequest,
+  requestAgents,
+  serveTrustedConnection,
+  toRemoteAgents,
+  type RemoteAgent,
+} from "./peer-link";
 import {
   PeerService,
   defaultPeerServiceDeps,
+  toPairConnection,
   type PeerServiceDeps,
   type ServiceConnection,
   type ServiceEndpoint,
   type ServiceIncoming,
+  type ServiceStream,
 } from "./service";
 import { addPeer, readPeers } from "./store";
 import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test-pair-transport";
@@ -548,6 +559,24 @@ describe("PeerService at boot", () => {
     await service.shutdown();
   });
 
+  test("bootIfPaired after shutdown does nothing: peers.json is not even read", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    let reads = 0;
+    const { service, binds, logs } = makeService({
+      readPeers: async () => {
+        reads++;
+        return readPeers();
+      },
+    });
+    await service.shutdown();
+    await service.bootIfPaired();
+    expect(reads).toBe(0);
+    expect(binds).toEqual([]);
+    expect(service.view().status).toEqual({ kind: "idle" });
+    expect(await lockContents()).toBeNull();
+    expect(logs).toEqual([]);
+  });
+
   test("a malformed peers.json binds nothing and shows its error", async () => {
     await mkdir(peerDir(), { recursive: true });
     await writeFile(peersFile(), "{");
@@ -621,5 +650,62 @@ describe("PeerService trusted ALPN", () => {
 
     listed.close(PEER_CLOSE.done, "done");
     await service.shutdown();
+  });
+});
+
+/** What the wrapper's readToEnd throws for a stream longer than its limit (iroh.ts isIrohTooLong). */
+const irohTooLong = () => new IrohError("RecvStream.readToEnd", "TooLong");
+
+/** `stream` with its reads failing as `fail` says. */
+function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
+  return {
+    writeAll: (bytes) => stream.writeAll(bytes),
+    finish: () => stream.finish(),
+    readToEnd: async () => {
+      throw fail();
+    },
+  };
+}
+
+describe("toPairConnection maps iroh's TooLong to PairProtocolError", () => {
+  for (const [alpn, reason] of [
+    [PAIR_ALPN, `message longer than ${PAIR_MAX_MESSAGE_BYTES} bytes`],
+    [PEER_ALPN, `request longer than ${PEER_MAX_REQUEST_BYTES} bytes`],
+  ] as const) {
+    test(`on the ${alpn} ALPN: an over-long message closes the connection with code 3 and says why`, async () => {
+      // A listed peer, so the trusted ALPN reads its request at all.
+      await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+      const { service, endpoint } = makeService();
+      endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial stays pending
+      service.openDialog();
+      await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
+      const link = createMemoryLink(ID_REMOTE, service.view().selfId!);
+      const conn = serviceConnection(link.b, alpn);
+      endpoint.push({
+        accept: async () => ({ ...conn, acceptBi: async () => failingReads(await conn.acceptBi(), irohTooLong) }),
+      });
+
+      const stream = await link.a.openBi();
+      await stream.writeAll(alpn === PAIR_ALPN ? encodePairMessage({ op: "pair-hello" }) : encodePeerRequest("agents"));
+      await stream.finish();
+      await waitFor(() => link.a.closeInfo() !== null, { message: "the connection closed" });
+      // Unmapped, the pair ALPN would close it as a "connection error", and the
+      // trusted ALPN would not close it at all.
+      expect(link.a.closeInfo()).toEqual({ byPeer: true, code: alpn === PAIR_ALPN ? PAIR_CLOSE.error : PEER_CLOSE.error, reason });
+      await service.shutdown();
+    });
+  }
+
+  test("on both stream directions; any other read error passes through unchanged", async () => {
+    const link = createMemoryLink(ID_REMOTE, "00".repeat(32));
+    const other = new IrohError("RecvStream.readToEnd", "Reset");
+    const conn = serviceConnection(link.a, PEER_ALPN);
+    const opened = toPairConnection({ ...conn, openBi: async () => failingReads(await conn.openBi(), irohTooLong) });
+    const read = (await opened.openBi()).readToEnd(1234);
+    await expect(read).rejects.toBeInstanceOf(PairProtocolError);
+    await expect(read).rejects.toThrow("message longer than 1234 bytes");
+
+    const passthrough = toPairConnection({ ...conn, openBi: async () => failingReads(await conn.openBi(), () => other) });
+    await expect((await passthrough.openBi()).readToEnd(10)).rejects.toBe(other);
   });
 });

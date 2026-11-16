@@ -45,7 +45,7 @@ import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
-import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import { wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
@@ -446,13 +446,16 @@ function remoteTitle(entry: PeerSectionEntry): string {
 /**
  * The main area for a selected peer-section row (SPEC §20.5): the center
  * placeholder and the right pane's "not available" placeholder, side by side
- * on the split layout's seam, `height` rows. Both are cut to their pane.
+ * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
+ * (the right pane is often narrow), and a word longer than the pane is broken.
  */
 function renderRemotePlaceholders(entry: PeerSectionEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
-  const center = padLines([truncateToWidth(`${DIM}${remoteCenterText(entry)}${RESET}`, lw, "")], height);
-  const right = padLines([truncateToWidth(`${DIM}${REMOTE_RIGHT_PANE_TEXT}${RESET}`, rw, "")], height);
+  const placeholder = (text: string, width: number) =>
+    padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), height);
+  const center = placeholder(remoteCenterText(entry), lw);
+  const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw);
   const sep = `${DIM_GRAY}│${RESET}`;
   return center.map((line, i) => padToWidth(line, lw) + sep + (right[i] ?? ""));
 }

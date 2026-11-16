@@ -153,8 +153,10 @@ one. This works like Telegram, where the first poller wins.
   `_all.md`. That one entry blocks the key at both the hook layer and the
   kernel layer, the same way `sealed` is blocked. Adam adds the same line to
   his installed `_all.md` by hand; there is no migration code.
-- Agents cannot write anything under `~/.itsybitsy/peer/`, because it is not
-  in `allowWrite`. No agent can add a trusted peer.
+- No agent can write anything under `~/.itsybitsy/peer/`, so no agent can add
+  a trusted peer. Ordinary agents don't have it in `allowWrite`. `@system` is
+  not kernel-sandboxed, and its hook table can write all of `~/.itsybitsy`, so
+  `peer/` is on its protected write list (`systemProtectedWritePaths`).
 
 ### Pairing
 
@@ -315,7 +317,10 @@ Pairing happens only in the watch window. There is no `ib peer add`.
 2. **Pairing:**
    - code helpers: generate, normalize, constant-time compare, expiry;
    - the pair protocol over a transport seam;
-   - the Peers dialog on `I`, including name entry.
+   - the Peers dialog on `I`, including name entry;
+   - binding the endpoint in `ib watch` when the dialog opens. This takes the
+     endpoint lock and calls `ep.close()` on exit. Phase 2 is the first phase
+     to bind the endpoint.
 
    Tests drive the protocol through the seam and the dialog through the
    existing dashboard test helpers. Real-endpoint tests use `presetMinimal`,

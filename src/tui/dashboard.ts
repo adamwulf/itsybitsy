@@ -499,6 +499,12 @@ class StatusBarComponent implements Component {
   codexUsageError = false;
   version = "";
   repoHeaderSelected = false;
+  /**
+   * A peer-section row is selected (SPEC §20.5): the footer lists only keys
+   * the read-only guard allows (isRemoteAllowedKey), not the agent actions it
+   * would refuse.
+   */
+  remoteSelected = false;
   hasResolvableWarnings = false;
 
   invalidate(): void {}
@@ -522,7 +528,10 @@ class StatusBarComponent implements Component {
 
     let row1Left: string;
     let row2Left: string;
-    if (this.repoHeaderSelected) {
+    if (this.remoteSelected) {
+      row1Left = `${DIM}j/k: select    J/K: repo    p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers    (read-only remote agent)${RESET}`;
+    } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo${fixHint}${RESET}`;
@@ -735,8 +744,12 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
  * - navigation and focus: j/k, J/K, the arrows, Tab and Shift+Tab, `[` `]` `{` `}`;
  * - the sidebar tabs 1, 2 and 3;
  * - pane cycling: p and n (and ←/→, their arrow forms);
+ * - the `@` jump: it lists only local rows (handleFuzzyAgent keeps only local
+ *   kinds), so it is the quick way back from a peer section;
  * - help `?`, the command palette `/` (whose commands pass this same guard) and Peers `I`;
  * - quit (Ctrl+C, which the TUI's input listener handles before the dashboard).
+ *
+ * The footer's remote hints (StatusBarComponent.remoteSelected) list these keys.
  */
 export function isRemoteAllowedKey(data: string): boolean {
   switch (data) {
@@ -745,6 +758,7 @@ export function isRemoteAllowedKey(data: string): boolean {
     case "[": case "]": case "{": case "}":
     case "1": case "2": case "3":
     case "p": case "n":
+    case "@":
     case "?": case "/": case "I":
       return true;
   }
@@ -2256,6 +2270,7 @@ export class DashboardComponent implements Component {
     this.rightPane.selectedRepoHeader = selectedRepoHeader;
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
+    this.statusBar.remoteSelected = remote !== null;
 
     // Wire info panel
     this.infoPanel.agent = selected;

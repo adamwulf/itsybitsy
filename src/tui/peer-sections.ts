@@ -10,13 +10,16 @@
  * - A peer that has never answered has no list: its section is the header only.
  *   A peer that is not connected keeps its last list, marked `stale` (dimmed).
  * - Rows are keyed by the peer's id plus their own: a remote agent by
- *   (peerId, agentId) and a remote repo by (peerId, repoPath), never by a bare
- *   agent id, so a remote id that equals a local one, or one on another peer,
- *   stays a row of its own. Local agent ids never contain a colon
- *   (validation.ts isValidAgentId), so a key here never equals a local key.
+ *   (peerId, repoPath, agentId) — an agent id is unique only within its repo —
+ *   and a remote repo by (peerId, repoPath), never by a bare agent id, so a
+ *   remote id that equals a local one, one on another peer, or one in another
+ *   repo of the same peer stays a row of its own. Every key has a colon after
+ *   its prefix, and local agent ids never contain one (validation.ts
+ *   isValidAgentId), so a key here never equals a local key.
  */
 
 import type { PeerSectionEntry } from "../agents";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import type { RemoteAgent } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
 
@@ -27,7 +30,11 @@ import type { PeerLinkState } from "../peers/poller";
  */
 export const MAX_REMOTE_DEPTH = 8;
 
-/** The selection key of a peer-section row. */
+/**
+ * The selection key of a peer-section row. A peer id is 64 hex characters, so
+ * a repo key's path is everything after it; a remote agent's repo path and id
+ * may both hold a colon, so they are JSON-encoded together.
+ */
 export function peerEntryKey(entry: PeerSectionEntry): string {
   switch (entry.kind) {
     case "peer-header":
@@ -35,8 +42,13 @@ export function peerEntryKey(entry: PeerSectionEntry): string {
     case "remote-repo-header":
       return `remoterepo:${entry.peerId}:${entry.repoPath}`;
     case "remote-agent":
-      return `remote:${entry.peerId}:${entry.remote.id}`;
+      return `remote:${JSON.stringify([entry.peerId, entry.remote.repoPath, entry.remote.id])}`;
   }
+}
+
+/** Whether a selection key is a peer-section row's (peerEntryKey), not a local row's. */
+export function isPeerEntryKey(key: string): boolean {
+  return key.startsWith("peer:") || key.startsWith("remoterepo:") || key.startsWith("remote:");
 }
 
 /** Whether `kind` is one of the peer-section row kinds. */
@@ -49,11 +61,18 @@ export function remoteDisplayName(remote: RemoteAgent): string {
   return remote.nickname ?? remote.id;
 }
 
-/** The peer's sections, in `links` order (peers.json order). */
+/**
+ * The peer's sections, in `links` order (peers.json order). A remote repo's
+ * coordinator (agentType `repo-coordinator`) is left out, as the local tree
+ * leaves out local ones: the agents it manages become roots of their repo, a
+ * repo whose only agent is its coordinator gets no header, and the counts
+ * count only the rows drawn. The list on the wire is unchanged.
+ */
 export function flattenPeerSections(links: readonly PeerLinkState[]): PeerSectionEntry[] {
   const out: PeerSectionEntry[] = [];
   for (const link of links) {
-    const repos = link.agents === null ? [] : groupByRepo(link.agents);
+    const drawn = link.agents === null ? null : link.agents.filter((agent) => agent.agentType !== REPO_COORDINATOR_TYPE);
+    const repos = drawn === null ? [] : groupByRepo(drawn);
     out.push({
       kind: "peer-header",
       peerId: link.id,
@@ -61,8 +80,8 @@ export function flattenPeerSections(links: readonly PeerLinkState[]): PeerSectio
       connected: link.connected,
       lastOkAt: link.lastOkAt,
       lastError: link.lastError,
-      repoCount: link.agents === null ? null : repos.length,
-      agentCount: link.agents === null ? null : link.agents.length,
+      repoCount: drawn === null ? null : repos.length,
+      agentCount: drawn === null ? null : drawn.length,
     });
     const stale = !link.connected;
     for (const repo of repos) {
@@ -132,7 +151,8 @@ function connectorFor(ancestorIsLast: readonly boolean[]): string {
 /**
  * One repo's agents in tree order, each nested under its `manager` when that
  * manager is in the same repo's list (else it is a root, like a local agent
- * whose manager is elsewhere). Siblings keep the order the other install sent.
+ * whose manager is elsewhere, or is the repo coordinator flattenPeerSections
+ * left out). Siblings keep the order the other install sent.
  * The list comes from the other install, so it is not trusted to be a tree: an
  * agent in a manager cycle has no root above it, so each cycle is entered at
  * its first agent in list order, and every agent is drawn exactly once.

@@ -9,7 +9,7 @@ import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM, GREEN, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
-import { peerEntryKey, remoteDisplayName } from "./peer-sections";
+import { isPeerEntryKey, isPeerSectionKind, peerEntryKey, remoteDisplayName } from "./peer-sections";
 import { peerLinkStateText } from "./peers-dialog";
 
 export const MAX_TREE_HEIGHT = 7;
@@ -408,9 +408,13 @@ export class AgentTreeComponent implements Component {
    * The peer sections (SPEC §20.5), drawn below the local tree: built by
    * src/tui/peer-sections.ts from the poller's state and set by the dashboard
    * through setPeerSections. Kept apart from `_flatList`, so `flatList` (which
-   * the `@` jump, favorites and every local lookup read) stays local-only, and
-   * no filter of the local tree touches them: the V filter does not apply, and
-   * the Favorites tab shows none except the selected-row carve-out.
+   * favorites, the question jump and every other local lookup read) stays
+   * local-only, and no filter of the local tree touches them: the V filter
+   * does not apply, and the Favorites tab shows none except the selected-row
+   * carve-out. `visibleList` DOES include them: the `@` jump
+   * (agent-actions.ts handleFuzzyAgent) reads visibleList and stays local
+   * only because it keeps just the agent, repo-header and system-coordinator
+   * kinds — do not widen that filter.
    */
   private _peerList: PeerSectionEntry[] = [];
   private selectedIndex = 0;
@@ -1231,8 +1235,16 @@ export class AgentTreeComponent implements Component {
     if (idx !== -1) {
       this.selectedIndex = idx;
     } else {
-      // Selected item gone — clamp to valid range
-      this.selectedIndex = Math.min(this.selectedIndex, visible.length - 1);
+      // Selected item gone — clamp to valid range. A gone LOCAL row clamps
+      // within the local rows (the peer sections follow them), so retiring the
+      // bottom-most local agent lands on the local row above it, not on a peer
+      // header. With no local row left, or for a gone remote row, the range is
+      // the whole list.
+      const firstPeerRow = visible.findIndex((f) => isPeerSectionKind(f.kind));
+      const localRows = firstPeerRow === -1 ? visible.length : firstPeerRow;
+      const local = selectedId !== null && !isPeerEntryKey(selectedId);
+      const rows = local && localRows > 0 ? localRows : visible.length;
+      this.selectedIndex = Math.min(this.selectedIndex, rows - 1);
       this.updateSelectedId();
     }
     this.ensureSelectedVisible();

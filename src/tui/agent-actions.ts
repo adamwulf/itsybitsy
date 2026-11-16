@@ -1975,6 +1975,9 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
 }
 
 export function handleFuzzyAgent(ctx: ActionCtx) {
+  // visibleList includes the peer sections' rows (SPEC §20.5). The jump lists
+  // only local rows because the filters below keep just the agent,
+  // repo-header and system-coordinator kinds: do not widen them to peer kinds.
   const visible = ctx.agentTree.visibleList;
   const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
   const repoEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header");

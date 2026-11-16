@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { PeerSectionEntry } from "../agents";
+import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import type { RemoteAgent } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
-import { MAX_REMOTE_DEPTH, flattenPeerSections, peerEntryKey, remoteDisplayName, samePeerLinks } from "./peer-sections";
+import { MAX_REMOTE_DEPTH, flattenPeerSections, isPeerEntryKey, peerEntryKey, remoteDisplayName, samePeerLinks } from "./peer-sections";
 
 const PEER_A = "a1".repeat(32);
 const PEER_B = "b2".repeat(32);
@@ -133,15 +134,55 @@ describe("peerEntryKey", () => {
     expect(keys).toEqual([
       `peer:${PEER_A}`,
       `remoterepo:${PEER_A}:/repos/app`,
-      `remote:${PEER_A}:agent-1`,
+      `remote:${JSON.stringify([PEER_A, "/repos/app", "agent-1"])}`,
       `peer:${PEER_B}`,
       `remoterepo:${PEER_B}:/repos/app`,
-      `remote:${PEER_B}:agent-1`,
+      `remote:${JSON.stringify([PEER_B, "/repos/app", "agent-1"])}`,
     ]);
     expect(new Set(keys).size).toBe(keys.length);
     // A local agent is keyed by its bare id (agent-1), and a local repo header by `repopath:`.
     expect(keys).not.toContain("agent-1");
     expect(keys.some((k) => k.startsWith("repopath:"))).toBe(false);
+    expect(keys.every(isPeerEntryKey)).toBe(true);
+    for (const local of ["agent-1", "repopath:/repos/app", "__system-coordinator__"]) expect(isPeerEntryKey(local)).toBe(false);
+  });
+
+  test("one agent id in two repos of one peer is two keys, even when the paths and ids hold colons", () => {
+    const rows = flattenPeerSections([
+      link(PEER_A, [
+        remote("agent-1", { repoName: "a", repoPath: "/repos/a" }),
+        remote("agent-1", { repoName: "b", repoPath: "/repos/b" }),
+        // Split at a colon, these two would read the same.
+        remote("y:z", { repoName: "c", repoPath: "/x" }),
+        remote("z", { repoName: "d", repoPath: "/x:y" }),
+      ]),
+    ]);
+    const agentKeys = rows.filter((r) => r.kind === "remote-agent").map(peerEntryKey);
+    expect(agentKeys).toHaveLength(4);
+    expect(new Set(agentKeys).size).toBe(4);
+  });
+});
+
+describe("remote repo coordinators", () => {
+  test("are left out like local ones: their agents become roots, a coordinator-only repo has no header, the counts count only drawn rows", () => {
+    const rows = flattenPeerSections([
+      link(PEER_A, [
+        remote("coord", { agentType: REPO_COORDINATOR_TYPE, state: "stopped" }),
+        remote("worker-1", { manager: "coord" }),
+        remote("worker-2", { manager: "coord" }),
+        remote("child", { manager: "worker-1" }),
+        remote("lonely-coord", { agentType: REPO_COORDINATOR_TYPE, repoName: "empty", repoPath: "/repos/empty" }),
+      ]),
+    ]);
+    expect(rows.map(describeRow)).toEqual([
+      "peer peer-a1",
+      "repo app /repos/app",
+      "agent ├── worker-1",
+      "agent │   └── child",
+      "agent └── worker-2",
+    ]);
+    expect(rows[0]).toMatchObject({ kind: "peer-header", repoCount: 1, agentCount: 3 });
+    expect(rows[1]).toMatchObject({ kind: "remote-repo-header", agentCount: 3 });
   });
 });
 

@@ -35,7 +35,7 @@ import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
 import { peerEntryKey } from "./peer-sections";
-import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT } from "./dashboard";
+import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
 import { DIM } from "./colors";
 import { getStateColors } from "./color-scheme";
 import * as agentActions from "./agent-actions";
@@ -9172,7 +9172,10 @@ describe("Peer sections in the Agents tree", () => {
   const PEER_C = "0c".repeat(32);
   const PEER_D = "0d".repeat(32);
   const WIDTH = 160;
-  const WORKER_KEY = `remote:${PEER_B}:worker-abc`;
+  /** A remote agent's selection key (peer-sections.ts peerEntryKey): peer, repo path and id. */
+  const agentKey = (peer: string, repo: string, id: string, repoPath = `/remote/${repo}`) =>
+    `remote:${JSON.stringify([peer, repoPath, id])}`;
+  const WORKER_KEY = agentKey(PEER_B, "itsybitsy", "worker-abc");
 
   let origRows: number;
   let spawns: string[][];
@@ -9298,7 +9301,7 @@ describe("Peer sections in the Agents tree", () => {
     for (const state of odd) expect(stripAnsi(rows)).toContain(state);
     expect(rows).not.toContain("function");
     expect(rows).not.toContain("[object");
-    selectByKey(dashboard, `remote:${PEER_B}:odd-0`);
+    selectByKey(dashboard, agentKey(PEER_B, "app", "odd-0"));
     dashboard.infoPanel.displayHeight = 20;
     const info = dashboard.infoPanel.render(60).join("\n");
     expect(stripAnsi(info)).toContain("State: constructor");
@@ -9328,7 +9331,7 @@ describe("Peer sections in the Agents tree", () => {
       expect(header).toEndWith(width === 40 ? "P… · connected" : `${"P".repeat(32)} · connected`);
 
       // The info panel and the whole screen fit too, with the long row selected.
-      selectByKey(dashboard, `remote:${PEER_B}:${"n".repeat(100)}`);
+      selectByKey(dashboard, agentKey(PEER_B, "", "n".repeat(100), `/${"p".repeat(200)}`));
       dashboard.infoPanel.displayHeight = 20;
       expect(dashboard.infoPanel.render(width).filter((r) => visibleWidth(r) > width)).toEqual([]);
       dashboard.sidebarWidth = width;
@@ -9341,17 +9344,17 @@ describe("Peer sections in the Agents tree", () => {
     expect(treeRows(dashboard).map(stripAnsi).filter((r) => /\bagent-1\b/.test(r))).toHaveLength(3);
     expect(dashboard.selectedAgent).toBe(local);
 
-    selectByKey(dashboard, `remote:${PEER_B}:agent-1`);
+    selectByKey(dashboard, agentKey(PEER_B, "other-repo", "agent-1"));
     expect(dashboard.selectedAgent).toBeNull();
     expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", peerId: PEER_B });
     expect(treeRows(dashboard).filter((r) => r.includes("\x1b[7m")).map(stripAnsi)).toEqual([expect.stringContaining("complete")]);
 
-    selectByKey(dashboard, `remote:${PEER_C}:agent-1`);
+    selectByKey(dashboard, agentKey(PEER_C, "app", "agent-1"));
     expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", peerId: PEER_C });
     // A poller change that reorders the peers keeps the selection on C's row.
     const [b, c, d] = service.state.links;
     service.set({ links: [c!, b!, d!] });
-    expect(keyOf(dashboard)).toBe(`remote:${PEER_C}:agent-1`);
+    expect(keyOf(dashboard)).toBe(agentKey(PEER_C, "app", "agent-1"));
     expect(dashboard.selectedAgent).toBeNull();
 
     // Back to the local agent-1: k until it is selected again.
@@ -9491,6 +9494,118 @@ describe("Peer sections in the Agents tree", () => {
     }
   });
 
+  for (const [label, key] of [
+    ["remote repo header", `remoterepo:${PEER_B}:/remote/itsybitsy`],
+    ["peer header", `peer:${PEER_B}`],
+  ] as const) {
+    test(`the guard refuses the keys a local header has (x, r, D, ., f) on a ${label}`, () => {
+      const { dashboard } = setup();
+      selectByKey(dashboard, key);
+      const pinned = [...dashboard.agentTree.pinnedRepoPaths];
+      const handlers = Object.keys(agentActions)
+        .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
+        .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
+      try {
+        for (const k of ["x", "r", "D", ".", "f"]) {
+          resetNotice(dashboard);
+          dashboard.handleInput(k);
+          expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+          expect(dashboard.dialog).toBeNull();
+        }
+        for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
+        expect([...dashboard.agentTree.pinnedRepoPaths]).toEqual(pinned);
+        expect(keyOf(dashboard)).toBe(key);
+      } finally {
+        for (const handler of handlers) handler.mockRestore();
+      }
+    });
+  }
+
+  test("one agent id in two repos of one peer: each row selects on its own, and the rows below stay reachable", () => {
+    const { dashboard, service } = setup();
+    const agents = () => [remote("dup", "alpha"), remote("dup", "beta", { state: "waiting" }), remote("after", "gamma")];
+    service.set({ links: [{ ...links()[0]!, agents: agents() }] });
+    const alpha = agentKey(PEER_B, "alpha", "dup");
+    const beta = agentKey(PEER_B, "beta", "dup");
+    selectByKey(dashboard, alpha);
+    expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", remote: { repoPath: "/remote/alpha" } });
+    dashboard.handleInput("j"); // beta's repo header
+    dashboard.handleInput("j");
+    expect(keyOf(dashboard)).toBe(beta);
+    expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", remote: { repoPath: "/remote/beta", state: "waiting" } });
+    expect(treeRows(dashboard).filter((r) => r.includes("\x1b[7m")).map((r) => stripAnsi(r).trim())).toEqual([expect.stringMatching(/^└── dup +waiting$/)]);
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    expect(keyOf(dashboard)).toBe(agentKey(PEER_B, "gamma", "after"));
+
+    // J from alpha's row lands on beta's; a refresh with new objects keeps beta's; so does the Favorites carve-out.
+    selectByKey(dashboard, alpha);
+    dashboard.handleInput("J");
+    expect(keyOf(dashboard)).toBe(beta);
+    service.set({ links: [{ ...links()[0]!, agents: agents() }] });
+    expect(keyOf(dashboard)).toBe(beta);
+    dashboard.handleInput("3");
+    expect(treeRows(dashboard).map((r) => stripAnsi(r).trim()).filter((r) => /▾|└──/.test(r))).toEqual([
+      "▾ beta",
+      expect.stringMatching(/^└── dup +waiting$/),
+    ]);
+  });
+
+  test("a vanished bottom-most local agent selects the local row above it, not the first peer header", () => {
+    const dashboard = makeDashboard();
+    const a = makeAgent("agent-a", "/repos/local");
+    const b = makeAgent("agent-b", "/repos/local");
+    dashboard.onUpdate([a, b], [makeFlatAgent(a), makeFlatAgent(b)], []);
+    const service = new FakePeerService();
+    service.state = { ...service.state, links: links() };
+    dashboard.setPeerService(service);
+    dashboard.handleInput("j");
+    expect(dashboard.selectedAgent?.id).toBe("agent-b");
+
+    // agent-b is retired: the watcher's next list lacks it.
+    dashboard.onUpdate([a], [makeFlatAgent(a)], []);
+    expect(dashboard.selectedAgent?.id).toBe("agent-a");
+    expect(keyOf(dashboard)).toBeNull();
+    expect(dashboard.infoPanel.remote).toBeNull();
+  });
+
+  test("the footer lists only the keys a remote row allows, and the agent hints come back on a local row", () => {
+    const { dashboard, local } = setup();
+    const footer = () => ((dashboard as any).statusBar.render(WIDTH) as string[]).map(stripAnsi).join("\n");
+    expect(footer()).toContain("s: send");
+
+    selectByKey(dashboard, WORKER_KEY);
+    const text = footer();
+    const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers"];
+    for (const hint of shown) expect(text).toContain(hint);
+    for (const hint of ["s: send", "m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
+      expect(text).not.toContain(hint);
+    }
+    // Every key the remote footer names is one the guard allows.
+    for (const key of ["j", "k", "J", "K", "p", "n", "1", "2", "3", "[", "]", "{", "}", "@", "/", "?", "I"]) {
+      expect(isRemoteAllowedKey(key)).toBe(true);
+    }
+
+    for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
+    expect(footer()).toContain("s: send");
+  });
+
+  test("@ works on a remote row: it lists only local rows and lands on one", () => {
+    const { dashboard, local } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    resetNotice(dashboard);
+    dashboard.handleInput("@");
+    expect(dashboard.notice).not.toBe(REMOTE_READ_ONLY_NOTICE);
+    const jump = assertDialog(dashboard.dialog, "fuzzy");
+    const items = jump.allItems.map(stripAnsi);
+    expect(items.some((item) => /Laptop|worker-abc|manager-def|itsybitsy/.test(item))).toBe(false);
+    jump.onSelect(items.findIndex((item) => item.includes("agent-1")));
+    expect(dashboard.selectedAgent).toBe(local);
+    expect(keyOf(dashboard)).toBeNull();
+    expect(dashboard.infoPanel.remote).toBeNull();
+    expect(dashboard.infoPanel.agent).toBe(local);
+  });
+
   test("every allowlisted key still works on a remote row", () => {
     const onRemote = (): DashboardComponent => {
       const { dashboard } = setup();
@@ -9511,11 +9626,11 @@ describe("Peer sections in the Agents tree", () => {
     d.handleInput("\x1b[A");
     expect(keyOf(d)).toBe(WORKER_KEY);
     d.handleInput("J");
-    expect(keyOf(d)).toBe(`remote:${PEER_B}:agent-1`);
+    expect(keyOf(d)).toBe(agentKey(PEER_B, "other-repo", "agent-1"));
     d.handleInput("J");
-    expect(keyOf(d)).toBe(`remote:${PEER_C}:agent-1`);
+    expect(keyOf(d)).toBe(agentKey(PEER_C, "app", "agent-1"));
     d.handleInput("K");
-    expect(keyOf(d)).toBe(`remote:${PEER_B}:agent-1`);
+    expect(keyOf(d)).toBe(agentKey(PEER_B, "other-repo", "agent-1"));
     notRefused(d);
 
     // Tab / Shift+Tab move the focus; [ ] { } resize the sidebar.

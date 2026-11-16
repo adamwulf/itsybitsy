@@ -29,17 +29,42 @@ in Oct 2026. These are the calls this plan uses:
 - `ep.connect(new EndpointAddr(id), alpn)` dials a peer by its id alone.
 - `conn.remoteId()` returns the peer's authenticated id.
 - `conn.openBi()` / `acceptBi()`, `writeAll`, `read(limit)`, `finish`
-- `EndpointId.fromString()`, `.toString()` (base32), `.fmtShort()`
+- `EndpointId.fromString()`, `.toString()`, `.fmtShort()`. An id is 64
+  lowercase hex characters, and the short form is the first 10.
 
-Caveats:
+**Phase 0 (done, see [iroh-spike-findings.md](iroh-spike-findings.md)).** All
+five checks passed on Bun 1.3.10 with `@number0/iroh` 1.2.0:
 
-- The package targets Node ≥ 20.3 and does not mention Bun.
-- Its only macOS build is arm64. Both laptops are Apple Silicon, so this is
-  fine.
-- `bun build --compile` embeds a `.node` addon only when the file is
-  `require`d directly. napi-rs's loader picks the binary at runtime, so we may
-  need to require `@number0/iroh-darwin-arm64/*.node` ourselves.
-- None of this has been tried yet. Phase 0 checks it.
+- Two processes found each other by id alone through n0, and
+  `conn.remoteId()` matched the dialing side's id.
+- A plain `import` embeds the addon in a binary built with the exact `ib`
+  flags, and that binary runs from a directory with no `node_modules`.
+- The addon adds about 12.3 MB (71 → 83 MB). A run that never loads it
+  showed no measurable change in `--version` CPU time.
+- Loading the addon costs about 25 ms of CPU but 230–400 ms of wall time in
+  the compiled binary, on every load.
+- A relay-disabled loopback on `127.0.0.1` connects in 1–2 ms.
+- The process exits once `ep.close()` has been called.
+
+Its only macOS build is arm64. Both laptops are Apple Silicon, so this is
+fine.
+
+API quirks the code has to handle:
+
+- Every byte buffer is a plain `Array<number>`. `Uint8Array` and `Buffer` are
+  rejected.
+- Every error is a plain `Error` with `code: "GenericFailure"`. The meaning is
+  only in the message text.
+- `EndpointId.fromString` accepts only exact lowercase hex. Input must be
+  trimmed and lowercased first.
+- `read(limit)` returns whatever chunk has arrived. `readToEnd(limit)` throws
+  `TooLong` when the stream is over the limit.
+- A failed handshake rejects `accept()` on the server, so the accept loop must
+  catch errors per connection. A loop without that catch died, and every
+  later dial to it hung.
+- A dial can take up to 30 s to fail.
+- A pending `acceptNext()` keeps Bun alive until `ep.close()` is called, at
+  which point it resolves with `null`.
 
 **Connecting by key alone.** `Endpoint.bind()` applies the n0 preset, which
 turns on n0's public relays and discovery:
@@ -73,13 +98,20 @@ turns on n0's public relays and discovery:
 
 ### Integration
 
-`src/peers/` loads `@number0/iroh` with a dynamic `import()`, the same way
-`ib watch` loads Telegram. Only `ib watch` and `ib peer ...` load the addon.
-Hooks never do, so `ib`'s start time does not change.
-
-If Phase 0 fails, the fallback is a small Rust sidecar binary that `ib watch`
-spawns and talks to with JSON over stdio. That fallback would come back to you
-for approval first.
+- `@number0/iroh` becomes a root dependency, so `bun test` can load it from
+  `node_modules`.
+- Only `src/peers/iroh.ts` imports it, and only through a dynamic `import()`,
+  the same way `ib watch` loads Telegram.
+- Only `ib watch` ever loads the addon. Hooks and the `ib peer` commands
+  never do, so their start time does not change.
+- `ib peer id` derives the public key from `secret.key` with `node:crypto`
+  (ed25519). A test checks that the result matches what iroh reports for the
+  same key.
+- `src/peers/iroh.ts` is a thin wrapper:
+  - it converts `Uint8Array` to `Array<number>` and back at the boundary;
+  - it turns the addon's errors into short messages;
+  - it exposes only the calls this plan uses.
+- `ib watch` calls `ep.close()` on exit.
 
 ### Process model
 
@@ -130,13 +162,19 @@ one. This works like Telegram, where the first poller wins.
 shows this install's id, the paired peers with their connection state, and a
 "Pair with id" input.
 
-Pairing uses its own ALPN, `itsybitsy/pair/1`, on one bi stream. Messages are
-newline-delimited JSON, at most 4 KB each.
+Pairing uses its own ALPN, `itsybitsy/pair/1`, on one connection. Each
+request and reply has its own bi stream:
 
-1. On B, open the Peers dialog to read B's id, and leave it open. B accepts
-   pairing only while that dialog is open.
-2. On A, enter B's id. A checks it with `EndpointId.fromString`, dials B, and
-   sends `pair-hello`.
+- A writes one JSON message and calls `finish`.
+- B reads it with `readToEnd(4096)`, writes one JSON reply, and calls
+  `finish`.
+
+This needs no framing code. B ties the pending code to the connection.
+
+1. On B, open the Peers dialog to read B's id (64 hex characters), and leave
+   it open. B accepts pairing only while that dialog is open.
+2. On A, paste B's id. A trims and lowercases it, checks it with
+   `EndpointId.fromString`, dials B, and sends `pair-hello`.
 3. B accepts the request only if all of these hold:
    - its Peers dialog is open;
    - no other pairing is pending;
@@ -195,9 +233,13 @@ paired" refusal in step 3.
 - The trusted ALPN, `itsybitsy/peer/1`, accepts only ids listed in
   `peers.json`, re-read on every accept. Any other id is closed before
   anything is read.
+- The accept loop catches errors per connection. One bad handshake must not
+  stop it.
 - Every 5 s, `ib watch` dials each peer by id. It keeps a live connection open
-  between polls. iroh handles network changes and sleep/wake. A failed dial is
-  retried on the next tick.
+  between polls, and iroh handles network changes and sleep/wake. A failed
+  dial is retried on the next tick.
+- A peer never has two dials in flight at once. A dial can take up to 30 s to
+  fail, so ticks that come in while a dial is pending are skipped.
 - Each peer's state is kept in memory: connected, or last seen N ago plus the
   last error. The state shows in that peer's tree section header and in the
   Peers dialog. Nothing is written to disk.
@@ -257,26 +299,26 @@ Pairing happens only in the watch window. There is no `ib peer add`.
 
 ## Phases
 
-0. **Spike (gate).** In a scratch project:
-   - run two Bun endpoints that dial each other by id alone and exchange a
-     message;
-   - build with the exact `bun build --compile` flags from AGENTS.md, and run
-     the binary from another directory to confirm the addon is embedded;
-   - measure how the binary size and the `ib --version` CPU time change;
-   - check whether a relay-disabled loopback on `127.0.0.1` works, so tests
-     can skip the network.
+0. **Spike: done.** All five checks passed. See
+   [iroh-spike-findings.md](iroh-spike-findings.md) and `spikes/iroh/`.
+1. **Identity and peer store:**
+   - the root `@number0/iroh` dependency and the `src/peers/iroh.ts` wrapper;
+   - `src/peers/identity.ts`, including the `node:crypto` id derivation;
+   - the endpoint lock and the `peers.json` store;
+   - `ib peer id|list|remove`, the `_all.md` deny line, and the hook gate.
 
-   I report back before Phase 1.
-1. **Identity and peer store:** `src/peers/identity.ts`, the endpoint lock,
-   the `peers.json` store, `ib peer id|list|remove`, the `_all.md` deny line,
-   and the hook gate. Unit tests.
+   Write unit tests. Rebuild the real `ib` and measure its `--version` CPU
+   time before and after, because the spike measured only a tiny entry.
 2. **Pairing:**
    - code helpers: generate, normalize, constant-time compare, expiry;
    - the pair protocol over a transport seam;
    - the Peers dialog on `I`, including name entry.
 
    Tests drive the protocol through the seam and the dialog through the
-   existing dashboard test helpers.
+   existing dashboard test helpers. Real-endpoint tests use `presetMinimal`,
+   `RelayMode.disabled()` and `bindAddr("127.0.0.1:0")`, and dial
+   `ep.addr().directAddresses()`. They need no network, and a round trip
+   takes a few milliseconds.
 3. **Trusted link:** the trusted ALPN, the allowlisted accept loop, the
    `agents` op, the 5 s poller, and in-memory peer state.
 4. **Tree:** the peer sections in the sidebar, the read-only guard, the

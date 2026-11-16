@@ -179,11 +179,20 @@ export function formatSince(ms: number): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
+/**
+ * A peer's connection state as plain text: `connected`, `last seen N ago`, or
+ * `not connected yet`. The dialog and the tree's peer headers both show it.
+ */
+export function peerLinkStateText(link: Pick<PeerLinkState, "connected" | "lastOkAt">, now: number): string {
+  if (link.connected) return "connected";
+  if (link.lastOkAt !== null) return `last seen ${formatSince(now - link.lastOkAt)} ago`;
+  return "not connected yet";
+}
+
 /** A peer's connection state, after its name and short id. */
 function linkStateText(link: PeerLinkState, now: number): string {
-  if (link.connected) return `${GREEN}● connected${RESET}`;
-  if (link.lastOkAt !== null) return `${YELLOW}●${RESET} last seen ${formatSince(now - link.lastOkAt)} ago`;
-  return `${YELLOW}●${RESET} not connected yet`;
+  const text = peerLinkStateText(link, now);
+  return link.connected ? `${GREEN}● ${text}${RESET}` : `${YELLOW}●${RESET} ${text}`;
 }
 
 /** The input line: the end of the value stays visible. */

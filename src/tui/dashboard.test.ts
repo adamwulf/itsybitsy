@@ -8904,7 +8904,7 @@ describe("Peers dialog", () => {
     expect(out).toContain("not a peer");
   });
 
-  test("a service change renders only while the Peers dialog is open", () => {
+  test("with no peer section on screen, a service change renders only while the Peers dialog is open", () => {
     const dashboard = makeDashboard();
     // Counts renders, and stands in for the overlay the dialog opens.
     let renders = 0;
@@ -8918,6 +8918,8 @@ describe("Peers dialog", () => {
     const service = new FakePeerService();
     dashboard.setPeerService(service);
     const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), lastError: null, agents: [] };
+    // The Teams tab draws no peer section (the Agents tab's case is under "Peer sections").
+    dashboard.setSidebarMode("teams");
 
     // Closed: the poller's background changes draw nothing.
     service.set({ links: [link] });
@@ -8928,6 +8930,9 @@ describe("Peers dialog", () => {
     const opened = counter.renders();
     service.set({ links: [link] });
     expect(counter.renders()).toBe(opened + 1);
+    // The open dialog redraws on every change, one the sections do not show included.
+    service.set({ status: { kind: "starting" } });
+    expect(counter.renders()).toBe(opened + 2);
 
     dashboard.handleInput("\x1b"); // close it
     const closed = counter.renders();

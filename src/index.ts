@@ -1776,6 +1776,8 @@ export async function main() {
             }
             continue;
           }
+          // Peer-section rows exist only in ib watch's tree; flattenAgentTree never makes one.
+          if (entry.kind !== "agent") continue;
 
           const row = rowByEntry.get(entry)!;
           // Pad prefix using visibleWidth to account for box-drawing/icon chars

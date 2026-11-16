@@ -6,7 +6,9 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
-import type { Agent, FlatEntry } from "../agents";
+import type { Agent, FlatEntry, PeerSectionEntry } from "../agents";
+import { shortPeerId } from "../peers/store";
+import { peerLinkStateText } from "./peers-dialog";
 import { isPidAliveCtx, isPidAliveSinceCtx } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getStateColors } from "./color-scheme";
@@ -43,6 +45,13 @@ export type InfoSubField = "default-type" | "notes";
 
 export class InfoPanelComponent implements Component {
   agent: Agent | null = null;
+  /**
+   * The selected peer-section row (SPEC §20.5): a remote agent, a remote repo
+   * or a paired install's header. The dashboard's selection sync sets it, and
+   * clears it on any local or empty selection. It is never an `Agent`, so
+   * none of the local agent rows below (stoplights, git, paths) can show for it.
+   */
+  remote: PeerSectionEntry | null = null;
   isSystemCoordinatorSelected = false;
   /**
    * Team mode (§17.3c): when set, the render branch shows team metadata. The
@@ -90,6 +99,9 @@ export class InfoPanelComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
+    if (this.remote) {
+      return this.renderRemoteInfo(this.remote, width);
+    }
     if (this.agent) {
       return this.renderAgentInfo(width);
     }
@@ -222,6 +234,56 @@ export class InfoPanelComponent implements Component {
       }
     }
 
+    return padLines(lines, this.displayHeight);
+  }
+
+  /**
+   * A selected peer-section row (SPEC §20.5), read-only. A remote agent shows
+   * the fields its install sent: id, nickname, repo, state, type and manager,
+   * with the peer's name. Every value is cut to the panel's width, so a long
+   * remote value cannot break the layout.
+   */
+  private renderRemoteInfo(entry: PeerSectionEntry, width: number): string[] {
+    const lines: string[] = [];
+    const title = (text: string) => lines.push(truncateToWidth(`${BOLD}${text}${RESET} ${DIM}(read-only)${RESET}`, width, ""));
+    const field = (label: string, value: string) => lines.push(truncateToWidth(`${DIM}${label}:${RESET} ${value}`, width, ""));
+    const notConnected = `${DIM}(peer not connected)${RESET}`;
+    switch (entry.kind) {
+      case "remote-agent": {
+        const agent = entry.remote;
+        const state = displayState(agent.state);
+        const stateText = entry.stale
+          ? `${DIM}${state}${RESET} ${notConnected}`
+          : `${getStateColors()[state] ?? getStateColors().unknown}${state}${RESET}`;
+        title("Remote agent");
+        field("Peer", entry.peerName);
+        field("Id", agent.id);
+        field("Nickname", agent.nickname ?? "—");
+        field("Repo", agent.repoName);
+        field("Path", agent.repoPath);
+        field("State", stateText);
+        field("Type", agent.agentType ?? "—");
+        field("Manager", agent.manager ?? "—");
+        break;
+      }
+      case "remote-repo-header":
+        title("Remote repo");
+        field("Peer", entry.peerName);
+        field("Repo", entry.repoName);
+        field("Path", entry.repoPath);
+        field("Agents", entry.stale ? `${entry.agentCount} ${notConnected}` : String(entry.agentCount));
+        break;
+      case "peer-header":
+        title("Paired install");
+        field("Peer", entry.peerName);
+        field("Id", shortPeerId(entry.peerId));
+        field("State", peerLinkStateText(entry, Date.now()));
+        if (!entry.connected && entry.lastError !== null) field("Error", entry.lastError);
+        if (entry.agentCount !== null) {
+          field("Agents", `${entry.agentCount} in ${entry.repoCount} repo${entry.repoCount === 1 ? "" : "s"}`);
+        }
+        break;
+    }
     return padLines(lines, this.displayHeight);
   }
 

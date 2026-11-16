@@ -78,7 +78,9 @@ export function buildDashboardRows(flatList: FlatEntry[]): SystemDashboardRow[] 
       // the system dashboard table doesn't render them.
       continue;
     }
-    // kind === "agent"
+    // Peer-section rows live only in the Agents tree's peer sections; the
+    // watcher's flat list (this table's input) never has one.
+    if (entry.kind !== "agent") continue;
     const agent = entry.agent;
     const isCoordinator = agent.meta.agentType === REPO_COORDINATOR_TYPE;
     const role = isCoordinator ? "coord" : abbreviateRole(agent.meta.agentType, agent.meta.worker);

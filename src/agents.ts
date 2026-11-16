@@ -2906,9 +2906,10 @@ export const CLAUDE_PID_START_MARGIN_SECONDS = 60;
  *    PID-derived `stopped` verdict (the veto covers the watchdog signal and
  *    the tmux session alike).
  *  - isPidAliveSinceUncached: confirming a dead verdict in the claude_pid gate
- *    before the reap, and both lifecycle-lock gates (stepping over a reclaim
- *    claim, reclaiming an owner's lock). The gate skips it only when the reap
- *    is memoized as a no-op (reapPassMemos) — then no teardown follows and the
+ *    before the reap, both lifecycle-lock gates (stepping over a reclaim
+ *    claim, reclaiming an owner's lock), and taking over the iroh endpoint lock
+ *    (src/peers/endpoint-lock.ts). The gate skips it only when the reap is
+ *    memoized as a no-op (reapPassMemos) — then no teardown follows and the
  *    cached read only renders.
  *
  * The rule the split encodes: a cached process-start read may RENDER a state,
@@ -3012,7 +3013,7 @@ let selfProcessStartEpochSecondsMemo: number | null = null;
  *  on every lock acquisition forever. */
 let selfProcessStartEpochSecondsResolved = false;
 
-function selfProcessStartEpochSeconds(): number | undefined {
+export function selfProcessStartEpochSeconds(): number | undefined {
   if (!selfProcessStartEpochSecondsResolved) {
     selfProcessStartEpochSecondsMemo = processStartEpochSecondsCtx.fn(process.pid);
     selfProcessStartEpochSecondsResolved = true;
@@ -3174,7 +3175,7 @@ export const isPidAliveSinceCtx = new InjectionContext<
  * Delegates through isPidAliveSinceCtx so a test that stubs the liveness seam
  * still governs both reads; the only production difference is the eviction.
  */
-function isPidAliveSinceUncached(
+export function isPidAliveSinceUncached(
   pid: number,
   pidWriteEpochSeconds: number | undefined,
 ): boolean {

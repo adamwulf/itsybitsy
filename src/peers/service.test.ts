@@ -25,33 +25,52 @@ const ID_REMOTE = "c3".repeat(32);
 /** An endpoint whose incoming connections the test pushes. Loads no addon. */
 class FakeEndpoint implements ServiceEndpoint {
   private queue: ServiceIncoming[] = [];
-  private waiters: Array<(incoming: ServiceIncoming | null) => void> = [];
+  private waiters: Array<{ resolve: (incoming: ServiceIncoming | null) => void; reject: (err: Error) => void }> = [];
   private isClosed = false;
   closeCalls = 0;
   readonly connects: string[] = [];
+  /** What a dial does; by default it fails at once. */
+  connectImpl: (id: string) => Promise<ServiceConnection> = async () => {
+    throw new Error("Endpoint.connect: no network in tests");
+  };
 
   push(incoming: ServiceIncoming): void {
     const waiter = this.waiters.shift();
-    if (waiter) waiter(incoming);
+    if (waiter) waiter.resolve(incoming);
     else this.queue.push(incoming);
+  }
+
+  /** Make the pending (or next) acceptNext reject, as an endpoint-level failure would. */
+  failAccept(err: Error): void {
+    const waiter = this.waiters.shift();
+    if (waiter) waiter.reject(err);
   }
 
   acceptNext(): Promise<ServiceIncoming | null> {
     if (this.isClosed) return Promise.resolve(null);
     const next = this.queue.shift();
     if (next) return Promise.resolve(next);
-    return new Promise((resolve) => this.waiters.push(resolve));
+    return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
   }
 
-  async connect(id: string): Promise<ServiceConnection> {
+  connect(id: string): Promise<ServiceConnection> {
     this.connects.push(id);
-    throw new Error("Endpoint.connect: no network in tests");
+    return this.connectImpl(id);
   }
+
+  /** When set, close() does not resolve until this does. */
+  closeGate: Promise<void> | null = null;
 
   async close(): Promise<void> {
     this.closeCalls++;
     this.isClosed = true;
-    for (const waiter of this.waiters.splice(0)) waiter(null);
+    for (const waiter of this.waiters.splice(0)) waiter.resolve(null);
+    if (this.closeGate) await this.closeGate;
+  }
+
+  /** acceptNext is waiting (the accept loop is running). */
+  get accepting(): boolean {
+    return this.waiters.length > 0;
   }
 }
 
@@ -117,9 +136,12 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-/** Real lock, identity and store under the temp home; a fake endpoint; a fake clock. */
-function makeService(overrides: Partial<PeerServiceDeps> = {}) {
-  const endpoint = new FakeEndpoint();
+/**
+ * Real lock, identity and store under the temp home; fake endpoints (bind N
+ * returns `endpoints[N]`); a fake clock.
+ */
+function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: FakeEndpoint[] = [new FakeEndpoint()]) {
+  const endpoint = endpoints[0]!;
   const logs: string[] = [];
   const binds: string[][] = [];
   const clock = createFakeClock();
@@ -129,7 +151,9 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}) {
     loadIdentity: loadOrCreateIdentity,
     bindEndpoint: async (_secretKey, alpns) => {
       binds.push(alpns);
-      return endpoint;
+      const next = endpoints[binds.length - 1];
+      if (!next) throw new Error(`bind ${binds.length} has no fake endpoint`);
+      return next;
     },
     readPeers,
     addPeer,
@@ -205,6 +229,43 @@ describe("PeerService binding", () => {
     await service.acceptLoopDone;
     expect(await lockContents()).toBeNull();
     expect(logs).toContain("peering: endpoint closed");
+  });
+
+  test("a failed accept loop closes the endpoint and releases the lock, so the next open rebinds cleanly", async () => {
+    const first = new FakeEndpoint();
+    const second = new FakeEndpoint();
+    const { service, binds, logs } = makeService({}, [first, second]);
+    const ownLock = `${process.pid} ${ME_START}\n`;
+    service.openDialog();
+    await waitFor(() => service.view().status.kind === "listening" && first.accepting, { message: "first endpoint accepting" });
+    expect(await lockContents()).toBe(ownLock);
+
+    let finishClose!: () => void;
+    first.closeGate = new Promise((resolve) => (finishClose = resolve));
+    first.failAccept(new Error("Endpoint.acceptNext: socket gone"));
+    await waitFor(() => first.closeCalls === 1, { message: "first close started" });
+    expect(service.view().status).toEqual({ kind: "error", message: "accept loop stopped: Endpoint.acceptNext: socket gone" });
+    // An open while the close is still running must not bind next to it.
+    service.closeDialog();
+    service.openDialog();
+    await Bun.sleep(10);
+    expect(binds.length).toBe(1);
+    expect(await lockContents()).toBe(ownLock);
+    finishClose();
+    await waitFor(async () => (await lockContents()) === null, { message: "lock released" });
+    expect(binds.length).toBe(1);
+    expect(logs).toContain("peering: accept loop stopped: Endpoint.acceptNext: socket gone; closing the endpoint");
+    expect(logs).toContain("peering: endpoint closed");
+
+    service.closeDialog();
+    service.openDialog();
+    await waitFor(() => service.view().status.kind === "listening" && second.accepting, { message: "rebound" });
+    expect(binds.length).toBe(2);
+    expect(await lockContents()).toBe(ownLock);
+    await service.shutdown();
+    expect(first.closeCalls).toBe(1);
+    expect(second.closeCalls).toBe(1);
+    expect(await lockContents()).toBeNull();
   });
 
   test("shutdown with nothing bound touches no lock", async () => {
@@ -299,6 +360,50 @@ describe("PeerService accept loop", () => {
       op: "pair-refused",
       reason: "not-accepting",
     });
+    await service.shutdown();
+  });
+});
+
+describe("PeerService busy rule across directions", () => {
+  test("an incoming pair-hello while an outgoing pairing is still dialing gets busy", async () => {
+    const { service, endpoint } = makeService();
+    service.openDialog();
+    await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
+    const selfId = service.view().selfId!;
+    endpoint.connectImpl = () => new Promise(() => {}); // a dial that is still in flight
+    const outgoing = "d4".repeat(32);
+    expect(service.pairWith(outgoing)).toBeNull();
+    expect(service.view().session).toMatchObject({ role: "initiator", peerId: outgoing, stage: { stage: "connecting" } });
+
+    const remote = incomingFrom(endpoint, selfId);
+    expect(decodePairMessage((await rawRequest(remote, encodePairMessage({ op: "pair-hello" }))) as Uint8Array)).toEqual({
+      op: "pair-refused",
+      reason: "busy",
+    });
+    expect(service.view().session).toMatchObject({ role: "initiator", peerId: outgoing });
+    await service.shutdown();
+  });
+
+  test("the code of a cancelled request is a wrong code in the next one", async () => {
+    const codes = ["ABCD1234", "WXYZ5678"];
+    const { service, endpoint } = makeService({ generateCode: () => codes.shift()! });
+    service.openDialog();
+    await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
+    const selfId = service.view().selfId!;
+
+    const first = incomingFrom(endpoint, selfId);
+    await rawRequest(first, encodePairMessage({ op: "pair-hello" }));
+    expect(service.view().session?.stage).toMatchObject({ stage: "code-shown", code: "ABCD1234" });
+    service.cancel();
+
+    const second = incomingFrom(endpoint, selfId);
+    await rawRequest(second, encodePairMessage({ op: "pair-hello" }));
+    expect(service.view().session?.stage).toMatchObject({ stage: "code-shown", code: "WXYZ5678" });
+    const reply = await rawRequest(second, encodePairMessage({ op: "pair-code", code: "ABCD-1234" }));
+    expect(decodePairMessage(reply as Uint8Array)).toEqual({ op: "pair-fail", reason: "wrong-code" });
+    expect(service.view().session?.stage).toEqual({ stage: "failed", failure: { kind: "wrong-code" } });
+    expect(await readPeers()).toEqual([]);
+    second.close(PAIR_CLOSE.done, "done");
     await service.shutdown();
   });
 });

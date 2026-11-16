@@ -7,15 +7,20 @@
  *   another live `ib watch` holds it, it does not bind and reports
  *   "peering disabled: ib watch pid N owns the endpoint". Each later dialog
  *   open retries, so peering moves here once the owner exits.
- * - Loading the addon costs 230-400 ms of wall time in the compiled binary, so
- *   binding runs in the background: the status reads "starting" meanwhile and
- *   the TUI never waits on it.
+ * - Binding is async and the dialog shows "starting…" while it runs, but the
+ *   first addon load is NOT off the event loop: `import("@number0/iroh")`
+ *   evaluates the napi module synchronously, so the first open stalls the UI
+ *   once, for about a third of a second (230-400 ms in the compiled binary),
+ *   after the dialog has drawn. The module stays loaded, so a later rebind
+ *   does not stall.
  * - Once bound, the endpoint stays up until `shutdown()` (ib watch exit),
  *   which closes it (resolving the pending `acceptNext`, which otherwise keeps
  *   Bun alive) and releases the lock.
  * - The accept loop hands each connection to its own task and catches errors
  *   per connection: one failed handshake never stops it. It dispatches by
- *   ALPN; Phase 2 has only the pair ALPN.
+ *   ALPN; Phase 2 has only the pair ALPN. If `acceptNext` itself fails, the
+ *   endpoint is closed and the lock released, so the next dialog open binds
+ *   afresh.
  * - Everything is logged through the injected `log` (watch.log in `ib watch`),
  *   never to stderr, which would corrupt the TUI.
  *
@@ -292,6 +297,14 @@ export class PeerService {
     this.active?.session.cancel();
     this.active = null;
     if (this.binding !== null) await this.binding;
+    await this.closeEndpoint();
+  }
+
+  /**
+   * Close the bound endpoint (if any) and release the lock (if held), leaving
+   * the service unbound so a later bind starts clean.
+   */
+  private async closeEndpoint(): Promise<void> {
     const ep = this.endpoint;
     this.endpoint = null;
     try {
@@ -392,9 +405,18 @@ export class PeerService {
         incoming = await ep.acceptNext();
       } catch (err) {
         if (this.endpoint !== ep) return;
+        // Without its accept loop the endpoint is useless: close it and give
+        // the lock back, so the next dialog open binds afresh instead of
+        // binding a second endpoint with the same key next to this one.
+        // `binding` keeps a dialog open from starting that bind before the
+        // close has finished.
         const message = `accept loop stopped: ${errorDetail(err)}`;
-        this.deps.log(`peering: ${message}`);
+        this.deps.log(`peering: ${message}; closing the endpoint`);
+        this.cancel();
         this.setStatus({ kind: "error", message });
+        this.binding = this.closeEndpoint().finally(() => {
+          this.binding = null;
+        });
         return;
       }
       if (incoming === null) return; // the endpoint closed

@@ -1694,7 +1694,7 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 
 - `ib peer id` prints this install's id on one line: the ed25519 public key as 64 lowercase hex characters. The key is `~/.itsybitsy/peer/secret.key` (the 32 secret-key bytes as hex, mode 0600, in a 0700 directory). It is created with an exclusive create if missing and never overwritten.
 - `ib peer list` prints each paired peer's name, full id and `pairedAt` from `~/.itsybitsy/peer/peers.json`, or `No paired peers.`
-- `ib peer remove <name|id>` removes one peer by exact full id or exact name. A name that several peers share removes nothing, fails, and lists their ids. Removal is one-sided.
+- `ib peer remove <name|id>` removes one peer by exact full id or exact name. A name that several peers share removes nothing, fails, and lists their ids. Removal is one-sided. A running `ib watch` refuses the removed peer's next request, even on a connection it already has (§20.4).
 
 None of them load the iroh addon. `ib peer id` derives the id from the key with `node:crypto`. Pairing happens only in `ib watch`, so there is no `ib peer add`.
 
@@ -3572,21 +3572,21 @@ The design source-of-truth is **`SPEC-ANTIGRAVITY-CLI.md`** in the repo root; `A
 
 ---
 
-## 20. Peering: Pairing in `ib watch`
+## 20. Peering: Pairing and the Trusted Link in `ib watch`
 
-Two installs pair over [iroh](https://www.iroh.computer) so that each trusts the other's key. The design is `docs/plans/iroh-peering.md`; this section is the behavior as built through its Phase 2. The identity, `peers.json`, the endpoint lock and `ib peer` are in §12.1.3. Phases 3–4 (the trusted ALPN `itsybitsy/peer/1`, the `agents` op, the poller, binding at boot, and peer sections in the tree) are not built yet.
+Two installs pair over [iroh](https://www.iroh.computer) so that each trusts the other's key, and then poll each other's agents over a trusted link. The design is `docs/plans/iroh-peering.md`; this section is the behavior as built through its Phase 3. The identity, `peers.json`, the endpoint lock and `ib peer` are in §12.1.3. Phase 4 (peer sections in the sidebar tree and the read-only guard) is not built yet; nothing outside the Peers dialog shows the polled agents.
 
 Ids are ed25519 public keys written as 64 lowercase hex characters; the short id is the first 10.
 
 ### 20.1 Peers Dialog
 
-`I` opens the Peers dialog (listed under App in `?` help). Opening it is the only thing that binds the endpoint (§20.3).
+`I` opens the Peers dialog (listed under App in `?` help). Opening it binds the endpoint when nothing is bound yet; a paired install has usually bound it at boot already (§20.3).
 
 **Idle view:**
 
 - this install's full id, from `secret.key` without loading the addon (the key is created if missing), wrapped when the dialog is narrow;
 - the endpoint status: `starting…` while the addon loads and binds, `accepting pairing requests while this dialog is open` once bound, `peering disabled: ib watch pid N owns the endpoint` when another live `ib watch` holds the lock, or `peering unavailable: <error>`;
-- the paired peers from `peers.json`, name and short id, up to 10 (the rest are counted), or the file's error when it is malformed;
+- the paired peers from `peers.json`, name and short id, up to 10 (the rest are counted), or the file's error when it is malformed. Once the endpoint has bound, each peer's row also shows its link state from the poller (§20.4): `● connected`, `● last seen N ago` (N in its largest whole unit: `42s`, `5m`, `3h`, `2d`), or `● not connected yet`; when it is not connected and has a last error, the error is on the line below. A peer the poller has not listed yet (the endpoint is not bound, or the peer was added since the last tick) shows no state;
 - a **Pair with id** input.
 
 **Pair with id.** Enter trims and lowercases the input and requires exactly 64 hex characters. Empty input, anything else, and this install's own id each show an error inline, under the input; typing clears it. Pairing also needs the endpoint bound, and no other pairing pending. The input uses the plain input dialog's editing rules, so a pasted id works whether it arrives as a bracketed paste (pi-tui reassembles one and delivers it as a single `\x1b[200~…\x1b[201~` chunk), a bracketed paste split across reads, or plain text.
@@ -3650,11 +3650,48 @@ A connection that closes without one of these codes (a timeout, the other `ib wa
 
 ### 20.3 Endpoint in `ib watch`
 
-`src/peers/service.ts`; `launchDashboard` creates it and loads nothing at boot.
+`src/peers/service.ts`; `launchDashboard` creates it.
 
-- **Binding.** The first `I` loads the identity, takes the endpoint lock (§12.1.3), and then loads the addon and binds with the n0 preset and the pair ALPN. The dialog draws first and shows `starting…` while this runs. Loading the addon is not off the event loop: `import("@number0/iroh")` evaluates the napi module synchronously, so the first open stalls the UI once, for about a third of a second (230–400 ms in the compiled binary), after the dialog has drawn. The module stays loaded, so later opens and rebinds do not stall. When another live `ib watch` holds the lock, nothing binds; the status says which pid, and `watch.log` gets `peering disabled: ib watch pid N owns the endpoint`. Each later dialog open retries the lock, so peering moves here once the owner exits. A bind that fails releases the lock and shows the error.
-- **Lifetime.** Once bound, the endpoint stays up, whatever the dialog does, until `ib watch` exits or the accept loop fails (below); after a loop failure it is closed and the next dialog open binds again. On exit it cancels any pairing, closes the endpoint (which resolves the pending `acceptNext`; until then it keeps Bun alive) and releases the lock, raced against a 2 s timeout like the Telegram shutdown.
-- **Accept loop.** Each incoming connection runs in its own task with its own error handling, so a failed handshake never stops the loop. Connections are dispatched by ALPN; only the pair ALPN exists so far, and any other is closed. A pair connection that sends no `pair-hello` within 10 s, or whose `pair-hello` read fails, is closed with code 3. If the loop itself fails (`acceptNext` throws), the endpoint is closed and the lock released, and the status shows `peering unavailable: accept loop stopped: <error>`; the next dialog open binds afresh rather than next to the old endpoint.
-- **Logging.** Bind, lock, refusal and pairing results go to `watch.log`, never to stderr.
+- **Binding.** The endpoint binds at one of two moments, and only once:
+  - **At boot**, when `peers.json` lists at least one peer. `launchDashboard` starts this in the background right after `tui.start()`, the way Telegram boots, so the dashboard draws first; `watch.log` gets `peering: binding at boot for N paired peer(s)`. With no peers (no file, or an empty list) nothing is loaded or bound, and an install that never pairs never touches the network. A malformed `peers.json` binds nothing; `watch.log` gets `peering: not binding at boot: <error>`, and the dialog shows the error.
+  - **When the Peers dialog opens** and nothing is bound yet. The dialog draws first and shows `starting…` while the bind runs.
+
+  Either way the bind loads the identity, takes the endpoint lock (§12.1.3), and then loads the addon and binds with the n0 preset and both ALPNs: `itsybitsy/pair/1` (§20.2) and `itsybitsy/peer/1` (§20.4). Loading the addon is not off the event loop: `import("@number0/iroh")` evaluates the napi module synchronously, so the first bind stalls the UI once, for about a third of a second (230–400 ms in the compiled binary). For a paired install that stall happens at boot, just after the TUI has drawn; for an unpaired one, on the first dialog open, after the dialog has drawn. The module stays loaded, so later opens and rebinds do not stall. When another live `ib watch` holds the lock, nothing binds; the status says which pid, and `watch.log` gets `peering disabled: ib watch pid N owns the endpoint`. Each later dialog open retries the lock, so peering moves here once the owner exits. A bind that fails releases the lock and shows the error.
+- **Lifetime.** Once bound, the endpoint stays up, whatever the dialog does, until `ib watch` exits or the accept loop fails (below); after a loop failure it is closed and the next dialog open binds again. Binding starts the poller (§20.4). On exit it cancels any pairing, stops the poller, then closes the endpoint (which resolves the pending `acceptNext`; until then it keeps Bun alive) and releases the lock, raced against a 2 s timeout like the Telegram shutdown. A failed accept loop stops the poller the same way.
+- **Accept loop.** Each incoming connection runs in its own task with its own error handling, so a failed handshake or a bad peer never stops the loop. Connections are dispatched by ALPN: the pair ALPN to §20.2, the peer ALPN to §20.4, and any other is closed. A pair connection that sends no `pair-hello` within 10 s, or whose `pair-hello` read fails, is closed with code 3. If the loop itself fails (`acceptNext` throws), the endpoint is closed and the lock released, and the status shows `peering unavailable: accept loop stopped: <error>`; the next dialog open binds afresh rather than next to the old endpoint.
+- **Logging.** Bind, lock, refusal, pairing and link results go to `watch.log`, never to stderr.
+
+### 20.4 Trusted Link
+
+ALPN `itsybitsy/peer/1` (`src/peers/peer-link.ts`), served by the accept loop and dialed by the poller (`src/peers/poller.ts`).
+
+**Allowlist.** Only ids in `peers.json` may use the peer ALPN. The responder re-reads `peers.json` for every accepted connection and closes any other id with code 1 (`not a peer`) before reading anything from it. It re-reads the file again before EVERY request on a live connection, so `ib peer remove` takes effect on the other side's next request, not its next dial. A `peers.json` that cannot be read refuses. Removal is one-sided: the removed side's polls fail with `not a peer`.
+
+**Requests.** Each request uses its own bi stream: the dialer writes one JSON object and calls `finish`; the responder reads it with `readToEnd(4096)`, writes one JSON reply and calls `finish`; the dialer reads the reply with `readToEnd(1048576)`. Requests on one connection are served independently, each with its own error handling.
+
+| Request | Reply |
+|---|---|
+| `{"op":"agents"}` | `{"op":"agents","agents":[{id, nickname, repoName, repoPath, state, agentType, manager}, …]}` |
+| any other op | `{"op":"error","reason":"unknown op \"<op>\""}`; the connection stays open |
+
+- The agent list comes from the watcher's latest snapshot (`watcher.lastAgents`, injected into the service by `ib watch`), so an answer costs no IO. It is every agent the watcher lists (archived agents are never in it) except the system coordinator. Each entry carries exactly the seven fields above: `nickname`, `agentType` and `manager` are `null` when unset, and `state` is the agent's displayed state. Prompts, logs, tmux output and every other field are never sent.
+- A list whose JSON is over 1 MB is replied as `{"op":"error","reason":"the agent list is over 1048576 bytes"}`; a snapshot that throws is replied as `internal error`.
+- A request that is over 4096 bytes, not UTF-8, not JSON, not an object or has no op closes the connection with code 3 and the reason (e.g. `request is not JSON`, `request longer than 4096 bytes`).
+- The dialer rebuilds each received entry from the seven fields only (anything else is dropped) and strips control characters from them; a reply that is not an agent list, or an entry with a missing or mistyped field, fails the request.
+
+| Close code | Meaning |
+|---|---|
+| 0 | a normal close: shutting down, or the peer was dropped from `peers.json` |
+| 1 | `not a peer` |
+| 3 | a malformed request; the reason says which |
+
+**Poller.** Runs while the endpoint is bound; it polls once when the endpoint binds, then every 5 s.
+
+- Each tick re-reads `peers.json`, so a newly paired peer is polled from the next tick, and a removed one is dropped: its connection is closed (code 0, `removed`) and its state forgotten. A `peers.json` that cannot be read keeps the known peers polled and is logged once per distinct error.
+- Each peer keeps one live connection between polls and is redialed only once that connection has closed.
+- A peer never has two dials or requests in flight at once. A dial can take up to 30 s to fail, so ticks that come while one is pending skip that peer; other peers are polled as usual. A failed dial or request is retried on the next tick.
+- Per-peer state, in memory only (nothing is written to disk): connected or not, `lastOkAt`, `lastError` (one short line: the dial's error such as `timed out`, `not a peer`, `closed by the other side`, `the other side reported: <reason>`, or a malformed reply), and the last agent list received, which is kept after the peer drops so Phase 4 can show it as last seen. The service exposes it as `view().links`, in `peers.json` order, and notifies its listeners when something visible changes (connected, the error, the list, a name, or the set of peers); a poll that changes nothing but `lastOkAt` does not notify.
+- `watch.log` gets a line when a peer connects and when its error changes, not on every failed tick.
+- Stopping (on exit, or with the endpoint after an accept-loop failure) cancels the timer and closes every connection with code 0; a dial still in flight is closed when it lands. The state is kept, disconnected.
 
 ---

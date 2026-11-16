@@ -1746,7 +1746,7 @@ export class DashboardComponent implements Component {
     });
   }
 
-  /** `I`: open the Peers dialog. Opening it is what binds the endpoint (once). */
+  /** `I`: open the Peers dialog. Opening it binds the endpoint if boot has not already. */
   openPeersDialog(): void {
     const service = this.peerService;
     if (!service) {

@@ -3933,12 +3933,14 @@ export async function launchDashboard(): Promise<void> {
     dashboard.telegramStatusTimer = setInterval(() => telegramMonitor.refresh(), 5_000);
   }
   // Peering (src/peers/service.ts): nothing is loaded or bound here. The
-  // endpoint binds the first time the Peers dialog (`I`) opens, and stays up
-  // until quitDashboard shuts it down. Logs go to watch.log. That first open
-  // stalls the UI once, for about a third of a second, after the dialog has
-  // drawn "starting…": the dynamic import in src/peers/iroh.ts evaluates the
-  // napi addon synchronously on the event loop.
-  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog));
+  // endpoint binds at boot when peers.json lists a peer (bootIfPaired, started
+  // below once the TUI is up), or else the first time the Peers dialog (`I`)
+  // opens, and stays up until quitDashboard shuts it down. Logs go to
+  // watch.log. That first bind stalls the UI once, for about a third of a
+  // second: the dynamic import in src/peers/iroh.ts evaluates the napi addon
+  // synchronously on the event loop. The trusted link answers peers from the
+  // watcher's latest agents, so an answer costs no IO.
+  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () => dashboard.watcher?.lastAgents ?? []));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read
@@ -4106,9 +4108,10 @@ export async function launchDashboard(): Promise<void> {
       telegramBootPromise,
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
     ]);
-    // Close the iroh endpoint (if the Peers dialog ever bound it) and release
-    // the endpoint lock. Raced like Telegram: under the n0 preset close() can
-    // take about a second, and a stuck one must not hold up the exit.
+    // Stop the peer poller, close the iroh endpoint (if boot or the Peers
+    // dialog bound it) and release the endpoint lock. Raced like Telegram:
+    // under the n0 preset close() can take about a second, and a stuck one
+    // must not hold up the exit.
     const stopPeers = Promise.race([
       peerService.shutdown(),
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
@@ -4195,6 +4198,10 @@ export async function launchDashboard(): Promise<void> {
   logToWatchLog(`[startup] tui.start() called (+${Date.now() - bootStart}ms)`);
   colorDetection.queryColorScheme();
   dashboard.startPolling();
+  // Peering at boot, in the background like Telegram, now that the TUI is up:
+  // a paired install binds the endpoint (taking the endpoint lock first) and
+  // starts polling its peers. It never throws; shutdown waits for the bind.
+  void peerService.bootIfPaired();
   logToWatchLog(`[startup] dashboard.startPolling() called, starting watcher (+${Date.now() - bootStart}ms)`);
   await watcher.start();
   logToWatchLog(`[startup] watcher.start() resolved (+${Date.now() - bootStart}ms)`);

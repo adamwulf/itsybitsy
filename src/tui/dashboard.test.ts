@@ -8735,6 +8735,7 @@ describe("Peers dialog", () => {
       peers: [],
       peersError: null,
       session: null,
+      links: [],
     };
     calls: string[] = [];
     private listeners = new Set<() => void>();

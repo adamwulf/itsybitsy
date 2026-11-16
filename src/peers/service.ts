@@ -1,25 +1,36 @@
 /**
  * The iroh endpoint inside `ib watch` (docs/plans/iroh-peering.md, "Process
- * model"; SPEC.md §20.3), and the one pairing session it runs at a time.
+ * model" and "Reconnection"; SPEC.md §20.3), the one pairing session it runs
+ * at a time, and the trusted link's poller.
  *
- * - Binding: Phase 2 binds when the Peers dialog opens (`openDialog`), never
- *   at boot, and only once. Before binding it takes the endpoint lock; when
- *   another live `ib watch` holds it, it does not bind and reports
- *   "peering disabled: ib watch pid N owns the endpoint". Each later dialog
- *   open retries, so peering moves here once the owner exits.
- * - Binding is async and the dialog shows "starting…" while it runs, but the
- *   first addon load is NOT off the event loop: iroh.ts's dynamic import of
- *   the package evaluates the napi module synchronously, so the first open
- *   stalls the UI once, for about a third of a second (230-400 ms compiled),
- *   after the dialog has drawn. The module stays loaded, so a later rebind
- *   does not stall.
+ * - Binding happens at two moments, and only once: at boot when `peers.json`
+ *   lists at least one peer (`bootIfPaired`, which `ib watch` starts in the
+ *   background after the TUI has drawn), and when the Peers dialog opens
+ *   (`openDialog`) with nothing bound yet. An install with no peers that never
+ *   opens the dialog never loads the addon or touches the network. Before
+ *   binding it takes the endpoint lock; when another live `ib watch` holds it,
+ *   it does not bind and reports "peering disabled: ib watch pid N owns the
+ *   endpoint". Each later dialog open retries, so peering moves here once the
+ *   owner exits.
+ * - Binding is async, but the first addon load is NOT off the event loop:
+ *   iroh.ts's dynamic import of the package evaluates the napi module
+ *   synchronously, so the first bind stalls the UI once, for about a third of
+ *   a second (230-400 ms compiled). For a paired install that happens at boot,
+ *   just after the TUI has drawn; otherwise on the first dialog open, after
+ *   the dialog has drawn "starting…". The module stays loaded, so a later
+ *   rebind does not stall.
+ * - The endpoint accepts two ALPNs: pair (pairing.ts) and peer (peer-link.ts,
+ *   the trusted link). Once bound, the poller (poller.ts) runs and asks each
+ *   peer in `peers.json` for its agents every 5 s; the trusted ALPN answers
+ *   from the injected `agents()` snapshot (the watcher's latest agents).
  * - Once bound, the endpoint stays up until `ib watch` exits (`shutdown()`)
- *   or until the accept loop fails. Either way it is closed (which resolves a
- *   pending `acceptNext`, which otherwise keeps Bun alive) and the lock is
- *   released; after an accept-loop failure, the next dialog open binds again.
+ *   or until the accept loop fails. Either way the poller stops, then the
+ *   endpoint is closed (which resolves a pending `acceptNext`, which otherwise
+ *   keeps Bun alive) and the lock is released; after an accept-loop failure,
+ *   the next dialog open binds again.
  * - The accept loop hands each connection to its own task and catches errors
- *   per connection: one failed handshake never stops it. It dispatches by
- *   ALPN; Phase 2 has only the pair ALPN. If `acceptNext` itself fails, the
+ *   per connection: one failed handshake or bad peer never stops it. It
+ *   dispatches by ALPN and closes any other. If `acceptNext` itself fails, the
  *   endpoint is closed and the lock released, so the next dialog open binds
  *   afresh.
  * - Everything is logged through the injected `log` (watch.log in `ib watch`),
@@ -29,6 +40,7 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
+import type { Agent } from "../agents";
 import { acquireEndpointLock, releaseEndpointLock, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
@@ -49,6 +61,8 @@ import {
   type PairStage,
   type PairStream,
 } from "./pairing";
+import { PEER_ALPN, serveTrustedConnection, toRemoteAgents } from "./peer-link";
+import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
 
 // ---------------------------------------------------------------------------
@@ -95,10 +109,18 @@ export interface PeerServiceDeps {
   now(): number;
   setTimer(ms: number, fn: () => void): () => void;
   log(line: string): void;
+  /**
+   * The agents the trusted ALPN reports: in `ib watch`, the watcher's latest
+   * snapshot (`watcher.lastAgents`), so an answer costs no extra IO.
+   */
+  agents(): readonly Agent[];
 }
 
-/** The real dependencies: the endpoint lock, ~/.itsybitsy/peer, and the addon with the n0 preset. */
-export function defaultPeerServiceDeps(log: (line: string) => void): PeerServiceDeps {
+/**
+ * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
+ * the n0 preset, and `agents` (the watcher's latest agents in `ib watch`).
+ */
+export function defaultPeerServiceDeps(log: (line: string) => void, agents: () => readonly Agent[]): PeerServiceDeps {
   return {
     acquireLock: () => acquireEndpointLock(),
     releaseLock: () => releaseEndpointLock(),
@@ -113,6 +135,7 @@ export function defaultPeerServiceDeps(log: (line: string) => void): PeerService
       return () => clearTimeout(timer);
     },
     log,
+    agents,
   };
 }
 
@@ -145,6 +168,11 @@ export interface PeerServiceView {
   peers: Peer[];
   peersError: string | null;
   session: PeerSessionView | null;
+  /**
+   * Each polled peer's link state (poller.ts), in `peers.json` order. Empty
+   * until the endpoint has bound; kept, disconnected, after it stops.
+   */
+  links: readonly PeerLinkState[];
 }
 
 function errorDetail(err: unknown): string {
@@ -189,10 +217,21 @@ export class PeerService {
   private active: { id: number; session: PairSession } | null = null;
   private nextSessionId = 0;
   private readonly listeners = new Set<() => void>();
+  /** Polls each peer's agents while the endpoint is bound. */
+  private readonly poller: PeerPoller;
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
 
-  constructor(private readonly deps: PeerServiceDeps) {}
+  constructor(private readonly deps: PeerServiceDeps) {
+    this.poller = new PeerPoller({
+      readPeers: deps.readPeers,
+      dial: (id) => this.dialPeer(id),
+      now: deps.now,
+      setTimer: deps.setTimer,
+      log: deps.log,
+    });
+    this.poller.onChange(() => this.notify());
+  }
 
   /** Subscribe to every change of {@link view}. Returns the unsubscribe function. */
   onChange(listener: () => void): () => void {
@@ -213,20 +252,51 @@ export class PeerService {
       session: active === null
         ? null
         : { id: active.id, role: active.session.role, peerId: active.session.peerId, stage: active.session.stage },
+      links: this.poller.states(),
     };
+  }
+
+  /**
+   * `ib watch` boot: bind when `peers.json` lists at least one peer. With no
+   * peers nothing is loaded or bound. When another live `ib watch` holds the
+   * endpoint lock, the status says so and nothing binds, as for the dialog.
+   * Never throws.
+   */
+  async bootIfPaired(): Promise<void> {
+    let peers: Peer[];
+    try {
+      peers = await this.deps.readPeers();
+      this.peers = peers;
+      this.peersError = null;
+    } catch (err) {
+      this.peersError = errorDetail(err);
+      this.deps.log(`peering: not binding at boot: ${this.peersError}`);
+      this.notify();
+      return;
+    }
+    this.notify();
+    if (peers.length === 0) return;
+    this.deps.log(`peering: binding at boot for ${peers.length} paired peer${peers.length === 1 ? "" : "s"}`);
+    this.startBind();
+    if (this.binding !== null) await this.binding;
   }
 
   /** The Peers dialog opened: accept pairing requests, and bind if not bound yet. */
   openDialog(): void {
     this.dialogOpen = true;
     void this.refreshPeers();
+    this.startBind();
+    this.notify();
+  }
+
+  /** Start a bind unless one runs, the endpoint is up, or `ib watch` is exiting. */
+  private startBind(): void {
     const kind = this.status.kind;
     if (!this.shuttingDown && this.binding === null && kind !== "starting" && kind !== "listening") {
       this.binding = this.bind().finally(() => {
         this.binding = null;
       });
     }
-    this.notify();
   }
 
   /** The Peers dialog closed: stop accepting, and cancel a pairing still in progress. */
@@ -292,7 +362,7 @@ export class PeerService {
     }
   }
 
-  /** ib watch is exiting: cancel any pairing, close the endpoint, release the lock. */
+  /** ib watch is exiting: cancel any pairing, stop the poller, close the endpoint, release the lock. */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     this.active?.session.cancel();
@@ -302,10 +372,11 @@ export class PeerService {
   }
 
   /**
-   * Close the bound endpoint (if any) and release the lock (if held), leaving
-   * the service unbound so a later bind starts clean.
+   * Stop the poller, then close the bound endpoint (if any) and release the
+   * lock (if held), leaving the service unbound so a later bind starts clean.
    */
   private async closeEndpoint(): Promise<void> {
+    this.poller.stop();
     const ep = this.endpoint;
     this.endpoint = null;
     try {
@@ -379,7 +450,7 @@ export class PeerService {
 
     let ep: ServiceEndpoint;
     try {
-      ep = await this.deps.bindEndpoint(identity.secretKey, [PAIR_ALPN]);
+      ep = await this.deps.bindEndpoint(identity.secretKey, [PAIR_ALPN, PEER_ALPN]);
     } catch (err) {
       const message = errorDetail(err);
       this.deps.log(`peering: could not bind the endpoint: ${message}`);
@@ -397,6 +468,7 @@ export class PeerService {
     this.deps.log(`peering: endpoint bound as ${shortPeerId(identity.id)}`);
     this.setStatus({ kind: "listening" });
     this.acceptLoopDone = this.acceptLoop(ep);
+    this.poller.start();
   }
 
   private async acceptLoop(ep: ServiceEndpoint): Promise<void> {
@@ -445,11 +517,36 @@ export class PeerService {
         });
         return;
       }
+      if (alpn === PEER_ALPN) {
+        await serveTrustedConnection(toPairConnection(conn), {
+          isPeer: (id) => this.isPeer(id),
+          snapshot: () => toRemoteAgents(this.deps.agents()),
+          log: this.deps.log,
+        });
+        return;
+      }
       this.deps.log(`peering: closed a connection on unknown ALPN ${JSON.stringify(alpn)}`);
       conn.close(PAIR_CLOSE.error, "unknown alpn");
     } catch (err) {
       this.deps.log(`peering: incoming connection failed: ${errorDetail(err)}`);
     }
+  }
+
+  /** The trusted ALPN's allowlist: `peers.json`, re-read on every call. A failed read refuses. */
+  private async isPeer(id: string): Promise<boolean> {
+    try {
+      return (await this.deps.readPeers()).some((peer) => peer.id === id);
+    } catch (err) {
+      this.deps.log(`peer link: could not read peers.json, so refusing: ${errorDetail(err)}`);
+      return false;
+    }
+  }
+
+  /** The poller's dial: the trusted ALPN, on the bound endpoint. */
+  private async dialPeer(id: string): Promise<PairConnection> {
+    const ep = this.endpoint;
+    if (ep === null) throw new Error("the endpoint is closed");
+    return toPairConnection(await ep.connect(id, PEER_ALPN));
   }
 
   /** B's admission rule: only while the dialog is open and no other pairing is pending. */

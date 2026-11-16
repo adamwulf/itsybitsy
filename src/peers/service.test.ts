@@ -10,6 +10,7 @@ import { acquireEndpointLock, releaseEndpointLock } from "./endpoint-lock";
 import { loadOrCreateIdentity } from "./identity";
 import { irohAddonLoaderCtx } from "./iroh";
 import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, decodePairMessage, encodePairMessage } from "./pairing";
+import { PEER_ALPN } from "./peer-link";
 import {
   PeerService,
   type PeerServiceDeps,
@@ -161,6 +162,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: FakeEn
     now: clock.now,
     setTimer: clock.setTimer,
     log: (line) => logs.push(line),
+    agents: () => [],
     ...overrides,
   });
   return { service, endpoint, logs, binds, clock };
@@ -169,7 +171,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: FakeEn
 const lockContents = () => readFile(peerEndpointLockFile(), "utf-8").catch(() => null);
 
 describe("PeerService binding", () => {
-  test("nothing binds until the dialog opens; then it takes the lock and binds once, on the pair ALPN", async () => {
+  test("with no peers nothing binds until the dialog opens; then it takes the lock and binds once, on the pair and peer ALPNs", async () => {
     const { service, binds, logs } = makeService();
     expect(service.view().status).toEqual({ kind: "idle" });
     expect(binds).toEqual([]);
@@ -178,7 +180,7 @@ describe("PeerService binding", () => {
     service.openDialog();
     expect(service.view().status).toEqual({ kind: "starting" });
     await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
-    expect(binds).toEqual([[PAIR_ALPN]]);
+    expect(binds).toEqual([[PAIR_ALPN, PEER_ALPN]]);
     expect(await lockContents()).toBe(`${process.pid} ${ME_START}\n`);
     const selfId = service.view().selfId!;
     expect(selfId).toMatch(/^[0-9a-f]{64}$/);
@@ -215,7 +217,7 @@ describe("PeerService binding", () => {
     service.closeDialog();
     service.openDialog();
     await waitFor(() => service.view().status.kind === "listening", { message: "listening after the owner exited" });
-    expect(binds).toEqual([[PAIR_ALPN]]);
+    expect(binds).toEqual([[PAIR_ALPN, PEER_ALPN]]);
     await service.shutdown();
   });
 
@@ -293,7 +295,7 @@ describe("PeerService binding", () => {
   test("the real defaults are never reached: the addon loader throws in this file", async () => {
     // Guard for the tests above: they inject bindEndpoint, so the addon is never needed.
     const { defaultPeerServiceDeps } = await import("./service");
-    const deps = defaultPeerServiceDeps(() => {});
+    const deps = defaultPeerServiceDeps(() => {}, () => []);
     await expect(deps.bindEndpoint(new Uint8Array(32), [PAIR_ALPN])).rejects.toThrow("a service test loaded the iroh addon");
   });
 });

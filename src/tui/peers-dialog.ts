@@ -1,10 +1,11 @@
 /**
  * The Peers dialog (`I` in `ib watch`; SPEC.md §20.1): this install's id, the
- * paired peers, a "Pair with id" input, and the pairing stages on either
- * side. The protocol and the endpoint live in src/peers/ (pairing.ts,
- * service.ts); this module only renders the service's view and maps keys to
- * its calls. Its inputs are the plain dialog input's editing rules, so a
- * pasted id works the same way, bracketed paste included.
+ * paired peers with each one's connection state, a "Pair with id" input, and
+ * the pairing stages on either side. The protocol, the endpoint and the
+ * poller live in src/peers/ (pairing.ts, service.ts, poller.ts); this module
+ * only renders the service's view and maps keys to its calls. Its inputs are
+ * the plain dialog input's editing rules, so a pasted id works the same way,
+ * bracketed paste included.
  *
  * Esc cancels at every stage, keeps the saved name at the name prompt, leaves
  * a result, and closes the dialog from the idle view.
@@ -13,6 +14,7 @@
 import { matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { describePairFailure } from "../peers/pairing";
 import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peers/pair-code";
+import type { PeerLinkState } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
 import { shortPeerId } from "../peers/store";
 import { cancelPaste, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
@@ -168,6 +170,22 @@ function statusLine(status: EndpointStatus): string {
   }
 }
 
+/** A duration as its largest whole unit: `42s`, `5m`, `3h`, `2d`. */
+export function formatSince(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+/** A peer's connection state, after its name and short id. */
+function linkStateText(link: PeerLinkState, now: number): string {
+  if (link.connected) return `${GREEN}● connected${RESET}`;
+  if (link.lastOkAt !== null) return `${YELLOW}●${RESET} last seen ${formatSince(now - link.lastOkAt)} ago`;
+  return `${YELLOW}●${RESET} not connected yet`;
+}
+
 /** The input line: the end of the value stays visible. */
 function inputLine(value: string, innerWidth: number): string {
   const line = `> ${value}█`;
@@ -206,9 +224,17 @@ export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number)
   } else {
     const listed = view.peers.slice(0, MAX_LISTED_PEERS);
     const nameWidth = Math.max(...listed.map((p) => visibleWidth(p.name)));
+    // The poller's state, once the endpoint has bound; until then, none.
+    const links = new Map(view.links.map((link) => [link.id, link]));
+    const now = Date.now();
     for (const peer of listed) {
       const pad = " ".repeat(Math.max(0, nameWidth - visibleWidth(peer.name)));
-      lines.push(truncateToWidth(`  ${peer.name}${pad}  ${DIM}${shortPeerId(peer.id)}${RESET}`, innerWidth, ""));
+      const link = links.get(peer.id);
+      const state = link === undefined ? "" : `  ${linkStateText(link, now)}`;
+      lines.push(truncateToWidth(`  ${peer.name}${pad}  ${DIM}${shortPeerId(peer.id)}${RESET}${state}`, innerWidth, ""));
+      if (link !== undefined && !link.connected && link.lastError !== null) {
+        for (const line of wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4))) lines.push(`    ${RED}${line}${RESET}`);
+      }
     }
     if (view.peers.length > listed.length) {
       lines.push(`${DIM}  …and ${view.peers.length - listed.length} more (ib peer list shows all)${RESET}`);

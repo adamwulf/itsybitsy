@@ -354,6 +354,9 @@ Pairing happens only in the watch window. There is no `ib peer add`.
 
 ## Out of scope for v1
 
+Future direction: one repo list across machines, with each agent assigned to a
+machine. See [unified-multi-machine-repos.md](unified-multi-machine-repos.md).
+
 - Any action on remote agents: send, retire, merge, resume, and so on.
 - Viewing a remote agent's tmux.
 - Live updates for a selected remote agent. This is planned for later; v1

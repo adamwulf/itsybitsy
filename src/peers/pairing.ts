@@ -19,7 +19,10 @@
  * B always sends the last message. It then waits for A to close (A closes as
  * soon as it has read it), so a close cannot race the reply, and closes itself
  * after {@link FINAL_REPLY_LINGER_MS} at the latest. Every other close carries
- * a code that tells the other side why: {@link PAIR_CLOSE}.
+ * a code that tells the other side why: {@link PAIR_CLOSE}. A new connection
+ * that sends no pair-hello within {@link HELLO_TIMEOUT_MS}, or whose read
+ * fails, is closed with the error code; after that, the code's 2-minute
+ * expiry bounds how long B waits.
  *
  * Both sides are state machines over {@link PairConnection}, a small transport
  * seam: src/peers/service.ts adapts the iroh wrapper to it, and the tests use
@@ -40,6 +43,8 @@ export const PAIR_ALPN = "itsybitsy/pair/1";
 export const PAIR_MAX_MESSAGE_BYTES = 4096;
 /** How long B waits, after its last message, for A to close before closing itself. */
 export const FINAL_REPLY_LINGER_MS = 5_000;
+/** How long B waits for a new connection's pair-hello before closing it (error code). */
+export const HELLO_TIMEOUT_MS = 10_000;
 
 /** Connection close codes. The other side maps them to what it shows. */
 export const PAIR_CLOSE = {
@@ -665,17 +670,29 @@ export async function respondToPairing(conn: PairConnection, deps: ResponderDeps
   const from = shortPeerId(conn.remoteId);
   let stream: PairStream;
   let hello: PairMessage;
+  // A connection that never sends pair-hello must not hold this handler (and
+  // its connection) open: close it after HELLO_TIMEOUT_MS, which fails the read.
+  let timedOut = false;
+  const cancelTimeout = deps.setTimer(HELLO_TIMEOUT_MS, () => {
+    timedOut = true;
+    closeQuietly(conn, PAIR_CLOSE.error, "no pair-hello");
+  });
   try {
     stream = await conn.acceptBi();
     hello = decodePairMessage(await stream.readToEnd(PAIR_MAX_MESSAGE_BYTES));
   } catch (err) {
-    if (err instanceof PairProtocolError) {
+    if (timedOut) {
+      deps.log(`pairing: no pair-hello from ${from} within ${HELLO_TIMEOUT_MS / 1000} s`);
+    } else if (err instanceof PairProtocolError) {
       deps.log(`pairing: ${err.message}, from ${from}`);
       closeQuietly(conn, PAIR_CLOSE.error, err.message);
     } else {
-      deps.log(`pairing: connection from ${from} ended before pair-hello: ${errorDetail(err)}`);
+      deps.log(`pairing: connection from ${from} failed before pair-hello: ${errorDetail(err)}`);
+      closeQuietly(conn, PAIR_CLOSE.error, "connection error");
     }
     return;
+  } finally {
+    cancelTimeout();
   }
   if (hello.op !== "pair-hello") {
     deps.log(`pairing: expected pair-hello from ${from}, got ${hello.op}`);

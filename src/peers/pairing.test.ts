@@ -3,6 +3,7 @@ import { waitFor } from "../test-utils";
 import { PAIR_CODE_TTL_MS } from "./pair-code";
 import {
   FINAL_REPLY_LINGER_MS,
+  HELLO_TIMEOUT_MS,
   PAIR_CLOSE,
   PAIR_MAX_MESSAGE_BYTES,
   PairInitiator,
@@ -17,6 +18,7 @@ import {
   type PairConnection,
   type PairMessage,
   type PairRefusal,
+  type PairStream,
 } from "./pairing";
 import { sanitizePeerName, shortPeerId, type Peer } from "./store";
 import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test-pair-transport";
@@ -363,6 +365,42 @@ describe("pair protocol: malformed messages", () => {
     });
   }
 
+  for (const [label, bytes, reason] of [
+    ["not JSON", text("not json"), "message is not JSON"],
+    ["oversized", new Uint8Array(PAIR_MAX_MESSAGE_BYTES + 1).fill(0x20), `message longer than ${PAIR_MAX_MESSAGE_BYTES} bytes`],
+    ["an unknown op", text('{"op":"pair-nope"}'), 'unknown op "pair-nope"'],
+  ] as const) {
+    test(`a code-stage message that is ${label} closes with the error code, spends the code and saves nothing`, async () => {
+      const t = setup();
+      const first = await rawRequest(t.link.a, encodePairMessage({ op: "pair-hello" }));
+      expect(decodePairMessage(first as Uint8Array)).toEqual({ op: "pair-code-shown" });
+      expect(t.clock.pending()).toBe(1); // the code's expiry
+      expect(await rawRequest(t.link.a, bytes)).toBeInstanceOf(Error);
+      await t.responderDone;
+      expect(t.link.a.closeInfo()).toEqual({ byPeer: true, code: PAIR_CLOSE.error, reason });
+      expect(t.responder().stage).toEqual({ stage: "failed", failure: { kind: "error", detail: reason } });
+      expect(t.clock.pending()).toBe(0);
+      expect(t.storeB.peers).toEqual([]);
+    });
+  }
+
+  test("a pair-code on a stream opened before pair-code-shown is a blind guess: it spends the one attempt", async () => {
+    const t = setup();
+    const helloStream = await t.link.a.openBi();
+    const codeStream = await t.link.a.openBi();
+    await codeStream.writeAll(encodePairMessage({ op: "pair-code", code: "ZZZZ9999" }));
+    await codeStream.finish();
+    await helloStream.writeAll(encodePairMessage({ op: "pair-hello" }));
+    await helloStream.finish();
+    expect(decodePairMessage(await helloStream.readToEnd(PAIR_MAX_MESSAGE_BYTES))).toEqual({ op: "pair-code-shown" });
+    expect(decodePairMessage(await codeStream.readToEnd(PAIR_MAX_MESSAGE_BYTES))).toEqual({ op: "pair-fail", reason: "wrong-code" });
+    t.link.a.close(PAIR_CLOSE.done, "done");
+    await t.responderDone;
+    expect(t.responder().stage).toEqual({ stage: "failed", failure: { kind: "wrong-code" } });
+    expect(t.clock.pending()).toBe(0);
+    expect(t.storeB.peers).toEqual([]);
+  });
+
   test("B closes with an error when the second message is not pair-code", async () => {
     const t = setup();
     const first = await rawRequest(t.link.a, encodePairMessage({ op: "pair-hello" }));
@@ -411,6 +449,125 @@ describe("pair protocol: malformed messages", () => {
       stage: "failed",
       failure: { kind: "error", detail: "the other side reported: could not save the pairing" },
     });
+  });
+});
+
+describe("pair protocol: B's wait for pair-hello", () => {
+  test("a connection that sends nothing is closed with the error code after 10 s (fake clock)", async () => {
+    const t = setup();
+    expect(HELLO_TIMEOUT_MS).toBe(10_000);
+    t.clock.advance(HELLO_TIMEOUT_MS - 1);
+    expect(t.link.a.closeInfo()).toBeNull();
+    t.clock.advance(1);
+    await t.responderDone;
+    expect(t.link.a.closeInfo()).toEqual({ byPeer: true, code: PAIR_CLOSE.error, reason: "no pair-hello" });
+    expect(t.admitCalls()).toBe(0);
+    expect(t.clock.pending()).toBe(0);
+    expect(t.logs).toContain(`B: pairing: no pair-hello from ${SHORT_A} within 10 s`);
+  });
+
+  test("a pair-hello that is started but never finished is cut off the same way", async () => {
+    const t = setup();
+    const stream = await t.link.a.openBi();
+    await stream.writeAll(text('{"op":"pair-'));
+    t.clock.advance(HELLO_TIMEOUT_MS);
+    await t.responderDone;
+    expect(t.link.a.closeInfo()).toEqual({ byPeer: true, code: PAIR_CLOSE.error, reason: "no pair-hello" });
+    expect(t.admitCalls()).toBe(0);
+  });
+
+  test("a pair-hello in time cancels the timeout", async () => {
+    const t = setup();
+    await t.initiator.start();
+    expect(t.clock.pending()).toBe(1); // only the code's expiry
+    t.clock.advance(HELLO_TIMEOUT_MS);
+    expect(t.responder().stage.stage).toBe("code-shown");
+    t.initiator.cancel();
+    await t.responderDone;
+  });
+});
+
+describe("pair protocol: read failures close the connection", () => {
+  /** B's end of a link whose `failOn`-th accepted stream fails to read with a non-protocol error. */
+  function failingReads(failOn: number) {
+    const link = createMemoryLink(ID_A, ID_B);
+    let accepted = 0;
+    const conn: PairConnection = {
+      remoteId: link.b.remoteId,
+      openBi: () => link.b.openBi(),
+      acceptBi: async (): Promise<PairStream> => {
+        const stream = await link.b.acceptBi();
+        if (++accepted !== failOn) return stream;
+        return {
+          writeAll: (bytes) => stream.writeAll(bytes),
+          finish: () => stream.finish(),
+          readToEnd: async () => {
+            throw new Error("RecvStream.readToEnd: stream reset by peer");
+          },
+        };
+      },
+      close: (code, reason) => link.b.close(code, reason),
+      closed: () => link.b.closed(),
+      closeInfo: () => link.b.closeInfo(),
+    };
+    return { link, conn };
+  }
+
+  function responderDeps(clock = createFakeClock()) {
+    const store = memoryStore();
+    const logs: string[] = [];
+    return {
+      clock,
+      store,
+      logs,
+      deps: {
+        ...store,
+        log: (line: string) => logs.push(line),
+        onChange: () => {},
+        setTimer: clock.setTimer,
+        now: clock.now,
+        generateCode: () => CODE,
+        admit: () => null,
+      },
+    };
+  }
+
+  test("a failed pair-hello read that is not a protocol error closes with the error code", async () => {
+    const { link, conn } = failingReads(1);
+    const { clock, logs, deps } = responderDeps();
+    const done = respondToPairing(conn, deps);
+    await rawRequest(link.a, encodePairMessage({ op: "pair-hello" }));
+    await done;
+    expect(link.a.closeInfo()).toEqual({ byPeer: true, code: PAIR_CLOSE.error, reason: "connection error" });
+    expect(clock.pending()).toBe(0);
+    expect(logs).toContain(
+      `pairing: connection from ${SHORT_A} failed before pair-hello: RecvStream.readToEnd: stream reset by peer`,
+    );
+  });
+
+  test("a failed code-stage read closes with the error code, spends the code and saves nothing", async () => {
+    const { link, conn } = failingReads(2);
+    const { clock, store, deps } = responderDeps();
+    let session: PairResponder | null = null;
+    const done = respondToPairing(conn, {
+      ...deps,
+      admit: (s) => {
+        session = s;
+        return null;
+      },
+    });
+    expect(decodePairMessage((await rawRequest(link.a, encodePairMessage({ op: "pair-hello" }))) as Uint8Array)).toEqual({
+      op: "pair-code-shown",
+    });
+    await rawRequest(link.a, encodePairMessage({ op: "pair-code", code: CODE }));
+    await done;
+    expect(link.a.closeInfo()).toEqual({ byPeer: true, code: PAIR_CLOSE.error, reason: "connection error" });
+    expect(session!.stage).toEqual({
+      stage: "failed",
+      failure: { kind: "connection-failed", detail: "RecvStream.readToEnd: stream reset by peer" },
+    });
+    expect(clock.pending()).toBe(0);
+    expect(store.peers).toEqual([]);
   });
 });
 

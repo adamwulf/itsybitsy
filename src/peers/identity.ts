@@ -12,9 +12,9 @@
  */
 
 import { createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
-import { peerDir, peerSecretKeyFile } from "../runtime-names";
+import { open, readFile, unlink } from "node:fs/promises";
+import { peerSecretKeyFile } from "../runtime-names";
+import { ensurePeerDir } from "./peer-dir";
 
 /** PKCS#8 DER header for a raw 32-byte ed25519 private key (RFC 8410). */
 const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
@@ -75,17 +75,6 @@ async function readSecretKey(path: string): Promise<Uint8Array> {
     text = await readFile(path, "utf-8");
   }
   return parseSecretKey(text, path);
-}
-
-/** Create the peer directory (mode 0700) without changing the mode of anything above it. */
-async function ensurePeerDir(): Promise<void> {
-  const dir = peerDir();
-  await mkdir(dirname(dir), { recursive: true });
-  try {
-    await mkdir(dir, { mode: 0o700 });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
 }
 
 /**

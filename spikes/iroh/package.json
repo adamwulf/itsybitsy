@@ -1,0 +1,9 @@
+{
+  "name": "iroh-spike",
+  "private": true,
+  "type": "module",
+  "description": "Phase 0 throwaway spike: @number0/iroh under Bun and bun build --compile. See docs/plans/iroh-spike-findings.md.",
+  "dependencies": {
+    "@number0/iroh": "^1.2.0"
+  }
+}

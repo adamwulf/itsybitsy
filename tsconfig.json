@@ -25,5 +25,8 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  // spikes/ are throwaway experiments with their own package.json and
+  // node_modules; they are not part of ib.
+  "exclude": ["node_modules", "spikes"]
 }

@@ -302,6 +302,8 @@ Pairing happens only in the watch window. There is no `ib peer add`.
 
 - Any action on remote agents: send, retire, merge, resume, and so on.
 - Viewing a remote agent's tmux.
+- Live updates for a selected remote agent. This is planned for later; v1
+  only polls every 5 s.
 - The remote install's system coordinator.
 - Remote rows in the Favorites and Teams tabs, or under the V filter.
 - Collapsing peer sections.
@@ -324,12 +326,11 @@ Pairing happens only in the watch window. There is no `ib peer add`.
 6. Use n0's public relays and DNS for now. Our own relays come later.
 7. Both laptops are Apple Silicon.
 8. Adam adds the `secret.key` deny line to his installed `_all.md` by hand.
+9. A selected remote agent shows the center-pane placeholder and its info
+   panel fields. Nothing more.
+10. Peers are polled every 5 s for now. Later, a selected remote agent
+    should get live updates, but that is out of scope for v1.
 
 ## Open questions
 
-1. When a remote agent is selected, is a center-pane placeholder plus info
-   panel fields enough for v1? Or do you want something more there, such as
-   the agent's last few log lines? That would add one more protocol op.
-2. Is a 5 s poll OK? The alternative is a push stream that sends updates as
-   they happen. That is closer to how quickly local agents update, but it
-   takes more code.
+None yet. Phase 0 may raise some.

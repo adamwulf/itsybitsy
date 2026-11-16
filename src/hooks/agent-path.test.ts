@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, checkManagerCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, checkManagerCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, peerDirWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile, symlink } from "fs/promises";
@@ -2819,7 +2819,9 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
     test(`@system Write to ${target.slice(ITSY.length + 1)} → DENIED`, () => {
       const result = checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: target } }), systemCtx());
       expect(result.decision).toBe("deny");
-      expect(result.reason).toBe(protectedConfigWriteDenyReason(PEER_DIR));
+      expect(result.reason).toBe(peerDirWriteDenyReason(PEER_DIR));
+      expect(result.reason).toContain("human-only 'ib peer'");
+      expect(result.reason).not.toContain("may read it");
     });
   }
 
@@ -2836,7 +2838,7 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
           systemCtx(),
         );
         expect(result.decision).toBe("deny");
-        expect(result.reason).toBe(protectedConfigWriteDenyReason(PEER_DIR));
+        expect(result.reason).toBe(peerDirWriteDenyReason(PEER_DIR));
       }
     } finally {
       resetUserHome();

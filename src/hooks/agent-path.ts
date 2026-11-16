@@ -114,7 +114,8 @@ export interface PathCheckContext {
    * Files/dirs whose WRITES are denied (reads untouched). For a normal agent:
    * its own `<agentDir>/meta.json`. For @system: the agent-types dir, config.json,
    * repos.json, layout.json and the sealed dir under `~/.itsybitsy`, none of
-   * which @system may rewrite to widen itself (its worktree root is its whole home).
+   * which @system may rewrite to widen itself (its worktree root is its whole
+   * home), and the peer dir (the iroh secret key and the trusted-peer list).
    */
   protectedWritePaths: ProtectedWritePath[];
 }
@@ -229,10 +230,22 @@ function isSealHelperResultPath(filePath: string): boolean {
  * Deny reason for a WRITE to a protected coordinator-configuration path (the
  * @system agent-types dir, config.json, repos.json, layout.json, sealed). Names
  * the file so the Denials tab shows exactly what was refused. Reads are allowed.
- * Exported so tests can assert against it.
+ * Exported so tests can assert against it. The peer dir has its own reason,
+ * {@link peerDirWriteDenyReason}.
  */
 export function protectedConfigWriteDenyReason(path: string): string {
   return `Access denied: ${path} is a protected coordinator configuration path (agents may read it, not modify it — use 'ib' to change configuration)`;
+}
+
+/**
+ * Deny reason for a WRITE under @system's `~/.itsybitsy/peer/` (the iroh secret
+ * key and the trusted-peer list). Unlike the configuration paths, agents may
+ * not read all of it (`_all.md` denies secret.key) and no agent can change it
+ * through `ib` (`ib peer` is human-only), so it tells the agent to ask the user.
+ * Names the path for the Denials tab. Exported so tests can assert against it.
+ */
+export function peerDirWriteDenyReason(path: string): string {
+  return `Access denied: ${path} is managed by the human-only 'ib peer' command and ib watch; agents cannot modify it. Ask the user`;
 }
 
 /**
@@ -285,13 +298,14 @@ export function systemProtectedWritePaths(itsybitsyHome: string): ProtectedWrite
     const p = canonicalizeSandboxPath(join(itsybitsyHome, name));
     return { path: p, subtree: false, reason: protectedConfigWriteDenyReason(p) };
   };
+  const peer = canonicalizeSandboxPath(join(itsybitsyHome, "peer"));
   return [
     dir("agent-types"),
     file("config.json"),
     file("repos.json"),
     file("layout.json"),
     dir("sealed"),
-    dir("peer"),
+    { path: peer, subtree: true, reason: peerDirWriteDenyReason(peer) },
   ];
 }
 
@@ -535,7 +549,7 @@ export const SETTINGS_WRITE_DENY_REASON =
  * self-escalation), the agy boundary files (`.agents/hooks.json` / the rule
  * file, whose rewrite disables the hook gate on the next resume), or any
  * `protectedWritePaths` entry (a normal agent's own `<agentDir>/meta.json`, or
- * @system's agent-types/config/sealed). The hook can tell the agent's redirect
+ * @system's agent-types/config/sealed/peer). The hook can tell the agent's redirect
  * from `ib` writing the file, because it sees the command; the kernel cannot.
  *
  * Each candidate write-target token is RESOLVED against cwd (join + resolve +
@@ -1102,9 +1116,10 @@ function checkBashCommandPaths(
 
   // Block bash mutations of the agent's protected files (.claude/settings*.json,
   // the agy boundary files, and every ctx.protectedWritePaths entry — a normal
-  // agent's own meta.json, or @system's config/agent-types/sealed) — agents must
-  // not grant themselves new permissions, disable their own hook gate, or rewrite
-  // the files the hook and harness read their configuration from.
+  // agent's own meta.json, or @system's config/agent-types/sealed/peer) — agents
+  // must not grant themselves new permissions, disable their own hook gate,
+  // rewrite the files the hook and harness read their configuration from, or
+  // change the install's peering identity and trusted peers.
   const settingsDenial = checkBashSettingsWrite(command, cwd, ctx);
   if (settingsDenial) return settingsDenial;
 
@@ -1197,7 +1212,8 @@ function checkFilePath(
   // the rule file, whose rewrite disables the hook gate on the next resume), or
   // any ctx.protectedWritePaths entry (a normal agent's own meta.json; for
   // @system the agent-types dir, config.json, repos.json, layout.json, sealed —
-  // all self-widening). Reads are allowed; only mutation tools are blocked.
+  // all self-widening — and peer, the iroh key and trusted peers). Reads are
+  // allowed here; only mutation tools are blocked.
   if (WRITE_TOOLS.has(toolName)) {
     const kind = worktreeProtectedFileKind(structural, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
@@ -1412,8 +1428,8 @@ const SHELL_OPERATOR_CHARS = new Set([";", "&", "|", "(", ")", "<", ">", "`"]);
  * the token at every unquoted, unescaped operator character in
  * SHELL_OPERATOR_CHARS, then removes quotes and backslash escapes the way the
  * shell does for a literal word: `pe''er`, `"peer"` and `p\eer` all read as
- * `peer`. Quoted text stays one word, so a quoted message that mentions
- * `ib peer` is still data. Expansions (`$X`, `$(…)`) are not resolved.
+ * `peer`. Quoted text stays one word. Expansions (`$X`, `$(…)`, `$'…'`) are
+ * not resolved; see containsIbSubcommandInvocation for what that leaves.
  */
 function splitShellWord(token: string): string[] {
   const words: string[] = [];
@@ -1447,9 +1463,23 @@ function splitShellWord(token: string): string[] {
  * Detect an `ib <subcommand>` invocation for any subcommand in `subcommands`,
  * including one glued to an operator (`ib list;ib peer id`, `ib list|ib peer`,
  * `(ib peer id)`, `ib peer>out`) or spelled with quotes or escapes inside the
- * word (`ib pe''er`). Quoted words and heredoc bodies are data, so a message
- * that only mentions `ib tgsend` is not a match. An untokenizable command never
- * gets here — containsInternalIbInvocation has already denied it.
+ * word (`ib pe''er`). An untokenizable command never gets here —
+ * containsInternalIbInvocation has already denied it.
+ *
+ * Quoted text and heredoc bodies are treated as data, so a message that only
+ * mentions `ib tgsend` is not a match. That is safe only for single quotes and
+ * quoted-delimiter heredocs (`<<'EOF'`). In double quotes and in an
+ * unquoted-delimiter heredoc the shell still runs command substitution, so
+ * `ib tgsend "id: $(ib peer id)"` runs `ib peer id`, and this scan does not
+ * see it.
+ *
+ * This scan does not stand alone. It also misses a redirect between `ib` and
+ * the subcommand (`ib 2>/dev/null peer id`), ANSI-C quoting (`ib $'peer' id`),
+ * and any other expansion that produces the subcommand. Agents other than
+ * @system are stopped by the chained-command check in checkIbCommandAccess.
+ * Coordinators, @system included, are stopped by the intercept-task hook's
+ * shell-metacharacter gate (findShellMetachar, SPEC §12.2.4), which rejects
+ * every one of these forms. Relaxing that gate reopens them.
  */
 function containsIbSubcommandInvocation(command: string, subcommands: ReadonlySet<string>): boolean {
   const tokens = tokenizeBashPaths(maskHeredocBodies(command));
@@ -1545,7 +1575,9 @@ export async function checkIbCommandAccess(
 
   // `ib peer` is user-only, like nuke, so this sits ahead of the @system
   // early-return. Same shell-word scan as the Telegram gate below: a quoted
-  // message or heredoc body that only mentions `ib peer` is not denied.
+  // message or heredoc body that only mentions `ib peer` is not denied. The
+  // scan's limits, and the metacharacter gates it relies on, are listed on
+  // containsIbSubcommandInvocation.
   if (containsIbSubcommandInvocation(normalizedCommand, IB_PEER_COMMANDS)) {
     return {
       decision: "deny",
@@ -1962,8 +1994,9 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     worktreePath = home;
     rootRepo = home;
     // @system's worktree root is its whole ~/.itsybitsy home, so the resolver
-    // would grant writes to the agent-types dir and the harness config files;
-    // deny those writes structurally so @system cannot widen itself.
+    // would grant writes to the agent-types dir, the harness config files and
+    // the peer dir; deny those writes structurally so @system cannot widen
+    // itself or change which installs are trusted.
     protectedWritePaths = systemProtectedWritePaths(home);
     try {
       const policy = await buildSystemHookPolicy(userHome());

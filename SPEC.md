@@ -854,7 +854,7 @@ itsybitsy installs hooks into each agent's `settings.local.json`, plus optional 
 
 **Structural steps** (run before the resolver; the hook is deliberately stricter than the kernel here):
 
-6. **Protected-write block** (mutation tools only): writes to `<worktree>/.claude/settings*.json`, the agy boundary files (`.agents/hooks.json` and its rule file), and the agent's own `<agent-dir>/meta.json` are protected against self-escalation. For `@system`, the hook also protects its `agent-types/` directory, `config.json`, `repos.json`, `layout.json`, and `sealed/` against writes. Read access follows the shared path resolver and any authored denies. Protected paths are canonicalized to resolve symlinks. These are hook checks; the global coordinator has no kernel profile in this rollout (§12.1.8).
+6. **Protected-write block** (mutation tools only): writes to `<worktree>/.claude/settings*.json`, the agy boundary files (`.agents/hooks.json` and its rule file), and the agent's own `<agent-dir>/meta.json` are protected against self-escalation. For `@system`, the hook also protects its `agent-types/` directory, `config.json`, `repos.json`, `layout.json`, `sealed/`, and `peer/` (the iroh secret key and trusted peers, §12.1.3) against writes. Read access follows the shared path resolver and any authored denies. Protected paths are canonicalized to resolve symlinks. These are hook checks; the global coordinator has no kernel profile in this rollout (§12.1.8).
 10. **Other agents' / own non-worktree files**: deny anything under `.itsybitsy/agents/` that is not the agent's own worktree or its own `agent.log` (so `meta.json`, `prompt.txt`, the outbox, and sibling agents stay denied to file tools, stricter than the kernel's `AGENTDIR` write root).
 11. **Main repo (outside worktree)**: deny the main checkout — including its `.git` (a kernel write root) — for worktree agents. The worktree and the agents dir are excluded (handled above / by the resolver).
 
@@ -1696,7 +1696,7 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 - `ib peer list` prints each paired peer's name, full id and `pairedAt` from `~/.itsybitsy/peer/peers.json`, or `No paired peers.`
 - `ib peer remove <name|id>` removes one peer by exact full id or exact name. A name that several peers share removes nothing, fails, and lists their ids. Removal is one-sided.
 
-None of them load the iroh addon. `ib peer id` derives the id from the key with `node:crypto`. Pairing happens only in `ib watch`, so there is no `ib peer add`. The embedded `_all.md` denies `~/.itsybitsy/peer/secret.key` to every agent at the hook and kernel layers. Nothing grants agents a write under `~/.itsybitsy/peer/`, so no agent can add a trusted peer.
+None of them load the iroh addon. `ib peer id` derives the id from the key with `node:crypto`. Pairing happens only in `ib watch`, so there is no `ib peer add`. The embedded `_all.md` denies `~/.itsybitsy/peer/secret.key` to every agent, `@system` included, at the hook layer, and at the kernel layer for a sandboxed agent. No agent can write under `~/.itsybitsy/peer/`, so none can add a trusted peer: no shipped agent type lists it in `paths.allowWrite`, and `@system`, whose worktree root is all of `~/.itsybitsy`, has `peer/` on its protected write list (`systemProtectedWritePaths`, `src/hooks/agent-path.ts`).
 
 #### 12.1.4 Display
 

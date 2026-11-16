@@ -269,8 +269,10 @@ export function agentProtectedWritePaths(
 /**
  * The protected-write list for the @system coordinator, whose worktree root is
  * its whole `~/.itsybitsy` home: the agent-types dir (widening its own layers),
- * config.json / repos.json / layout.json (widening the harness), and the sealed
- * dir. `itsybitsyHome` is the resolved `~/.itsybitsy` directory. Each path is
+ * config.json / repos.json / layout.json (widening the harness), the sealed
+ * dir, and the peer dir (the iroh secret key and peers.json, the list of
+ * installs trusted to connect). `itsybitsyHome` is the resolved `~/.itsybitsy`
+ * directory. Each path is
  * canonicalized (symlink-resolving) so a symlinked parent cannot defeat the
  * match against the realpath'd inbound path.
  */
@@ -289,6 +291,7 @@ export function systemProtectedWritePaths(itsybitsyHome: string): ProtectedWrite
     file("repos.json"),
     file("layout.json"),
     dir("sealed"),
+    dir("peer"),
   ];
 }
 

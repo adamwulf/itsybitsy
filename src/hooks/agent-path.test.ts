@@ -2805,6 +2805,49 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
     expect(result.reason).toBe(protectedConfigWriteDenyReason(CONFIG));
   });
 
+  // ~/.itsybitsy/peer holds the iroh secret key and peers.json, the list of
+  // installs trusted to connect; @system takes Telegram input.
+  const PEER_DIR = join(ITSY, "peer");
+  const PEERS_JSON = join(PEER_DIR, "peers.json");
+
+  test("the resolver alone WOULD allow a write under peer/ (control)", () => {
+    const ctx = { ...systemCtx(), protectedWritePaths: [] };
+    expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: PEERS_JSON } }), ctx).decision).toBe("allow");
+  });
+
+  for (const target of [PEERS_JSON, join(PEER_DIR, "secret.key"), join(PEER_DIR, "endpoint.lock")]) {
+    test(`@system Write to ${target.slice(ITSY.length + 1)} → DENIED`, () => {
+      const result = checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: target } }), systemCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toBe(protectedConfigWriteDenyReason(PEER_DIR));
+    });
+  }
+
+  test("@system Bash redirects into peer/ → DENIED", () => {
+    setUserHome("/Users/test");
+    try {
+      for (const command of [
+        `echo [] > ${PEERS_JSON}`,
+        "echo [] > ~/.itsybitsy/peer/peers.json",
+        'ib list >> "$HOME/.itsybitsy/peer/peers.json"',
+      ]) {
+        const result = checkPathAccess(
+          makeInput({ toolName: "Bash", toolInput: { command }, cwd: ITSY }),
+          systemCtx(),
+        );
+        expect(result.decision).toBe("deny");
+        expect(result.reason).toBe(protectedConfigWriteDenyReason(PEER_DIR));
+      }
+    } finally {
+      resetUserHome();
+    }
+  });
+
+  test("@system Read of peers.json → ALLOWED (writes blocked, reads untouched)", () => {
+    const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: PEERS_JSON } }), systemCtx());
+    expect(result.decision).toBe("allow");
+  });
+
   test("a normal agent is unaffected by @system's protected list (only its own meta.json is protected)", () => {
     // The normal fixture agent has no config.json/agent-types guard; a write to a
     // path outside its worktree is governed by the resolver, not this guard.

@@ -103,6 +103,8 @@ import {
   type RemoteControlFiles, type RemoteControlFilesOptions, type RemoteControlStatus,
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
+import { buildPeersDialogContent, newPeersDialog, syncPeersDialog, type PeersDialogService } from "./peers-dialog";
+import { PeerService, defaultPeerServiceDeps } from "../peers/service";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -668,6 +670,9 @@ class DialogOverlayComponent implements Component {
       case "permissions-editor": {
         return buildPermissionsEditorContent(dialog, innerWidth);
       }
+      case "peers": {
+        return buildPeersDialogContent(dialog, innerWidth);
+      }
     }
   }
 }
@@ -723,6 +728,12 @@ export class DashboardComponent implements Component {
   _dialog: DialogState = null;
   private overlayHandle: OverlayHandle | null = null;
   private dialogOverlay: DialogOverlayComponent;
+  /**
+   * The iroh endpoint service behind the Peers dialog (`I`). launchDashboard
+   * sets the real one (src/peers/service.ts); a dashboard built in a test has
+   * none unless the test sets a fake, so no test can bind a real endpoint.
+   */
+  peerService: PeersDialogService | null = null;
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
   private noticeCounter = 0;
@@ -1726,7 +1737,29 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
+  /** Attach the Peers dialog's service and re-render the dialog on its changes. */
+  setPeerService(service: PeersDialogService): void {
+    this.peerService = service;
+    service.onChange(() => {
+      if (this._dialog?.type === "peers") syncPeersDialog(this._dialog);
+      this.tui?.requestRender();
+    });
+  }
+
+  /** `I`: open the Peers dialog. Opening it is what binds the endpoint (once). */
+  openPeersDialog(): void {
+    const service = this.peerService;
+    if (!service) {
+      this.setNotice("Peering is not available here", "error");
+      return;
+    }
+    this.showDialog(newPeersDialog(service));
+    service.openDialog();
+  }
+
   showDialog(dialog: NonNullable<DialogState>) {
+    // Replacing the Peers dialog closes it: pairing is accepted only while it is open.
+    if (this._dialog?.type === "peers" && dialog !== this._dialog) this._dialog.service.closeDialog();
     this._dialog = dialog;
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
@@ -1746,6 +1779,7 @@ export class DashboardComponent implements Component {
   }
 
   closeDialog() {
+    if (this._dialog?.type === "peers") this._dialog.service.closeDialog();
     this._dialog = null;
     this.overlayHandle?.hide();
     this.overlayHandle = null;
@@ -3173,6 +3207,8 @@ export class DashboardComponent implements Component {
     else if (data === "O") { agentActions.handleOpenDiffToolVsManager(this); }
     // Help dialog
     else if (data === "?") { agentActions.handleHelp(this); }
+    // Peers dialog: this install's id, paired peers, pairing
+    else if (data === "I") { this.openPeersDialog(); }
     // Setup dialog
     else if (data === "h") { agentActions.handleSetup(this); }
     // Re-check repo health
@@ -3906,6 +3942,11 @@ export async function launchDashboard(): Promise<void> {
   //   soon as the startup launch above ends, since it may rewrite the settings
   //   file after the first read. Watcher updates add the coordinator's stopped
   //   state (onUpdate).
+  // Peering (src/peers/service.ts): nothing is loaded or bound here. The
+  // endpoint binds, in the background, the first time the Peers dialog (`I`)
+  // opens, and stays up until quitDashboard shuts it down. Logs go to watch.log.
+  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog));
+  dashboard.setPeerService(peerService);
   dashboard.setCollectorStatus(sandboxCollectorHealth());
   void dashboard.refreshRemoteControlStatus();
   void dashboard.refreshRemoteControlAfterLaunch(coordinatorStartup);
@@ -4061,6 +4102,13 @@ export async function launchDashboard(): Promise<void> {
       telegramBootPromise,
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
     ]);
+    // Close the iroh endpoint (if the Peers dialog ever bound it) and release
+    // the endpoint lock. Raced like Telegram: under the n0 preset close() can
+    // take about a second, and a stuck one must not hold up the exit.
+    const stopPeers = Promise.race([
+      peerService.shutdown(),
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
     // Flush layout save to disk before exiting, then release coordinator
     Promise.all([
       flushPendingSave().catch(() => { /* ignore write errors on exit */ }),
@@ -4068,6 +4116,7 @@ export async function launchDashboard(): Promise<void> {
       stopOutbox.catch(() => { /* ignore — already raced */ }),
       finishBoot.catch(() => { /* ignore — boot was best effort */ }),
       disposeTelegramMonitor.catch(() => { /* ignore — already raced */ }),
+      stopPeers.catch(() => { /* ignore — already raced */ }),
     ]).then(() => {
       // Release coordinator ref — if last ref, kills the tmux session
       // and pauses all per-repo coordinators

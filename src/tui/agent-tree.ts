@@ -203,6 +203,17 @@ function entryKey(f: FlatEntry): string | null {
 /** Widest state column of the peer sections: a remote state is the other install's text. */
 const MAX_REMOTE_STATE_COL_WIDTH = 16;
 
+/**
+ * The color of a state the other install sent (already through displayState).
+ * Only a state's own entry counts: indexing the color table with remote text
+ * such as `constructor` or `toString` would otherwise draw an inherited
+ * function's source on the row.
+ */
+export function remoteStateColor(state: string): string {
+  const colors = getStateColors();
+  return Object.hasOwn(colors, state) ? colors[state]! : colors.unknown!;
+}
+
 /** Reverse-video a selected row across its full width, as the local rows do. */
 function highlightRow(truncated: string, selected: boolean, width: number): string {
   if (!selected) return truncated;
@@ -262,7 +273,7 @@ export function formatRemoteAgentRow(
   const statePad = " ".repeat(Math.max(0, stateColWidth - visibleWidth(state)));
   const line = entry.stale
     ? `${DIM}${prefix}${name}${namePad}  ${state}${statePad}${RESET}`
-    : `${prefix}${name}${namePad}  ${getStateColors()[fullState] ?? getStateColors().unknown}${state}${RESET}${statePad}`;
+    : `${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${RESET}${statePad}`;
   return highlightRow(truncateToWidth(line, width, ""), selected, width);
 }
 

@@ -12,7 +12,7 @@ import { peerLinkStateText } from "./peers-dialog";
 import { isPidAliveCtx, isPidAliveSinceCtx } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getStateColors } from "./color-scheme";
-import { displayState } from "./agent-tree";
+import { displayState, remoteStateColor } from "./agent-tree";
 import { wrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, DIM_GRAY, GREEN, RED, YELLOW } from "./colors";
 import type { WorktreeCleanliness } from "../git-status";
@@ -254,7 +254,7 @@ export class InfoPanelComponent implements Component {
         const state = displayState(agent.state);
         const stateText = entry.stale
           ? `${DIM}${state}${RESET} ${notConnected}`
-          : `${getStateColors()[state] ?? getStateColors().unknown}${state}${RESET}`;
+          : `${remoteStateColor(state)}${state}${RESET}`;
         title("Remote agent");
         field("Peer", entry.peerName);
         field("Id", agent.id);

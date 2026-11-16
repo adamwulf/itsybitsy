@@ -9290,6 +9290,21 @@ describe("Peer sections in the Agents tree", () => {
     expect(raw[9]).not.toContain(getStateColors().running!);
   });
 
+  test("a remote state that names an inherited property is drawn as text, never as the property", () => {
+    const { dashboard, service } = setup();
+    const odd = ["constructor", "toString", "__proto__", "hasOwnProperty"];
+    service.set({ links: [{ ...links()[0]!, agents: odd.map((state, i) => remote(`odd-${i}`, "app", { state })) }] });
+    const rows = treeRows(dashboard).join("\n");
+    for (const state of odd) expect(stripAnsi(rows)).toContain(state);
+    expect(rows).not.toContain("function");
+    expect(rows).not.toContain("[object");
+    selectByKey(dashboard, `remote:${PEER_B}:odd-0`);
+    dashboard.infoPanel.displayHeight = 20;
+    const info = dashboard.infoPanel.render(60).join("\n");
+    expect(stripAnsi(info)).toContain("State: constructor");
+    expect(info).not.toContain("function");
+  });
+
   test("the V filter does not apply to peer sections", () => {
     const { dashboard, service } = setup();
     service.set({ links: [{ ...links()[0]!, agents: [remote("old", "app", { state: "stopped" })] }] });

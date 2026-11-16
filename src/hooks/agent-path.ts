@@ -1399,20 +1399,62 @@ const IB_BOUNCE_COMMANDS = new Set(["bounce"]);
  */
 const IB_PEER_COMMANDS = new Set(["peer"]);
 
+/** Unquoted characters that end a shell word: control and redirection operators. */
+const SHELL_OPERATOR_CHARS = new Set([";", "&", "|", "(", ")", "<", ">", "`"]);
+
 /**
- * Detect an `ib <subcommand>` invocation for any subcommand in `subcommands`.
- * Same token scan as containsInternalIbInvocation: quoted words and heredoc
- * bodies are data, so a message that only mentions `ib tgsend` is not a
- * match. An untokenizable command never gets here —
- * containsInternalIbInvocation has already denied it.
+ * Split one tokenizeBashPaths token into the shell words it holds, each
+ * dequoted. tokenizeBashPaths splits only on whitespace, so `list;ib` is one
+ * token, though the shell starts a new command `ib` after the `;`. This breaks
+ * the token at every unquoted, unescaped operator character in
+ * SHELL_OPERATOR_CHARS, then removes quotes and backslash escapes the way the
+ * shell does for a literal word: `pe''er`, `"peer"` and `p\eer` all read as
+ * `peer`. Quoted text stays one word, so a quoted message that mentions
+ * `ib peer` is still data. Expansions (`$X`, `$(…)`) are not resolved.
+ */
+function splitShellWord(token: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < token.length; i++) {
+    const c = token[i]!;
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      else word += c;
+    } else if (quote === '"') {
+      if (c === '"') quote = null;
+      else if (c === "\\" && i + 1 < token.length && '$`"\\'.includes(token[i + 1]!)) word += token[++i];
+      else word += c;
+    } else if (c === "\\") {
+      if (i + 1 < token.length) word += token[++i];
+    } else if (c === "'" || c === '"') {
+      quote = c;
+    } else if (SHELL_OPERATOR_CHARS.has(c)) {
+      if (word) words.push(word);
+      word = "";
+    } else {
+      word += c;
+    }
+  }
+  if (word) words.push(word);
+  return words;
+}
+
+/**
+ * Detect an `ib <subcommand>` invocation for any subcommand in `subcommands`,
+ * including one glued to an operator (`ib list;ib peer id`, `ib list|ib peer`,
+ * `(ib peer id)`, `ib peer>out`) or spelled with quotes or escapes inside the
+ * word (`ib pe''er`). Quoted words and heredoc bodies are data, so a message
+ * that only mentions `ib tgsend` is not a match. An untokenizable command never
+ * gets here — containsInternalIbInvocation has already denied it.
  */
 function containsIbSubcommandInvocation(command: string, subcommands: ReadonlySet<string>): boolean {
   const tokens = tokenizeBashPaths(maskHeredocBodies(command));
   if (!tokens) return false;
-  for (let i = 0; i + 1 < tokens.length; i++) {
-    const executable = stripBashSurroundingQuotes(tokens[i]!);
-    if (basename(executable) !== "ib") continue;
-    if (subcommands.has(stripBashSurroundingQuotes(tokens[i + 1]!))) return true;
+  const words = tokens.flatMap(splitShellWord);
+  for (let i = 0; i + 1 < words.length; i++) {
+    if (basename(words[i]!) !== "ib") continue;
+    if (subcommands.has(words[i + 1]!)) return true;
   }
   return false;
 }

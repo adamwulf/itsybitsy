@@ -2064,6 +2064,21 @@ describe("checkIbCommandAccess", () => {
     "ib peer --help",
     "/usr/local/bin/ib peer id",
     "ib 'peer' list",
+    // Glued to an operator: tokenizeBashPaths splits only on whitespace.
+    "ib list;ib peer id",
+    "ib list&&ib peer id",
+    "ib list|ib peer id",
+    "ib list;(ib peer id)",
+    "ib list||ib peer list",
+    "ib list&ib peer list",
+    "ib list `ib peer id`",
+    "ib peer;true",
+    "ib peer>/tmp/peer-out",
+    "ib peer<<<x",
+    // Quotes or escapes inside the word.
+    "ib pe''er id",
+    'ib "pe"er id',
+    "ib p\\eer id",
   ];
 
   test("denies every ib peer subcommand to a regular agent — user-only", async () => {
@@ -2251,6 +2266,16 @@ describe("checkIbCommandAccess", () => {
       const result = await checkIbCommandAccess(command, "@system", agentsDir);
       expect(result?.decision).toBe("deny");
       expect(result!.reason).toContain("'ib peer' is a user-only command");
+    }
+  });
+
+  test("@system may still send a message that only mentions ib peer, even with operators in it", async () => {
+    for (const command of [
+      'ib send agent-target1 "run ib list;ib peer id"',
+      "ib send agent-target1 'ib list&&ib peer id'",
+      "ib send agent-target1 <<'EOF'\nib list;ib peer id\nEOF",
+    ]) {
+      expect(await checkIbCommandAccess(command, "@system", agentsDir)).toBeNull();
     }
   });
 

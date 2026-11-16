@@ -128,12 +128,16 @@ other, and requests could reach either process. So only one `ib watch` owns
 the endpoint:
 
 1. Before binding, `ib watch` creates `~/.itsybitsy/peer/endpoint.lock` with
-   `O_CREAT|O_EXCL` and writes its pid into it.
-2. If the lock exists and that pid is alive, this `ib watch` skips peering.
+   `O_CREAT|O_EXCL` and writes `<pid> <startEpoch>` into it. `startEpoch` is
+   its real process start time.
+2. If the lock exists and its process is alive (the same pid with the same
+   start time), this `ib watch` skips peering.
    It logs "peering disabled: ib watch pid N owns the endpoint" to
    `watch.log`, and its Peers dialog says the same.
-3. If the pid in the lock is dead, this `ib watch` takes the lock over. The
-   owner deletes the lock when it exits.
+3. If that process is gone, this `ib watch` takes the lock over. "Gone" means
+   the pid is dead, or it now belongs to a process with a different start
+   time. A different start time can happen after a reboot. The owner deletes
+   the lock when it exits.
 
 A second `ib watch` tries for the lock only at the two bind moments above. So
 once the owner exits, opening Peers or restarting moves peering to the second

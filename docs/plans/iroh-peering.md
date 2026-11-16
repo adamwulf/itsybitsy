@@ -257,8 +257,10 @@ trust B. Pairing again fixes it. B already trusts A's id, so step 3 replies
 **Protocol.**
 
 - On the trusted ALPN, the dialer sends `{"op":"agents"}`.
-- The responder answers from its watcher's latest snapshot
-  (`watcher.lastAgents`), so the answer costs no extra IO.
+- The responder answers from the watcher's latest list *after* state
+  detection, the list `onUpdate` receives, so the answer costs no extra IO.
+  It must not use `watcher.lastAgents`, which is assigned before detection and
+  says "unknown" while detection runs.
 - For each agent, the answer carries `{id, nickname, repoName, repoPath,
   state, agentType, manager}`, capped at 1 MB in total. `manager` lets the
   receiving side nest agents the way it nests local ones.

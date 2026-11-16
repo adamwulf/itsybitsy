@@ -63,3 +63,28 @@ test("shipped floor denies the tagged profile and collector control files even w
     expect(profile).toContain(`(deny file-write* (subpath "${home}/.itsybitsy/sealed") (with message "${tag}"))`);
   }
 });
+
+test("shipped floor denies the peering secret key despite the ~/.itsybitsy read floor", async () => {
+  const floor = parseAgentTypeFile(await Bun.file(join(import.meta.dir, "../docs/agent-types/_all.md")).text()).frontmatter;
+  // Not under /private/tmp or /private/var, which the floor makes writable.
+  const home = "/Users/peer-key-floor-home";
+  const key = `${home}/.itsybitsy/peer/secret.key`;
+  const peers = `${home}/.itsybitsy/peer/peers.json`;
+  for (const canSpawnChildren of [false, true]) {
+    const params = { HOME: home, AGENTDIR: `${home}/agent`, WORKTREE: `${home}/worktree`,
+      GITDIR: `${home}/git`, REPOAGENTS: `${home}/agents`, PARENTCLAUDE: `${home}/parent-claude`,
+      TMUXSOCK: `${home}/tmux`, canSpawnChildren };
+    const paths = floor.paths as PathsConfig;
+    const table = sandboxPathAccessTable(paths, params);
+    // Hook layer.
+    expect(resolvePathAccess(key, "read", table)).toBe("deny");
+    expect(resolvePathAccess(key, "write", table)).toBe("deny");
+    expect(resolvePathAccess(peers, "read", table)).toBe("allow");
+    expect(resolvePathAccess(peers, "write", table)).toBe("deny");
+    // Kernel layer.
+    const tag = newSandboxTag();
+    const profile = generateProfile({ enabled: true, rawAllow: [], domains: [] }, paths, params, tag);
+    expect(profile).toContain(`(deny file-read* (subpath "${key}") (with message "${tag}"))`);
+    expect(profile).toContain(`(deny file-write* (subpath "${key}") (with message "${tag}"))`);
+  }
+});

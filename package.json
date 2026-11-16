@@ -14,6 +14,7 @@
     "build": "bun build --compile --minify --sourcemap --bytecode --format=esm --no-compile-autoload-dotenv --no-compile-autoload-bunfig index.ts --outfile ib"
   },
   "dependencies": {
-    "@mariozechner/pi-tui": "^0.56.0"
+    "@mariozechner/pi-tui": "^0.56.0",
+    "@number0/iroh": "^1.2.0"
   }
 }

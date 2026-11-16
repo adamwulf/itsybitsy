@@ -15,6 +15,16 @@ test("all runtime path builders", () => {
   expect(names.userQuestionsFile(repo)).toBe(`${repo}/.itsybitsy/user-questions.json`);
 });
 
+test("peer paths live under the user home, through the home seam", () => {
+  setUserHome("/tmp/runtime-names-peer-home");
+  try {
+    expect(names.peerDir()).toBe("/tmp/runtime-names-peer-home/.itsybitsy/peer");
+    expect(names.peerSecretKeyFile()).toBe("/tmp/runtime-names-peer-home/.itsybitsy/peer/secret.key");
+    expect(names.peersFile()).toBe("/tmp/runtime-names-peer-home/.itsybitsy/peer/peers.json");
+    expect(names.peerEndpointLockFile()).toBe("/tmp/runtime-names-peer-home/.itsybitsy/peer/endpoint.lock");
+  } finally { resetUserHome(); }
+});
+
 test("tmux names preserve agent ids and accept only the new prefix", () => {
   const session = names.tmuxSessionName("1234abcd", "ittybitty-agent");
   expect(names.agentIdFromTmuxSession(session)).toBe("ittybitty-agent");

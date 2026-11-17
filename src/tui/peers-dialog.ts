@@ -156,18 +156,28 @@ export function handlePeersDialogInput(ctx: DialogCtx, d: PeersDialogState, data
   return true;
 }
 
-function statusLine(status: EndpointStatus): string {
+/** The endpoint status: one line, plus the last error on its own line(s) while a retry is pending. */
+function statusLines(status: EndpointStatus, now: number): Array<{ text: string; color?: string }> {
   switch (status.kind) {
     case "idle":
     case "starting":
-      return `${YELLOW}●${RESET} starting…`;
+      return [{ text: `${YELLOW}●${RESET} starting…` }];
     case "listening":
-      return `${GREEN}●${RESET} accepting pairing requests while this dialog is open`;
+      return [{ text: `${GREEN}●${RESET} accepting pairing requests while this dialog is open` }];
     case "disabled":
-      return `${YELLOW}●${RESET} peering disabled: ib watch pid ${status.ownerPid} owns the endpoint`;
+      return [{ text: `${YELLOW}●${RESET} peering disabled: ib watch pid ${status.ownerPid} owns the endpoint` }];
     case "error":
-      return `${RED}●${RESET} peering unavailable: ${status.message}`;
+      if (status.retryAt === null) return [{ text: `${RED}●${RESET} peering unavailable: ${status.message}` }];
+      return [
+        { text: `${YELLOW}●${RESET} peering unavailable; retrying in ${retrySeconds(status.retryAt, now)} s` },
+        { text: `last error: ${status.message}`, color: RED },
+      ];
   }
+}
+
+/** Whole seconds until `retryAt`, rounded up, at least 1 (the retry is still pending). */
+function retrySeconds(retryAt: number, now: number): number {
+  return Math.max(1, Math.ceil((retryAt - now) / 1000));
 }
 
 /** A duration as its largest whole unit: `42s`, `5m`, `3h`, `2d`. */
@@ -222,7 +232,7 @@ export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number)
   } else {
     lines.push(`${DIM}loading…${RESET}`);
   }
-  prose(statusLine(view.status));
+  for (const line of statusLines(view.status, Date.now())) prose(line.text, line.color);
   lines.push("");
 
   lines.push(`${BOLD}Paired peers${RESET}`);

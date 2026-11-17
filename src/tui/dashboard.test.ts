@@ -8872,8 +8872,17 @@ describe("Peers dialog", () => {
     expect(text(dashboard)).toContain("starting…");
     service.set({ status: { kind: "disabled", ownerPid: 4242 } });
     expect(text(dashboard)).toContain("peering disabled: ib watch pid 4242 owns the endpoint");
-    service.set({ status: { kind: "error", message: "load: dlopen failed" } });
-    expect(text(dashboard)).toContain("peering unavailable: load: dlopen failed");
+    service.set({ status: { kind: "error", message: "load: dlopen failed", retryAt: null } });
+    out = text(dashboard);
+    expect(out).toContain("peering unavailable: load: dlopen failed");
+    expect(out).not.toContain("retrying");
+    // A pending automatic rebind: the countdown, rounded up, and the last error.
+    service.set({ status: { kind: "error", message: "load: dlopen failed", retryAt: Date.now() + 9_500 } });
+    out = text(dashboard);
+    expect(out).toContain("peering unavailable; retrying in 10 s");
+    expect(out).toContain("last error: load: dlopen failed");
+    service.set({ status: { kind: "error", message: "load: dlopen failed", retryAt: Date.now() - 50 } });
+    expect(text(dashboard)).toContain("retrying in 1 s");
     service.set({ selfId: null });
     expect(text(dashboard)).toContain("loading…");
     service.set({ identityError: "secret.key is not 64 lowercase hex characters", peersError: "peers.json: not valid JSON" });

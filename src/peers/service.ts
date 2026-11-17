@@ -3,10 +3,12 @@
  * model" and "Reconnection"; SPEC.md §20.3), the one pairing session it runs
  * at a time, and the trusted link's poller.
  *
- * - Binding happens at two moments, and only once: at boot when `peers.json`
- *   lists at least one peer (`bootIfPaired`, which `ib watch` starts in the
- *   background once the watcher's first scan is done), and when the Peers dialog opens
- *   (`openDialog`) with nothing bound yet. An install with no peers that never
+ * - The endpoint binds at boot when `peers.json` lists at least one peer
+ *   (`bootIfPaired`, which `ib watch` starts in the background once the
+ *   watcher's first scan is done), or when the Peers dialog opens
+ *   (`openDialog`) with nothing bound yet, and again through the automatic
+ *   rebind after a failure (below); one bind runs at a time, and a bound
+ *   endpoint is never bound again. An install with no peers that never
  *   opens the dialog never loads the addon or touches the network. Before
  *   binding it takes the endpoint lock; when another live `ib watch` holds it,
  *   it does not bind and reports "peering disabled: ib watch pid N owns the
@@ -22,6 +24,8 @@
  *   binds at once, in place of the retry. `binding` is held from the start of
  *   a bind (or of a failed endpoint's close) until its retry is armed, so two
  *   binds never run and each failure leaves at most one endpoint and one lock.
+ *   Each failure is one watch.log line with its wait; at the 60 s cap a
+ *   repeat of the same failure is not logged again.
  * - Binding is async, but the first addon load is NOT off the event loop:
  *   iroh.ts's dynamic import of the package evaluates the napi module
  *   synchronously, so the first bind stalls the UI once, for about a third of
@@ -164,6 +168,13 @@ export function peerRetryDelayMs(failures: number): number {
   return Math.min(PEER_RETRY_MAX_MS, PEER_RETRY_INITIAL_MS * 2 ** doublings);
 }
 
+/** How one bind ended. A failure carries its watch.log text, logged once with the retry it arms. */
+type BindOutcome =
+  | { kind: "bound" }
+  | { kind: "disabled" }
+  | { kind: "failed"; failure: string }
+  | { kind: "shutting-down" };
+
 /** The endpoint's state, as the dialog shows it. */
 export type EndpointStatus =
   /** Not asked to bind yet. */
@@ -247,6 +258,8 @@ export class PeerService {
   private binding: Promise<void> | null = null;
   /** Consecutive failures since the last successful bind; sets the retry's wait. */
   private failures = 0;
+  /** The failure last logged at the 60 s cap; the same one again is not logged (logFailure). */
+  private quietFailure: string | null = null;
   /** Cancels the pending automatic rebind; null when none is pending. */
   private cancelRetryTimer: (() => void) | null = null;
   /** Cancels the open dialog's countdown tick; null when none is armed. */
@@ -371,11 +384,10 @@ export class PeerService {
         this.stopRetrying(notNeeded);
         return;
       }
-      this.deps.log(`peering: retrying the bind after ${plural(this.failures, "failure")}`);
     }
     const outcome = await this.bind();
-    if (outcome === "failed") this.retryLater();
-    else if (outcome === "disabled" && this.failures > 0) this.stopRetrying("another ib watch owns the endpoint");
+    if (outcome.kind === "failed") this.retryLater(outcome.failure);
+    else if (outcome.kind === "disabled" && this.failures > 0) this.stopRetrying("another ib watch owns the endpoint");
   }
 
   /**
@@ -403,13 +415,18 @@ export class PeerService {
    * After a failure (a failed bind, or a failed accept loop once its endpoint
    * is closed): count it and arm the automatic rebind, unless `ib watch` is
    * exiting or nothing needs the endpoint (no peers known, the dialog closed;
-   * the retry re-reads `peers.json` before it binds).
+   * the retry re-reads `peers.json` before it binds). `failure` is logged
+   * here, once, with what happens next.
    */
-  private retryLater(): void {
-    if (this.shuttingDown) return;
+  private retryLater(failure: string): void {
+    if (this.shuttingDown) {
+      this.deps.log(`peering: ${failure}`);
+      return;
+    }
     this.failures++;
     if (!this.dialogOpen && this.peers.length === 0) {
-      this.stopRetrying("no paired peers and the Peers dialog is closed");
+      this.deps.log(`peering: ${failure}; not retrying: no paired peers and the Peers dialog is closed`);
+      this.resetRetries();
       return;
     }
     const delay = peerRetryDelayMs(this.failures);
@@ -421,15 +438,37 @@ export class PeerService {
       this.cancelRetry();
       this.startBind(true);
     });
-    this.deps.log(`peering: retrying the bind in ${delay / 1000} s`);
+    this.logFailure(failure, delay);
     if (this.status.kind === "error") this.setStatus({ ...this.status, retryAt });
     this.armCountdown();
+  }
+
+  /**
+   * One watch.log line per failure, with the wait before the retry. At the
+   * 60 s cap a failure identical to the last one logged there is not logged
+   * again, so a permanent failure does not fill watch.log; a different one
+   * is, and `recovered after N failures` gives the count.
+   */
+  private logFailure(failure: string, delay: number): void {
+    if (delay < PEER_RETRY_MAX_MS) {
+      this.deps.log(`peering: ${failure}; retrying in ${delay / 1000} s`);
+      return;
+    }
+    if (failure === this.quietFailure) return;
+    this.quietFailure = failure;
+    this.deps.log(`peering: ${failure}; retrying every ${PEER_RETRY_MAX_MS / 1000} s, not logging this error again until it changes`);
   }
 
   /** Give up retrying until the next bind: log why, and start the next run of failures at 5 s. */
   private stopRetrying(why: string): void {
     this.deps.log(`peering: not retrying the bind: ${why}`);
+    this.resetRetries();
+  }
+
+  /** A new run of failures starts at 5 s, and logs its first failure at the cap again. */
+  private resetRetries(): void {
     this.failures = 0;
+    this.quietFailure = null;
   }
 
   /** Cancel the pending retry (and the dialog's countdown); the error stays shown. */
@@ -583,9 +622,10 @@ export class PeerService {
 
   /**
    * Load the identity, take the lock, bind, and start the accept loop and the
-   * poller. Every failure is logged, shown, and leaves the lock released.
+   * poller. Every failure is shown, leaves the lock released, and is returned
+   * for the caller to log once with the retry it arms (retryLater).
    */
-  private async bind(): Promise<"bound" | "disabled" | "failed" | "shutting-down"> {
+  private async bind(): Promise<BindOutcome> {
     this.setStatus({ kind: "starting" });
     let identity: PeerIdentity;
     try {
@@ -594,9 +634,8 @@ export class PeerService {
       this.identityError = null;
     } catch (err) {
       this.identityError = errorDetail(err);
-      this.deps.log(`peering: could not load this install's identity: ${this.identityError}`);
       this.setStatus({ kind: "error", message: this.identityError, retryAt: null });
-      return "failed";
+      return { kind: "failed", failure: `could not load this install's identity: ${this.identityError}` };
     }
 
     let lock: EndpointLockResult;
@@ -604,14 +643,13 @@ export class PeerService {
       lock = await this.deps.acquireLock();
     } catch (err) {
       const message = `could not take the endpoint lock: ${errorDetail(err)}`;
-      this.deps.log(`peering: ${message}`);
       this.setStatus({ kind: "error", message, retryAt: null });
-      return "failed";
+      return { kind: "failed", failure: message };
     }
     if (!lock.acquired) {
       this.deps.log(`peering disabled: ib watch pid ${lock.ownerPid} owns the endpoint`);
       this.setStatus({ kind: "disabled", ownerPid: lock.ownerPid });
-      return "disabled";
+      return { kind: "disabled" };
     }
     this.lockHeld = true;
     if (lock.takenFromPid !== undefined) {
@@ -623,25 +661,24 @@ export class PeerService {
       ep = await this.deps.bindEndpoint(identity.secretKey, [PAIR_ALPN, PEER_ALPN]);
     } catch (err) {
       const message = errorDetail(err);
-      this.deps.log(`peering: could not bind the endpoint: ${message}`);
       this.lockHeld = false;
       await this.deps.releaseLock().catch(() => {});
       this.setStatus({ kind: "error", message, retryAt: null });
-      return "failed";
+      return { kind: "failed", failure: `could not bind the endpoint: ${message}` };
     }
     if (this.shuttingDown) {
       // shutdown() waits for this bind and then closes `this.endpoint`.
       this.endpoint = ep;
-      return "shutting-down";
+      return { kind: "shutting-down" };
     }
     this.endpoint = ep;
     this.deps.log(`peering: endpoint bound as ${shortPeerId(identity.id)}`);
     if (this.failures > 0) this.deps.log(`peering: recovered after ${plural(this.failures, "failure")}`);
-    this.failures = 0;
+    this.resetRetries();
     this.setStatus({ kind: "listening" });
     this.acceptLoopDone = this.acceptLoop(ep);
     this.poller.start();
-    return "bound";
+    return { kind: "bound" };
   }
 
   private async acceptLoop(ep: ServiceEndpoint): Promise<void> {
@@ -655,12 +692,14 @@ export class PeerService {
         // the lock back, then arm the retry, so the rebind starts afresh
         // instead of binding a second endpoint with the same key next to
         // this one. `binding` keeps a dialog open from starting that bind
-        // before the close has finished.
+        // before the close has finished. The failure is logged now (a close
+        // that hangs would otherwise hide it) and again with the retry; an
+        // accept loop can fail at most once per successful bind.
         const message = `accept loop stopped: ${errorDetail(err)}`;
         this.deps.log(`peering: ${message}; closing the endpoint`);
         this.cancel();
         this.setStatus({ kind: "error", message, retryAt: null });
-        this.track(this.closeEndpoint().then(() => this.retryLater()));
+        this.track(this.closeEndpoint().then(() => this.retryLater(message)));
         return;
       }
       if (incoming === null) return; // the endpoint closed

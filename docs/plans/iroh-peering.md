@@ -129,9 +129,10 @@ turns on n0's public relays and discovery:
   resets the wait. It retries only while `peers.json` lists a peer or the
   Peers dialog is open. It stops when another live `ib watch` holds the lock
   (peering shows as disabled, and the lock is not polled) and on exit.
-  Opening the dialog while a retry is pending binds at once instead. Every
-  failure, retry and recovery goes to `watch.log`, and the dialog shows
-  "retrying in N s" with the last error.
+  Opening the dialog while a retry is pending binds at once instead. Each
+  failure is one `watch.log` line with its wait; once the wait reaches 60 s,
+  a repeat of the same failure is not logged again. Recovery is logged, and
+  the dialog shows "retrying in N s" with the last error.
 
 **One endpoint per machine.** Two endpoints with the same key would fight: the
 relay keeps one connection per id, the discovery records would overwrite each

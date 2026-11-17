@@ -1093,9 +1093,10 @@ export async function main() {
     case "add": {
       // `ib add [path] [name]` takes no flags. A name like `--name` would pass
       // isValidRepoName (a leading "-" is allowed) and register the flag itself
-      // as the name, and a third argument would be dropped, so both are refused.
+      // as the name, a path like `--name` would register a nonexistent
+      // <cwd>/--name, and a third argument would be dropped, so all are refused.
       const name = args[2];
-      if (args.length > 3 || name?.startsWith("-")) {
+      if (args.length > 3 || args[1]?.startsWith("-") || name?.startsWith("-")) {
         console.error(COMMAND_HELP.add);
         process.exit(1);
       }

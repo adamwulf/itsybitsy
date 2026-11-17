@@ -635,7 +635,11 @@ describe("ib add [path] [name] (CLI)", () => {
     try {
       const folder = join(cli.root, "folder");
       await mkdir(folder, { recursive: true });
-      for (const args of [["add", folder, "--name", "app-two"], ["add", folder, "--name"], ["add", folder, "-x"], ["add", folder, "one", "two"]]) {
+      for (const args of [
+        ["add", folder, "--name", "app-two"], ["add", folder, "--name"], ["add", folder, "-x"], ["add", folder, "one", "two"],
+        // A flag where the path goes: it would register a nonexistent <cwd>/--name.
+        ["add", "--name", "app-two"], ["add", "-x"],
+      ]) {
         const run = await cli.run(args);
         expect(run.exitCode).toBe(1);
         expect(run.stderr).toContain("Usage: ib add [path] [name]");

@@ -869,11 +869,12 @@ describe("PeerService self-heal", () => {
     }
   });
 
-  test("an endpoint whose accept loop dies as soon as it binds backs off 5, 10, 20, 40, 60 s, and goes quiet at the cap", async () => {
+  test("an endpoint whose accept loop dies as soon as it binds backs off 5, 10, 20, 40, 60 s, goes quiet at the cap, and logs only the recovery of the bind that stays up", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
-    const endpoints = Array.from({ length: 8 }, () => {
+    const endpoints = Array.from({ length: 8 }, (_, i) => {
       const ep = new FakeEndpoint();
-      ep.acceptFailure = new Error(SOCKET_GONE); // every bind succeeds; every accept loop dies at once
+      // Every bind succeeds; the first 7 accept loops die at once, the 8th stays up.
+      if (i < 7) ep.acceptFailure = new Error(SOCKET_GONE);
       ep.connectImpl = () => new Promise(() => {});
       return ep;
     });
@@ -903,6 +904,18 @@ describe("PeerService self-heal", () => {
       ...cycle("retrying in 40 s"),
       ...cycle(AT_CAP),
     ]);
+
+    // The 8th bind comes up and stays up: still part of the quiet run, so it is not logged...
+    const quietLogs = [...logs];
+    clock.advance(retryAt(service)! - clock.now());
+    await waitFor(() => service.view().status.kind === "listening" && endpoints[7]!.accepting, { message: "bind 8 stays up" });
+    expect(binds.length).toBe(8);
+    expect(logs).toEqual(quietLogs);
+    clock.advance(59_999);
+    expect(logs).toEqual(quietLogs);
+    // ...and 60 s later its recovery is, counting all 7 failures.
+    clock.advance(1);
+    expect(logs).toEqual([...quietLogs, recovered(7)]);
     await service.shutdown();
     expect(clock.pending()).toBe(0);
   });

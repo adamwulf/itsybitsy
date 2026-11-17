@@ -175,7 +175,7 @@ export const PEER_RETRY_COUNTDOWN_MS = 1_000;
  */
 export const PEER_RETRY_STABLE_MS = 60_000;
 
-/** The wait before the automatic rebind after `failures` consecutive failures (1 or more): 5, 10, 20, 40, then 60 s. */
+/** The wait before the automatic rebind after `failures` failures in the current run (1 or more): 5, 10, 20, 40, then 60 s. */
 export function peerRetryDelayMs(failures: number): number {
   const doublings = Math.min(Math.max(failures - 1, 0), 16);
   return Math.min(PEER_RETRY_MAX_MS, PEER_RETRY_INITIAL_MS * 2 ** doublings);
@@ -274,9 +274,11 @@ export class PeerService {
   private binding: Promise<void> | null = null;
   /**
    * Failures in the current run, which sets the retry's wait: counted since
-   * the last bind that stayed up PEER_RETRY_STABLE_MS, or since the last give-up
-   * (stopRetrying). A bind does not reset it, so it stays above 0 while
-   * listening during that stability window, until the stable check fires.
+   * resetRetries last ran, on a recovery (armStableTimer, once a bind has
+   * stayed up PEER_RETRY_STABLE_MS) or a give-up (stopRetrying, or
+   * retryLater when nothing needs the endpoint). A bind does not reset it,
+   * so it stays above 0 while listening during that stability window, until
+   * the stable check fires.
    */
   private failures = 0;
   /** The failure last logged at the 60 s cap; the same one again is not logged (logFailure). */

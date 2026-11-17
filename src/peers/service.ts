@@ -27,8 +27,11 @@
  *   a bind (or of a failed endpoint's close) until its retry is armed, so two
  *   binds never run and each failure leaves at most one endpoint and one lock.
  *   Each failure is one watch.log line with its wait; at the 60 s cap a
- *   repeat of the same failure is not logged again, nor are the bound and
- *   closed lines of the rebind that repeats it.
+ *   repeat of the same failure is not logged again. When that failure is an
+ *   accept-loop failure, each rebind's bound, closing and closed lines are
+ *   not logged either, including the bind that ends up staying up; its
+ *   recovery is logged when the 60 s stability check fires. A bind after a
+ *   bind-stage failure (identity, lock, bind) is always logged.
  * - Binding is async, but the first addon load is NOT off the event loop:
  *   iroh.ts's dynamic import of the package evaluates the napi module
  *   synchronously, so the first bind stalls the UI once, for about a third of
@@ -178,6 +181,9 @@ export function peerRetryDelayMs(failures: number): number {
   return Math.min(PEER_RETRY_MAX_MS, PEER_RETRY_INITIAL_MS * 2 ** doublings);
 }
 
+/** How an accept-loop failure's message starts (the status message and its watch.log lines). */
+const ACCEPT_LOOP_STOPPED = "accept loop stopped: ";
+
 /** How one bind ended. A failure carries its watch.log text, logged once with the retry it arms. */
 type BindOutcome =
   | { kind: "bound" }
@@ -266,7 +272,12 @@ export class PeerService {
    * retry it arms); no other bind starts until it settles.
    */
   private binding: Promise<void> | null = null;
-  /** Consecutive failures since the last successful bind; sets the retry's wait. */
+  /**
+   * Failures in the current run, which sets the retry's wait: counted since
+   * the last bind that stayed up PEER_RETRY_STABLE_MS, or since the last give-up
+   * (stopRetrying). A bind does not reset it, so it stays above 0 while
+   * listening during that stability window, until the stable check fires.
+   */
   private failures = 0;
   /** The failure last logged at the 60 s cap; the same one again is not logged (logFailure). */
   private quietFailure: string | null = null;
@@ -459,9 +470,10 @@ export class PeerService {
    * One watch.log line per failure, with the wait before the retry. At the
    * 60 s cap a failure identical to the last one logged there is not logged
    * again, so a permanent failure does not fill watch.log; a different one
-   * is, and `recovered after N failures` gives the count. While such a
-   * failure repeats ({@link quiet}), the lines of a rebind that fails again
-   * (bound, closing, closed) are not logged either.
+   * is, and `recovered after N failures` gives the count. While an
+   * accept-loop failure repeats like that, the other lines of each rebind
+   * that repeats it (bound, closing, closed) are not logged either
+   * ({@link quietFailureRepeats}, {@link quietBindCycle}).
    */
   private logFailure(failure: string, delay: number): void {
     if (delay < PEER_RETRY_MAX_MS) {
@@ -479,13 +491,19 @@ export class PeerService {
     this.resetRetries();
   }
 
+  /** `failure` repeats the failure no longer logged at the 60 s cap. */
+  private quietFailureRepeats(failure: string): boolean {
+    return this.quietFailure !== null && failure === this.quietFailure;
+  }
+
   /**
-   * A failure is repeating at the 60 s cap and is no longer logged: a rebind
-   * that comes up only to fail the same way again stays out of watch.log too.
-   * `failure`, when given, must be that same failure.
+   * The failure repeating unlogged at the cap is an accept-loop failure, so
+   * each cycle binds before it fails again: such a bind is part of the
+   * repeat and is not logged. A bind after a bind-stage failure (identity,
+   * lock, bind) is a change, and is logged.
    */
-  private quiet(failure?: string): boolean {
-    return this.quietFailure !== null && (failure === undefined || failure === this.quietFailure);
+  private quietBindCycle(): boolean {
+    return this.quietFailure !== null && this.quietFailure.startsWith(ACCEPT_LOOP_STOPPED);
   }
 
   /**
@@ -720,7 +738,7 @@ export class PeerService {
       return { kind: "shutting-down" };
     }
     this.endpoint = ep;
-    if (!this.quiet()) this.deps.log(`peering: endpoint bound as ${shortPeerId(identity.id)}`);
+    if (!this.quietBindCycle()) this.deps.log(`peering: endpoint bound as ${shortPeerId(identity.id)}`);
     // After failures, the run (and its backoff) ends only once this endpoint
     // has stayed up for PEER_RETRY_STABLE_MS, which also logs the recovery.
     if (this.failures > 0) this.armStableTimer(ep);
@@ -746,8 +764,8 @@ export class PeerService {
         // accept loop can fail at most once per successful bind.
         // A repeat of the failure that is no longer logged is not logged here
         // either.
-        const message = `accept loop stopped: ${errorDetail(err)}`;
-        const quiet = this.quiet(message);
+        const message = `${ACCEPT_LOOP_STOPPED}${errorDetail(err)}`;
+        const quiet = this.quietFailureRepeats(message);
         if (!quiet) this.deps.log(`peering: ${message}; closing the endpoint`);
         this.cancel();
         this.setStatus({ kind: "error", message, retryAt: null });

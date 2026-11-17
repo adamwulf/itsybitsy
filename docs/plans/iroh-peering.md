@@ -127,14 +127,18 @@ turns on n0's public relays and discovery:
   its own through the same path (the lock, then the bind, then the poller).
   It waits 5 s, then doubles the wait each time up to 60 s. A rebind resets
   the wait only once it has stayed up for 60 s; an accept loop that dies
-  sooner is one more failure, so a flapping endpoint backs off too. It retries only while `peers.json` lists a peer or the
-  Peers dialog is open. It stops when another live `ib watch` holds the lock
-  (peering shows as disabled, and the lock is not polled) and on exit.
-  Opening the dialog while a retry is pending binds at once instead. Each
-  failure is one `watch.log` line with its wait; once the wait reaches 60 s,
-  a repeat of the same failure (and the rebind that repeats it) is not
-  logged again. Recovery is logged once the rebind has stayed up, and
-  the dialog shows "retrying in N s" with the last error.
+  sooner is one more failure, so a flapping endpoint backs off too. It
+  retries only while `peers.json` lists a peer or the Peers dialog is open.
+  It stops when another live `ib watch` holds the lock (peering shows as
+  disabled, and the lock is not polled) and on exit. Opening the dialog
+  while a retry is pending binds at once instead. Each failure is one
+  `watch.log` line with its wait; once the wait reaches 60 s, a repeat of
+  the same failure is not logged again. When that failure is the accept
+  loop dying, the binds of the repeating cycle and their close lines are
+  not logged either, including the bind that ends up staying up; a bind
+  after a failure to bind (identity, lock, socket) is logged. Recovery is
+  logged once a rebind has stayed up for 60 s, and the dialog shows
+  "retrying in N s" with the last error.
 
 **One endpoint per machine.** Two endpoints with the same key would fight: the
 relay keeps one connection per id, the discovery records would overwrite each
@@ -153,9 +157,11 @@ the endpoint:
    time. A different start time can happen after a reboot. The owner deletes
    the lock when it exits.
 
-A second `ib watch` tries for the lock only at the two bind moments above
-(and a retry that finds the lock held stops there). So once the owner exits,
-opening Peers or restarting moves peering to the second one. This works like Telegram, where the first poller wins.
+A second `ib watch` tries for the lock only when it binds: at boot, when the
+Peers dialog opens, or in an automatic rebind after its own failure. It never
+polls the lock: when a bind finds the lock held, retrying stops there. So once
+the owner exits, opening Peers or restarting moves peering to the second one.
+This works like Telegram, where the first poller wins.
 
 ### Key generation and storage
 

@@ -698,6 +698,8 @@ describe("PeerService self-heal", () => {
   const AT_CAP = "retrying every 60 s, not logging this error again until it changes";
   /** watch.log lines about retrying; each failure has exactly one, so there is no separate "retrying" line. */
   const retryLines = (logs: string[]) => logs.filter((line) => /retrying|recovered/.test(line));
+  const recovered = (failures: number) =>
+    `peering: recovered after ${failures} failure${failures === 1 ? "" : "s"}: the endpoint has stayed up for 60 s`;
 
   test("an accept-loop failure rebinds after 5 s, through the lock, and the poller runs again", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
@@ -729,12 +731,14 @@ describe("PeerService self-heal", () => {
     expect(await lockContents()).toBe(OWN_LOCK);
     await waitFor(() => service.view().links[0]?.connected === true, { message: "polled again" });
     expect(second.connects).toEqual([ID_REMOTE]);
-    expect(retryLines(logs)).toEqual([`peering: accept loop stopped: ${SOCKET_GONE}; retrying in 5 s`, "peering: recovered after 1 failure"]);
+    expect(retryLines(logs)).toEqual([`peering: accept loop stopped: ${SOCKET_GONE}; retrying in 5 s`]);
+    clock.advance(60_000); // recovered once the rebind has stayed up for 60 s
+    expect(retryLines(logs)).toEqual([`peering: accept loop stopped: ${SOCKET_GONE}; retrying in 5 s`, recovered(1)]);
     await service.shutdown();
     expect(second.closeCalls).toBe(1);
   });
 
-  test("repeated bind failures back off 5, 10, 20, 40, 60, 60 s, one log line each; a success resets it to 5 s", async () => {
+  test("repeated bind failures back off 5, 10, 20, 40, 60, 60 s, one log line each; a bind that stays up resets it to 5 s", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const fail = (n: number) => new Error(`load: dlopen failed ${n}`);
     const endpoint = new FakeEndpoint();
@@ -766,8 +770,9 @@ describe("PeerService self-heal", () => {
       "peering: could not bind the endpoint: load: dlopen failed 4; retrying in 40 s",
       `peering: could not bind the endpoint: load: dlopen failed 5; ${AT_CAP}`,
       `peering: could not bind the endpoint: load: dlopen failed 6; ${AT_CAP}`,
-      "peering: recovered after 6 failures",
     ]);
+    clock.advance(60_000);
+    expect(retryLines(logs).at(-1)).toBe(recovered(6));
 
     endpoint.failAccept(new Error(SOCKET_GONE));
     await waitFor(() => retryAt(service) !== null, { message: "retry after the loop failed" });
@@ -790,8 +795,9 @@ describe("PeerService self-heal", () => {
       await waitFor(() => binds.length === failure + 1, { message: `bind ${failure + 1}` });
     }
     await waitFor(() => service.view().status.kind === "listening" && endpoint.accepting, { message: "bound" });
-    const selfId = service.view().selfId!;
+    clock.advance(60_000);
     // Failures 6 and 7 repeat failure 5 at the cap: not logged. 8 differs, and 9 differs from 8.
+    // The bind that follows a repeating failure is not logged either; its recovery is, once it has stayed up.
     expect(logs).toEqual([
       "peering: binding at boot for 1 paired peer",
       "peering: could not bind the endpoint: load: dlopen failed; retrying in 5 s",
@@ -801,10 +807,80 @@ describe("PeerService self-heal", () => {
       `peering: could not bind the endpoint: load: dlopen failed; ${AT_CAP}`,
       `peering: could not bind the endpoint: bind: address in use; ${AT_CAP}`,
       `peering: could not bind the endpoint: load: dlopen failed; ${AT_CAP}`,
-      `peering: endpoint bound as ${selfId.slice(0, 10)}`,
-      "peering: recovered after 9 failures",
+      recovered(9),
     ]);
     await service.shutdown();
+  });
+
+  test("an endpoint whose accept loop dies as soon as it binds backs off 5, 10, 20, 40, 60 s, and goes quiet at the cap", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const endpoints = Array.from({ length: 8 }, () => {
+      const ep = new FakeEndpoint();
+      ep.acceptFailure = new Error(SOCKET_GONE); // every bind succeeds; every accept loop dies at once
+      ep.connectImpl = () => new Promise(() => {});
+      return ep;
+    });
+    const { service, binds, logs, clock } = makeService({}, endpoints);
+    await service.bootIfPaired();
+    const waits: number[] = [];
+    for (let failure = 1; failure <= 7; failure++) {
+      await waitFor(() => retryAt(service) !== null, { message: `retry ${failure} armed` });
+      expect(endpoints[failure - 1]!.closeCalls).toBe(1);
+      const wait = retryAt(service)! - clock.now();
+      waits.push(wait / 1000);
+      if (failure === 7) break;
+      clock.advance(wait);
+      await waitFor(() => binds.length === failure + 1, { message: `bind ${failure + 1}` });
+    }
+    // No flapping at 5 s: a rebind that does not stay up continues the run.
+    expect(waits).toEqual([5, 10, 20, 40, 60, 60, 60]);
+    const selfId = service.view().selfId!;
+    const stopped = `peering: accept loop stopped: ${SOCKET_GONE}`;
+    const cycle = (tail: string) => [`peering: endpoint bound as ${selfId.slice(0, 10)}`, `${stopped}; closing the endpoint`, "peering: endpoint closed", `${stopped}; ${tail}`];
+    // At the cap the failure is logged once; the 6th and 7th cycles repeat it and log nothing at all.
+    expect(logs).toEqual([
+      "peering: binding at boot for 1 paired peer",
+      ...cycle("retrying in 5 s"),
+      ...cycle("retrying in 10 s"),
+      ...cycle("retrying in 20 s"),
+      ...cycle("retrying in 40 s"),
+      ...cycle(AT_CAP),
+    ]);
+    await service.shutdown();
+    expect(clock.pending()).toBe(0);
+  });
+
+  test("the backoff resets only once a rebind has stayed up for 60 s", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const [ep1, ep2, ep3, ep4] = [new FakeEndpoint(), new FakeEndpoint(), new FakeEndpoint(), new FakeEndpoint()];
+    for (const ep of [ep1, ep2, ep3, ep4]) ep.connectImpl = () => new Promise(() => {});
+    ep1.acceptFailure = new Error(SOCKET_GONE);
+    const { service, logs, clock } = makeService({}, [ep1, ep2, ep3, ep4]);
+    await service.bootIfPaired();
+    await waitFor(() => retryAt(service) !== null, { message: "retry 1 armed" });
+    expect(retryAt(service)! - clock.now()).toBe(5_000);
+
+    // ep2 stays up for 59.999 s, then fails: still the same run, so the wait doubles.
+    clock.advance(5_000);
+    await waitFor(() => service.view().status.kind === "listening" && ep2.accepting, { message: "ep2 bound" });
+    clock.advance(59_999);
+    expect(logs.some((line) => line.startsWith("peering: recovered"))).toBe(false);
+    ep2.failAccept(new Error(SOCKET_GONE));
+    await waitFor(() => retryAt(service) !== null, { message: "retry 2 armed" });
+    expect(retryAt(service)! - clock.now()).toBe(10_000);
+
+    // ep3 stays up for 60 s: recovered, and its later failure waits 5 s again.
+    clock.advance(10_000);
+    await waitFor(() => service.view().status.kind === "listening" && ep3.accepting, { message: "ep3 bound" });
+    clock.advance(59_999);
+    expect(logs.some((line) => line.startsWith("peering: recovered"))).toBe(false);
+    clock.advance(1);
+    expect(logs).toContain(recovered(2));
+    ep3.failAccept(new Error(SOCKET_GONE));
+    await waitFor(() => retryAt(service) !== null, { message: "retry 3 armed" });
+    expect(retryAt(service)! - clock.now()).toBe(5_000);
+    await service.shutdown();
+    expect(clock.pending()).toBe(0);
   });
 
   test("a failed identity load and a lock error (not another owner holding it) retry like a failed bind", async () => {
@@ -831,7 +907,8 @@ describe("PeerService self-heal", () => {
       await waitFor(() => service.view().status.kind === "listening", { message: "bound after the identity retry" });
       expect(service.view().identityError).toBeNull();
       expect(binds.length).toBe(1);
-      expect(logs).toContain("peering: recovered after 1 failure");
+      clock.advance(60_000);
+      expect(logs).toContain(recovered(1));
       await service.shutdown();
     }
     {
@@ -1130,13 +1207,12 @@ describe("PeerService self-heal", () => {
     service.openDialog();
     await waitFor(() => service.view().status.kind === "listening" && endpoint.accepting, { message: "bound" });
     expect(binds.length).toBe(2);
-    expect(retryLines(logs)).toEqual([
-      "peering: could not bind the endpoint: load: dlopen failed; retrying in 5 s",
-      "peering: recovered after 1 failure",
-    ]);
-    // Only the poller's timer is left.
-    expect(timers.filter((t) => t.armed).map((t) => t.ms)).toEqual([5_000]);
-    expect(timers.filter((t) => t.armed)[0]).not.toBe(retry);
+    expect(retryLines(logs)).toEqual(["peering: could not bind the endpoint: load: dlopen failed; retrying in 5 s"]);
+    // Left: the poller's timer, and the 60 s check that the rebind stays up. No retry.
+    expect(timers.filter((t) => t.armed).map((t) => t.ms).sort((a, b) => a - b)).toEqual([5_000, 60_000]);
+    expect(timers.filter((t) => t.armed)).not.toContain(retry);
+    clock.advance(60_000);
+    expect(logs).toContain(recovered(1));
     await service.shutdown();
   });
 
@@ -1208,7 +1284,9 @@ describe("PeerService self-heal", () => {
     await waitFor(() => service.view().status.kind === "listening" && ep3.accepting, { message: "ep3 bound" });
     ep3.failAccept(new Error(SOCKET_GONE));
     await waitFor(() => retryAt(service) !== null, { message: "retry armed after ep3" });
-    clock.advance(5_000);
+    // ep3 failed before staying up 60 s: the third failure of the run.
+    expect(retryAt(service)! - clock.now()).toBe(20_000);
+    clock.advance(20_000);
     await waitFor(() => service.view().status.kind === "listening" && ep4.accepting, { message: "ep4 bound" });
 
     await service.shutdown();

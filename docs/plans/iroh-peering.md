@@ -125,13 +125,15 @@ turns on n0's public relays and discovery:
 - **Self-heal.** After a failure (a bind that fails, or the accept loop
   failing), `ib watch` closes the endpoint, releases the lock, and rebinds on
   its own through the same path (the lock, then the bind, then the poller).
-  It waits 5 s, then doubles the wait each time up to 60 s; a successful bind
-  resets the wait. It retries only while `peers.json` lists a peer or the
+  It waits 5 s, then doubles the wait each time up to 60 s. A rebind resets
+  the wait only once it has stayed up for 60 s; an accept loop that dies
+  sooner is one more failure, so a flapping endpoint backs off too. It retries only while `peers.json` lists a peer or the
   Peers dialog is open. It stops when another live `ib watch` holds the lock
   (peering shows as disabled, and the lock is not polled) and on exit.
   Opening the dialog while a retry is pending binds at once instead. Each
   failure is one `watch.log` line with its wait; once the wait reaches 60 s,
-  a repeat of the same failure is not logged again. Recovery is logged, and
+  a repeat of the same failure (and the rebind that repeats it) is not
+  logged again. Recovery is logged once the rebind has stayed up, and
   the dialog shows "retrying in N s" with the last error.
 
 **One endpoint per machine.** Two endpoints with the same key would fight: the

@@ -16,8 +16,10 @@
  *   owner exits.
  * - After a failure (a bind that fails, or the accept loop failing once its
  *   endpoint is closed), the service rebinds on its own through the same
- *   path, after 5 s, then 10, 20, 40 and 60 s, staying at 60 s; a successful
- *   bind resets that. It retries only while something needs the endpoint:
+ *   path, after 5 s, then 10, 20, 40 and 60 s, staying at 60 s; a rebind
+ *   whose endpoint stays up for 60 s resets that, while one whose accept
+ *   loop dies sooner is one more failure, so a flapping endpoint backs off
+ *   too. It retries only while something needs the endpoint:
  *   `peers.json` lists a peer, or the Peers dialog is open. It stops for good
  *   when another live `ib watch` holds the lock ("disabled"; the lock is never
  *   polled), and on shutdown. Opening the dialog while a retry is pending
@@ -25,7 +27,8 @@
  *   a bind (or of a failed endpoint's close) until its retry is armed, so two
  *   binds never run and each failure leaves at most one endpoint and one lock.
  *   Each failure is one watch.log line with its wait; at the 60 s cap a
- *   repeat of the same failure is not logged again.
+ *   repeat of the same failure is not logged again, nor are the bound and
+ *   closed lines of the rebind that repeats it.
  * - Binding is async, but the first addon load is NOT off the event loop:
  *   iroh.ts's dynamic import of the package evaluates the napi module
  *   synchronously, so the first bind stalls the UI once, for about a third of
@@ -161,6 +164,13 @@ export const PEER_RETRY_INITIAL_MS = 5_000;
 export const PEER_RETRY_MAX_MS = 60_000;
 /** While the open Peers dialog shows a pending retry, the service notifies this often, so its countdown moves. */
 export const PEER_RETRY_COUNTDOWN_MS = 1_000;
+/**
+ * A rebind counts as recovered, and the backoff resets, only once its
+ * endpoint has stayed up this long; an accept loop that dies sooner is one
+ * more failure, so an endpoint that binds and then fails at once backs off
+ * instead of rebinding every 5 s.
+ */
+export const PEER_RETRY_STABLE_MS = 60_000;
 
 /** The wait before the automatic rebind after `failures` consecutive failures (1 or more): 5, 10, 20, 40, then 60 s. */
 export function peerRetryDelayMs(failures: number): number {
@@ -264,6 +274,8 @@ export class PeerService {
   private cancelRetryTimer: (() => void) | null = null;
   /** Cancels the open dialog's countdown tick; null when none is armed. */
   private cancelCountdown: (() => void) | null = null;
+  /** Cancels the check that a rebind has stayed up for PEER_RETRY_STABLE_MS; null when none is armed. */
+  private cancelStableTimer: (() => void) | null = null;
   private lockHeld = false;
   private shuttingDown = false;
   private dialogOpen = false;
@@ -447,7 +459,9 @@ export class PeerService {
    * One watch.log line per failure, with the wait before the retry. At the
    * 60 s cap a failure identical to the last one logged there is not logged
    * again, so a permanent failure does not fill watch.log; a different one
-   * is, and `recovered after N failures` gives the count.
+   * is, and `recovered after N failures` gives the count. While such a
+   * failure repeats ({@link quiet}), the lines of a rebind that fails again
+   * (bound, closing, closed) are not logged either.
    */
   private logFailure(failure: string, delay: number): void {
     if (delay < PEER_RETRY_MAX_MS) {
@@ -463,6 +477,37 @@ export class PeerService {
   private stopRetrying(why: string): void {
     this.deps.log(`peering: not retrying the bind: ${why}`);
     this.resetRetries();
+  }
+
+  /**
+   * A failure is repeating at the 60 s cap and is no longer logged: a rebind
+   * that comes up only to fail the same way again stays out of watch.log too.
+   * `failure`, when given, must be that same failure.
+   */
+  private quiet(failure?: string): boolean {
+    return this.quietFailure !== null && (failure === undefined || failure === this.quietFailure);
+  }
+
+  /**
+   * After a bind that follows failures: once that endpoint has stayed up for
+   * PEER_RETRY_STABLE_MS, log the recovery and reset the backoff. Closing the
+   * endpoint sooner cancels it, so that failure continues the run.
+   */
+  private armStableTimer(ep: ServiceEndpoint): void {
+    this.cancelStable();
+    this.cancelStableTimer = this.deps.setTimer(PEER_RETRY_STABLE_MS, () => {
+      this.cancelStableTimer = null;
+      if (this.endpoint !== ep || this.shuttingDown) return;
+      this.deps.log(
+        `peering: recovered after ${plural(this.failures, "failure")}: the endpoint has stayed up for ${PEER_RETRY_STABLE_MS / 1000} s`,
+      );
+      this.resetRetries();
+    });
+  }
+
+  private cancelStable(): void {
+    this.cancelStableTimer?.();
+    this.cancelStableTimer = null;
   }
 
   /** A new run of failures starts at 5 s, and logs its first failure at the cap again. */
@@ -579,8 +624,11 @@ export class PeerService {
   /**
    * Stop the poller, then close the bound endpoint (if any) and release the
    * lock (if held), leaving the service unbound so a later bind starts clean.
+   * The endpoint did not stay up long enough to count as recovered, so the
+   * stable check is cancelled. `logClosed` false leaves out "endpoint closed".
    */
-  private async closeEndpoint(): Promise<void> {
+  private async closeEndpoint(logClosed = true): Promise<void> {
+    this.cancelStable();
     this.poller.stop();
     const ep = this.endpoint;
     this.endpoint = null;
@@ -598,7 +646,7 @@ export class PeerService {
         }
       }
     }
-    if (ep !== null) this.deps.log("peering: endpoint closed");
+    if (ep !== null && logClosed) this.deps.log("peering: endpoint closed");
   }
 
   private notify(): void {
@@ -672,9 +720,10 @@ export class PeerService {
       return { kind: "shutting-down" };
     }
     this.endpoint = ep;
-    this.deps.log(`peering: endpoint bound as ${shortPeerId(identity.id)}`);
-    if (this.failures > 0) this.deps.log(`peering: recovered after ${plural(this.failures, "failure")}`);
-    this.resetRetries();
+    if (!this.quiet()) this.deps.log(`peering: endpoint bound as ${shortPeerId(identity.id)}`);
+    // After failures, the run (and its backoff) ends only once this endpoint
+    // has stayed up for PEER_RETRY_STABLE_MS, which also logs the recovery.
+    if (this.failures > 0) this.armStableTimer(ep);
     this.setStatus({ kind: "listening" });
     this.acceptLoopDone = this.acceptLoop(ep);
     this.poller.start();
@@ -695,11 +744,14 @@ export class PeerService {
         // before the close has finished. The failure is logged now (a close
         // that hangs would otherwise hide it) and again with the retry; an
         // accept loop can fail at most once per successful bind.
+        // A repeat of the failure that is no longer logged is not logged here
+        // either.
         const message = `accept loop stopped: ${errorDetail(err)}`;
-        this.deps.log(`peering: ${message}; closing the endpoint`);
+        const quiet = this.quiet(message);
+        if (!quiet) this.deps.log(`peering: ${message}; closing the endpoint`);
         this.cancel();
         this.setStatus({ kind: "error", message, retryAt: null });
-        this.track(this.closeEndpoint().then(() => this.retryLater(message)));
+        this.track(this.closeEndpoint(!quiet).then(() => this.retryLater(message)));
         return;
       }
       if (incoming === null) return; // the endpoint closed

@@ -746,6 +746,7 @@ describe("AgentWatcher", () => {
         question: "Should I proceed?",
         timestamp: "2026-03-05T00:00:00Z",
         status: "pending",
+        repoPath: tempDir,
       };
       mockReadPendingQuestions.mockResolvedValue([question]);
 
@@ -771,8 +772,8 @@ describe("AgentWatcher", () => {
       let callCount = 0;
       mockReadPendingQuestions.mockImplementation(async () => {
         callCount++;
-        if (callCount === 1) return [{ id: "q-1", agent: "a1", question: "Q1", timestamp: "t1", status: "pending" as const }];
-        return [{ id: "q-2", agent: "a2", question: "Q2", timestamp: "t2", status: "pending" as const }];
+        if (callCount === 1) return [{ id: "q-1", agent: "a1", question: "Q1", timestamp: "t1", status: "pending" as const, repoPath: tempDir }];
+        return [{ id: "q-2", agent: "a2", question: "Q2", timestamp: "t2", status: "pending" as const, repoPath: tempDir2 }];
       });
 
       let receivedQuestions: PendingQuestion[] = [];

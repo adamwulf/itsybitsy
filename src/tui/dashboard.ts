@@ -2173,9 +2173,15 @@ export class DashboardComponent implements Component {
       this.agentTree.healthReports = this.watcher.healthReports;
     }
 
-    const qIds = new Set<string>();
-    for (const q of questions) qIds.add(q.agent);
-    this.agentTree.questionAgentIds = qIds;
+    // The red name: the full ids of the agents with a pending question. A
+    // question names its agent by repo and id; the same id in another repo is
+    // another agent.
+    const askers = new Set(questions.map((q) => `${q.repoPath}\0${q.agent}`));
+    const qKeys = new Set<string>();
+    for (const agent of agents) {
+      if (askers.has(`${agent.repoPath}\0${agent.id}`)) qKeys.add(this.agentTree.agentKey(agent));
+    }
+    this.agentTree.questionAgentKeys = qKeys;
 
     const filtered = this.rightPane.filteredQuestions;
     if (this.rightPane.questionsSelectedIndex >= filtered.length) {

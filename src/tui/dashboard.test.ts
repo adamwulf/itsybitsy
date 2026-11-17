@@ -37,7 +37,7 @@ import type { PeerLinkState } from "../peers/poller";
 import { peerEntryKey } from "./peer-sections";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
-import { DIM } from "./colors";
+import { DIM, RED } from "./colors";
 import { getStateColors } from "./color-scheme";
 import * as agentActions from "./agent-actions";
 import * as paneManager from "./pane-manager";
@@ -2860,6 +2860,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: "/repos/test",
     }];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
@@ -2885,6 +2886,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: "/repos/test",
     }];
     dashboard.onUpdate([agent], flatList, questions);
 
@@ -2914,6 +2916,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: tempRepo,
     }];
     dashboard.onUpdate([agent], flatList, questions);
 
@@ -2956,6 +2959,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: tempRepo,
     }];
     dashboard.onUpdate([agent], flatList, questions);
 
@@ -2978,8 +2982,8 @@ describe("DashboardComponent right pane and navigation features", () => {
       makeFlatAgent(agent1),
     ];
     const questions: PendingQuestion[] = [
-      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
-      { id: "q-2", agent: "agent-a", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending" },
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending", repoPath: "/repos/test" },
+      { id: "q-2", agent: "agent-a", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending", repoPath: "/repos/test" },
     ];
     dashboard.onUpdate([agent1], flatList, questions);
 
@@ -3007,8 +3011,8 @@ describe("DashboardComponent right pane and navigation features", () => {
       makeFlatAgent(agent2, { connector: "└── " }),
     ];
     const questions: PendingQuestion[] = [
-      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
-      { id: "q-2", agent: "agent-b", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending" },
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending", repoPath: "/repos/test" },
+      { id: "q-2", agent: "agent-b", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending", repoPath: "/repos/test" },
     ];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
@@ -3024,7 +3028,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const questions: PendingQuestion[] = [
-      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending", repoPath: "/repos/test" },
     ];
     dashboard.onUpdate([agent], flatList, questions);
 
@@ -3051,6 +3055,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "test?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: "/repos/test",
     }];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
@@ -3121,6 +3126,31 @@ describe("DashboardComponent right pane and navigation features", () => {
     } finally {
       await rm(base, { recursive: true, force: true });
     }
+  });
+
+  test("a question marks (red) and filters to its own repo's agent, not another repo's agent with the same id", () => {
+    dashboard = makeDashboard();
+    dashboard.setMachineName("studio");
+    const alpha = _makeAgent({ id: "dup", repoPath: "/repos/alpha", repoName: "alpha" });
+    const beta = _makeAgent({ id: "dup", repoPath: "/repos/beta", repoName: "beta" });
+    const question: PendingQuestion = { id: "q-1", agent: "dup", question: "?", timestamp: "t", status: "pending", repoPath: "/repos/beta" };
+    dashboard.onUpdate([alpha, beta], [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true, true, true),
+      makeFlatAgent(alpha),
+      makeFlatRepoHeader("beta", "/repos/beta", true, true, true),
+      makeFlatAgent(beta),
+    ], [question]);
+    expect([...dashboard.agentTree.questionAgentKeys]).toEqual(["studio/beta/dup"]);
+    dashboard.agentTree.maxHeight = 20;
+    const redRows = dashboard.agentTree.render(60).filter((l) => l.includes(`${RED}dup`));
+    expect(redRows).toHaveLength(1);
+    // The QUESTIONS list of alpha's agent is empty; beta's has the question.
+    dashboard.agentTree.selectAgent(alpha);
+    dashboard.syncSelectedAgent();
+    expect(dashboard.rightPane.filteredQuestions).toEqual([]);
+    dashboard.agentTree.selectAgent(beta);
+    dashboard.syncSelectedAgent();
+    expect(dashboard.rightPane.filteredQuestions).toEqual([question]);
   });
 
   test("selecting another agent drops every log mode's content and cached window", () => {
@@ -8738,7 +8768,7 @@ describe("tabs on screen under an overlay", () => {
     { mode: "DIFF", fill: (rp, lines) => { rp.diffContent = lines; } },
     { mode: "STATUS", fill: (rp, lines) => { rp.statusContent = lines; } },
     { mode: "QUESTIONS", fill: (rp, lines) => {
-      rp.questions = lines.map((question, i) => ({ id: `q${i}`, agent: "agent-a", question, timestamp: "", status: "pending" }));
+      rp.questions = lines.map((question, i) => ({ id: `q${i}`, agent: "agent-a", question, timestamp: "", status: "pending", repoPath: "/repos/test" }));
     } },
   ];
 

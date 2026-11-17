@@ -1514,6 +1514,11 @@ describe("readPendingQuestions", () => {
     expect(questions.length).toBe(1);
     expect(questions[0]!.id).toBe("q-1");
     expect(questions[0]!.status).toBe("pending");
+    // Tagged with the repo it was read from (not stored in the file), so the
+    // asking agent is named by repo and id.
+    expect(questions[0]!.repoPath).toBe(tempDir);
+    const stored = await Bun.file(join(tempDir, ".itsybitsy", "user-questions.json")).json();
+    expect(stored.questions[0].repoPath).toBeUndefined();
   });
 
   test("filters out questions from agents that no longer exist", async () => {

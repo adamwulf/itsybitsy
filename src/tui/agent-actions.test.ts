@@ -22,7 +22,7 @@ import {
   handleOpenDiffTool, handleOpenDiffToolVsManager, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
-  effectiveSpawnCapability, handleAnswerQuestion,
+  effectiveSpawnCapability, handleAnswerQuestion, handleAcknowledgeQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
   handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam, handleManageTeamMember,
   handleFolderBrowser, newRepoPrompt, newAgentFormTypeOrder,
@@ -2156,9 +2156,9 @@ describe("handleFuzzyAgent — §17.3 @-jump force-select in Agents panel", () =
 });
 
 describe("handleGoToQuestionAgent — sidebar tab", () => {
-  const question: PendingQuestion = { id: "q1", agent: "agent-q", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending" };
   // The question's agent has a row in the tree; the jump selects that row's agent.
   const asker = makeAgent({ id: "agent-q" });
+  const question: PendingQuestion = { id: "q1", agent: "agent-q", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending", repoPath: asker.repoPath };
 
   test("from the Teams tab: switches to Agents and makes Agents the active source", () => {
     const { ctx, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
@@ -3825,7 +3825,7 @@ describe("handleAnswerQuestion — deliver the answer before acknowledging", () 
   function openAnswerDialog(repoDir: string) {
     const agent = makeAgent({ id: "agent-1", repoPath: repoDir });
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    const question: PendingQuestion = { id: "q1", agent: "agent-1", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending" };
+    const question: PendingQuestion = { id: "q1", agent: "agent-1", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending", repoPath: repoDir };
     const mock = makeMockCtx({ agent, flatList, questions: [question] });
     let closeCalls = 0;
     mock.ctx.closeDialog = () => { closeCalls++; };
@@ -3867,6 +3867,51 @@ describe("handleAnswerQuestion — deliver the answer before acknowledging", () 
       expect(notices.some((n) => n.includes("Answered"))).toBe(true);
     } finally {
       await rm(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  test("with one agent id in two repos, g, A and Enter act on the asking repo's agent (SPEC §17.1)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "aa-twin-q-"));
+    try {
+      const twins: Agent[] = [];
+      const questions: PendingQuestion[] = [];
+      for (const repo of ["alpha", "beta"]) {
+        const repoPath = join(base, repo);
+        await mkdir(join(repoPath, ".itsybitsy"), { recursive: true });
+        const q = { id: `q-${repo}`, agent: "dup", question: `${repo}?`, timestamp: "2026-01-01T00:00:00Z", status: "pending" as const };
+        await Bun.write(join(repoPath, ".itsybitsy", "user-questions.json"), JSON.stringify({ questions: [q] }));
+        questions.push({ ...q, repoPath });
+        twins.push(makeAgent({ id: "dup", repoPath, repoName: repo }));
+      }
+      const [alpha, beta] = twins as [Agent, Agent];
+      const status = async (repo: string) =>
+        (await Bun.file(join(base, repo, ".itsybitsy", "user-questions.json")).json()).questions[0].status;
+      const { ctx, dialogs, flushActions } = makeMockCtx({ flatList: [makeFlatAgent(alpha), makeFlatAgent(beta)], questions });
+
+      // g on beta's question selects beta's agent, not the first "dup".
+      ctx.rightPane.questionsSelectedIndex = 1;
+      const selected: Agent[] = [];
+      ctx.agentTree.selectAgent = (agent) => { selected.push(agent); return true; };
+      handleGoToQuestionAgent(ctx);
+      expect(selected).toEqual([beta]);
+
+      // A acknowledges it in beta's repo only.
+      handleAcknowledgeQuestion(ctx);
+      await flushActions();
+      expect(await status("beta")).toBe("acknowledged");
+      expect(await status("alpha")).toBe("pending");
+
+      // Enter on alpha's question answers alpha's agent.
+      const sentTo: Agent[] = [];
+      setStagedSenderForTests(async (agent) => { sentTo.push(agent); return { ok: true, exitCode: 0, stdout: "", stderr: "" }; });
+      ctx.rightPane.questionsSelectedIndex = 0;
+      handleAnswerQuestion(ctx);
+      assertDialog(dialogs.at(-1)!, "textarea").onSubmit("yes");
+      await flushActions();
+      expect(sentTo).toEqual([alpha]);
+      expect(await status("alpha")).toBe("acknowledged");
+    } finally {
+      await rm(base, { recursive: true, force: true });
     }
   });
 

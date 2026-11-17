@@ -198,6 +198,12 @@ export interface PendingQuestion {
   question: string;
   timestamp: string;
   status: "pending" | "acknowledged";
+  /**
+   * The repo whose user-questions.json the question was read from. Set by the
+   * reader (readPendingQuestions / readAllQuestions), never stored in the file.
+   * With `agent` it names the asking agent: an agent id is unique only per repo.
+   */
+  repoPath: string;
 }
 
 /** Grace period for newly created agents before treating missing tmux as "stopped" (ms) */
@@ -2027,9 +2033,9 @@ async function readQuestionsInternal(repoPath: string, pendingOnly: boolean): Pr
       activeAgentIds = new Set();
     }
 
-    return data.questions.filter((q: PendingQuestion) =>
-      activeAgentIds.has(q.agent) && (!pendingOnly || q.status === "pending")
-    );
+    return data.questions
+      .filter((q: PendingQuestion) => activeAgentIds.has(q.agent) && (!pendingOnly || q.status === "pending"))
+      .map((q: PendingQuestion) => ({ ...q, repoPath }));
   } catch (err: unknown) {
     // Expected: file missing (ENOENT), malformed JSON, etc. — silently return empty
     if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code !== "ENOENT") {

@@ -71,7 +71,7 @@ describe("cyclePaneMode", () => {
   });
 
   test("p (delta +1) from AGENT LOG goes to INITIAL PROMPT, then DENIALS", () => {
-    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
+    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" }] });
     expect(PANE_MODES[ctx.modeIndex]).toBe("AGENT LOG");
     cyclePaneMode(ctx, 1);
     expect(PANE_MODES[ctx.modeIndex]).toBe("INITIAL PROMPT");
@@ -89,14 +89,14 @@ describe("cyclePaneMode", () => {
   });
 
   test("cycles backward through modes", () => {
-    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
+    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" }] });
     setCtxMode(ctx, "DENIALS");
     cyclePaneMode(ctx, -1);
     expect(PANE_MODES[ctx.modeIndex]).toBe("INITIAL PROMPT");
   });
 
   test("skips ERRORS when no errors", () => {
-    const ctx = makePaneCtx({ errors: [], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
+    const ctx = makePaneCtx({ errors: [], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" }] });
     // ERRORS follows TREE — cycle to it
     setCtxMode(ctx, "TREE");
     cyclePaneMode(ctx, 1);
@@ -114,14 +114,14 @@ describe("cyclePaneMode", () => {
   });
 
   test("wraps around forward (STATUS -> skips REPO -> PROXY LOG)", () => {
-    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
+    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" }] });
     setCtxMode(ctx, "STATUS");
     cyclePaneMode(ctx, 1);
     expect(PANE_MODES[ctx.modeIndex]).toBe("PROXY LOG");
   });
 
   test("wraps around backward (PROXY LOG -> skips REPO -> STATUS)", () => {
-    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const }] });
+    const ctx = makePaneCtx({ errors: ["err"], questions: [{ id: "q1", agent: "a", question: "?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" }] });
     setCtxMode(ctx, "PROXY LOG");
     cyclePaneMode(ctx, -1);
     expect(PANE_MODES[ctx.modeIndex]).toBe("STATUS");
@@ -405,8 +405,8 @@ describe("RightPaneComponent", () => {
   test("filteredQuestions returns all when no agent", () => {
     const rp = new RightPaneComponent();
     rp.questions = [
-      { id: "q1", agent: "a1", question: "Q1?", timestamp: "t", status: "pending" as const },
-      { id: "q2", agent: "a2", question: "Q2?", timestamp: "t", status: "pending" as const },
+      { id: "q1", agent: "a1", question: "Q1?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" },
+      { id: "q2", agent: "a2", question: "Q2?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" },
     ];
     rp.agent = null;
     expect(rp.filteredQuestions).toHaveLength(2);
@@ -415,14 +415,24 @@ describe("RightPaneComponent", () => {
   test("filteredQuestions filters by agent ID when agent is set", () => {
     const rp = new RightPaneComponent();
     rp.questions = [
-      { id: "q1", agent: "a1", question: "Q1?", timestamp: "t", status: "pending" as const },
-      { id: "q2", agent: "a2", question: "Q2?", timestamp: "t", status: "pending" as const },
-      { id: "q3", agent: "a1", question: "Q3?", timestamp: "t", status: "pending" as const },
+      { id: "q1", agent: "a1", question: "Q1?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" },
+      { id: "q2", agent: "a2", question: "Q2?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" },
+      { id: "q3", agent: "a1", question: "Q3?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" },
     ];
     rp.agent = makeAgent({ id: "a1" });
     const filtered = rp.filteredQuestions;
     expect(filtered).toHaveLength(2);
     expect(filtered.every((q) => q.agent === "a1")).toBe(true);
+  });
+
+  test("filteredQuestions leaves out a question from the same agent id in another repo", () => {
+    const rp = new RightPaneComponent();
+    rp.questions = [
+      { id: "q1", agent: "a1", question: "here?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/test" },
+      { id: "q2", agent: "a1", question: "there?", timestamp: "t", status: "pending" as const, repoPath: "/tmp/other" },
+    ];
+    rp.agent = makeAgent({ id: "a1" });
+    expect(rp.filteredQuestions.map((q) => q.id)).toEqual(["q1"]);
   });
 
   test("ERRORS mode shows errors and orphaned sessions", () => {

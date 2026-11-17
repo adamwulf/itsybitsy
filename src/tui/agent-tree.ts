@@ -438,7 +438,8 @@ export class AgentTreeComponent implements Component {
    * returns null and no row renders in reverse video.
    */
   private hasSelection = false;
-  questionAgentIds: Set<string> = new Set();
+  /** Fully qualified ids (agentKey) of the agents with a pending question: their names render red. */
+  questionAgentKeys: Set<string> = new Set();
   healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
   /**
@@ -786,18 +787,17 @@ export class AgentTreeComponent implements Component {
    * every selection mutation so the filter has a stable input across the rest
    * of the operation. No-op when repoFilter === "all" (filter ignores sticky
    * anyway), but we still null it out so a later toggle starts clean.
+   * `repoPathHint` is the selected row's repo when the caller knows the row
+   * itself (index navigation, selectByRepoPath), which tells apart rows that
+   * share a key.
    */
-  private updateStickyReveal(): void {
+  private updateStickyReveal(repoPathHint?: string): void {
     if (this.repoFilter === "all" || !this.hasSelection || this.selectedId === null) {
       this._stickyRevealedRepoPath = null;
       return;
     }
     // The selected local row's repo: a repo header's own, or an agent's.
-    const selectedKey = this.selectedId;
-    const selected = this._flatList.find((f) => this.rowKey(f) === selectedKey);
-    const repoPath = selected?.kind === "repo-header"
-      ? selected.repoPath
-      : selected?.kind === "agent" ? selected.agent.repoPath : null;
+    const repoPath = repoPathHint ?? this.selectedRowRepoPath(this.selectedId);
     if (repoPath === null) {
       this._stickyRevealedRepoPath = null;
       return;
@@ -816,6 +816,24 @@ export class AgentTreeComponent implements Component {
       ? !header.hasAgents
       : !header.hasNonStoppedAgents;
     this._stickyRevealedRepoPath = wouldBeHidden ? repoPath : null;
+  }
+
+  /** The repo of a local row (a repo header's own, an agent's), or null. */
+  private static rowRepoPath(f: FlatEntry): string | null {
+    return f.kind === "repo-header" ? f.repoPath : f.kind === "agent" ? f.agent.repoPath : null;
+  }
+
+  /**
+   * The repo of the local row keyed `key`, found by key. When rows share the
+   * key (duplicates registered before names were unique), the repo already
+   * revealed for the selection wins over the first match, so a refresh does not
+   * move the reveal to the other row.
+   */
+  private selectedRowRepoPath(key: string): string | null {
+    const matches = this._flatList.filter((f) => this.rowKey(f) === key);
+    const sticky = this._stickyRevealedRepoPath;
+    const row = (sticky !== null ? matches.find((f) => AgentTreeComponent.rowRepoPath(f) === sticky) : undefined) ?? matches[0];
+    return row ? AgentTreeComponent.rowRepoPath(row) : null;
   }
 
   /**
@@ -973,7 +991,8 @@ export class AgentTreeComponent implements Component {
     if (!header) return false;
     this.selectedId = this.rowKey(header);
     this.hasSelection = true;
-    this.updateStickyReveal();
+    // By path, not key: two headers can share a key (SPEC §17.1 Row keys).
+    this.updateStickyReveal(repoPath);
     const visible = this.visibleList;
     const idx = visible.findIndex((f) => f.kind === "repo-header" && f.repoPath === repoPath);
     if (idx === -1) return false;
@@ -1207,16 +1226,30 @@ export class AgentTreeComponent implements Component {
     }
     // A parent-header has no key: unreachable after the skip above, but keep
     // selectedId sane rather than inventing one.
-    const key = this.rowKey(visible[this.selectedIndex]!);
+    const row = visible[this.selectedIndex]!;
+    const key = this.rowKey(row);
     if (key === null) return;
     this.selectedId = key;
-    this.updateStickyReveal();
+    this.updateStickyReveal(AgentTreeComponent.rowRepoPath(row) ?? undefined);
     // Re-resolve selectedIndex inline (NOT via resolveSelection, which would
     // call back into updateSelectedId on a miss). The sticky update above may
     // have changed visibleList's shape; selectedIndex must follow.
-    const updatedVisible = this.visibleList;
-    const idx = updatedVisible.findIndex((f) => this.rowKey(f) === key);
+    const idx = this.indexOfKey(this.visibleList, key, this.selectedIndex);
     if (idx !== -1) this.selectedIndex = idx;
+  }
+
+  /**
+   * The index in `rows` of the row keyed `key`: `preferred` when the row there
+   * has that key, else the first row that has it, else -1. Rows share a key
+   * only for duplicates registered before names were unique (two repos with
+   * one name, two peers with one name; SPEC §17.1 Row keys): preferring the
+   * current index keeps the selection on the row the user chose, so j/k pass
+   * the second row instead of jumping back to the first.
+   */
+  private indexOfKey(rows: FlatEntry[], key: string, preferred: number): number {
+    const at = rows[preferred];
+    if (at !== undefined && this.rowKey(at) === key) return preferred;
+    return rows.findIndex((f) => this.rowKey(f) === key);
   }
 
   /**
@@ -1269,7 +1302,7 @@ export class AgentTreeComponent implements Component {
       return;
     }
     const selectedId = this.selectedId;
-    const idx = visible.findIndex((f) => this.rowKey(f) === selectedId);
+    const idx = this.indexOfKey(visible, selectedId, this.selectedIndex);
     if (idx !== -1) {
       this.selectedIndex = idx;
     } else {
@@ -1433,7 +1466,7 @@ export class AgentTreeComponent implements Component {
           lines.push(truncated);
         }
       } else {
-        const hasQ = this.questionAgentIds.has(item.agent.id);
+        const hasQ = this.questionAgentKeys.has(this.agentKey(item.agent));
         // Indent the whole agent row with its repo subtree when grouping is
         // active (prefix the box-drawing connector), so agents render UNDER
         // their repo-header instead of left of it.

@@ -1736,6 +1736,60 @@ describe("fully qualified row keys", () => {
   });
 });
 
+// Two repos registered under one name before names were unique: their
+// headers share a key (SPEC §17.1 Row keys). No migration; selection still
+// stays on the row the user chose.
+describe("rows that share a key (duplicate registry names from before)", () => {
+  function header(path: string, agents: Agent[]): FlatEntry {
+    return {
+      kind: "repo-header", repoName: "app", repoRegistryName: "app", repoPath: path,
+      hasAgents: agents.length > 0, hasRunningAgents: agents.length > 0, hasNonStoppedAgents: agents.length > 0,
+    };
+  }
+  function list(withSecondAgent = true): FlatEntry[] {
+    const a = makeAgent("a1", "running", { repoName: "app", repoPath: "/x/app" });
+    const b = makeAgent("b1", "running", { repoName: "app", repoPath: "/y/app" });
+    const second = withSecondAgent ? [b] : [];
+    return [header("/x/app", [a]), { kind: "agent", agent: a, depth: 0, connector: "└── " },
+      header("/y/app", second), ...second.map((agent) => ({ kind: "agent" as const, agent, depth: 0, connector: "└── " }))];
+  }
+  const where = (tree: AgentTreeComponent): string => {
+    const sel = tree.selection;
+    return sel?.kind === "repo-header" ? `header ${sel.repoPath}` : sel?.kind === "agent" ? `agent ${sel.agent.id}` : String(sel?.kind);
+  };
+
+  test("j passes the second header instead of jumping back to the first", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(list());
+    const seen: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      tree.moveSelection(1);
+      seen.push(where(tree));
+    }
+    expect(seen).toEqual(["header /x/app", "agent a1", "header /y/app", "agent b1", "header /x/app"]);
+    tree.moveSelection(-1);
+    expect(where(tree)).toBe("agent b1");
+    tree.moveSelection(-1);
+    expect(where(tree)).toBe("header /y/app");
+  });
+
+  test("a refresh keeps the second header selected, and selectByRepoPath selects by path", () => {
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(list());
+    expect(tree.selectByRepoPath("/y/app")).toBe(true);
+    expect(where(tree)).toBe("header /y/app");
+    tree.setFlatList(list());
+    expect(where(tree)).toBe("header /y/app");
+    // Under the V filter an empty second repo is revealed for its own selection.
+    tree.setFlatList(list(false));
+    tree.setRepoFilter("non-empty");
+    expect(tree.selectByRepoPath("/y/app")).toBe(true);
+    expect(where(tree)).toBe("header /y/app");
+    tree.setFlatList(list(false));
+    expect(where(tree)).toBe("header /y/app");
+  });
+});
+
 describe("AgentTreeComponent agent keys", () => {
   test("agentKey is machine/registry name/id; the default machine name is the fallback", () => {
     const tree = new AgentTreeComponent();

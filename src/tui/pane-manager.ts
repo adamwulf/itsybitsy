@@ -244,10 +244,14 @@ export class RightPaneComponent implements Component {
   repoCoordinatorFocused = false;
   private content: string[] = [];
 
-  /** Return questions filtered by the currently selected agent. If no agent, return all. */
+  /**
+   * Return questions filtered by the currently selected agent (by repo and id:
+   * the same id in another repo is another agent). If no agent, return all.
+   */
   get filteredQuestions(): PendingQuestion[] {
-    if (!this.agent) return this.questions;
-    return this.questions.filter((q) => q.agent === this.agent!.id);
+    const agent = this.agent;
+    if (!agent) return this.questions;
+    return this.questions.filter((q) => q.agent === agent.id && q.repoPath === agent.repoPath);
   }
 
   /**

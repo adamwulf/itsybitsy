@@ -1888,14 +1888,24 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
   });
 }
 
+/**
+ * The agent that asked `q`: the tree's agent with the question's id in the
+ * question's repo (an id is unique only per repo, SPEC §17.1), or null.
+ */
+function questionAgent(ctx: ActionCtx, q: PendingQuestion): Agent | null {
+  const entry = ctx.agentTree.flatList.find(
+    (f) => f.kind === "agent" && f.agent.id === q.agent && f.agent.repoPath === q.repoPath,
+  );
+  return entry?.kind === "agent" ? entry.agent : null;
+}
+
 export function handleAnswerQuestion(ctx: ActionCtx) {
   const questions = ctx.rightPane.filteredQuestions;
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
-  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
-  const answerAgent = agentEntry.agent;
+  const answerAgent = questionAgent(ctx, q);
+  if (!answerAgent) { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   // The dialog is frozen while a send is in flight (no re-submit, no cancel) and
   // the draft is kept on failure. `answered` records that the answer was ACCEPTED
   // for delivery so it is never resent — the acknowledge is what may still be
@@ -1951,10 +1961,10 @@ export function handleAcknowledgeQuestion(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
-  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
+  const asker = questionAgent(ctx, q);
+  if (!asker) { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   ctx.executeAndRefresh(async () => {
-    const result = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
+    const result = await acknowledgeQuestion(asker.repoPath, q.id);
     if (result.ok) ctx.setNotice(`Acknowledged ${q.id}`, "info");
     else ctx.setNotice(`Acknowledge failed: ${result.stderr || result.stdout}`, "error");
   });
@@ -1965,10 +1975,8 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  // A question names its agent by bare id only, so it jumps to the first row
-  // with that id, as `A` (acknowledge) finds it.
-  const asker = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
-  if (asker?.kind === "agent" && ctx.agentTree.selectAgent(asker.agent)) {
+  const asker = questionAgent(ctx, q);
+  if (asker && ctx.agentTree.selectAgent(asker)) {
     // §17.1 Phase 2: jumping from the QUESTIONS pane to an agent is an
     // Agents-panel operation — make the Agents tree the active source and
     // ensure the sidebar shows it (parallel to the @-fuzzy jump). The

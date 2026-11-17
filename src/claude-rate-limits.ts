@@ -38,7 +38,11 @@ export interface ClaudeRateLimits {
 }
 
 export interface ClaudeRateLimitsRecord extends ClaudeRateLimits {
-  /** Epoch seconds when this record's windows last changed (diagnostic only). */
+  /**
+   * Epoch seconds when this record's windows last changed, which is when the
+   * session last saw a new reading (`recordClaudeRateLimits` skips unchanged
+   * writes). `combineWindows` uses it to find the newest report of a window.
+   */
   updatedAt: number;
 }
 
@@ -109,6 +113,9 @@ export async function recordClaudeRateLimits(
     ...windows,
   };
   // Most statusline runs repeat the session's last reading; skip the write.
+  // This keeps `updatedAt` at the time of the session's last new reading, so
+  // an idle session re-running its statusline does not look current to
+  // `combineWindows`.
   if (previous && sameWindow(previous.five_hour, merged.five_hour) && sameWindow(previous.seven_day, merged.seven_day)) {
     return;
   }
@@ -146,19 +153,33 @@ export async function deleteClaudeRateLimits(dir: string): Promise<void> {
 }
 
 /**
- * The account's current window from all agents' reports of it. Each session
- * reports the last values it saw, and an idle session keeps reporting old
- * ones, so the record's write time says nothing about which report is
- * current. The current window is the one that resets last; within it, usage
- * only grows, so the highest reported percentage is the latest.
+ * The account's current `key` window from all agents' reports of it, or
+ * undefined when no record has that window.
+ *
+ * The current window is the one that resets last; reports within
+ * SAME_WINDOW_SECONDS of it are the same window. Within it, the report of the
+ * record with the newest `updatedAt` wins. Usage can drop within a window (a
+ * manual limit reset keeps `resets_at`), so the highest report is not always
+ * the latest. An idle session that re-runs its statusline with old values
+ * keeps its old `updatedAt` (see `recordClaudeRateLimits`), so it does not
+ * outrank a newer report. Reports that share the newest `updatedAt` (it has
+ * 1-second resolution) can't be ordered, so their average is used.
  */
-export function combineWindows(windows: Array<RateLimitWindow | undefined>): RateLimitWindow | undefined {
-  const reports = windows.filter((w): w is RateLimitWindow => w !== undefined);
+export function combineWindows(
+  records: ClaudeRateLimitsRecord[],
+  key: keyof ClaudeRateLimits,
+): RateLimitWindow | undefined {
+  const reports = records.flatMap((record) => {
+    const window = record[key];
+    return window ? [{ window, updatedAt: record.updatedAt }] : [];
+  });
   if (reports.length === 0) return undefined;
-  const latestReset = Math.max(...reports.map((w) => w.resets_at));
-  const current = reports.filter((w) => latestReset - w.resets_at < SAME_WINDOW_SECONDS);
+  const latestReset = Math.max(...reports.map((r) => r.window.resets_at));
+  const current = reports.filter((r) => latestReset - r.window.resets_at < SAME_WINDOW_SECONDS);
+  const newestUpdate = Math.max(...current.map((r) => r.updatedAt));
+  const newest = current.filter((r) => r.updatedAt === newestUpdate);
   return {
-    used_percentage: Math.max(...current.map((w) => w.used_percentage)),
+    used_percentage: newest.reduce((sum, r) => sum + r.window.used_percentage, 0) / newest.length,
     resets_at: latestReset,
   };
 }
@@ -217,8 +238,8 @@ export async function readClaudeUsage(now: Date = new Date()): Promise<UsageResu
     entries.map((entry) => readRecord(join(agentsDir, entry, CLAUDE_RATE_LIMITS_FILE))),
   )).filter((record): record is ClaudeRateLimitsRecord => record !== null);
   if (records.length === 0) return { data: null, error: false };
-  const fiveHour = combineWindows(records.map((r) => r.five_hour));
-  const sevenDay = combineWindows(records.map((r) => r.seven_day));
+  const fiveHour = combineWindows(records, "five_hour");
+  const sevenDay = combineWindows(records, "seven_day");
   const combined: ClaudeRateLimitsRecord = {
     updatedAt: Math.max(...records.map((r) => r.updatedAt)),
     ...(fiveHour ? { five_hour: fiveHour } : {}),

@@ -149,15 +149,22 @@ export function repoNameFromFolder(folderName: string): string {
   return folderName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
 }
 
+/** The way forward from a taken name for `ib add` and the folder browser's [ Add ]: name the repo yourself. */
+export const ADD_NAME_HINT = "use ib add <path> <name>";
+/** The way forward from a taken name for [ New Repo ], which names the repo after the folder it creates. */
+export const NEW_REPO_NAME_HINT = "choose another folder name";
+
 /**
  * Why `repoName` at `resolvedPath` cannot be added to `registry`, or null if
  * it can. These are addRepo's rules, kept in one place so createRepo can check
- * them before it creates a folder on disk.
+ * them before it creates a folder on disk. `nameHint` ends a refusal of a taken
+ * name (another repo's or a team's): what the caller can do instead.
  */
 export async function checkNewRepoEntry(
   resolvedPath: string,
   repoName: string,
   registry: RegistryData,
+  nameHint: string = ADD_NAME_HINT,
 ): Promise<string | null> {
   const canonicalRepo = await realpath(resolvedPath).catch(() => resolve(resolvedPath));
   const canonicalHome = await realpath(userHome()).catch(() => resolve(userHome()));
@@ -179,7 +186,7 @@ export async function checkNewRepoEntry(
   // teams). Bidirectional with team-create's collision refusal (SPEC §16.1).
   // Case-SENSITIVE strict lookup, matching the resolver and getTeam's exact keys.
   if ((await getTeam(normalizeTeamName(repoName))) !== null) {
-    return `"${repoName}" is already a team name — choose a different repo name (e.g. ib add <path> <name>)`;
+    return `"${repoName}" is already a team name — choose a different repo name; ${nameHint}`;
   }
 
   // Check for duplicate
@@ -194,7 +201,7 @@ export async function checkNewRepoEntry(
   const lower = repoName.toLowerCase();
   const clash = registry.repos.find((r) => r.name.toLowerCase() === lower || r.nickname?.toLowerCase() === lower);
   if (clash) {
-    return `"${repoName}" is already the name of a registered repo (${clash.path}) — repo names must be unique; use ib add <path> <name>`;
+    return `"${repoName}" is already the name of a registered repo (${clash.path}) — repo names must be unique; ${nameHint}`;
   }
 
   return null;

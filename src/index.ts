@@ -1091,9 +1091,17 @@ export async function main() {
 
   switch (command) {
     case "add": {
+      // `ib add [path] [name]` takes no flags. A name like `--name` would pass
+      // isValidRepoName (a leading "-" is allowed) and register the flag itself
+      // as the name, and a third argument would be dropped, so both are refused.
+      const name = args[2];
+      if (args.length > 3 || name?.startsWith("-")) {
+        console.error(COMMAND_HELP.add);
+        process.exit(1);
+      }
       const target = args[1] ?? process.cwd();
       // An optional name: needed when the folder's name is already registered.
-      const result = await addRepo(target, args[2]);
+      const result = await addRepo(target, name);
       console.log(result.message);
       process.exit(result.ok ? 0 : 1);
       break;

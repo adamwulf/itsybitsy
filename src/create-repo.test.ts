@@ -122,6 +122,7 @@ describe("createRepo", () => {
     const result = await createRepo(parent, "backend");
     expect(result.ok).toBe(false);
     expect(result.message).toContain("already a team name");
+    expect(result.message).toEndWith("choose another folder name");
     expect(await readdir(parent)).toEqual([]);
   });
 
@@ -130,6 +131,10 @@ describe("createRepo", () => {
     const result = await createRepo(parent, "App");
     expect(result.ok).toBe(false);
     expect(result.message).toContain("already the name of a registered repo (/elsewhere/app)");
+    // It names the repo after the folder it creates: the way forward is another
+    // folder name, not `ib add <path> <name>`.
+    expect(result.message).toEndWith("choose another folder name");
+    expect(result.message).not.toContain("ib add");
     expect(await readdir(parent)).toEqual([]);
     expect((await loadRegistry()).repos).toEqual([{ path: "/elsewhere/app", name: "app" }]);
   });

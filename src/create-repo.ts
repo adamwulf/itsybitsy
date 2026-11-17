@@ -7,7 +7,7 @@
 import { join, resolve } from "path";
 import { mkdir, stat } from "fs/promises";
 import { SpawnContext } from "./types";
-import { addRepo, checkNewRepoEntry, loadRegistry, repoNameFromFolder } from "./registry";
+import { addRepo, checkNewRepoEntry, loadRegistry, NEW_REPO_NAME_HINT, repoNameFromFolder } from "./registry";
 
 /**
  * Runs the two git commands. Production uses the real `Bun.spawn`, so git
@@ -66,7 +66,9 @@ export async function createRepo(parentDir: string, folderName: string): Promise
   }
 
   const target = join(parent, name);
-  const entryError = await checkNewRepoEntry(target, repoName, await loadRegistry());
+  // The repo is named after the folder this creates, so the way past a taken
+  // name is another folder name (not `ib add <path> <name>`).
+  const entryError = await checkNewRepoEntry(target, repoName, await loadRegistry(), NEW_REPO_NAME_HINT);
   if (entryError) {
     return { ok: false, message: entryError };
   }

@@ -525,7 +525,7 @@ describe("registry team-name collision refusal", () => {
     await mkdir(repoDir, { recursive: true });
     const result = await addRepo(repoDir, "backend");
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("already a team name");
+    expect(result.message).toBe(`"backend" is already a team name — choose a different repo name; use ib add <path> <name>`);
   });
 
   test("addRepo allows a name with no team collision", async () => {
@@ -625,6 +625,23 @@ describe("ib add [path] [name] (CLI)", () => {
       expect(added.stdout).toContain(`Added: app-two (${second})`);
       const registry = await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).json();
       expect(registry.repos.map((r: { name: string }) => r.name)).toEqual(["app", "app-two"]);
+    } finally {
+      await cli.cleanup();
+    }
+  });
+
+  test("a flag-like name or a third argument is refused with the usage text, and nothing is registered", async () => {
+    const cli = await createCliFixture();
+    try {
+      const folder = join(cli.root, "folder");
+      await mkdir(folder, { recursive: true });
+      for (const args of [["add", folder, "--name", "app-two"], ["add", folder, "--name"], ["add", folder, "-x"], ["add", folder, "one", "two"]]) {
+        const run = await cli.run(args);
+        expect(run.exitCode).toBe(1);
+        expect(run.stderr).toContain("Usage: ib add [path] [name]");
+        expect(run.stdout).not.toContain("Added:");
+      }
+      expect(await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).exists()).toBe(false);
     } finally {
       await cli.cleanup();
     }

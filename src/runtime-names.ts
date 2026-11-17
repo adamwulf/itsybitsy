@@ -27,6 +27,10 @@ export const peerSecretKeyFile = (): string => join(peerDir(), "secret.key");
 export const peersFile = (): string => join(peerDir(), "peers.json");
 export const peerEndpointLockFile = (): string => join(peerDir(), "endpoint.lock");
 
+// This machine's name (src/machine-name.ts): the first segment of every local
+// row key in `ib watch` (SPEC §17.1). Set once, then always read from here.
+export const machineNameFile = (): string => join(userHome(), RUNTIME_DIR_NAME, "machine-name");
+
 export const tmuxSessionName = (repoId: string, id: string): string => `${TMUX_SESSION_PREFIX}${repoId}-${id}`;
 export const agentIdFromTmuxSession = (name: string): string | null => /^itsybitsy-[a-f0-9]{8}-(.+)$/.exec(name)?.[1] ?? null;
 export const isAgentTmuxSession = (name: string): boolean => name.startsWith(TMUX_SESSION_PREFIX);

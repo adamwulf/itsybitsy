@@ -1026,12 +1026,14 @@ function highestOf(pct: number | null, high: number | null): number | null {
  *
  * - A full window blocks the nudge: either window can stop an agent.
  * - A window that reset during the episode nudges right away, whatever the other
- *   window reads, as long as it isn't full. Usage only grows within a window, so
- *   a lower reading is taken as a reset (a window past its `resets_at` reads as
- *   0%, see src/claude-rate-limits.ts). This doesn't rely on seeing 100%, because
- *   the last reading before a stop can be lower. Tearing down the agent that held
- *   the highest report also lowers the combined reading, which costs one false
- *   nudge; the real reset still nudges later.
+ *   window reads, as long as it isn't full. Usage only grows within a window
+ *   until it resets, so a lower reading is taken as a reset: a window past its
+ *   `resets_at` reads as 0%, and a manual limit reset lowers the newest report
+ *   of the window (see `combineWindows` in src/claude-rate-limits.ts). This
+ *   doesn't rely on seeing 100%, because the last reading before a stop can be
+ *   lower. Tearing down the agent that held the newest report can also lower the
+ *   combined reading, which costs one false nudge; the real reset still nudges
+ *   later.
  * - Otherwise the reading doesn't explain the stop. If it looks clear (session
  *   below the recovery threshold, or weekly alone with no 5-hour window on any
  *   record), nudge on the RATE_LIMIT_NUDGE_BACKOFF_MS schedule.

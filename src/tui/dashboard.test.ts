@@ -3085,6 +3085,44 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(dashboard.currentMode).toBe("INITIAL PROMPT");
   });
 
+  test("moving between two agents with one id in two repos reloads the right pane and the info panel", async () => {
+    const base = await mkdtemp(join(tmpdir(), "ib-dash-twin-"));
+    try {
+      const twins: Agent[] = [];
+      for (const repo of ["alpha", "beta"]) {
+        const repoPath = join(base, repo);
+        const agentDir = join(repoPath, ".itsybitsy", "agents", "dup");
+        await mkdir(agentDir, { recursive: true });
+        await writeFile(join(agentDir, "agent.log"), `log of ${repo}/dup\n`);
+        twins.push(_makeAgent({ id: "dup", repoPath, repoName: repo, state: "running" }));
+      }
+      const [alpha, beta] = twins as [Agent, Agent];
+      dashboard = makeDashboard();
+      dashboard.setMachineName("studio");
+      dashboard.onUpdate([alpha, beta], [
+        makeFlatRepoHeader("alpha", alpha.repoPath, true, true, true),
+        makeFlatAgent(alpha),
+        makeFlatRepoHeader("beta", beta.repoPath, true, true, true),
+        makeFlatAgent(beta),
+      ], []);
+      const logText = () => (dashboard.rightPane.agentLogContent ?? []).map(stripAnsi).join("\n");
+
+      dashboard.handleInput("j"); // alpha's dup
+      expect(dashboard.currentAgentKey).toBe("studio/alpha/dup");
+      await waitFor(() => logText().includes("log of alpha/dup"), { timeoutMs: WAIT_TIMEOUT_MS, message: "alpha's log" });
+
+      dashboard.handleInput("j"); // beta's header
+      dashboard.handleInput("j"); // beta's dup: the same bare id, another agent
+      expect(dashboard.selectedAgent).toBe(beta);
+      expect(dashboard.currentAgentKey).toBe("studio/beta/dup");
+      expect(dashboard.infoPanel.agent).toBe(beta);
+      await waitFor(() => logText().includes("log of beta/dup"), { timeoutMs: WAIT_TIMEOUT_MS, message: "beta's log" });
+      expect(logText()).not.toContain("alpha");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
   test("selecting another agent drops every log mode's content and cached window", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
@@ -3096,7 +3134,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.onUpdate([agent1, agent2], flatList, []);
     dashboard.jumpToMode("WATCHDOG LOG");
     const staleWindow = {
-      agentId: "agent-a", fileSize: 1, atTop: true, loadedLineCount: 1,
+      agentKey: dashboard.agentTree.agentKey(agent1), fileSize: 1, atTop: true, loadedLineCount: 1,
       displayHeight: 10, scrollOffset: 0, bufferRows: 20,
     };
     const rp = dashboard.rightPane;

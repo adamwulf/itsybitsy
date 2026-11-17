@@ -32,11 +32,11 @@ function makePaneCtx(overrides?: {
   rp.orphanedTmuxSessions = overrides?.orphanedTmuxSessions ?? [];
   return {
     rightPane: rp,
-    agentTree: { selectedAgent: overrides?.agent ?? null },
+    agentTree: { selectedAgent: overrides?.agent ?? null, agentKey: (a: Agent) => localAgentKey("studio", a) },
     splitPane: { fullWidth: false },
     modeIndex: DEFAULT_MODE_INDEX,
     savedModeIndex: DEFAULT_MODE_INDEX,
-    currentAgentId: overrides?.agent?.id ?? null,
+    currentAgentKey: overrides?.agent ? localAgentKey("studio", overrides.agent) : null,
     tui: { requestRender: () => renderCalls.push(1) },
     setQuestionsFocused: () => {},
     renderCalls,
@@ -916,7 +916,7 @@ describe("loadAgentLog (windowed)", () => {
 
     expect(ctx.rightPane.agentLogContent).not.toBeNull();
     expect(ctx.rightPane.loadedLogWindow).not.toBeNull();
-    expect(ctx.rightPane.loadedLogWindow!.agentId).toBe(agent.id);
+    expect(ctx.rightPane.loadedLogWindow!.agentKey).toBe(ctx.agentTree.agentKey(agent));
     expect(ctx.rightPane.loadedLogWindow!.atTop).toBe(true);
   });
 
@@ -1010,25 +1010,50 @@ describe("loadAgentLog (windowed)", () => {
 
     await loadAgentLog(ctx, agentA);
     const firstLoaded = ctx.rightPane.loadedLogWindow!;
-    expect(firstLoaded.agentId).toBe(agentA.id);
+    expect(firstLoaded.agentKey).toBe(ctx.agentTree.agentKey(agentA));
 
     // Switch to agentB
-    ctx.currentAgentId = agentB.id;
+    ctx.currentAgentKey = ctx.agentTree.agentKey(agentB);
     await loadAgentLog(ctx, agentB);
     const secondLoaded = ctx.rightPane.loadedLogWindow!;
-    expect(secondLoaded.agentId).toBe(agentB.id);
+    expect(secondLoaded.agentKey).toBe(ctx.agentTree.agentKey(agentB));
     expect(secondLoaded).not.toBe(firstLoaded);
   });
 
-  test("stale agent (currentAgentId changed during await) does not write content", async () => {
+  test("stale agent (currentAgentKey changed during await) does not write content", async () => {
     const agent = await makeBigLog("agent-pm-stale", 50);
     const ctx = makePaneCtx({ agent });
     ctx.rightPane.displayHeight = 10;
-    ctx.currentAgentId = "different-agent";
+    ctx.currentAgentKey = "studio/test/different-agent";
 
     await loadAgentLog(ctx, agent);
     expect(ctx.rightPane.agentLogContent).toBeNull();
     expect(ctx.rightPane.loadedLogWindow).toBeNull();
+  });
+
+  test("a load for the same bare id in another repo is stale too", async () => {
+    const agent = await makeBigLog("agent-pm-twin", 50);
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    // The selection moved to the agent with this id in another repo.
+    ctx.currentAgentKey = localAgentKey("studio", { repoRegistryName: "other-repo", id: agent.id });
+    await loadAgentLog(ctx, agent);
+    expect(ctx.rightPane.agentLogContent).toBeNull();
+    expect(ctx.rightPane.loadedLogWindow).toBeNull();
+  });
+
+  test("a window cached for one agent never serves the same bare id in another repo", async () => {
+    const agent = await makeBigLog("agent-pm-twin2", 50);
+    const ctx = makePaneCtx({ agent });
+    ctx.rightPane.displayHeight = 10;
+    await loadAgentLog(ctx, agent);
+    const cached = ctx.rightPane.loadedLogWindow!;
+    expect(cached.agentKey).toBe(ctx.agentTree.agentKey(agent));
+    const twin = { ...agent, repoRegistryName: "other-repo" };
+    ctx.currentAgentKey = ctx.agentTree.agentKey(twin);
+    await loadAgentLog(ctx, twin);
+    expect(ctx.rightPane.loadedLogWindow).not.toBe(cached);
+    expect(ctx.rightPane.loadedLogWindow!.agentKey).toBe("studio/other-repo/agent-pm-twin2");
   });
 
   test("file growth (active agent appending) invalidates cache", async () => {
@@ -1124,7 +1149,7 @@ describe("loadTailLog (WATCHDOG LOG / PROXY LOG)", () => {
       ctx.rightPane.displayHeight = 10;
       await loadTailLog(ctx, agent, m.mode);
       const loaded = ctx.rightPane[m.window]!;
-      expect(loaded.agentId).toBe(agent.id);
+      expect(loaded.agentKey).toBe(ctx.agentTree.agentKey(agent));
       expect(loaded.atTop).toBe(false);
       expect(loaded.loadedLineCount).toBeLessThan(lines.length);
       const content = ctx.rightPane[m.content]!.map(stripAnsi);
@@ -1268,7 +1293,7 @@ describe("loadTailLog (WATCHDOG LOG / PROXY LOG)", () => {
       const ctx = makePaneCtx({ agent });
       const p = loadTailLog(ctx, agent, m.mode);
       expect(ctx.rightPane[m.loading]).toBe(true);
-      ctx.currentAgentId = "agent-other";
+      ctx.currentAgentKey = "studio/test/agent-other";
       await p;
       expect(ctx.rightPane[m.content]).toBeNull();
       expect(ctx.rightPane[m.window]).toBeNull();
@@ -1483,11 +1508,11 @@ describe("loadDenials (lazy)", () => {
 
     // Simulate dashboard agent-switch: a different agent is now selected,
     // and the new agent's load has set denialsLoading=true again.
-    ctx.currentAgentId = "agent-race-B";
+    ctx.currentAgentKey = "studio/test/agent-race-B";
     ctx.rightPane.denialsLoading = true; // B's load is in flight
 
     // Now A's stale promise resolves. Because startedForAgentId !==
-    // currentAgentId, A's finally must NOT touch denialsLoading.
+    // currentAgentKey, A's finally must NOT touch denialsLoading.
     await aPromise;
     expect(ctx.rightPane.denialsLoading).toBe(true);
     // A's stale read must also NOT have populated denials for the new agent.

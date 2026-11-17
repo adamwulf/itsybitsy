@@ -131,7 +131,8 @@ export function formatAgentRow(
  * Used by loadTailLog() to skip re-reads when the cached window already covers the requested view.
  */
 export interface LoadedLogWindow {
-  agentId: string;
+  /** The agent's fully qualified id (SPEC §17.1): the same id in another repo is another agent. */
+  agentKey: string;
   /**
    * Total file size at the time of the last read (cache invalidation key);
    * null when the cached content is the "No <file> found" placeholder.
@@ -187,7 +188,7 @@ export class RightPaneComponent implements Component {
   promptContent: string[] | null = null;
   denialsContent: DenialEntry[] | null = null;
   denialsLoading = false;
-  loadedDenialsLog: { agentId: string; fileSize: number } | null = null;
+  loadedDenialsLog: { agentKey: string; fileSize: number } | null = null;
   private denialsRowsCache: { content: string; width: number; rows: string[] } | null = null;
   errors: string[] = [];
   orphanedTmuxSessions: string[] = [];
@@ -762,11 +763,18 @@ export class RightPaneComponent implements Component {
 /** Context for pane management functions */
 export interface PaneCtx {
   rightPane: RightPaneComponent;
-  agentTree: { selectedAgent: Agent | null };
+  /** `agentKey` gives an agent's fully qualified id (SPEC §17.1), as `currentAgentKey` holds it. */
+  agentTree: { selectedAgent: Agent | null; agentKey(agent: Agent): string };
   splitPane: { fullWidth: boolean };
   modeIndex: number;
   savedModeIndex: number;
-  currentAgentId: string | null;
+  /**
+   * The selected agent's fully qualified id (`"__coordinator__"` for the system
+   * coordinator, null for none). An async load checks it before writing, so a
+   * load for another agent — also one with the same bare id in another repo —
+   * never lands in the pane.
+   */
+  currentAgentKey: string | null;
   tui: { requestRender(): void } | null;
   setQuestionsFocused(value: boolean): void;
 }
@@ -839,14 +847,14 @@ export function triggerAsyncLoadIfNeeded(ctx: PaneCtx, forceRefresh = false) {
  */
 function logCacheCovers(
   loaded: LoadedLogWindow | null,
-  agentId: string,
+  agentKey: string,
   displayHeight: number,
   scrollOffset: number,
   bufferRows: number,
   currentFileSize: number | null,
 ): boolean {
   if (!loaded) return false;
-  if (loaded.agentId !== agentId) return false;
+  if (loaded.agentKey !== agentKey) return false;
   // The file has changed on disk (appeared, grew, shrank, or vanished) —
   // re-read so active agents see new lines and orphaned-file errors surface
   // promptly.
@@ -882,9 +890,9 @@ export async function loadTailLog(ctx: PaneCtx, agent: Agent, mode: TailLogMode)
   if (ctx.rightPane[slot.loadingKey]) return;
   ctx.rightPane[slot.loadingKey] = true;
 
-  // Capture the agent id we started with so a stale finally can detect that
-  // a newer load owns the flag and decline to clear it.
-  const startedForAgentId = agent.id;
+  // Capture the agent's full id we started with so a stale finally can detect
+  // that a newer load owns the flag and decline to clear it.
+  const startedForAgentKey = ctx.agentTree.agentKey(agent);
 
   try {
     const displayHeight = Math.max(1, ctx.rightPane.displayHeight);
@@ -894,10 +902,10 @@ export async function loadTailLog(ctx: PaneCtx, agent: Agent, mode: TailLogMode)
     // Stat the file before deciding on cache coverage so growing logs from
     // active agents trigger a re-read instead of being served stale forever.
     const currentFileSize = await statAgentFileSize(agent, slot.fileName);
-    if (ctx.currentAgentId !== startedForAgentId) return;
+    if (ctx.currentAgentKey !== startedForAgentKey) return;
 
     // Cache hit: the loaded window already covers the visible area for this agent.
-    if (logCacheCovers(ctx.rightPane[slot.windowKey], agent.id, displayHeight, scrollOffset, bufferRows, currentFileSize)) {
+    if (logCacheCovers(ctx.rightPane[slot.windowKey], startedForAgentKey, displayHeight, scrollOffset, bufferRows, currentFileSize)) {
       return;
     }
 
@@ -906,13 +914,13 @@ export async function loadTailLog(ctx: PaneCtx, agent: Agent, mode: TailLogMode)
       scrollOffset,
       bufferRows,
     });
-    if (ctx.currentAgentId !== startedForAgentId) return;
+    if (ctx.currentAgentKey !== startedForAgentKey) return;
     ctx.rightPane[slot.contentKey] = colorizeLog(window.lines);
     // Cache real content and the missing/empty placeholders (keyed on the
     // stat result null / 0, so the file appearing or growing re-reads). Never
     // cache a read-error or "line too long" placeholder.
     ctx.rightPane[slot.windowKey] = window.isPlaceholder && !window.fileState ? null : {
-      agentId: agent.id,
+      agentKey: startedForAgentKey,
       fileSize: window.fileState === "missing" ? null : window.fileSize,
       atTop: window.atTop,
       loadedLineCount: window.lines.length,
@@ -926,7 +934,7 @@ export async function loadTailLog(ctx: PaneCtx, agent: Agent, mode: TailLogMode)
     // Only clear the loading flag if this load is still the active one for
     // the currently-selected agent — otherwise leave it alone so we don't
     // clobber a newer load's loading=true (mirrors loadDenials).
-    if (ctx.currentAgentId === startedForAgentId) {
+    if (ctx.currentAgentKey === startedForAgentKey) {
       ctx.rightPane[slot.loadingKey] = false;
     }
   }
@@ -939,31 +947,31 @@ export async function loadTailLog(ctx: PaneCtx, agent: Agent, mode: TailLogMode)
 export async function loadDenials(ctx: PaneCtx, agent: Agent, forceRefresh = false) {
   if (ctx.rightPane.denialsLoading) return;
   if (forceRefresh) ctx.rightPane.denialsContent = null;
-  // Capture the agent id we started with — when we resolve we must NOT touch
-  // shared state (denialsLoading) on behalf of a different agent's load,
+  // Capture the agent's full id we started with — when we resolve we must NOT
+  // touch shared state (denialsLoading) on behalf of a different agent's load,
   // otherwise we'd clobber the new agent's in-flight load flag.
-  const startedForAgentId = agent.id;
+  const startedForAgentKey = ctx.agentTree.agentKey(agent);
   ctx.rightPane.denialsLoading = true;
   let didRead = false;
   try {
     const fileSize = await statAgentLogSize(agent);
-    if (ctx.currentAgentId !== startedForAgentId) return;
+    if (ctx.currentAgentKey !== startedForAgentKey) return;
     const cached = ctx.rightPane.loadedDenialsLog;
     if (!forceRefresh && ctx.rightPane.denialsContent && fileSize !== null
-      && cached?.agentId === agent.id && cached.fileSize === fileSize) return;
+      && cached?.agentKey === startedForAgentKey && cached.fileSize === fileSize) return;
     didRead = true;
     ctx.rightPane.updateContent();
     ctx.tui?.requestRender();
     const lines = await readAgentLog(agent);
-    if (ctx.currentAgentId === startedForAgentId) {
+    if (ctx.currentAgentKey === startedForAgentKey) {
       ctx.rightPane.denialsContent = parseDenials(lines);
-      ctx.rightPane.loadedDenialsLog = fileSize === null ? null : { agentId: agent.id, fileSize };
+      ctx.rightPane.loadedDenialsLog = fileSize === null ? null : { agentKey: startedForAgentKey, fileSize };
     }
   } finally {
     // Only clear the loading flag if this load is still the active one for
     // the currently-selected agent — otherwise leave it alone so we don't
     // clobber a newer load's denialsLoading=true.
-    if (ctx.currentAgentId === startedForAgentId) {
+    if (ctx.currentAgentKey === startedForAgentKey) {
       ctx.rightPane.denialsLoading = false;
       if (didRead) {
         ctx.rightPane.updateContent();
@@ -974,8 +982,9 @@ export async function loadDenials(ctx: PaneCtx, agent: Agent, forceRefresh = fal
 }
 
 export async function loadAgentPrompt(ctx: PaneCtx, agent: Agent) {
+  const key = ctx.agentTree.agentKey(agent);
   const content = await readAgentPrompt(agent);
-  if (ctx.currentAgentId === agent.id) {
+  if (ctx.currentAgentKey === key) {
     ctx.rightPane.promptContent = content;
     ctx.rightPane.updateContent();
     ctx.tui?.requestRender();
@@ -988,9 +997,10 @@ export async function loadDiff(ctx: PaneCtx, agent: Agent, forceRefresh = false)
   ctx.rightPane.diffLoading = true;
   ctx.rightPane.updateContent();
   ctx.tui?.requestRender();
+  const key = ctx.agentTree.agentKey(agent);
   try {
     const result = await diffAgent(agent);
-    if (ctx.currentAgentId === agent.id) {
+    if (ctx.currentAgentKey === key) {
       const output = result.stdout || result.stderr || "(no output)";
       ctx.rightPane.diffContent = colorizeDiff(output.split("\n"));
       ctx.rightPane.diffLoading = false;
@@ -998,7 +1008,7 @@ export async function loadDiff(ctx: PaneCtx, agent: Agent, forceRefresh = false)
       ctx.tui?.requestRender();
     }
   } catch (err) {
-    if (ctx.currentAgentId === agent.id) {
+    if (ctx.currentAgentKey === key) {
       ctx.rightPane.diffContent = [`Error loading diff: ${err}`];
       ctx.rightPane.diffLoading = false;
       ctx.rightPane.updateContent();
@@ -1013,9 +1023,10 @@ export async function loadStatus(ctx: PaneCtx, agent: Agent, forceRefresh = fals
   ctx.rightPane.statusLoading = true;
   ctx.rightPane.updateContent();
   ctx.tui?.requestRender();
+  const key = ctx.agentTree.agentKey(agent);
   try {
     const result = await statusAgent(agent);
-    if (ctx.currentAgentId === agent.id) {
+    if (ctx.currentAgentKey === key) {
       const output = result.stdout || result.stderr || "(no output)";
       ctx.rightPane.statusContent = output.split("\n");
       ctx.rightPane.statusLoading = false;
@@ -1023,7 +1034,7 @@ export async function loadStatus(ctx: PaneCtx, agent: Agent, forceRefresh = fals
       ctx.tui?.requestRender();
     }
   } catch (err) {
-    if (ctx.currentAgentId === agent.id) {
+    if (ctx.currentAgentKey === key) {
       ctx.rightPane.statusContent = [`Error loading status: ${err}`];
       ctx.rightPane.statusLoading = false;
       ctx.rightPane.updateContent();

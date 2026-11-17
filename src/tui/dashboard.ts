@@ -812,7 +812,13 @@ export class DashboardComponent implements Component {
   private repoCoordinatorPoller: TmuxPoller;
   /** The tmux session currently being polled for repo coordinator */
   repoCoordinatorSession: string | null = null;
-  currentAgentId: string | null = null;
+  /**
+   * The effective selection's agent as its fully qualified id (SPEC §17.1),
+   * `"__coordinator__"` for the system coordinator, null otherwise. A change of
+   * it is a selection change (syncSelectedAgent), so moving between two agents
+   * with the same bare id in two repos resets and reloads the panes.
+   */
+  currentAgentKey: string | null = null;
   /** Repo path whose notes are currently loaded into the info-panel notes editor. */
   private notesEditorRepoPath: string | null = null;
   /** Snapshot of notes text taken when the user entered the notes sub-field — used to revert on Escape. */
@@ -992,7 +998,7 @@ export class DashboardComponent implements Component {
    */
   private hasAutoSelectedFirstAgent = false;
   private _questionsFocused = false;
-  /** Cache of which agents have an attached tmux client */
+  /** Cache of which agents have an attached tmux client, by fully qualified id (SPEC §17.1) */
   private _clientAttached: Map<string, boolean> = new Map();
   private clientCheckTimer: ReturnType<typeof setInterval> | null = null;
   /**
@@ -2267,7 +2273,7 @@ export class DashboardComponent implements Component {
     this.focusManager.coordinatorMode = isCoordinator;
 
     // When entering coordinator mode (transition, not every tick), reset view and focus
-    const wasCoordinator = this.currentAgentId === "__coordinator__";
+    const wasCoordinator = this.currentAgentKey === "__coordinator__";
     if (isCoordinator && !wasCoordinator) {
       this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
@@ -2426,13 +2432,15 @@ export class DashboardComponent implements Component {
       this.rightPane.repoCoordinatorAgent?.id ?? null
     );
 
-    // Determine the effective ID for change detection
-    const newId = isCoordinator ? "__coordinator__" : (selected?.id ?? null);
-    if (newId !== this.currentAgentId) {
-      this.currentAgentId = newId;
+    // Determine the effective key for change detection: the agent's fully
+    // qualified id, so the same bare id in another repo is a change too.
+    const newKey = isCoordinator ? "__coordinator__" : (selected ? this.agentTree.agentKey(selected) : null);
+    if (newKey !== this.currentAgentKey) {
+      this.currentAgentKey = newKey;
       this.setTerminalTitle(isCoordinator ? "ib: coordinator" : (selected ? `ib: ${selected.id}` : "ib"));
       this.tmuxPane.resetForAgent();
-      this.inputField.switchAgent(newId);
+      // Drafts are kept per agent, by full id.
+      this.inputField.switchAgent(newKey);
       this.coordinatorInputField.switchAgent(isCoordinator ? "__coordinator__" : null);
       this.rightPane.resetTailLogs();
       this.rightPane.promptContent = null;
@@ -2740,6 +2748,7 @@ export class DashboardComponent implements Component {
     } finally {
       this.gitStatusInFlight = false;
     }
+    // The same id in another repo has another worktree, so this is per agent.
     if (this.infoPanel.agent?.id !== agent.id ||
         agentWorktreePath(this.infoPanel.agent) !== agentWorktreePath(agent)) return;
     if (this.infoPanel.gitCleanliness === cleanliness && this.infoPanel.gitHead === head &&
@@ -2752,7 +2761,8 @@ export class DashboardComponent implements Component {
 
   /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */
   private checkClientAttached(agent: Agent) {
-    const agentId = agent.id;
+    // By fully qualified id: the same bare id in another repo is another agent.
+    const agentKey = this.agentTree.agentKey(agent);
     const session = agent.meta.tmux_session;
 
     const doCheck = async () => {
@@ -2760,16 +2770,16 @@ export class DashboardComponent implements Component {
 
       // Discard result if the agent changed while we were awaiting
       const current = this.agentTree.selectedAgent;
-      if (!current || current.id !== agentId) return;
+      if (!current || this.agentTree.agentKey(current) !== agentKey) return;
 
-      const wasAttached = this._clientAttached.get(agentId) ?? false;
-      this._clientAttached.set(agentId, attached);
+      const wasAttached = this._clientAttached.get(agentKey) ?? false;
+      this._clientAttached.set(agentKey, attached);
 
       if (attached && !this.clientCheckTimer) {
         // Start polling every 3s to detect disconnect
         this.clientCheckTimer = setInterval(() => {
           const sel = this.agentTree.selectedAgent;
-          if (!sel || sel.id !== agentId) {
+          if (!sel || this.agentTree.agentKey(sel) !== agentKey) {
             // Agent switched away, stop polling
             if (this.clientCheckTimer) {
               clearInterval(this.clientCheckTimer);

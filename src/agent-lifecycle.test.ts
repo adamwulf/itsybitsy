@@ -1,4 +1,4 @@
-import { test, expect, describe, afterEach } from "bun:test";
+import { test, expect, describe, afterEach, beforeEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -21,7 +21,10 @@ import {
   findRetiredAgentArchives,
   setSandboxProxyKillForTesting,
   resetSandboxProxyKillForTesting,
+  scanAndKillOrphans,
 } from "./agent-lifecycle";
+import { isPidAliveCtx, killPidCtx, sleepMsCtx } from "./agents";
+import { setWatchLogPath, resetWatchLogPath } from "./watch-log";
 import type { SpawnFn, SpawnResult } from "./types";
 
 /** Create a temp directory for test isolation */
@@ -905,6 +908,168 @@ describe("agent-lifecycle", () => {
         resetCoordinatorHome();
         await rm(home, { recursive: true, force: true });
       }
+    });
+  });
+
+  // ── scanAndKillOrphans ─────────────────────────────────────────────────
+  //
+  // On darwin the scan reads every candidate PID's cwd with ONE
+  // `lsof -a -d cwd -p <pid,pid,...> -Fpn` call. pgrep/lsof go through the
+  // spawnCtx stub and every signal through the terminateProcess seams, so no
+  // real process is listed or killed. process.platform is pinned to "darwin"
+  // so the lsof branch runs on any host.
+  describe("scanAndKillOrphans — one lsof call over all PIDs", () => {
+    const originalPlatform = process.platform;
+    let root = "";
+    let agentsDir = "";
+    let logPath = "";
+    let calls: string[][] = [];
+    let signals: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+    let alive = new Set<number>();
+
+    type Reply = { stdout: string; exitCode: number };
+    function stubSpawn(pgrep: Reply, lsof: Reply): void {
+      spawnCtx.set((cmd: string[]) => {
+        calls.push(cmd);
+        const reply = cmd[0] === "pgrep" ? pgrep : cmd[0] === "lsof" ? lsof : { stdout: "", exitCode: 1 };
+        return {
+          stdout: new Response(reply.stdout).body!,
+          stderr: new Response("").body!,
+          exited: Promise.resolve(reply.exitCode),
+        } as SpawnResult;
+      });
+    }
+
+    function lsofArgv(pids: number[]): string[] {
+      return ["lsof", "-a", "-d", "cwd", "-p", pids.join(","), "-Fpn"];
+    }
+
+    beforeEach(async () => {
+      Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+      root = await mkdtemp(join(tmpdir(), "lifecycle-orphans-"));
+      agentsDir = join(root, ".itsybitsy", "agents");
+      // agent-live still has its directory; agent-gone and agent-gone2 do not.
+      await mkdir(join(agentsDir, "agent-live", "repo"), { recursive: true });
+      logPath = join(root, "watch.log");
+      setWatchLogPath(logPath);
+      calls = [];
+      signals = [];
+      alive = new Set<number>();
+      sleepMsCtx.set(async () => {});
+      isPidAliveCtx.set((pid) => alive.has(pid));
+      killPidCtx.set((pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") alive.delete(pid);
+        return true;
+      });
+    });
+
+    afterEach(async () => {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+      isPidAliveCtx.reset();
+      killPidCtx.reset();
+      sleepMsCtx.reset();
+      resetWatchLogPath();
+      await rm(root, { recursive: true, force: true });
+    });
+
+    test("spawns lsof exactly once with every PID comma-joined and -Fpn", async () => {
+      const pids = [11, 22, 33, 44, 55, 66];
+      stubSpawn(
+        { stdout: pids.join("\n"), exitCode: 0 },
+        { stdout: pids.map((p) => `p${p}\nfcwd\nn/Users/someone/project`).join("\n"), exitCode: 0 },
+      );
+
+      expect(await scanAndKillOrphans(agentsDir)).toBe(0);
+      expect(calls).toEqual([["pgrep", "-f", "claude"], lsofArgv(pids)]);
+      expect(calls.filter((c) => c[0] === "lsof")).toHaveLength(1);
+      expect(signals).toEqual([]);
+    });
+
+    test("parses several PIDs from one -Fpn output and terminates each orphan", async () => {
+      alive = new Set([201, 202]);
+      const goneCwd = join(agentsDir, "agent-gone", "repo");
+      const gone2Cwd = join(agentsDir, "agent-gone2", "repo", "src");
+      stubSpawn(
+        { stdout: "201\n202", exitCode: 0 },
+        { stdout: `p201\nfcwd\nn${goneCwd}\np202\nfcwd\nn${gone2Cwd}`, exitCode: 0 },
+      );
+
+      expect(await scanAndKillOrphans(agentsDir)).toBe(2);
+      expect(signals).toEqual([
+        { pid: 201, signal: "SIGTERM" },
+        { pid: 202, signal: "SIGTERM" },
+      ]);
+      const log = await Bun.file(logPath).text();
+      expect(log).toContain(
+        "[terminate] outcome=term-exited label=lifecycle-orphan agent=agent-gone pid=201 tmux=<none> reason=agent-dir-deleted",
+      );
+      expect(log).toContain(
+        "[terminate] outcome=term-exited label=lifecycle-orphan agent=agent-gone2 pid=202 tmux=<none> reason=agent-dir-deleted",
+      );
+    });
+
+    test("skips a cwd outside any agents dir, a live agent dir, a pid with no n line, and an unlisted pid", async () => {
+      alive = new Set([101, 102, 103, 104, 105]);
+      const outsideCwd = join(root, "elsewhere");
+      const liveCwd = join(agentsDir, "agent-live", "repo");
+      const goneCwd = join(agentsDir, "agent-gone", "repo");
+      stubSpawn(
+        { stdout: "101\n102\n103\n104\n105", exitCode: 0 },
+        {
+          // 104 has a p line but no n line; 105 is not listed at all.
+          stdout: `p101\nfcwd\nn${outsideCwd}\np102\nfcwd\nn${liveCwd}\np103\nfcwd\nn${goneCwd}\np104\nfcwd`,
+          exitCode: 0,
+        },
+      );
+
+      expect(await scanAndKillOrphans(agentsDir)).toBe(1);
+      expect(signals).toEqual([{ pid: 103, signal: "SIGTERM" }]);
+      const log = await Bun.file(logPath).text();
+      expect(log.trim().split("\n")).toHaveLength(1);
+      expect(log).toContain("agent=agent-gone pid=103");
+    });
+
+    test("non-zero lsof exit with partial output still processes the listed PIDs", async () => {
+      // 301 exited between pgrep and lsof: lsof exits 1 but still prints 302.
+      alive = new Set([302]);
+      const goneCwd = join(agentsDir, "agent-gone", "repo");
+      stubSpawn(
+        { stdout: "301\n302", exitCode: 0 },
+        { stdout: `p302\nfcwd\nn${goneCwd}`, exitCode: 1 },
+      );
+
+      expect(await scanAndKillOrphans(agentsDir)).toBe(1);
+      expect(calls).toEqual([["pgrep", "-f", "claude"], lsofArgv([301, 302])]);
+      expect(signals).toEqual([{ pid: 302, signal: "SIGTERM" }]);
+    });
+
+    test("non-zero lsof exit with no output returns 0 and signals nothing", async () => {
+      alive = new Set([401]);
+      stubSpawn({ stdout: "401", exitCode: 0 }, { stdout: "", exitCode: 1 });
+
+      expect(await scanAndKillOrphans(agentsDir)).toBe(0);
+      expect(signals).toEqual([]);
+    });
+
+    test("an orphan that is already dead is not counted", async () => {
+      // alive stays empty: terminateProcess reports not-alive.
+      const goneCwd = join(agentsDir, "agent-gone", "repo");
+      stubSpawn(
+        { stdout: "501", exitCode: 0 },
+        { stdout: `p501\nfcwd\nn${goneCwd}`, exitCode: 0 },
+      );
+
+      expect(await scanAndKillOrphans(agentsDir)).toBe(0);
+      expect(signals).toEqual([]);
+      expect(await Bun.file(logPath).text()).toContain("[terminate] outcome=not-alive label=lifecycle-orphan agent=agent-gone pid=501");
+    });
+
+    test("no pgrep output returns 0 without spawning lsof", async () => {
+      stubSpawn({ stdout: "", exitCode: 1 }, { stdout: "", exitCode: 0 });
+
+      expect(await scanAndKillOrphans(agentsDir)).toBe(0);
+      expect(calls).toEqual([["pgrep", "-f", "claude"]]);
     });
   });
 });

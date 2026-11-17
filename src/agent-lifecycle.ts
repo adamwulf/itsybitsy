@@ -944,8 +944,29 @@ export async function teardownAgent(
 // ── scanAndKillOrphans ───────────────────────────────────────────────────────
 
 /**
+ * Parse `lsof -Fpn` output into a pid → cwd map. A `p<pid>` line starts a
+ * process set and an `n<path>` line names a file of the current process; every
+ * other field lsof always emits (e.g. `f<fd>`) is ignored. The first `n` line
+ * of a process wins. A process with no `n` line is absent from the map.
+ */
+function parseLsofCwds(stdout: string): Map<number, string> {
+  const cwds = new Map<number, string>();
+  let currentPid: number | null = null;
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("p")) {
+      const pid = parseInt(line.slice(1), 10);
+      currentPid = isNaN(pid) ? null : pid;
+    } else if (line.startsWith("n") && currentPid !== null && !cwds.has(currentPid)) {
+      cwds.set(currentPid, line.slice(1));
+    }
+  }
+  return cwds;
+}
+
+/**
  * Find orphaned Claude processes whose cwd is in a deleted agent directory.
- * On macOS, uses lsof to get process cwd.
+ * On macOS, one lsof call reads the cwd of every candidate PID; elsewhere,
+ * /proc/<pid>/cwd is read per PID.
  * Returns count of killed orphans.
  */
 export async function scanAndKillOrphans(agentsDir: string): Promise<number> {
@@ -955,20 +976,31 @@ export async function scanAndKillOrphans(agentsDir: string): Promise<number> {
   const pgrepResult = await spawnCtx.run(["pgrep", "-f", "claude"]);
   if (pgrepResult.exitCode !== 0 || !pgrepResult.stdout) return 0;
 
-  const pids = pgrepResult.stdout.split("\n").filter((p) => p.trim());
-
-  for (const pidStr of pids) {
+  const pids: number[] = [];
+  for (const pidStr of pgrepResult.stdout.split("\n")) {
     const pid = parseInt(pidStr.trim(), 10);
-    if (isNaN(pid)) continue;
+    if (!isNaN(pid)) pids.push(pid);
+  }
+  if (pids.length === 0) return 0;
 
-    // Get process cwd (macOS)
+  // macOS: read every cwd with ONE lsof call (a per-PID call cost ~80ms each,
+  // which held up the post-merge refresh in `ib watch` for seconds). lsof exits
+  // non-zero when some PIDs exited after pgrep but still prints the rest, so
+  // the output is parsed whatever the exit code.
+  let darwinCwds: Map<number, string> | null = null;
+  if (process.platform === "darwin") {
+    const lsofResult = await spawnCtx.run([
+      "lsof", "-a", "-d", "cwd", "-p", pids.join(","), "-Fpn",
+    ]);
+    darwinCwds = parseLsofCwds(lsofResult.stdout);
+    if (darwinCwds.size === 0) return 0;
+  }
+
+  for (const pid of pids) {
+    // Get process cwd
     let procCwd = "";
-    if (process.platform === "darwin") {
-      const lsofResult = await spawnCtx.run(["lsof", "-a", "-d", "cwd", "-p", String(pid), "-Fn"]);
-      if (lsofResult.exitCode === 0) {
-        const nLine = lsofResult.stdout.split("\n").find((l) => l.startsWith("n"));
-        if (nLine) procCwd = nLine.slice(1);
-      }
+    if (darwinCwds !== null) {
+      procCwd = darwinCwds.get(pid) ?? "";
     } else {
       try {
         const { readlink } = await import("fs/promises");

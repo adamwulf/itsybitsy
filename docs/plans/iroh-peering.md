@@ -120,7 +120,18 @@ turns on n0's public relays and discovery:
 - `ib watch` binds the endpoint at boot if `peers.json` lists at least one
   peer, or when you open the Peers dialog. An install that never pairs never
   touches the network.
-- Once bound, the endpoint stays up until `ib watch` exits.
+- Once bound, the endpoint stays up until `ib watch` exits, or until its
+  accept loop fails.
+- **Self-heal.** After a failure (a bind that fails, or the accept loop
+  failing), `ib watch` closes the endpoint, releases the lock, and rebinds on
+  its own through the same path (the lock, then the bind, then the poller).
+  It waits 5 s, then doubles the wait each time up to 60 s; a successful bind
+  resets the wait. It retries only while `peers.json` lists a peer or the
+  Peers dialog is open. It stops when another live `ib watch` holds the lock
+  (peering shows as disabled, and the lock is not polled) and on exit.
+  Opening the dialog while a retry is pending binds at once instead. Every
+  failure, retry and recovery goes to `watch.log`, and the dialog shows
+  "retrying in N s" with the last error.
 
 **One endpoint per machine.** Two endpoints with the same key would fight: the
 relay keeps one connection per id, the discovery records would overwrite each
@@ -139,9 +150,9 @@ the endpoint:
    time. A different start time can happen after a reboot. The owner deletes
    the lock when it exits.
 
-A second `ib watch` tries for the lock only at the two bind moments above. So
-once the owner exits, opening Peers or restarting moves peering to the second
-one. This works like Telegram, where the first poller wins.
+A second `ib watch` tries for the lock only at the two bind moments above
+(and a retry that finds the lock held stops there). So once the owner exits,
+opening Peers or restarting moves peering to the second one. This works like Telegram, where the first poller wins.
 
 ### Key generation and storage
 

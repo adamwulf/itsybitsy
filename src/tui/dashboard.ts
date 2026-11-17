@@ -4134,7 +4134,8 @@ export async function launchDashboard(): Promise<void> {
   // endpoint binds at boot when peers.json lists a peer (bootIfPaired, started
   // at the end of this function once the watcher's first scan is done), or
   // else the first time the Peers dialog (`I`) opens, and stays up until
-  // quitDashboard shuts it down. Logs go to watch.log. That first bind stalls
+  // quitDashboard shuts it down; after a failed bind or accept loop the
+  // service rebinds on its own with backoff (SPEC §20.3). Logs go to watch.log. That first bind stalls
   // the UI once, for about a third of a second: the dynamic import in
   // src/peers/iroh.ts evaluates the napi addon synchronously on the event loop.
   // The trusted link answers peers from the watcher's last fully detected

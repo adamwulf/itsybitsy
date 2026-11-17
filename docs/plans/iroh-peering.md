@@ -263,7 +263,10 @@ trust B. Pairing again fixes it. B already trusts A's id, so step 3 replies
   It must not use `watcher.lastAgents`, which is assigned before detection and
   says "unknown" while detection runs.
 - For each agent, the answer carries `{id, nickname, repoName, repoPath,
-  state, agentType, manager}`, capped at 1 MB in total. `manager` lets the
+  state, agentType, manager}`, plus the repo's registry name (added
+  2026-11-17), capped at 1 MB in total. Fully qualified row ids
+  (`machine/repo/agent`) use the registry name, so renaming a repo's nickname
+  never changes an agent's id. `manager` lets the
   receiving side nest agents the way it nests local ones.
 - The answer never includes prompts, logs, or tmux output.
 

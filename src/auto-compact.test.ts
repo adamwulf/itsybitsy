@@ -27,6 +27,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     id: "agent-abc123",
     repoPath: "/tmp/test-repo",
     repoName: "test-repo",
+    repoRegistryName: "test-repo",
     state: "running",
     age: "5m",
     archived: false,

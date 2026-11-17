@@ -57,7 +57,7 @@ describe("lifecycle broker", () => {
   }
 
   const agentRecord = (id: string): Agent =>
-    ({ id, repoPath: repo, repoName: "repo", meta: { id } as unknown as AgentMeta, state: "waiting", age: "", archived: false, children: [] }) as Agent;
+    ({ id, repoPath: repo, repoName: "repo", repoRegistryName: "repo", meta: { id } as unknown as AgentMeta, state: "waiting", age: "", archived: false, children: [] }) as Agent;
 
   async function queue(id: string, body: unknown): Promise<void> {
     await mkdir(spawnRequestDir(agentDir), { recursive: true });

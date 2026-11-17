@@ -21,7 +21,7 @@ import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer
 import { PeerService } from "./service";
 import { addPeer, readPeers, removePeer, shortPeerId } from "./store";
 
-const ALLOWED_KEYS = ["agentType", "id", "manager", "nickname", "repoName", "repoPath", "state"];
+const ALLOWED_KEYS = ["agentType", "id", "manager", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
 
 const homes: string[] = [];
 const services: PeerService[] = [];
@@ -51,7 +51,7 @@ function inHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
 
 /** A local agent with fields that must never cross the wire. */
 function localAgent(id: string, meta: Partial<Agent["meta"]> = {}): Agent {
-  const agent = makeAgent({ id, repoName: "app", repoPath: "/repos/app", state: "running" });
+  const agent = makeAgent({ id, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running" });
   Object.assign(agent.meta, { prompt: "SECRET PROMPT", summary: "SECRET SUMMARY", agentType: "worker", ...meta });
   return agent;
 }
@@ -136,8 +136,8 @@ test("each side binds at boot and its poller fetches the other's snapshot, with 
   const seenByA = link(a)!.agents!;
   expect(seenByA).toEqual(toRemoteAgents(bAgents));
   expect(seenByA).toEqual([
-    { id: "agent-b1", nickname: "builder", repoName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null },
-    { id: "agent-b2", nickname: null, repoName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-b1" },
+    { id: "agent-b1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null },
+    { id: "agent-b2", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-b1" },
   ]);
   for (const entry of seenByA) expect(Object.keys(entry).sort()).toEqual(ALLOWED_KEYS);
   // B sees A's agents without A's system coordinator.

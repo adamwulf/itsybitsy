@@ -3,13 +3,14 @@ import type { PeerSectionEntry } from "../agents";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import type { RemoteAgent } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
-import { MAX_REMOTE_DEPTH, flattenPeerSections, isPeerEntryKey, peerEntryKey, remoteDisplayName, samePeerLinks } from "./peer-sections";
+import { MAX_REMOTE_DEPTH, flattenPeerSections, peerEntryKey, remoteDisplayName, samePeerLinks } from "./peer-sections";
+import { localAgentKey } from "./row-keys";
 
 const PEER_A = "a1".repeat(32);
 const PEER_B = "b2".repeat(32);
 
 function remote(id: string, overrides: Partial<RemoteAgent> = {}): RemoteAgent {
-  return { id, nickname: null, repoName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, ...overrides };
+  return { id, nickname: null, repoName: overrides.repoName ?? "app", repoRegistryName: overrides.repoName ?? "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, ...overrides };
 }
 
 function link(id: string, agents: RemoteAgent[] | null, overrides: Partial<PeerLinkState> = {}): PeerLinkState {
@@ -128,38 +129,37 @@ describe("flattenPeerSections", () => {
 });
 
 describe("peerEntryKey", () => {
-  test("rows are keyed by their peer: the same agent id on two peers, or equal to a local id, is two keys and no local key", () => {
+  test("rows are keyed by fully qualified id with the peer's name as the machine: the same agent on two peers, or equal to a local one, is two keys", () => {
     const rows = flattenPeerSections([link(PEER_A, [remote("agent-1")]), link(PEER_B, [remote("agent-1")])]);
     const keys = rows.map(peerEntryKey);
     expect(keys).toEqual([
-      `peer:${PEER_A}`,
-      `remoterepo:${PEER_A}:/repos/app`,
-      `remote:${JSON.stringify([PEER_A, "/repos/app", "agent-1"])}`,
-      `peer:${PEER_B}`,
-      `remoterepo:${PEER_B}:/repos/app`,
-      `remote:${JSON.stringify([PEER_B, "/repos/app", "agent-1"])}`,
+      "peer-a1",
+      "peer-a1/app",
+      "peer-a1/app/agent-1",
+      "peer-b2",
+      "peer-b2/app",
+      "peer-b2/app/agent-1",
     ]);
     expect(new Set(keys).size).toBe(keys.length);
-    // A local agent is keyed by its bare id (agent-1), and a local repo header by `repopath:`.
-    expect(keys).not.toContain("agent-1");
-    expect(keys.some((k) => k.startsWith("repopath:"))).toBe(false);
-    expect(keys.every(isPeerEntryKey)).toBe(true);
-    for (const local of ["agent-1", "repopath:/repos/app", "__system-coordinator__"]) expect(isPeerEntryKey(local)).toBe(false);
+    // The same agent on this machine is keyed by this machine's name.
+    expect(keys).not.toContain(localAgentKey("studio", { repoRegistryName: "app", id: "agent-1" }));
   });
 
-  test("one agent id in two repos of one peer is two keys, even when the paths and ids hold colons", () => {
+  test("a remote repo is keyed by its registry name and shown by its display name", () => {
+    const rows = flattenPeerSections([link(PEER_A, [remote("agent-1", { repoName: "nick", repoRegistryName: "app" })])]);
+    expect(rows.map(peerEntryKey)).toEqual(["peer-a1", "peer-a1/app", "peer-a1/app/agent-1"]);
+    expect(rows[1]).toMatchObject({ kind: "remote-repo-header", repoName: "nick", repoRegistryName: "app" });
+  });
+
+  test("one agent id in two repos of one peer is two keys", () => {
     const rows = flattenPeerSections([
       link(PEER_A, [
         remote("agent-1", { repoName: "a", repoPath: "/repos/a" }),
         remote("agent-1", { repoName: "b", repoPath: "/repos/b" }),
-        // Split at a colon, these two would read the same.
-        remote("y:z", { repoName: "c", repoPath: "/x" }),
-        remote("z", { repoName: "d", repoPath: "/x:y" }),
       ]),
     ]);
     const agentKeys = rows.filter((r) => r.kind === "remote-agent").map(peerEntryKey);
-    expect(agentKeys).toHaveLength(4);
-    expect(new Set(agentKeys).size).toBe(4);
+    expect(agentKeys).toEqual(["peer-a1/a/agent-1", "peer-a1/b/agent-1"]);
   });
 });
 

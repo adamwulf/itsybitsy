@@ -525,6 +525,7 @@ describe("notifySpawner", () => {
       },
       repoPath: "/tmp/test-repo",
       repoName: "test-repo",
+      repoRegistryName: "test-repo",
       children: [],
       archived: false,
       state: "unknown",

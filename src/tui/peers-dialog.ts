@@ -16,7 +16,7 @@ import { describePairFailure } from "../peers/pairing";
 import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peers/pair-code";
 import type { PeerLinkState } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
-import { shortPeerId } from "../peers/store";
+import { peerNameProblem, shortPeerId } from "../peers/store";
 import { cancelPaste, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
 import { BOLD, DIM, GREEN, RED, RESET, YELLOW } from "./colors";
 import type { DialogCtx } from "./dialog-handler";
@@ -51,14 +51,16 @@ export type PeersDialogState = {
   inputKey: string | null;
   /** Shown in red under the active input. */
   error: string | null;
+  /** This machine's name (src/machine-name.ts): the name prompt refuses it. */
+  machineName: string;
   width?: number;
 };
 
 /** Most peers listed; the rest are counted. */
 const MAX_LISTED_PEERS = 10;
 
-export function newPeersDialog(service: PeersDialogService): PeersDialogState {
-  return { type: "peers", service, idValue: "", sessionValue: "", inputKey: null, error: null };
+export function newPeersDialog(service: PeersDialogService, machineName: string): PeersDialogState {
+  return { type: "peers", service, idValue: "", sessionValue: "", inputKey: null, error: null, machineName };
 }
 
 /** Start each session stage's input empty. Called on every service change and before every key. */
@@ -140,9 +142,18 @@ export function handlePeersDialogInput(ctx: DialogCtx, d: PeersDialogState, data
       }
       break;
     case "naming":
-      if (escape) d.service.submitName(null);
-      else if (enter) d.service.submitName(d.sessionValue);
-      else editLine(ctx, d, "sessionValue", data);
+      if (escape) {
+        d.service.submitName(null);
+      } else if (enter) {
+        // A blank name keeps the saved one, like Esc. Any other is refused
+        // inline when another peer or this machine has it (SPEC §20.2).
+        d.error = d.sessionValue.trim() === ""
+          ? null
+          : peerNameProblem(d.sessionValue, session.peerId, d.service.view().peers, d.machineName);
+        if (d.error === null) d.service.submitName(d.sessionValue);
+      } else if (editLine(ctx, d, "sessionValue", data)) {
+        d.error = null;
+      }
       break;
     case "done":
     case "failed":
@@ -301,6 +312,7 @@ export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number)
         prose(`Paired with ${peer}.`, GREEN);
         lines.push(`${BOLD}Name for ${peer}:${RESET}`);
         lines.push(inputLine(d.sessionValue, innerWidth));
+        error();
         hint = `Enter: save    Esc: keep ${JSON.stringify(stage.savedName)}`;
         break;
       case "done":

@@ -82,6 +82,7 @@ import { FocusManager } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
+import { loadMachineName } from "../machine-name";
 import {
   DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH,
   getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
@@ -1294,11 +1295,24 @@ export class DashboardComponent implements Component {
   }
 
   /**
-   * Mark an agent as a favorite (no toggle). The new-agent form calls this for
-   * an agent made while the Favorites tab shows (SPEC §17.1).
+   * This machine's name (src/machine-name.ts), the first segment of every
+   * local row key (SPEC §17.1). launchDashboard sets it before the first list
+   * arrives; every component that keys or shows a local agent gets it.
    */
-  addFavorite(agentId: string) {
-    this.agentTree.addFavorite(agentId);
+  setMachineName(name: string) {
+    this.agentTree.machineName = name;
+    this.teamsTree.machineName = name;
+    this.rightPane.machineName = name;
+    this.infoPanel.machineName = name;
+  }
+
+  /**
+   * Mark the agent with this fully qualified id as a favorite (no toggle). The
+   * new-agent form calls this for an agent made while the Favorites tab shows
+   * (SPEC §17.1).
+   */
+  addFavorite(key: string) {
+    this.agentTree.addFavorite(key);
     this.favoritesChanged();
   }
 
@@ -1908,7 +1922,7 @@ export class DashboardComponent implements Component {
       this.setNotice("Peering is not available here", "error");
       return;
     }
-    this.showDialog(newPeersDialog(service));
+    this.showDialog(newPeersDialog(service, this.agentTree.machineName));
     service.openDialog();
   }
 
@@ -2172,7 +2186,7 @@ export class DashboardComponent implements Component {
         return best;
       }, null);
       if (newest) {
-        this.agentTree.selectAgentById(newest.agent.id);
+        this.agentTree.selectAgent(newest.agent);
       }
     }
 
@@ -2559,7 +2573,7 @@ export class DashboardComponent implements Component {
       // Agents tree owns the active selection; mirror into the Teams tree.
       const sel = this.agentTree.selection;
       if (sel?.kind === "agent") {
-        if (!this.teamsTree.selectMemberByAgentId(sel.agent.id)) {
+        if (!this.teamsTree.selectMemberByKey(this.agentTree.agentKey(sel.agent))) {
           this.teamsTree.deselect();
         }
       } else {
@@ -2571,7 +2585,7 @@ export class DashboardComponent implements Component {
     // activeSelectionSource === "teams" — Teams tree owns selection.
     const sel = this.teamsTree.selection;
     if (sel?.kind === "agent") {
-      if (!this.agentTree.selectAgentById(sel.agent.id)) {
+      if (!this.agentTree.selectAgent(sel.agent)) {
         this.agentTree.deselect();
       }
     } else {
@@ -2585,12 +2599,12 @@ export class DashboardComponent implements Component {
    * member row selected in the Teams tree, while the Teams tab is showing.
    *
    * When the Teams tree owns the selection, that row IS the selection. When
-   * the Agents tree owns it, the row is only the mirror's highlight, and the
-   * mirror matches by bare id (`selectMemberByAgentId`) — with the same id in
-   * two repos it can highlight the other repo's agent. So a mirrored row
-   * counts only when it is the very agent the Agents tree has selected (same
-   * id AND repo). Otherwise this returns null and `x` acts on the Agents-tree
-   * selection, as it did before the picker existed.
+   * the Agents tree owns it, the row is only the mirror's highlight
+   * (`selectMemberByKey`, by fully qualified id), which can be stale: the
+   * Teams list is rebuilt asynchronously and a failed mirror leaves the old
+   * row. So a mirrored row counts only when it is the very agent the Agents
+   * tree has selected (same id AND repo). Otherwise this returns null and `x`
+   * acts on the Agents-tree selection, as it did before the picker existed.
    */
   private teamMemberRowForX(): { teamName: string; agent: Agent } | null {
     if (this.sidebarMode !== "teams") return null;
@@ -3412,7 +3426,7 @@ export class DashboardComponent implements Component {
         ? this.teamsTree.selection
         : this.agentTree.selection;
       if (sel?.kind === "agent") {
-        const nowFavorite = this.agentTree.toggleFavorite(sel.agent.id);
+        const nowFavorite = this.agentTree.toggleFavorite(this.agentTree.agentKey(sel.agent));
         const name = agentDisplayName(sel.agent);
         this.setNotice(nowFavorite ? `Favorited ${name}` : `Unfavorited ${name}`, "info");
         this.favoritesChanged();
@@ -4089,6 +4103,10 @@ export async function launchDashboard(): Promise<void> {
   const telegramWake = tgToken !== "" ? new WakeDetector({ log: logToWatchLog }) : null;
 
   const dashboard = new DashboardComponent();
+  // The first segment of every local row key (SPEC §17.1): read from
+  // ~/.itsybitsy/machine-name, or set once from the computer name. Before the
+  // layout, so favorites and the first selection use it.
+  dashboard.setMachineName(await loadMachineName());
   const savedLayout = await loadLayout();
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);

@@ -10,12 +10,17 @@ import {
 import { isRunningState, isVisibleUnderRunningFilter, buildAgentTree, flattenAgentTree, type Agent, type FlatEntry } from "../agents";
 import { RED, RESET, REVERSE, YELLOW } from "./colors";
 import { visibleWidth } from "@mariozechner/pi-tui";
+import { keyOf, selectById } from "./test-tree-keys";
+import { localAgentKey } from "./row-keys";
+import { flattenPeerSections, peerEntryKey } from "./peer-sections";
 
 function makeAgent(id: string, state: string = "running", overrides: Partial<Agent> = {}): Agent {
   return {
     id,
     repoPath: `/repos/${id}`,
     repoName: "myrepo",
+    // A repo with no nickname: the registry name is the display name.
+    repoRegistryName: overrides.repoName ?? "myrepo",
     meta: {
       id,
       session_id: `sess-${id}`,
@@ -52,7 +57,7 @@ function makeFlatWithHeaders(groups: Array<{ repoName: string; repoPath: string;
   for (const g of groups) {
     const hasRunningAgents = g.agents.some((a) => isRunningState(a.state));
     const hasNonStoppedAgents = g.agents.some((a) => isVisibleUnderRunningFilter(a.state));
-    result.push({ kind: "repo-header", repoName: g.repoName, repoPath: g.repoPath, hasAgents: g.agents.length > 0, hasRunningAgents, hasNonStoppedAgents });
+    result.push({ kind: "repo-header", repoName: g.repoName, repoRegistryName: g.repoName, repoPath: g.repoPath, hasAgents: g.agents.length > 0, hasRunningAgents, hasNonStoppedAgents });
     for (const agent of g.agents) {
       result.push({ kind: "agent", agent, depth: 1, connector: "" });
     }
@@ -132,22 +137,22 @@ describe("AgentTreeComponent", () => {
     expect(tree.selectedAgent?.id).toBe("agent-2");
   });
 
-  test("selectAgentById selects by id and sets a selection (§17.1)", () => {
+  test("selectAgentByKey selects by id and sets a selection (§17.1)", () => {
     const tree = new AgentTreeComponent();
     const agents = [makeAgent("agent-1"), makeAgent("agent-2"), makeAgent("agent-3")];
     tree.setFlatList(makeFlat(agents));
     expect(tree.selection).toBeNull(); // starts in no-selection
-    const found = tree.selectAgentById("agent-2");
+    const found = selectById(tree, "agent-2");
     expect(found).toBe(true);
     expect(tree.selectedAgent?.id).toBe("agent-2");
     expect(tree.selection).not.toBeNull();
   });
 
-  test("selectAgentById returns false for unknown id and leaves no-selection", () => {
+  test("selectAgentByKey returns false for unknown id and leaves no-selection", () => {
     const tree = new AgentTreeComponent();
     const agents = [makeAgent("agent-1")];
     tree.setFlatList(makeFlat(agents));
-    const found = tree.selectAgentById("nonexistent");
+    const found = selectById(tree, "nonexistent");
     expect(found).toBe(false);
     expect(tree.selection).toBeNull();
   });
@@ -219,7 +224,7 @@ describe("AgentTreeComponent", () => {
   test("scrolled to the last row, the window ends at the last row and fills the pane", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
-    tree.selectAgentById("agent-19");
+    selectById(tree, "agent-19");
     const lines = tree.render(80);
     expect(lines.length).toBe(MAX_TREE_HEIGHT);
     expect(lines[lines.length - 1]).toContain("agent-19");
@@ -228,7 +233,7 @@ describe("AgentTreeComponent", () => {
   test("a pane grown tall enough for the whole list renders it unscrolled", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
-    tree.selectAgentById("agent-19");
+    selectById(tree, "agent-19");
     expect(tree.render(80).join("\n")).toContain("▲");
     tree.maxHeight = 30;
     const lines = tree.render(80);
@@ -243,7 +248,7 @@ describe("AgentTreeComponent", () => {
     const tree = new AgentTreeComponent();
     const flat = makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`)));
     tree.setFlatList(flat);
-    tree.selectAgentById("agent-14");
+    selectById(tree, "agent-14");
     tree.maxHeight = 40;
     tree.setFlatList(flat); // a watcher update while in TREE mode
     tree.maxHeight = MAX_TREE_HEIGHT;
@@ -270,12 +275,12 @@ describe("AgentTreeComponent", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
       // Non-empty repo A with one agent
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       // Empty repo X (this is the one we'll sit on)
-      { kind: "repo-header", repoName: "xerox", repoPath: "/repos/xerox", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "xerox", repoRegistryName: "xerox", repoPath: "/repos/xerox", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
       // Non-empty repo Z with one agent
-      { kind: "repo-header", repoName: "zulu", repoPath: "/repos/zulu", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "zulu", repoRegistryName: "zulu", repoPath: "/repos/zulu", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("z1", "running", { repoName: "zulu", repoPath: "/repos/zulu" }), depth: 1, connector: "" },
     ];
     tree.setFlatList(flat);
@@ -321,9 +326,9 @@ describe("AgentTreeComponent", () => {
   test("setRepoFilter('all') while on an empty header preserves selection", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
-      { kind: "repo-header", repoName: "xerox", repoPath: "/repos/xerox", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "xerox", repoRegistryName: "xerox", repoPath: "/repos/xerox", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
     ];
     tree.setFlatList(flat);
     tree.setRepoFilter("non-empty");
@@ -340,11 +345,11 @@ describe("AgentTreeComponent", () => {
   // called on a freshly-spawned agent in a previously-empty repo before the
   // flatList catches up — sticky stays null and the header reappears via
   // hasAgents on the next setFlatList.)
-  test("selectAgentById on an agent in a non-empty repo leaves sticky null", () => {
+  test("selectAgentByKey on an agent in a non-empty repo leaves sticky null", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "beta", repoRegistryName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("b1", "running", { repoName: "beta", repoPath: "/repos/beta" }), depth: 1, connector: "" },
     ];
     tree.setFlatList(flat);
@@ -352,7 +357,7 @@ describe("AgentTreeComponent", () => {
     // Alpha is hidden (empty, not selected). Beta is visible.
     expect(tree.visibleList.length).toBe(2);
     // Select b1 — beta is already visible via hasAgents.
-    expect(tree.selectAgentById("b1")).toBe(true);
+    expect(selectById(tree, "b1")).toBe(true);
     expect(tree.selectedAgent?.id).toBe("b1");
     // Alpha is still hidden because nothing in alpha is selected.
     expect(tree.visibleList.some((f) => f.kind === "repo-header" && f.repoPath === "/repos/alpha")).toBe(false);
@@ -367,16 +372,16 @@ describe("AgentTreeComponent", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
       // Repo with a running agent
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       // Repo with only waiting agents (no running, but NON-stopped) — now shown.
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "beta", repoRegistryName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("b1", "waiting", { repoName: "beta", repoPath: "/repos/beta" }), depth: 1, connector: "" },
       // Repo whose only agent is stopped — hidden (all agents stopped).
-      { kind: "repo-header", repoName: "delta", repoPath: "/repos/delta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "delta", repoRegistryName: "delta", repoPath: "/repos/delta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
       { kind: "agent", agent: makeAgent("d1", "stopped", { repoName: "delta", repoPath: "/repos/delta" }), depth: 1, connector: "" },
       // Empty repo — hidden.
-      { kind: "repo-header", repoName: "gamma", repoPath: "/repos/gamma", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "gamma", repoRegistryName: "gamma", repoPath: "/repos/gamma", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
     ];
     tree.setFlatList(flat);
     tree.setRepoFilter("running-only");
@@ -393,7 +398,7 @@ describe("AgentTreeComponent", () => {
   test("running-only hides only stopped agents within visible repos", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       { kind: "agent", agent: makeAgent("a2", "waiting", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       { kind: "agent", agent: makeAgent("a3", "creating", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
@@ -415,12 +420,12 @@ describe("AgentTreeComponent", () => {
   test("running-only keeps the selected stopped agent visible (sticky)", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
       { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       { kind: "agent", agent: makeAgent("a2", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
     ];
     tree.setFlatList(flat);
-    expect(tree.selectAgentById("a1")).toBe(true);
+    expect(selectById(tree, "a1")).toBe(true);
     tree.setRepoFilter("running-only");
     // Alpha's header has no non-stopped agents but is sticky-revealed because
     // a1 is selected. a1 itself stays visible; a2 (also stopped, not selected)
@@ -450,7 +455,7 @@ describe("AgentTreeComponent", () => {
       children: [child],
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: mgr, depth: 0, connector: "└── " },
       { kind: "agent", agent: child, depth: 1, connector: "    └── " },
     ];
@@ -491,7 +496,7 @@ describe("AgentTreeComponent", () => {
       children: [childA, childB, childC],
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: mgr, depth: 0, connector: "└── " },
       { kind: "agent", agent: childA, depth: 1, connector: "    ├── " },
       { kind: "agent", agent: childB, depth: 1, connector: "    ├── " },
@@ -531,7 +536,7 @@ describe("AgentTreeComponent", () => {
     // Use deliberately-distinctive sentinel connectors so a recomputation
     // would replace them with the canonical box-drawing strings and fail.
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: mgr, depth: 0, connector: "SENTINEL-MGR" },
       { kind: "agent", agent: childA, depth: 1, connector: "SENTINEL-A" },
       { kind: "agent", agent: childB, depth: 1, connector: "SENTINEL-B" },
@@ -572,7 +577,7 @@ describe("AgentTreeComponent", () => {
       meta: { ...makeAgent("cycle-b").meta, manager: "cycle-a" },
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: selfCycle, depth: 0, connector: "├── " },
       { kind: "agent", agent: cycleA, depth: 0, connector: "├── " },
       { kind: "agent", agent: cycleB, depth: 0, connector: "└── " },
@@ -603,7 +608,7 @@ describe("AgentTreeComponent", () => {
       meta: { ...makeAgent("orphan").meta, manager: "ghost-id-does-not-exist" },
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: orphan, depth: 0, connector: "└── " },
     ];
     tree.setFlatList(flat);
@@ -631,9 +636,9 @@ describe("AgentTreeComponent", () => {
       meta: { ...makeAgent("alpha-child").meta, manager: "beta-mgr" },
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: alphaChild, depth: 0, connector: "└── " },
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "beta", repoRegistryName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: betaMgr, depth: 0, connector: "└── " },
     ];
     tree.setFlatList(flat);
@@ -688,9 +693,9 @@ describe("AgentTreeComponent", () => {
       repoPath: "/repos/beta",
     });
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: alphaChild, depth: 0, connector: "└── " },
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "beta", repoRegistryName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: betaChild, depth: 0, connector: "└── " },
     ];
     tree.setFlatList(flat);
@@ -718,10 +723,10 @@ describe("AgentTreeComponent", () => {
   test("a pinned empty repo header stays visible under 'non-empty'", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       // Empty repo — normally hidden under 'non-empty'.
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "beta", repoRegistryName: "beta", repoPath: "/repos/beta", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
     ];
     tree.setFlatList(flat);
     tree.setRepoFilter("non-empty");
@@ -736,7 +741,7 @@ describe("AgentTreeComponent", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
       // Repo with only stopped agents — the only state running-only hides.
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
       { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
       { kind: "agent", agent: makeAgent("a2", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "" },
     ];
@@ -764,7 +769,7 @@ describe("AgentTreeComponent", () => {
       "op_stuck", "unknown", "stopped",
     ];
     const flat: FlatEntry[] = [
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       ...states.map((s, i) => ({
         kind: "agent" as const,
         agent: makeAgent(`a-${s}`, s, { repoName: "alpha", repoPath: "/repos/alpha" }),
@@ -788,10 +793,10 @@ describe("AgentTreeComponent", () => {
     const tree = new AgentTreeComponent();
     const flat: FlatEntry[] = [
       // Repo whose only agents are stopped — must be HIDDEN.
-      { kind: "repo-header", repoName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
       { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/repos/alpha" }), depth: 1, connector: "└── " },
       // Repo with a single waiting agent (non-running, non-stopped) — must be SHOWN.
-      { kind: "repo-header", repoName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "beta", repoRegistryName: "beta", repoPath: "/repos/beta", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("b1", "waiting", { repoName: "beta", repoPath: "/repos/beta" }), depth: 1, connector: "└── " },
     ];
     tree.setFlatList(flat);
@@ -815,9 +820,9 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
   function makeFlatWithParent(): FlatEntry[] {
     return [
       { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
-      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
-      { kind: "repo-header", repoName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "bravo", repoRegistryName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("b1", "running", { repoName: "bravo", repoPath: "/Users/x/Developer/bravo" }), depth: 0, connector: "" },
     ];
   }
@@ -845,9 +850,9 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList([
       { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
-      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
       { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
-      { kind: "repo-header", repoName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "bravo", repoRegistryName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("b1", "running", { repoName: "bravo", repoPath: "/Users/x/Developer/bravo" }), depth: 0, connector: "" },
     ]);
     tree.setRepoFilter("running-only");
@@ -867,17 +872,17 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
     tree.setFlatList([
       // Group 1: 'Developer' — has a running repo, so it must survive.
       { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
-      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
       // Group 2: 'automerge' — a single repo with only stopped agents. Its lone
       // repo-header is hidden, so the parent-header must be hidden too.
       { kind: "parent-header", parentDir: "/Users/x/automerge", displayName: "automerge" },
-      { kind: "repo-header", repoName: "amr", repoPath: "/Users/x/automerge/amr", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "amr", repoRegistryName: "amr", repoPath: "/Users/x/automerge/amr", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
       { kind: "agent", agent: makeAgent("m1", "stopped", { repoName: "amr", repoPath: "/Users/x/automerge/amr" }), depth: 0, connector: "" },
       // Group 3: 'ruby' — a single EMPTY repo (no agents at all). Under
       // running-only its repo-header is hidden, so the parent-header must be too.
       { kind: "parent-header", parentDir: "/Users/x/ruby", displayName: "ruby" },
-      { kind: "repo-header", repoName: "rb", repoPath: "/Users/x/ruby/rb", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "rb", repoRegistryName: "rb", repoPath: "/Users/x/ruby/rb", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
     ]);
     tree.setRepoFilter("running-only");
     const parentNames = tree.visibleList
@@ -897,11 +902,11 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList([
       { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
-      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
       // 'empty' group: a single repo with no agents — hidden under non-empty.
       { kind: "parent-header", parentDir: "/Users/x/empty", displayName: "empty" },
-      { kind: "repo-header", repoName: "e1", repoPath: "/Users/x/empty/e1", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "e1", repoRegistryName: "e1", repoPath: "/Users/x/empty/e1", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false },
     ]);
     tree.setRepoFilter("non-empty");
     const parentNames = tree.visibleList
@@ -917,10 +922,10 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
     tree.setFlatList([
       { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
       // Stopped repo — hidden.
-      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
       { kind: "agent", agent: makeAgent("a1", "stopped", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
       // Running repo — kept, so the parent-header must be kept.
-      { kind: "repo-header", repoName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "bravo", repoRegistryName: "bravo", repoPath: "/Users/x/Developer/bravo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("b1", "running", { repoName: "bravo", repoPath: "/Users/x/Developer/bravo" }), depth: 0, connector: "" },
     ]);
     tree.setRepoFilter("running-only");
@@ -936,7 +941,7 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList([
       { kind: "parent-header", parentDir: "/Users/x/pinned", displayName: "pinned" },
-      { kind: "repo-header", repoName: "p1", repoPath: "/Users/x/pinned/p1", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
+      { kind: "repo-header", repoName: "p1", repoRegistryName: "p1", repoPath: "/Users/x/pinned/p1", hasAgents: true, hasRunningAgents: false, hasNonStoppedAgents: false },
       { kind: "agent", agent: makeAgent("p1a", "stopped", { repoName: "p1", repoPath: "/Users/x/pinned/p1" }), depth: 0, connector: "" },
     ]);
     tree.pinnedRepoPaths.add("/Users/x/pinned/p1");
@@ -999,10 +1004,10 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
   function makeFlatTwoGroups(): FlatEntry[] {
     return [
       { kind: "parent-header", parentDir: "/Users/x/Developer", displayName: "Developer" },
-      { kind: "repo-header", repoName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "alpha", repoRegistryName: "alpha", repoPath: "/Users/x/Developer/alpha", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("a1", "running", { repoName: "alpha", repoPath: "/Users/x/Developer/alpha" }), depth: 0, connector: "" },
       { kind: "parent-header", parentDir: "/Users/x/Projects", displayName: "Projects" },
-      { kind: "repo-header", repoName: "charlie", repoPath: "/Users/x/Projects/charlie", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "charlie", repoRegistryName: "charlie", repoPath: "/Users/x/Projects/charlie", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: makeAgent("c1", "running", { repoName: "charlie", repoPath: "/Users/x/Projects/charlie" }), depth: 0, connector: "" },
     ];
   }
@@ -1042,7 +1047,7 @@ describe("AgentTreeComponent parent-header (groupByParent)", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlatTwoGroups());
     // Select a1 (idx 2), the last row of the first group.
-    tree.selectAgentById("a1");
+    selectById(tree, "a1");
     expect(tree.selectedAgent?.id).toBe("a1");
     // Press j: idx 2 → 3 (Projects parent-header) skipped DOWN to idx 4 (charlie).
     tree.moveSelection(1);
@@ -1093,6 +1098,7 @@ describe("AgentTreeComponent favorites view", () => {
     return {
       kind: "repo-header",
       repoName: repo,
+      repoRegistryName: repo,
       repoPath: `/repos/${repo}`,
       hasAgents: agents.length > 0,
       hasRunningAgents: agents.some((a) => isRunningState(a.state)),
@@ -1140,7 +1146,7 @@ describe("AgentTreeComponent favorites view", () => {
   test("shows a favorite and all its same-repo descendants, recursively", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     tree.setFavoritesOnly(true);
     expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild"]);
     // Repo headers only for repos with a shown agent.
@@ -1155,8 +1161,8 @@ describe("AgentTreeComponent favorites view", () => {
   test("switching to a Favorites list that fits the pane shows it unscrolled", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
-    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
-    tree.selectAgentById("agent-14");
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(keyOf(tree, `agent-${i}`));
+    selectById(tree, "agent-14");
     expect(tree.render(80).join("\n")).toContain("▲");
     tree.setFavoritesOnly(true);
     const lines = tree.render(80);
@@ -1175,9 +1181,9 @@ describe("AgentTreeComponent favorites view", () => {
   test("switching to a Favorites list drawn at a smaller height keeps the selected row in view", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
-    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(keyOf(tree, `agent-${i}`));
     tree.maxHeight = 5;
-    tree.selectAgentById("agent-15"); // not a favorite: kept by the selected-row carve-out
+    selectById(tree, "agent-15"); // not a favorite: kept by the selected-row carve-out
     tree.setFavoritesOnly(true);
     tree.maxHeight = 4;
     const lines = tree.render(80);
@@ -1188,10 +1194,10 @@ describe("AgentTreeComponent favorites view", () => {
   test("a Favorites list that fits and then grows past the pane still shows from its top", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
-    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
-    tree.selectAgentById("agent-14");
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(keyOf(tree, `agent-${i}`));
+    selectById(tree, "agent-14");
     tree.setFavoritesOnly(true);
-    for (let i = 15; i < 18; i++) tree.toggleFavorite(`agent-${i}`);
+    for (let i = 15; i < 18; i++) tree.toggleFavorite(keyOf(tree, `agent-${i}`));
     const lines = tree.render(80);
     expect(lines[0]).toContain("agent-10");
     expect(lines.join("\n")).not.toContain("▲");
@@ -1203,11 +1209,11 @@ describe("AgentTreeComponent favorites view", () => {
   test("with no selection, a Favorites list that fits and then grows still shows from its top", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlat(Array.from({ length: 20 }, (_, i) => makeAgent(`agent-${i}`))));
-    for (let i = 10; i < 15; i++) tree.toggleFavorite(`agent-${i}`);
-    tree.selectAgentById("agent-14");
+    for (let i = 10; i < 15; i++) tree.toggleFavorite(keyOf(tree, `agent-${i}`));
+    selectById(tree, "agent-14");
     tree.deselect();
     tree.setFavoritesOnly(true);
-    for (let i = 15; i < 18; i++) tree.toggleFavorite(`agent-${i}`);
+    for (let i = 15; i < 18; i++) tree.toggleFavorite(keyOf(tree, `agent-${i}`));
     const lines = tree.render(80);
     expect(lines[0]).toContain("agent-10");
     expect(lines.join("\n")).not.toContain("▲");
@@ -1217,20 +1223,21 @@ describe("AgentTreeComponent favorites view", () => {
   test("an agent a favorite spawned in another repo (meta.spawned_by only) is not shown", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("mgr");
-    tree.toggleFavorite("beta-solo");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
+    tree.toggleFavorite(keyOf(tree, "beta-solo"));
     tree.setFavoritesOnly(true);
     expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "beta-solo"]);
     expect(agentIds(tree)).not.toContain("x-spawned");
     // Favoriting it directly does show it.
-    tree.toggleFavorite("x-spawned");
+    tree.toggleFavorite(keyOf(tree, "x-spawned"));
     expect(agentIds(tree)).toContain("x-spawned");
   });
 
   test("the ancestor walk stops at a manager in another repo", () => {
-    // Defensive: meta.manager is never cross-repo in practice, but if it were,
-    // buildAgentTree would nest the agent under its manager — the same-repo
-    // rule still keeps it out of the manager's favorites view.
+    // Defensive: meta.manager is never cross-repo in practice. If it were, the
+    // manager is looked up in the agent's own repo (buildAgentTree too, which
+    // leaves `foreign` an orphan root of beta), so it is not in the favorite
+    // manager's view.
     const mgr = agentIn("mgr", "alpha", null);
     const foreign = agentIn("foreign", "beta", "mgr");
     foreign.meta.created_epoch = mgr.meta.created_epoch + 1;
@@ -1238,7 +1245,7 @@ describe("AgentTreeComponent favorites view", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(flattenAgentTree(buildAgentTree([mgr, foreign]), repos));
     expect(tree.visibleList.some((f) => f.kind === "agent" && f.agent.id === "foreign")).toBe(true);
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     tree.setFavoritesOnly(true);
     expect(agentIds(tree)).toEqual(["mgr"]);
   });
@@ -1254,15 +1261,27 @@ describe("AgentTreeComponent favorites view", () => {
     const repos = [{ name: "alpha", path: "/repos/alpha" }];
     const tree = new AgentTreeComponent();
     tree.setFlatList(flattenAgentTree(buildAgentTree([child, grandchild, unrelated]), repos));
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(localAgentKey(tree.machineName, { repoRegistryName: "alpha", id: "mgr" }));
     tree.setFavoritesOnly(true);
     expect(agentIds(tree)).toEqual(["child", "grandchild"]);
+  });
+
+  test("a gone favorite manager counts only in its own repo: the same id in another repo does not", () => {
+    const child = agentIn("child", "alpha", "mgr");
+    const otherChild = agentIn("other-child", "beta", "mgr");
+    otherChild.meta.created_epoch = child.meta.created_epoch + 1;
+    const repos = ["alpha", "beta"].map((name) => ({ name, path: `/repos/${name}` }));
+    const tree = new AgentTreeComponent();
+    tree.setFlatList(flattenAgentTree(buildAgentTree([child, otherChild]), repos));
+    tree.toggleFavorite(localAgentKey(tree.machineName, { repoRegistryName: "alpha", id: "mgr" }));
+    tree.setFavoritesOnly(true);
+    expect(agentIds(tree)).toEqual(["child"]);
   });
 
   test("a favorite descendant does not bring in its ancestors or siblings", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("grandchild");
+    tree.toggleFavorite(keyOf(tree, "grandchild"));
     tree.setFavoritesOnly(true);
     expect(agentIds(tree)).toEqual(["grandchild"]);
     expect(repoPaths(tree)).toEqual(["/repos/alpha"]);
@@ -1271,7 +1290,7 @@ describe("AgentTreeComponent favorites view", () => {
   test("a pinned repo without favorites is hidden", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("other");
+    tree.toggleFavorite(keyOf(tree, "other"));
     tree.togglePinnedRepo("/repos/beta");
     tree.togglePinnedRepo("/repos/gamma");
     tree.setFavoritesOnly(true);
@@ -1286,7 +1305,7 @@ describe("AgentTreeComponent favorites view", () => {
   test("turning the view off restores the full list", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     tree.setFavoritesOnly(true);
     tree.setFavoritesOnly(false);
     expect(agentIds(tree)).toEqual(["mgr", "child", "grandchild", "other", "x-spawned", "beta-solo"]);
@@ -1297,9 +1316,9 @@ describe("AgentTreeComponent favorites view", () => {
   test("the selected non-favorite agent stays visible and selected until the selection moves away", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("mgr");
-    tree.toggleFavorite("beta-solo");
-    expect(tree.selectAgentById("other")).toBe(true);
+    tree.toggleFavorite(keyOf(tree, "mgr"));
+    tree.toggleFavorite(keyOf(tree, "beta-solo"));
+    expect(selectById(tree, "other")).toBe(true);
     tree.setFavoritesOnly(true);
     // Switching to the view never changes the selection.
     expect(tree.selectedAgent?.id).toBe("other");
@@ -1316,7 +1335,7 @@ describe("AgentTreeComponent favorites view", () => {
   test("a selected favoriteless repo header stays visible until the selection moves away", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     expect(tree.selectByRepoPath("/repos/gamma")).toBe(true);
     tree.setFavoritesOnly(true);
     expect(tree.selectedRepoPath).toBe("/repos/gamma");
@@ -1332,7 +1351,7 @@ describe("AgentTreeComponent favorites view", () => {
     tree.setFavoritesOnly(true);
     // No favorites: the coordinator is the only row.
     expect(tree.visibleList.map((f) => f.kind)).toEqual(["system-coordinator"]);
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     tree.selectFirstRow();
     expect(tree.isSystemCoordinatorSelected).toBe(true);
     tree.moveSelection(1);
@@ -1349,7 +1368,7 @@ describe("AgentTreeComponent favorites view", () => {
   test("selectSystemCoordinator force-selects the coordinator (the @-jump)", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     tree.setFavoritesOnly(true);
     // From a sticky-revealed favoriteless header: the jump lands on the
     // coordinator and the header drops out again.
@@ -1373,7 +1392,7 @@ describe("AgentTreeComponent favorites view", () => {
   test("connectors are rebuilt when a non-favorite manager is hidden", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("child");
+    tree.toggleFavorite(keyOf(tree, "child"));
     tree.setFavoritesOnly(true);
     expect(agentIds(tree)).toEqual(["child", "grandchild"]);
     // child's manager is hidden, so child is the sole visible root of alpha.
@@ -1384,8 +1403,8 @@ describe("AgentTreeComponent favorites view", () => {
   test("composes with running-only: favorites first, then the V filter", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture({ grandchild: "stopped", "x-spawned": "stopped" }));
-    tree.toggleFavorite("mgr");
-    tree.toggleFavorite("x-spawned");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
+    tree.toggleFavorite(keyOf(tree, "x-spawned"));
     tree.setFavoritesOnly(true);
     tree.setRepoFilter("running-only");
     expect(agentIds(tree)).toEqual(["mgr", "child"]);
@@ -1400,11 +1419,11 @@ describe("AgentTreeComponent favorites view", () => {
     tree.setFavoritesOnly(true);
     const kinds = () => tree.visibleList.map((f) => f.kind);
     expect(kinds()).toEqual(["system-coordinator"]);
-    expect(tree.toggleFavorite("beta-solo")).toBe(true);
-    expect(tree.favoriteAgentIds.has("beta-solo")).toBe(true);
+    expect(tree.toggleFavorite(keyOf(tree, "beta-solo"))).toBe(true);
+    expect(tree.favoriteAgentIds.has(keyOf(tree, "beta-solo"))).toBe(true);
     expect(agentIds(tree)).toEqual(["beta-solo"]);
-    expect(tree.toggleFavorite("beta-solo")).toBe(false);
-    expect(tree.favoriteAgentIds.has("beta-solo")).toBe(false);
+    expect(tree.toggleFavorite(keyOf(tree, "beta-solo"))).toBe(false);
+    expect(tree.favoriteAgentIds.has(keyOf(tree, "beta-solo"))).toBe(false);
     expect(kinds()).toEqual(["system-coordinator"]);
   });
 
@@ -1412,23 +1431,23 @@ describe("AgentTreeComponent favorites view", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
     tree.setFavoritesOnly(true);
-    tree.addFavorite("beta-solo");
-    expect(tree.favoriteAgentIds.has("beta-solo")).toBe(true);
+    tree.addFavorite(keyOf(tree, "beta-solo"));
+    expect(tree.favoriteAgentIds.has(keyOf(tree, "beta-solo"))).toBe(true);
     expect(agentIds(tree)).toEqual(["beta-solo"]);
     // A second call keeps it a favorite (unlike toggleFavorite).
-    tree.addFavorite("beta-solo");
-    expect(tree.favoriteAgentIds.has("beta-solo")).toBe(true);
+    tree.addFavorite(keyOf(tree, "beta-solo"));
+    expect(tree.favoriteAgentIds.has(keyOf(tree, "beta-solo"))).toBe(true);
     expect(agentIds(tree)).toEqual(["beta-solo"]);
   });
 
   test("unfavoriting the selected agent keeps it visible until the selection moves away", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("mgr");
-    tree.toggleFavorite("other");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
+    tree.toggleFavorite(keyOf(tree, "other"));
     tree.setFavoritesOnly(true);
-    expect(tree.selectAgentById("other")).toBe(true);
-    tree.toggleFavorite("other");
+    expect(selectById(tree, "other")).toBe(true);
+    tree.toggleFavorite(keyOf(tree, "other"));
     expect(tree.selectedAgent?.id).toBe("other");
     expect(agentIds(tree)).toContain("other");
     tree.moveSelection(-1);
@@ -1448,7 +1467,7 @@ describe("AgentTreeComponent favorites view", () => {
       header("bravo", [b1]),
       row(b1, "└── "),
     ]);
-    tree.toggleFavorite("a1");
+    tree.toggleFavorite(keyOf(tree, "a1"));
     tree.setFavoritesOnly(true);
     const parents = tree.visibleList
       .filter((f): f is Extract<FlatEntry, { kind: "parent-header" }> => f.kind === "parent-header")
@@ -1465,7 +1484,7 @@ describe("AgentTreeComponent favorites view", () => {
     tree.setFlatList([header("alpha", [a, b, self]), row(a, "├── "), row(b, "├── "), row(self, "└── ")]);
     tree.setFavoritesOnly(true);
     expect(agentIds(tree)).toEqual([]);
-    tree.toggleFavorite("cyc-a");
+    tree.toggleFavorite(keyOf(tree, "cyc-a"));
     expect(agentIds(tree)).toEqual(["cyc-a", "cyc-b"]);
   });
 
@@ -1492,12 +1511,12 @@ describe("AgentTreeComponent favorites view", () => {
     expect(lines[1]).toContain("No favorites — press . on an agent");
     // The sidebar sizes the tree from renderRowCount, which counts the hint row.
     expect(tree.renderRowCount).toBe(2);
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     expect(tree.render(60).join("\n")).not.toContain("No favorites");
     expect(tree.renderRowCount).toBe(tree.visibleList.length);
     // A tree forced to one row (the user shrank it with `{`) keeps the
     // coordinator row only.
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     tree.maxHeight = 1;
     expect(tree.render(60).map(plain)).toHaveLength(1);
   });
@@ -1505,7 +1524,7 @@ describe("AgentTreeComponent favorites view", () => {
   test("an empty view says the V filter hides the favorites when favorites exist", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture({ mgr: "stopped", child: "stopped", grandchild: "stopped" }));
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(keyOf(tree, "mgr"));
     tree.setFavoritesOnly(true);
     tree.setRepoFilter("running-only");
     expect(tree.visibleList.map((f) => f.kind)).toEqual(["system-coordinator"]);
@@ -1522,7 +1541,7 @@ describe("AgentTreeComponent favorites view", () => {
     unrelated.meta.created_epoch = child.meta.created_epoch + 1;
     const tree = new AgentTreeComponent();
     tree.setFlatList(flattenAgentTree(buildAgentTree([child, unrelated]), [{ name: "alpha", path: "/repos/alpha" }]));
-    tree.toggleFavorite("mgr");
+    tree.toggleFavorite(localAgentKey(tree.machineName, { repoRegistryName: "alpha", id: "mgr" }));
     tree.setFavoritesOnly(true);
     expect(agentIds(tree)).toEqual(["child"]);
     tree.setRepoFilter("running-only");
@@ -1535,7 +1554,7 @@ describe("AgentTreeComponent favorites view", () => {
   test("an empty view with only ids of gone agents shows the press-'.' hint", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFixture());
-    tree.toggleFavorite("agent-that-is-gone");
+    tree.toggleFavorite(localAgentKey(tree.machineName, { repoRegistryName: "alpha", id: "agent-that-is-gone" }));
     tree.setFavoritesOnly(true);
     tree.setRepoFilter("running-only");
     const text = tree.render(60).join("\n");
@@ -1584,7 +1603,7 @@ describe("agent-tree helpers", () => {
     const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlat([makeAgent("agent-fav"), makeAgent("agent-plain")]));
-    tree.favoriteAgentIds.add("agent-fav");
+    tree.favoriteAgentIds.add(keyOf(tree, "agent-fav"));
     for (const width of [50, 100]) {
       const lines = tree.render(width).map(plain);
       const favLine = lines.find((l) => l.includes("agent-fav"))!;
@@ -1598,7 +1617,7 @@ describe("agent-tree helpers", () => {
   test("a selected favorite row in the tree is reversed across its full width", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(makeFlat([makeAgent("agent-fav"), makeAgent("agent-plain")]));
-    tree.toggleFavorite("agent-fav");
+    tree.toggleFavorite(keyOf(tree, "agent-fav"));
     tree.moveSelection(1);
     const line = tree.render(50).find((l) => l.includes("agent-fav"))!;
     expect(line.startsWith(REVERSE)).toBe(true);
@@ -1609,5 +1628,149 @@ describe("agent-tree helpers", () => {
 
   test("MAX_TREE_HEIGHT is 7", () => {
     expect(MAX_TREE_HEIGHT).toBe(7);
+  });
+});
+
+// SPEC §17.1: every agent row is keyed by its fully qualified id
+// `<machine>/<repo>/<agent>`, so the same agent id in two repos, or on a peer,
+// is a row of its own.
+describe("fully qualified row keys", () => {
+  type AgentEntry = Extract<FlatEntry, { kind: "agent" }>;
+
+  function inRepo(id: string, repo: string, manager: string | null, order: number): Agent {
+    const agent = makeAgent(id, "running", { repoName: repo, repoPath: `/repos/${repo}` });
+    agent.meta = { ...agent.meta, manager, created_epoch: 1735689600 + order };
+    return agent;
+  }
+
+  /** Repos alpha and beta each have an agent `dup`; alpha's has a child `kid`. On machine "studio". */
+  function twoRepos(): { tree: AgentTreeComponent; alphaDup: Agent; betaDup: Agent } {
+    const alphaDup = inRepo("dup", "alpha", null, 0);
+    const kid = inRepo("kid", "alpha", "dup", 1);
+    const betaDup = inRepo("dup", "beta", null, 2);
+    const tree = new AgentTreeComponent();
+    tree.machineName = "studio";
+    const repos = ["alpha", "beta"].map((name) => ({ name, path: `/repos/${name}` }));
+    tree.setFlatList(flattenAgentTree(buildAgentTree([alphaDup, kid, betaDup]), repos));
+    return { tree, alphaDup, betaDup };
+  }
+
+  const rows = (tree: AgentTreeComponent) =>
+    tree.visibleList.map((f) => (f.kind === "agent" ? `${f.connector}${tree.agentKey(f.agent)}` : f.kind === "repo-header" ? `[${f.repoName}]` : f.kind));
+
+  test("the same id in two local repos is two rows; a child nests only under its own repo's manager", () => {
+    const { tree, alphaDup, betaDup } = twoRepos();
+    expect(rows(tree)).toEqual(["[alpha]", "└── studio/alpha/dup", "    └── studio/alpha/kid", "[beta]", "└── studio/beta/dup"]);
+    expect(betaDup.children).toEqual([]);
+    expect(alphaDup.children.map((a) => a.id)).toEqual(["kid"]);
+  });
+
+  test("each row can be selected on its own, and stays selected when the list is rebuilt", () => {
+    const { tree, alphaDup, betaDup } = twoRepos();
+    expect(tree.selectAgent(betaDup)).toBe(true);
+    expect(tree.selectedAgent).toBe(betaDup);
+    expect(tree.selectAgent(alphaDup)).toBe(true);
+    expect(tree.selectedAgent).toBe(alphaDup);
+    tree.selectAgentByKey("studio/beta/dup");
+    tree.setFlatList([...tree.flatList]);
+    expect(tree.selectedAgent).toBe(betaDup);
+    expect(tree.selectAgentByKey("studio/gamma/dup")).toBe(false);
+  });
+
+  test("j reaches both rows, and k comes back", () => {
+    const { tree } = twoRepos();
+    const down: string[] = [];
+    for (let i = 0; i < tree.visibleList.length; i++) {
+      tree.moveSelection(1);
+      const agent = tree.selectedAgent;
+      down.push(agent ? tree.agentKey(agent) : tree.selection?.kind ?? "none");
+    }
+    expect(down).toEqual(["repo-header", "studio/alpha/dup", "studio/alpha/kid", "repo-header", "studio/beta/dup"]);
+    tree.moveSelection(-1);
+    tree.moveSelection(-1);
+    expect(tree.agentKey(tree.selectedAgent!)).toBe("studio/alpha/kid");
+  });
+
+  test("favoriting one does not favorite the other: star, Favorites view and V-filter connectors", () => {
+    const { tree, alphaDup, betaDup } = twoRepos();
+    tree.toggleFavorite(tree.agentKey(betaDup));
+    expect([...tree.favoriteAgentIds]).toEqual(["studio/beta/dup"]);
+    expect(tree.isFavorite(betaDup)).toBe(true);
+    expect(tree.isFavorite(alphaDup)).toBe(false);
+    const lines = tree.render(80);
+    const starred = lines.filter((l) => l.includes("★"));
+    expect(starred).toHaveLength(1);
+    expect(lines.indexOf(starred[0]!)).toBe(lines.length - 1);
+
+    tree.setFavoritesOnly(true);
+    expect(rows(tree)).toEqual(["[beta]", "└── studio/beta/dup"]);
+    tree.setFavoritesOnly(false);
+    tree.setRepoFilter("running-only");
+    expect(rows(tree)).toEqual(["[alpha]", "└── studio/alpha/dup", "    └── studio/alpha/kid", "[beta]", "└── studio/beta/dup"]);
+  });
+
+  test("the same agent id locally, on a peer, and on two peers is a row of its own each", () => {
+    const { tree } = twoRepos();
+    const remote = { id: "dup", nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", state: "running", agentType: "worker", manager: null };
+    const link = (id: string, name: string) => ({ id, name, connected: true, lastOkAt: 1, lastError: null, agents: [remote] });
+    tree.setPeerSections(flattenPeerSections([link("a1".repeat(32), "Laptop"), link("b2".repeat(32), "Desk")]));
+    const keys: string[] = [];
+    for (let i = 0; i < tree.visibleList.length; i++) {
+      tree.moveSelection(1);
+      const sel = tree.selection;
+      if (sel?.kind === "agent") keys.push(tree.agentKey(sel.agent));
+      if (sel?.kind === "remote" && sel.entry.kind === "remote-agent") keys.push(peerEntryKey(sel.entry));
+    }
+    expect(keys).toEqual(["studio/alpha/dup", "studio/alpha/kid", "studio/beta/dup", "Laptop/alpha/dup", "Desk/alpha/dup"]);
+    // Selecting a remote row never selects the local agent with that id.
+    expect(tree.selectedAgent).toBeNull();
+  });
+
+  test("a vanished local row clamps within the local rows (local keys start with this machine's name)", () => {
+    const { tree, betaDup } = twoRepos();
+    const remote = { id: "x", nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null };
+    tree.setPeerSections(flattenPeerSections([{ id: "a1".repeat(32), name: "Laptop", connected: true, lastOkAt: 1, lastError: null, agents: [remote] }]));
+    tree.selectAgent(betaDup);
+    tree.setFlatList(tree.flatList.filter((f) => !(f.kind === "agent" && f.agent === betaDup)));
+    expect(tree.selection?.kind).toBe("repo-header");
+  });
+});
+
+describe("AgentTreeComponent agent keys", () => {
+  test("agentKey is machine/registry name/id; the default machine name is the fallback", () => {
+    const tree = new AgentTreeComponent();
+    const agent = makeAgent("a1", "running", { repoName: "web" });
+    expect(tree.agentKey(agent)).toBe("local/web/a1");
+    tree.machineName = "Studio";
+    expect(tree.agentKey(agent)).toBe("Studio/web/a1");
+    // A nicknamed repo is keyed by its registry name, never the nickname shown.
+    const nicknamed = makeAgent("a2", "running", { repoName: "Website", repoRegistryName: "web" });
+    expect(tree.agentKey(nicknamed)).toBe("Studio/web/a2");
+    expect(keyOf(new AgentTreeComponent(), "missing")).not.toBe(tree.agentKey(agent));
+  });
+
+  test("a nickname rename re-keys nothing: the favorite and the selected header survive it", () => {
+    const list = (display: string): FlatEntry[] => {
+      const agent = makeAgent("a1", "running", { repoName: display, repoRegistryName: "web", repoPath: "/repos/web" });
+      const other = makeAgent("b1", "running", { repoName: "zz", repoRegistryName: "zz", repoPath: "/repos/zz" });
+      return flattenAgentTree(buildAgentTree([agent, other]), [
+        { name: display, path: "/repos/web", registryName: "web" },
+        { name: "zz", path: "/repos/zz" },
+      ]);
+    };
+    const tree = new AgentTreeComponent();
+    tree.machineName = "Studio";
+    tree.setFlatList(list("web"));
+    tree.toggleFavorite(keyOf(tree, "a1"));
+    expect([...tree.favoriteAgentIds]).toEqual(["Studio/web/a1"]);
+    expect(tree.selectByRepoPath("/repos/web")).toBe(true);
+
+    // Renamed to a nickname that sorts after "zz": a new row order and display name, the same keys.
+    tree.setFlatList(list("zweb"));
+    expect(tree.selection).toEqual({ kind: "repo-header", repoName: "zweb", repoPath: "/repos/web" });
+    const renamed = tree.flatList.find((f) => f.kind === "agent" && f.agent.id === "a1");
+    expect(renamed?.kind === "agent" && tree.isFavorite(renamed.agent)).toBe(true);
+    tree.setFavoritesOnly(true);
+    expect(tree.visibleList.filter((f) => f.kind === "agent").map((f) => f.kind === "agent" && f.agent.repoName)).toEqual(["zweb"]);
   });
 });

@@ -291,6 +291,7 @@ export function buildSystemCoordinatorAgent(
     id: "ib-coordinator",
     repoPath,
     repoName: "system",
+    repoRegistryName: "system",
     meta: {
       id: "ib-coordinator",
       session_id: "",

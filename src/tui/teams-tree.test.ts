@@ -11,6 +11,7 @@ import { RESET, REVERSE, YELLOW } from "./colors";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import type { Agent } from "../agents";
 import type { Team } from "../teams";
+import { localAgentKey } from "./row-keys";
 
 function makeAgent(
   id: string,
@@ -22,6 +23,7 @@ function makeAgent(
     id,
     repoPath: `/repos/${repoName}/${id}`,
     repoName,
+    repoRegistryName: repoName,
     meta: {
       id,
       session_id: `sess-${id}`,
@@ -350,6 +352,26 @@ describe("teams-tree row formatters", () => {
   });
 });
 
+describe("teams-tree fully qualified keys (SPEC §17.1)", () => {
+  test("the mirror (selectMemberByKey) and the ★ match a member by its full id, never by its bare id", () => {
+    // The roster's "dup" is web/dup; api/dup (the same bare id) is on no team.
+    const webDup = makeAgent("dup", "web");
+    const apiDup = makeAgent("dup", "api");
+    const tree = new TeamsTreeComponent();
+    tree.machineName = "studio";
+    tree.setFlatList(flattenTeamsTree([makeTeam("backend", ["dup"])], byId([webDup])));
+    expect(tree.selectMemberByKey(localAgentKey("studio", apiDup))).toBe(false);
+    expect(tree.selectedMember).toBeNull();
+    expect(tree.selectMemberByKey("studio/web/dup")).toBe(true);
+    expect(tree.selectedMember?.agent).toBe(webDup);
+
+    tree.favoriteAgentIds = new Set([localAgentKey("studio", apiDup)]);
+    expect(tree.render(60).join("\n")).not.toContain("★");
+    tree.favoriteAgentIds = new Set(["studio/web/dup"]);
+    expect(tree.render(60).join("\n")).toContain("★");
+  });
+});
+
 describe("teams-tree favorite star", () => {
   const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
@@ -362,8 +384,8 @@ describe("teams-tree favorite star", () => {
   });
 
   test("member rows keep the state column aligned between favorite and non-favorite", () => {
-    const { tree } = fixture();
-    tree.favoriteAgentIds = new Set(["a1"]);
+    const { tree, agents } = fixture();
+    tree.favoriteAgentIds = new Set([localAgentKey(tree.machineName, agents[0]!)]);
     const lines = tree.render(60).map(plain);
     const favLine = lines.find((l) => l.includes("api/a1"))!;
     const plainLine = lines.find((l) => l.includes("web/a2"))!;

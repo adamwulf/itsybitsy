@@ -9,19 +9,20 @@
  *   nested by `manager` within a repo the way local agents nest.
  * - A peer that has never answered has no list: its section is the header only.
  *   A peer that is not connected keeps its last list, marked `stale` (dimmed).
- * - Rows are keyed by the peer's id plus their own: a remote agent by
- *   (peerId, repoPath, agentId) — an agent id is unique only within its repo —
- *   and a remote repo by (peerId, repoPath), never by a bare agent id, so a
- *   remote id that equals a local one, one on another peer, or one in another
- *   repo of the same peer stays a row of its own. Every key has a colon after
- *   its prefix, and local agent ids never contain one (validation.ts
- *   isValidAgentId), so a key here never equals a local key.
+ * - Rows are keyed like local ones (src/tui/row-keys.ts), with the peer's name
+ *   as the machine and the remote repo's registry name as the repo: a remote
+ *   agent by `<peer>/<repo>/<agent>`, a remote repo by `<peer>/<repo>`, a peer
+ *   header by `<peer>`. A remote id that equals a local
+ *   one, one on another peer, or one in another repo of the same peer is a row
+ *   of its own, since the pairing name prompt keeps peer names apart from each
+ *   other and from this machine's name.
  */
 
 import type { PeerSectionEntry } from "../agents";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import type { RemoteAgent } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
+import { fullyQualifiedAgentId, repoRowKey } from "./row-keys";
 
 /**
  * Deepest manager nesting drawn. A remote list is the other install's to
@@ -31,24 +32,18 @@ import type { PeerLinkState } from "../peers/poller";
 export const MAX_REMOTE_DEPTH = 8;
 
 /**
- * The selection key of a peer-section row. A peer id is 64 hex characters, so
- * a repo key's path is everything after it; a remote agent's repo path and id
- * may both hold a colon, so they are JSON-encoded together.
+ * The selection key of a peer-section row: its fully qualified id, with the
+ * peer's name as the machine (src/tui/row-keys.ts).
  */
 export function peerEntryKey(entry: PeerSectionEntry): string {
   switch (entry.kind) {
     case "peer-header":
-      return `peer:${entry.peerId}`;
+      return entry.peerName;
     case "remote-repo-header":
-      return `remoterepo:${entry.peerId}:${entry.repoPath}`;
+      return repoRowKey(entry.peerName, entry.repoRegistryName);
     case "remote-agent":
-      return `remote:${JSON.stringify([entry.peerId, entry.remote.repoPath, entry.remote.id])}`;
+      return fullyQualifiedAgentId(entry.peerName, entry.remote.repoRegistryName, entry.remote.id);
   }
-}
-
-/** Whether a selection key is a peer-section row's (peerEntryKey), not a local row's. */
-export function isPeerEntryKey(key: string): boolean {
-  return key.startsWith("peer:") || key.startsWith("remoterepo:") || key.startsWith("remote:");
 }
 
 /** Whether `kind` is one of the peer-section row kinds. */
@@ -90,6 +85,7 @@ export function flattenPeerSections(links: readonly PeerLinkState[]): PeerSectio
         peerId: link.id,
         peerName: link.name,
         repoName: repo.repoName,
+        repoRegistryName: repo.repoRegistryName,
         repoPath: repo.repoPath,
         agentCount: repo.agents.length,
         stale,
@@ -124,17 +120,18 @@ export function samePeerLinks(a: readonly PeerLinkState[], b: readonly PeerLinkS
 
 interface RemoteRepo {
   repoName: string;
+  repoRegistryName: string;
   repoPath: string;
   agents: RemoteAgent[];
 }
 
-/** Group on repoPath (the name is the first agent's); sort by name, then path. */
+/** Group on repoPath (the names are the first agent's); sort by display name, then path. */
 function groupByRepo(agents: readonly RemoteAgent[]): RemoteRepo[] {
   const byPath = new Map<string, RemoteRepo>();
   for (const agent of agents) {
     const repo = byPath.get(agent.repoPath);
     if (repo) repo.agents.push(agent);
-    else byPath.set(agent.repoPath, { repoName: agent.repoName, repoPath: agent.repoPath, agents: [agent] });
+    else byPath.set(agent.repoPath, { repoName: agent.repoName, repoRegistryName: agent.repoRegistryName, repoPath: agent.repoPath, agents: [agent] });
   }
   return [...byPath.values()].sort(
     (x, y) => x.repoName.localeCompare(y.repoName) || x.repoPath.localeCompare(y.repoPath),

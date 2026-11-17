@@ -26,7 +26,7 @@ import { createMemoryLink, type MemoryConnection } from "./test-pair-transport";
 
 const ID_A = "a1".repeat(32);
 const ID_B = "b2".repeat(32);
-const ALLOWED_KEYS = ["agentType", "id", "manager", "nickname", "repoName", "repoPath", "state"];
+const ALLOWED_KEYS = ["agentType", "id", "manager", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
 
 beforeEach(() => {
   irohAddonLoaderCtx.set(async () => {
@@ -37,7 +37,7 @@ afterEach(() => irohAddonLoaderCtx.reset());
 
 /** An agent with every field the reply must leave out set to something recognizable. */
 function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
-  const agent = makeAgent({ id, repoName: "app", repoPath: "/repos/app", state: "running" });
+  const agent = makeAgent({ id, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running" });
   Object.assign(agent.meta, {
     prompt: "SECRET PROMPT",
     summary: "secret summary",
@@ -98,14 +98,15 @@ async function rawRequest(conn: MemoryConnection, bytes: Uint8Array): Promise<Ui
 const decodeText = (bytes: Uint8Array | Error) => JSON.parse(new TextDecoder().decode(bytes as Uint8Array));
 
 describe("toRemoteAgents", () => {
-  test("keeps exactly the seven allowed fields and leaves out the system coordinator", () => {
+  test("keeps exactly the eight allowed fields and leaves out the system coordinator", () => {
     const worker = fullAgent("agent-1");
-    const bare = makeAgent({ id: "agent-2", repoName: "lib", repoPath: "/repos/lib", state: "waiting" });
+    // A nicknamed repo: shown as "library", keyed by its registry name "lib".
+    const bare = makeAgent({ id: "agent-2", repoName: "library", repoRegistryName: "lib", repoPath: "/repos/lib", state: "waiting" });
     const system = fullAgent("agent-sys", { agentType: SYSTEM_COORDINATOR_TYPE });
     const out = toRemoteAgents([worker, system, bare]);
     expect(out).toEqual([
-      { id: "agent-1", nickname: "builder", repoName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-mgr" },
-      { id: "agent-2", nickname: null, repoName: "lib", repoPath: "/repos/lib", state: "waiting", agentType: null, manager: null },
+      { id: "agent-1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-mgr" },
+      { id: "agent-2", nickname: null, repoName: "library", repoRegistryName: "lib", repoPath: "/repos/lib", state: "waiting", agentType: null, manager: null },
     ]);
     for (const entry of out) expect(Object.keys(entry).sort()).toEqual(ALLOWED_KEYS);
     expect(JSON.stringify(out)).not.toContain("SECRET");
@@ -118,10 +119,10 @@ describe("decodeAgentsReply", () => {
     const agents = decodeAgentsReply(
       encode({
         op: "agents",
-        agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoPath: "/r", state: "running", prompt: "leak", extra: { x: 1 } }],
+        agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoRegistryName: "app\x1b[31m", repoPath: "/r", state: "running", prompt: "leak", extra: { x: 1 } }],
       }),
     );
-    expect(agents).toEqual([{ id: "agent-1", nickname: null, repoName: "app[31m", repoPath: "/r", state: "running", agentType: null, manager: null }]);
+    expect(agents).toEqual([{ id: "agent-1", nickname: null, repoName: "app[31m", repoRegistryName: "app[31m", repoPath: "/r", state: "running", agentType: null, manager: null }]);
     expect(Object.keys(agents[0]!).sort()).toEqual(ALLOWED_KEYS);
   });
 
@@ -132,10 +133,10 @@ describe("decodeAgentsReply", () => {
     const [agent] = decodeAgentsReply(
       encode({
         op: "agents",
-        agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}` }],
+        agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoRegistryName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}` }],
       }),
     );
-    expect(agent).toEqual({ id: "agent-1", nickname: "nick", repoName: "app", repoPath: "/r", state: "running", agentType: "w", manager: "m" });
+    expect(agent).toEqual({ id: "agent-1", nickname: "nick", repoName: "app", repoRegistryName: "app", repoPath: "/r", state: "running", agentType: "w", manager: "m" });
     for (const value of Object.values(agent!)) expect(value).not.toMatch(/\p{Cf}/u);
     // An error reply's reason is cleaned the same way.
     expect(() => decodeAgentsReply(encode({ op: "error", reason: `bad‮reason` }))).toThrow(
@@ -153,11 +154,16 @@ describe("decodeAgentsReply", () => {
     expect(() => decodeAgentsReply(encode({ op: "agents", agents: [{ id: 1 }] }))).toThrow(
       new PeerProtocolError("agent 0 in the reply is malformed"),
     );
+    // repoRegistryName is required, like repoName: rows are keyed by it.
+    const noRegistryName = { id: "a", repoName: "app", repoPath: "/r", state: "running" };
+    expect(() => decodeAgentsReply(encode({ op: "agents", agents: [noRegistryName] }))).toThrow(
+      new PeerProtocolError("agent 0 in the reply is malformed"),
+    );
     expect(() => decodeAgentsReply(new Uint8Array([0xff, 0xfe]))).toThrow(new PeerProtocolError("reply is not UTF-8"));
   });
 
   test("a list over 1 MB is sent as an error reply", () => {
-    const big: RemoteAgent[] = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
+    const big: RemoteAgent[] = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
     expect(() => decodeAgentsReply(encodeAgentsReply(big))).toThrow(
       new PeerErrorReply(`the other side reported: the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`),
     );
@@ -171,7 +177,7 @@ describe("requestAgents", () => {
     const responder = (async () => {
       const stream = await link.b.acceptBi();
       await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
-      const agents = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
+      const agents = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
       await stream.writeAll(encode({ op: "agents", agents }));
       await stream.finish();
     })();

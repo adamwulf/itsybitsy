@@ -16,6 +16,7 @@ import { stripAnsi } from "../parse-state";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { parseDenials } from "../agents";
 import { CYAN, YELLOW, RESET } from "./colors";
+import { localAgentKey } from "./row-keys";
 
 /** Build a mock PaneCtx with a real RightPaneComponent */
 function makePaneCtx(overrides?: {
@@ -806,11 +807,12 @@ describe("formatAgentRow favorite star", () => {
     const rp = new RightPaneComponent();
     rp.displayHeight = 20;
     rp.allAgents = [
-      { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+      { kind: "repo-header", repoName: "my-repo", repoRegistryName: "my-repo", repoPath: "/repos/my-repo", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
       { kind: "agent", agent: fav, depth: 0, connector: "├── " },
       { kind: "agent", agent: plain, depth: 0, connector: "└── " },
     ];
-    rp.favoriteAgentIds = new Set(["fav-1"]);
+    rp.machineName = "studio";
+    rp.favoriteAgentIds = new Set([localAgentKey("studio", fav)]);
     rp.selectedRepoHeader = "my-repo";
     for (const mode of ["TREE", "REPO"] as const) {
       rp.setMode(mode);

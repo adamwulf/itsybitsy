@@ -41,6 +41,7 @@ import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../
 import type { ConfigResult } from "../config";
 import { fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
+import { fullyQualifiedAgentId } from "./row-keys";
 import type { PaneMode, TailLogMode } from "./pane-manager";
 import { isTailLogMode } from "./pane-manager";
 import { RESET, BOLD, DIM, RED } from "./colors";
@@ -174,7 +175,9 @@ export interface ActionCtx {
     isSystemCoordinatorSelected: boolean;
     flatList: FlatEntry[];
     visibleList: FlatEntry[];
-    selectAgentById(id: string): boolean;
+    /** This machine's name: the first segment of a local agent's fully qualified id (SPEC §17.1). */
+    machineName: string;
+    selectAgent(agent: Agent): boolean;
     selectByRepoPath(repoPath: string): boolean;
     selectSystemCoordinator(): boolean;
   };
@@ -218,10 +221,11 @@ export interface ActionCtx {
    */
   setSidebarMode: (mode: import("./sidebar").SidebarMode) => void;
   /**
-   * §17.1 Favorites tab: mark an agent as a favorite (no toggle) and persist
-   * it. The new-agent form calls it for an agent made from the Favorites tab.
+   * §17.1 Favorites tab: mark the agent with this fully qualified id
+   * (`<machine>/<repo>/<agent>`) as a favorite (no toggle) and persist it. The
+   * new-agent form calls it for an agent made from the Favorites tab.
    */
-  addFavorite(agentId: string): void;
+  addFavorite(key: string): void;
   /**
    * §17.3 / §17.3a: the Teams-tree handle. Lets `handleSend` read the team
    * anchor (`{ kind: "team", teamName }`) selected in the Teams panel, since
@@ -1863,9 +1867,12 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
             const result = await newAgent(repo.path, processedPrompt, opts);
             if (result.ok) {
               ctx.closeDialog();
-              // newAgent's stdout is the new agent's id. A coordinator has no
-              // row in the Agents tree, so `.` could never unfavorite it.
-              if (favoriteOnCreate && agentType !== REPO_COORDINATOR_TYPE) ctx.addFavorite(result.stdout.trim());
+              // newAgent's stdout is the new agent's id; its row is keyed by the
+              // repo's registry name (SPEC §17.1). A coordinator has no row in
+              // the Agents tree, so `.` could never unfavorite it.
+              if (favoriteOnCreate && agentType !== REPO_COORDINATOR_TYPE) {
+                ctx.addFavorite(fullyQualifiedAgentId(ctx.agentTree.machineName, repo.name, result.stdout.trim()));
+              }
               ctx.pendingSelectNewestInRepo = repo.path;
               ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`, "info");
             } else {
@@ -1958,7 +1965,10 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  if (ctx.agentTree.selectAgentById(q.agent)) {
+  // A question names its agent by bare id only, so it jumps to the first row
+  // with that id, as `A` (acknowledge) finds it.
+  const asker = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
+  if (asker?.kind === "agent" && ctx.agentTree.selectAgent(asker.agent)) {
     // §17.1 Phase 2: jumping from the QUESTIONS pane to an agent is an
     // Agents-panel operation — make the Agents tree the active source and
     // ensure the sidebar shows it (parallel to the @-fuzzy jump). The
@@ -2044,7 +2054,7 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
         ctx.jumpToMode("REPO");
         ctx.tui?.requestRender();
       } else {
-        ctx.agentTree.selectAgentById(selected.entry.agent.id);
+        ctx.agentTree.selectAgent(selected.entry.agent);
         ctx.syncSelectedAgent();
         ctx.jumpToMode("AGENT LOG");
         ctx.tui?.requestRender();

@@ -30,6 +30,7 @@ function mockAgent(overrides: Partial<Agent> & { id: string }): Agent {
   return {
     repoPath: "/Users/test/project",
     repoName: "project",
+    repoRegistryName: "project",
     meta: {
       id: overrides.id,
       session_id: "session-1",

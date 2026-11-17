@@ -2,15 +2,24 @@
  * Shared test utilities for itsybitsy tests.
  */
 
+import { basename } from "node:path";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import type { AgentState } from "./parse-state";
 import type { SpawnResult, FetchLike } from "./types";
+
+/** A fixture repo's registry name: its folder's name, as `ib add` names it; `fallback` when there is no path. */
+function registryNameOf(repoPath: string, fallback: string): string {
+  return basename(repoPath) || fallback;
+}
 
 /** Create a test Agent with sensible defaults. All fields can be overridden. */
 export function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
   return {
     repoPath: "/tmp/test",
     repoName: "test",
+    // The registry name is the repo folder's name, as `ib add` names it; a
+    // different repoName models a nickname.
+    repoRegistryName: registryNameOf(overrides.repoPath ?? "/tmp/test", overrides.repoName ?? "test"),
     state: "unknown",
     age: "1m",
     archived: false,
@@ -44,8 +53,12 @@ export function makeFlatAgent(agent: Agent, overrides?: { depth?: number; connec
 }
 
 /** Create a FlatEntry of kind "repo-header" for tests */
-export function makeFlatRepoHeader(repoName: string, repoPath: string = "", hasAgents: boolean = false, hasRunningAgents: boolean = false, hasNonStoppedAgents: boolean = false): Extract<FlatEntry, { kind: "repo-header" }> {
-  return { kind: "repo-header", repoName, repoPath, hasAgents, hasRunningAgents, hasNonStoppedAgents };
+/**
+ * A repo header. Its registry name defaults to the folder's name (as `ib add`
+ * names a repo), or to repoName with no path; a different repoName models a nickname.
+ */
+export function makeFlatRepoHeader(repoName: string, repoPath: string = "", hasAgents: boolean = false, hasRunningAgents: boolean = false, hasNonStoppedAgents: boolean = false, repoRegistryName: string = registryNameOf(repoPath, repoName)): Extract<FlatEntry, { kind: "repo-header" }> {
+  return { kind: "repo-header", repoName, repoRegistryName, repoPath, hasAgents, hasRunningAgents, hasNonStoppedAgents };
 }
 
 /** Create a FlatEntry of kind "system-coordinator" for tests */

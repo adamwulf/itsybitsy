@@ -161,7 +161,8 @@ function makeMockCtx(overrides?: {
       isSystemCoordinatorSelected: false,
       flatList: overrides?.flatList ?? [],
       visibleList: overrides?.flatList ?? [],
-      selectAgentById: () => true,
+      machineName: "studio",
+      selectAgent: () => true,
       selectByRepoPath: () => true,
       selectSystemCoordinator: () => true,
     },
@@ -1230,7 +1231,7 @@ describe("handleFuzzyAgent system coordinator", () => {
       flatList: [makeFlatSystemCoordinator(), makeFlatAgent(makeAgent({ id: "agent-fuzz4" }))],
     });
     const calls: string[] = [];
-    ctx.agentTree.selectAgentById = () => { calls.push("selectAgentById"); return true; };
+    ctx.agentTree.selectAgent = () => { calls.push("selectAgent"); return true; };
     ctx.agentTree.selectSystemCoordinator = () => { calls.push("selectSystemCoordinator"); return true; };
     ctx.syncSelectedAgent = () => { calls.push("syncSelectedAgent"); };
     ctx.jumpToMode = (mode) => { calls.push(`jumpToMode:${mode}`); };
@@ -2156,14 +2157,20 @@ describe("handleFuzzyAgent — §17.3 @-jump force-select in Agents panel", () =
 
 describe("handleGoToQuestionAgent — sidebar tab", () => {
   const question: PendingQuestion = { id: "q1", agent: "agent-q", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending" };
+  // The question's agent has a row in the tree; the jump selects that row's agent.
+  const asker = makeAgent({ id: "agent-q" });
 
   test("from the Teams tab: switches to Agents and makes Agents the active source", () => {
     const { ctx, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
       sidebarMode: "teams",
       activeSelectionSource: "teams",
       questions: [question],
+      flatList: [makeFlatAgent(asker)],
     });
+    const selected: Agent[] = [];
+    ctx.agentTree.selectAgent = (agent) => { selected.push(agent); return true; };
     handleGoToQuestionAgent(ctx);
+    expect(selected).toEqual([asker]);
     expect(setSidebarModeCalls).toEqual(["agents"]);
     expect(setActiveSelectionSourceCalls).toEqual(["agents"]);
   });
@@ -2172,6 +2179,7 @@ describe("handleGoToQuestionAgent — sidebar tab", () => {
     const { ctx, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
       sidebarMode: "favorites",
       questions: [question],
+      flatList: [makeFlatAgent(asker)],
     });
     handleGoToQuestionAgent(ctx);
     expect(setSidebarModeCalls).toEqual([]);
@@ -3072,6 +3080,7 @@ function mkAgent(id: string, repoName: string): Agent {
     id,
     repoPath: `/repos/${repoName}/${id}`,
     repoName,
+    repoRegistryName: repoName,
     meta: {
       id,
       session_id: `sess-${id}`,

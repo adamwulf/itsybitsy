@@ -17,12 +17,12 @@
  * `readToEnd(1 MB)`. No framing code.
  *
  *   dialer    → {"op":"agents"}
- *   responder → {"op":"agents","agents":[{id, nickname, repoName, repoPath, state, agentType, manager}, …]}
+ *   responder → {"op":"agents","agents":[{id, nickname, repoName, repoRegistryName, repoPath, state, agentType, manager}, …]}
  *             | {"op":"error","reason":"…"}   (an unknown op, a list over 1 MB, an internal error)
  *
  * A request over 4096 bytes, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
- * reason. The agent list carries exactly the seven fields above, never
+ * reason. The agent list carries exactly the eight fields above, never
  * prompts, logs or tmux output, and never the system coordinator.
  *
  * The transport is the pair protocol's seam ({@link PairConnection}):
@@ -61,7 +61,10 @@ const MAX_CLOSE_REASON = 100;
 export interface RemoteAgent {
   id: string;
   nickname: string | null;
+  /** The repo's display name on the other install (its nickname, else its registry name): what is shown. */
   repoName: string;
+  /** The repo's registry name on the other install: what the row is keyed by (SPEC §20.5). */
+  repoRegistryName: string;
   repoPath: string;
   /** The agent's state on the other install (an AgentState there; kept as text here). */
   state: string;
@@ -98,7 +101,7 @@ export function cleanRemoteText(text: string): string {
 
 /**
  * The reply's agent list, from the watcher's last fully detected snapshot
- * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the seven
+ * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the eight
  * allowed fields of each agent, and no system coordinator. (The system
  * coordinator has no agent directory, so the watcher never lists it; the
  * filter keeps it out even if that changes.)
@@ -110,6 +113,7 @@ export function toRemoteAgents(agents: readonly Agent[]): RemoteAgent[] {
       id: a.id,
       nickname: a.meta.nickname ?? null,
       repoName: a.repoName,
+      repoRegistryName: a.repoRegistryName,
       repoPath: a.repoPath,
       state: a.state,
       agentType: a.meta.agentType ?? null,
@@ -188,6 +192,7 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
     id: required("id"),
     nickname: optional("nickname"),
     repoName: required("repoName"),
+    repoRegistryName: required("repoRegistryName"),
     repoPath: required("repoPath"),
     state: required("state"),
     agentType: optional("agentType"),

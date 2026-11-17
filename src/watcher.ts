@@ -16,7 +16,7 @@ import * as runtimeNames from "./runtime-names";
 import { watch, type FSWatcher } from "fs";
 import { join } from "path";
 import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, detectAgentStates, computeAge } from "./agents";
-import type { Agent, FlatEntry, PendingQuestion, ReadAgentsResult } from "./agents";
+import type { Agent, FlatEntry, PendingQuestion, ReadAgentsResult, RepoReadInput } from "./agents";
 import { repoDisplayName } from "./registry";
 import type { RepoEntry } from "./registry";
 import { checkRepoHealth, checkGlobalHealth } from "./health-check";
@@ -64,13 +64,13 @@ export async function mapInChunks<T, R>(
  * coordinator's coordinatorSpawnCtx).
  */
 export interface WatcherAgentsApi {
-  readAllAgents: (repos: Array<{ path: string; name: string }>, includeArchived: boolean) => Promise<ReadAgentsResult>;
+  readAllAgents: (repos: RepoReadInput[], includeArchived: boolean) => Promise<ReadAgentsResult>;
   detectAgentStates: (
     agents: Agent[],
     opts?: { reap?: boolean; confirmTmuxMissingAcrossPolls?: boolean }
   ) => Promise<void>;
   buildAgentTree: (agents: Agent[]) => Agent[];
-  flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string }[], coordinator?: { state: string; age: string }, groupByParent?: boolean) => FlatEntry[];
+  flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string; registryName?: string }[], coordinator?: { state: string; age: string }, groupByParent?: boolean) => FlatEntry[];
   readPendingQuestions: (repoPath: string) => Promise<PendingQuestion[]>;
 }
 
@@ -414,7 +414,10 @@ export class AgentWatcher {
     const tRefreshStart = isInitial ? Date.now() : 0;
     try {
       const agentsApi = agentsCtx.fn;
-      const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
+      // The display name is what the tree shows; the registry name keys its rows
+      // and is what a peer is sent (SPEC §17.1, §20.4), so a nickname rename
+      // never re-keys a row.
+      const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r), registryName: r.name }));
       // Skip archived agents: the dashboard never renders them (flattenAgentTree
       // drops every archived row) and re-stat'ing thousands of immutable archived
       // meta.json files on every refresh tick is pure waste. See readAllAgents docs.
@@ -445,7 +448,7 @@ export class AgentWatcher {
       const tDetectMs = isInitial ? Date.now() - tDetectStart : 0;
 
       const roots = agentsApi.buildAgentTree(agents);
-      const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
+      const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path, registryName: r.name }));
       const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo, this.groupByParent);
 
       // Read pending questions from all repos

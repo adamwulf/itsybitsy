@@ -7,6 +7,7 @@ import {
   makeFlatSystemCoordinator,
 } from "../test-utils";
 import type { Agent, FlatEntry } from "../agents";
+import { selectById } from "./test-tree-keys";
 
 /** Build an agent with a specific id, repo, and state. */
 function agentInRepo(id: string, repoName: string, state: Agent["state"]): Agent {
@@ -17,7 +18,7 @@ function agentInRepo(id: string, repoName: string, state: Agent["state"]): Agent
 function treeWith(list: FlatEntry[], startId: string): AgentTreeComponent {
   const tree = new AgentTreeComponent();
   tree.setFlatList(list);
-  expect(tree.selectAgentById(startId)).toBe(true);
+  expect(selectById(tree, startId)).toBe(true);
   return tree;
 }
 

@@ -641,6 +641,7 @@ function buildHookAgent(
     id,
     repoPath,
     repoName: "",
+    repoRegistryName: "",
     meta: {
       id,
       session_id: "",

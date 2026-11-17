@@ -5,7 +5,9 @@
  *
  * - Peers are keyed by id: 64 lowercase hex characters (an iroh endpoint id).
  *   Input ids are trimmed and lowercased first.
- * - A name is only a local label. Names need not be unique.
+ * - A name is a local label, and the first segment of the peer's row keys in
+ *   `ib watch`. The pairing name prompt refuses a name another peer or this
+ *   machine has (peerNameProblem); the store itself does not check.
  * - `pairedAt` is an ISO 8601 timestamp.
  * - Every write replaces the whole file atomically (temp file + rename), so a
  *   reader sees the old or the new array, never a torn one.
@@ -55,6 +57,24 @@ export function sanitizePeerName(name: string, id: string): string {
   const stripped = name.replace(/\p{Cc}/gu, "").trim();
   const capped = Array.from(stripped).slice(0, MAX_PEER_NAME).join("").trimEnd();
   return capped.length > 0 ? capped : shortPeerId(id);
+}
+
+/**
+ * Why `name` cannot become the name of peer `id`, or null if it can (SPEC
+ * §20.2). A peer's name is the first segment of its rows' keys in `ib watch`
+ * (`<machine>/<repo>/<agent>`, SPEC §17.1), so it may not hold a `/`, and may
+ * not equal, case-insensitively, another peer's name or this machine's name.
+ * The name is checked as it would be stored (sanitizePeerName). Only the
+ * pairing name prompt asks; names already in peers.json are left alone.
+ */
+export function peerNameProblem(name: string, id: string, peers: readonly Peer[], machineName: string): string | null {
+  const stored = sanitizePeerName(name, id);
+  if (stored.includes("/")) return `A name cannot contain "/".`;
+  const lower = stored.toLowerCase();
+  if (lower === machineName.toLowerCase()) return `"${machineName}" is this machine's name.`;
+  const other = peers.find((p) => p.id !== id && p.name.toLowerCase() === lower);
+  if (other) return `Another peer is already named "${other.name}".`;
+  return null;
 }
 
 /** peers.json exists but is not a valid peer list. */

@@ -27,6 +27,7 @@ function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
   return {
     repoPath: "/tmp/repo",
     repoName: "repo",
+    repoRegistryName: rest.repoName ?? "repo",
     state: "running",
     age: "2m",
     archived: false,
@@ -39,7 +40,7 @@ function makeAgent(overrides: Partial<Agent> & { id: string }): Agent {
 function makeFlatList(): FlatEntry[] {
   return [
     { kind: "system-coordinator", state: "running", age: "5m" },
-    { kind: "repo-header", repoName: "itsybitsy", repoPath: "/tmp/itsybitsy", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+    { kind: "repo-header", repoName: "itsybitsy", repoRegistryName: "itsybitsy", repoPath: "/tmp/itsybitsy", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
     {
       kind: "agent",
       agent: makeAgent({ id: "agent-abc12345", state: "running", meta: { model: "opus" } as any }),
@@ -56,7 +57,7 @@ function makeFlatList(): FlatEntry[] {
       depth: 1,
       connector: "  ",
     },
-    { kind: "repo-header", repoName: "muse-ios", repoPath: "/tmp/muse-ios", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
+    { kind: "repo-header", repoName: "muse-ios", repoRegistryName: "muse-ios", repoPath: "/tmp/muse-ios", hasAgents: true, hasRunningAgents: true, hasNonStoppedAgents: true },
     {
       kind: "agent",
       agent: makeAgent({

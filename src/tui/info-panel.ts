@@ -21,6 +21,9 @@ import { NotesEditorComponent } from "./notes-editor";
 import { _formatTimestamp } from "../agent-lifecycle";
 import { cliDisplayName, kernelSandboxStatus, metadataCli } from "../agent-cli";
 import { resolvePathsConfig } from "../sandbox";
+import { FALLBACK_MACHINE_NAME } from "../machine-name";
+import { localAgentKey } from "./row-keys";
+import { peerEntryKey } from "./peer-sections";
 
 /**
  * Team-mode payload for the info panel (SPEC §17.3c). Parallel to the
@@ -45,6 +48,8 @@ export type InfoSubField = "default-type" | "notes";
 
 export class InfoPanelComponent implements Component {
   agent: Agent | null = null;
+  /** This machine's name, as the Agents tree's: the first segment of the "Full id:" row. */
+  machineName: string = FALLBACK_MACHINE_NAME;
   /**
    * The selected peer-section row (SPEC §20.5): a remote agent, a remote repo
    * or a paired install's header. The dashboard's selection sync sets it, and
@@ -199,6 +204,10 @@ export class InfoPanelComponent implements Component {
       lines.push(truncateToWidth(`${DIM}Paths:${RESET} runtime roots only`, width, ""));
     }
 
+    // The agent's fully qualified id, its row key (SPEC §17.1): the machine
+    // and the repo's registry name it belongs to. The tree shows only the name.
+    lines.push(truncateToWidth(`${DIM}Full id:${RESET} ${localAgentKey(this.machineName, agent)}`, width, ""));
+
     // Identity line — only shown when a nickname is set, so the canonical id
     // stays visible/copyable: `nickname (id: <id>)`. The sidebar tree shows the
     // nickname ALONE, so without this the real id would be hidden. When there's
@@ -258,6 +267,7 @@ export class InfoPanelComponent implements Component {
         title("Remote agent");
         field("Peer", entry.peerName);
         field("Id", agent.id);
+        field("Full id", peerEntryKey(entry));
         field("Nickname", agent.nickname ?? "—");
         field("Repo", agent.repoName);
         field("Path", agent.repoPath);

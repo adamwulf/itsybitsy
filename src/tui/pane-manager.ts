@@ -20,6 +20,8 @@ import { displayState, computeStateColWidth, AGE_COL_WIDTH, favoriteStar } from 
 import { buildFocusSeparator } from "./focus";
 import { RESET, BOLD, DIM, RED, GREEN, CYAN, REVERSE, DIM_GRAY, YELLOW } from "./colors";
 import { formatSandboxDisplay } from "./sandbox-format";
+import { localAgentKey } from "./row-keys";
+import { FALLBACK_MACHINE_NAME } from "../machine-name";
 
 // Right pane modes. `p` cycles forward (+1) and `n` backward (-1), so from the
 // startup AGENT LOG pane `n` reaches WATCHDOG LOG then PROXY LOG and `p`
@@ -154,9 +156,16 @@ export class RightPaneComponent implements Component {
   selectedRepoHeader: string | null = null;
   questions: PendingQuestion[] = [];
   allAgents: FlatEntry[] = [];
-  /** Favorite agent ids — the TREE/REPO rows show a ★ for these (no
-   *  filtering here). The dashboard hands over the Agents tree's set. */
+  /** Fully qualified ids of the favorite agents — the TREE/REPO rows show a ★
+   *  for these (no filtering here). The dashboard hands over the Agents tree's set. */
   favoriteAgentIds: ReadonlySet<string> = new Set();
+  /** This machine's name, as the Agents tree's (the dashboard sets both). */
+  machineName: string = FALLBACK_MACHINE_NAME;
+
+  /** Whether the local agent is a favorite (by its fully qualified id, SPEC §17.1). */
+  private isFavorite(agent: Agent): boolean {
+    return this.favoriteAgentIds.has(localAgentKey(this.machineName, agent));
+  }
   scrollOffset = 0;
   displayHeight = 20;
   agentLogContent: string[] | null = null;
@@ -390,7 +399,7 @@ export class RightPaneComponent implements Component {
         const treeStateColWidth = computeStateColWidth(this.allAgents);
         this.content = this.allAgents
           .filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent")
-          .map(({ agent, connector }) => formatAgentRow(agent, connector, treeStateColWidth, this.favoriteAgentIds.has(agent.id)));
+          .map(({ agent, connector }) => formatAgentRow(agent, connector, treeStateColWidth, this.isFavorite(agent)));
         if (this.content.length === 0) this.content = [`${DIM}No agents${RESET}`];
         break;
       }
@@ -445,7 +454,7 @@ export class RightPaneComponent implements Component {
         } else {
           const repoStateColWidth = computeStateColWidth(this.allAgents);
           for (const { agent, connector } of repoAgents) {
-            this.content.push(formatAgentRow(agent, connector, repoStateColWidth, this.favoriteAgentIds.has(agent.id)));
+            this.content.push(formatAgentRow(agent, connector, repoStateColWidth, this.isFavorite(agent)));
           }
         }
         // Health check section

@@ -35,6 +35,7 @@ import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
 import { peerEntryKey } from "./peer-sections";
+import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
 import { DIM } from "./colors";
 import { getStateColors } from "./color-scheme";
@@ -2232,6 +2233,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
       try {
         dashboard = makeDashboard();
+        dashboard.setMachineName("studio");
         dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
 
         dashboard.handleInput(tabKey);
@@ -2258,10 +2260,12 @@ describe("DashboardComponent dialog and action handlers", () => {
         // meta.json is written before the late spawn steps — only the notice
         // shows that newAgent returned ok.
         expect(dashboard.notice).toBe("Created new agent in only-repo");
-        expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(expectFavorite ? [meta.id] : []);
+        // The favorite is the new agent's fully qualified id: machine/repo/id.
+        const fullId = `studio/only-repo/${meta.id}`;
+        expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(expectFavorite ? [fullId] : []);
         if (expectFavorite) {
           await flushPendingSave();
-          expect((await loadLayout())!.favoriteAgentIds).toEqual([meta.id]);
+          expect((await loadLayout())!.favoriteAgentIds).toEqual([fullId]);
         }
       } finally {
         cancelPendingSave();
@@ -3033,7 +3037,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(dashboard.questionsSelectedIndex).toBe(0); // clamped
   });
 
-  test("selectAgentById via g in QUESTIONS navigates correctly", () => {
+  test("g in QUESTIONS selects the question's agent", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
@@ -3317,7 +3321,7 @@ describe("focus cycling", () => {
     const fav = makeAgent("agent-fav", "/repos/test");
     const plain = makeAgent("agent-plain", "/repos/test");
     dashboard.agentTree.setFlatList([makeFlatAgent(fav), makeFlatAgent(plain)]);
-    dashboard.agentTree.toggleFavorite("agent-fav");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-fav"));
     dashboard.teamsTree.setFlatList([
       { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
     ]);
@@ -3342,8 +3346,8 @@ describe("focus cycling", () => {
     const fav = makeAgent("agent-fav", "/repos/test");
     const plain = makeAgent("agent-plain", "/repos/test");
     dashboard.onUpdate([fav, plain], [makeFlatAgent(fav), makeFlatAgent(plain)], []);
-    dashboard.agentTree.toggleFavorite("agent-fav");
-    expect(dashboard.agentTree.selectAgentById("agent-plain")).toBe(true);
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-fav"));
+    expect(selectById(dashboard.agentTree, "agent-plain")).toBe(true);
     dashboard.syncSelectedAgent();
     dashboard.handleInput("3");
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-plain");
@@ -3551,6 +3555,7 @@ describe("formatAgentRow full-width highlight", () => {
       id: "agent-abc",
       repoPath: "/repos/test",
       repoName: "test",
+      repoRegistryName: "test",
       state: "running",
       age: "1m",
       archived: false,
@@ -3663,6 +3668,7 @@ describe("formatAgentRow compact mode", () => {
       id: "agent-abc",
       repoPath: "/repos/test",
       repoName: "test",
+      repoRegistryName: "test",
       state: "running",
       age: "1m",
       archived: false,
@@ -4149,12 +4155,13 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
 
     dashboard.jumpToMode("TREE");
     // Render and split each line at the sidebar/main separator (vertical bar `│`).
-    // The tree row should only appear in the main column, never the sidebar column.
+    // The tree row should only appear in the main column, never the sidebar
+    // column (whose info panel names the agent only in its "Full id:" row).
     const lines = dashboard.render(160).map(stripAnsi);
     let sidebarHasTreeRow = false;
     for (const l of lines) {
       const sidebar = l.split("│")[0] ?? "";
-      if (sidebar.includes("agent-dup-test")) {
+      if (sidebar.includes("agent-dup-test") && !sidebar.includes("Full id:")) {
         sidebarHasTreeRow = true;
         break;
       }
@@ -5226,38 +5233,41 @@ describe("applyLayout", () => {
       sidebarWidth: 60,
       splitPaneLeftWidth: 80,
       heightOffsets: { tree: 0, info: 0, coordinator: 0 },
-      favoriteAgentIds: ["agent-1", "agent-2"],
+      favoriteAgentIds: ["studio/web/agent-1", "studio/api/agent-2"],
     });
-    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["agent-1", "agent-2"]);
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["studio/web/agent-1", "studio/api/agent-2"]);
     dashboard.applyLayout({
       sidebarWidth: 60,
       splitPaneLeftWidth: 80,
       heightOffsets: { tree: 0, info: 0, coordinator: 0 },
     });
-    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["agent-1", "agent-2"]);
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["studio/web/agent-1", "studio/api/agent-2"]);
   });
 
-  test("'.' on an agent toggles it as a favorite, persists it, and applyLayout(loadLayout()) restores it", async () => {
+  test("'.' on an agent toggles it as a favorite, persists its fully qualified id, and applyLayout(loadLayout()) restores it", async () => {
     const dashboard = makeDashboard();
+    dashboard.setMachineName("studio");
     const agent = makeAgent("agent-star", "/repos/test");
     dashboard.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
-    expect(dashboard.agentTree.selectAgentById("agent-star")).toBe(true);
+    expect(selectById(dashboard.agentTree, "agent-star")).toBe(true);
     dashboard.handleInput(".");
-    expect(dashboard.agentTree.favoriteAgentIds.has("agent-star")).toBe(true);
+    expect(dashboard.agentTree.favoriteAgentIds.has(treeKeyOf(dashboard.agentTree, "agent-star"))).toBe(true);
     expect(dashboard.notice).toBe("Favorited agent-star");
     // The repo is not pinned — '.' on an agent never pins.
     expect(dashboard.agentTree.pinnedRepoPaths.size).toBe(0);
 
     await flushPendingSave();
     const saved = await loadLayout();
-    expect(saved!.favoriteAgentIds).toEqual(["agent-star"]);
+    expect(saved!.favoriteAgentIds).toEqual(["studio/test/agent-star"]);
     const restored = makeDashboard();
+    restored.setMachineName("studio");
     restored.applyLayout(saved!);
-    expect(restored.agentTree.favoriteAgentIds.has("agent-star")).toBe(true);
+    restored.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
+    expect(restored.agentTree.isFavorite(agent)).toBe(true);
 
     // Second press unfavorites and persists the removal.
     dashboard.handleInput(".");
-    expect(dashboard.agentTree.favoriteAgentIds.has("agent-star")).toBe(false);
+    expect(dashboard.agentTree.favoriteAgentIds.has(treeKeyOf(dashboard.agentTree, "agent-star"))).toBe(false);
     expect(dashboard.notice).toBe("Unfavorited agent-star");
     await flushPendingSave();
     expect((await loadLayout())!.favoriteAgentIds).toEqual([]);
@@ -5276,11 +5286,11 @@ describe("applyLayout", () => {
         { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
         { kind: "team-member", teamName: "backend", agent, connector: "  " },
       ]);
-      dashboard.agentTree.selectAgentById("agent-star");
+      selectById(dashboard.agentTree, "agent-star");
       expect(stripAnsi(dashboard.render(160).join("\n"))).not.toContain("★");
       dashboard.handleInput(".");
       expect(stripAnsi(dashboard.render(160).join("\n"))).toMatch(/★ agent-star/);
-      expect(dashboard.rightPane.favoriteAgentIds.has("agent-star")).toBe(true);
+      expect(dashboard.rightPane.favoriteAgentIds.has("local/test/agent-star")).toBe(true);
       dashboard.handleInput("2");
       expect(stripAnsi(dashboard.render(160).join("\n"))).toMatch(/★ \S*agent-star/);
       cancelPendingSave();
@@ -5289,12 +5299,40 @@ describe("applyLayout", () => {
     }
   });
 
+  test("two local repos with one agent id: j reaches each, the info panel shows its full id, '.' favorites only it", () => {
+    const dashboard = makeDashboard();
+    dashboard.setMachineName("studio");
+    const alpha = _makeAgent({ id: "dup", repoPath: "/repos/alpha", repoName: "alpha" });
+    const beta = _makeAgent({ id: "dup", repoPath: "/repos/beta", repoName: "beta" });
+    dashboard.onUpdate([alpha, beta], [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true, true, true),
+      makeFlatAgent(alpha),
+      makeFlatRepoHeader("beta", "/repos/beta", true, true, true),
+      makeFlatAgent(beta),
+    ], []);
+    dashboard.infoPanel.displayHeight = 20;
+    const fullId = () => dashboard.infoPanel.render(60).map(stripAnsi).find((l) => l.startsWith("Full id:"));
+
+    dashboard.handleInput("j"); // the first row was auto-selected: now alpha's dup
+    expect(dashboard.selectedAgent).toBe(alpha);
+    expect(fullId()).toBe("Full id: studio/alpha/dup");
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    expect(dashboard.selectedAgent).toBe(beta);
+    expect(fullId()).toBe("Full id: studio/beta/dup");
+
+    dashboard.handleInput(".");
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["studio/beta/dup"]);
+    expect(dashboard.agentTree.isFavorite(alpha)).toBe(false);
+    cancelPendingSave();
+  });
+
   test("'.' notice uses the agent's nickname", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-nick", "/repos/test");
     agent.meta.nickname = "builder";
     dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
-    dashboard.agentTree.selectAgentById("agent-nick");
+    selectById(dashboard.agentTree, "agent-nick");
     dashboard.handleInput(".");
     expect(dashboard.notice).toBe("Favorited builder");
   });
@@ -5312,7 +5350,7 @@ describe("applyLayout", () => {
     dashboard.handleInput("j"); // member
     expect(dashboard.activeSelectionSource).toBe("teams");
     dashboard.handleInput(".");
-    expect(dashboard.agentTree.favoriteAgentIds.has("agent-member")).toBe(true);
+    expect(dashboard.agentTree.favoriteAgentIds.has(treeKeyOf(dashboard.agentTree, "agent-member"))).toBe(true);
     expect(dashboard.notice).toBe("Favorited agent-member");
   });
 
@@ -5347,7 +5385,7 @@ describe("applyLayout", () => {
     dashboard.handleInput(".");
     expect(dashboard.notice).toBe("Select an agent or repo header");
     expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
-    dashboard.agentTree.toggleFavorite("agent-a");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-a"));
     dashboard.handleInput("j");
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-a");
     expect(dashboard.agentTree.visibleList[0]!.kind).toBe("system-coordinator");
@@ -5358,12 +5396,12 @@ describe("applyLayout", () => {
     const a = makeAgent("agent-a", "/repos/test");
     const b = makeAgent("agent-b", "/repos/test");
     dashboard.onUpdate([a, b], [makeFlatAgent(a), makeFlatAgent(b)], []);
-    dashboard.agentTree.toggleFavorite("agent-a");
-    dashboard.agentTree.toggleFavorite("agent-b");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-a"));
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-b"));
     dashboard.handleInput("3");
-    dashboard.agentTree.selectAgentById("agent-b");
+    selectById(dashboard.agentTree, "agent-b");
     dashboard.handleInput(".");
-    expect(dashboard.agentTree.favoriteAgentIds.has("agent-b")).toBe(false);
+    expect(dashboard.agentTree.favoriteAgentIds.has(treeKeyOf(dashboard.agentTree, "agent-b"))).toBe(false);
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-b");
     dashboard.handleInput("k");
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-a");
@@ -5576,7 +5614,7 @@ describe("sidebar height resize ({/} keys)", () => {
     dashboard.sidebar.displayHeight = 30;
     const agents = Array.from({ length: 10 }, (_, i) => makeAgent(`a${i}`, "/repos/test"));
     dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
-    dashboard.agentTree.toggleFavorite("a0");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "a0"));
     for (let i = 0; i < 4; i++) dashboard.handleInput("{"); // Agents tree 7 → 3 rows
     dashboard.handleInput("3");
     dashboard.handleInput("}"); // Favorites (base 1): clamped, then grown
@@ -5598,8 +5636,8 @@ describe("sidebar height resize ({/} keys)", () => {
     dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
     // Agents (base 7) shrunk to 5 rows.
     dashboard.sidebar.heightOffsets = { tree: -2, info: 2, coordinator: 0 };
-    dashboard.agentTree.toggleFavorite("a1");
-    dashboard.agentTree.toggleFavorite("a2");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "a1"));
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "a2"));
     dashboard.handleInput("3");
     // Favorites (base 2) shows the tree at its 1-row minimum: { can't shrink it.
     dashboard.handleInput("{");
@@ -7928,19 +7966,20 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       expect(assertDialog(dashboard.dialog, "select").items[0]).toBe(`Remove ${a.repoName}/agent-tm1 from @backend`);
     });
 
-    test("'x' on a mirrored row that is ANOTHER repo's same-id agent acts on the selected agent, not the row", () => {
+    test("the mirror never highlights ANOTHER repo's same-id agent, and 'x' acts on the selected agent", () => {
       // api/review is selected in the Agents tab and is on no team; the
-      // roster's "review" is web/review. The mirror matches by bare id.
+      // roster's "review" is web/review. The mirror matches by fully
+      // qualified id, so it leaves web/review's row alone.
       const selected = makeAgent("review", "/tmp/repo-api");
       selected.repoName = "api";
       const twin = makeAgent("review", "/tmp/repo-web");
       twin.repoName = "web";
       const dashboard = dashboardWith([selected], [header("backend"), member("backend", twin)]);
       dashboard.handleInput("j"); // select api/review in the Agents tab
-      dashboard.handleInput("2"); // the mirror highlights web/review's row
+      dashboard.handleInput("2"); // no Teams row is this agent's
       expect(dashboard.activeSelectionSource).toBe("agents");
       expect(dashboard.agentTree.selectedAgent).toBe(selected);
-      expect(dashboard.teamsTree.selectedMember?.agent).toBe(twin);
+      expect(dashboard.teamsTree.selectedMember).toBeNull();
 
       // No picker offering to remove or retire web/review: `x` is the retire
       // confirm for the Agents-tree selection, as before the picker existed.
@@ -9069,6 +9108,50 @@ describe("Peers dialog", () => {
     expect(text(dashboard)).toContain(`${OTHER_SHORT} was already paired, as "Old name".`);
   });
 
+  test("the name prompt refuses, inline, another peer's name, this machine's name, and a /", () => {
+    const dashboard = makeDashboard();
+    dashboard.setMachineName("Studio");
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    dashboard.handleInput("I");
+    const THIRD = "0b".repeat(32);
+    service.set({
+      peers: [
+        { id: THIRD, name: "Laptop", pairedAt: "x" },
+        // The peer being named is already saved, under its short id.
+        { id: OTHER, name: OTHER_SHORT, pairedAt: "x" },
+      ],
+    });
+    service.setSession("initiator", { stage: "naming", savedName: OTHER_SHORT });
+    service.calls = [];
+    const submit = (name: string) => {
+      const dialog = assertDialog(dashboard.dialog, "peers");
+      dialog.sessionValue = "";
+      for (const ch of name) dashboard.handleInput(ch);
+      dashboard.handleInput("\r");
+      return dialog;
+    };
+
+    expect(submit("laptop").error).toBe(`Another peer is already named "Laptop".`);
+    expect(text(dashboard)).toContain(`Another peer is already named "Laptop".`);
+    expect(submit(" STUDIO ").error).toBe(`"Studio" is this machine's name.`);
+    expect(submit("home/office").error).toBe(`A name cannot contain "/".`);
+    expect(service.calls).toEqual([]);
+
+    // Typing clears the error; the peer's own saved name and a new name are fine.
+    dashboard.handleInput("x");
+    expect(assertDialog(dashboard.dialog, "peers").error).toBeNull();
+    submit(OTHER_SHORT.toUpperCase());
+    expect(service.calls).toEqual([`name:${OTHER_SHORT.toUpperCase()}`]);
+    submit("Desk");
+    expect(service.calls.at(-1)).toBe("name:Desk");
+    // Esc and a blank name still keep the saved name.
+    submit("   ");
+    expect(service.calls.at(-1)).toBe("name:   ");
+    dashboard.handleInput("\x1b");
+    expect(service.calls.at(-1)).toBe("name:null");
+  });
+
   test("every failure renders its message", () => {
     const { dashboard, service } = open();
     const cases: Array<[PairStage, string]> = [
@@ -9181,9 +9264,14 @@ describe("Peer sections in the Agents tree", () => {
   const PEER_C = "0c".repeat(32);
   const PEER_D = "0d".repeat(32);
   const WIDTH = 160;
-  /** A remote agent's selection key (peer-sections.ts peerEntryKey): peer, repo path and id. */
-  const agentKey = (peer: string, repo: string, id: string, repoPath = `/remote/${repo}`) =>
-    `remote:${JSON.stringify([peer, repoPath, id])}`;
+  /** The peers' names in links(): a peer-section row's key starts with its peer's name. */
+  const PEER_NAMES: Record<string, string> = { [PEER_B]: "Laptop B", [PEER_C]: "Laptop C", [PEER_D]: "Laptop D" };
+  /** A remote agent's selection key (peer-sections.ts peerEntryKey): `<peer name>/<repo>/<id>`. */
+  const agentKey = (peer: string, repo: string, id: string) => `${PEER_NAMES[peer]}/${repo}/${id}`;
+  /** A remote repo header's key: `<peer name>/<repo>`. */
+  const repoKey = (peer: string, repo: string) => `${PEER_NAMES[peer]}/${repo}`;
+  /** A peer header's key: the peer's name. */
+  const peerKey = (peer: string) => PEER_NAMES[peer]!;
   const WORKER_KEY = agentKey(PEER_B, "itsybitsy", "worker-abc");
 
   let origRows: number;
@@ -9209,7 +9297,7 @@ describe("Peer sections in the Agents tree", () => {
   });
 
   function remote(id: string, repoName: string, overrides: Partial<RemoteAgent> = {}): RemoteAgent {
-    return { id, nickname: null, repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
+    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
   }
 
   /** Laptop B connected; Laptop C unreachable, last seen 2m ago; Laptop D never answered. */
@@ -9340,7 +9428,7 @@ describe("Peer sections in the Agents tree", () => {
       expect(header).toEndWith(width === 40 ? "P… · connected" : `${"P".repeat(32)} · connected`);
 
       // The info panel and the whole screen fit too, with the long row selected.
-      selectByKey(dashboard, agentKey(PEER_B, "", "n".repeat(100), `/${"p".repeat(200)}`));
+      selectByKey(dashboard, `${"P".repeat(32)}/${"r".repeat(100)}/${"n".repeat(100)}`);
       dashboard.infoPanel.displayHeight = 20;
       expect(dashboard.infoPanel.render(width).filter((r) => visibleWidth(r) > width)).toEqual([]);
       dashboard.sidebarWidth = width;
@@ -9398,6 +9486,7 @@ describe("Peer sections in the Agents tree", () => {
       "Remote agent (read-only)",
       "Peer: Laptop B",
       "Id: worker-abc",
+      "Full id: Laptop B/itsybitsy/worker-abc",
       "Nickname: abc-nick",
       "Repo: itsybitsy",
       "Path: /remote/itsybitsy",
@@ -9416,14 +9505,14 @@ describe("Peer sections in the Agents tree", () => {
 
   test("a selected peer header or remote repo header shows its own placeholder and fields", () => {
     const { dashboard } = setup();
-    selectByKey(dashboard, `remoterepo:${PEER_B}:/remote/itsybitsy`);
+    selectByKey(dashboard, repoKey(PEER_B, "itsybitsy"));
     expect(paneText(dashboard.render(WIDTH), 2)).toBe("Remote repo on Laptop B (read-only)");
     dashboard.infoPanel.displayHeight = 20;
     let info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd());
     expect(info).toContain("Path: /remote/itsybitsy");
     expect(info).toContain("Agents: 2");
 
-    selectByKey(dashboard, `peer:${PEER_C}`);
+    selectByKey(dashboard, peerKey(PEER_C));
     expect(paneText(dashboard.render(WIDTH), 2)).toBe("Paired install Laptop C (read-only)");
     info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd());
     expect(info).toContain("State: last seen 2m ago");
@@ -9504,8 +9593,8 @@ describe("Peer sections in the Agents tree", () => {
   });
 
   for (const [label, key] of [
-    ["remote repo header", `remoterepo:${PEER_B}:/remote/itsybitsy`],
-    ["peer header", `peer:${PEER_B}`],
+    ["remote repo header", repoKey(PEER_B, "itsybitsy")],
+    ["peer header", peerKey(PEER_B)],
   ] as const) {
     test(`the guard refuses the keys a local header has (x, r, D, ., f) on a ${label}`, () => {
       const { dashboard } = setup();
@@ -9627,11 +9716,11 @@ describe("Peer sections in the Agents tree", () => {
     // j / k / ↓ / ↑ move one row; J / K jump between repo anchors, remote ones included.
     let d = onRemote();
     d.handleInput("j");
-    expect(keyOf(d)).toBe(`remoterepo:${PEER_B}:/remote/other-repo`);
+    expect(keyOf(d)).toBe(repoKey(PEER_B, "other-repo"));
     d.handleInput("k");
     expect(keyOf(d)).toBe(WORKER_KEY);
     d.handleInput("\x1b[B");
-    expect(keyOf(d)).toBe(`remoterepo:${PEER_B}:/remote/other-repo`);
+    expect(keyOf(d)).toBe(repoKey(PEER_B, "other-repo"));
     d.handleInput("\x1b[A");
     expect(keyOf(d)).toBe(WORKER_KEY);
     d.handleInput("J");
@@ -9771,7 +9860,7 @@ describe("Peer sections in the Agents tree", () => {
 
   test("a selected remote row that its peer drops moves the selection, and the panes follow", () => {
     const { dashboard, service, local } = setup();
-    selectByKey(dashboard, `peer:${PEER_D}`);
+    selectByKey(dashboard, peerKey(PEER_D));
     service.set({ links: [] });
     expect(keyOf(dashboard)).toBeNull();
     expect(dashboard.selectedAgent).toBe(local);

@@ -171,7 +171,15 @@ export function resolveAgentIconChar(meta: AgentMeta): string {
 export interface Agent {
   id: string;
   repoPath: string;
+  /** The repo's display name: its nickname when set, else its registry name. What the screen shows. */
   repoName: string;
+  /**
+   * The repo's registry name (RepoEntry.name), which a nickname rename never
+   * changes. The middle segment of the agent's fully qualified id in `ib
+   * watch` (`<machine>/<repo>/<agent>`, SPEC §17.1), and the `repoRegistryName`
+   * a peer is sent (SPEC §20.4). Equal to repoName for a repo with no nickname.
+   */
+  repoRegistryName: string;
   meta: AgentMeta;
   /** Latest watchdog-owned transient state, when available. */
   transient?: TransientState | null;
@@ -1852,12 +1860,25 @@ export interface ReadAgentsResult {
   liveTmuxSessions: Set<string>;
 }
 
+/**
+ * A repo to read agents from: its path, its display name (`name`, nickname or
+ * registry name) and its registry name. `registryName` defaults to `name`,
+ * which is right for a repo with no nickname; the `ib watch` watcher, whose
+ * agents are keyed and sent to peers by registry name, always passes it.
+ */
+export interface RepoReadInput {
+  path: string;
+  name: string;
+  registryName?: string;
+}
+
 /** Read agents from a single directory (agents/ or archive/) */
 async function readAgentsFromDir(
   dir: string,
   repoPath: string,
   repoName: string,
-  archived: boolean
+  archived: boolean,
+  repoRegistryName: string,
 ): Promise<ReadAgentsResult> {
   const agents: Agent[] = [];
   const errors: AgentReadError[] = [];
@@ -1902,6 +1923,7 @@ async function readAgentsFromDir(
               id: entry.name,
               repoPath,
               repoName,
+              repoRegistryName,
               meta: placeholderMeta,
               state: "creating",
               age: computeAge(startEpochSec),
@@ -1924,6 +1946,7 @@ async function readAgentsFromDir(
         id: meta.id,
         repoPath,
         repoName,
+        repoRegistryName,
         meta,
         transient,
         state: "unknown", // Updated by watcher via parseState()
@@ -1951,22 +1974,26 @@ async function readAgentsFromDir(
  * the ever-growing pile of archived `meta.json` files on every `ib watch`
  * refresh tick, where archived agents are always discarded downstream anyway
  * (flattenAgentTree drops them, and every consumer filters `!a.archived`).
+ *
+ * `repoName` is the repo's display name and `registryName` its registry name
+ * (see RepoReadInput; it defaults to `repoName`).
  */
 export async function readRepoAgents(
   repoPath: string,
   repoName: string,
-  includeArchived = true
+  includeArchived = true,
+  registryName: string = repoName,
 ): Promise<ReadAgentsResult> {
   const agentsDir = runtimeNames.agentsDir(repoPath);
 
   if (!includeArchived) {
-    return readAgentsFromDir(agentsDir, repoPath, repoName, false);
+    return readAgentsFromDir(agentsDir, repoPath, repoName, false, registryName);
   }
 
   const archiveDir = runtimeNames.archiveDir(repoPath);
   const [active, archived] = await Promise.all([
-    readAgentsFromDir(agentsDir, repoPath, repoName, false),
-    readAgentsFromDir(archiveDir, repoPath, repoName, true),
+    readAgentsFromDir(agentsDir, repoPath, repoName, false, registryName),
+    readAgentsFromDir(archiveDir, repoPath, repoName, true, registryName),
   ]);
 
   return {
@@ -2031,22 +2058,28 @@ function byCreatedEpoch(a: Agent, b: Agent): number {
  * Build agent tree: set children arrays based on manager field.
  * Returns only root agents (those with no manager, or whose manager isn't in the list).
  * Siblings at each level are sorted by created_epoch (oldest first).
+ *
+ * A manager is always in its agent's own repo (`ib new-agent` resolves it in
+ * that repo's agents dir), so it is looked up per repo: the same id in two
+ * repos is two agents, and a child never nests under the other repo's one.
  */
 export function buildAgentTree(agents: Agent[]): Agent[] {
-  const byId = new Map<string, Agent>();
+  const keyOf = (repoPath: string, id: string): string => `${repoPath}\0${id}`;
+  const byKey = new Map<string, Agent>();
   for (const agent of agents) {
     agent.children = [];
     agent.orphaned = false;
     // Non-archived agents take priority over archived ones with the same ID
-    const existing = byId.get(agent.id);
+    const key = keyOf(agent.repoPath, agent.id);
+    const existing = byKey.get(key);
     if (!existing || existing.archived) {
-      byId.set(agent.id, agent);
+      byKey.set(key, agent);
     }
   }
 
   const roots: Agent[] = [];
   for (const agent of agents) {
-    const manager = agent.meta.manager ? byId.get(agent.meta.manager) : undefined;
+    const manager = agent.meta.manager ? byKey.get(keyOf(agent.repoPath, agent.meta.manager)) : undefined;
     if (manager && !manager.archived) {
       manager.children.push(agent);
     } else {
@@ -2071,7 +2104,8 @@ export function buildAgentTree(agents: Agent[]): Agent[] {
 
 export type FlatEntry =
   | { kind: "agent"; agent: Agent; depth: number; connector: string }
-  | { kind: "repo-header"; repoName: string; repoPath: string; hasAgents: boolean; hasRunningAgents: boolean; hasNonStoppedAgents: boolean }
+  /** `repoName` is the display name shown; `repoRegistryName` keys the row (SPEC §17.1). */
+  | { kind: "repo-header"; repoName: string; repoRegistryName: string; repoPath: string; hasAgents: boolean; hasRunningAgents: boolean; hasNonStoppedAgents: boolean }
   | { kind: "parent-header"; parentDir: string; displayName: string }
   | { kind: "system-coordinator"; state: string; age: string }
   | PeerSectionEntry;
@@ -2100,7 +2134,8 @@ export type PeerSectionEntry =
       repoCount: number | null;
       agentCount: number | null;
     }
-  | { kind: "remote-repo-header"; peerId: string; peerName: string; repoName: string; repoPath: string; agentCount: number; stale: boolean }
+  /** `repoName` is the remote repo's display name shown; `repoRegistryName` keys the row (SPEC §20.5). */
+  | { kind: "remote-repo-header"; peerId: string; peerName: string; repoName: string; repoRegistryName: string; repoPath: string; agentCount: number; stale: boolean }
   | { kind: "remote-agent"; peerId: string; peerName: string; remote: RemoteAgent; connector: string; stale: boolean };
 
 /**
@@ -2210,7 +2245,9 @@ export function buildParentDisplayNames(parentDirs: string[]): Map<string, strin
  * When repos has > 1 entry, inserts repo header rows and groups agents under them.
  * Empty repos (in repos but with no agents) get a header with repoHasAgents=false.
  *
- * Accepts either string[] (display names, legacy) or {name, path}[] (with paths for selection persistence).
+ * Accepts either string[] (display names, legacy) or {name, path, registryName?}[]
+ * (with paths for selection persistence). `name` is the display name a header
+ * shows; `registryName` (default `name`) is its repoRegistryName, which keys it.
  *
  * When `groupByParent` is true AND there is more than one repo, repos that
  * share an on-disk parent directory are grouped under a `parent-header` entry
@@ -2223,18 +2260,22 @@ export function buildParentDisplayNames(parentDirs: string[]): Map<string, strin
  */
 export function flattenAgentTree(
   roots: Agent[],
-  repos: string[] | { name: string; path: string }[] = [],
+  repos: string[] | { name: string; path: string; registryName?: string }[] = [],
   coordinator?: { state: string; age: string },
   groupByParent: boolean = false,
 ): FlatEntry[] {
   // Normalize to {name, path} format
-  const repoInfos: { name: string; path: string }[] = repos.map((r) =>
+  const repoInfos: { name: string; path: string; registryName?: string }[] = repos.map((r) =>
     typeof r === "string" ? { name: r, path: "" } : r
   );
   const repoNames = repoInfos.map((r) => r.name);
-  // Build a map from name → path for repo headers
+  // Build maps from name → path and name → registry name for repo headers
   const repoPathByName = new Map<string, string>();
-  for (const r of repoInfos) repoPathByName.set(r.name, r.path);
+  const registryNameByName = new Map<string, string>();
+  for (const r of repoInfos) {
+    repoPathByName.set(r.name, r.path);
+    registryNameByName.set(r.name, r.registryName ?? r.name);
+  }
   const result: FlatEntry[] = [];
 
   // Prepend system coordinator entry before all repo headers
@@ -2286,20 +2327,23 @@ export function flattenAgentTree(
     // is never duplicated.
     const emitRepo = (repoName: string): void => {
       const agents = repoGroups.get(repoName);
+      const repoPath = repoPathByName.get(repoName) ?? "";
+      // A repo known only from its agents takes its registry name from them.
+      const repoRegistryName = registryNameByName.get(repoName) ?? agents?.[0]?.repoRegistryName ?? repoName;
       if (agents && agents.length > 0) {
         // Filter out per-repo coordinators — they don't appear in the agent tree
         const nonCoordinators = agents.filter(a => a.meta.agentType !== REPO_COORDINATOR_TYPE);
         const hasRunningAgents = nonCoordinators.some(subtreeHasRunning);
         const hasNonStoppedAgents = nonCoordinators.some(subtreeHasNonStopped);
         // Repo with agents — emit repo header then walk agents
-        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: nonCoordinators.length > 0, hasRunningAgents, hasNonStoppedAgents });
+        result.push({ kind: "repo-header", repoName, repoRegistryName, repoPath, hasAgents: nonCoordinators.length > 0, hasRunningAgents, hasNonStoppedAgents });
         for (let i = 0; i < nonCoordinators.length; i++) {
           const isLast = i === nonCoordinators.length - 1;
           walk(nonCoordinators[i]!, 0, [isLast]);
         }
       } else {
         // Empty repo — just a header
-        result.push({ kind: "repo-header", repoName, repoPath: repoPathByName.get(repoName) ?? "", hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false });
+        result.push({ kind: "repo-header", repoName, repoRegistryName, repoPath, hasAgents: false, hasRunningAgents: false, hasNonStoppedAgents: false });
       }
     };
 
@@ -2768,11 +2812,11 @@ export const reapReadAgentMetaCtx = new InjectionContext<
  * snapshot — uses this.
  */
 export async function readAgentsOfRepos(
-  repos: Array<{ path: string; name: string }>,
+  repos: RepoReadInput[],
   includeArchived: boolean
 ): Promise<{ agents: Agent[]; errors: AgentReadError[] }> {
   const results = await Promise.all(
-    repos.map((r) => readRepoAgents(r.path, r.name, includeArchived))
+    repos.map((r) => readRepoAgents(r.path, r.name, includeArchived, r.registryName ?? r.name))
   );
   return {
     agents: results.flatMap((r) => r.agents),
@@ -2798,7 +2842,7 @@ export async function readAgentsOfRepos(
  * agent's nickname).
  */
 export async function readAllAgents(
-  repos: Array<{ path: string; name: string }>,
+  repos: RepoReadInput[],
   includeArchived: boolean
 ): Promise<ReadAgentsResult> {
   const [{ agents: allAgents, errors: allErrors }, tmuxSessions] = await Promise.all([

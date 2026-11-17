@@ -1773,6 +1773,44 @@ describe("rows that share a key (duplicate registry names from before)", () => {
     expect(where(tree)).toBe("header /y/app");
   });
 
+  test("under the V filter, a refresh keeps the second header and never reveals the hidden first one", () => {
+    const tree = new AgentTreeComponent();
+    // The first /x/app is empty (hidden by "non-empty"); the second has an agent.
+    const b = makeAgent("b1", "running", { repoName: "app", repoPath: "/y/app" });
+    const rows = (): FlatEntry[] => [header("/x/app", []), header("/y/app", [b]), { kind: "agent", agent: b, depth: 0, connector: "└── " }];
+    tree.setFlatList(rows());
+    tree.setRepoFilter("non-empty");
+    expect(tree.selectByRepoPath("/y/app")).toBe(true);
+    tree.setFlatList(rows());
+    expect(where(tree)).toBe("header /y/app");
+    expect(tree.visibleList.some((f) => f.kind === "repo-header" && f.repoPath === "/x/app")).toBe(false);
+    tree.moveSelection(1);
+    expect(where(tree)).toBe("agent b1");
+    tree.setFlatList(rows());
+    expect(where(tree)).toBe("agent b1");
+  });
+
+  test("rows added or removed above keep the second header selected", () => {
+    const a = makeAgent("a1", "running", { repoName: "app", repoPath: "/x/app" });
+    const a2 = makeAgent("a2", "running", { repoName: "app", repoPath: "/x/app" });
+    const b = makeAgent("b1", "running", { repoName: "app", repoPath: "/y/app" });
+    const row = (agent: Agent): FlatEntry => ({ kind: "agent", agent, depth: 0, connector: "├── " });
+    const tree = new AgentTreeComponent();
+    tree.setFlatList([header("/x/app", [a]), row(a), header("/y/app", [b]), row(b)]);
+    expect(tree.selectByRepoPath("/y/app")).toBe(true);
+    // An agent spawned higher up: the second header moves down a row.
+    tree.setFlatList([header("/x/app", [a, a2]), row(a), row(a2), header("/y/app", [b]), row(b)]);
+    expect(where(tree)).toBe("header /y/app");
+    // Both of the first repo's agents retired: it moves up two rows.
+    tree.setFlatList([header("/x/app", []), header("/y/app", [b]), row(b)]);
+    expect(where(tree)).toBe("header /y/app");
+    // An agent row selected in the second repo stays put too.
+    tree.moveSelection(1);
+    expect(where(tree)).toBe("agent b1");
+    tree.setFlatList([header("/x/app", [a]), row(a), header("/y/app", [b]), row(b)]);
+    expect(where(tree)).toBe("agent b1");
+  });
+
   test("a refresh keeps the second header selected, and selectByRepoPath selects by path", () => {
     const tree = new AgentTreeComponent();
     tree.setFlatList(list());

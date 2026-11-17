@@ -3901,15 +3901,19 @@ describe("handleAnswerQuestion — deliver the answer before acknowledging", () 
       expect(await status("beta")).toBe("acknowledged");
       expect(await status("alpha")).toBe("pending");
 
-      // Enter on alpha's question answers alpha's agent.
+      // Enter on beta's question (re-opened) answers beta's agent: beta is the
+      // second "dup" row, so a bare-id lookup would answer alpha.
+      await Bun.write(join(base, "beta", ".itsybitsy", "user-questions.json"),
+        JSON.stringify({ questions: [{ ...questions[1]!, repoPath: undefined }] }));
       const sentTo: Agent[] = [];
       setStagedSenderForTests(async (agent) => { sentTo.push(agent); return { ok: true, exitCode: 0, stdout: "", stderr: "" }; });
-      ctx.rightPane.questionsSelectedIndex = 0;
+      ctx.rightPane.questionsSelectedIndex = 1;
       handleAnswerQuestion(ctx);
       assertDialog(dialogs.at(-1)!, "textarea").onSubmit("yes");
       await flushActions();
-      expect(sentTo).toEqual([alpha]);
-      expect(await status("alpha")).toBe("acknowledged");
+      expect(sentTo).toEqual([beta]);
+      expect(await status("beta")).toBe("acknowledged");
+      expect(await status("alpha")).toBe("pending");
     } finally {
       await rm(base, { recursive: true, force: true });
     }

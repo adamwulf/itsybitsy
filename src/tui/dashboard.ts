@@ -2433,9 +2433,12 @@ export class DashboardComponent implements Component {
         this.focusManager.setFocus("agent-tree");
       }
     }
-    // Switch repo coordinator input field agent
+    // Switch repo coordinator input field agent. Its draft is keyed by full id
+    // (SPEC §17.1): a per-repo coordinator's id is the folder's name, so two
+    // repos with one folder name have coordinators with one id.
+    const repoCoordinator = this.rightPane.repoCoordinatorAgent;
     this.repoCoordinatorInputField.switchAgent(
-      this.rightPane.repoCoordinatorAgent?.id ?? null
+      repoCoordinator ? this.agentTree.agentKey(repoCoordinator) : null
     );
 
     // Determine the effective key for change detection: the agent's fully

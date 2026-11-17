@@ -3128,6 +3128,69 @@ describe("DashboardComponent right pane and navigation features", () => {
     }
   });
 
+  test("the input draft is kept per agent: two agents with one id in two repos do not share it", () => {
+    dashboard = makeDashboard();
+    dashboard.setMachineName("studio");
+    const alpha = _makeAgent({ id: "dup", repoPath: "/repos/alpha", repoName: "alpha" });
+    const beta = _makeAgent({ id: "dup", repoPath: "/repos/beta", repoName: "beta" });
+    dashboard.onUpdate([alpha, beta], [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true, true, true),
+      makeFlatAgent(alpha),
+      makeFlatRepoHeader("beta", "/repos/beta", true, true, true),
+      makeFlatAgent(beta),
+    ], []);
+    const select = (agent: Agent) => {
+      dashboard.agentTree.selectAgent(agent);
+      dashboard.syncSelectedAgent();
+    };
+    select(alpha);
+    for (const ch of "for alpha") dashboard.inputField.handleInput(ch);
+    expect(dashboard.inputField.getText()).toBe("for alpha");
+    select(beta);
+    expect(dashboard.inputField.getText()).toBe("");
+    select(alpha);
+    expect(dashboard.inputField.getText()).toBe("for alpha");
+  });
+
+  test("the per-repo coordinator draft is kept per repo, also when two repos' coordinators share an id", () => {
+    tmuxPollerSpawnCtx.set(() => makeSpawnResult(1));
+    try {
+      dashboard = makeDashboard();
+      dashboard.setMachineName("studio");
+      // Two folders named "app": the second registered as `ib add <path> app-two`.
+      // A per-repo coordinator's id is its folder's name, so both are "app".
+      const coordA = _makeAgent({ id: "app", repoPath: "/x/app", repoName: "app" });
+      const coordB = _makeAgent({ id: "app", repoPath: "/y/app", repoName: "app-two", repoRegistryName: "app-two" });
+      for (const coord of [coordA, coordB]) coord.meta.agentType = "repo-coordinator";
+      dashboard.watcher = {
+        lastAgents: [coordA, coordB],
+        lastLiveTmuxSessions: new Set<string>(),
+        healthReports: new Map(),
+        refresh: () => {},
+        updateRepos: () => {},
+        recheckHealth: () => {},
+      } as unknown as DashboardComponent["watcher"];
+      dashboard.onUpdate([coordA, coordB], [
+        makeFlatRepoHeader("app", "/x/app"),
+        makeFlatRepoHeader("app-two", "/y/app", false, false, false, "app-two"),
+      ], []);
+      const selectRepo = (path: string) => {
+        dashboard.agentTree.selectByRepoPath(path);
+        dashboard.syncSelectedAgent();
+      };
+      selectRepo("/x/app");
+      expect(dashboard.rightPane.repoCoordinatorAgent).toBe(coordA);
+      for (const ch of "to the first") dashboard.repoCoordinatorInputField.handleInput(ch);
+      selectRepo("/y/app");
+      expect(dashboard.rightPane.repoCoordinatorAgent).toBe(coordB);
+      expect(dashboard.repoCoordinatorInputField.getText()).toBe("");
+      selectRepo("/x/app");
+      expect(dashboard.repoCoordinatorInputField.getText()).toBe("to the first");
+    } finally {
+      tmuxPollerSpawnCtx.reset();
+    }
+  });
+
   test("a question marks (red) and filters to its own repo's agent, not another repo's agent with the same id", () => {
     dashboard = makeDashboard();
     dashboard.setMachineName("studio");

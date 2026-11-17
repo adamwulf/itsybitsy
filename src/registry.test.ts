@@ -66,6 +66,36 @@ describe("registry", () => {
     expect(result.message).toContain("Already registered");
   });
 
+  test("ib add (addRepo, basename) refuses a name already registered, case-insensitively", async () => {
+    const first = join(tempDir, "a", "app");
+    const second = join(tempDir, "b", "App");
+    await mkdir(first, { recursive: true });
+    await mkdir(second, { recursive: true });
+    expect((await addRepo(first)).ok).toBe(true);
+    const result = await addRepo(second);
+    expect(result.ok).toBe(false);
+    expect(result.message).toBe(`"App" is already the name of a registered repo (${first}) — repo names must be unique`);
+    expect((await listRepos()).map((r) => r.path)).toEqual([first]);
+  });
+
+  test("folder browser [ Add ] (addRepo with a name) refuses a registered name or nickname, case-insensitively", async () => {
+    await saveRegistry({ repos: [{ path: "/x/one", name: "one" }, { path: "/x/two", name: "two", nickname: "web" }] });
+    const dir = join(tempDir, "folder");
+    await mkdir(dir);
+    expect((await addRepo(dir, "ONE")).message).toContain("already the name of a registered repo (/x/one)");
+    expect((await addRepo(dir, "Web")).message).toContain("already the name of a registered repo (/x/two)");
+    expect((await addRepo(dir, "three")).ok).toBe(true);
+  });
+
+  test("duplicate names already registered are left alone", async () => {
+    await saveRegistry({ repos: [{ path: "/x/one", name: "app" }, { path: "/y/one", name: "app" }] });
+    expect((await listRepos()).length).toBe(2);
+    const dir = join(tempDir, "other");
+    await mkdir(dir);
+    expect((await addRepo(dir)).ok).toBe(true);
+    expect((await listRepos()).map((r) => r.name)).toEqual(["app", "app", "other"]);
+  });
+
   test("addRepo rejects 'coordinator' basename", async () => {
     const repoDir = join(tempDir, "coordinator");
     await mkdir(repoDir, { recursive: true });

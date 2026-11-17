@@ -187,6 +187,16 @@ export async function checkNewRepoEntry(
     return `Already registered: ${resolvedPath}`;
   }
 
+  // Repo names are unique, case-insensitively: a repo's name is the middle
+  // segment of its agents' row keys in `ib watch` (`<machine>/<repo>/<agent>`,
+  // SPEC §17.1). A nickname counts as a name, since it is what the tree shows.
+  // Only new entries are checked; duplicates already registered stay.
+  const lower = repoName.toLowerCase();
+  const clash = registry.repos.find((r) => r.name.toLowerCase() === lower || r.nickname?.toLowerCase() === lower);
+  if (clash) {
+    return `"${repoName}" is already the name of a registered repo (${clash.path}) — repo names must be unique`;
+  }
+
   return null;
 }
 

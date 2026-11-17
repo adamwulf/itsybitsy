@@ -125,6 +125,15 @@ describe("createRepo", () => {
     expect(await readdir(parent)).toEqual([]);
   });
 
+  test("[ New Repo ] refuses a name already registered, case-insensitively, before creating the folder", async () => {
+    await saveRegistry({ repos: [{ path: "/elsewhere/app", name: "app" }] });
+    const result = await createRepo(parent, "App");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("already the name of a registered repo (/elsewhere/app)");
+    expect(await readdir(parent)).toEqual([]);
+    expect((await loadRegistry()).repos).toEqual([{ path: "/elsewhere/app", name: "app" }]);
+  });
+
   test("refuses a path that is already registered before creating the folder", async () => {
     const target = join(parent, "ghost");
     await saveRegistry({ repos: [{ path: target, name: "ghost" }] });

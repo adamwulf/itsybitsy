@@ -471,8 +471,10 @@ export function hasHelpFlag(args: string[]): boolean {
  */
 const COMMAND_HELP: Record<string, string> = {
   add:
-    "Usage: ib add [path]\n" +
-    "  Register a repo. Defaults to the current working directory.",
+    "Usage: ib add [path] [name]\n" +
+    "  Register a repo. Defaults to the current working directory.\n" +
+    "  The name defaults to the folder's name. Repo names are unique (ignoring\n" +
+    "  case), so give another name when that one is already registered.",
   remove:
     "Usage: ib remove <path|name>\n" +
     "  Unregister a previously added repo by absolute path or display name.",
@@ -936,7 +938,7 @@ function printUsage(): void {
   console.log("ib — Cross-repo agent dashboard");
   console.log("");
   console.log("Registry:");
-  console.log("  add [path]          Register a repo (default: cwd)");
+  console.log("  add [path] [name]   Register a repo (default: cwd; name: the folder's)");
   console.log("  remove <path>       Unregister a repo");
   console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
   console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
@@ -1090,7 +1092,8 @@ export async function main() {
   switch (command) {
     case "add": {
       const target = args[1] ?? process.cwd();
-      const result = await addRepo(target);
+      // An optional name: needed when the folder's name is already registered.
+      const result = await addRepo(target, args[2]);
       console.log(result.message);
       process.exit(result.ok ? 0 : 1);
       break;

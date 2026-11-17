@@ -194,7 +194,7 @@ export async function checkNewRepoEntry(
   const lower = repoName.toLowerCase();
   const clash = registry.repos.find((r) => r.name.toLowerCase() === lower || r.nickname?.toLowerCase() === lower);
   if (clash) {
-    return `"${repoName}" is already the name of a registered repo (${clash.path}) — repo names must be unique`;
+    return `"${repoName}" is already the name of a registered repo (${clash.path}) — repo names must be unique; use ib add <path> <name>`;
   }
 
   return null;

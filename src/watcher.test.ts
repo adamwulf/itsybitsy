@@ -1476,3 +1476,59 @@ describe("health-check throttling (D2)", () => {
     });
   });
 });
+
+// SPEC §17.1 Row keys / §20.4: rows are keyed, and peers are sent, by a repo's
+// REGISTRY name, never its nickname. This runs the watcher with the real reader
+// (readAgentsOfRepos: no tmux) and the real buildAgentTree / flattenAgentTree,
+// so it covers the watcher handing `registryName: r.name` to both and the
+// reader copying it onto each agent.
+describe("AgentWatcher registry names", () => {
+  let base: string;
+
+  beforeEach(async () => {
+    base = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-registry-"));
+    coordinatorSpawnCtx.set(() => ({ stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(1) }) as any);
+    tmuxPollerSpawnCtx.set(() => ({ stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(1) }) as any);
+  });
+
+  afterEach(async () => {
+    agentsCtx.reset();
+    coordinatorSpawnCtx.reset();
+    tmuxPollerSpawnCtx.reset();
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("a nicknamed repo's agents and header carry the registry name; the display name stays the nickname", async () => {
+    const real = await import("./agents");
+    const { toRemoteAgents } = await import("./peers/peer-link");
+    agentsCtx.set({
+      readAllAgents: async (repos, includeArchived) => ({
+        ...(await real.readAgentsOfRepos(repos, includeArchived)),
+        orphanedTmuxSessions: [],
+        liveTmuxSessions: new Set<string>(),
+      }),
+      detectAgentStates: async () => {},
+      buildAgentTree: real.buildAgentTree,
+      flattenAgentTree: real.flattenAgentTree,
+      readPendingQuestions: async () => [],
+    });
+    const web = join(base, "web");
+    const other = join(base, "other");
+    for (const repo of [web, other]) await mkdir(join(repo, ".itsybitsy", "agents"), { recursive: true });
+    await mkdir(join(web, ".itsybitsy", "agents", "agent-1"));
+    await writeFile(join(web, ".itsybitsy", "agents", "agent-1", "meta.json"), JSON.stringify({ id: "agent-1", created_epoch: 1, model: "claude:sonnet", prompt: "x", manager: null }));
+
+    let seen: { agents: Agent[]; flat: FlatEntry[] } | null = null;
+    const repos: RepoEntry[] = [{ path: web, name: "web", nickname: "Website" }, { path: other, name: "other" }];
+    const watcher = new AgentWatcher(repos, { onUpdate: (agents, flat) => { seen = { agents, flat }; } });
+    await watcher.start();
+    watcher.stop();
+
+    const { agents, flat } = seen!;
+    expect(agents.map((a) => [a.repoName, a.repoRegistryName])).toEqual([["Website", "web"]]);
+    const header = flat.find((f) => f.kind === "repo-header" && f.repoPath === web);
+    expect(header).toMatchObject({ kind: "repo-header", repoName: "Website", repoRegistryName: "web" });
+    // What a peer is sent: shown as the nickname, keyed by the registry name.
+    expect(toRemoteAgents(agents)[0]).toMatchObject({ repoName: "Website", repoRegistryName: "web" });
+  });
+});

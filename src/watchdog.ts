@@ -1012,8 +1012,18 @@ export const RATE_LIMIT_MAX_RETRIES = 3;
 /** Delay between retry attempts in milliseconds */
 export const RATE_LIMIT_RETRY_DELAY_MS = 2_000;
 
+/**
+ * How far a usage reading must fall below the episode's high to count as a
+ * window reset. The combined reading is the newest report
+ * (src/claude-rate-limits.ts), which can dip a point or two with no reset:
+ * sessions write adjacent values out of order, and same-second ties are
+ * averaged. A reset falls much further (to 0% when the window ends, or from
+ * near the limit to a low value after a manual reset).
+ */
+const RESET_MIN_FALL_PCT = 5;
+
 function fellBelow(pct: number | null, high: number | null): boolean {
-  return pct !== null && high !== null && pct < high;
+  return pct !== null && high !== null && high - pct >= RESET_MIN_FALL_PCT;
 }
 
 function highestOf(pct: number | null, high: number | null): number | null {
@@ -1026,12 +1036,17 @@ function highestOf(pct: number | null, high: number | null): number | null {
  *
  * - A full window blocks the nudge: either window can stop an agent.
  * - A window that reset during the episode nudges right away, whatever the other
- *   window reads, as long as it isn't full. Usage only grows within a window, so
- *   a lower reading is taken as a reset (a window past its `resets_at` reads as
- *   0%, see src/claude-rate-limits.ts). This doesn't rely on seeing 100%, because
- *   the last reading before a stop can be lower. Tearing down the agent that held
- *   the highest report also lowers the combined reading, which costs one false
- *   nudge; the real reset still nudges later.
+ *   window reads, as long as it isn't full. A reading at least
+ *   RESET_MIN_FALL_PCT below the episode's high is taken as a reset; smaller
+ *   falls are jitter between sessions' reports. A window past its `resets_at`
+ *   reads as 0% by the clock alone. A manual limit reset keeps `resets_at` and
+ *   lowers the newest report of the window (see `combineWindows` in
+ *   src/claude-rate-limits.ts) only once some session reports after it, so if
+ *   every session is stopped at the limit the reading stays full until the user
+ *   prompts one. This doesn't rely on seeing 100%, because the last reading
+ *   before a stop can be lower. Tearing down the agent that held the newest
+ *   report can also lower the combined reading, which costs one false nudge;
+ *   the real reset still nudges later.
  * - Otherwise the reading doesn't explain the stop. If it looks clear (session
  *   below the recovery threshold, or weekly alone with no 5-hour window on any
  *   record), nudge on the RATE_LIMIT_NUDGE_BACKOFF_MS schedule.

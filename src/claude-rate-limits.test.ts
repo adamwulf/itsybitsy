@@ -5,10 +5,12 @@ import { tmpdir } from "os";
 import {
   CLAUDE_RATE_LIMITS_FILE,
   claudeUsageFromRecord,
+  combineWindows,
   deleteClaudeRateLimits,
   parseStatuslineRateLimits,
   readClaudeUsage,
   recordClaudeRateLimits,
+  type ClaudeRateLimitsRecord,
 } from "./claude-rate-limits";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 
@@ -85,6 +87,55 @@ describe("claudeUsageFromRecord", () => {
     expect(usage.sessionReset).toBeNull();
     expect(usage.sessionWindowEnded).toBeUndefined();
     expect(usage.weeklyPct).toBe(5);
+  });
+});
+
+describe("combineWindows", () => {
+  const RESET = NOW_S + 3 * 86_400;
+  /** A record whose only window is a weekly report of `pct` written at `updatedAt`. */
+  const weekly = (updatedAt: number, pct: number, resets_at = RESET): ClaudeRateLimitsRecord =>
+    ({ updatedAt, seven_day: { used_percentage: pct, resets_at } });
+
+  test("after a manual reset, the newest report wins over higher older ones in the same window", () => {
+    // A reset keeps resets_at and drops used_percentage; idle sessions still
+    // hold their readings from before it.
+    const records = [
+      weekly(NOW_S - 3000, 96),
+      weekly(NOW_S - 2000, 95),
+      weekly(NOW_S - 1000, 93),
+      weekly(NOW_S - 60, 20),
+      weekly(NOW_S - 30, 20),
+    ];
+    expect(combineWindows(records, "seven_day")).toEqual({ used_percentage: 20, resets_at: RESET });
+  });
+
+  test("normal growth: the newest report, which is also the highest, wins", () => {
+    const records = [weekly(NOW_S - 600, 40), weekly(NOW_S - 300, 42), weekly(NOW_S - 60, 45)];
+    expect(combineWindows(records, "seven_day")).toEqual({ used_percentage: 45, resets_at: RESET });
+  });
+
+  test("reports that share the newest updatedAt and disagree give their average", () => {
+    const records = [weekly(NOW_S - 600, 96), weekly(NOW_S, 19), weekly(NOW_S, 20)];
+    expect(combineWindows(records, "seven_day")).toEqual({ used_percentage: 19.5, resets_at: RESET });
+  });
+
+  test("a later window wins over an earlier one whatever their updatedAt", () => {
+    // The old window's report is the most recently written; it still loses.
+    const records: ClaudeRateLimitsRecord[] = [
+      { updatedAt: NOW_S, five_hour: { used_percentage: 100, resets_at: NOW_S - 60 } },
+      { updatedAt: NOW_S - 300, five_hour: { used_percentage: 2, resets_at: NOW_S + 5 * 3600 } },
+    ];
+    expect(combineWindows(records, "five_hour")).toEqual({ used_percentage: 2, resets_at: NOW_S + 5 * 3600 });
+  });
+
+  test("a newer record without the window does not count; no report gives undefined", () => {
+    const records: ClaudeRateLimitsRecord[] = [
+      weekly(NOW_S - 600, 30),
+      { updatedAt: NOW_S, five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 } },
+    ];
+    expect(combineWindows(records, "seven_day")).toEqual({ used_percentage: 30, resets_at: RESET });
+    expect(combineWindows([weekly(NOW_S, 30)], "five_hour")).toBeUndefined();
+    expect(combineWindows([], "seven_day")).toBeUndefined();
   });
 });
 
@@ -166,7 +217,7 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     expect(live.data?.sessionPct).toBe(2);
   });
 
-  test("combines the windows of all agents: the current window, its highest usage", async () => {
+  test("combines the windows of all agents: the current window, its newest report", async () => {
     await recordClaudeRateLimits("agent-a", {
       five_hour: { used_percentage: 20, resets_at: NOW_S + 3600 },
       seven_day: { used_percentage: 40, resets_at: NOW_S + 86_400 },
@@ -185,24 +236,47 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     });
   });
 
-  test("an idle session's later write of old values does not win", async () => {
-    // The account is at 100% in the current window (agent-busy). An idle
-    // session last saw the previous window and a lower value in this one;
-    // its statusline runs later (a mode toggle, a refreshInterval) and so
-    // its record is the most recently written. The reading must stay 100%.
+  test("an idle session re-running its statusline with old values does not win", async () => {
+    // An idle session last saw 2% in the current window; the account has
+    // since reached 100% (agent-busy). The idle session's statusline runs
+    // again later (a mode toggle, a refreshInterval) with its old values, so
+    // the write is skipped and its record keeps the older updatedAt.
+    await recordClaudeRateLimits("agent-idle-same-window", {
+      five_hour: { used_percentage: 2, resets_at: NOW_S + 3600 },
+    }, NOW_MS - 900_000);
     await recordClaudeRateLimits("agent-busy", {
       five_hour: { used_percentage: 100, resets_at: NOW_S + 3600 },
     }, NOW_MS - 600_000);
-    await recordClaudeRateLimits("agent-idle-old-window", {
-      five_hour: { used_percentage: 3, resets_at: NOW_S - 14_400 },
-    }, NOW_MS - 10_000);
     await recordClaudeRateLimits("agent-idle-same-window", {
       five_hour: { used_percentage: 2, resets_at: NOW_S + 3600 },
     }, NOW_MS - 5_000);
+    // A session that last saw the previous window, written most recently.
+    await recordClaudeRateLimits("agent-idle-old-window", {
+      five_hour: { used_percentage: 3, resets_at: NOW_S - 14_400 },
+    }, NOW_MS - 1_000);
 
     const result = await readClaudeUsage(new Date(NOW_MS));
     expect(result.data?.sessionPct).toBe(100);
     expect(result.data?.sessionReset).toBe("1h 0m");
+  });
+
+  test("a manual weekly reset reads as the newest report, not the highest (live 96%-vs-20% case)", async () => {
+    // Recorded 2026-11-17: idle agents still held the reading from before
+    // the user reset the weekly limit, newer ones reported after it. All
+    // carry the same resets_at. The footer showed 96%; the real usage was 20%.
+    const resetsAt = 1795176000;
+    const at = (s: number) => s * 1000;
+    await recordClaudeRateLimits("phase1-cleanup", { seven_day: { used_percentage: 96, resets_at: resetsAt } }, at(1794810325));
+    await recordClaudeRateLimits("older-idle-a", { seven_day: { used_percentage: 95, resets_at: resetsAt } }, at(1794805000));
+    await recordClaudeRateLimits("older-idle-b", { seven_day: { used_percentage: 93, resets_at: resetsAt } }, at(1794790000));
+    // Two agents wrote 19 and 20 in the same second; a later one wrote 20.
+    await recordClaudeRateLimits("today-a", { seven_day: { used_percentage: 19, resets_at: resetsAt } }, at(1794940000));
+    await recordClaudeRateLimits("today-b", { seven_day: { used_percentage: 20, resets_at: resetsAt } }, at(1794940000));
+    await recordClaudeRateLimits("today-c", { seven_day: { used_percentage: 20, resets_at: resetsAt } }, at(1794945000));
+
+    const result = await readClaudeUsage(new Date(at(1794950256)));
+    expect(result.error).toBe(false);
+    expect(result.data?.weeklyPct).toBe(20);
   });
 
   test("a new window's report wins over a higher report of the window that just reset", async () => {
@@ -222,11 +296,13 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
   });
 
   test("reports of one window with slightly different reset times are combined", async () => {
-    await recordClaudeRateLimits("agent-a", {
-      five_hour: { used_percentage: 90, resets_at: NOW_S + 3600 },
-    }, NOW_MS);
+    // agent-b's later resets_at does not put agent-a's newer report in an
+    // older window.
     await recordClaudeRateLimits("agent-b", {
       five_hour: { used_percentage: 4, resets_at: NOW_S + 3630 },
+    }, NOW_MS - 60_000);
+    await recordClaudeRateLimits("agent-a", {
+      five_hour: { used_percentage: 90, resets_at: NOW_S + 3600 },
     }, NOW_MS);
 
     const result = await readClaudeUsage(new Date(NOW_MS));

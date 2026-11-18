@@ -3,7 +3,7 @@ import { join } from "path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
-import { claudeUsageFromRecord, type ClaudeRateLimits } from "./claude-rate-limits";
+import { claudeUsageFromRecord, readClaudeUsage, recordClaudeRateLimits, type ClaudeRateLimits } from "./claude-rate-limits";
 import { agentOutboxDir, readOutbox } from "./outbox";
 import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
@@ -2228,6 +2228,56 @@ describe("watchdog", () => {
 
         expect(nudges().length).toBe(1);
         expect(nudges()[0]).toContain(`Usage has refreshed ${expectedText}`);
+      });
+
+      test("a manual weekly reset nudges once a newer record reports the drop", async () => {
+        // Real records under the test home. Idle agents keep the reading from
+        // before the user reset the weekly limit (same resets_at); a newer
+        // record reports the drop. The combined reading has to fall, or the
+        // stopped agent is never nudged.
+        const recordIds = ["rl-idle-a", "rl-idle-b", "rl-fresh"];
+        setWatchdogFetchUsage(() => readClaudeUsage(new Date(now)));
+        try {
+          await recordClaudeRateLimits("rl-idle-a", { seven_day: live(96) }, now - 1_200_000);
+          await recordClaudeRateLimits("rl-idle-b", { seven_day: live(100) }, now - 600_000);
+          await tick([agent("a1", "rate_limited")]);
+          expect(nudges()).toEqual([]);
+
+          now += 5_000;
+          await recordClaudeRateLimits("rl-fresh", { seven_day: live(20) }, now);
+          await tick([agent("a1", "rate_limited")]);
+
+          expect(nudges().length).toBe(1);
+          expect(nudges()[0]).toContain("Usage has refreshed (weekly 20%)");
+        } finally {
+          for (const id of recordIds) rmSync(agentOutboxDir(id), { recursive: true, force: true });
+        }
+      });
+
+      const jitter: Array<[string, (pct: number) => ClaudeRateLimits]> = [
+        ["session", (pct) => ({ five_hour: live(pct), seven_day: live(30) })],
+        ["weekly", (pct) => ({ seven_day: live(pct) })],
+      ];
+
+      test.each(jitter)("a newer %s record a point lower is not a reset", async (_name, windows) => {
+        // Real records under the test home. Sessions can write adjacent values
+        // out of order, so the combined (newest) reading can dip a point with
+        // no reset. That dip must not nudge outside the backoff schedule.
+        const recordIds = ["rl-earlier", "rl-later"];
+        setWatchdogFetchUsage(() => readClaudeUsage(new Date(now)));
+        try {
+          await recordClaudeRateLimits("rl-earlier", windows(60), now - 600_000);
+          await tick([agent("a1", "rate_limited")]);
+          expect(nudges()).toEqual([]);
+
+          now += 5_000;
+          await recordClaudeRateLimits("rl-later", windows(59), now);
+          await tick([agent("a1", "rate_limited")]);
+
+          expect(nudges()).toEqual([]);
+        } finally {
+          for (const id of recordIds) rmSync(agentOutboxDir(id), { recursive: true, force: true });
+        }
       });
 
       test("one reset nudges once, then the agent is on the backoff schedule", async () => {

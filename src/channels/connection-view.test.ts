@@ -20,19 +20,19 @@ function view(partial: Partial<TelegramConnectionView>): TelegramConnectionView 
 }
 
 describe("deriveTelegramConnection", () => {
-  test("boot connecting, with and without an error yet", () => {
-    expect(deriveTelegramConnection({ phase: "connecting", lastError: null, lastErrorAt: null })).toEqual(
+  test("boot connecting, with and without an error yet, carries the queued item count", () => {
+    expect(deriveTelegramConnection({ phase: "connecting", lastError: null, lastErrorAt: null, outboxPending: 0 })).toEqual(
       view({ state: "connecting" }),
     );
-    expect(deriveTelegramConnection({ phase: "connecting", lastError: "HTTP 502", lastErrorAt: 500 })).toEqual(
-      view({ state: "connecting", lastError: "HTTP 502", lastErrorAt: 500 }),
-    );
+    expect(
+      deriveTelegramConnection({ phase: "connecting", lastError: "HTTP 502", lastErrorAt: 500, outboxPending: 2 }),
+    ).toEqual(view({ state: "connecting", lastError: "HTTP 502", lastErrorAt: 500, outboxPending: 2 }));
   });
 
-  test("boot disabled carries the reason", () => {
-    expect(deriveTelegramConnection({ phase: "disabled", reason: "bot token rejected (HTTP 401)", at: 9 })).toEqual(
-      view({ state: "disabled", lastError: "bot token rejected (HTTP 401)", lastErrorAt: 9 }),
-    );
+  test("boot disabled carries the reason and the queued item count", () => {
+    expect(
+      deriveTelegramConnection({ phase: "disabled", reason: "bot token rejected (HTTP 401)", at: 9, outboxPending: 1 }),
+    ).toEqual(view({ state: "disabled", lastError: "bot token rejected (HTTP 401)", lastErrorAt: 9, outboxPending: 1 }));
   });
 
   test("running: polling and a healthy outbox is connected, with the pending count", () => {
@@ -118,6 +118,13 @@ describe("telegramHelpDetail", () => {
     expect(
       telegramHelpDetail(view({ state: "connecting", lastError: "errno:ETIMEDOUT", lastErrorAt: now - 12_000 }), now),
     ).toEqual(["connecting — errno:ETIMEDOUT (12s ago)"]);
+    // Messages dropped while boot is still connecting are counted too.
+    expect(
+      telegramHelpDetail(
+        view({ state: "connecting", lastError: "HTTP 502", lastErrorAt: now - 40_000, outboxPending: 2 }),
+        now,
+      ),
+    ).toEqual(["connecting — HTTP 502 (40s ago); 2 queued"]);
   });
 
   test("disabled shows the reason and no age", () => {

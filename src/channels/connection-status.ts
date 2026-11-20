@@ -47,7 +47,10 @@ export interface TelegramConnectionStatus {
   lastError: string | null;
   /** Epoch ms when `lastError` was observed, or null. */
   lastErrorAt: number | null;
-  /** Outbox items (texts, reactions, files) not yet delivered. */
+  /** Outbox items (texts, reactions, files) not yet delivered. While boot is
+   *  still connecting or routing is disabled there is no outbox, and this is
+   *  the count of item files waiting in the outbox dir (refreshed on the
+   *  monitor's 5 s backstop and on boot events). */
   outboxPending: number;
   /** pid of the `ib watch` process that wrote the file. */
   pid: number;

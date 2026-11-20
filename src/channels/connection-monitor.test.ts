@@ -24,7 +24,7 @@ import {
   logCtx as dispatcherLogCtx,
 } from "./dispatcher";
 import type { OutboxHealth, OutboxHealthChangeFn } from "./outbox";
-import { TelegramOutbox, setOutboxDir, resetOutboxDir } from "./outbox";
+import { TelegramOutbox, setOutboxDir, resetOutboxDir, countQueuedOutboxItems } from "./outbox";
 import { resetMessageCache } from "./message-cache";
 import {
   TelegramClient,
@@ -124,10 +124,13 @@ interface Harness {
   logs: string[];
   wake: ReturnType<typeof makeFakeWake>;
   setNow: (ms: number) => void;
+  /** Item files "in the outbox dir" while there is no outbox. */
+  setQueuedFiles: (n: number) => void;
 }
 
 function makeMonitor(opts: { writeStatus?: (s: TelegramConnectionStatus) => Promise<void> } = {}): Harness {
   let now = 1_000;
+  let queuedFiles = 0;
   const views: TelegramConnectionView[] = [];
   const writes: TelegramConnectionStatus[] = [];
   const clears: number[] = [];
@@ -147,8 +150,18 @@ function makeMonitor(opts: { writeStatus?: (s: TelegramConnectionStatus) => Prom
     clearStatus: async (pid) => {
       clears.push(pid);
     },
+    countQueuedItems: () => queuedFiles,
   });
-  return { monitor, views, writes, clears, logs, wake, setNow: (ms) => { now = ms; } };
+  return {
+    monitor,
+    views,
+    writes,
+    clears,
+    logs,
+    wake,
+    setNow: (ms) => { now = ms; },
+    setQueuedFiles: (n) => { queuedFiles = n; },
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -189,6 +202,46 @@ describe("TelegramConnectionMonitor", () => {
     });
     await h.monitor.flush();
     expect(h.writes.length).toBe(1);
+  });
+
+  test("before the outbox exists, outboxPending counts the item files waiting in the outbox dir", async () => {
+    const h = makeMonitor();
+    h.monitor.bootRetry("HTTP 502");
+    expect(h.monitor.view()?.outboxPending).toBe(0);
+    // `ib tgsend` drops two messages during the outage; the 5 s backstop sees them.
+    h.setQueuedFiles(2);
+    h.monitor.refresh();
+    expect(h.monitor.view()).toEqual({ state: "connecting", lastError: "HTTP 502", lastErrorAt: 1_000, outboxPending: 2 });
+    h.monitor.refresh(); // unchanged: no new view, no new write
+    h.monitor.bootDisabled("Telegram routing disabled: another poller or webhook is active");
+    expect(h.monitor.view()?.outboxPending).toBe(2);
+    await h.monitor.flush();
+    expect(h.writes.map((w) => [w.state, w.outboxPending])).toEqual([
+      ["connecting", 0],
+      ["connecting", 2],
+      ["disabled", 2],
+    ]);
+
+    // Once attached, the outbox's own count is used, not the dir.
+    const d = makeFakeDispatcher();
+    const o = makeFakeOutbox();
+    const attached = makeMonitor();
+    attached.setQueuedFiles(5);
+    attached.monitor.attach(d.dispatcher, o.outbox);
+    expect(attached.monitor.view()?.outboxPending).toBe(0);
+  });
+
+  test("countQueuedOutboxItems counts .txt, .react.json and .file.json only; 0 for a missing dir", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tg-monitor-count-"));
+    try {
+      expect(countQueuedOutboxItems(join(root, "missing"))).toBe(0);
+      for (const name of ["1-a.txt", "2-b.react.json", "3-c.file.json", "4-d.txt.tmp", "1-a.txt.result", "5-e.txt.progress"]) {
+        await writeFile(join(root, name), "x");
+      }
+      expect(countQueuedOutboxItems(root)).toBe(3);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("attach: connecting until start() settles, then connected", () => {
@@ -414,6 +467,7 @@ describe("TelegramConnectionMonitor", () => {
         writes.push(s);
       },
       clearStatus: async () => {},
+      countQueuedItems: () => 0,
     });
     monitor.refresh();
     await monitor.flush();
@@ -436,7 +490,7 @@ describe("TelegramConnectionMonitor with the real status file", () => {
   });
 
   test("writes the current state for readers and removes the file on dispose", async () => {
-    const monitor = new TelegramConnectionMonitor({ log: () => {}, now: () => 123 });
+    const monitor = new TelegramConnectionMonitor({ log: () => {}, now: () => 123, countQueuedItems: () => 0 });
     monitor.bootRetry("HTTP 502");
     await monitor.flush();
     const read = await readTelegramStatus();

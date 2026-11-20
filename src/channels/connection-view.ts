@@ -29,16 +29,19 @@ export interface TelegramConnectionView {
   lastError: string | null;
   /** When `lastError` first appeared (epoch ms), or null. */
   lastErrorAt: number | null;
-  /** Outbox items not yet delivered; 0 before the outbox exists. */
+  /** Outbox items not yet delivered. Before the outbox exists (boot
+   *  connecting, or disabled) this is the count of item files waiting in the
+   *  outbox dir. */
   outboxPending: number;
 }
 
 /** What the monitor knows. `running` means boot succeeded and the dispatcher
  *  and outbox exist; `dispatcherStarted` is false until the dispatcher's
- *  `start()` (its startup probe) has settled. */
+ *  `start()` (its startup probe) has settled. Before that, `outboxPending` is
+ *  the number of item files in the outbox dir. */
 export type TelegramConnectionInputs =
-  | { phase: "connecting"; lastError: string | null; lastErrorAt: number | null }
-  | { phase: "disabled"; reason: string; at: number | null }
+  | { phase: "connecting"; lastError: string | null; lastErrorAt: number | null; outboxPending: number }
+  | { phase: "disabled"; reason: string; at: number | null; outboxPending: number }
   | {
       phase: "running";
       dispatcherStarted: boolean;
@@ -48,10 +51,15 @@ export type TelegramConnectionInputs =
 
 export function deriveTelegramConnection(inputs: TelegramConnectionInputs): TelegramConnectionView {
   if (inputs.phase === "connecting") {
-    return { state: "connecting", lastError: inputs.lastError, lastErrorAt: inputs.lastErrorAt, outboxPending: 0 };
+    return {
+      state: "connecting",
+      lastError: inputs.lastError,
+      lastErrorAt: inputs.lastErrorAt,
+      outboxPending: inputs.outboxPending,
+    };
   }
   if (inputs.phase === "disabled") {
-    return { state: "disabled", lastError: inputs.reason, lastErrorAt: inputs.at, outboxPending: 0 };
+    return { state: "disabled", lastError: inputs.reason, lastErrorAt: inputs.at, outboxPending: inputs.outboxPending };
   }
   const { dispatcher, outbox } = inputs;
   const pending = outbox.pending;

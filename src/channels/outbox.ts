@@ -103,7 +103,7 @@
 import { join } from "path";
 import { userHome } from "../home";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
-import { watch, type FSWatcher } from "node:fs";
+import { readdirSync, watch, type FSWatcher } from "node:fs";
 import type { TelegramClient } from "./telegram-client";
 import { classifyError, isAbortError, isTransientStatus, sleepCtx } from "./telegram-client";
 import { backoffDelayMs, type BackoffOptions } from "./backoff";
@@ -1122,6 +1122,19 @@ function retryDelayMs(attempt: number, opts: BackoffOptions, retryAfterSec: numb
  *  Sidecars (`.tmp`, `.result`, `.progress`) are not queued items. */
 function isQueuedFile(name: string): boolean {
   return name.endsWith(".txt") || name.endsWith(".react.json") || name.endsWith(".file.json");
+}
+
+/** Count the queued items (`.txt`, `.react.json`, `.file.json`) in the outbox
+ *  dir; 0 when it cannot be read. `ib watch` uses it while there is no
+ *  `TelegramOutbox` yet (boot still connecting, or routing disabled), so the
+ *  status file and `?` help can still say how many messages wait. One cheap
+ *  readdir of a normally-empty dir. */
+export function countQueuedOutboxItems(dir: string = defaultOutboxDir()): number {
+  try {
+    return readdirSync(dir).filter(isQueuedFile).length;
+  } catch {
+    return 0;
+  }
 }
 
 /** Pull a usable `message_id` out of a `sendMessage` success body, or null.

@@ -20,9 +20,10 @@
  *     boot is still retrying, boot hears the same wake and cuts its own
  *     backoff short.
  *
- * `refresh()` re-derives from the dispatcher's and outbox's `getHealth()`;
- * `ib watch` also calls it from its 5 s status timer as a backstop for any
- * change that did not fire an event.
+ * `refresh()` re-derives from the dispatcher's and outbox's `getHealth()`
+ * (before boot succeeds, from the boot phase plus a count of the item files in
+ * the outbox dir); `ib watch` also calls it from its 5 s status timer as a
+ * backstop for any change that did not fire an event.
  */
 
 import {
@@ -38,7 +39,7 @@ import {
   type TelegramConnectionView,
 } from "./connection-view";
 import type { DispatcherStateChange, TelegramDispatcher } from "./dispatcher";
-import type { OutboxHealth, TelegramOutbox } from "./outbox";
+import { countQueuedOutboxItems, type OutboxHealth, type TelegramOutbox } from "./outbox";
 import type { WakeEvent, WakeSource } from "./wake-detector";
 
 export interface ConnectionMonitorOptions {
@@ -56,6 +57,9 @@ export interface ConnectionMonitorOptions {
   writeStatus?: (status: TelegramConnectionStatus) => Promise<void>;
   /** Status file remover. Defaults to `clearTelegramStatus`. */
   clearStatus?: (ownerPid: number) => Promise<void>;
+  /** Items waiting in the outbox dir, used only while there is no outbox
+   *  (boot connecting, or disabled). Defaults to `countQueuedOutboxItems`. */
+  countQueuedItems?: () => number;
 }
 
 /** Boot progress; `running` carries what boot built. */
@@ -71,6 +75,7 @@ export class TelegramConnectionMonitor {
   private readonly pid: number;
   private readonly writeStatus: (status: TelegramConnectionStatus) => Promise<void>;
   private readonly clearStatus: (ownerPid: number) => Promise<void>;
+  private readonly countQueuedItems: () => number;
 
   private boot: BootPhase = { phase: "connecting", lastError: null, lastErrorAt: null };
   private dispatcherStarted = false;
@@ -89,6 +94,7 @@ export class TelegramConnectionMonitor {
     this.pid = opts.pid ?? process.pid;
     this.writeStatus = opts.writeStatus ?? writeTelegramStatus;
     this.clearStatus = opts.clearStatus ?? clearTelegramStatus;
+    this.countQueuedItems = opts.countQueuedItems ?? (() => countQueuedOutboxItems());
     if (opts.wake) this.unsubscribes.push(opts.wake.onWake((event) => this.handleWake(event)));
   }
 
@@ -163,7 +169,17 @@ export class TelegramConnectionMonitor {
   }
 
   private inputs(): TelegramConnectionInputs {
-    if (this.boot.phase !== "running") return this.boot;
+    // No outbox yet: count the item files `ib tgsend` dropped meanwhile, so
+    // a long outage at startup still reads "N queued". A readdir per refresh
+    // (boot events and the 5 s backstop), only until boot succeeds.
+    if (this.boot.phase === "connecting") {
+      const { lastError, lastErrorAt } = this.boot;
+      return { phase: "connecting", lastError, lastErrorAt, outboxPending: this.countQueuedItems() };
+    }
+    if (this.boot.phase === "disabled") {
+      const { reason, at } = this.boot;
+      return { phase: "disabled", reason, at, outboxPending: this.countQueuedItems() };
+    }
     return {
       phase: "running",
       dispatcherStarted: this.dispatcherStarted,

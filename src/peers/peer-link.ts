@@ -17,7 +17,7 @@
  * `readToEnd(1 MB)`. No framing code.
  *
  *   dialer    → {"op":"agents"}
- *   responder → {"op":"agents","agents":[{id, nickname, repoName, repoRegistryName, repoPath, state, agentType, manager}, …]}
+ *   responder → {"op":"agents","repos":[{registryName, displayName}, …],"agents":[{id, nickname, repoName, repoRegistryName, repoPath, state, agentType, manager}, …]}
  *             | {"op":"error","reason":"…"}   (an unknown op, a list over 1 MB, an internal error)
  *
  * A request over 4096 bytes, or one that is not UTF-8, not JSON, not an object
@@ -31,6 +31,7 @@
  * throws {@link PairProtocolError} when the stream is over its limit.
  */
 
+import { repoDisplayName, type RepoEntry } from "../registry";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { PairProtocolError, type PairCloseInfo, type PairConnection, type PairStream } from "./pairing";
@@ -71,6 +72,23 @@ export interface RemoteAgent {
   agentType: string | null;
   /** The id of the agent's manager, so the receiving side can nest it. */
   manager: string | null;
+}
+
+export interface RemoteRepo {
+  registryName: string;
+  displayName: string;
+}
+
+export interface PeerSnapshot {
+  repos: RemoteRepo[];
+  agents: RemoteAgent[];
+}
+
+export function peerSnapshot(repos: readonly RepoEntry[], agents: readonly Agent[]): PeerSnapshot {
+  return {
+    repos: repos.map((repo) => ({ registryName: repo.name, displayName: repoDisplayName(repo) })),
+    agents: toRemoteAgents(agents),
+  };
 }
 
 /** A request, reply or agent entry that is malformed, oversized, or not what the protocol allows. */
@@ -132,8 +150,8 @@ function encodeErrorReply(reason: string): Uint8Array {
 }
 
 /** The `agents` reply, or an error reply when the list is over {@link PEER_MAX_REPLY_BYTES}. */
-export function encodeAgentsReply(agents: RemoteAgent[]): Uint8Array {
-  const bytes = encodeJson({ op: "agents", agents });
+export function encodeAgentsReply({ repos, agents }: PeerSnapshot): Uint8Array {
+  const bytes = encodeJson({ op: "agents", repos, agents });
   if (bytes.length > PEER_MAX_REPLY_BYTES) return encodeErrorReply(`the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`);
   return bytes;
 }
@@ -204,14 +222,22 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
  * Parse an `agents` reply. Throws {@link PeerErrorReply} for an error reply
  * and {@link PeerProtocolError} for anything malformed.
  */
-export function decodeAgentsReply(bytes: Uint8Array): RemoteAgent[] {
+export function decodeAgentsReply(bytes: Uint8Array): PeerSnapshot {
   const message = decodeObject(bytes, "reply");
   if (message.op === "error") {
     const reason = typeof message.reason === "string" ? cleanRemoteText(message.reason) : "";
     throw new PeerErrorReply(`the other side reported: ${reason || "an error"}`);
   }
   if (message.op !== "agents" || !Array.isArray(message.agents)) throw new PeerProtocolError("reply is not an agent list");
-  return message.agents.map(parseRemoteAgent);
+  if (!Array.isArray(message.repos)) throw new PeerProtocolError("reply has no repo list");
+  const repos = message.repos.map((entry: unknown, i: number) => {
+    if (!entry || typeof entry !== "object" || !("registryName" in entry) || typeof entry.registryName !== "string"
+        || !("displayName" in entry) || typeof entry.displayName !== "string") {
+      throw new PeerProtocolError(`repo ${i} in the reply is malformed`);
+    }
+    return { registryName: cleanField(entry.registryName), displayName: cleanField(entry.displayName) };
+  });
+  return { repos, agents: message.agents.map(parseRemoteAgent) };
 }
 
 /** What a close of the trusted connection means, as the poller shows it. */
@@ -248,7 +274,7 @@ function errorDetail(err: unknown): string {
  * failure: the transport's error, a {@link PeerErrorReply}, or a
  * {@link PeerProtocolError} for a malformed or oversized reply.
  */
-export async function requestAgents(conn: PairConnection): Promise<RemoteAgent[]> {
+export async function requestAgents(conn: PairConnection): Promise<PeerSnapshot> {
   const stream = await conn.openBi();
   await stream.writeAll(encodePeerRequest("agents"));
   await stream.finish();
@@ -270,7 +296,7 @@ export interface PeerResponderDeps {
   /** Whether `id` is in `peers.json`, re-read on every call. A failed read must answer false. */
   isPeer(id: string): Promise<boolean>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
-  snapshot(): RemoteAgent[];
+  snapshot(): PeerSnapshot;
   /** watch.log in `ib watch`. */
   log(line: string): void;
 }

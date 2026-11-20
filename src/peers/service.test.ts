@@ -197,7 +197,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
     now: clock.now,
     setTimer: clock.setTimer,
     log: (line) => logs.push(line),
-    agents: () => [],
+    snapshot: () => ({ repos: [], agents: [] }),
     ...overrides,
   });
   return { service, endpoint, logs, binds, clock, calls };
@@ -361,7 +361,7 @@ describe("PeerService binding", () => {
   test("the real defaults are never reached: the addon loader throws in this file", async () => {
     // Guard for the tests above: they inject bindEndpoint, so the addon is never needed.
     const { defaultPeerServiceDeps } = await import("./service");
-    const deps = defaultPeerServiceDeps(() => {}, () => []);
+    const deps = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }));
     await expect(deps.bindEndpoint(new Uint8Array(32), [PAIR_ALPN])).rejects.toThrow("a service test loaded the iroh addon");
   });
 });
@@ -531,7 +531,7 @@ function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: stri
   endpoint.connectImpl = async (id) => {
     const link = createMemoryLink("00".repeat(32), id);
     served.push(link.b);
-    void serveTrustedConnection(link.b, { isPeer: async () => true, snapshot: () => agents, log: () => {} });
+    void serveTrustedConnection(link.b, { isPeer: async () => true, snapshot: () => ({ repos: [], agents }), log: () => {} });
     const conn = serviceConnection(link.a, PEER_ALPN);
     return {
       ...conn,
@@ -562,7 +562,7 @@ describe("PeerService at boot", () => {
 
     await waitFor(() => service.view().links[0]?.connected === true, { message: "peer polled" });
     expect(service.view().links).toEqual([
-      { id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: expect.any(Number), lastError: null, agents: REMOTE_AGENTS },
+      { id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: expect.any(Number), lastError: null, repos: [], agents: REMOTE_AGENTS },
     ]);
     expect(endpoint.connects).toEqual([ID_REMOTE]);
 
@@ -578,7 +578,7 @@ describe("PeerService at boot", () => {
       loads++;
       throw new Error("loaded");
     });
-    const realBind = defaultPeerServiceDeps(() => {}, () => []).bindEndpoint;
+    const realBind = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] })).bindEndpoint;
     for (const setup of [async () => {}, async () => {
       await mkdir(peerDir(), { recursive: true });
       await writeFile(peersFile(), "[]\n");
@@ -1415,9 +1415,9 @@ describe("PeerService trusted ALPN", () => {
     Object.assign(local.meta, { prompt: "SECRET PROMPT", agentType: "worker", manager: "agent-0", nickname: "nick" });
     let snapshots = 0;
     const { service, endpoint } = makeService({
-      agents: () => {
+      snapshot: () => {
         snapshots++;
-        return [local];
+        return { repos: [], agents: toRemoteAgents([local]) };
       },
     });
     endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
@@ -1426,7 +1426,7 @@ describe("PeerService trusted ALPN", () => {
 
     const listed = incomingFrom(endpoint, selfId, PEER_ALPN);
     const reply = await requestAgents(listed);
-    expect(reply).toEqual(toRemoteAgents([local]));
+    expect(reply).toEqual({ repos: [], agents: toRemoteAgents([local]) });
     expect(JSON.stringify(reply)).not.toContain("SECRET");
     expect(snapshots).toBe(1);
 

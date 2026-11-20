@@ -32,6 +32,7 @@ function remoteAgent(id: string, state = "running"): RemoteAgent {
 /** The other install: whether it lists us, what it reports, and the connections it has served. */
 interface Remote {
   allowed: boolean;
+  repos: { registryName: string; displayName: string }[];
   agents: RemoteAgent[];
   requests: number;
   /** The far (responder) end of each connection dialed to it. */
@@ -53,7 +54,7 @@ function makeRig(initialPeers: Peer[]) {
   const remote = (id: string): Remote => {
     let r = remotes.get(id);
     if (r === undefined) {
-      r = { allowed: true, agents: [remoteAgent(`agent-of-${id.slice(0, 4)}`)], requests: 0, served: [], stalled: false, overlaps: 0 };
+      r = { allowed: true, repos: [{ registryName: "app", displayName: "App" }], agents: [remoteAgent(`agent-of-${id.slice(0, 4)}`)], requests: 0, served: [], stalled: false, overlaps: 0 };
       remotes.set(id, r);
     }
     return r;
@@ -73,7 +74,7 @@ function makeRig(initialPeers: Peer[]) {
       },
       snapshot: () => {
         r.requests++;
-        return r.agents;
+        return { repos: r.repos, agents: r.agents };
       },
       log: () => {},
     });
@@ -144,6 +145,7 @@ describe("PeerPoller", () => {
       connected: true,
       lastOkAt: rig.clock.now(),
       lastError: null,
+      repos: rig.remote(P1).repos,
       agents: rig.remote(P1).agents,
     });
     for (let i = 2; i <= 4; i++) {
@@ -313,7 +315,7 @@ describe("PeerPoller", () => {
     });
     rig.poller.start();
     await waitFor(() => rig.state(P1)?.lastError !== null, { message: "first dial failed" });
-    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, lastOkAt: null, lastError: "timed out", agents: null });
+    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null });
 
     rig.setDial(rig.connect);
     rig.tick();
@@ -326,7 +328,7 @@ describe("PeerPoller", () => {
     rig.clock.jump(1_000);
     rig.remote(P1).served[0]!.close(PEER_CLOSE.done, "shutting down");
     await waitFor(() => rig.state(P1)?.connected === false, { message: "dropped" });
-    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, lastOkAt: okAt, lastError: "closed by the other side", agents: firstList });
+    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, lastOkAt: okAt, lastError: "closed by the other side", repos: rig.remote(P1).repos, agents: firstList });
 
     // Its list changes while it is away; the redial brings the new one.
     rig.remote(P1).agents = [remoteAgent("agent-new", "waiting")];

@@ -43,6 +43,8 @@ import {
   describePeerClose,
   requestAgents,
   type RemoteAgent,
+  type RemoteRepo,
+  type PeerSnapshot,
 } from "./peer-link";
 import type { PairConnection } from "./pairing";
 import { shortPeerId, type Peer } from "./store";
@@ -72,6 +74,7 @@ export interface PeerLinkState {
   /** Why the last dial or request failed, or the connection closed; null once a request succeeds. */
   lastError: string | null;
   /** The last agent list received, kept after the peer drops; null until one arrives. */
+  repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
 }
 
@@ -95,9 +98,10 @@ interface Link {
   connected: boolean;
   lastOkAt: number | null;
   lastError: string | null;
+  repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
   /** `agents` as JSON, to tell a changed list from the same one. */
-  agentsKey: string | null;
+  snapshotKey: string | null;
 }
 
 /** A failed dial or request, as one short line. */
@@ -149,6 +153,7 @@ export class PeerPoller {
       connected: link.connected,
       lastOkAt: link.lastOkAt,
       lastError: link.lastError,
+      repos: link.repos,
       agents: link.agents,
     }));
   }
@@ -227,8 +232,9 @@ export class PeerPoller {
           connected: false,
           lastOkAt: null,
           lastError: null,
+          repos: null,
           agents: null,
-          agentsKey: null,
+          snapshotKey: null,
         });
         changed = true;
       } else {
@@ -278,9 +284,9 @@ export class PeerPoller {
         link.conn = dialed;
         this.watchClose(link, dialed, generation);
       }
-      const agents = await this.requestWithTimeout(link, conn);
+      const snapshot = await this.requestWithTimeout(link, conn);
       if (!this.isCurrent(link, generation)) return;
-      this.succeeded(link, agents);
+      this.succeeded(link, snapshot);
     } catch (err) {
       if (!this.isCurrent(link, generation)) return;
       this.failed(link, describeFailure(err, conn));
@@ -295,7 +301,7 @@ export class PeerPoller {
    * other side's), closes it, which fails the pending request, and rejects
    * with {@link PeerRequestTimeout}.
    */
-  private requestWithTimeout(link: Link, conn: PairConnection): Promise<RemoteAgent[]> {
+  private requestWithTimeout(link: Link, conn: PairConnection): Promise<PeerSnapshot> {
     return new Promise((resolve, reject) => {
       let settled = false;
       const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
@@ -335,16 +341,17 @@ export class PeerPoller {
     );
   }
 
-  private succeeded(link: Link, agents: RemoteAgent[]): void {
+  private succeeded(link: Link, snapshot: PeerSnapshot): void {
     link.lastOkAt = this.deps.now();
-    const key = JSON.stringify(agents);
-    const changed = !link.connected || link.lastError !== null || key !== link.agentsKey;
+    const key = JSON.stringify(snapshot);
+    const changed = !link.connected || link.lastError !== null || key !== link.snapshotKey;
     if (!link.connected) this.deps.log(`peer link: connected to ${link.name} (${shortPeerId(link.id)})`);
     link.connected = true;
     link.lastError = null;
-    if (key !== link.agentsKey) {
-      link.agents = agents;
-      link.agentsKey = key;
+    if (key !== link.snapshotKey) {
+      link.repos = snapshot.repos;
+      link.agents = snapshot.agents;
+      link.snapshotKey = key;
     }
     if (changed) this.notify();
   }

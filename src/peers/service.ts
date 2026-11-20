@@ -61,7 +61,6 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
-import type { Agent } from "../agents";
 import { acquireEndpointLock, releaseEndpointLock, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
@@ -82,7 +81,7 @@ import {
   type PairStage,
   type PairStream,
 } from "./pairing";
-import { PEER_ALPN, serveTrustedConnection, toRemoteAgents } from "./peer-link";
+import { PEER_ALPN, serveTrustedConnection, type PeerSnapshot } from "./peer-link";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
 
@@ -135,14 +134,14 @@ export interface PeerServiceDeps {
    * fully detected snapshot (`watcher.lastDetectedAgents`, never the
    * mid-refresh `lastAgents`), so an answer costs no extra IO.
    */
-  agents(): readonly Agent[];
+  snapshot(): PeerSnapshot;
 }
 
 /**
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(log: (line: string) => void, agents: () => readonly Agent[]): PeerServiceDeps {
+export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot): PeerServiceDeps {
   return {
     acquireLock: () => acquireEndpointLock(),
     releaseLock: () => releaseEndpointLock(),
@@ -157,7 +156,7 @@ export function defaultPeerServiceDeps(log: (line: string) => void, agents: () =
       return () => clearTimeout(timer);
     },
     log,
-    agents,
+    snapshot,
   };
 }
 
@@ -802,7 +801,7 @@ export class PeerService {
       if (alpn === PEER_ALPN) {
         await serveTrustedConnection(toPairConnection(conn), {
           isPeer: (id) => this.isPeer(id),
-          snapshot: () => toRemoteAgents(this.deps.agents()),
+          snapshot: this.deps.snapshot,
           log: this.deps.log,
         });
         return;

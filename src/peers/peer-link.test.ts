@@ -20,6 +20,8 @@ import {
   requestAgents,
   serveTrustedConnection,
   toRemoteAgents,
+  peerSnapshot,
+  type PeerSnapshot,
   type RemoteAgent,
 } from "./peer-link";
 import { createMemoryLink, type MemoryConnection } from "./test-pair-transport";
@@ -55,7 +57,7 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { peers?: Set<string>; snapshot?: () => RemoteAgent[] } = {}) {
+function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot } = {}) {
   const link = createMemoryLink(ID_A, ID_B);
   const peers = options.peers ?? new Set([ID_A]);
   const logs: string[] = [];
@@ -68,7 +70,7 @@ function serve(options: { peers?: Set<string>; snapshot?: () => RemoteAgent[] } 
     },
     snapshot: () => {
       snapshots++;
-      return options.snapshot ? options.snapshot() : [];
+      return options.snapshot ? options.snapshot() : { repos: [], agents: [] };
     },
     log: (line) => logs.push(line),
   });
@@ -116,12 +118,14 @@ describe("toRemoteAgents", () => {
 
 describe("decodeAgentsReply", () => {
   test("rebuilds each entry from the allowed fields only, and strips control characters", () => {
-    const agents = decodeAgentsReply(
+    const { repos, agents } = decodeAgentsReply(
       encode({
         op: "agents",
+        repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
         agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoRegistryName: "app\x1b[31m", repoPath: "/r", state: "running", prompt: "leak", extra: { x: 1 } }],
       }),
     );
+    expect(repos).toEqual([{ registryName: "app", displayName: "App" }]);
     expect(agents).toEqual([{ id: "agent-1", nickname: null, repoName: "app[31m", repoRegistryName: "app[31m", repoPath: "/r", state: "running", agentType: null, manager: null }]);
     expect(Object.keys(agents[0]!).sort()).toEqual(ALLOWED_KEYS);
   });
@@ -130,9 +134,10 @@ describe("decodeAgentsReply", () => {
     // U+202E RIGHT-TO-LEFT OVERRIDE, U+2066 LEFT-TO-RIGHT ISOLATE, U+200B ZERO WIDTH SPACE,
     // U+200D ZERO WIDTH JOINER, U+FEFF BOM, U+00AD SOFT HYPHEN: all \p{Cf}.
     const cf = "‮⁦​‍﻿­";
-    const [agent] = decodeAgentsReply(
+    const { agents: [agent] } = decodeAgentsReply(
       encode({
         op: "agents",
+        repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
         agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoRegistryName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}` }],
       }),
     );
@@ -151,12 +156,16 @@ describe("decodeAgentsReply", () => {
     expect(() => decodeAgentsReply(encode("not json"))).toThrow(new PeerProtocolError("reply is not JSON"));
     expect(() => decodeAgentsReply(encode([1]))).toThrow(new PeerProtocolError("reply is not a JSON object"));
     expect(() => decodeAgentsReply(encode({ op: "agents" }))).toThrow(new PeerProtocolError("reply is not an agent list"));
-    expect(() => decodeAgentsReply(encode({ op: "agents", agents: [{ id: 1 }] }))).toThrow(
+    expect(() => decodeAgentsReply(encode({ op: "agents", repos: [], agents: [{ id: 1 }] }))).toThrow(
       new PeerProtocolError("agent 0 in the reply is malformed"),
     );
+    expect(() => decodeAgentsReply(encode({ op: "agents", agents: [] }))).toThrow("reply has no repo list");
+    for (const repo of [null, {}, { registryName: "app" }, { registryName: 2, displayName: "App" }]) {
+      expect(() => decodeAgentsReply(encode({ op: "agents", agents: [], repos: [repo] }))).toThrow("repo 0 in the reply is malformed");
+    }
     // repoRegistryName is required, like repoName: rows are keyed by it.
     const noRegistryName = { id: "a", repoName: "app", repoPath: "/r", state: "running" };
-    expect(() => decodeAgentsReply(encode({ op: "agents", agents: [noRegistryName] }))).toThrow(
+    expect(() => decodeAgentsReply(encode({ op: "agents", repos: [], agents: [noRegistryName] }))).toThrow(
       new PeerProtocolError("agent 0 in the reply is malformed"),
     );
     expect(() => decodeAgentsReply(new Uint8Array([0xff, 0xfe]))).toThrow(new PeerProtocolError("reply is not UTF-8"));
@@ -164,7 +173,7 @@ describe("decodeAgentsReply", () => {
 
   test("a list over 1 MB is sent as an error reply", () => {
     const big: RemoteAgent[] = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
-    expect(() => decodeAgentsReply(encodeAgentsReply(big))).toThrow(
+    expect(() => decodeAgentsReply(encodeAgentsReply({ repos: [], agents: big }))).toThrow(
       new PeerErrorReply(`the other side reported: the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`),
     );
   });
@@ -188,12 +197,16 @@ describe("requestAgents", () => {
 });
 
 describe("serveTrustedConnection", () => {
-  const snapshot = (): RemoteAgent[] => toRemoteAgents([fullAgent("agent-1")]);
+  const snapshot = () => peerSnapshot([
+    { name: "app", path: "/repos/app" },
+    { name: "empty", nickname: "No agents", path: "/repos/empty" },
+  ], [fullAgent("agent-1")]);
 
   test("answers a peer's agents requests, each on its own stream, over one connection", async () => {
     const side = serve({ snapshot });
     expect(await requestAgents(side.a)).toEqual(snapshot());
     expect(await requestAgents(side.a)).toEqual(snapshot());
+    expect(snapshot().repos).toEqual([{ registryName: "app", displayName: "app" }, { registryName: "empty", displayName: "No agents" }]);
     expect(side.snapshots()).toBe(2);
     // One check at the connection's accept, then two per request: when its
     // stream is accepted and right before it is answered.

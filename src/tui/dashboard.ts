@@ -24,6 +24,7 @@ import { loadRegistry, setRepoDefaultAgentType, setRepoNotes } from "../registry
 import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { peerSnapshot } from "../peers/peer-link";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow, expandTabs } from "../tmux-poller";
@@ -4178,7 +4179,8 @@ export async function launchDashboard(): Promise<void> {
   // The trusted link answers peers from the watcher's last fully detected
   // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
   // and never carries a state that detection has not filled in yet.
-  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () => dashboard.watcher?.lastDetectedAgents ?? []));
+  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () =>
+    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [])));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read

@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes } from "./registry";
 import { join } from "path";
-import { mkdtemp, open, rm, mkdir, symlink } from "fs/promises";
+import { chmod, mkdtemp, open, stat, rm, mkdir, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { createTeam } from "./teams";
@@ -45,6 +45,49 @@ describe("registry", () => {
       expect(await loadRegistry()).toEqual(newRegistry);
     } finally {
       await reader.close();
+    }
+  });
+
+  test("atomic saves create a private file and preserve existing permissions", async () => {
+    const path = join(tempDir, ".itsybitsy", "repos.json");
+    await saveRegistry({ repos: [] });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    await chmod(path, 0o640);
+    await saveRegistry({ repos: [{ name: "new", path: "/new" }] });
+    expect((await stat(path)).mode & 0o777).toBe(0o640);
+  });
+
+  test("all registry mutations refuse malformed input and preserve its bytes", async () => {
+    const path = join(tempDir, ".itsybitsy", "repos.json");
+    const bytes = '{"repos":[{"path":"/existing","name":"one"},';
+    await Bun.write(path, bytes);
+    const changes = [
+      () => addRepo("/new", "two"), () => removeRepo("/existing"),
+      () => renameRepo("/existing", "renamed"), () => setRepoNotes("/existing", "notes"),
+      () => setRepoDefaultAgentType("/existing", "worker"),
+    ];
+    for (const change of changes) {
+      await expect(change()).rejects.toThrow("Cannot read repo registry");
+      expect(await Bun.file(path).text()).toBe(bytes);
+    }
+  });
+
+  test("a registry I/O error prevents a mutation", async () => {
+    const path = join(tempDir, ".itsybitsy", "repos.json");
+    // A directory in place of the file reliably makes the read fail, even as root.
+    await mkdir(path, { recursive: true });
+    const marker = join(path, "original");
+    await Bun.write(marker, "original contents");
+    await expect(addRepo("/new", "new")).rejects.toThrow("Cannot read repo registry");
+    expect(await Bun.file(marker).text()).toBe("original contents");
+  });
+
+  test("refuses a nickname matching another registered name or nickname in a different case", async () => {
+    const repos = [{ path: "/one", name: "One", nickname: "First" }, { path: "/two", name: "Two" }];
+    await saveRegistry({ repos });
+    for (const nickname of ["ONE", "fIrSt"]) {
+      expect((await renameRepo("/two", nickname)).ok).toBe(false);
+      expect(await listRepos()).toEqual(repos);
     }
   });
 

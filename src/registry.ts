@@ -1,6 +1,6 @@
 import { join, resolve, basename, isAbsolute } from "path";
 import { userHome } from "./home";
-import { mkdir, realpath, rename, unlink } from "fs/promises";
+import { mkdir, open, realpath, rename, stat, unlink } from "fs/promises";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
 // because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
@@ -152,8 +152,18 @@ export async function saveRegistry(data: RegistryData): Promise<void> {
   await mkdir(itsybitsyDir(), { recursive: true });
   const path = registryPath();
   const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+  const existing = await stat(path).catch((err: NodeJS.ErrnoException) => {
+    if (err.code !== "ENOENT") throw err;
+    return null;
+  });
+  const file = await open(tmp, "wx", 0o600);
   try {
-    await Bun.write(tmp, JSON.stringify(data, null, 2) + "\n");
+    try {
+      await file.writeFile(JSON.stringify(data, null, 2) + "\n");
+      if (existing) await file.chmod(existing.mode & 0o7777);
+    } finally {
+      await file.close();
+    }
     await rename(tmp, path);
   } catch (err) {
     await unlink(tmp).catch(() => {});
@@ -232,7 +242,7 @@ export async function checkNewRepoEntry(
 export async function addRepo(repoPath: string, name?: string): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
   const repoName = name ?? basename(resolved);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
 
   const error = await checkNewRepoEntry(resolved, repoName, registry);
   if (error) {
@@ -246,7 +256,7 @@ export async function addRepo(repoPath: string, name?: string): Promise<{ ok: bo
 
 export async function removeRepo(repoPath: string): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
   const before = registry.repos.length;
   registry.repos = registry.repos.filter((r) => r.path !== resolved);
   let removedPath = resolved;
@@ -269,7 +279,7 @@ export async function removeRepo(repoPath: string): Promise<{ ok: boolean; messa
 
 export async function renameRepo(repoPath: string, nickname: string): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
   const entry = registry.repos.find((r) => r.path === resolved);
   if (!entry) {
     return { ok: false, message: `Not found: ${resolved}` };
@@ -284,8 +294,9 @@ export async function renameRepo(repoPath: string, nickname: string): Promise<{ 
       return { ok: false, message: `"coordinator" is a reserved name` };
     }
     // Reject nicknames that collide with another repo's display name or basename
+    const lower = trimmed.toLowerCase();
     const collision = registry.repos.find((r) =>
-      r.path !== resolved && (repoDisplayName(r) === trimmed || r.name === trimmed)
+      r.path !== resolved && (repoDisplayName(r).toLowerCase() === lower || r.name.toLowerCase() === lower)
     );
     if (collision) {
       return { ok: false, message: `Name "${trimmed}" already used by ${collision.path}` };
@@ -310,7 +321,7 @@ export async function setRepoDefaultAgentType(
   type: string | null,
 ): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
   const entry = registry.repos.find((r) => r.path === resolved);
   if (!entry) {
     return { ok: false, message: `Not found: ${resolved}` };
@@ -335,7 +346,7 @@ export async function setRepoNotes(
   notes: string | null,
 ): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
   const entry = registry.repos.find((r) => r.path === resolved);
   if (!entry) {
     return { ok: false, message: `Not found: ${resolved}` };

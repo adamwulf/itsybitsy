@@ -7,6 +7,9 @@ import { join } from "path";
 import { mkdtemp, rm, readdir } from "fs/promises";
 import { tmpdir } from "os";
 import { bootTelegramSubsystem } from "./boot";
+import type { BootRetryInfo } from "./boot";
+import { randomCtx } from "./backoff";
+import type { WakeListener, WakeSource } from "./wake-detector";
 import {
   TelegramClient,
   fetchCtx as clientFetchCtx,
@@ -91,6 +94,10 @@ const EMPTY_ACCESS: AccessState = { allowed_chat_ids: [], allowed_user_ids: [] }
 interface BootHarness {
   mock: MockFetch;
   logs: string[];
+  /** Every backoff wait boot asked for, in ms. */
+  sleeps: number[];
+  /** Fake clock, advanced by each wait. Pass `now: () => h.clock`. */
+  clock: number;
   client: TelegramClient | null;
   dispatchers: TelegramDispatcher[];
   outboxOpts: OutboxOptions[];
@@ -98,6 +105,23 @@ interface BootHarness {
   buildDispatcher: (opts: DispatcherOptions) => TelegramDispatcher;
   buildOutbox: (opts: OutboxOptions) => TelegramOutbox;
   log: (line: string) => void;
+}
+
+/** A WakeSource the test fires by hand. */
+function makeFakeWake(): WakeSource & { fire: () => void; listenerCount: () => number } {
+  const listeners = new Set<WakeListener>();
+  return {
+    onWake(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    fire() {
+      for (const listener of [...listeners]) listener({ sleptMs: 60_000 });
+    },
+    listenerCount: () => listeners.size,
+  };
 }
 
 function makeHarness(): BootHarness {
@@ -109,12 +133,15 @@ function makeHarness(): BootHarness {
 
   // Inject the mock fetch so any TelegramClient built in this test uses it.
   clientFetchCtx.set(mock.fn);
-  clientSleepCtx.set(async () => { /* fast-forward */ });
   clientLogCtx.set(() => { /* silence */ });
+  // No jitter: backoff waits are exactly 1 s, 2 s, 4 s ...
+  randomCtx.set(() => 0);
 
-  return {
+  const harness: BootHarness = {
     mock,
     logs,
+    sleeps: [],
+    clock: 0,
     client,
     dispatchers,
     outboxOpts,
@@ -135,6 +162,12 @@ function makeHarness(): BootHarness {
     },
     log: (line) => { logs.push(line); },
   };
+  // Fast-forward every wait, recording it and advancing the fake clock.
+  clientSleepCtx.set(async (ms) => {
+    harness.sleeps.push(ms);
+    harness.clock += ms;
+  });
+  return harness;
 }
 
 /* ------------------------------------------------------------------ */
@@ -160,6 +193,7 @@ describe("bootTelegramSubsystem", () => {
     clientFetchCtx.reset();
     clientSleepCtx.reset();
     clientLogCtx.reset();
+    randomCtx.reset();
     resetCacheStateDir();
     resetAccessStateDir();
     await rm(cacheRoot, { recursive: true, force: true });
@@ -235,8 +269,251 @@ describe("bootTelegramSubsystem", () => {
     expect(result.message).toBe("Telegram routing disabled: bot token rejected (HTTP 403)");
   });
 
-  test("step 1: probe network failure → disabled with 'probe failed'", async () => {
+  // Replaces "probe network failure → disabled with 'probe failed'": a
+  // network failure is transient, so boot retries it instead of disabling
+  // routing for the whole ib watch session.
+  test("step 1: probe network failure is retried with backoff, then boot succeeds", async () => {
+    await writeCachedChatId("100");
     h.mock.enqueueError(new Error("ECONNRESET"));
+    h.mock.enqueueResponse({ ok: true, result: [] }); // retry succeeds
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(h.mock.callCount()).toBe(2);
+    expect(retries).toEqual([{ reason: "errno:ECONNRESET", attempt: 1, delayMs: 1_000 }]);
+    expect(h.sleeps).toEqual([1_000]);
+    expect(h.logs).toEqual([
+      "Telegram connect failed (errno:ECONNRESET); retrying with backoff",
+      "Telegram connected after 1s",
+    ]);
+  });
+
+  // Replaces "probe other 4xx (e.g. 502) → disabled with 'probe failed (HTTP
+  // 502)'": a 5xx is transient. The permanent `probe-other` path is now
+  // pinned by the 404 test below.
+  test("step 1: a 502 burst is retried with doubling backoff and logged once", async () => {
+    await writeCachedChatId("100");
+    for (let i = 0; i < 3; i++) h.mock.enqueueResponse({ ok: false, description: "Bad Gateway" }, 502);
+    h.mock.enqueueResponse({ ok: true, result: [] });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      onRetry: (info) => retries.push(info),
+      now: () => h.clock,
+    });
+    expect(result.ok).toBe(true);
+    expect(h.mock.callCount()).toBe(4);
+    expect(retries.map((r) => [r.reason, r.attempt])).toEqual([
+      ["HTTP 502", 1],
+      ["HTTP 502", 2],
+      ["HTTP 502", 3],
+    ]);
+    expect(h.sleeps).toEqual([1_000, 2_000, 4_000]);
+    // One line for the error class, one for the recovery (7s of fake sleep).
+    expect(h.logs).toEqual([
+      "Telegram connect failed (HTTP 502); retrying with backoff",
+      "Telegram connected after 7s",
+    ]);
+  });
+
+  test("step 1: a 429 waits max(Retry-After, backoff)", async () => {
+    await writeCachedChatId("100");
+    h.mock.enqueueResponse({ ok: false, error_code: 429, description: "Too Many Requests" }, 429, { "retry-after": "7" });
+    // Body-only retry_after shorter than the backoff: backoff wins.
+    h.mock.enqueueResponse({ ok: false, error_code: 429, parameters: { retry_after: 1 } }, 429);
+    h.mock.enqueueResponse({ ok: true, result: [] });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(retries.map((r) => r.reason)).toEqual(["429 Too Many Requests", "429 Too Many Requests"]);
+    expect(h.sleeps).toEqual([7_000, 2_000]);
+  });
+
+  test("step 1: a probe timeout is retried and labelled errno:ETIMEDOUT", async () => {
+    await writeCachedChatId("100");
+    h.mock.enqueueError(new DOMException("The operation timed out.", "TimeoutError"));
+    h.mock.enqueueResponse({ ok: true, result: [] });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(retries.map((r) => r.reason)).toEqual(["errno:ETIMEDOUT"]);
+    expect(h.logs[0]).toBe("Telegram connect failed (errno:ETIMEDOUT); retrying with backoff");
+  });
+
+  test("step 1: a truncated 200 is retried (transient), not 'probe failed (HTTP 200)'", async () => {
+    await writeCachedChatId("100");
+    let calls = 0;
+    clientFetchCtx.set(async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response('{"ok":true,"result":[', { status: 200 })
+        : makeResponse({ ok: true, result: [] });
+    });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(calls).toBe(2);
+    expect(retries.map((r) => r.reason)).toEqual(["HTTP 200 (bad body)"]);
+    expect(h.logs[0]).toBe("Telegram connect failed (HTTP 200 (bad body)); retrying with backoff");
+  });
+
+  test("step 1: the probe timer firing mid-body (real fetch) is retried as errno:ETIMEDOUT", async () => {
+    // Headers and the first bytes arrive, then the body stalls until the
+    // client's 300 ms probe timer fires. The second probe answers in full.
+    await writeCachedChatId("100");
+    clientFetchCtx.reset(); // real fetch
+    let calls = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        calls += 1;
+        if (calls > 1) return Response.json({ ok: true, result: [] });
+        const stalled = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"ok":true,'));
+          },
+        });
+        return new Response(stalled, { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    try {
+      const retries: BootRetryInfo[] = [];
+      const result = await bootTelegramSubsystem({
+        token: "TEST_TOKEN",
+        access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+        buildClient: (token) => new TelegramClient({ token, baseUrl: server.url.origin, timeouts: { probeMs: 300 } }),
+        buildDispatcher: h.buildDispatcher,
+        buildOutbox: h.buildOutbox,
+        log: h.log,
+        onRetry: (info) => retries.push(info),
+      });
+      expect(result.ok).toBe(true);
+      expect(calls).toBe(2);
+      expect(retries.map((r) => r.reason)).toEqual(["errno:ETIMEDOUT"]);
+      expect(h.logs.some((l) => l.includes("routing disabled"))).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("step 1: a wake while the probe body is still arriving probes again at once (no failure counted)", async () => {
+    await writeCachedChatId("100");
+    const wake = makeFakeWake();
+    let calls = 0;
+    clientFetchCtx.set(async (_input, init) => {
+      calls += 1;
+      if (calls > 1) return makeResponse({ ok: true, result: [] });
+      // Headers are in; the body stalls on a dead socket until our signal
+      // fires, which errors the stream mid-read.
+      const sig = init?.signal as AbortSignal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"ok":true,'));
+          sig.addEventListener("abort", () => controller.error(sig.reason));
+        },
+      });
+      queueMicrotask(() => wake.fire());
+      return new Response(body, { status: 200 });
+    });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      wake,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(calls).toBe(2);
+    expect(retries).toEqual([]);
+    expect(h.sleeps).toEqual([]);
+    expect(h.logs).toEqual([]);
+  });
+
+  test("step 1: alternating error classes log one line per class", async () => {
+    await writeCachedChatId("100");
+    h.mock.enqueueResponse({ ok: false }, 502);
+    h.mock.enqueueError(new Error("ECONNRESET"));
+    h.mock.enqueueResponse({ ok: false }, 502);
+    h.mock.enqueueError(new Error("ECONNRESET"));
+    h.mock.enqueueResponse({ ok: true, result: [] });
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    expect(h.logs.filter((l) => l.startsWith("Telegram connect failed"))).toEqual([
+      "Telegram connect failed (HTTP 502); retrying with backoff",
+      "Telegram connect failed (errno:ECONNRESET); retrying with backoff",
+    ]);
+  });
+
+  test("step 1: a token in a fetch error never reaches the log or onRetry", async () => {
+    await writeCachedChatId("100");
+    h.mock.enqueueError(new Error("request to https://api.telegram.org/botSECRET_BOOT_TOKEN/getUpdates failed"));
+    h.mock.enqueueResponse({ ok: true, result: [] });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "SECRET_BOOT_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(h.logs.some((l) => l.includes("SECRET_BOOT_TOKEN"))).toBe(false);
+    expect(retries.some((r) => r.reason.includes("SECRET_BOOT_TOKEN"))).toBe(false);
+  });
+
+  test("step 1: a 401 after transient failures still disables (permanent outcome unchanged)", async () => {
+    h.mock.enqueueResponse({ ok: false }, 503);
+    h.mock.enqueueResponse({ ok: false, error_code: 401, description: "Unauthorized" }, 401);
     const result = await bootTelegramSubsystem({
       token: "TEST_TOKEN",
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
@@ -247,13 +524,13 @@ describe("bootTelegramSubsystem", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.reason).toBe("probe-network");
-    expect(result.message).toContain("Telegram routing disabled: probe failed");
-    expect(result.message).toContain("ECONNRESET");
+    expect(result.reason).toBe("probe-auth");
+    expect(result.message).toBe("Telegram routing disabled: bot token rejected (HTTP 401)");
+    expect(h.mock.callCount()).toBe(2);
   });
 
-  test("step 1: probe other 4xx (e.g. 502) → disabled with 'probe failed (HTTP 502)'", async () => {
-    h.mock.enqueueResponse({ ok: false, description: "Bad Gateway" }, 502);
+  test("step 1: probe other 4xx (e.g. 404) → disabled with 'probe failed (HTTP 404)', no retry", async () => {
+    h.mock.enqueueResponse({ ok: false, error_code: 404, description: "Not Found" }, 404);
     const result = await bootTelegramSubsystem({
       token: "TEST_TOKEN",
       access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
@@ -265,7 +542,167 @@ describe("bootTelegramSubsystem", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("probe-other");
-    expect(result.message).toBe("Telegram routing disabled: probe failed (HTTP 502)");
+    expect(result.message).toBe("Telegram routing disabled: probe failed (HTTP 404)");
+    expect(h.logs).toEqual([result.message]);
+    expect(h.mock.callCount()).toBe(1);
+    expect(h.sleeps).toEqual([]);
+  });
+
+  test("step 2: a transient failure on the resolve probe is retried too", async () => {
+    h.mock.enqueueResponse({ ok: true, result: [] }); // step 1
+    h.mock.enqueueResponse({ ok: false }, 502); // step 2, first try
+    h.mock.enqueueResponse({ ok: true, result: [update(10, { id: 100, type: "private" })] });
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.chatId).toBe("100");
+    expect(h.mock.callCount()).toBe(3);
+  });
+
+  test("abort during the backoff wait stops the retries and returns 'aborted'", async () => {
+    h.mock.enqueueResponse({ ok: false }, 502);
+    const abort = new AbortController();
+    // The backoff wait never ends on its own; only the abort can end it.
+    clientSleepCtx.set(() => new Promise<void>(() => {}));
+    const pending = bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      signal: abort.signal,
+      onRetry: () => abort.abort(),
+    });
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("aborted");
+    expect(h.mock.callCount()).toBe(1);
+    expect(h.dispatchers).toEqual([]);
+    expect(h.logs[h.logs.length - 1]).toBe(result.message);
+  });
+
+  test("abort during an in-flight probe cancels it and returns 'aborted'", async () => {
+    const abort = new AbortController();
+    let probeStarted = false;
+    clientFetchCtx.set(async (_input, init) => {
+      probeStarted = true;
+      return await new Promise<Response>((_, reject) => {
+        const sig = init?.signal as AbortSignal | undefined;
+        sig?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    });
+    const pending = bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      signal: abort.signal,
+    });
+    while (!probeStarted) await new Promise<void>((r) => setTimeout(r, 1));
+    abort.abort();
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("aborted");
+  });
+
+  test("a signal that already fired skips the probe", async () => {
+    const abort = new AbortController();
+    abort.abort();
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      signal: abort.signal,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("aborted");
+    expect(h.mock.callCount()).toBe(0);
+  });
+
+  test("a wake cuts the backoff wait short and resets the backoff", async () => {
+    await writeCachedChatId("100");
+    h.mock.enqueueResponse({ ok: false }, 502);
+    h.mock.enqueueResponse({ ok: false }, 502);
+    h.mock.enqueueResponse({ ok: false }, 502); // first try after the wake
+    h.mock.enqueueResponse({ ok: true, result: [] });
+    const wake = makeFakeWake();
+    const retries: BootRetryInfo[] = [];
+    // Waits 1 and 2 end on their own; wait 3 hangs until the wake. After the
+    // wake the backoff restarts at attempt 1.
+    clientSleepCtx.set((ms) => {
+      h.sleeps.push(ms);
+      if (h.sleeps.length === 2) return new Promise<void>(() => {});
+      return Promise.resolve();
+    });
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      wake,
+      onRetry: (info) => {
+        retries.push(info);
+        if (retries.length === 2) queueMicrotask(() => wake.fire());
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(retries.map((r) => r.attempt)).toEqual([1, 2, 1]);
+    expect(h.sleeps).toEqual([1_000, 2_000, 1_000]);
+    // Boot unsubscribed when it finished.
+    expect(wake.listenerCount()).toBe(0);
+  });
+
+  test("a wake during an in-flight probe cancels it and probes again at once", async () => {
+    await writeCachedChatId("100");
+    const wake = makeFakeWake();
+    let calls = 0;
+    clientFetchCtx.set(async (_input, init) => {
+      calls += 1;
+      if (calls === 1) {
+        // A probe on a dead socket: only an abort ends it.
+        queueMicrotask(() => wake.fire());
+        return await new Promise<Response>((_, reject) => {
+          const sig = init?.signal as AbortSignal | undefined;
+          sig?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        });
+      }
+      return makeResponse({ ok: true, result: [] });
+    });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      wake,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(calls).toBe(2);
+    // A wake-cancelled probe is not a failure: no retry, no wait, no log.
+    expect(retries).toEqual([]);
+    expect(h.sleeps).toEqual([]);
+    expect(h.logs).toEqual([]);
   });
 
   test("step 2: no allowlisted private inbound → disabled with the inbound message", async () => {

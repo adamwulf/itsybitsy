@@ -14948,6 +14948,11 @@ describe("resolveAgentId", () => {
   });
 });
 
+/** Result wait for Telegram client tests that only need the window to
+ *  EXPIRE (the queued paths). The default 3s window is exercised once, by the
+ *  "no `ib watch` running" test; a test that waits for a result keeps it. */
+const TG_QUEUED_WAIT_MS = 300;
+
 describe("telegramSend (native, file-drop client)", () => {
   let tempDir: string;
   let outboxDir: string;
@@ -14955,20 +14960,169 @@ describe("telegramSend (native, file-drop client)", () => {
   async function loadDeps() {
     const ibCmds = await import("./ib-commands");
     const outbox = await import("./channels/outbox");
-    return { ibCmds, outbox };
+    const status = await import("./channels/connection-status");
+    return { ibCmds, outbox, status };
   }
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "tgsend-test-"));
     outboxDir = join(tempDir, "outbox");
-    const { outbox } = await loadDeps();
+    const { outbox, status } = await loadDeps();
     outbox.setOutboxDir(outboxDir);
+    // Never read the real ~/.itsybitsy status file.
+    status.setStatusDir(join(tempDir, "state"));
   });
 
   afterEach(async () => {
-    const { outbox } = await loadDeps();
+    const { ibCmds, outbox, status } = await loadDeps();
     outbox.resetOutboxDir();
+    status.resetStatusDir();
+    ibCmds.telegramResultWaitCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** Write a status file as `ib watch` would. */
+  async function writeStatus(
+    state: "connecting" | "connected" | "reconnecting" | "disabled",
+    lastError: string | null,
+    pid: number = process.pid,
+  ): Promise<void> {
+    const { status } = await loadDeps();
+    await status.writeTelegramStatus({
+      state,
+      lastError,
+      lastErrorAt: lastError === null ? null : Date.now(),
+      outboxPending: 1,
+      pid,
+      updatedAt: Date.now(),
+    });
+  }
+
+  /** Play `bodies` as the dropped `.txt`'s `.result`, in order: the first as
+   *  soon as the item appears, each later one `delayMs` after the previous. */
+  function answerDrops(bodies: Array<Record<string, unknown>>, delayMs = 0): () => void {
+    let next = 0;
+    let busy = false;
+    const timer = setInterval(async () => {
+      if (busy || next >= bodies.length) return;
+      busy = true;
+      try {
+        const entries = await readdir(outboxDir);
+        const txt = entries.find((e) => e.endsWith(".txt"));
+        if (txt) {
+          if (next > 0 && delayMs > 0) await new Promise<void>((r) => setTimeout(r, delayMs));
+          await Bun.write(join(outboxDir, `${txt}.result`), JSON.stringify(bodies[next]));
+          next += 1;
+        }
+      } catch { /* ignore */ }
+      busy = false;
+    }, 25);
+    return () => clearInterval(timer);
+  }
+
+  test("queued wording: no status file → ib watch is not running", async () => {
+    const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
+    const result = await ibCmds.telegramSend("hello");
+    expect(result).toEqual({
+      ok: true,
+      message: "queued: ib watch is not running; it will be sent when ib watch starts",
+    });
+  });
+
+  test("queued wording: a status file from a dead ib watch → ib watch is not running", async () => {
+    const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
+    // macOS pids stay below 100000, so this pid cannot be alive.
+    await writeStatus("connected", null, 999_999);
+    const result = await ibCmds.telegramSend("hello");
+    expect(result).toEqual({
+      ok: true,
+      message: "queued: ib watch is not running; it will be sent when ib watch starts",
+    });
+  });
+
+  test("queued wording: reconnecting names Telegram's last error", async () => {
+    const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
+    await writeStatus("reconnecting", "HTTP 502");
+    const result = await ibCmds.telegramSend("hello");
+    expect(result).toEqual({
+      ok: true,
+      message:
+        "queued: Telegram is unreachable (HTTP 502); ib watch will send it automatically when the connection recovers",
+    });
+  });
+
+  test("queued wording: connecting says ib watch is still connecting", async () => {
+    const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
+    await writeStatus("connecting", "errno:ENOTFOUND");
+    const result = await ibCmds.telegramSend("hello");
+    expect(result).toEqual({
+      ok: true,
+      message:
+        "queued: ib watch is still connecting to Telegram (errno:ENOTFOUND); it will send it automatically once connected",
+    });
+  });
+
+  test("queued wording: disabled shows the reason and that the message stays queued", async () => {
+    const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
+    await writeStatus("disabled", "another poller or webhook is active");
+    const result = await ibCmds.telegramSend("hello");
+    expect(result).toEqual({
+      ok: true,
+      message:
+        "queued: Telegram routing is disabled in this ib watch (another poller or webhook is active); the message stays queued until an ib watch start connects to Telegram",
+    });
+  });
+
+  test("queued wording: connected but unconfirmed says it will go out in order, and claims no earlier messages", async () => {
+    const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
+    await writeStatus("connected", null);
+    const result = await ibCmds.telegramSend("hello");
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe(
+      "queued: ib watch is connected but Telegram has not confirmed this message yet; it stays queued and will be sent automatically, in order",
+    );
+  });
+
+  test("an interim queued result is reported when no final result arrives", async () => {
+    const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
+    // The status file says connected; the outbox's own interim result is more
+    // specific (this item is failing), so it wins.
+    await writeStatus("connected", null);
+    const interim = "queued: Telegram is unreachable (HTTP 502); ib watch will send it automatically when the connection recovers";
+    const stop = answerDrops([{ ok: true, queued: true, message: interim }]);
+    try {
+      const result = await ibCmds.telegramSend("hello");
+      expect(result).toEqual({ ok: true, message: interim });
+    } finally {
+      stop();
+    }
+    // The client must leave an interim result in place for the outbox.
+    const entries = await readdir(outboxDir);
+    expect(entries.some((e) => e.endsWith(".txt.result"))).toBe(true);
+  });
+
+  test("an interim result followed by a final one inside the window reports the final one", async () => {
+    const { ibCmds } = await loadDeps();
+    const stop = answerDrops(
+      [
+        { ok: true, queued: true, message: "queued: Telegram is unreachable (errno:ConnectionRefused); ib watch will send it automatically when the connection recovers" },
+        { ok: true, message: "ok (message_id 1584)" },
+      ],
+      150,
+    );
+    try {
+      const result = await ibCmds.telegramSend("hello");
+      expect(result).toEqual({ ok: true, message: "ok (message_id 1584)" });
+    } finally {
+      stop();
+    }
   });
 
   test("awaitResult:false queues the message and returns without the result poll", async () => {
@@ -14982,27 +15136,26 @@ describe("telegramSend (native, file-drop client)", () => {
     expect(await Bun.file(join(outboxDir, files[0]!)).text()).toBe("from the hook");
   });
 
-  test("no `ib watch` running → returns ok:true with 'queued' after ~1s", async () => {
+  test("no `ib watch` running → returns ok:true with 'queued:' after the full 3s window", async () => {
     const { ibCmds } = await loadDeps();
     const start = Date.now();
     const result = await ibCmds.telegramSend("hello");
     const elapsed = Date.now() - start;
-    // The poll loop is 10×100ms, so a run that ends in "queued" must have sat
-    // through all ten waits. That lower bound is a property of the code, not of
-    // the machine — it proves the loop ran to exhaustion instead of returning
-    // early, and a busy machine can only push elapsed further above it.
-    expect(elapsed).toBeGreaterThanOrEqual(1_000);
+    // The poll loop is 30×100ms, so a run that ends in "queued" must have sat
+    // through all thirty waits. That lower bound is a property of the code, not
+    // of the machine — it proves the loop ran to exhaustion instead of
+    // returning early, and a busy machine can only push elapsed further above it.
+    expect(elapsed).toBeGreaterThanOrEqual(ibCmds.TELEGRAM_RESULT_WAIT_MS);
     // There is deliberately no upper bound. It used to be `< 2_500`, which is
     // the instrument commit 4449ed0 removed from wrap.test.ts: a duration
     // ceiling measures the machine as much as the code (identical work there
     // ranged 59-263ms depending only on load), so no threshold makes it robust.
-    // It also had no teeth — POLL_ATTEMPTS could have doubled to 20 (~2s) and
-    // still slipped under 2500. What the ceiling was really guarding is "this
+    // It also had no teeth — POLL_ATTEMPTS could have doubled and still
+    // slipped under the ceiling. What the ceiling was really guarding is "this
     // returns instead of hanging", and the per-test timeout enforces that
     // directly. The assertions below pin the outcome itself.
     expect(result.ok).toBe(true);
-    expect(result.message).toContain("queued");
-    expect(result.message).toContain("ib watch may not be running");
+    expect(result.message).toBe("queued: ib watch is not running; it will be sent when ib watch starts");
 
     // Message file should still be on disk waiting for `ib watch`.
     const entries = await readdir(outboxDir);
@@ -15065,6 +15218,7 @@ describe("telegramSend (native, file-drop client)", () => {
 
   test("malformed result JSON is treated as 'no result yet' until timeout", async () => {
     const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
     const fs = await import("fs/promises");
     let wroteJunk = false;
     const watcher = setInterval(async () => {
@@ -15084,7 +15238,7 @@ describe("telegramSend (native, file-drop client)", () => {
       const result = await ibCmds.telegramSend("hi");
       // Falls through to the timeout-as-queued branch.
       expect(result.ok).toBe(true);
-      expect(result.message).toContain("queued");
+      expect(result.message.startsWith("queued:")).toBe(true);
     } finally {
       clearInterval(watcher);
     }
@@ -15092,6 +15246,7 @@ describe("telegramSend (native, file-drop client)", () => {
 
   test("the dropped .txt file contains the original message text", async () => {
     const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
     // Don't write a result, so tgsend times out — but we can still inspect
     // the file it dropped.
     const promise = ibCmds.telegramSend("exact-payload");
@@ -15137,17 +15292,21 @@ describe("telegramReact (native, file-drop client)", () => {
     tempDir = await mkdtemp(join(tmpdir(), "tgreact-test-"));
     outboxDir = join(tempDir, "outbox");
     stateDir = join(tempDir, "state");
-    const { outbox, lastMsg, access } = await loadDeps();
+    const { ibCmds, outbox, lastMsg, access } = await loadDeps();
     outbox.setOutboxDir(outboxDir);
+    // access's state dir also holds the status file, so no real one is read.
     access.setStateDir(stateDir);
     lastMsg.setStateDir(stateDir);
+    // Most tests here only need the wait to expire; the result test resets it.
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
   });
 
   afterEach(async () => {
-    const { outbox, lastMsg, access } = await loadDeps();
+    const { ibCmds, outbox, lastMsg, access } = await loadDeps();
     outbox.resetOutboxDir();
     access.resetStateDir();
     lastMsg.resetStateDir();
+    ibCmds.telegramResultWaitCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -15177,8 +15336,10 @@ describe("telegramReact (native, file-drop client)", () => {
     await lastMsg.writeLastMessage("100", 4321);
     // No `ib watch` running → times out as queued, but the descriptor lands.
     const result = await ibCmds.telegramReact("👍");
-    expect(result.ok).toBe(true);
-    expect(result.message).toContain("queued");
+    expect(result).toEqual({
+      ok: true,
+      message: "queued: ib watch is not running; it will be sent when ib watch starts",
+    });
 
     const entries = await readdir(outboxDir);
     const reactFiles = entries.filter((e) => e.endsWith(".react.json"));
@@ -15222,6 +15383,7 @@ describe("telegramReact (native, file-drop client)", () => {
 
   test("a result file appearing within the timeout is returned to the caller", async () => {
     const { ibCmds, lastMsg } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.reset();
     await lastMsg.writeLastMessage("100", 3);
     const fs = await import("fs/promises");
     const { mkdir: mkdirP } = fs;
@@ -15257,21 +15419,28 @@ describe("telegramSendFile (native, file-drop client)", () => {
   async function loadDeps() {
     const ibCmds = await import("./ib-commands");
     const outbox = await import("./channels/outbox");
-    return { ibCmds, outbox };
+    const status = await import("./channels/connection-status");
+    return { ibCmds, outbox, status };
   }
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "tgsendfile-test-"));
     outboxDir = join(tempDir, "outbox");
-    const { outbox } = await loadDeps();
+    const { ibCmds, outbox, status } = await loadDeps();
     outbox.setOutboxDir(outboxDir);
+    // Never read the real ~/.itsybitsy status file.
+    status.setStatusDir(join(tempDir, "state"));
+    // Most tests here only need the wait to expire; the result test resets it.
+    ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
     payloadPath = join(tempDir, "rendered.png");
     await Bun.write(payloadPath, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
   });
 
   afterEach(async () => {
-    const { outbox } = await loadDeps();
+    const { ibCmds, outbox, status } = await loadDeps();
     outbox.resetOutboxDir();
+    status.resetStatusDir();
+    ibCmds.telegramResultWaitCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -15290,8 +15459,10 @@ describe("telegramSendFile (native, file-drop client)", () => {
   test("drops a .file.json descriptor (default kind=document, absolute path)", async () => {
     const { ibCmds } = await loadDeps();
     const result = await ibCmds.telegramSendFile(payloadPath);
-    expect(result.ok).toBe(true);
-    expect(result.message).toContain("queued");
+    expect(result).toEqual({
+      ok: true,
+      message: "queued: ib watch is not running; it will be sent when ib watch starts",
+    });
 
     const entries = await readdir(outboxDir);
     const fileDescs = entries.filter((e) => e.endsWith(".file.json"));
@@ -15328,6 +15499,7 @@ describe("telegramSendFile (native, file-drop client)", () => {
 
   test("a result file appearing within the timeout is returned to the caller", async () => {
     const { ibCmds } = await loadDeps();
+    ibCmds.telegramResultWaitCtx.reset();
     const fs = await import("fs/promises");
     await fs.mkdir(outboxDir, { recursive: true });
     const watcher = setInterval(async () => {

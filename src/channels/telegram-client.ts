@@ -26,6 +26,7 @@
 
 import { InjectionContext } from "../types";
 import type { FetchLike } from "../types";
+import { backoffDelayMs } from "./backoff";
 import type { TelegramUpdate, TelegramMessage, TelegramApiResponse, TelegramFile } from "./types";
 
 /** Hardcoded Bot API base URL. No env override (Phase 0 decision). */
@@ -36,28 +37,72 @@ export const TELEGRAM_API_BASE = "https://api.telegram.org";
  *  and the dispatcher fallback. */
 export const TELEGRAM_CHUNK_LIMIT = 4000;
 
-/** Exponential backoff bounds. Initial = 1s, capped at 30s. */
+/** Exponential backoff bounds for the `getUpdates` retry loop. Initial = 1s,
+ *  capped at 30s, with jitter (see backoff.ts). */
 const BACKOFF_INITIAL_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 
 /** Per-request fetch timeouts. A dead TCP socket (e.g. after a Wi-Fi switch)
  *  otherwise hangs the request indefinitely while the OS waits to surface a
  *  TCP keepalive failure. The hard timeouts surface the disconnect as an
- *  AbortError within seconds so the retry loop wakes up. */
-const GETUPDATES_TIMEOUT_BUFFER_MS = 10_000;
-const PROBE_TIMEOUT_MS = 10_000;
-const SENDMESSAGE_TIMEOUT_MS = 15_000;
-// The typing indicator only lasts ~5s server-side; a longer timeout adds no
-// value because the indicator would expire before the response mattered.
-const SENDCHATACTION_TIMEOUT_MS = 5_000;
-// getFile is a small JSON POST — same one-shot ceiling as sendMessage.
-const GETFILE_TIMEOUT_MS = 15_000;
-// Downloads and uploads can be megabytes over a slow link, so they need a
-// far more generous deadline than the small JSON methods. 120s is well above
-// what the 20 MB download / 50 MB upload caps need on a normal connection
-// while still surfacing a dead socket eventually.
-const DOWNLOAD_TIMEOUT_MS = 120_000;
-const SENDFILE_TIMEOUT_MS = 120_000;
+ *  AbortError within seconds so the retry loop wakes up. Production uses
+ *  these defaults; tests shorten them through `TelegramClientOptions.timeouts`. */
+export interface TelegramTimeouts {
+  /** Added to the long-poll `timeout` seconds for the `getUpdates` deadline. */
+  getUpdatesBufferMs: number;
+  probeMs: number;
+  /** `sendMessage` and `setMessageReaction`. */
+  sendMessageMs: number;
+  /** The typing indicator only lasts ~5s server-side; a longer timeout adds no
+   *  value because the indicator would expire before the response mattered. */
+  sendChatActionMs: number;
+  /** getFile is a small JSON POST — same one-shot ceiling as sendMessage. */
+  getFileMs: number;
+  /** Downloads and uploads can be megabytes over a slow link, so they need a
+   *  far more generous deadline than the small JSON methods. 120s is well
+   *  above what the 20 MB download / 50 MB upload caps need on a normal
+   *  connection while still surfacing a dead socket eventually. */
+  downloadMs: number;
+  sendFileMs: number;
+}
+
+/** Fetch options for the outbound Bot API calls — sendMessage,
+ *  setMessageReaction, sendPhoto, sendDocument: never reuse a pooled
+ *  keep-alive connection, always open a fresh one.
+ *
+ *  Root cause of the `errno:23` sends in watch.log 2026-11-20 (each after ~2
+ *  min idle): the send went out on a pooled socket whose network path had
+ *  died silently while idle (no FIN, no RST), so it hung for the full
+ *  `sendMessageMs` and then timed out (Bun's timeout DOMException carries
+ *  `code` 23). Bun honours `keepalive: false` — checked 2026-11-20 on Bun
+ *  1.3.10 against a local server: each request opens its own connection and
+ *  an existing pooled one is not reused; a server that goes silent on a
+ *  connection after one answer makes the default second request time out,
+ *  while `keepalive: false` succeeds. The cost is one TCP + TLS handshake per
+ *  send. Not used for getUpdates (one long-poll at a time; a dead socket ends
+ *  in its own timeout and is retried) or probeOnce. */
+export const OUTBOUND_FETCH_INIT: Readonly<Pick<RequestInit, "keepalive">> = Object.freeze({ keepalive: false });
+
+export const DEFAULT_TELEGRAM_TIMEOUTS: Readonly<TelegramTimeouts> = Object.freeze({
+  getUpdatesBufferMs: 10_000,
+  probeMs: 10_000,
+  sendMessageMs: 15_000,
+  sendChatActionMs: 5_000,
+  getFileMs: 15_000,
+  downloadMs: 120_000,
+  sendFileMs: 120_000,
+});
+
+/** True when a failed Bot API call is worth retrying: a network-level failure
+ *  (status 0, the convention `getFile` / `sendPhoto` / `sendDocument` use for
+ *  a fetch throw), 429 Too Many Requests, or any 5xx (e.g. 502 Bad Gateway).
+ *  Every other status (400, 401, 403, 404, ...) is permanent for that request:
+ *  sending the same request again cannot succeed. A fetch THROW from
+ *  `sendMessage` / `setMessageReaction` is also transient; callers handle that
+ *  case in their catch. */
+export function isTransientStatus(status: number): boolean {
+  return status === 0 || status === 429 || status >= 500;
+}
 
 /** Bot API `getFile` download ceiling. The standard Bot API refuses to serve
  *  files larger than 20 MB via `getFile` (a local Bot API server would be
@@ -109,12 +154,21 @@ export function chunk(text: string, limit: number = TELEGRAM_CHUNK_LIMIT): strin
  *  We don't try to be exhaustive — just stable enough that a streak of
  *  identical errors collapses to one log line. Exported so callers logging
  *  network failures elsewhere (e.g. the dispatcher's probe path) can avoid
- *  surfacing raw `err.message`, which may embed URL fragments. */
+ *  surfacing raw `err.message`, which may embed URL fragments.
+ *
+ *  The names are checked BEFORE `code`. A timer-fired abort
+ *  (`AbortSignal.timeout`) rejects with a `TimeoutError` DOMException whose
+ *  legacy `code` is 23 (TIMEOUT_ERR), and an AbortController abort is an
+ *  `AbortError` with `code` 20. Checking `code` first labelled a request that
+ *  hung for its whole timeout `errno:23`, which read like a fast socket error
+ *  (watch.log 2026-11-20). A timeout is `errno:ETIMEDOUT`, the label the boot
+ *  probe and the getUpdates loop already use. */
 export function classifyError(err: unknown): string {
   if (err instanceof Error) {
+    if (err.name === "TimeoutError") return "errno:ETIMEDOUT";
+    if (err.name === "AbortError") return "AbortError";
     const code = (err as Error & { code?: string }).code;
     if (code) return `errno:${code}`;
-    if (err.name === "AbortError") return "AbortError";
     if (err.name && err.name !== "Error") return err.name;
     // Match grammy-style messages best-effort.
     const msg = err.message ?? "";
@@ -122,9 +176,20 @@ export function classifyError(err: unknown): string {
     if (msg.includes("ECONNRESET")) return "errno:ECONNRESET";
     if (msg.includes("ENOTFOUND")) return "errno:ENOTFOUND";
     if (msg.includes("EAI_AGAIN")) return "errno:EAI_AGAIN";
-    return `Error:${msg.slice(0, 40)}`;
+    return `Error:${redactLabelText(msg).slice(0, 40)}`;
   }
-  return `unknown:${String(err).slice(0, 40)}`;
+  return `unknown:${redactLabelText(String(err)).slice(0, 40)}`;
+}
+
+/** Strip anything that could carry the bot token from free text before it
+ *  becomes a label: every URL becomes `<url>`, and a `bot<token>` word (the
+ *  token as it appears in a Bot API path, up to the next `/` or whitespace)
+ *  becomes `bot<redacted>`. Labels reach watch.log, status.json, the `?` help
+ *  row and `ib tgsend` output. */
+function redactLabelText(text: string): string {
+  return text
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S*/gi, "<url>")
+    .replace(/\bbot[^/\s]+/gi, "bot<redacted>");
 }
 
 /** Callback fired by `getUpdates` after each attempt. Used by the dispatcher's
@@ -247,7 +312,9 @@ export interface SendDocumentOptions {
 }
 
 /** Result of `sendPhoto` / `sendDocument`. Mirrors {@link SendMessageResult}
- *  so the outbox's 429-retry logic reads the same shape. */
+ *  so the outbox's retry logic reads the same shape. A fetch throw is folded
+ *  into status 0; `timedOut` is true when that throw was the `sendFileMs`
+ *  timer (the upload could not finish in time). */
 export type SendFileResult =
   | { ok: true; result: TelegramMessage }
   | {
@@ -256,6 +323,7 @@ export type SendFileResult =
       error_code?: number;
       description?: string;
       retryAfterSec: number | null;
+      timedOut?: boolean;
     };
 
 export interface TelegramClientOptions {
@@ -263,6 +331,9 @@ export interface TelegramClientOptions {
   token: string;
   /** Override base URL — reserved for tests. Production uses TELEGRAM_API_BASE. */
   baseUrl?: string;
+  /** Override per-request timeouts — reserved for tests (e.g. a fake Telegram
+   *  server that never answers). Production uses DEFAULT_TELEGRAM_TIMEOUTS. */
+  timeouts?: Partial<TelegramTimeouts>;
 }
 
 /** HTTP response shape that pairs the parsed body with status + headers, so
@@ -286,6 +357,7 @@ type AttemptOutcome<T> =
 export class TelegramClient {
   private readonly token: string;
   private readonly baseUrl: string;
+  private readonly timeouts: TelegramTimeouts;
 
   /** Tracks every error class seen by `getUpdates` since the last successful
    *  poll, so a streak of errors logs at most one line per unique class.
@@ -299,6 +371,7 @@ export class TelegramClient {
     if (!opts.token) throw new Error("TelegramClient: token is required");
     this.token = opts.token;
     this.baseUrl = opts.baseUrl ?? TELEGRAM_API_BASE;
+    this.timeouts = { ...DEFAULT_TELEGRAM_TIMEOUTS, ...opts.timeouts };
   }
 
   /** Long-poll for updates with built-in resilience.
@@ -326,7 +399,7 @@ export class TelegramClient {
     // Telegram holds the request for `timeout` seconds; we add 10s buffer for
     // network latency + response framing. Past that, the socket is presumed
     // dead and we abort the fetch so the retry loop can wake up.
-    const fetchTimeoutMs = longPollSec * 1_000 + GETUPDATES_TIMEOUT_BUFFER_MS;
+    const fetchTimeoutMs = longPollSec * 1_000 + this.timeouts.getUpdatesBufferMs;
 
     let attempt = 0;
 
@@ -379,16 +452,20 @@ export class TelegramClient {
    *  rather than retrying forever. Network throws are surfaced as-is.
    *
    *  Returns `{ ok: true, updates }` on a successful 2xx response with a
-   *  parseable Telegram envelope, or `{ ok: false, status }` on any other
-   *  HTTP status. The dispatcher only branches on 409 — other failures are
+   *  parseable Telegram envelope, or `{ ok: false, status }` otherwise —
+   *  including a 2xx whose body could not be read (`status` 2xx), which boot
+   *  treats as transient. A body cut short by our own signal (timer, stop,
+   *  wake) throws that abort instead. The dispatcher only branches on 409 — other failures are
    *  logged via the API description and treated as "probe failed but go
    *  ahead and start the loop", since the loop has its own retry handling.
+   *  The boot (boot.ts) retries transient failures itself and reads
+   *  `retryAfterSec` (header, else body `parameters.retry_after`) on a 429.
    */
   async probeOnce(
     opts: { offset?: number; limit?: number; timeout?: number; signal?: AbortSignal } = {},
   ): Promise<
     | { ok: true; updates: TelegramUpdate[] }
-    | { ok: false; status: number; description?: string }
+    | { ok: false; status: number; description?: string; retryAfterSec: number | null }
   > {
     const params: Record<string, unknown> = {
       timeout: opts.timeout ?? 0,
@@ -400,7 +477,7 @@ export class TelegramClient {
     const url = this.urlFor("getUpdates");
     // 10s timeout — the probe uses `timeout: 0` server-side so it should return
     // promptly. A dead socket otherwise hangs forever.
-    const composedSignal = composeAbortSignal(opts.signal, PROBE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(opts.signal, this.timeouts.probeMs);
     const resp = await fetchCtx.fn(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -408,19 +485,28 @@ export class TelegramClient {
       signal: composedSignal,
     });
     const raw = await readRaw<TelegramUpdate[]>(resp);
+    // readRaw swallows a body-read error. When the body could not be read
+    // because our signal fired mid-body (the probe timer, the caller's stop,
+    // or a wake), throw that abort, as a fetch throw before the headers
+    // would: a timeout then reads errno:ETIMEDOUT and a wake reaches boot's
+    // "probe again" path, instead of a bogus `HTTP 200` failure.
+    if (raw.body === null && composedSignal.aborted) {
+      throw composedSignal.reason ?? new DOMException("probe aborted", "AbortError");
+    }
     if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
       return { ok: true, updates: (raw.body.result ?? []) as TelegramUpdate[] };
     }
     const description = raw.body?.description;
     if (description !== undefined) {
-      return { ok: false, status: raw.status, description };
+      return { ok: false, status: raw.status, description, retryAfterSec: raw.retryAfterSec };
     }
-    return { ok: false, status: raw.status };
+    return { ok: false, status: raw.status, retryAfterSec: raw.retryAfterSec };
   }
 
   /** POST `sendMessage`. No retry loop — outbound is one-shot from the caller's
-   *  perspective. Phase 6 (`ib tgsend`) wraps this with one 429-retry of its
-   *  own; the dispatcher (Phase 5) doesn't retry on outbound failures.
+   *  perspective. The outbox (outbox.ts) retries transient failures (see
+   *  `isTransientStatus`); the dispatcher (Phase 5) doesn't retry on outbound
+   *  failures.
    *
    *  Goes through `readRaw` so the `Retry-After` HTTP header is read alongside
    *  the body's `parameters.retry_after`. Callers honoring 429 backoff should
@@ -430,19 +516,23 @@ export class TelegramClient {
     const body = JSON.stringify({ chat_id: opts.chat_id, text: opts.text });
     const url = this.urlFor("sendMessage");
     // 15s per-attempt timeout — outbound is one-shot; a dead socket otherwise
-    // stalls the outbox queue indefinitely.
-    const composedSignal = composeAbortSignal(undefined, SENDMESSAGE_TIMEOUT_MS);
+    // stalls the outbox queue indefinitely. A fresh connection per send
+    // (OUTBOUND_FETCH_INIT) keeps an idle pooled socket from being that
+    // dead socket.
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.sendMessageMs);
     const resp = await fetchCtx.fn(url, {
+      ...OUTBOUND_FETCH_INIT,
       method: "POST",
       headers: { "content-type": "application/json" },
       body,
       signal: composedSignal,
     });
     const raw = await readRaw<TelegramMessage>(resp);
-    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
-      return { ok: true, result: (raw.body.result ?? {}) as TelegramMessage };
+    if (accepted(raw)) {
+      noteUnreadableAcceptedBody("sendMessage", raw);
+      return { ok: true, result: (raw.body?.result ?? {}) as TelegramMessage };
     }
-    logCtx.fn(`telegram sendMessage: status=${raw.status}`);
+    logPermanentFailure("sendMessage", raw.status);
     return {
       ok: false,
       status: raw.status,
@@ -462,7 +552,7 @@ export class TelegramClient {
     try {
       const body = JSON.stringify({ chat_id: opts.chat_id, action: opts.action });
       const url = this.urlFor("sendChatAction");
-      const composedSignal = composeAbortSignal(undefined, SENDCHATACTION_TIMEOUT_MS);
+      const composedSignal = composeAbortSignal(undefined, this.timeouts.sendChatActionMs);
       await fetchCtx.fn(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -476,7 +566,7 @@ export class TelegramClient {
 
   /** POST `setMessageReaction`. No retry loop — outbound is one-shot from the
    *  caller's perspective, same contract as {@link sendMessage}. The outbox
-   *  wraps this with a single 429-retry of its own.
+   *  retries transient failures itself.
    *
    *  `emoji` is sent as a one-element `reaction` array `[{type:"emoji",emoji}]`;
    *  passing `null` sends an empty `reaction` array, which clears the bot's
@@ -495,18 +585,20 @@ export class TelegramClient {
       reaction,
     });
     const url = this.urlFor("setMessageReaction");
-    const composedSignal = composeAbortSignal(undefined, SENDMESSAGE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.sendMessageMs);
     const resp = await fetchCtx.fn(url, {
+      ...OUTBOUND_FETCH_INIT,
       method: "POST",
       headers: { "content-type": "application/json" },
       body,
       signal: composedSignal,
     });
     const raw = await readRaw<boolean>(resp);
-    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
+    if (accepted(raw)) {
+      noteUnreadableAcceptedBody("setMessageReaction", raw);
       return { ok: true };
     }
-    logCtx.fn(`telegram setMessageReaction: status=${raw.status}`);
+    logPermanentFailure("setMessageReaction", raw.status);
     return {
       ok: false,
       status: raw.status,
@@ -525,7 +617,7 @@ export class TelegramClient {
   async getFile(fileId: string): Promise<GetFileResult> {
     const body = JSON.stringify({ file_id: fileId });
     const url = this.urlFor("getFile");
-    const composedSignal = composeAbortSignal(undefined, GETFILE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.getFileMs);
     let resp: Response;
     try {
       resp = await fetchCtx.fn(url, {
@@ -566,7 +658,7 @@ export class TelegramClient {
    *  Returns the bytes as a Uint8Array on success. */
   async downloadFile(filePath: string): Promise<DownloadFileResult> {
     const url = this.fileUrlFor(filePath);
-    const composedSignal = composeAbortSignal(undefined, DOWNLOAD_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.downloadMs);
     let resp: Response;
     try {
       resp = await fetchCtx.fn(url, { method: "GET", signal: composedSignal });
@@ -614,7 +706,7 @@ export class TelegramClient {
    *
    *  Telegram recompresses photos sent this way — callers wanting exact bytes
    *  (e.g. a PNG diff) should use {@link sendDocument} instead. No retry loop;
-   *  the outbox wraps this with a single 429-retry. Never logs the URL. */
+   *  the outbox retries transient failures. Never logs the URL. */
   async sendPhoto(opts: SendPhotoOptions): Promise<SendFileResult> {
     return this.sendMultipartFile("sendPhoto", "photo", opts.chat_id, opts.path, opts.caption);
   }
@@ -647,29 +739,34 @@ export class TelegramClient {
     form.append(field, Bun.file(path));
 
     const url = this.urlFor(method);
-    const composedSignal = composeAbortSignal(undefined, SENDFILE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.sendFileMs);
     let resp: Response;
     try {
       // No explicit content-type header: the runtime derives the multipart
       // boundary from the FormData body. Setting it manually breaks parsing.
-      resp = await fetchCtx.fn(url, { method: "POST", body: form, signal: composedSignal });
+      resp = await fetchCtx.fn(url, { ...OUTBOUND_FETCH_INIT, method: "POST", body: form, signal: composedSignal });
     } catch (err) {
       // Surface as a non-2xx-shaped failure so the outbox formats it uniformly.
-      // classifyError, never err.message (token-bearing URL safety).
-      logCtx.fn(`telegram ${method}: ${classifyError(err)}`);
+      // classifyError, never err.message (token-bearing URL safety). Not
+      // logged: status 0 is transient, and the outbox logs its retries.
+      // `timedOut` lets the outbox tell an upload that cannot finish in
+      // `sendFileMs` from other transient failures: there is no caller
+      // signal here, so any abort is our own timer.
       return {
         ok: false,
         status: 0,
         error_code: 0,
         description: classifyError(err),
         retryAfterSec: null,
+        timedOut: isAbortError(err),
       };
     }
     const raw = await readRaw<TelegramMessage>(resp);
-    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
-      return { ok: true, result: (raw.body.result ?? {}) as TelegramMessage };
+    if (accepted(raw)) {
+      noteUnreadableAcceptedBody(method, raw);
+      return { ok: true, result: (raw.body?.result ?? {}) as TelegramMessage };
     }
-    logCtx.fn(`telegram ${method}: status=${raw.status}`);
+    logPermanentFailure(method, raw.status);
     return {
       ok: false,
       status: raw.status,
@@ -784,7 +881,38 @@ async function readRaw<T>(resp: Response): Promise<RawResponse<T>> {
   return { status, retryAfterSec, body };
 }
 
-function isAbortError(err: unknown): boolean {
+/** True when an outbound call's answer means Telegram ACCEPTED the request
+ *  (sendMessage, setMessageReaction, sendPhoto, sendDocument). Telegram
+ *  answers 2xx only with `{ok:true}`, so any 2xx is a success unless its body
+ *  is a readable `ok:false` envelope. In particular a 2xx whose body could not
+ *  be read — truncated, reset mid-body, or the timeout fired mid-body — is
+ *  delivered, just without a message id. Treating it as a failure reported an
+ *  error for a message Telegram had delivered, and a manual resend arrived
+ *  twice. */
+function accepted<T>(raw: RawResponse<T>): boolean {
+  return raw.status >= 200 && raw.status < 300 && raw.body?.ok !== false;
+}
+
+/** Log a delivered call whose 2xx body could not be read, so an `ok` with no
+ *  message id has an explanation in watch.log. */
+function noteUnreadableAcceptedBody<T>(method: string, raw: RawResponse<T>): void {
+  if (raw.body === null) {
+    logCtx.fn(`telegram ${method}: HTTP ${raw.status} with an unreadable body; treating it as delivered`);
+  }
+}
+
+/** Log a failed outbound call only when it is PERMANENT. Transient failures
+ *  (status 0, 429, 5xx) are retried by the outbox, which owns their logging
+ *  (one `send stalled` line per streak); a line per attempt here flooded
+ *  watch.log during an outage. Status only — never the URL. */
+function logPermanentFailure(method: string, status: number): void {
+  if (!isTransientStatus(status)) logCtx.fn(`telegram ${method}: status=${status}`);
+}
+
+/** True for a cancelled fetch: a timer-fired `AbortSignal.timeout` or an
+ *  `AbortController` abort. Callers that own the user signal check it first to
+ *  tell "the caller cancelled" from "the request timed out". */
+export function isAbortError(err: unknown): boolean {
   if (err instanceof Error) {
     // `AbortSignal.timeout` surfaces as TimeoutError; an AbortController-fired
     // abort surfaces as AbortError. Both indicate a cancelled fetch.
@@ -810,18 +938,25 @@ function composeAbortSignal(
   return AbortSignal.any([userSignal, timer]);
 }
 
-/** Standard exponential backoff capped at BACKOFF_MAX_MS. */
+/** Exponential backoff capped at BACKOFF_MAX_MS, with jitter so the poll loop
+ *  and the outbox do not retry in lockstep after a shared network drop. */
 function computeBackoff(attempt: number): number {
-  // attempt is 1-indexed in the retry loop. 1->1s, 2->2s, 3->4s ... cap 30s.
-  const exp = Math.min(BACKOFF_INITIAL_MS * 2 ** (attempt - 1), BACKOFF_MAX_MS);
-  return exp;
+  // attempt is 1-indexed in the retry loop. ~1s, ~2s, ~4s ... cap 30s.
+  return backoffDelayMs(attempt, { initialMs: BACKOFF_INITIAL_MS, maxMs: BACKOFF_MAX_MS });
 }
 
-/** Sleep that resolves on the AbortSignal too. Throws on abort so callers can
- *  unwind cleanly. */
-async function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+/** Sleep that ends early when the AbortSignal fires. Throws on abort so callers
+ *  can unwind cleanly. `sleep` defaults to this module's injectable
+ *  {@link sleepCtx}; the dispatcher passes its own so its tests fast-forward
+ *  through one context. Shared by `getUpdates`, the boot probe retry
+ *  (boot.ts) and the dispatcher's loop backoff. */
+export async function abortableSleep(
+  ms: number,
+  signal: AbortSignal | undefined,
+  sleep: SleepFn = sleepCtx.fn,
+): Promise<void> {
   if (!signal) {
-    await sleepCtx.fn(ms);
+    await sleep(ms);
     return;
   }
   if (signal.aborted) throw new DOMException("aborted", "AbortError");
@@ -836,8 +971,7 @@ async function abortableSleep(ms: number, signal: AbortSignal | undefined): Prom
       reject(new DOMException("aborted", "AbortError"));
     };
     signal.addEventListener("abort", onAbort, { once: true });
-    sleepCtx
-      .fn(ms)
+    sleep(ms)
       .then(() => {
         if (settled) return;
         settled = true;

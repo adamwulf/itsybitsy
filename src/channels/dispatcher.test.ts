@@ -36,6 +36,8 @@ import {
   sleepCtx as clientSleepCtx,
   logCtx as clientLogCtx,
 } from "./telegram-client";
+import type { GetUpdatesOptions } from "./telegram-client";
+import { randomCtx } from "./backoff";
 import {
   setStateDir as setCacheStateDir,
   resetStateDir as resetCacheStateDir,
@@ -2111,6 +2113,25 @@ describe("TelegramDispatcher", () => {
     expect(body.chat_id).toBe("100");
   });
 
+  test("a Telegram reply that fails transiently (502) is still logged", async () => {
+    // The client logs only PERMANENT statuses now (the outbox owns retry
+    // logging), so replyOnTelegram must log a non-ok answer itself.
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/clear" })],
+    });
+    mock.enqueueResponse({ ok: false, error_code: 502, description: "Bad Gateway" }, 502);
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => logs.some((l) => l.includes("replyOnTelegram failed")), 1_000);
+    await d.stop();
+
+    expect(logs).toContain("Telegram dispatcher: replyOnTelegram failed: Bad Gateway");
+    expect(logs.some((l) => l.includes("status=502"))).toBe(false);
+  });
+
   test("inbound '/restart' → triggers restartCoordinatorCtx and acks on Telegram, no coordinator send", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({
@@ -2956,6 +2977,262 @@ describe("TelegramDispatcher health state machine", () => {
     // Sanity: lastFailureReason on the dispatcher must also be token-free.
     const h = d.getHealth();
     expect(h.reason === null || !h.reason.includes("SECRET_DISP_TOKEN_999")).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Poll loop resilience: backoff, reconnectNow, supervisor            */
+/* ------------------------------------------------------------------ */
+
+/** One scripted `getUpdates` call for {@link makeStubClient}. */
+type GetUpdatesStep = { throws: unknown } | { updates: TelegramUpdate[] } | "hang";
+
+/** A client whose `getUpdates` follows a script, so a test can make it throw
+ *  a NON-abort error (the real client never does) or hang until aborted. The
+ *  default after the script is "hang", like an idle long-poll. */
+function makeStubClient(steps: GetUpdatesStep[]) {
+  const signals: AbortSignal[] = [];
+  const stub = {
+    probeOnce: async () => ({ ok: true as const, updates: [] as TelegramUpdate[] }),
+    getUpdates: async (opts: GetUpdatesOptions): Promise<TelegramUpdate[]> => {
+      const signal = opts.signal!;
+      signals.push(signal);
+      const step = steps.shift() ?? "hang";
+      if (step === "hang") {
+        return await new Promise<TelegramUpdate[]>((_, reject) => {
+          if (signal.aborted) {
+            reject(new DOMException("aborted", "AbortError"));
+            return;
+          }
+          signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        });
+      }
+      if ("throws" in step) throw step.throws;
+      opts.onPollOutcome?.("success");
+      return step.updates;
+    },
+    sendMessage: async () => ({ ok: true as const, result: {} as TelegramMessage }),
+  };
+  return { client: stub as unknown as TelegramClient, signals };
+}
+
+describe("TelegramDispatcher poll loop resilience", () => {
+  let send: SendSpy;
+  let logs: string[];
+  let dispSleeps: number[];
+  let stateRoot: string;
+
+  beforeEach(async () => {
+    send = makeSendSpy();
+    sendCtx.set(send.fn);
+    dispSleeps = [];
+    sleepCtx.set(async (ms) => { dispSleeps.push(ms); });
+    nowCtx.set(() => 1_700_000_000_000);
+    logs = [];
+    logCtx.set((line) => logs.push(line));
+    clientLogCtx.set(() => { /* silence */ });
+    clientSleepCtx.set(async () => { /* fast forward */ });
+    // No jitter: the loop's backoff waits are exactly 1 s, 2 s, 4 s ...
+    randomCtx.set(() => 0);
+    stateRoot = await mkdtemp(join(tmpdir(), "dispatcher-loop-"));
+    setLastMsgStateDir(join(stateRoot, "channels", "telegram"));
+    resetMessageCache();
+  });
+
+  afterEach(async () => {
+    sendCtx.reset();
+    sleepCtx.reset();
+    nowCtx.reset();
+    logCtx.reset();
+    clientLogCtx.reset();
+    clientSleepCtx.reset();
+    clientFetchCtx.reset();
+    randomCtx.reset();
+    resetLastMsgStateDir();
+    resetMessageCache();
+    await rm(stateRoot, { recursive: true, force: true });
+  });
+
+  function makeDispatcherWith(client: TelegramClient): TelegramDispatcher {
+    return new TelegramDispatcher({ client, allowedChatIds: ["100"], allowedUserIds: [], chatId: "100" });
+  }
+
+  const hello = (id: number) => update(id, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: `hello ${id}` });
+
+  test("a non-abort getUpdates throw backs off with doubling waits, then the loop keeps polling", async () => {
+    const boom = new Error("boom");
+    const { client, signals } = makeStubClient([
+      { throws: boom },
+      { throws: boom },
+      { throws: boom },
+      { updates: [hello(5)] },
+    ]);
+    const d = makeDispatcherWith(client);
+    const states: string[] = [];
+    d.onStateChange((c) => states.push(`${c.from}->${c.to}`));
+    await d.start();
+    await waitFor(() => send.calls.length === 1, 1_000);
+    // Waited before each retry, never spun: 1 s, 2 s, 4 s.
+    expect(dispSleeps).toEqual([1_000, 2_000, 4_000]);
+    expect(logs.filter((l) => l.includes("unexpected getUpdates throw"))).toEqual([
+      "Telegram dispatcher: unexpected getUpdates throw: Error:boom; backing off",
+      "Telegram dispatcher: unexpected getUpdates throw: Error:boom; backing off",
+      "Telegram dispatcher: unexpected getUpdates throw: Error:boom; backing off",
+    ]);
+    // The throws show as a retry streak, and the success ends it.
+    expect(states).toEqual(["down->polling", "polling->retrying", "retrying->polling"]);
+    expect(send.calls[0]!.message).toContain("hello 5");
+    // The loop is still polling (the 5th call is the idle long-poll).
+    await waitFor(() => signals.length === 5, 1_000);
+    expect(d.isRunning()).toBe(true);
+    await d.stop();
+  });
+
+  test("a reply whose result is not an array backs off instead of killing the loop", async () => {
+    // Real client, malformed body: getUpdates returns `{}`. Before the fix the
+    // loop threw on `updates.reduce` and stopped polling for good.
+    const mock = makeMockFetch();
+    clientFetchCtx.set(mock.fn);
+    mock.enqueueResponse({ ok: true, result: [] }); // startup probe
+    mock.enqueueResponse({ ok: true, result: { not: "an array" } });
+    mock.enqueueResponse({ ok: true, result: [hello(9)] });
+    const d = makeDispatcherWith(new TelegramClient({ token: "TEST_TOKEN" }));
+    await d.start();
+    await waitFor(() => send.calls.length === 1, 1_000);
+    expect(dispSleeps).toEqual([1_000]);
+    expect(logs.some((l) => l.includes("unexpected getUpdates throw: TypeError"))).toBe(true);
+    expect(d.isRunning()).toBe(true);
+    await d.stop();
+  });
+
+  test("reconnectNow aborts an in-flight poll and the loop polls again at once", async () => {
+    const { client, signals } = makeStubClient(["hang", { updates: [hello(3)] }]);
+    const d = makeDispatcherWith(client);
+    await d.start();
+    await waitFor(() => signals.length === 1, 1_000);
+    expect(signals[0]!.aborted).toBe(false);
+
+    d.reconnectNow("wake from sleep");
+    expect(signals[0]!.aborted).toBe(true);
+    await waitFor(() => send.calls.length === 1, 1_000);
+    expect(send.calls[0]!.message).toContain("hello 3");
+    // A reconnect is not a failure: no wait, no log, still polling.
+    expect(dispSleeps).toEqual([]);
+    expect(logs).toEqual([]);
+    expect(d.getHealth().state).toBe("polling");
+    expect(d.isRunning()).toBe(true);
+    await d.stop();
+  });
+
+  test("reconnectNow during a backoff wait cuts it short and resets the backoff", async () => {
+    const boom = new Error("boom");
+    const { client, signals } = makeStubClient([{ throws: boom }, { throws: boom }, { throws: boom }]);
+    // Wait 1 ends on its own; wait 2 hangs until something aborts it.
+    sleepCtx.set((ms) => {
+      dispSleeps.push(ms);
+      return dispSleeps.length === 2 ? new Promise<void>(() => {}) : Promise.resolve();
+    });
+    const d = makeDispatcherWith(client);
+    await d.start();
+    await waitFor(() => dispSleeps.length === 2, 1_000);
+    d.reconnectNow("wake from sleep");
+    // The third throw starts a fresh streak: attempt 1 again.
+    await waitFor(() => dispSleeps.length === 3, 1_000);
+    expect(dispSleeps).toEqual([1_000, 2_000, 1_000]);
+    await waitFor(() => signals.length === 4, 1_000);
+    await d.stop();
+  });
+
+  test("reconnectNow is a no-op before start and after stop", async () => {
+    const { client } = makeStubClient([]);
+    const d = makeDispatcherWith(client);
+    d.reconnectNow("early");
+    await d.start();
+    await d.stop();
+    d.reconnectNow("late");
+    expect(d.isRunning()).toBe(false);
+    expect(d.getHealth().state).toBe("down");
+  });
+
+  test("a crashed loop is logged and restarted instead of dying silently", async () => {
+    // The loop's own error handling throws: the log sink fails on the
+    // "unexpected throw" line. runLoop rejects; superviseLoop must log and
+    // start it again, and the next update must still arrive.
+    logCtx.set((line) => {
+      if (line.includes("unexpected getUpdates throw")) throw new Error("log sink down");
+      logs.push(line);
+    });
+    const { client } = makeStubClient([{ throws: new Error("boom") }, { updates: [hello(4)] }]);
+    const d = makeDispatcherWith(client);
+    await d.start();
+    await waitFor(() => send.calls.length === 1, 1_000);
+    expect(logs).toContain("Telegram dispatcher: poll loop crashed (Error:log sink down); restarting");
+    // One backoff before the restart.
+    expect(dispSleeps).toEqual([1_000]);
+    expect(d.isRunning()).toBe(true);
+    await d.stop();
+    expect(d.getHealth().state).toBe("down");
+  });
+
+  test("stop() during a backoff wait ends the loop promptly", async () => {
+    const { client } = makeStubClient([{ throws: new Error("boom") }]);
+    sleepCtx.set((ms) => {
+      dispSleeps.push(ms);
+      return new Promise<void>(() => {}); // only an abort ends it
+    });
+    const d = makeDispatcherWith(client);
+    await d.start();
+    await waitFor(() => dispSleeps.length === 1, 1_000);
+    await d.stop();
+    expect(d.isRunning()).toBe(false);
+  });
+
+  test("health reasonAt keeps the first time of a streak and clears on recovery", async () => {
+    let nowMs = 1_700_000_000_000;
+    nowCtx.set(() => nowMs);
+    const mock = makeMockFetch();
+    clientFetchCtx.set(mock.fn);
+    // Each client backoff wait advances the clock 1 s.
+    clientSleepCtx.set(async () => { nowMs += 1_000; });
+    mock.enqueueResponse({ ok: true, result: [] }); // startup probe
+    mock.enqueueError(new Error("ETIMEDOUT")); // t0
+    mock.enqueueError(new Error("ETIMEDOUT")); // t0 + 1 s, same class
+    mock.enqueueError(new Error("ECONNRESET")); // t0 + 2 s, new class
+    const t0 = nowMs;
+    const d = makeDispatcherWith(new TelegramClient({ token: "TEST_TOKEN" }));
+    await d.start();
+    await waitFor(() => d.getHealth().reason === "errno:ECONNRESET", 1_000);
+    expect(d.getHealth().reasonAt).toBe(t0 + 2_000);
+    await d.stop();
+    expect(d.getHealth().reason).toBe("errno:ECONNRESET");
+
+    // A recovery clears both.
+    const mock2 = makeMockFetch();
+    clientFetchCtx.set(mock2.fn);
+    mock2.enqueueResponse({ ok: true, result: [] }); // startup probe
+    mock2.enqueueError(new Error("ETIMEDOUT"));
+    mock2.enqueueResponse({ ok: true, result: [] });
+    const d2 = makeDispatcherWith(new TelegramClient({ token: "TEST_TOKEN" }));
+    await d2.start();
+    await waitFor(() => d2.getHealth().lastSuccessAt !== null, 1_000);
+    expect(d2.getHealth().reason).toBeNull();
+    expect(d2.getHealth().reasonAt).toBeNull();
+    await d2.stop();
+  });
+
+  test("pollTimeoutSec is passed to getUpdates as the long-poll timeout", async () => {
+    const timeouts: Array<number | undefined> = [];
+    const { client } = makeStubClient([]);
+    const original = client.getUpdates.bind(client);
+    (client as unknown as { getUpdates: typeof client.getUpdates }).getUpdates = (opts) => {
+      timeouts.push(opts?.timeout);
+      return original(opts);
+    };
+    const d = new TelegramDispatcher({ client, allowedChatIds: ["100"], allowedUserIds: [], chatId: "100", pollTimeoutSec: 2 });
+    await d.start();
+    await waitFor(() => timeouts.length === 1, 1_000);
+    expect(timeouts).toEqual([2]);
+    await d.stop();
   });
 });
 

@@ -102,6 +102,7 @@ import {
   readRemoteControlFiles, remoteControlStatus,
   type RemoteControlFiles, type RemoteControlFilesOptions, type RemoteControlStatus,
 } from "../remote-control-light";
+import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -790,6 +791,10 @@ export class DashboardComponent implements Component {
    */
   private clockTimer: ReturnType<typeof setTimeout> | null = null;
   private telegramStatus: "red" | "yellow" | "green" | null = null;
+  /** Latest Telegram connection view (header light + help panel); null when
+   *  no bot token is configured. Set through `setTelegramConnection`. */
+  telegramConnection: TelegramConnectionView | null = null;
+  /** 5 s backstop tick that re-derives the Telegram connection state. */
   telegramStatusTimer: ReturnType<typeof setInterval> | null = null;
   /** Latest shared sandbox denial collector probe (top bar + help panel). */
   collectorStatus: CollectorHealth | null = null;
@@ -1609,6 +1614,14 @@ export class DashboardComponent implements Component {
     if (this.telegramStatus === status) return;
     this.telegramStatus = status;
     this.tui?.requestRender();
+  }
+
+  /** Apply a Telegram connection view (src/channels/connection-view.ts): the
+   *  header light from `telegramLight`, and the view itself for the `?` help
+   *  row. Null hides both. */
+  setTelegramConnection(view: TelegramConnectionView | null): void {
+    this.telegramConnection = view;
+    this.setTelegramStatus(view ? telegramLight(view) : null);
   }
 
   setCollectorStatus(status: CollectorHealth): void {
@@ -3812,6 +3825,8 @@ export async function launchDashboard(): Promise<void> {
   const { TelegramOutbox, defaultOutboxDir } = await import("../channels/outbox");
   const { readAccess } = await import("../channels/access");
   const { bootTelegramSubsystem } = await import("../channels/boot");
+  const { TelegramConnectionMonitor } = await import("../channels/connection-monitor");
+  const { WakeDetector } = await import("../channels/wake-detector");
   // Redirect telegram-client and dispatcher logs (which default to stderr)
   // into watch.log so they don't corrupt the TUI rendering. Must run BEFORE
   // the telegram boot IIFE so no `getUpdates` retry line can leak in between.
@@ -3832,11 +3847,11 @@ export async function launchDashboard(): Promise<void> {
   }
   let telegramDispatcher: import("../channels/dispatcher").TelegramDispatcher | null = null;
   let telegramOutbox: import("../channels/outbox").TelegramOutbox | null = null;
-  let telegramBootOk = false;
-  /** Unsubscribe handle for the dispatcher's onStateChange listener.
-   *  Cleared on Ctrl+C so we don't leak the closure across the shutdown
-   *  promise chain. */
-  let telegramStateUnsub: (() => void) | null = null;
+  /** Aborted on quit: a boot still retrying a transient failure gives up. */
+  const telegramBootAbort = new AbortController();
+  /** Wake-from-sleep detector (src/channels/wake-detector.ts), only with a
+   *  token: on a wake the poll loop and a retrying boot reconnect at once. */
+  const telegramWake = tgToken !== "" ? new WakeDetector({ log: logToWatchLog }) : null;
 
   const dashboard = new DashboardComponent();
   const savedLayout = await loadLayout();
@@ -3860,31 +3875,25 @@ export async function launchDashboard(): Promise<void> {
   const groupByParentValue = config["tree.groupByParent"]?.value;
   dashboard.setGroupByParent(groupByParentValue === true);
   dashboard.setVersion(version);
+  // Telegram connection state (src/channels/connection-monitor.ts): one view
+  // from the boot, the poll loop and the outbox, pushed on every change to
+  // the header light + `?` help row (only with a token) and to
+  // ~/.itsybitsy/channels/telegram/status.json (always, so `ib tgsend` can
+  // tell "no token" from "ib watch is not running"). The 5 s tick re-derives
+  // it as a backstop for a change that fired no event.
+  const telegramMonitor = new TelegramConnectionMonitor({
+    log: logToWatchLog,
+    wake: telegramWake ?? undefined,
+    onChange: (view) => {
+      if (tgToken !== "") dashboard.setTelegramConnection(view);
+    },
+  });
   if (tgToken !== "") {
-    // Start yellow ("boot in progress"). The background boot promise below
-    // flips this to green on success or red on failure. The 5 s interval
-    // re-reads the closure-captured `telegramDispatcher` / `telegramBootOk`
-    // vars, which are populated when the background boot resolves.
-    //
-    // Health-aware polling: instead of `isRunning()` (a sticky boolean that
-    // stays true while the loop hangs on a dead socket), we read the
-    // dispatcher's state machine. `polling` → green, `retrying` → yellow,
-    // anything else → red.
-    dashboard.setTelegramStatus("yellow");
-    dashboard.telegramStatusTimer = setInterval(() => {
-      if (!telegramDispatcher) {
-        dashboard.setTelegramStatus(telegramBootOk ? "yellow" : "red");
-        return;
-      }
-      const health = telegramDispatcher.getHealth();
-      if (health.state === "polling") {
-        dashboard.setTelegramStatus("green");
-      } else if (health.state === "retrying") {
-        dashboard.setTelegramStatus("yellow");
-      } else {
-        dashboard.setTelegramStatus("red");
-      }
-    }, 5_000);
+    // Show yellow "connecting" until the background boot below reports.
+    // Without a token the boot's "disabled" is the first state published.
+    telegramMonitor.refresh();
+    telegramWake?.start();
+    dashboard.telegramStatusTimer = setInterval(() => telegramMonitor.refresh(), 5_000);
   }
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read
@@ -3923,7 +3932,10 @@ export async function launchDashboard(): Promise<void> {
   // watcher exists. Fire-and-forget: we only `await` it during shutdown (and
   // even then with a short timeout) so a hung Telegram API call cannot stall
   // dashboard startup. Boot diagnostics route through ~/.itsybitsy/watch.log
-  // rather than stderr (which would render the dashboard unreadable).
+  // rather than stderr (which would render the dashboard unreadable). A
+  // transient probe failure (outage, timeout, 5xx, 429) is retried inside
+  // the boot until it connects or quit aborts it; the light stays yellow
+  // "connecting" meanwhile.
   const telegramBootPromise: Promise<void> = (async () => {
     try {
       const bootResult = await bootTelegramSubsystem({
@@ -3933,47 +3945,43 @@ export async function launchDashboard(): Promise<void> {
         buildDispatcher: (opts) => new TelegramDispatcher(opts),
         buildOutbox: (opts) => new TelegramOutbox({ ...opts, log: logToWatchLog }),
         log: logToWatchLog,
+        signal: telegramBootAbort.signal,
+        wake: telegramWake ?? undefined,
+        onRetry: (info) => telegramMonitor.bootRetry(info.reason),
       });
+      // Quit while the last probe was in flight: start nothing.
+      if (telegramBootAbort.signal.aborted) return;
       if (bootResult.ok) {
         telegramDispatcher = bootResult.dispatcher;
         telegramOutbox = bootResult.outbox;
-        telegramBootOk = true;
-        // Subscribe to dispatcher health transitions and pipe them to
-        // watch.log. Boot already logged the initial connect status, so the
-        // initial down→polling transition (reason=null) is suppressed here.
-        // Subsequent transitions:
-        //   polling  → retrying  : log "telegram: disconnected (<reason>)"
-        //   retrying → polling   : log "telegram: <reason>" (e.g. "reconnected after 12s")
-        //   any      → down      : silent (shutdown / 409 are already logged
-        //                          via boot or the dispatcher itself)
-        telegramStateUnsub = telegramDispatcher.onStateChange((change) => {
-          if (change.to === "retrying" && change.reason !== null) {
-            logToWatchLog(`telegram: disconnected (${change.reason})`);
-          } else if (change.to === "polling" && change.reason !== null) {
-            logToWatchLog(`telegram: ${change.reason}`);
-          }
-        });
+        // Attach before starting so no transition is missed. The monitor
+        // logs the dispatcher's transitions (disconnected / reconnected),
+        // kicks the outbox when the poll loop recovers, and reconnects both
+        // on a wake from sleep.
+        telegramMonitor.attach(telegramDispatcher, telegramOutbox);
         // Don't await — start() runs the loop in the background.
-        telegramDispatcher.start().catch((err) => {
-          logToWatchLog(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        telegramDispatcher.start()
+          .catch((err) => {
+            logToWatchLog(`Telegram dispatcher failed to start: ${err instanceof Error ? err.message : String(err)}`);
+          })
+          .finally(() => telegramMonitor.dispatcherStartSettled());
         // Outbox start() awaits the sweep + watcher install. We let it run in
         // the background so a stuck filesystem can't block the dashboard.
         telegramOutbox.start().catch((err) => {
           logToWatchLog(`Telegram outbox failed to start at ${defaultOutboxDir()}: ${err instanceof Error ? err.message : String(err)}`);
         });
-        // Promote to green on the next render.
-        if (tgToken !== "") dashboard.setTelegramStatus("green");
       } else {
         // The boot helper already wrote the failure reason to watch.log via
-        // the injected `log`; just flip the indicator.
-        if (tgToken !== "") dashboard.setTelegramStatus("red");
+        // the injected `log`; publish it (light, help row, status file).
+        telegramMonitor.bootDisabled(bootResult.message);
       }
     } catch (err) {
       // bootTelegramSubsystem itself shouldn't throw — but if a future change
       // adds a path that does, we don't want it to take down launchDashboard.
       logToWatchLog(`Telegram routing disabled: boot threw (${err instanceof Error ? err.message : String(err)})`);
-      if (tgToken !== "") dashboard.setTelegramStatus("red");
+      // A fixed label: the status file must stay token-safe, and a raw
+      // exception message carries no such guarantee.
+      telegramMonitor.bootDisabled("boot threw unexpectedly (see watch.log)");
     }
   })();
 
@@ -4011,13 +4019,18 @@ export async function launchDashboard(): Promise<void> {
     dashboard.setTerminalTitle("");
     process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[2J\x1b[H");
     process.stdout.write("Quitting ib watch…\n");
-    // Unsubscribe the state-change listener before stopping so a stop()
-    // transition doesn't fire one final logToWatchLog call after we've
-    // already torn down the TUI write paths.
-    if (telegramStateUnsub) {
-      telegramStateUnsub();
-      telegramStateUnsub = null;
-    }
+    // Telegram connection: a boot still retrying gives up, the wake detector
+    // stops, and the monitor stops listening and publishing BEFORE the
+    // dispatcher stops, so the stop's → down transition neither logs nor
+    // writes "disabled". dispose() then waits for queued status writes and
+    // removes the status file (a clean quit; a crash leaves it for readers
+    // to discard by pid).
+    telegramBootAbort.abort();
+    telegramWake?.stop();
+    const disposeTelegramMonitor = Promise.race([
+      telegramMonitor.dispose(),
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
     // Stop the Telegram dispatcher if it was started. Race against a 2s
     // timeout so a hung getUpdates abort cannot block exit. We don't
     // process.exit() synchronously — give shutdown a chance to flush.
@@ -4040,9 +4053,10 @@ export async function launchDashboard(): Promise<void> {
       : Promise.resolve();
     // If the user hits Ctrl+C before the background boot resolves, race it
     // out with a short timeout so the dashboard exits promptly even when
-    // the Telegram API is hung. After this race resolves the boot promise
-    // is "released" — any handlers it has chained will still run, but they
-    // won't block process exit because of the .finally(process.exit) below.
+    // the Telegram API is hung (the abort above normally ends it at once).
+    // After this race resolves the boot promise is "released" — any
+    // handlers it has chained will still run, but they won't block process
+    // exit because of the .finally(process.exit) below.
     const finishBoot = Promise.race([
       telegramBootPromise,
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
@@ -4053,6 +4067,7 @@ export async function launchDashboard(): Promise<void> {
       stopTelegram.catch(() => { /* ignore — already raced */ }),
       stopOutbox.catch(() => { /* ignore — already raced */ }),
       finishBoot.catch(() => { /* ignore — boot was best effort */ }),
+      disposeTelegramMonitor.catch(() => { /* ignore — already raced */ }),
     ]).then(() => {
       // Release coordinator ref — if last ref, kills the tmux session
       // and pauses all per-repo coordinators

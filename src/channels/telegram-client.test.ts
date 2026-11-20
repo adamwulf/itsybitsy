@@ -4,11 +4,13 @@ import {
   TELEGRAM_API_BASE,
   TELEGRAM_CHUNK_LIMIT,
   chunk,
+  classifyError,
   fetchCtx,
   sleepCtx,
   logCtx,
 } from "./telegram-client";
 import type { FetchLike } from "../types";
+import { randomCtx } from "./backoff";
 
 /** Build a Response object whose `.json()` resolves to `body`, with the
  *  given status and optional headers. */
@@ -132,12 +134,31 @@ describe("getUpdates", () => {
     });
     logs = [];
     logCtx.set((line) => logs.push(line));
+    // Pin the jitter draw so backoff delays are exact (0 → no reduction).
+    randomCtx.set(() => 0);
   });
 
   afterEach(() => {
     fetchCtx.reset();
     sleepCtx.reset();
     logCtx.reset();
+    randomCtx.reset();
+  });
+
+  test("backoff doubles from 1s, caps at 30s, and is jittered downward", async () => {
+    for (let i = 0; i < 7; i++) mock.enqueueResponse({}, 502);
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+    await client.getUpdates();
+    expect(sleeps).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+
+    // A non-zero draw shortens each delay by up to 20%.
+    sleeps.length = 0;
+    randomCtx.set(() => 0.5);
+    mock.enqueueResponse({}, 502);
+    mock.enqueueResponse({ ok: true, result: [] });
+    await client.getUpdates();
+    expect(sleeps).toEqual([900]);
   });
 
   test("happy path returns parsed updates", async () => {
@@ -452,15 +473,61 @@ describe("sendMessage", () => {
     }
   });
 
-  test("logs status only — never the URL with the token", async () => {
-    mock.enqueueResponse({ ok: false, error_code: 500, description: "boom" }, 500);
+  test("logs a permanent status only — never the URL with the token", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 400, description: "Bad Request" }, 400);
     const client = new TelegramClient({ token: "VERYSECRET" });
 
     await client.sendMessage({ chat_id: 1, text: "x" });
 
-    expect(logs.length).toBeGreaterThan(0);
-    expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
-    expect(logs.some((l) => l.includes("status=500"))).toBe(true);
+    expect(logs).toEqual(["telegram sendMessage: status=400"]);
+  });
+
+  test("does not log a transient status: the outbox logs its retries", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 500, description: "boom" }, 500);
+    mock.enqueueResponse({ ok: false, error_code: 429, description: "Too Many Requests" }, 429);
+    const client = new TelegramClient({ token: "T" });
+
+    expect((await client.sendMessage({ chat_id: 1, text: "x" })).ok).toBe(false);
+    expect((await client.sendMessage({ chat_id: 1, text: "x" })).ok).toBe(false);
+    expect(logs).toEqual([]);
+  });
+
+  test("a 2xx whose body cannot be read is delivered, with no message id", async () => {
+    // Truncated JSON: Telegram accepted the message; only the answer was cut.
+    mock.enqueue(() => new Response('{"ok":true,"result":{"message_id":4', { status: 200 }));
+    const client = new TelegramClient({ token: "T" });
+
+    expect(await client.sendMessage({ chat_id: 1, text: "x" })).toEqual({ ok: true, result: {} as never });
+    expect(logs).toEqual(["telegram sendMessage: HTTP 200 with an unreadable body; treating it as delivered"]);
+  });
+
+  test("a 2xx whose body stream errors mid-read is delivered", async () => {
+    mock.enqueue(() => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"ok":tr'));
+          controller.error(new Error("socket reset"));
+        },
+      });
+      return new Response(body, { status: 200 });
+    });
+    const client = new TelegramClient({ token: "T" });
+
+    expect((await client.sendMessage({ chat_id: 1, text: "x" })).ok).toBe(true);
+  });
+
+  test("a 2xx with a readable ok:false envelope is still a failure", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 400, description: "Bad Request: odd" }, 200);
+    const client = new TelegramClient({ token: "T" });
+
+    const result = await client.sendMessage({ chat_id: 1, text: "x" });
+    expect(result).toEqual({
+      ok: false,
+      status: 200,
+      error_code: 400,
+      description: "Bad Request: odd",
+      retryAfterSec: null,
+    });
   });
 
   test("429 with only Retry-After header (no body parameter) surfaces retryAfterSec", async () => {
@@ -619,14 +686,22 @@ describe("setMessageReaction", () => {
     }
   });
 
-  test("logs status only — never the URL with the token", async () => {
+  test("logs a permanent status only — never the URL with the token", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 400, description: "REACTION_INVALID" }, 400);
     mock.enqueueResponse({ ok: false, error_code: 500, description: "boom" }, 500);
     const client = new TelegramClient({ token: "VERYSECRET" });
 
     await client.setMessageReaction({ chat_id: 1, message_id: 2, emoji: "👍" });
+    await client.setMessageReaction({ chat_id: 1, message_id: 2, emoji: "👍" });
 
-    expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
-    expect(logs.some((l) => l.includes("status=500"))).toBe(true);
+    expect(logs).toEqual(["telegram setMessageReaction: status=400"]);
+  });
+
+  test("a 2xx whose body cannot be read is delivered", async () => {
+    mock.enqueue(() => new Response("", { status: 200 }));
+    const client = new TelegramClient({ token: "T" });
+
+    expect(await client.setMessageReaction({ chat_id: 1, message_id: 2, emoji: "👍" })).toEqual({ ok: true });
   });
 
   test("surfaces retryAfterSec from a 429 for the outbox 429-retry", async () => {
@@ -825,6 +900,19 @@ describe("getUpdates per-request timeout & onPollOutcome", () => {
     await expect(client.probeOnce({ offset: -1, limit: 1, timeout: 0 })).rejects.toThrow(/timed out/i);
   });
 
+  test("probeOnce reports Retry-After on a 429 (header first, body fallback)", async () => {
+    const replies = [
+      new Response(JSON.stringify({ ok: false, error_code: 429 }), { status: 429, headers: { "retry-after": "9" } }),
+      new Response(JSON.stringify({ ok: false, error_code: 429, parameters: { retry_after: 4 } }), { status: 429 }),
+      new Response(JSON.stringify({ ok: false, description: "Bad Gateway" }), { status: 502 }),
+    ];
+    fetchCtx.set((async () => replies.shift()!) as FetchLike);
+    const client = new TelegramClient({ token: "T" });
+    expect(await client.probeOnce()).toEqual({ ok: false, status: 429, retryAfterSec: 9 });
+    expect(await client.probeOnce()).toEqual({ ok: false, status: 429, retryAfterSec: 4 });
+    expect(await client.probeOnce()).toEqual({ ok: false, status: 502, description: "Bad Gateway", retryAfterSec: null });
+  });
+
   test("sendMessage per-request timeout: TimeoutError surfaces", async () => {
     fetchCtx.set((async () => {
       throw new DOMException("The operation timed out.", "TimeoutError");
@@ -832,8 +920,8 @@ describe("getUpdates per-request timeout & onPollOutcome", () => {
 
     const client = new TelegramClient({ token: "T" });
     // sendMessage doesn't have a retry loop — a hung socket surfaces as
-    // a thrown error to the caller (outbox catches it and writes a
-    // ok:false result file).
+    // a thrown error to the caller (the outbox catches it, labels it
+    // errno:ETIMEDOUT and retries).
     await expect(client.sendMessage({ chat_id: 1, text: "x" })).rejects.toThrow(/timed out/i);
   });
 });
@@ -1092,17 +1180,18 @@ describe("sendPhoto / sendDocument (multipart upload)", () => {
     }
   });
 
-  test("logs status only — never the URL with the token", async () => {
+  test("logs a permanent status only — never the URL with the token", async () => {
+    mock.enqueueResponse({ ok: false, error_code: 413, description: "Request Entity Too Large" }, 413);
     mock.enqueueResponse({ ok: false, error_code: 500, description: "boom" }, 500);
     const client = new TelegramClient({ token: "VERYSECRET" });
 
     await client.sendPhoto({ chat_id: 1, path: tmpFile });
+    await client.sendPhoto({ chat_id: 1, path: tmpFile });
 
-    expect(logs.some((l) => l.includes("VERYSECRET"))).toBe(false);
-    expect(logs.some((l) => l.includes("status=500"))).toBe(true);
+    expect(logs).toEqual(["telegram sendPhoto: status=413"]);
   });
 
-  test("a fetch throw surfaces a classifyError label (token-safe) as ok=false", async () => {
+  test("a fetch throw surfaces a classifyError label (token-safe) as ok=false, unlogged", async () => {
     mock.enqueueError(new Error("connect ECONNRESET https://api.telegram.org/botSECRET/sendPhoto"));
     const client = new TelegramClient({ token: "SECRET" });
 
@@ -1110,8 +1199,31 @@ describe("sendPhoto / sendDocument (multipart upload)", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.description?.includes("/botSECRET/")).toBe(false);
+      expect(result.timedOut).toBe(false);
     }
-    expect(logs.some((l) => l.includes("/botSECRET/"))).toBe(false);
+    // Status 0 is transient: the outbox logs its retries, not the client.
+    expect(logs).toEqual([]);
+  });
+
+  test("an upload that hits the sendFileMs timer reports timedOut with the ETIMEDOUT label", async () => {
+    mock.enqueueError(new DOMException("The operation timed out.", "TimeoutError"));
+    const client = new TelegramClient({ token: "T" });
+
+    expect(await client.sendDocument({ chat_id: 1, path: tmpFile })).toEqual({
+      ok: false,
+      status: 0,
+      error_code: 0,
+      description: "errno:ETIMEDOUT",
+      retryAfterSec: null,
+      timedOut: true,
+    });
+  });
+
+  test("a 2xx whose body cannot be read is delivered, with no message id", async () => {
+    mock.enqueue(() => new Response("<partial", { status: 200 }));
+    const client = new TelegramClient({ token: "T" });
+
+    expect(await client.sendDocument({ chat_id: 1, path: tmpFile })).toEqual({ ok: true, result: {} as never });
   });
 
   test("surfaces retryAfterSec from a 429 for the outbox 429-retry", async () => {
@@ -1128,5 +1240,134 @@ describe("sendPhoto / sendDocument (multipart upload)", () => {
       expect(result.status).toBe(429);
       expect(result.retryAfterSec).toBe(5);
     }
+  });
+});
+
+describe("outbound calls open a fresh connection (keepalive: false)", () => {
+  afterEach(() => {
+    fetchCtx.reset();
+    logCtx.reset();
+  });
+
+  test("sendMessage, setMessageReaction, sendPhoto and sendDocument pass keepalive:false; getUpdates and probeOnce do not", async () => {
+    const mock = makeMockFetch();
+    fetchCtx.set(mock.fn);
+    logCtx.set(() => {});
+    const { mkdtemp } = await import("fs/promises");
+    const { join } = await import("path");
+    const { tmpdir } = await import("os");
+    const file = join(await mkdtemp(join(tmpdir(), "tgka-")), "f.bin");
+    await Bun.write(file, new Uint8Array([1]));
+    const okBody = { ok: true, result: { message_id: 1, chat: { id: 1 } } };
+    for (let i = 0; i < 6; i++) mock.enqueueResponse(i === 4 ? { ok: true, result: [] } : okBody);
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+
+    await client.sendMessage({ chat_id: 1, text: "x" });
+    await client.setMessageReaction({ chat_id: 1, message_id: 1, emoji: "👍" });
+    await client.sendPhoto({ chat_id: 1, path: file });
+    await client.sendDocument({ chat_id: 1, path: file });
+    await client.getUpdates({ timeout: 0 });
+    await client.probeOnce();
+
+    expect(mock.allInits().map((init) => init?.keepalive)).toEqual([false, false, false, false, undefined, undefined]);
+  });
+
+  test("a pooled socket that went silent is not reused: two sends both land", async () => {
+    // A raw HTTP server that answers the FIRST request on each connection
+    // (with keep-alive) and then goes silent on it, like a pooled socket
+    // whose path died while idle: no FIN, no RST. Reusing it hangs until the
+    // timeout — the errno:23 sends in watch.log 2026-11-20.
+    let connections = 0;
+    const answered = new Map<object, { buf: string; done: boolean }>();
+    const listener = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open(socket) {
+          connections += 1;
+          answered.set(socket, { buf: "", done: false });
+        },
+        data(socket, data) {
+          const state = answered.get(socket)!;
+          if (state.done) return; // silent from now on
+          state.buf += new TextDecoder().decode(data);
+          const headerEnd = state.buf.indexOf("\r\n\r\n");
+          if (headerEnd < 0) return;
+          const length = Number(/content-length:\s*(\d+)/i.exec(state.buf)?.[1] ?? "0");
+          if (state.buf.length < headerEnd + 4 + length) return;
+          state.done = true;
+          const body = JSON.stringify({ ok: true, result: { message_id: connections, chat: { id: 1 } } });
+          socket.write(
+            `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: keep-alive\r\n\r\n${body}`,
+          );
+        },
+      },
+    });
+    try {
+      const baseUrl = `http://127.0.0.1:${listener.port}`;
+      // Control: the server really reproduces the failure for a default
+      // (pooled) fetch — the second request reuses the silent socket.
+      const control = async (): Promise<string> => {
+        try {
+          const r = await fetch(`${baseUrl}/botT/getMe`, { method: "POST", body: "{}", signal: AbortSignal.timeout(300) });
+          await r.text();
+          return "ok";
+        } catch (err) {
+          return (err as Error).name;
+        }
+      };
+      expect(await control()).toBe("ok");
+      expect(await control()).toBe("TimeoutError");
+      expect(connections).toBe(1);
+
+      const client = new TelegramClient({ token: "T", baseUrl, timeouts: { sendMessageMs: 1_000 } });
+      const first = await client.sendMessage({ chat_id: 1, text: "a" });
+      const second = await client.sendMessage({ chat_id: 1, text: "b" });
+      expect(first.ok && second.ok).toBe(true);
+      expect(connections).toBe(3);
+    } finally {
+      listener.stop(true);
+    }
+  });
+});
+
+describe("classifyError", () => {
+  test("a real fetch timeout is errno:ETIMEDOUT, not its DOMException code (errno:23)", async () => {
+    // Bun rejects a timed-out fetch with a TimeoutError whose legacy `code`
+    // is 23. Checking `code` first once labelled a 15 s hang `errno:23`.
+    const server = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+    try {
+      let caught: unknown = null;
+      try {
+        await fetch(server.url, { signal: AbortSignal.timeout(100) });
+      } catch (err) {
+        caught = err;
+      }
+      expect((caught as Error).name).toBe("TimeoutError");
+      expect(classifyError(caught)).toBe("errno:ETIMEDOUT");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("names win over code: TimeoutError and AbortError DOMExceptions", () => {
+    expect(classifyError(new DOMException("The operation timed out.", "TimeoutError"))).toBe("errno:ETIMEDOUT");
+    expect(classifyError(new DOMException("aborted", "AbortError"))).toBe("AbortError");
+  });
+
+  test("a coded error keeps its errno label", () => {
+    const err = Object.assign(new Error("Unable to connect"), { code: "ConnectionRefused" });
+    expect(classifyError(err)).toBe("errno:ConnectionRefused");
+  });
+
+  test("the free-text fallback never echoes a URL or a bot token", () => {
+    expect(classifyError(new Error("request to https://api.telegram.org/bot123:SECRET/sendMessage failed"))).toBe(
+      "Error:request to <url> failed",
+    );
+    expect(classifyError(new Error("bot123456:SECRETSECRET rejected"))).toBe("Error:bot<redacted> rejected");
+    expect(classifyError("see /botSECRET_TOKEN/getMe")).toBe("unknown:see /bot<redacted>/getMe");
+    // A word that merely contains "bot" is left alone.
+    expect(classifyError(new Error("robot arm jammed"))).toBe("Error:robot arm jammed");
   });
 });

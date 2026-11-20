@@ -73,11 +73,11 @@ fails, fix it before moving on.
 ### 4.1. Outbound (catches token/chat-id misconfiguration)
 
 `ib tgsend` writes to `~/.itsybitsy/channels/telegram/outbox/` and waits
-up to 1s for `ib watch` to send the message and write back a result. If
-no result appears, the message stays queued in the outbox dir and will be
-processed when `ib watch` next starts (assuming Telegram is configured).
-`ib tgsend` itself does not know the chat ID and never talks to Telegram —
-only `ib watch` does.
+up to 3s for `ib watch` to send the message and write back a result. If
+no result appears, the message stays queued in the outbox dir and `ib watch`
+sends it automatically: right away once a running `ib watch` can reach
+Telegram again, or when the next `ib watch` starts. `ib tgsend` itself does
+not know the chat ID and never talks to Telegram — only `ib watch` does.
 
 Make sure `ib watch` is running, then in a separate shell:
 
@@ -93,13 +93,33 @@ prints `ok (3 parts, message_ids 1584, 1585, 1586)` instead, one id per chunk.
 
 A bare `ok` (or `ok (3 parts)` with no ids) is still a SUCCESS — it means the
 send landed but the API response carried no usable `message_id`. Only the
-`queued`/error paths below mean the message did not go out.
+`queued:`/error paths below mean the message did not go out yet.
 
-If you see `queued (ib watch may not be running, or Telegram is not configured)`,
-either `ib watch` is not running or its Telegram subsystem failed to boot
-(see step 4.2's stderr lines). The message is still on disk under the
-outbox directory and will be sent the next time `ib watch` boots
-successfully.
+A line starting with `queued:` (exit 0) means the message is on disk and will
+be sent automatically; do NOT resend it by hand, or it arrives twice. The rest
+of the line says why it has not gone out:
+
+- `queued: ib watch is not running; it will be sent when ib watch starts` —
+  start `ib watch`.
+- `queued: Telegram is unreachable (HTTP 502); ib watch will send it
+  automatically when the connection recovers` — Telegram or the network is
+  failing (the label may also be `errno:...`, e.g. `errno:ETIMEDOUT` for a
+  request that got no answer within its timeout).
+  `~/.itsybitsy/watch.log` shows one `telegram outbox: send stalled (...)`
+  line, then `telegram outbox: send recovered ...` when the queue drains.
+  Later messages wait behind the stalled one, so order is kept.
+- `queued: ib watch is still connecting to Telegram (...)` — `ib watch` has
+  not reached Telegram since it started: its boot is retrying (see step
+  4.2's `Telegram connect failed (...); retrying with backoff`).
+- `queued: Telegram routing is disabled in this ib watch (...)` — see step
+  4.2's "Telegram routing disabled" lines; the message waits for an `ib watch`
+  start that boots Telegram.
+- `queued: ib watch is connected but Telegram has not confirmed this message
+  yet ...` — the send (or one ahead of it) is still in flight: a slow upload,
+  a backlog, or a request waiting out its timeout. It goes out in order.
+
+An error (non-zero exit, e.g. `sendMessage failed: Bad Request: chat not
+found`) is permanent: Telegram refused this request, and it is not retried.
 
 ### 4.2. Inbound, single message (catches dispatcher startup, allowlist,
 channel-reminder format)
@@ -131,8 +151,18 @@ emits exactly one and continues running the rest of the dashboard):
   4.8.
 - `Telegram routing disabled: bot token rejected (HTTP 401)` /
   `(HTTP 403)` — the token in config is wrong or the bot was deleted.
-- `Telegram routing disabled: probe failed (...)` — network error
-  reaching `api.telegram.org`. Check connectivity / DNS.
+- `Telegram routing disabled: probe failed (HTTP <status>)` — Telegram
+  answered with a 4xx other than 401/403/409/429 (404 usually means a
+  malformed token). It is never a 2xx: a 200 whose body was cut short is
+  retried (`HTTP 200 (bad body)`), and one cut short by the probe's own
+  timeout reads `errno:ETIMEDOUT`.
+- A network error, timeout, 429, 5xx or truncated 200 does NOT disable routing: the boot
+  retries with backoff (1 s doubling to 60 s) and `~/.itsybitsy/watch.log`
+  shows `Telegram connect failed (<reason>); retrying with backoff`, then
+  `Telegram connected after Ns` once it gets through. Meanwhile the header
+  light is yellow and `?` help shows `Telegram  connecting — <reason> (Ns
+  ago)`. If it never connects, check connectivity / DNS to
+  `api.telegram.org`.
 - `Telegram routing disabled: no recent inbound from an allowlisted
   private chat. DM your bot, then restart ib watch.` — the bot has no
   pending message from a chat that's in your allowlist. DM the bot from
@@ -217,7 +247,8 @@ While `ib watch` is running and a long-poll is in flight, quit it
 
 Expected: process exits within ~1-2s. The AbortController cancels the
 in-flight `getUpdates` fetch, the dispatcher loop unwinds, and the TUI
-exits.
+exits. `~/.itsybitsy/channels/telegram/status.json` is removed (a crash
+leaves it behind; readers discard it because its `pid` is gone).
 
 If it hangs for more than ~3s, the AbortController plumbing has a bug
 that the unit tests didn't catch. Report the symptom.
@@ -347,10 +378,27 @@ use the integration day-to-day.
   `restartSystemCoordinator` while messages are in flight, the dispatcher
   hits its "retry once after 2s, then reply 'coordinator offline'" path.
   Worth confirming this looks reasonable when it happens.
-- **Long polls during sleep/network change.** Close laptop → reopen → the
-  in-flight fetch fails (ETIMEDOUT or similar) → the outer retry loop
-  should backoff and recover. Watch `ib watch`'s stderr; one log line per
-  unique error class is expected, not one per attempt.
+- **Long polls during sleep/network change.** Close laptop for a minute
+  or more → reopen. Within ~5 s of waking, `~/.itsybitsy/watch.log` should
+  show `telegram: wake from sleep detected (slept ~Ns); reconnecting`: the
+  in-flight poll (or backoff wait) is dropped and a fresh poll starts at
+  once, rather than waiting out a 30 s backoff or a 35 s dead-socket
+  timeout, and a stalled outbox retries at once too. A DM sent right after
+  waking should reach the coordinator within seconds. A plain network
+  change without sleep has no wake line: the dead poll times out (≤35 s),
+  `telegram: disconnected (...)` and then `telegram: reconnected after Ns`
+  appear, one line per unique error class, not one per attempt. While
+  reconnecting the header light is yellow and `?` help shows
+  `Telegram  reconnecting — <reason> (Ns ago)`.
+- **Outbound during an outage.** `ib tgsend` while Telegram is down (or Wi-Fi
+  is off) should print `queued: Telegram is unreachable (...)`, and the
+  message should arrive on its own once the connection is back — exactly once,
+  and before anything sent after it. While the outbox is stalled the header
+  light is yellow and `?` help shows `Telegram  reconnecting — <reason> (Ns
+  ago); N queued`; the poll loop's recovery retries the stalled message at
+  once. A message whose send timed out AFTER Telegram received it can arrive
+  twice (`sendMessage` has no idempotency key); that is accepted over losing
+  it.
 - **Token in `config.json`.** Phase 2 added `ensureConfigFilePerms` to
   chmod the file to 0600 on every write. The token is sensitive — if you
   ever back up or share `~/.itsybitsy/config.json`, the bot token goes

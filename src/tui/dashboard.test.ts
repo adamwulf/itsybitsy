@@ -8394,6 +8394,31 @@ describe("idle render checks", () => {
     expect(counter.renders()).toBe(2);
   });
 
+  test("setTelegramConnection drives the light and keeps the view for help; renders only on a light change", () => {
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+    const connected = { state: "connected" as const, lastError: null, lastErrorAt: null, outboxPending: 0 };
+
+    dashboard.setTelegramConnection({ state: "connecting", lastError: null, lastErrorAt: null, outboxPending: 0 });
+    expect(dashboard.render(160)[0]!).toContain("\x1b[33m●\x1b[0m Telegram");
+    dashboard.setTelegramConnection(connected);
+    expect(dashboard.render(160)[0]!).toContain("\x1b[32m●\x1b[0m Telegram");
+    const rendersBefore = counter.renders();
+    // A new error or pending count with the same light: the view updates for
+    // the help panel, but the header does not re-render.
+    dashboard.setTelegramConnection({ ...connected, outboxPending: 3 });
+    expect(counter.renders()).toBe(rendersBefore);
+    expect(dashboard.telegramConnection?.outboxPending).toBe(3);
+    dashboard.setTelegramConnection({ state: "reconnecting", lastError: "HTTP 502", lastErrorAt: 1, outboxPending: 3 });
+    expect(dashboard.render(160)[0]!).toContain("\x1b[33m●\x1b[0m Telegram");
+    dashboard.setTelegramConnection({ state: "disabled", lastError: "bot token rejected (HTTP 401)", lastErrorAt: 1, outboxPending: 0 });
+    expect(dashboard.render(160)[0]!).toContain("\x1b[31m●\x1b[0m Telegram");
+    dashboard.setTelegramConnection(null);
+    expect(stripAnsi(dashboard.render(160)[0]!)).not.toContain("Telegram");
+    expect(dashboard.telegramConnection).toBeNull();
+  });
+
   test("setCollectorStatus renders only when the light changes", () => {
     const dashboard = makeDashboard();
     const counter = countingTui();

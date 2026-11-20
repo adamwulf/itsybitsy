@@ -8438,7 +8438,7 @@ export function resetSayRunner(): void {
 
 export interface TelegramSendOptions {
   /**
-   * `false` queues the message and returns without the up-to-1s poll for the
+   * `false` queues the message and returns without the up-to-3s poll for the
    * outbox result. For a caller whose process must not stay alive for it (the
    * session-start hook: Claude Code waits for the hook process to exit).
    */
@@ -8924,54 +8924,89 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
 }
 
 /**
- * Outbound `ib tgsend` — file-drop client for the `ib watch` outbox.
- *
- * Phase B refactor: `ib tgsend` no longer talks to Telegram directly. It
- * writes the message text to `~/.itsybitsy/channels/telegram/outbox/` and
- * polls for a `<stem>.txt.result` file containing the JSON outcome from
- * `ib watch`'s outbox processor. If `ib watch` is not running (or Telegram
- * is not configured), no result will appear; we time out after 1s and
- * return an "ok-but-queued" outcome so the caller exits 0 — the message is
- * legitimately waiting on disk and `ib watch` will pick it up next start.
+ * How long `ib tgsend` / `ib tgreact` / `ib tgsendfile` wait for `ib watch`'s
+ * result before reporting `queued:`. 3s rather than the old 1s: the outbox
+ * picks a drop up within ~0.5s (fs.watch, or its safety rescan), a normal
+ * round trip takes a few hundred ms (a little more now that every outbound
+ * call opens a fresh connection), and a fast transient failure (a refused
+ * connection, a 502) is retried inline about 1s later. 3s covers all three, so
+ * those cases print `ok (message_id N)` instead of `queued:`. A request that
+ * HANGS cannot finish in 3s: it times out only after `sendMessageMs` (15s).
+ * That was the `errno:23` in watch.log 2026-11-20 — a timeout on a pooled
+ * keep-alive socket that died while idle, not a fast socket error; fresh
+ * connections per outbound call remove that cause. Every `queued:` outcome
+ * pays the full window, so it stays short. Tests shorten it.
  */
-export async function telegramSend(text: string, opts: TelegramSendOptions = {}): Promise<{ ok: boolean; message: string }> {
+export const TELEGRAM_RESULT_WAIT_MS = 3_000;
+export const telegramResultWaitCtx = new InjectionContext<number>(TELEGRAM_RESULT_WAIT_MS);
+
+/** Poll cadence for the result file. Keeps the small-message happy path fast
+ *  (one round trip is typically <100ms) without spinning. */
+const TELEGRAM_RESULT_POLL_MS = 100;
+
+/**
+ * Drop one item into the `ib watch` Telegram outbox and wait for its result.
+ * Shared by `ib tgsend`, `ib tgreact` and `ib tgsendfile`; `ext` picks the item
+ * kind (`.txt`, `.react.json`, `.file.json`).
+ *
+ * Three outcomes:
+ *   - a final result arrives in the wait window: returned as is (`ok (...)`,
+ *     or `ok:false` with the API description for a permanent failure).
+ *   - the outbox wrote only an interim `{queued:true}` result (the item failed
+ *     transiently and is being retried): its `queued: ...` message is returned
+ *     with ok:true. We keep polling past it, since the retry may still land
+ *     inside the window.
+ *   - nothing arrived: ok:true with a `queued: ...` message built from the
+ *     Telegram status file (see {@link describeQueuedTelegramItem}).
+ *
+ * A queued item stays on disk and `ib watch` sends it automatically, so every
+ * queued outcome exits 0.
+ */
+async function dropInTelegramOutbox(
+  ext: ".txt" | ".react.json" | ".file.json",
+  content: string,
+  awaitResult: boolean,
+): Promise<{ ok: boolean; message: string }> {
   const { defaultOutboxDir } = await import("./channels/outbox");
   const { mkdir, rename, readFile, unlink } = await import("fs/promises");
   const { randomBytes } = await import("crypto");
-  const { join } = await import("path");
 
   const dir = defaultOutboxDir();
   const stem = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-  const txtPath = join(dir, `${stem}.txt`);
-  const tmpPath = `${txtPath}.tmp`;
-  const resultPath = `${txtPath}.result`;
+  const itemPath = join(dir, `${stem}${ext}`);
+  const tmpPath = `${itemPath}.tmp`;
+  const resultPath = `${itemPath}.result`;
 
   await mkdir(dir, { recursive: true });
-  await Bun.write(tmpPath, text);
-  await rename(tmpPath, txtPath);
+  await Bun.write(tmpPath, content);
+  await rename(tmpPath, itemPath);
 
-  if (opts.awaitResult === false) {
+  if (!awaitResult) {
     return { ok: true, message: "queued" };
   }
 
-  // Poll up to 1s for the result file. 100ms cadence keeps the small-message
-  // happy path fast (one round trip is typically <100ms) without spinning.
-  const POLL_INTERVAL_MS = 100;
-  const POLL_ATTEMPTS = 10;
-  for (let i = 0; i < POLL_ATTEMPTS; i++) {
-    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  let interim: string | null = null;
+  const attempts = Math.max(1, Math.ceil(telegramResultWaitCtx.fn / TELEGRAM_RESULT_POLL_MS));
+  for (let i = 0; i < attempts; i++) {
+    await new Promise<void>((r) => setTimeout(r, TELEGRAM_RESULT_POLL_MS));
     let resultText: string;
     try {
       resultText = await readFile(resultPath, "utf8");
     } catch {
       continue;
     }
-    let parsed: { ok: boolean; message: string };
+    let parsed: { ok?: unknown; message?: unknown; queued?: unknown };
     try {
-      parsed = JSON.parse(resultText) as { ok: boolean; message: string };
+      parsed = JSON.parse(resultText) as typeof parsed;
     } catch {
-      // Malformed result — treat as transient and keep polling. The outbox
-      // processor writes valid JSON or nothing.
+      // Malformed result — treat as "no result yet" and keep polling. The
+      // outbox writes valid JSON or nothing.
+      continue;
+    }
+    if (parsed.queued === true) {
+      // Interim: the outbox is retrying this item. Leave the file alone (the
+      // outbox overwrites it with the final result) and keep waiting.
+      interim = String(parsed.message ?? "");
       continue;
     }
     // Best-effort delete of the .result; the outbox cleans up after 5s anyway.
@@ -8979,10 +9014,51 @@ export async function telegramSend(text: string, opts: TelegramSendOptions = {})
     return { ok: !!parsed.ok, message: String(parsed.message ?? "") };
   }
 
-  return {
-    ok: true,
-    message: "queued (ib watch may not be running, or Telegram is not configured)",
-  };
+  if (interim !== null && interim !== "") return { ok: true, message: interim };
+  return { ok: true, message: await describeQueuedTelegramItem() };
+}
+
+/**
+ * Say why a dropped item has not been sent yet, from the status file
+ * `ib watch` keeps (channels/connection-status.ts). Every message starts with
+ * `queued:` and says the item will go out automatically.
+ */
+export async function describeQueuedTelegramItem(): Promise<string> {
+  const { readTelegramStatus } = await import("./channels/connection-status");
+  const { queuedTelegramUnreachable } = await import("./channels/outbox");
+  const current = await readTelegramStatus();
+  if (current === null || !current.live) {
+    return "queued: ib watch is not running; it will be sent when ib watch starts";
+  }
+  const { state, lastError } = current.status;
+  const why = lastError !== null && lastError !== "" ? ` (${lastError})` : "";
+  switch (state) {
+    case "reconnecting":
+      return queuedTelegramUnreachable(lastError);
+    case "connecting":
+      return `queued: ib watch is still connecting to Telegram${why}; it will send it automatically once connected`;
+    case "connected":
+      // No claim about earlier messages: the item itself may be the one in
+      // flight (a slow upload, or a request waiting out its timeout), and the
+      // status file only turns `reconnecting` once its retries run out.
+      return "queued: ib watch is connected but Telegram has not confirmed this message yet; it stays queued and will be sent automatically, in order";
+    case "disabled":
+      return `queued: Telegram routing is disabled in this ib watch${why}; the message stays queued until an ib watch start connects to Telegram`;
+  }
+}
+
+/**
+ * Outbound `ib tgsend` — file-drop client for the `ib watch` outbox.
+ *
+ * `ib tgsend` does not talk to Telegram directly. It writes the message text
+ * to `~/.itsybitsy/channels/telegram/outbox/` and waits up to
+ * {@link TELEGRAM_RESULT_WAIT_MS} for `<stem>.txt.result` from `ib watch`'s
+ * outbox. If no final result arrives, it returns ok:true with a `queued: ...`
+ * message saying why — the message is waiting on disk and `ib watch` sends it
+ * automatically. See {@link dropInTelegramOutbox}.
+ */
+export async function telegramSend(text: string, opts: TelegramSendOptions = {}): Promise<{ ok: boolean; message: string }> {
+  return dropInTelegramOutbox(".txt", text, opts.awaitResult !== false);
 }
 
 /**
@@ -8996,9 +9072,9 @@ export async function telegramSend(text: string, opts: TelegramSendOptions = {})
  *
  * Like `tgsend`, this does NOT talk to Telegram directly — it drops a
  * `<stem>.react.json` descriptor `{ message_id, emoji }` into the outbox and
- * polls up to 1s for the `<stem>.react.json.result` written by `ib watch`. If
- * `ib watch` is not running, the descriptor waits on disk and is picked up on
- * the next start; we return an "ok-but-queued" outcome so the caller exits 0.
+ * waits for the `<stem>.react.json.result` written by `ib watch`. If none
+ * arrives, the descriptor waits on disk and is sent automatically; we return a
+ * `queued: ...` outcome so the caller exits 0. See {@link dropInTelegramOutbox}.
  *
  * Pass `emoji === null` to CLEAR the bot's reaction on the target message.
  */
@@ -9032,46 +9108,11 @@ export async function telegramReact(
     messageId = last.message_id;
   }
 
-  const { defaultOutboxDir } = await import("./channels/outbox");
-  const { mkdir, rename, readFile, unlink } = await import("fs/promises");
-  const { randomBytes } = await import("crypto");
-  const { join } = await import("path");
-
-  const dir = defaultOutboxDir();
-  const stem = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-  const reactPath = join(dir, `${stem}.react.json`);
-  const tmpPath = `${reactPath}.tmp`;
-  const resultPath = `${reactPath}.result`;
-
-  await mkdir(dir, { recursive: true });
-  await Bun.write(tmpPath, JSON.stringify({ message_id: messageId, emoji: canonicalEmoji }));
-  await rename(tmpPath, reactPath);
-
-  // Poll up to 1s for the result file — same cadence as `tgsend`.
-  const POLL_INTERVAL_MS = 100;
-  const POLL_ATTEMPTS = 10;
-  for (let i = 0; i < POLL_ATTEMPTS; i++) {
-    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-    let resultText: string;
-    try {
-      resultText = await readFile(resultPath, "utf8");
-    } catch {
-      continue;
-    }
-    let parsed: { ok: boolean; message: string };
-    try {
-      parsed = JSON.parse(resultText) as { ok: boolean; message: string };
-    } catch {
-      continue;
-    }
-    await unlink(resultPath).catch(() => { /* ignore */ });
-    return { ok: !!parsed.ok, message: String(parsed.message ?? "") };
-  }
-
-  return {
-    ok: true,
-    message: "queued (ib watch may not be running, or Telegram is not configured)",
-  };
+  return dropInTelegramOutbox(
+    ".react.json",
+    JSON.stringify({ message_id: messageId, emoji: canonicalEmoji }),
+    true,
+  );
 }
 
 /**
@@ -9080,8 +9121,9 @@ export async function telegramReact(
  * Shares a rendered image/file with the user over Telegram. Like `tgsend` /
  * `tgreact`, this does NOT talk to Telegram directly — it drops a
  * `<stem>.file.json` descriptor `{ path, caption?, kind }` into the outbox and
- * polls up to 1s for the `<stem>.file.json.result` written by `ib watch`. The
- * outbox uploads the local file via `sendPhoto` / `sendDocument` (multipart).
+ * waits for the `<stem>.file.json.result` written by `ib watch` (see
+ * {@link dropInTelegramOutbox}). The outbox uploads the local file via
+ * `sendPhoto` / `sendDocument` (multipart).
  *
  * `kind` defaults to `"document"` to preserve exact bytes — Telegram
  * recompresses photos sent via `sendPhoto`, which would corrupt e.g. a PNG diff.
@@ -9112,51 +9154,12 @@ export async function telegramSendFile(
     return { ok: false, message: `file not found: ${absPath}` };
   }
 
-  const { defaultOutboxDir } = await import("./channels/outbox");
-  const { mkdir, rename, readFile, unlink } = await import("fs/promises");
-  const { randomBytes } = await import("crypto");
-  const { join } = await import("path");
-
-  const dir = defaultOutboxDir();
-  const stem = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-  const descPath = join(dir, `${stem}.file.json`);
-  const tmpPath = `${descPath}.tmp`;
-  const resultPath = `${descPath}.result`;
-
-  await mkdir(dir, { recursive: true });
   const descriptor: { path: string; caption?: string; kind: "photo" | "document" } = {
     path: absPath,
     kind,
   };
   if (opts.caption !== undefined && opts.caption !== "") descriptor.caption = opts.caption;
-  await Bun.write(tmpPath, JSON.stringify(descriptor));
-  await rename(tmpPath, descPath);
-
-  // Poll up to 1s for the result file — same cadence as `tgsend`/`tgreact`.
-  const POLL_INTERVAL_MS = 100;
-  const POLL_ATTEMPTS = 10;
-  for (let i = 0; i < POLL_ATTEMPTS; i++) {
-    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-    let resultText: string;
-    try {
-      resultText = await readFile(resultPath, "utf8");
-    } catch {
-      continue;
-    }
-    let parsed: { ok: boolean; message: string };
-    try {
-      parsed = JSON.parse(resultText) as { ok: boolean; message: string };
-    } catch {
-      continue;
-    }
-    await unlink(resultPath).catch(() => { /* ignore */ });
-    return { ok: !!parsed.ok, message: String(parsed.message ?? "") };
-  }
-
-  return {
-    ok: true,
-    message: "queued (ib watch may not be running, or Telegram is not configured)",
-  };
+  return dropInTelegramOutbox(".file.json", JSON.stringify(descriptor), true);
 }
 
 /**

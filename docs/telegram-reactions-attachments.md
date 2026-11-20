@@ -69,6 +69,8 @@ Outbound is a **file-drop queue** so per-shell `ib tgsend` processes don't each 
 1. `ib tgsend "text"` → `telegramSend()` (`ib-commands.ts:5531`) writes `<unix-ms>-<hex>.txt` into `~/.itsybitsy/channels/telegram/outbox/`, then polls up to 1s for a `.txt.result` file.
 2. `ib watch` runs `TelegramOutbox` (`outbox.ts:81`), which `fs.watch`es that dir, reads each `.txt`, chunks it, calls `client.sendMessage()` per chunk (`:309`), and writes the `.result` JSON.
 
+> **Superseded (2026-11-20):** the 1s wait and retry behavior described in this report are out of date; see docs/implementation-notes.md (Telegram channel subsystem → **Outbox**).
+
 The outbox schema is **plain text only** — `<stem>.txt` holds UTF-8 message text. There is no concept of an attachment payload in the queue.
 
 ### 1.4 Bot setup specifics (relevant to both features)
@@ -224,6 +226,8 @@ ib tgreact --clear  [--message-id <id>]   # remove the bot's reaction
   calls `client.setMessageReaction` (one 429-retry, same as text sends). If
   `ib watch` isn't running, the descriptor waits on disk and is processed on the
   next start (`tgreact` returns ok-but-queued, exit 0).
+  *(Superseded 2026-11-20: the ≤1s wait and one 429-retry are out of date; see
+  docs/implementation-notes.md, Telegram Outbox.)*
 - `setMessageReaction(chat_id, message_id, [{type:"emoji",emoji}])`; an empty
   `reaction` array clears the reaction (`emoji: null`).
 
@@ -288,7 +292,9 @@ Attachments were implemented on branch `agent/agent-d7d2d546`, on top of the
 reactions feature (§7). This section is the behavioral source-of-truth for the
 attachment feature. It builds on the §7 outbox descriptor pattern (full-filename
 keying, `<base>.result`, 5s retention, one 429-retry) and the dispatcher's
-`getUpdates`/`normalize` flow.
+`getUpdates`/`normalize` flow. *(Superseded 2026-11-20: the wait, retry and
+retention details in this section are out of date; see
+docs/implementation-notes.md, Telegram Outbox.)*
 
 ### 8.1 Inbound — Adam sends a photo/file, the agent gets a local path
 
@@ -442,6 +448,11 @@ thin, B is rich but dies with the process.
 | Sent, but no id determinable | `ok` |
 | Chunked, no ids determinable | `ok (3 parts)` |
 | `ib watch` not running / >1s | `queued (ib watch may not be running, or Telegram is not configured)` |
+
+> **Superseded (2026-11-20):** this table is not the current output contract.
+> The wait is 3s and a queued item prints `queued: <why it has not gone out>`;
+> see docs/implementation-notes.md (Telegram channel subsystem → **Outbox**,
+> "Clients").
 
 The last two rows are the pre-existing strings verbatim — a send whose id we
 can't name degrades to the OLD contract rather than to something new.

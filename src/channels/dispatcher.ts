@@ -97,12 +97,22 @@
  *     there they count as "anything else" and re-prompt.
  *   - `stop()` aborts the in-flight long-poll via AbortController and waits
  *     for the loop to exit (caller wraps in a 2s timeout race).
+ *   - The poll loop never exits except through `stop()`. `getUpdates`
+ *     retries every transient failure itself; anything it throws that is not
+ *     an abort (a bug, a malformed reply) backs off 1 s doubling to 30 s and
+ *     polls again, never in a hot loop. A loop that still rejects is logged
+ *     and restarted (`superviseLoop`) instead of dying with the light green.
+ *   - `reconnectNow(reason)` drops the in-flight poll or backoff wait and
+ *     polls again at once with a fresh backoff, without stopping the
+ *     dispatcher. `ib watch` calls it on a wake from sleep, when the old
+ *     socket is probably dead and a backoff wait may have 30 s left.
  */
 
 import { InjectionContext } from "../types";
 import { isCoordinatorRestartCommand } from "../coordinator";
-import { TelegramClient, classifyError, TELEGRAM_GETFILE_LIMIT_BYTES } from "./telegram-client";
+import { TelegramClient, abortableSleep, classifyError, TELEGRAM_GETFILE_LIMIT_BYTES } from "./telegram-client";
 import type { PollOutcome } from "./telegram-client";
+import { backoffDelayMs, type BackoffOptions } from "./backoff";
 import type {
   TelegramMessage,
   TelegramUpdate,
@@ -160,6 +170,17 @@ export type LogFn = (line: string) => void;
 const defaultLog: LogFn = (line) => process.stderr.write(line + "\n");
 export const logCtx = new InjectionContext<LogFn>(defaultLog);
 
+/** `logCtx.fn` for paths that must not throw (the poll-loop supervisor, the
+ *  state-change fan-out): a sink that throws is dropped, since there is
+ *  nowhere left to report its failure. */
+function safeLog(line: string): void {
+  try {
+    logCtx.fn(line);
+  } catch {
+    // The log sink itself failed.
+  }
+}
+
 /** Injectable bootstrapper for the system coordinator — used when a user
  *  confirms 'y' to start the coordinator after an offline-prompt. Defaults to
  *  the real `ensureSystemCoordinator` from src/coordinator.ts; tests inject a
@@ -191,6 +212,10 @@ const COORDINATOR_OFFLINE_RETRY_MS = 2_000;
 
 /** Drop-log throttle: one line per chat_id per hour. */
 const DROP_LOG_INTERVAL_MS = 60 * 60 * 1_000;
+
+/** Backoff after an unexpected (non-abort) `getUpdates` throw, and before a
+ *  crashed loop restarts. Same bounds as the client's own retry. */
+const LOOP_BACKOFF: BackoffOptions = { initialMs: 1_000, maxMs: 30_000 };
 
 /** Fixed sentinel routed by sendMessage as "[sent by @telegram]:". */
 export const TELEGRAM_SENTINEL = "@telegram";
@@ -260,6 +285,10 @@ export interface DispatcherHealth {
   state: DispatcherHealthState;
   lastSuccessAt: number | null;
   reason: string | null;
+  /** When `reason` took its current value (epoch ms), or null with it. A
+   *  streak of the same error keeps the time of its first occurrence, so
+   *  `ib watch` can show "HTTP 502 (40s ago)". */
+  reasonAt: number | null;
 }
 
 export interface DispatcherStateChange {
@@ -288,6 +317,9 @@ export interface DispatcherOptions {
    *  long-poll skips updates the boot already saw. Telegram drops everything
    *  with `update_id < offset`. */
   initialOffset?: number;
+  /** Long-poll seconds per `getUpdates` call. Defaults to the client's 25.
+   *  Tests against a fake server pass a small value. */
+  pollTimeoutSec?: number;
 }
 
 /** A downloadable attachment extracted from a TelegramMessage. The dispatcher
@@ -406,6 +438,14 @@ export class TelegramDispatcher {
    *  `stop()`. */
   private abortController: AbortController | null = null;
 
+  /** Per-iteration controller, composed with the stop signal for one poll
+   *  and the backoff wait after it. `reconnectNow()` fires it to drop that
+   *  poll without stopping the loop. Null between iterations. */
+  private iterationAbort: AbortController | null = null;
+
+  /** Long-poll seconds per `getUpdates` call; undefined = client default. */
+  private readonly pollTimeoutSec: number | undefined;
+
   /** Promise that resolves when the main loop exits. `stop()` awaits this. */
   private loopDone: Promise<void> | null = null;
 
@@ -420,6 +460,9 @@ export class TelegramDispatcher {
   private healthState: DispatcherHealthState = "down";
   private lastSuccessAt: number | null = null;
   private lastFailureReason: string | null = null;
+  /** When `lastFailureReason` took its current value. Set only through
+   *  `setFailureReason`. */
+  private lastFailureReasonAt: number | null = null;
   /** Wall-clock at the moment we left "polling" — used to compute the
    *  "reconnected after Ns" message when a streak ends. */
   private disconnectedAt: number | null = null;
@@ -433,6 +476,7 @@ export class TelegramDispatcher {
     if (opts.initialOffset !== undefined) {
       this.nextOffset = opts.initialOffset;
     }
+    this.pollTimeoutSec = opts.pollTimeoutSec;
   }
 
   /** Returns true when the main loop is running. False after `stop()` returns,
@@ -448,7 +492,16 @@ export class TelegramDispatcher {
       state: this.healthState,
       lastSuccessAt: this.lastSuccessAt,
       reason: this.lastFailureReason,
+      reasonAt: this.lastFailureReasonAt,
     };
+  }
+
+  /** Record the current failure reason; null clears it. The timestamp moves
+   *  only when the label changes, so a streak keeps its first time. */
+  private setFailureReason(reason: string | null): void {
+    if (reason === this.lastFailureReason) return;
+    this.lastFailureReason = reason;
+    this.lastFailureReasonAt = reason === null ? null : nowCtx.fn();
   }
 
   /** Subscribe to edge-only state transitions. The callback fires once when
@@ -470,11 +523,11 @@ export class TelegramDispatcher {
     if (from === to) {
       // Same state — no transition. Update reason for `getHealth()` callers
       // but don't fire listeners or log.
-      if (reason !== null) this.lastFailureReason = reason;
+      if (reason !== null) this.setFailureReason(reason);
       return;
     }
     this.healthState = to;
-    if (reason !== null) this.lastFailureReason = reason;
+    if (reason !== null) this.setFailureReason(reason);
     if (to === "retrying" && from === "polling") {
       // Edge into retrying: capture the moment so a later success can compute
       // "reconnected after Ns".
@@ -485,7 +538,7 @@ export class TelegramDispatcher {
       try {
         listener(change);
       } catch (err) {
-        logCtx.fn(`Telegram dispatcher: state-change listener threw: ${err instanceof Error ? err.message : String(err)}`);
+        safeLog(`Telegram dispatcher: state-change listener threw: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }
@@ -506,7 +559,7 @@ export class TelegramDispatcher {
         // Clear the failure reason once we've surfaced the recovery
         // transition — health snapshots after a recovery should reflect
         // the green state, not the prior red.
-        this.lastFailureReason = null;
+        this.setFailureReason(null);
       }
       return;
     }
@@ -516,7 +569,7 @@ export class TelegramDispatcher {
     } else {
       // Stay in retrying — no transition, but update the reason so the
       // dashboard's snapshot reflects the most recent failure class.
-      this.lastFailureReason = outcome.reason;
+      this.setFailureReason(outcome.reason);
     }
   }
 
@@ -591,12 +644,22 @@ export class TelegramDispatcher {
     // retrying. Boot already logged "connected" so we suppress a duplicate
     // here by passing reason=null.
     this.transitionHealth("polling", null);
-    this.loopDone = this.runLoop(this.abortController.signal).catch((err) => {
-      // Use classifyError instead of err.message — fetch errors can embed
-      // URL fragments containing the bot token. classifyError surfaces a
-      // bounded, stable label.
-      logCtx.fn(`Telegram dispatcher loop exited: ${classifyError(err)}`);
-    });
+    // superviseLoop never rejects (see there), so loopDone needs no catch.
+    this.loopDone = this.superviseLoop(this.abortController.signal);
+  }
+
+  /**
+   * Drop the in-flight long-poll, or the backoff wait between polls, and
+   * poll again at once with a fresh backoff. The dispatcher keeps running;
+   * only the current iteration is cut short. `ib watch` calls this on a wake
+   * from sleep: the socket of a poll that was in flight is probably dead,
+   * and a backoff wait could still have up to 30 s to run. `reason` is
+   * carried as the abort reason for debugging; the caller does the logging.
+   * No-op when the loop is not running.
+   */
+  reconnectNow(reason: string): void {
+    if (!this.running || this.iterationAbort === null) return;
+    this.iterationAbort.abort(new DOMException(`reconnect: ${reason}`, "AbortError"));
   }
 
   /**
@@ -627,48 +690,113 @@ export class TelegramDispatcher {
     this.transitionHealth("down", null);
   }
 
-  /** The actual long-poll loop. Exits when the abort signal fires. */
-  private async runLoop(signal: AbortSignal): Promise<void> {
+  /**
+   * Keep {@link runLoop} running until `stop()`. runLoop handles every
+   * failure it expects (see there), so a rejection means its own error
+   * handling threw — for example a log sink that throws. Before this, such a
+   * rejection was logged once and the dispatcher stopped polling for good
+   * while `running` stayed true and the light stayed green. Now it is logged
+   * and the loop starts again after a backoff.
+   *
+   * Never rejects: the only statements outside the try are the loop test, a
+   * log call that swallows its own errors, and `pause()`, which never throws.
+   */
+  private async superviseLoop(signal: AbortSignal): Promise<void> {
+    let crashes = 0;
     while (this.running && !signal.aborted) {
-      let updates: TelegramUpdate[];
       try {
-        updates = await this.client.getUpdates({
+        await this.runLoop(signal);
+      } catch (err) {
+        if (signal.aborted) return;
+        crashes += 1;
+        // classifyError, never err.message: it can embed the bot-token URL.
+        safeLog(`Telegram dispatcher: poll loop crashed (${classifyError(err)}); restarting`);
+        await this.pause(crashes, signal);
+      }
+    }
+  }
+
+  /**
+   * The long-poll loop. Returns only once `stop()` has fired `signal`.
+   *
+   * Each iteration gets its own AbortController, composed with the stop
+   * signal, so `reconnectNow()` can drop one poll (or the backoff wait after
+   * it) and start the next at once. `getUpdates` retries every transient
+   * failure internally and throws only on abort; a non-abort throw (a bug, a
+   * reply whose result is not an array) backs off here, 1 s doubling to 30 s,
+   * rather than spinning on `continue`.
+   */
+  private async runLoop(stopSignal: AbortSignal): Promise<void> {
+    let failures = 0;
+    while (this.running && !stopSignal.aborted) {
+      const iteration = new AbortController();
+      this.iterationAbort = iteration;
+      const signal = AbortSignal.any([stopSignal, iteration.signal]);
+      try {
+        const updates = await this.client.getUpdates({
           offset: this.nextOffset,
           allowed_updates: ["message", "message_reaction"],
+          timeout: this.pollTimeoutSec,
           signal,
           onPollOutcome: (outcome) => this.handlePollOutcome(outcome),
         });
-      } catch (err) {
-        // getUpdates only throws on abort. Any other transient failure is
-        // absorbed by the client's own retry loop.
-        if (signal.aborted || (err instanceof Error && err.name === "AbortError")) {
-          return;
+        if (!Array.isArray(updates)) {
+          throw new TypeError("getUpdates result is not an array");
         }
-        // Use classifyError — err.message could embed the bot-token URL.
-        logCtx.fn(
-          `Telegram dispatcher: unexpected getUpdates throw: ${classifyError(err)}; continuing`,
-        );
-        continue;
-      }
-
-      if (updates.length === 0) continue;
-
-      // Advance offset BEFORE processing — if a `processBatch` call throws
-      // we still want the next loop iteration to skip the failed batch
-      // rather than re-deliver it forever.
-      const maxId = updates.reduce((m, u) => (u.update_id > m ? u.update_id : m), -1);
-      if (maxId >= 0) this.nextOffset = maxId + 1;
-
-      try {
-        await this.processBatch(updates);
+        failures = 0;
+        if (updates.length > 0) await this.handleUpdates(updates);
       } catch (err) {
-        // Should never happen (processBatch swallows internally) — but if
-        // it does, log and keep polling so one bad batch doesn't kill the
-        // dispatcher.
-        logCtx.fn(
-          `Telegram dispatcher: processBatch threw: ${err instanceof Error ? err.message : String(err)}; continuing`,
-        );
+        if (stopSignal.aborted) return;
+        if (iteration.signal.aborted) {
+          // reconnectNow(): poll again at once with a fresh backoff.
+          failures = 0;
+          continue;
+        }
+        failures += 1;
+        // classifyError, never err.message: it can embed the bot-token URL.
+        const reason = classifyError(err);
+        this.handlePollOutcome({ kind: "retry", reason });
+        logCtx.fn(`Telegram dispatcher: unexpected getUpdates throw: ${reason}; backing off`);
+        await this.pause(failures, signal);
+        // reconnectNow() cut the wait short: start a fresh backoff.
+        if (iteration.signal.aborted) failures = 0;
+      } finally {
+        if (this.iterationAbort === iteration) this.iterationAbort = null;
       }
+    }
+  }
+
+  /** Advance the offset past one batch, then process it. */
+  private async handleUpdates(updates: TelegramUpdate[]): Promise<void> {
+    // Advance offset BEFORE processing — if a `processBatch` call throws
+    // we still want the next loop iteration to skip the failed batch
+    // rather than re-deliver it forever. A malformed entry without a
+    // numeric update_id is skipped rather than allowed to throw here.
+    const maxId = updates.reduce(
+      (m, u) => (typeof u?.update_id === "number" && u.update_id > m ? u.update_id : m),
+      -1,
+    );
+    if (maxId >= 0) this.nextOffset = maxId + 1;
+
+    try {
+      await this.processBatch(updates);
+    } catch (err) {
+      // Should never happen (processBatch swallows internally) — but if
+      // it does, log and keep polling so one bad batch doesn't kill the
+      // dispatcher.
+      logCtx.fn(
+        `Telegram dispatcher: processBatch threw: ${err instanceof Error ? err.message : String(err)}; continuing`,
+      );
+    }
+  }
+
+  /** Wait out backoff attempt `attempt`, ending early when `signal` fires.
+   *  Never throws. */
+  private async pause(attempt: number, signal: AbortSignal): Promise<void> {
+    try {
+      await abortableSleep(backoffDelayMs(attempt, LOOP_BACKOFF), signal, sleepCtx.fn);
+    } catch {
+      // Aborted (stop or reconnectNow): the caller's loop test decides.
     }
   }
 
@@ -1064,14 +1192,18 @@ export class TelegramDispatcher {
     }
   }
 
-  /** Reply to the configured chat. Errors are logged, never thrown. */
+  /** Reply to the configured chat. Errors are logged, never thrown. The
+   *  client logs only permanent HTTP failures (the outbox owns retry
+   *  logging), so a non-ok answer — a 502 included — is logged here. */
   private async replyOnTelegram(text: string): Promise<void> {
     try {
-      await this.client.sendMessage({ chat_id: this.chatId, text });
+      const sent = await this.client.sendMessage({ chat_id: this.chatId, text });
+      if (!sent.ok) {
+        logCtx.fn(`Telegram dispatcher: replyOnTelegram failed: ${sent.description ?? `HTTP ${sent.status}`}`);
+      }
     } catch (err) {
-      logCtx.fn(
-        `Telegram dispatcher: replyOnTelegram failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      // classifyError, never err.message: it can embed the bot-token URL.
+      logCtx.fn(`Telegram dispatcher: replyOnTelegram failed: ${classifyError(err)}`);
     }
   }
 

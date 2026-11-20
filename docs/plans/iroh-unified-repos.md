@@ -142,6 +142,69 @@ the reply change.
 - **Still refused on remote agents:** send, retire, merge, resume and
   everything else.
 
+### Qualified agent names (Adam, 2026-11-20)
+
+**What was decided before.** On 2026-11-16, fully qualified ids
+(`machine/repo/agent`) were decided for the `ib watch` TREE only. CLI
+commands were explicitly left on bare ids "for now". SPEC §17.1 recorded
+this: "CLI commands (`ib send`, …) and `teams.json` keep bare ids". That
+decision now extends to queues and addressing.
+
+**The message queue key.**
+- A queue lives at `~/.itsybitsy/agents/<machine>/<repo>/<agent>/`:
+  - `machine` is this machine's name;
+  - `repo` is the registered repo name;
+  - `agent` is the agent id.
+- This is the same key the tree uses, so same-named agents in different repos
+  or on different machines never share a queue.
+- There is no migration. Old flat `~/.itsybitsy/agents/<agent>/` dirs are
+  ignored.
+- This fixes the bug where same-named agents in two repos could receive each
+  other's messages.
+
+**Address forms.**
+- `agent`
+- `machine/agent`
+- `machine/repo/agent`
+- the existing `@repo/agent` (this machine), `@repo`, `@system`,
+  `@coordinator` and `@team`
+
+**Resolving a bare name (or `machine/agent`).** Ids and nicknames match
+exactly.
+1. If the caller runs inside a repo on this machine and that repo has the
+   name, that agent is used. This keeps today's same-repo-first rule, so a
+   manager can still reach its own workers by bare name.
+2. Otherwise, collect every match across all local repos and all connected
+   machines:
+   - one match: use it;
+   - several matches: FAIL, naming the exact qualified forms found, adding the
+     repo part where it is needed. Examples: "'foo' exists on laptop-a and
+     laptop-b; use laptop-a/foo or laptop-b/foo", or
+     "laptop-a/app/foo or laptop-a/web/foo";
+   - none: not found.
+
+**Where connected machines' agents come from.**
+- `ib watch` writes `~/.itsybitsy/peer/remote-agents.json` atomically on
+  every poller change. Each entry holds machine, repo, id, nickname, state,
+  and when it was last seen.
+- CLI processes read that file and ignore peers that are no longer
+  connected.
+- This replaces the earlier "peer state is memory only" rule. CLI commands
+  are separate processes, so they need it on disk. `secret.key` stays denied.
+
+**A target that resolves to a remote agent.**
+- `ib send`: "sending to agents on other machines is not supported yet".
+- `look`, `status`, `retire` and the like: "remote agents are read-only".
+  This holds until those features exist.
+
+**One resolver.**
+- Every command that takes an agent uses the same resolver. That covers send,
+  look, status, diff, merge, retire, rehire, ack, resume, pause, nuke and the
+  rest.
+- The hook gates use the same resolver too: the manager-only ownership
+  checks and the `@system` rules. The gate and the command therefore always
+  agree on which agent is meant, which is the lesson from the hook-gaps work.
+
 ## Phases
 
 6. **Unified tree:**
@@ -156,6 +219,17 @@ the reply change.
 
    Tests: matching (same name, different paths; case; remote-only; local-only),
    order and nesting, italic and dim, keys, the header guard, and the V filter.
+6a. **Qualified queue key:** the outbox fix, in progress in parallel with
+    Phase 6. Tests: the same name in two repos; coordinators whose folders
+    share a name; the same name under two machine names.
+6b. **One agent resolver, after Phase 6:**
+    - the address forms and the ambiguity rule above;
+    - `remote-agents.json`, written by the poller;
+    - the same resolver in every agent-taking command and in the hook gates.
+
+    Tests: a unique name; a name ambiguous across two machines; a name
+    ambiguous across repos; each qualified form; an unknown name; and the
+    gate agreeing with the command.
 7. **Remote new-agent:**
    - the `new-agent` op and the responder's checks and spawn, with `newAgent`
      injected;

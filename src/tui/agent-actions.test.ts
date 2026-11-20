@@ -286,6 +286,8 @@ beforeEach(async () => {
   sendRepoDir = await mkdtemp(join(tmpdir(), "agent-actions-send-"));
   const { setCoordinatorHome } = await import("../coordinator");
   setCoordinatorHome(join(sendRepoDir, "coord-home"));
+  setUserHome(sendRepoDir);
+  await Bun.write(join(sendRepoDir, ".itsybitsy", "machine-name"), "studio");
 });
 
 afterEach(async () => {
@@ -297,6 +299,7 @@ afterEach(async () => {
   tmuxSpawnCtx.reset();
   const { resetCoordinatorHome } = await import("../coordinator");
   resetCoordinatorHome();
+  resetUserHome();
   await rm(sendRepoDir, { recursive: true, force: true });
 });
 
@@ -753,7 +756,7 @@ describe("handleSend", () => {
     const d = assertDialog(dialogs[0]!, "textarea");
     d.onSubmit("Hello agent");
     await flushActions();
-    expect(notices.some((n) => n.includes("Sent to agent-1") || n.includes("Send failed"))).toBe(true);
+    expect(notices).toContain("Sent to agent-1");
   });
 
   test("empty message cancels send", () => {
@@ -776,14 +779,16 @@ describe("handleSend", () => {
   });
 
   test("per-repo coordinator send calls sendMessage", async () => {
-    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir, meta: { agentType: "repo-coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir });
+    coordAgent.meta.agentType = "repo-coordinator";
+    coordAgent.meta.tmux_session = "itsybitsy-abcd1234-coord-1";
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
     const d = assertDialog(dialogs[0]!, "textarea");
     d.onSubmit("Hello coordinator");
     await flushActions();
-    expect(notices.some((n) => n.includes("Sent to coord-1") || n.includes("Send failed"))).toBe(true);
+    expect(notices).toContain("Sent to coord-1");
   });
 
   test("does nothing when repo header selected but no coordinator agent", () => {
@@ -1879,6 +1884,7 @@ describe("handleAddPermission spawn toggle re-seals (A4 G3)", () => {
 });
 
 describe("effectiveSpawnCapability", () => {
+  beforeEach(async () => { await (await import("../agent-types")).ensureAgentTypesDir(); });
   test("per-agent canSpawnChildren override wins over type/worker (true)", async () => {
     const agent = makeAgent({ id: "agent-1", meta: { worker: true, agentType: "worker", canSpawnChildren: true } as any });
     expect(await effectiveSpawnCapability(agent)).toBe(true);

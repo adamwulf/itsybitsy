@@ -29,7 +29,7 @@
 
 import { join } from "path";
 import { rename, unlink, stat, readFile, appendFile, open, mkdir, rmdir } from "fs/promises";
-import { readRegistryStrict } from "./registry";
+import { readRegistryStrict, type RepoEntry } from "./registry";
 import { readRepoId } from "./repo-id";
 import { readMachineName } from "./machine-name";
 import { fullyQualifiedAgentId } from "./tui/row-keys";
@@ -41,14 +41,8 @@ export const OUTBOX_FILENAME = "outbox.jsonl";
 /** Filename for the per-session delivery lock. */
 export const OUTBOX_LOCK_FILENAME = ".outbox.lock";
 
-/** Shared queue identity for enqueue, drain, statusline and teardown. */
-export async function agentOutboxDir(agent: {
-  repoPath: string;
-  id: string;
-  meta: Pick<AgentMeta, "tmux_session"> | null;
-}): Promise<string> {
-  const { repoPath, id: agentId, meta } = agent;
-  const { repos } = await readRegistryStrict();
+/** Resolve the registered segment from one registry snapshot, including symlinked repos. */
+export async function registeredQueueRepo(repoPath: string, repos: RepoEntry[]): Promise<string | undefined> {
   let repo = repos.find((r) => r.path === repoPath);
   if (!repo && repos.length) {
     // A watchdog can start at the physical path of a registered symlink.
@@ -64,29 +58,45 @@ export async function agentOutboxDir(agent: {
       }
     }
   }
-  let name = repo?.name;
-  if (name !== undefined) {
-    const lower = name.toLowerCase();
-    const matches = repos.filter((entry) => entry.name.toLowerCase() === lower);
-    if (matches.length > 1) {
-      throw new Error(`Ambiguous queue for repo name '${name}' registered at: ${matches.map((entry) => entry.path).join(", ")}`);
-    }
-  } else {
-    // Only teardown of artifacts without session metadata needs the repo-id
-    // file. A live agent (including its sandboxed statusline) always uses the
-    // id embedded by spawn, whether or not its caller can read that file.
-    const repoId = meta === null ? await readRepoId(repoPath) : /^itsybitsy-([0-9a-f]{8})-.+$/.exec(meta.tmux_session)?.[1];
-    if (!repoId) {
-      throw new Error(`Cannot locate queue for '${agentId}': repo '${repoPath}' is unregistered and tmux_session has no repository id`);
-    }
-    name = `~${repoId}`;
+  if (!repo) return undefined;
+  const name = repo.name;
+  const matches = repos.filter((entry) => entry.name.toLowerCase() === name.toLowerCase());
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous queue for repo name '${name}' registered at: ${matches.map((entry) => entry.path).join(", ")}`);
   }
-  for (const part of [name, agentId]) {
-    if (!part || part === "." || part === ".." || part.includes("/")) {
-      throw new Error(`Invalid agent queue path component: ${JSON.stringify(part)}`);
-    }
+  return name;
+}
+
+type QueueAgent = { repoPath: string; id: string; meta: Pick<AgentMeta, "queue_key" | "tmux_session"> | null };
+
+/** Pre-key agents use their session's repo id. Only archive artifacts without a session need the repo-id file. */
+async function legacyQueueKey({ repoPath, id, meta }: QueueAgent): Promise<string> {
+  const { repos } = await readRegistryStrict();
+  let repo = await registeredQueueRepo(repoPath, repos);
+  if (repo === undefined) {
+    const repoId = meta !== null
+      ? /^itsybitsy-([0-9a-f]{8})-.+$/.exec(meta.tmux_session)?.[1]
+      : await readRepoId(repoPath);
+    if (!repoId) throw new Error(`Cannot locate queue for '${id}': repo '${repoPath}' is unregistered and tmux_session has no repository id`);
+    repo = `~${repoId}`;
   }
-  return join(getCoordinatorHome(), "agents", fullyQualifiedAgentId(await readMachineName(), name, agentId));
+  return fullyQualifiedAgentId(await readMachineName(), repo, id);
+}
+
+/** Validate persisted metadata before interpreting it as a relative path. */
+export function queueDirForKey(key: string, agentId: string): string {
+  const parts = typeof key === "string" ? key.split("/") : [];
+  if (parts.length !== 3 || parts[2] !== agentId ||
+      parts.some((part) => !part || part === "." || part === ".." || part.includes("\0"))) {
+    throw new Error(`Invalid queue key for '${agentId}': ${JSON.stringify(key)}`);
+  }
+  return join(getCoordinatorHome(), "agents", key);
+}
+
+/** All queue users prefer the immutable identity captured at spawn. */
+export async function agentOutboxDir(agent: QueueAgent): Promise<string> {
+  const stored = agent.meta?.queue_key;
+  return queueDirForKey(stored === undefined ? await legacyQueueKey(agent) : stored, agent.id);
 }
 
 /**
@@ -280,26 +290,13 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
   await rename(tmpPath, path);
 }
 
-/**
- * Delete the outbox queue and its lock. Called from agent teardown
- * (archive/retire/nuke) alongside `deleteAgentTransient`. Best-effort:
- * any error (including ENOENT) is ignored.
- *
- * Also attempts to rmdir `dir` itself afterwards — when this is called against
- * the centralized per-agent outbox dir (`agentOutboxDir(agent)`), that dir is
- * ours to create and clean up. The rmdir is best-effort: ENOENT (already
- * gone) and ENOTEMPTY (something else dropped a file in there) are both
- * ignored. The coordinator's outbox lives in `getCoordinatorHome()` directly,
- * which we must NOT rmdir; that case is explicitly short-circuited below as
- * defense-in-depth (ENOTEMPTY would also naturally protect it, but a guard
- * removes any latent footgun for a future caller that does pass it in).
- */
+/** Remove delivery files and the per-agent directory. Missing files are safe to retry. */
 export async function deleteAgentOutbox(dir: string): Promise<void> {
   for (const p of [outboxPath(dir), outboxPath(dir) + ".tmp", outboxLockPath(dir)]) {
     try {
       await unlink(p);
-    } catch {
-      /* best-effort */
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
   // Never rmdir the coordinator home itself — that path is the system
@@ -307,8 +304,8 @@ export async function deleteAgentOutbox(dir: string): Promise<void> {
   if (dir === getCoordinatorHome()) return;
   try {
     await rmdir(dir);
-  } catch {
-    /* best-effort — ENOENT/ENOTEMPTY both ignored */
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
 }
 

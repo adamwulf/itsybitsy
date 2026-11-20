@@ -650,7 +650,7 @@ export async function archiveAgent(
   }
 
   const { meta } = await readAgentMeta(agentDir);
-  const queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: meta?.tmux_session ? meta : null });
+  const queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: meta?.queue_key !== undefined || meta?.tmux_session ? meta : null });
   await mkdir(archiveFolder, { recursive: true });
 
   // output.log — move
@@ -784,7 +784,7 @@ export async function archiveAgent(
   // torn down, so there is no live tmux session to deliver to. The outbox
   // now lives under the CENTRAL coordinator-home root (agentOutboxDir), not
   // beside meta.json in the per-worktree agent dir; deleteAgentOutbox also
-  // best-effort rmdir's the per-agent outbox subdir. The statusline's Claude
+  // removes the per-agent outbox subdir. The statusline's Claude
   // rate-limit record lives in the same folder and must go first, or the
   // rmdir fails and the folder stays for good.
   await deleteClaudeRateLimits(queueDir);

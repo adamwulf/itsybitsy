@@ -85,7 +85,7 @@ export async function readMachineName(): Promise<string> {
   return name;
 }
 
-/** Initialize at watch launch, spawn, or watchdog startup, outside the agent sandbox. */
+/** Initialize at watch launch or spawn, outside the agent sandbox. */
 export async function initializeMachineName(deps: MachineNameDeps = defaultMachineNameDeps): Promise<string> {
   const path = machineNameFile();
   const saved = await savedMachineName(path);

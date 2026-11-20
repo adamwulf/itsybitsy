@@ -3328,10 +3328,11 @@ describe("runPerAgentWatchdog", () => {
     clearAllAgentsCache();
   });
 
-  test("sender and watchdog share an unregistered agent's queue without reading repo-id", async () => {
+  test.each([undefined, "spawn-host/original-registration/review"])("sender and watchdog use the same queue without reading repo-id (stored key %p)", async (key) => {
     const repo = join(outboxHome, "unregistered");
     const target = makeAgent({ repoPath: repo, id: "review" });
     target.meta.tmux_session = "itsybitsy-deadbeef-review";
+    if (key) target.meta.queue_key = key;
     const agentDir = join(repo, ".itsybitsy", "agents", target.id);
     mkdirSync(agentDir, { recursive: true });
     // A read of this file would fail getRepoId's validation. A sandboxed
@@ -3343,7 +3344,7 @@ describe("runPerAgentWatchdog", () => {
       tmux_api_terms: false, tmux_api_safeguard: false,
     });
     expect((await sendMessage(target, "queued", { cwd: "/" })).ok).toBe(true);
-    const expectedDir = join(outboxHome, "agents", "studio", "~deadbeef", "review");
+    const expectedDir = join(outboxHome, "agents", key ?? "studio/~deadbeef/review");
     expect((await readOutbox(expectedDir)).map((m) => m.message)).toEqual(["queued"]);
     const drainedDirs: string[] = [];
     setPerAgentReadMeta(async () => ({ meta: target.meta }));

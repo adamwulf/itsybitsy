@@ -4017,6 +4017,7 @@ export class DashboardComponent implements Component {
 export async function launchDashboard(): Promise<void> {
   const bootStart = Date.now();
   logToWatchLog("[startup] launchDashboard initiated");
+  const machine = await initializeMachineName();
   const registry = await loadRegistry();
   const repos = registry.repos;
   logToWatchLog(`[startup] registry loaded: ${repos.length} repos (+${Date.now() - bootStart}ms)`);
@@ -4113,7 +4114,7 @@ export async function launchDashboard(): Promise<void> {
   // The first segment of every local agent key (SPEC §17.1): read from
   // ~/.itsybitsy/machine-name, or set once from the computer name. Before the
   // layout, so favorites and the first selection use it.
-  dashboard.setMachineName(await initializeMachineName());
+  dashboard.setMachineName(machine);
   const savedLayout = await loadLayout();
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);

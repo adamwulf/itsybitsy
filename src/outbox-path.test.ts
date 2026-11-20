@@ -1,10 +1,11 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdir, readdir, rm } from "fs/promises";
 import { join } from "path";
-import { agentOutboxDir, readOutbox } from "./outbox";
+import { agentOutboxDir, readOutbox, deleteAgentOutbox } from "./outbox";
+import { deleteClaudeRateLimits, CLAUDE_RATE_LIMITS_FILE } from "./claude-rate-limits";
 import { archiveAgent } from "./agent-lifecycle";
 import { writeAgentTransient } from "./agents";
-import { drainOutbox, setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
+import { drainOutbox, sendMessage, setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
 import { setUserHome, resetUserHome } from "./home";
 import { createCliFixture, type CliFixture } from "./test-cli-runner";
 import { makeAgent, makeSpawnResult } from "./test-utils";
@@ -108,6 +109,52 @@ describe("fully qualified agent queues", () => {
     await Bun.write(machineNameFile(), "work/laptop");
     expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("alpha", "review", "work-laptop"));
   });
+
+  test("send, inline drain and archive follow the saved key across registration and machine changes", async () => {
+    const id = "review";
+    const key = "studio/alpha/review";
+    const agent = makeAgent({ repoPath: repoA, id });
+    agent.meta.queue_key = key;
+    agent.meta.tmux_session = "itsybitsy-deadbeef-review";
+    const planted = await plant(repoA, id, agent.meta.tmux_session);
+    await Bun.write(join(planted.agentDir, "meta.json"), JSON.stringify(agent.meta));
+
+    const dir = queue("alpha", id);
+    await cli.writeRegistry({ repos: [{ path: repoA, name: "renamed" }] });
+    await rm(machineNameFile());
+    await send("@renamed/review", "while registered");
+    await cli.writeRegistry({ repos: [] });
+    expect((await sendMessage(agent, "after removal", { cwd: "/" })).ok).toBe(true);
+    expect((await readOutbox(dir)).map((m) => m.message)).toEqual(["while registered", "after removal"]);
+
+    // No heartbeat: sendMessage now takes the inline drain for the same queue.
+    await rm(join(planted.agentDir, "meta.transient.json"));
+    expect((await sendMessage(agent, "drain", { cwd: "/" })).ok).toBe(true);
+    expect(await readOutbox(dir)).toEqual([]);
+    const typed = calls.filter((cmd) => cmd.includes("send-keys") && cmd.includes("-l")).flat().join(" ");
+    for (const message of ["while registered", "after removal", "drain"]) expect(typed).toContain(message);
+    await Bun.write(join(dir, "outbox.jsonl.tmp"), "pending");
+    await archiveAgent(repoA, id, planted.agentDir);
+    expect(await readdir(join(dir, ".."))).not.toContain(id);
+  });
+
+  test.each(["../repo/review", "/repo/review", "host/repo/other", "host/repo/x/review", "", null])(
+    "refuses an invalid stored key without falling back (%p)", async (key) => {
+      const agent = makeAgent({ repoPath: repoA, id: "review" });
+      Object.assign(agent.meta, { queue_key: key });
+      await expect(agentOutboxDir(agent)).rejects.toThrow("Invalid queue key");
+    },
+  );
+
+  test.each(["outbox.jsonl", "outbox.jsonl.tmp", ".outbox.lock", CLAUDE_RATE_LIMITS_FILE, CLAUDE_RATE_LIMITS_FILE + ".tmp.123"])(
+    "surfaces an unlink error removing %s", async (file) => {
+      const dir = queue("alpha", "review");
+      await mkdir(join(dir, file), { recursive: true });
+      const remove = file.startsWith(CLAUDE_RATE_LIMITS_FILE) ? deleteClaudeRateLimits : deleteAgentOutbox;
+      await expect(remove(dir)).rejects.toThrow();
+      expect(await readdir(dir)).toContain(file);
+    },
+  );
 
   test("an absent registry permits the unregistered session key", async () => {
     await rm(join(cli.home, ".itsybitsy", "repos.json"));

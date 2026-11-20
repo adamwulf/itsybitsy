@@ -93,6 +93,7 @@ describe("Phase 3 — agy watchdog fallback keystrokes", () => {
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "agy-wd-home-"));
     setUserHome(home);
+    await Bun.write(join(home, ".itsybitsy", "machine-name"), "studio");
     sentKeys = [];
     setWatchdogSpawnRunner(recordingRunner(sentKeys));
     setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
@@ -182,6 +183,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     tempHome = await mkdtemp(join(tmpdir(), "agy-wd-home-"));
     setCoordinatorHome(tempHome);
     setUserHome(tempHome);
+    await Bun.write(join(tempHome, ".itsybitsy", "machine-name"), "studio");
     agentId = "agy-hb";
     agentDir = join(tempRepo, ".itsybitsy", "agents", agentId);
     await mkdir(agentDir, { recursive: true });

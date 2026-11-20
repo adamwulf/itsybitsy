@@ -79,6 +79,16 @@ describe("hookStatusline", () => {
     });
   });
 
+  test("records under the saved key when the registry and machine identity are unavailable", async () => {
+    const file = join(projectDir, ".itsybitsy", "agents", "agent-a", "meta.json");
+    const meta = await Bun.file(file).json();
+    await Bun.write(file, JSON.stringify({ ...meta, queue_key: "spawn-host/first-name/agent-a" }));
+    await rm(join(home, ".itsybitsy", "machine-name"));
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), "{");
+    await hookStatusline(statuslineInput(), "agent-a", NOW_MS);
+    expect(await Bun.file(join(home, ".itsybitsy", "agents", "spawn-host", "first-name", "agent-a", CLAUDE_RATE_LIMITS_FILE)).exists()).toBe(true);
+  });
+
   test("a worktree statusline records usage for its owning repo", async () => {
     const worktree = join(projectDir, ".itsybitsy", "agents", "agent-a", "repo");
     await mkdir(worktree, { recursive: true });

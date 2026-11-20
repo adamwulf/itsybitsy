@@ -138,15 +138,16 @@ export async function deleteClaudeRateLimits(dir: string): Promise<void> {
   let entries: string[];
   try {
     entries = await readdir(dir);
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     return;
   }
   for (const entry of entries) {
-    if (!entry.startsWith(CLAUDE_RATE_LIMITS_FILE)) continue;
+    if (entry !== CLAUDE_RATE_LIMITS_FILE && !entry.startsWith(`${CLAUDE_RATE_LIMITS_FILE}.tmp.`)) continue;
     try {
       await unlink(join(dir, entry));
-    } catch {
-      // Best effort, like the rest of teardown.
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }
 }

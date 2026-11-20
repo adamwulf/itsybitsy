@@ -85,6 +85,8 @@ export interface AgentMeta {
    */
   agy_version?: string;
   tmux_session: string;
+  /** Fully qualified delivery queue chosen at spawn. Absent on older agents. */
+  queue_key?: string;
   prompt: string;
   manager: string | null;
   created: string;

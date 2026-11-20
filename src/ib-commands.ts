@@ -1,3 +1,4 @@
+import { fullyQualifiedAgentId } from "./tui/row-keys";
 import { initializeMachineName } from "./machine-name";
 import { getRepoId } from "./repo-id";
 export { getRepoId } from "./repo-id";
@@ -48,6 +49,8 @@ import {
   acquireOutboxLock,
   releaseOutboxLock,
   agentOutboxDir,
+  registeredQueueRepo,
+  queueDirForKey,
   type OutboxMessage,
   type AcquireLockOpts,
 } from "./outbox";
@@ -94,7 +97,7 @@ import {
   REGULAR_AGENT_INTERCEPT_MATCHER,
   resolveUserStatusLine,
 } from "./settings-builder";
-import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import { listRepos, readRegistryStrict, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
 import {
   type Team,
@@ -6207,6 +6210,15 @@ export async function newAgent(
   // Configuration
   let useWorktree = opts?.noWorktree !== true;
 
+  let repos: RepoEntry[];
+  let queueRepo: string | undefined;
+  try {
+    ({ repos } = await readRegistryStrict());
+    queueRepo = await registeredQueueRepo(rootRepoPath, repos);
+  } catch (err) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: String(err) };
+  }
+
   // Ensure agent types directory is initialized + load the requested type.
   const { ensureAgentTypesDir } = await import("./agent-types");
   try {
@@ -6239,8 +6251,7 @@ export async function newAgent(
   // spawned in the wrong repo should fail with the repo error, not silently
   // succeed via idempotency.
   if (agentTypeDef.repos !== undefined) {
-    const allKnownRepos = await listRepos();
-    const entry = allKnownRepos.find((r) => r.path === rootRepoPath);
+    const entry = repos.find((r) => r.path === rootRepoPath);
     const basenameOnly = basename(rootRepoPath);
     // Trim whitespace on the candidates as a defensive parallel to the
     // `allowed` list's .trim() — a nickname with trailing whitespace in
@@ -6643,12 +6654,6 @@ export async function newAgent(
     };
   }
 
-  // Do not allocate lifecycle directories until the CLI/worktree shape is
-  // known to be supported. In particular, rejected non-Claude
-  // worktree:false requests must leave an otherwise untouched repo untouched.
-  await mkdir(agentsDir, { recursive: true });
-  await mkdir(archiveDir, { recursive: true });
-
   // Codex spawn-path preconditions (SPEC §5.4 step 2 + §7 risk 14). Run
   // BEFORE any worktree/tmux work so a fail here doesn't leave residual
   // state behind. The path-safety check guards the TOML-in-shell quoting
@@ -6841,7 +6846,6 @@ export async function newAgent(
   }
 
   // 8. Generate agent ID
-  const repos = await listRepos();
   let id: string;
   if (coordinatorMode) {
     id = getCoordinatorAgentId(rootRepoPath);
@@ -6895,9 +6899,12 @@ export async function newAgent(
     }
   }
 
+  const machine = await initializeMachineName();
   // Get repo-id for session naming
   const repoId = await getRepoId(rootRepoPath);
   const tmuxSession = runtimeNames.tmuxSessionName(repoId, id);
+
+  const queueKey = fullyQualifiedAgentId(machine, queueRepo ?? `~${repoId}`, id);
 
   // 9. Uniqueness check
   const agentDir = join(agentsDir, id);
@@ -6927,16 +6934,15 @@ export async function newAgent(
     }
   }
 
-  // The watchdog broker also reaches this unsandboxed spawn path.
-  await initializeMachineName();
-
-  // 10. Create agent directory
+  // 10. Allocate lifecycle directories only after the queue identity is valid.
+  const queueDir = queueDirForKey(queueKey, id);
+  await mkdir(archiveDir, { recursive: true });
   await mkdir(agentDir, { recursive: true });
   // The per-agent outbox now lives under the CENTRAL coordinator-home root
   // (so codex agents under `-s workspace-write` can write to other agents'
   // outboxes — see agentOutboxDir). mkdir it before the agent starts so the
   // first enqueue doesn't race a missing-dir append.
-  await mkdir(await agentOutboxDir({ repoPath: rootRepoPath, id, meta: { tmux_session: tmuxSession } }), { recursive: true });
+  await mkdir(queueDir, { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
   // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are
@@ -6996,6 +7002,7 @@ export async function newAgent(
     id,
     session_id: sessionUuid,
     tmux_session: tmuxSession,
+    queue_key: queueKey,
     prompt,
     manager: manager || null,
     created: createdAt.toISOString(),

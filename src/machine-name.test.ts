@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { resetUserHome, setUserHome } from "./home";
 import { FALLBACK_MACHINE_NAME, initializeMachineName, readMachineName, sanitizeMachineName, type MachineNameDeps } from "./machine-name";
+import { runIsolatedCli } from "./test-cli-runner";
 import { machineNameFile } from "./runtime-names";
 
 let home: string;
@@ -78,6 +79,19 @@ describe("initializeMachineName", () => {
 
   test("an empty computer name and hostname give the fallback name", async () => {
     expect(await initializeMachineName(fakeDeps({ exitCode: 0, stdout: "\n" }, ".local").deps)).toBe(FALLBACK_MACHINE_NAME);
+  });
+
+  test("ib watch initializes a fresh home before exiting for an empty registry", async () => {
+    const bin = join(home, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "tmux"), "#!/bin/sh\nexit 1\n");
+    await chmod(join(bin, "tmux"), 0o700);
+    const result = await runIsolatedCli(["watch"], {
+      home, env: { PATH: bin }, allowedProcesses: [["scutil", "--get", "ComputerName"]],
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("No repos registered");
+    expect(await readMachineName()).not.toBe("");
   });
 
   test("a missing identity produces a read-only error even on a writable home", async () => {

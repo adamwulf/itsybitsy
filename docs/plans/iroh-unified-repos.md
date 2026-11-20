@@ -178,7 +178,8 @@ decision now extends to queues and addressing.
 exactly.
 1. If the caller runs inside a repo on this machine and that repo has the
    name, that agent is used. This keeps today's same-repo-first rule, so a
-   manager can still reach its own workers by bare name.
+   manager can still reach its own workers by bare name. Adam confirmed this
+   on 2026-11-20.
 2. Otherwise, collect every match across all local repos and all connected
    machines:
    - one match: use it;

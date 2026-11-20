@@ -1,0 +1,206 @@
+# iroh peering, next phase: one repo list across machines
+
+Status: plan, 2026-11-20. This phase follows [iroh-peering.md](iroh-peering.md)
+Phases 0–4, plus the self-heal and full-id work, all on `agent/iroh-peering`.
+
+It **supersedes** "remote agents shown as tree sections"
+(iroh-peering.md → "First connected feature", Tree part). The peer sections
+are removed. It realizes part of
+[unified-multi-machine-repos.md](unified-multi-machine-repos.md). Cloning a
+repo onto a machine that doesn't have it remains out of scope.
+
+## What Adam asked for
+
+1. **One repo list.** A repo that exists on several machines appears once in
+   the tree.
+2. **All agents together.** Under each repo, show every agent in that repo,
+   local and remote.
+3. **Italic remote agents.** Agents on another machine are drawn in italic.
+4. **Machine picker.** When more than one machine is connected, the New Agent
+   dialog lets him pick the machine the agent runs on. It defaults to this
+   machine. With only one machine there is no picker.
+
+## Design
+
+### Matching repos across machines
+
+- Repos match by **registry name**, ignoring case. Since 2026-11-17 a registry
+  name is unique on each machine, so a name identifies at most one repo per
+  machine.
+- Paths are never compared, because they normally differ between machines.
+- **Fallback when names differ:** none is automatic. The repo shows as two
+  entries, and you fix it by registering it under the same name with
+  `ib add <path> <name>`.
+- **Considered for later:** auto-matching by the normalized `origin` URL or
+  the git root commit. That costs a git call per repo, and forks share a root
+  commit, so it is left out of this phase (open question 1).
+
+### What the trusted link carries
+
+The reply to `agents` becomes `{repos, agents}`:
+
+- `repos`: one `{registryName, displayName}` per repo registered on that
+  machine, including repos with no agents.
+  - The tree needs it to show a repo that exists only on the other machine.
+  - The machine picker needs it to know which machines have the repo.
+- `agents`: the existing eight fields, unchanged. They are `id`, `nickname`,
+  `repoName`, `repoPath`, `state`, `agentType` and `manager`, plus
+  `repoRegistryName`. From these:
+  - **status** is `state`;
+  - **repo id** is `repoRegistryName`.
+- **Machine name** is NOT sent. The receiver already knows who answered: it
+  has the authenticated id, and its `peers.json` maps that id to the name
+  typed when pairing.
+  - A remote agent's full id stays `<peer name>/<repo>/<agent>`.
+  - The info panel shows the machine name, plus that peer's connection state.
+
+Both laptops run the same build, so there is no compatibility handling for
+the reply change.
+
+### Tree
+
+- **One header per repo.** There is one header per matched registry name,
+  covering this machine and every peer whose last list includes the repo.
+  - If the repo exists here, the header shows the local display name.
+    Otherwise it shows the remote display name.
+- **Agent order under a header:**
+  - local agents first, in today's order and nesting;
+  - then each peer's agents, in `peers.json` order, nested by manager within
+    that machine. A manager is always on the same machine as its agents.
+- **Remote agent rows:**
+  - drawn in italic (SGR 3);
+  - also dimmed when their peer is unreachable, showing the last list
+    received (as today).
+- **Remote-only repos** still get a header. All agents under it are italic.
+- **Removed:** the peer sections (`peer-header`, `remote-repo-header`). Peer
+  connection state stays visible in two places: the Peers dialog (`I`), and
+  the info panel of a selected remote agent ("Machine: <name> · connected" or
+  "last seen N ago").
+- **Keys:**
+  - Agent keys are unchanged (`machine/repo/agent`).
+  - A repo header's key becomes machine-independent, derived from the
+    registry name. Pins stay keyed by local path.
+- **The read-only guard** still applies to every remote agent row. On a repo
+  header:
+  - Local repo actions (remove, rename, pin, fix, and so on) work only when
+    the repo exists on this machine. On a remote-only header they are refused
+    with a notice.
+  - `a` (new agent) works on every header.
+- **V filter:** it now applies to remote agent rows too, because they live in
+  the main tree (open question 3).
+- **Favorites and Teams tabs** stay local-only.
+
+### New Agent dialog: picking a machine
+
+- **When the Machine field appears.** The form shows it only when at least
+  one connected peer has this repo.
+- **Options:**
+  - this machine, if the repo is registered here, which is the default;
+  - each connected peer that has the repo.
+  - If the repo exists only remotely, the first such peer is the default.
+- **Changing machine.** The field cycles like the Type field.
+- **Type list.** The list stays this machine's types. The remote machine
+  checks the type and returns a clear error if it doesn't have it.
+- **Attachments.** Attachment staging runs only for this machine. A remote
+  prompt is sent as plain text; local file paths in it won't exist there.
+  The form says so when a remote machine is selected.
+- **Submitting to a remote machine.** The form sends `new-agent` over the
+  trusted link and waits up to 30 s.
+  - On success it closes and shows "Created agent <id> on <peer>". The row
+    appears on the next poll, within 5 s.
+  - On failure it shows the error.
+
+### Remote new-agent request
+
+- **Request.** It uses its own bi stream on `itsybitsy/peer/1`:
+  `{"op":"new-agent","repo":"<registryName>","type":"<type>","name":"<optional>","prompt":"<text>"}`.
+  - The request cap is raised to 256 KB for this op only. `agents` keeps its
+    4 KB cap.
+- **Responder checks, in order:**
+  1. The allowlist, re-checked as for every request.
+  2. The repo name is registered here.
+  3. The type exists, is spawnable, and is not `repo-coordinator`. No
+     coordinators are started remotely.
+  4. The name passes the existing agent-name validation.
+  5. The prompt is non-empty and within the cap.
+- **Spawning.** The responder then calls the same
+  `newAgent(repo.path, prompt, { type, name })` that pressing `a` in its own
+  `ib watch` calls.
+  - It passes no extra options: no model, effort, spawner or permissions
+    override.
+  - Hooks, sandbox, agent-type permissions and every spawn gate therefore
+    apply exactly as for a local human spawn.
+- **Reply:** `{"ok":true,"id":"<id>"}` or `{"ok":false,"error":"<message>"}`.
+- **Visibility.** The receiving machine logs each request to `watch.log` and
+  shows a notice: "<peer> started agent <id> in <repo>".
+- **Permission model:**
+  - Only a human, in `ib watch`'s New Agent dialog, can send the request.
+  - There is no CLI path: no `ib new-agent --machine`, and `ib peer` stays
+    human-only.
+  - Agents cannot reach it, and the hook and security gates are unchanged.
+  - Any paired peer may make the request, because pairing is the trust
+    decision (open question 2).
+- **Still refused on remote agents:** send, retire, merge, resume and
+  everything else.
+
+## Phases
+
+6. **Unified tree:**
+   - the `repos` list in the `agents` reply;
+   - repo matching and merged headers;
+   - italic (and dimmed when stale) remote rows under their repo;
+   - removing the peer sections;
+   - the info-panel machine line;
+   - the guard rules for headers;
+   - the V filter for remote rows;
+   - docs.
+
+   Tests: matching (same name, different paths; case; remote-only; local-only),
+   order and nesting, italic and dim, keys, the header guard, and the V filter.
+7. **Remote new-agent:**
+   - the `new-agent` op and the responder's checks and spawn, with `newAgent`
+     injected;
+   - the 256 KB request cap for this op;
+   - the Machine field in the form, and the remote submit, timeout and
+     notices on both sides;
+   - docs.
+
+   Tests: every responder refusal; a real-endpoint loopback that starts an
+   agent through a stubbed `newAgent`; and the form with zero, one and two
+   connected peers.
+8. **Two-laptop check:** Adam pairs, sees merged repos with italic remote
+   agents, starts an agent on the other laptop from this one, and sees it
+   appear.
+
+Each phase gets the usual two-reviewer cycle before it is merged.
+
+## Cross-cutting checklist
+
+- **Agent functionality:** a remote spawn is an ordinary local `newAgent` on
+  the receiving machine. No `meta.json` change.
+- **Hooks:** unchanged. There is no new agent-facing command, and `ib peer`
+  stays human-only.
+- **Watchdog:** remote agents are watched only by their own machine, so
+  nothing changes here.
+- **`ib watch`:** tree, form, info panel, notices.
+
+## Out of scope for this phase
+
+- Cloning a repo onto a machine that doesn't have it.
+- Remote actions other than new-agent, and viewing a remote agent's tmux.
+- Remote rows in the Favorites and Teams tabs.
+- Matching repos that have different names.
+- Showing the remote machine's own agent types in the form.
+- Attachments for remote spawns.
+- A CLI form of a remote spawn.
+
+## Open questions (recommendation first)
+
+1. **Matching.** Match by registry name only, with no automatic fallback; you
+   align names with `ib add <path> <name>`. The alternative is to also match
+   by git `origin` URL.
+2. **Permission.** Any paired machine may start agents here, with a log line
+   and a notice on this machine. The alternative is a per-peer "may start
+   agents here" switch in the Peers dialog.
+3. **V filter.** It now applies to remote agent rows, because they are in the
+   main tree.

@@ -290,7 +290,11 @@ trust B. Pairing again fixes it. B already trusts A's id, so step 3 replies
   receiving side nest agents the way it nests local ones.
 - The answer never includes prompts, logs, or tmux output.
 
-**Tree.** The local tree stays exactly as it is now. Below it, each paired
+**Tree.** SUPERSEDED on 2026-11-20 by
+[iroh-unified-repos.md](iroh-unified-repos.md): one repo list across machines,
+with remote agents in italic under their repo. The peer sections described
+below were built in Phase 4 and are removed in that phase. As built in
+Phase 4, the local tree stays exactly as it is now, and below it each paired
 install gets its own section:
 
 ```

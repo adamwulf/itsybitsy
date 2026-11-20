@@ -1323,27 +1323,15 @@ const IB_MANAGER_ONLY_COMMANDS = new Set([
  * Returns { subcommand, targetId } when parsed, or null if not an ib command
  * that targets a specific agent.
  *
- * NOTE: This only matches commands starting with exactly "ib ". Alternate
- * invocations like `./ib retire` or `/usr/local/bin/ib retire` are not matched.
- * This is safe because agents are expected to have only `Bash(ib:*)` in their
- * allowList (not broader `Bash(*)`), so alternate paths are already blocked
- * by the allowList check before this function is called.
+ * Use the same positional operand as the CLI, including merge's leading
+ * flags and shell quoting around machine names containing spaces.
  */
 export function parseIbCommand(command: string): { subcommand: string; targetId: string } | null {
-  // Must start with "ib " or be exactly "ib"
-  if (command !== "ib" && !command.startsWith("ib ")) return null;
-
-  const parts = command.trim().split(/\s+/);
-  // parts[0] = "ib", parts[1] = subcommand, parts[2] = agent-id (possibly)
-  if (parts.length < 3) return null;
-
-  const subcommand = parts[1]!;
-  // Find first non-flag argument as the target ID
-  const targetId = parts.slice(2).find((p) => !p.startsWith("-"));
-  if (!targetId) return null;
-  if (!isValidAgentId(targetId)) return null;
-
-  return { subcommand, targetId };
+  const parts = tokenizeBashPaths(command.trim())?.map((word) => splitShellWord(word).join(""));
+  if (!parts || parts[0] !== "ib" || !parts[1]) return null;
+  const subcommand = parts[1];
+  const targetId = subcommand === "merge" ? parts.slice(2).find((p) => !p.startsWith("-")) : parts[2];
+  return targetId === undefined ? null : { subcommand, targetId };
 }
 
 /**
@@ -1520,7 +1508,8 @@ async function archiveHiddenBySandbox(repoRoot: string): Promise<boolean> {
 export async function checkIbCommandAccess(
   command: string,
   callingAgentId: string,
-  agentsDir: string
+  agentsDir: string,
+  cwd = resolve(agentsDir, "..", ".."),
 ): Promise<HookDecision | null> {
   // Shell line continuations are removed before execution. Normalize them
   // before authorization so a continued `ib sandbox seal ...` cannot evade
@@ -1588,18 +1577,18 @@ export async function checkIbCommandAccess(
   // @system has system-wide relationship authority, but cannot invoke the
   // internal lifecycle entry points above through its Bash tool. Legitimate
   // launch helpers call those commands directly and never enter PreToolUse.
-  if (callingAgentId === SYSTEM_AGENT_ID) return null;
+  const system = callingAgentId === SYSTEM_AGENT_ID;
 
   // Outbound Telegram belongs to @system alone: it is the only agent that
   // receives Telegram messages, so it is the only one that replies. Every
   // other agent — worker, manager, per-repo coordinator — is denied here.
-  if (containsIbSubcommandInvocation(normalizedCommand, IB_TELEGRAM_OUTBOUND_COMMANDS)) {
+  if (!system && containsIbSubcommandInvocation(normalizedCommand, IB_TELEGRAM_OUTBOUND_COMMANDS)) {
     return {
       decision: "deny",
       reason: "Access denied: 'ib tgsend', 'ib tgsendfile' and 'ib tgreact' are for the system coordinator only — it is the only agent that receives Telegram messages. Report to your manager (or to the user, if you have no manager) instead",
     };
   }
-  if (containsIbSubcommandInvocation(normalizedCommand, IB_BOUNCE_COMMANDS)) {
+  if (!system && containsIbSubcommandInvocation(normalizedCommand, IB_BOUNCE_COMMANDS)) {
     return {
       decision: "deny",
       reason: "Access denied: 'ib bounce' is for the system coordinator only — it quits ib watch and restarts the system coordinator. Report to your manager (or to the user, if you have no manager) instead",
@@ -1610,7 +1599,7 @@ export async function checkIbCommandAccess(
   // `ib send ...` can append a second lifecycle/internal command after `;`,
   // `&&`, a pipe, or a newline.  The scanner is quote/heredoc aware, so
   // punctuation in a quoted message remains usable.
-  if (/(?:^|[;&|\n]\s*)ib\s+/.test(normalizedCommand)) {
+  if (!system && /(?:^|[;&|\n]\s*)ib\s+/.test(normalizedCommand)) {
     const shellHit = findShellMetachar(normalizedCommand);
     if (shellHit) {
       return {
@@ -1623,11 +1612,12 @@ export async function checkIbCommandAccess(
   const parsed = parseIbCommand(normalizedCommand);
   if (!parsed) return null;
   if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
-  return checkManagerCommandAccess(parsed.subcommand, parsed.targetId, callingAgentId, agentsDir);
+  return checkManagerCommandAccess(parsed.subcommand, parsed.targetId, callingAgentId, agentsDir, { cwd });
 }
 
 /** Options for {@link checkManagerCommandAccess}. */
 export interface ManagerCommandAccessOptions {
+  cwd?: string;
   /**
    * The caller's meta.json, already read and verified by whoever calls this.
    * When given, the caller's own file is NOT read again: the watchdog broker
@@ -1654,7 +1644,7 @@ export interface ManagerCommandAccessOptions {
  *
  * Returns a deny decision, or null when the command is allowed. Unlike
  * `checkIbCommandAccess`, null here never means "not my concern": a command
- * that is not manager-only, or a target that is not a plain agent id, is
+ * that is not manager-only, or an unresolved target, is
  * DENIED. The watchdog lifecycle broker calls this directly, with structured
  * arguments, so nothing is lost or reinterpreted in a synthesized command line.
  */
@@ -1665,7 +1655,7 @@ export async function checkManagerCommandAccess(
   agentsDir: string,
   opts: ManagerCommandAccessOptions = {},
 ): Promise<HookDecision | null> {
-  if (!IB_MANAGER_ONLY_COMMANDS.has(subcommand) || !isValidAgentId(targetId)) {
+  if (!IB_MANAGER_ONLY_COMMANDS.has(subcommand) || ((opts.callerMeta || opts.ownArchiveOnly) && !isValidAgentId(targetId))) {
     return {
       decision: "deny",
       reason: `Access denied: 'ib ${subcommand}' on '${targetId}' is not a manager command on an agent id`,
@@ -1673,7 +1663,7 @@ export async function checkManagerCommandAccess(
   }
 
   const requestedSubcommand = subcommand;
-  const targetMetaPath = join(agentsDir, targetId, "meta.json");
+  let targetRepo: string;
   const callerRepoRoot = resolve(agentsDir, "..", "..");
 
   /** Is the CALLER a per-repo coordinator? From the verified meta when given. */
@@ -1701,7 +1691,7 @@ export async function checkManagerCommandAccess(
    */
   async function hasAccess(meta: Record<string, unknown>): Promise<boolean> {
     // Allow if caller is the manager
-    if (typeof meta.manager === "string" && meta.manager === callingAgentId) {
+    if (targetRepo === callerRepoRoot && meta.manager === callingAgentId) {
       return true;
     }
     // `ib ack` is the manager's alone.
@@ -1746,139 +1736,41 @@ export async function checkManagerCommandAccess(
     return callerIsCoordinator();
   }
 
-  /** Decide a rehire from the newest recoverable archive in the caller's repo. */
-  async function ownArchiveDecision(): Promise<{ decided: boolean; decision: HookDecision | null }> {
-    const { findRetiredAgentArchives } = await import("../agent-lifecycle");
-    const archives = await findRetiredAgentArchives(callerRepoRoot, targetId);
-    const archived =
-      archives.find((entry) => entry.manifest !== null) ?? archives[0];
-    if (!archived) return { decided: false, decision: null };
-    const meta = archived.meta as unknown as Record<string, unknown>;
-    if (await hasCoordinatorBypass(meta)) return { decided: true, decision: null };
-    if (await hasAccess(meta)) return { decided: true, decision: null };
-    return {
-      decided: true,
-      decision: {
-        decision: "deny",
-        reason: `Access denied: only the manager or spawner of '${targetId}' can run 'ib rehire'`,
-      },
-    };
-  }
-
+  const denied = (reason: string): HookDecision => ({ decision: "deny", reason: `Access denied: ${reason}` });
+  let meta: Record<string, unknown> | undefined;
   if (opts.ownArchiveOnly) {
-    if (requestedSubcommand !== "rehire") {
-      return { decision: "deny", reason: `Access denied: 'ib ${subcommand}' has no archived target` };
-    }
-    try {
-      const own = await ownArchiveDecision();
-      if (own.decided) return own.decision;
-    } catch { /* deny below */ }
-    return {
-      decision: "deny",
-      reason: `Access denied: retired agent '${targetId}' not found in this repository`,
-    };
-  }
-
-  // Same-repo check: target exists in calling agent's repo
-  try {
-    const metaFile = Bun.file(targetMetaPath);
-    if (await metaFile.exists()) {
-      let meta: Record<string, unknown>;
-      try {
-        meta = await metaFile.json();
-      } catch {
-        // File exists but can't be parsed — deny rather than falling through
-        // to cross-repo check which could match a different agent with the same ID
-        return {
-          decision: "deny",
-          reason: `Access denied: cannot read meta for agent '${targetId}'`,
-        };
-      }
-
-      // Per-repo coordinator bypass: a per-repo coordinator may run 'retire' or
-      // 'reassign' on any non-coordinator agent within its own repo, even when
-      // it is not the target's manager or spawner. Only applies same-repo and
-      // never to other coordinators. (SPEC §12.2)
-      if (await hasCoordinatorBypass(meta)) return null;
-
-      if (await hasAccess(meta)) return null; // allow
-      return {
-        decision: "deny",
-        reason: subcommand === "ack"
-          ? `Access denied: only the manager of '${targetId}' can run 'ib ack'`
-          : `Access denied: only the manager or spawner of '${targetId}' can run 'ib ${subcommand}'`,
-      };
-    }
-  } catch { /* exists() failed — fall through to cross-repo check */ }
-
-  // Rehire targets live under timestamped archive folders, not agents/<id>.
-  // Resolve the newest recoverable same-repo archive and authorize against its
-  // immutable metadata using the same manager/spawner rules as active agents.
-  if (subcommand === "rehire") {
-    try {
-      const own = await ownArchiveDecision();
-      if (own.decided) return own.decision;
-    } catch { /* fall through to cross-repo archive search */ }
-
-    // A sandboxed worktree agent cannot list its repo's archive, so this rule
-    // cannot see whose agent the archive was and would deny every rehire. Do
-    // not decide here. A caller the archive is hidden from cannot rehire by
-    // itself: `ib rehire` either hands the request to the caller's watchdog,
-    // which applies this rule unsandboxed, where the archive is readable
-    // (lifecycle-broker.ts), or runs in this same sandbox, where rehireAgent
-    // cannot read the archive either.
-    if (await archiveHiddenBySandbox(callerRepoRoot)) return null;
-  }
-
-  // Cross-repo check: target not in this repo — search other repos
-  try {
+    if (subcommand !== "rehire") return denied(`'ib ${subcommand}' has no archived target`);
+    targetRepo = callerRepoRoot;
+  } else {
     const { listRepos } = await import("../registry");
-    const repos = await listRepos();
-    for (const repo of repos) {
-      // Skip our own repo (already checked above)
-      if (resolve(repo.path) === callerRepoRoot) continue;
-
-      const crossMetaPath = join(runtimeNames.runtimeDir(repo.path), "agents", targetId, "meta.json");
-      const crossMetaFile = Bun.file(crossMetaPath);
-      if (await crossMetaFile.exists()) {
-        let meta: Record<string, unknown>;
-        try {
-          meta = await crossMetaFile.json();
-        } catch {
-          return {
-            decision: "deny",
-            reason: `Access denied: cannot read meta for agent '${targetId}'`,
-          };
-        }
-        if (await hasAccess(meta)) return null; // allow
-        return {
-          decision: "deny",
-          reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib ${subcommand}'`,
-        };
-      }
-
-      if (subcommand === "rehire") {
-        const { findRetiredAgentArchives } = await import("../agent-lifecycle");
-        const archives = await findRetiredAgentArchives(repo.path, targetId);
-        const archived =
-          archives.find((entry) => entry.manifest !== null) ?? archives[0];
-        if (archived) {
-          if (await hasAccess(archived.meta as unknown as Record<string, unknown>)) {
-            return null;
-          }
-          return {
-            decision: "deny",
-            reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib rehire'`,
-          };
-        }
-      }
-    }
-  } catch { /* ignore — deny below */ }
-
-  return {
-    decision: "deny",
-    reason: `Access denied: agent '${targetId}' not found in any registered repo`,
-  };
+    const { resolveAgentTarget } = await import("../resolve-target");
+    // Broker requests already bind the canonical id to the requester's repo.
+    const repos = opts.callerMeta ? [{ path: callerRepoRoot, name: basename(callerRepoRoot) }] : await listRepos();
+    const { agent, error } = await resolveAgentTarget(targetId, repos, opts.cwd ?? callerRepoRoot,
+      subcommand === "rehire" ? "rehire" : "agent");
+    // A hidden archive could win the caller's bare-name search even when a
+    // different repo or peer is visible. Only the watchdog can decide then.
+    if (subcommand === "rehire" && agent?.repoPath !== callerRepoRoot &&
+        ((!targetId.startsWith("@") && !targetId.includes("/")) || error?.startsWith("Agent not found:")) &&
+        await archiveHiddenBySandbox(callerRepoRoot)) return null;
+    if (!agent) return denied(error ?? `Agent not found: ${targetId}`);
+    if (opts.callerMeta && agent.id !== targetId) return denied(`Agent not found: ${targetId}`);
+    targetRepo = agent.repoPath;
+    targetId = agent.id;
+    if (callingAgentId === SYSTEM_AGENT_ID) return null;
+    if (!agent.archived) meta = agent.meta as unknown as Record<string, unknown>;
+  }
+  if (!meta) {
+    const { findRetiredAgentArchives } = await import("../agent-lifecycle");
+    const archives = await findRetiredAgentArchives(targetRepo, targetId);
+    const archived = archives.find((entry) => entry.manifest !== null) ?? archives[0];
+    if (!archived) return denied(`retired agent '${targetId}' not found in this repository`);
+    meta = archived.meta as unknown as Record<string, unknown>;
+  }
+  if (targetRepo === callerRepoRoot && await hasCoordinatorBypass(meta)) return null;
+  if (await hasAccess(meta)) return null;
+  const owners = subcommand === "ack" ? "manager" : "manager or spawner";
+  return denied(`only the ${owners} of '${targetId}' can run 'ib ${subcommand}'`);
 }
 
 // ── CLI entry point ──────────────────────────────────────────────────────────
@@ -2146,7 +2038,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");
-    decision = await checkIbCommandAccess(command, agentId, agentsDir)
+    decision = await checkIbCommandAccess(command, agentId, agentsDir, cwd)
       ?? checkPathAccess({ toolName, toolInput, cwd }, ctx);
   } else {
     decision = checkPathAccess({ toolName, toolInput, cwd }, ctx);

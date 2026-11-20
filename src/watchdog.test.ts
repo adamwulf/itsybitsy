@@ -791,6 +791,19 @@ describe("watchdog", () => {
       expect(hasSessionCalls.length).toBeGreaterThan(0);
     });
 
+    test("a spawner id in another repo is resolved by its recorded path", async () => {
+      const { notifySpawner } = await import("./watchdog");
+      const spawner = agent("parent", "running");
+      const wrong = { ...spawner, repoPath: join(spawner.repoPath, "other"),
+        meta: { ...spawner.meta, tmux_session: "wrong-spawner" } };
+      const worker = { ...agent("child", "waiting"), repoPath: wrong.repoPath };
+      worker.meta.spawned_by = { agent_id: spawner.id, repo_path: spawner.repoPath };
+      expect(await notifySpawner(worker, "test", [wrong, spawner, worker])).toBe(true);
+      const sends = spawnMock.calls.filter((c) => c.args.includes("send-keys"));
+      expect(sends.some((c) => c.args.includes(`=${spawner.meta.tmux_session}:`))).toBe(true);
+      expect(sends.some((c) => c.args.includes("=wrong-spawner:"))).toBe(false);
+    });
+
     test("no-op when agent has no manager", async () => {
       const a1 = agent("a1", "waiting", null);
       await notifyManager(a1, "test", [a1]);
@@ -1098,9 +1111,9 @@ describe("watchdog", () => {
           agentType: "repo-coordinator",
         }));
 
-        // The registry name DELIBERATELY differs from basename — the lookup
-        // must use basename(repo.path), not registry.name.
+        // Both registered paths end in myrepo. Only the stamped path owns this notification.
         setWatchdogListRepos(async () => [
+          { path: pjoin(parentDir, "other", "myrepo"), name: "other" },
           { path: repoDir, name: "completely-different-name" },
         ]);
 

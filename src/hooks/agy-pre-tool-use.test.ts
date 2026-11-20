@@ -680,6 +680,9 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
   });
 
   test("run_command 'ib retire <other>' is denied when the caller is not the manager (checkIbCommandAccess parity)", async () => {
+    await Bun.write(join(tempHome, ".itsybitsy", "repos.json"), JSON.stringify({
+      version: 1, repos: [{ path: join(tempHome, "fake-repo"), name: "fake-repo" }],
+    }));
     // Create a sibling target agent this caller does not manage.
     const agentsDir = join(agentDir, "..");
     const targetDir = join(agentsDir, "agent-target");

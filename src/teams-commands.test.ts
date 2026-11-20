@@ -350,7 +350,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     // Prefix-only input must be rejected.
     const prefixRes = await teamAdd("backend", "agent-newc", repos());
     expect(prefixRes.ok).toBe(false);
-    expect(prefixRes.stderr).toContain("agent not found: agent-newc");
+    expect(prefixRes.stderr).toContain("Agent not found: agent-newc");
 
     // Full id resolves and fires the join notice.
     const res = await teamAdd("backend", "agent-newcomer", repos());

@@ -1,14 +1,7 @@
+import { basename } from "node:path";
 import * as runtimeNames from "./runtime-names";
-/**
- * `ib send` target resolution (@-addressing, SPEC §12.3.1 and §16.1).
- *
- * This lives outside src/index.ts so that the watchdog's send broker
- * (send-broker.ts) can resolve a target for a sandboxed agent without
- * importing the CLI entry point. index.ts re-exports `matchAgentById` and
- * `resolveTarget`, so direct callers see no change.
- */
-
-import { join } from "path";
+import { loadMachineName } from "./machine-name";
+import { readConnectedPeers } from "./peers/remote-agents";
 import type { Agent, AgentReadError } from "./agents";
 import { repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
 import { normalizeTeamName, getTeam } from "./teams";
@@ -56,58 +49,38 @@ export interface ResolvedSendTarget {
   team?: { name: string; members: Agent[] };
 }
 
-/**
- * Resolve a send target using @-based addressing, and return the error text
- * instead of printing it (`error` is set when the target cannot be used).
- * `cwd` decides the caller's own repo, for `@coordinator` and for the
- * same-repo-first search of a bare id. Supports:
- *   @system → system coordinator
- *   @coordinator → own repo's coordinator
- *   @<repo-name> → that repo's coordinator
- *   @<repo-name>/<agent-id> → agent in specific repo
- *   @<team-name> → a team, resolved to its current member Agents (§16.4)
- *   <agent-id> (bare) → search same-repo first, then all repos
- *
- * Resolution order for a bare `@<name>` (§16.1): @system → @coordinator/@<repo>
- * → team. The team lookup is a FALL-THROUGH reached only after the repo lookup
- * fails, and only for a bare `@<name>` (no slash) — `@<repo>/<agent>` can never
- * address a team and still hard-errors on an unknown repo.
- */
-export async function resolveSendTarget(
+export function findOwnRepo(cwd: string, repos: RepoEntry[]): RepoEntry | undefined {
+  return repos.filter((r) => cwd === r.path || cwd.startsWith(r.path + "/"))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+type TargetResult = ResolvedSendTarget & { error?: string };
+const failure = (error: string): TargetResult => ({ agent: null, isSystemCoordinator: false, error });
+const local = (agent: Agent): TargetResult => ({ agent, isSystemCoordinator: false });
+
+/** Resolve an address in the calling CLI or hook's cwd. Rehire can also address retired agents. */
+export async function resolveAgentTarget(
   target: string,
   repos: RepoEntry[],
   cwd: string = process.cwd(),
-): Promise<ResolvedSendTarget & { error?: string }> {
+  purpose: "send" | "agent" | "rehire" = "agent",
+): Promise<TargetResult> {
   const { readAgentsOfRepos } = await import("./agents");
   const { checkCoordinatorExists } = await import("./coordinator");
-  // From disk only: resolution never uses readAllAgents' tmux orphan scan, and
-  // `tmux list-sessions` is a kernel denial for a sandboxed non-spawner.
-  const readAgents = () => readAgentsOfRepos(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
-
-  // @system → system coordinator
-  if (target === "@system") {
-    return { agent: null, isSystemCoordinator: true };
+  async function readAgents(scope: RepoEntry[] = repos) {
+    const { agents, errors } = await readAgentsOfRepos(scope.map((r) => ({
+      path: r.path, name: repoDisplayName(r), registryName: r.name,
+    })), purpose === "rehire");
+    // The ownership gate and the action must refer to the same directory.
+    return { agents: agents.filter((a) => a.archived || !a.storageDir ||
+      basename(a.storageDir) === a.id), errors };
   }
 
-  // Detect own repo from CWD
-  const findOwnRepo = (): RepoEntry | null => {
-    const exactMatch = repos.find((r) => r.path === cwd);
-    if (exactMatch) return exactMatch;
-    const prefixMatch = repos.find((r) => cwd.startsWith(r.path + "/"));
-    if (prefixMatch) return prefixMatch;
+  if (target === "@system") {
+    return purpose === "send" ? { agent: null, isSystemCoordinator: true } : failure("Agent not found: @system");
+  }
 
-    // Check if CWD is inside an agent worktree: /.itsybitsy/agents/([^/]+)/repo/
-    const match = runtimeNames.matchExactWorktree(cwd);
-    if (match) {
-      // Extract the root repo path by going up from /.itsybitsy/agents/
-      const repoRoot = cwd.substring(0, runtimeNames.lastRuntimeMarker(cwd));
-      return repos.find((r) => r.path === repoRoot) || null;
-    }
-
-    return null;
-  };
-
-  const ownRepo = findOwnRepo();
+  const ownRepo = findOwnRepo(cwd, repos);
 
   // @coordinator → own repo's coordinator
   if (target === "@coordinator") {
@@ -116,8 +89,8 @@ export async function resolveSendTarget(
     }
     const coordResult = await checkCoordinatorExists(ownRepo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
-      const { agents } = await readAgents();
-      const coordinator = agents.find((a) => a.repoPath === ownRepo.path && a.id === coordResult.agentId);
+      const { agents } = await readAgents([ownRepo]);
+      const coordinator = agents.find((a) => a.id === coordResult.agentId);
       return { agent: coordinator || null, isSystemCoordinator: false };
     }
     return { agent: null, isSystemCoordinator: false, error: `Error: no coordinator found for repo ${repoDisplayName(ownRepo)}` };
@@ -143,7 +116,7 @@ export async function resolveSendTarget(
       // No repo by this name. For a bare `@<name>` (no slash) this is where the
       // TEAM lookup falls through (§16.1/§16.4): try a team before erroring. A
       // slashed `@<repo>/<agent>` can never address a team, so it still errors.
-      if (!agentId) {
+      if (!agentId && purpose === "send") {
         const teamName = normalizeTeamName(repoName);
         const team = await getTeam(teamName);
         if (team) {
@@ -165,9 +138,8 @@ export async function resolveSendTarget(
 
     if (agentId) {
       // @<repo>/<agent-id> → agent in specific repo
-      const { agents, errors } = await readAgents();
-      const repoAgents = agents.filter((a) => a.repoPath === repo.path);
-      const match = matchAgentById(agentId, repoAgents);
+      const { agents, errors } = await readAgents([repo]);
+      const match = matchAgentById(agentId, agents);
       if (!match) {
         return {
           agent: null,
@@ -181,33 +153,71 @@ export async function resolveSendTarget(
     // @<repo> → that repo's coordinator
     const coordResult = await checkCoordinatorExists(repo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
-      const { agents } = await readAgents();
-      const coordinator = agents.find((a) => a.repoPath === repo.path && a.id === coordResult.agentId);
+      const { agents } = await readAgents([repo]);
+      const coordinator = agents.find((a) => a.id === coordResult.agentId);
       return { agent: coordinator || null, isSystemCoordinator: false };
     }
     return { agent: null, isSystemCoordinator: false, error: `Error: no coordinator found for repo ${repoName}` };
   }
 
-  // <agent-id> (bare) → search same-repo first, then all repos
-  const { agents, errors } = await readAgents();
+  const parts = target.split("/");
+  if (parts.length > 3 || parts.some((part) => !part)) return failure(`Agent not found: ${target}`);
+  const name = parts.at(-1)!;
+  const machine = parts.length > 1 ? parts[0]!.toLowerCase() : undefined;
+  const repoName = parts.length === 3 ? parts[1]!.toLowerCase() : undefined;
 
-  // Try same-repo agents first (if we have an ownRepo)
-  if (ownRepo) {
-    const sameRepoAgents = agents.filter((a) => a.repoPath === ownRepo.path);
-    const sameRepoMatch = matchAgentById(target, sameRepoAgents);
-    if (sameRepoMatch) {
-      return { agent: sameRepoMatch, isSystemCoordinator: false };
+  // A bare name first searches the caller's repo, including its worktrees.
+  let searched = repos;
+  let ownErrors: AgentReadError[] = [];
+  if (!machine && ownRepo) {
+    const { agents, errors } = await readAgents([ownRepo]);
+    const match = matchAgentById(name, agents);
+    if (match) return local(match);
+    ownErrors = errors;
+    searched = repos.filter((r) => r !== ownRepo);
+  }
+  const [localMachine, connected] = await Promise.all([machine ? loadMachineName() : "", readConnectedPeers()]);
+  const includesLocal = !machine || localMachine.toLowerCase() === machine;
+  const peers = connected.filter((p) => !machine || p.name.toLowerCase() === machine);
+  if (!includesLocal && !peers.length) return failure(`Unknown machine: ${parts[0]}`);
+
+  searched = includesLocal ? searched.filter((r) => !repoName || r.name.toLowerCase() === repoName) : [];
+  const { agents, errors } = await readAgents(searched);
+  const matches: { machine: string; repo: string; agent?: Agent }[] = [];
+  for (const repo of searched) {
+    const agent = matchAgentById(name, agents.filter((a) => a.repoPath === repo.path));
+    if (agent) matches.push({ machine: localMachine, repo: repo.name, agent });
+  }
+  for (const peer of peers) {
+    const matchingRepos = new Set(peer.agents.filter((a) =>
+      (!repoName || a.repo.toLowerCase() === repoName) && (a.id === name || a.nickname === name)
+    ).map((a) => a.repo));
+    for (const repo of matchingRepos) matches.push({ machine: peer.name, repo });
+  }
+  if (matches.length === 0) {
+    const note = unreadableAgentsDirsNote([...ownErrors, ...errors], repos);
+    return failure(`Agent not found: ${target}${note}`);
+  }
+  if (matches.length > 1) {
+    if (!machine && matches.some((m) => m.agent)) {
+      const localName = await loadMachineName();
+      for (const m of matches) if (m.agent) m.machine = localName;
     }
-    // No match in same repo, continue to global
+    matches.sort((a, b) => a.machine.localeCompare(b.machine) || a.repo.localeCompare(b.repo));
+    const machines = [...new Set(matches.map((m) => m.machine))];
+    const forms = matches.map((m) => matches.some((other) => other !== m && other.machine === m.machine)
+      ? `${m.machine}/${m.repo}/${name}` : `${m.machine}/${name}`);
+    return failure(`'${name}' exists on ${machines.join(" and ")}; use ${forms.join(" or ")}`);
   }
+  const agent = matches[0]!.agent;
+  if (agent) return local(agent);
+  return failure(purpose === "send"
+    ? "sending to agents on other machines is not supported yet"
+    : "remote agents are read-only");
+}
 
-  // Fall back to global search
-  const globalMatch = matchAgentById(target, agents);
-  if (!globalMatch) {
-    return { agent: null, isSystemCoordinator: false, error: `Agent not found: ${target}${unreadableAgentsDirsNote(errors, repos)}` };
-  }
-
-  return { agent: globalMatch, isSystemCoordinator: false };
+export function resolveSendTarget(target: string, repos: RepoEntry[], cwd = process.cwd()): Promise<TargetResult> {
+  return resolveAgentTarget(target, repos, cwd, "send");
 }
 
 /**

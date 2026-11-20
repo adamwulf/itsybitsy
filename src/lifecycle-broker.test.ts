@@ -349,7 +349,7 @@ describe("lifecycle broker", () => {
       await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(rehired).toEqual([]);
-      expect((await result(ID_A)).stderr).toContain(`retired agent '${CHILD_ID}' not found in this repository`);
+      expect((await result(ID_A)).stderr).toContain(`Agent not found: ${CHILD_ID}`);
     });
 
     test("the target is resolved from the requester's repo on disk", async () => {

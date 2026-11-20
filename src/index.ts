@@ -14,7 +14,7 @@ import { kernelSandboxStatus } from "./agent-cli";
 import { resolvePathsConfig } from "./sandbox";
 import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
 import { resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./hooks/shared";
-import { matchAgentById, resolveTarget } from "./resolve-target";
+import { findOwnRepo, matchAgentById, resolveAgentTarget, resolveTarget } from "./resolve-target";
 
 // `ib send` target resolution lives in resolve-target.ts (the watchdog's send
 // broker uses it too); re-exported here for existing callers.
@@ -109,13 +109,6 @@ export function formatAgentPathPolicy(
   renderPaths("read+write", paths.allowWrite);
   renderPaths("deny", paths.deny);
   return lines;
-}
-
-/** Find an agent by exact ID (or nickname) across all registered repos. */
-export async function findAgentById(id: string, repos: RepoEntry[]): Promise<Agent | null> {
-  const { readAllAgents } = await import("./agents");
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
-  return matchAgentById(id, agents);
 }
 
 /** Resolve an exact agent ID inside one already-selected repository only. */
@@ -438,14 +431,14 @@ export function parseMergeArgs(
 }
 
 /** Require an agent ID argument, find it, or exit with error. */
-export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]): Promise<Agent> {
+export async function requireAgent(idArg: string | undefined, repos: RepoEntry[], purpose: "agent" | "rehire" = "agent"): Promise<Agent> {
   if (!idArg) {
     console.error("Usage: ib <command> <agent-id>");
     process.exit(1);
   }
-  const agent = await findAgentById(idArg, repos);
+  const { agent, error } = await resolveAgentTarget(idArg, repos, process.cwd(), purpose);
   if (!agent) {
-    console.error(`Agent not found: ${idArg}`);
+    console.error(error ?? `Agent not found: ${idArg}`);
     process.exit(1);
   }
   return agent;
@@ -561,7 +554,10 @@ const COMMAND_HELP: Record<string, string> = {
     "  @<repo>                A repo's coordinator\n" +
     "  @<repo>/<agent-id>     A specific agent in a specific repo\n" +
     "  @<team>                Every member of a team\n" +
-    "  <agent-id>             A specific agent by id or nickname",
+    "  <agent-id>             Exact id or nickname, preferring the caller's repo\n" +
+    "  <machine>/<agent>      Unique on the named machine\n" +
+    "  <machine>/<repo>/<agent>  Exact registered repo on that machine\n" +
+    "  Sending to agents on other machines is not supported yet.",
   nickname:
     "Usage: ib nickname <agent-id> [<new-nickname> | --clear]\n" +
     "  Set, clear, or show an agent's nickname. With no third arg, prints the\n" +
@@ -575,7 +571,7 @@ const COMMAND_HELP: Record<string, string> = {
   rehire:
     "Usage: ib rehire <agent-id>\n" +
     "  Reconstruct a retired agent and resume its original session.\n" +
-    "  Requires the immutable exact agent ID; nicknames are not accepted.",
+    "  Accepts an exact id or nickname and optional machine/repo qualification.",
   nuke:
     "Usage: ib nuke <agent-id>\n" +
     "  Kill an agent AND archive its directory. Removes the tmux session and\n" +
@@ -937,6 +933,9 @@ export function printCommandHelp(commandKey: string): boolean {
 function printUsage(): void {
   console.log("ib — Cross-repo agent dashboard");
   console.log("");
+  console.log("Agent addresses accept an exact id or nickname, machine/agent, or machine/repo/agent.");
+  console.log("Bare names prefer the current repo. Remote agents are read-only.");
+  console.log("");
   console.log("Registry:");
   console.log("  add [path] [name]   Register a repo (default: cwd; name: the folder's)");
   console.log("  remove <path>       Unregister a repo");
@@ -1155,14 +1154,13 @@ export async function main() {
     case "ls": {
       const { readAllAgents, buildAgentTree, detectAgentStates } = await import("./agents");
       const repos = await listRepos();
+      // Filter by --manager flag if provided
+      const managerIdx = args.indexOf("--manager");
+      const manager = managerIdx !== -1 ? await requireAgent(args[managerIdx + 1], repos) : null;
       if (repos.length === 0) {
         console.log("No repos registered. Use 'ib add <path>' to add one.");
         break;
       }
-
-      // Filter by --manager flag if provided
-      const managerIdx = args.indexOf("--manager");
-      const managerFilter = managerIdx !== -1 ? args[managerIdx + 1] : null;
       const jsonOutput = args.includes("--json");
 
       const verbose = args.includes("--verbose") || args.includes("-v");
@@ -1180,13 +1178,14 @@ export async function main() {
         // Collect agents matching the manager filter (reuse extracted helpers)
         const agentsToShow: { agent: Agent; depth: number }[] = [];
         for (const root of roots) {
-          if (managerFilter) {
-            if (root.id === managerFilter) {
+          if (manager) {
+            if (root.repoPath !== manager.repoPath) continue;
+            if (root.id === manager.id) {
               for (const child of root.children) {
                 collectAgents(child, 1, null, agentsToShow);
               }
             } else {
-              findManagerInTree(root, managerFilter, agentsToShow);
+              findManagerInTree(root, manager.id, agentsToShow);
             }
           } else {
             collectAgents(root, 0, null, agentsToShow);
@@ -1229,14 +1228,15 @@ export async function main() {
         // Collect agents to display (flat list with indentation for children)
         const agentsToShow: { agent: Agent; depth: number }[] = [];
         for (const root of repoRoots) {
-          if (managerFilter) {
+          if (manager) {
+            if (root.repoPath !== manager.repoPath) continue;
             // When filtering by manager, show direct children of the manager
-            if (root.id === managerFilter) {
+            if (root.id === manager.id) {
               for (const child of root.children) {
                 collectAgents(child, 1, null, agentsToShow);
               }
             } else {
-              findManagerInTree(root, managerFilter, agentsToShow);
+              findManagerInTree(root, manager.id, agentsToShow);
             }
           } else {
             collectAgents(root, 0, null, agentsToShow);
@@ -1274,13 +1274,12 @@ export async function main() {
         sanitizeForDisplay,
       } = await import("./state-command");
       const repos = await listRepos();
+      const managerIdx = args.indexOf("--manager");
+      const manager = managerIdx !== -1 ? await requireAgent(args[managerIdx + 1], repos) : null;
       if (repos.length === 0) {
         console.log("No repos registered. Use 'ib add <path>' to add one.");
         break;
       }
-
-      const managerIdx = args.indexOf("--manager");
-      const managerFilter = managerIdx !== -1 ? args[managerIdx + 1] : null;
       const jsonOutput = args.includes("--json");
       const verbose = args.includes("--verbose") || args.includes("-v");
       const cleanupMode = args.includes("--cleanup");
@@ -1312,13 +1311,14 @@ export async function main() {
         const repoRoots = roots.filter((a) => a.repoName === name && !a.archived);
         const rows: { agent: Agent; depth: number }[] = [];
         for (const root of repoRoots) {
-          if (managerFilter) {
-            if (root.id === managerFilter) {
+          if (manager) {
+            if (root.repoPath !== manager.repoPath) continue;
+            if (root.id === manager.id) {
               for (const child of root.children) {
                 collectAgents(child, 1, null, rows);
               }
             } else {
-              findManagerInTree(root, managerFilter, rows);
+              findManagerInTree(root, manager.id, rows);
             }
           } else {
             collectAgents(root, 0, null, rows);
@@ -1494,33 +1494,9 @@ export async function main() {
       break;
     }
     case "watchdog": {
-      const watchdogAgentId = args[1];
-
-      if (!watchdogAgentId) {
-        console.error("Usage: ib watchdog <agent-id>");
-        process.exit(1);
-      }
-
-      if (!isValidAgentId(watchdogAgentId)) {
-        console.error(`Invalid agent ID: ${watchdogAgentId}`);
-        process.exit(1);
-      }
       const { runPerAgentWatchdog } = await import("./watchdog");
-      const repos = await listRepos();
-      if (repos.length === 0) {
-        console.error("No repos registered.");
-        process.exit(1);
-      }
-      // Find the repo containing this agent
-      const { existsSync } = await import("fs");
-      const agentRepo = repos.find((r) =>
-        existsSync(join(runtimeNames.runtimeDir(r.path), "agents", watchdogAgentId, "meta.json"))
-      );
-      if (!agentRepo) {
-        console.error(`Agent ${watchdogAgentId} not found in any registered repo.`);
-        process.exit(1);
-      }
-      await runPerAgentWatchdog(watchdogAgentId, agentRepo.path);
+      const agent = await requireAgent(args[1], await listRepos());
+      await runPerAgentWatchdog(agent.id, agent.repoPath);
 
       // runPerAgentWatchdog blocks until exit conditions are met
       break;
@@ -1926,11 +1902,7 @@ export async function main() {
       }
 
       if (diffAgentId) {
-        const agent = await findAgentById(diffAgentId, repos);
-        if (!agent) {
-          console.error(`Agent not found: ${diffAgentId}`);
-          process.exit(1);
-        }
+        const agent = await requireAgent(diffAgentId, repos);
         const { diffAgent } = await import("./ib-commands");
         await printAndExit(await diffAgent(agent, { stat: statOnly }));
       } else {
@@ -2004,7 +1976,7 @@ export async function main() {
 
       if (!filteredSendArgs[0]) {
         console.error(usage);
-        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, @<team>, or <agent-id>");
+        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, @<team>, <agent-id>, <machine>/<agent>, or <machine>/<repo>/<agent>");
         process.exit(1);
       }
 
@@ -2117,7 +2089,7 @@ export async function main() {
       // retires directly as before. See routeLifecycleThroughWatchdog.
       {
         const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
-        const brokered = await routeLifecycleThroughWatchdog({ op: "retire", target: agent.id });
+        const brokered = await routeLifecycleThroughWatchdog({ op: "retire", target: agent.id, targetRepoPath: agent.repoPath });
         if (brokered) await printAndExit(brokered);
       }
       await printAndExit(await cliActions.retireAgent(agent));
@@ -2141,7 +2113,8 @@ export async function main() {
         const brokered = await routeLifecycleThroughWatchdog({ op: "rehire", target: agentId });
         if (brokered) await printAndExit(brokered);
       }
-      await printAndExit(await cliActions.rehireAgent(agentId));
+      const agent = await requireAgent(agentId, await listRepos(), "rehire");
+      await printAndExit(await cliActions.rehireAgent(agent.id, { repoPath: agent.repoPath }));
       break;
     }
     case "nuke": {
@@ -2189,7 +2162,7 @@ export async function main() {
       // as before. See routeLifecycleThroughWatchdog.
       {
         const { routeLifecycleThroughWatchdog } = await import("./lifecycle-broker");
-        const brokered = await routeLifecycleThroughWatchdog({ op: "merge", target: agent.id, keep: parsedMerge.keep });
+        const brokered = await routeLifecycleThroughWatchdog({ op: "merge", target: agent.id, targetRepoPath: agent.repoPath, keep: parsedMerge.keep });
         if (brokered) await printAndExit(brokered);
       }
       const resolved = resolveMergeTargetDir(agent, process.cwd());
@@ -2219,16 +2192,7 @@ export async function main() {
         if (target === "--all") {
           // Resolve the current repo from cwd (same rule @coordinator uses):
           // exact match, prefix match, or an agent worktree's root repo.
-          const cwd = process.cwd();
-          const ownRepo =
-            repos.find((r) => r.path === cwd) ||
-            repos.find((r) => cwd.startsWith(r.path + "/")) ||
-            (() => {
-              const m = runtimeNames.matchExactWorktree(cwd);
-              if (!m) return undefined;
-              const repoRoot = cwd.substring(0, runtimeNames.lastRuntimeMarker(cwd));
-              return repos.find((r) => r.path === repoRoot);
-            })();
+          const ownRepo = findOwnRepo(process.cwd(), repos);
           if (!ownRepo) {
             console.error("Error: 'ib sandbox refresh --all' must run from within a registered repo");
             process.exit(1);
@@ -2366,11 +2330,7 @@ export async function main() {
       // no arguments — the most natural UX for a self-respawn.
       let agent: Agent | null = null;
       if (idArg) {
-        agent = await findAgentById(idArg, repos);
-        if (!agent) {
-          console.error(`Agent not found: ${idArg}`);
-          process.exit(1);
-        }
+        agent = await requireAgent(idArg, repos);
       } else {
         const { resolveAgentFromCwd, SYSTEM_AGENT_ID } = await import("./hooks/shared");
         const resolved = resolveAgentFromCwd(process.cwd());
@@ -2385,11 +2345,7 @@ export async function main() {
           console.error("Could not detect current agent from cwd. Pass an agent ID: ib respawn <id>");
           process.exit(1);
         }
-        agent = await findAgentById(resolved.agentId, repos);
-        if (!agent) {
-          console.error(`Agent not found: ${resolved.agentId}`);
-          process.exit(1);
-        }
+        agent = await requireAgent(resolved.agentId, repos);
       }
 
       const { detectAgentStates } = await import("./agents");
@@ -2410,11 +2366,7 @@ export async function main() {
         process.exit(1);
       }
       const repos = await listRepos();
-      const agent = await findAgentById(idArg, repos);
-      if (!agent) {
-        console.error(`Agent not found: ${idArg}`);
-        process.exit(1);
-      }
+      const agent = await requireAgent(idArg, repos);
       const { detectAgentStates } = await import("./agents");
       // Lifecycle path: about to mutate the agent (respawn-self). Reaping a
       // stale husk tmux session before relaunch is desired.
@@ -2654,25 +2606,18 @@ export async function main() {
         process.exit(1);
       }
 
+      const askAgent = await requireAgent(askAgentId, await listRepos());
       // A sandboxed WORKTREE agent cannot record a question itself
       // (`<repo>/.itsybitsy/user-questions.json` is outside its write roots), so
       // it asks its own — unsandboxed — watchdog to do it. Null for every other
       // caller, which asks directly as before. See routeAskThroughWatchdog.
       {
         const { routeAskThroughWatchdog } = await import("./ask-broker");
-        const brokered = await routeAskThroughWatchdog(askQuestionText, askAgentId);
+        const brokered = await routeAskThroughWatchdog(askQuestionText, askAgent.id, { targetRepoPath: askAgent.repoPath });
         if (brokered) await printAndExit(brokered);
       }
 
-      // Determine repo path from agent
-      const repos = await listRepos();
-      const askAgent = await findAgentById(askAgentId, repos);
-      if (!askAgent) {
-        console.error(`Agent not found: ${askAgentId}`);
-        process.exit(1);
-      }
-
-      await printAndExit(await cliActions.askQuestion(askAgent.repoPath, askAgentId, askQuestionText));
+      await printAndExit(await cliActions.askQuestion(askAgent.repoPath, askAgent.id, askQuestionText));
       break;
     }
     case "log": {
@@ -2712,11 +2657,7 @@ export async function main() {
         process.exit(1);
       }
 
-      const agent = await findAgentById(logAgentId, repos);
-      if (!agent) {
-        console.error(`Agent not found: ${logAgentId}`);
-        process.exit(1);
-      }
+      const agent = await requireAgent(logAgentId, repos);
 
       const { join } = await import("path");
       const { logAgent } = await import("./agent-lifecycle");

@@ -1624,9 +1624,9 @@ describe("parseIbCommand", () => {
     expect(result).toEqual({ subcommand: "resume", targetId: "agent-abc12345" });
   });
 
-  test("skips flags before agent id", () => {
-    const result = parseIbCommand("ib retire --force agent-abc12345");
-    expect(result).toEqual({ subcommand: "retire", targetId: "agent-abc12345" });
+  test("skips merge flags before the agent address", () => {
+    const result = parseIbCommand("ib merge --force agent-abc12345");
+    expect(result).toEqual({ subcommand: "merge", targetId: "agent-abc12345" });
   });
 
   test("parses ib send (send is parsed but unrestricted in access check)", () => {
@@ -1649,9 +1649,9 @@ describe("parseIbCommand", () => {
     expect(result).toBeNull();
   });
 
-  test("returns null for invalid agent id (contains special chars)", () => {
+  test("preserves a machine/repo/agent address", () => {
     const result = parseIbCommand("ib retire not/an/agent");
-    expect(result).toBeNull();
+    expect(result).toEqual({ subcommand: "retire", targetId: "not/an/agent" });
   });
 });
 
@@ -1664,16 +1664,20 @@ describe("checkIbCommandAccess", () => {
   beforeEach(async () => {
     tmpDir = await import("fs/promises").then((fs) => fs.mkdtemp("/tmp/ib-test-ib-access-"));
     agentsDir = join(tmpDir, ".itsybitsy", "agents");
+    const home = join(tmpDir, "home");
+    setUserHome(home);
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: tmpDir, name: "repo" }] }));
   });
 
   afterEach(async () => {
+    resetUserHome();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
   async function writeAgentMeta(id: string, meta: object): Promise<void> {
     const agentDir = join(agentsDir, id);
     await mkdir(agentDir, { recursive: true });
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, ...meta }));
   }
 
   async function writeRetiredMeta(id: string, meta: object): Promise<void> {
@@ -1814,7 +1818,7 @@ describe("checkIbCommandAccess", () => {
     expect(result?.reason).toContain("only the manager");
   });
 
-  test("rehire is exact-id-only and denies an archived nickname target", async () => {
+  test("rehire resolves an exact archived nickname for the manager", async () => {
     setUserHome(join(tmpDir, "home"));
     try {
       await writeRetiredMeta("agent-target1", {
@@ -1826,7 +1830,7 @@ describe("checkIbCommandAccess", () => {
         "agent-manager1",
         agentsDir,
       );
-      expect(result?.decision).toBe("deny");
+      expect(result).toBeNull();
     } finally {
       resetUserHome();
     }
@@ -1862,6 +1866,16 @@ describe("checkIbCommandAccess", () => {
       // Not even the target's manager could be recognised here.
       expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
       expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-other111", agentsDir)).toBeNull();
+    });
+
+    test("defers a bare name that also exists on a connected peer", async () => {
+      setSandboxedProcessOverride(() => true);
+      await hideArchive();
+      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify([{
+        name: "other", id: "peer", connected: true, lastOkAt: 1,
+        agents: [{ repo: "app", id: "agent-target1", nickname: null, state: "waiting" }],
+      }]));
+      expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
     });
 
     test("still decides when the sandbox can read the archive (a worktree:false agent)", async () => {
@@ -1997,7 +2011,7 @@ describe("checkIbCommandAccess", () => {
     const result = await checkIbCommandAccess("ib retire agent-target1", "agent-manager1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
-    expect(result!.reason).toContain("not found in any registered repo");
+    expect(result!.reason).toContain("Agent not found: agent-target1");
   });
 
   test("allows merge when calling agent is the manager", async () => {
@@ -2287,10 +2301,9 @@ describe("checkIbCommandAccess", () => {
     expect(result!.reason).toContain("user-only");
   });
 
-  test("@system can run retire on a target that doesn't exist (no found-in-repo check)", async () => {
-    // No target meta written — @system bypass returns null before existence check
+  test("@system must still resolve the manager-command target", async () => {
     const result = await checkIbCommandAccess("ib retire agent-target1", "@system", agentsDir);
-    expect(result).toBeNull();
+    expect(result?.reason).toContain("Agent not found: agent-target1");
   });
 
   // ── --model on new-agent is user-only ──────────────────────────────────────
@@ -3015,6 +3028,9 @@ describe("hookCheckPath with @system", () => {
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "sys-coord-hook-check-"));
     setUserHome(tempHome);
+    const repo = join(tempHome, "app");
+    await Bun.write(join(tempHome, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: repo, name: "app" }] }));
+    await Bun.write(join(repo, ".itsybitsy", "agents", "agent-foo", "meta.json"), JSON.stringify({ id: "agent-foo" }));
     // Create the system coordinator home with an allow list permitting Bash(ib:*)
     const claudeDir = join(tempHome, ".itsybitsy", ".claude");
     await mkdir(claudeDir, { recursive: true });

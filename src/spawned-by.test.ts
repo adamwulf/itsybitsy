@@ -9,6 +9,7 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentMeta } from "./agents";
 import type { SpawnedBy } from "./agents";
+import { setUserHome, resetUserHome } from "./home";
 import { checkIbCommandAccess } from "./hooks/agent-path";
 import { detectRole, generateInstructions } from "./hooks/session-start";
 import { notifySpawner } from "./watchdog";
@@ -189,9 +190,13 @@ describe("checkIbCommandAccess spawned_by", () => {
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "ib-test-spawner-access-"));
     agentsDir = join(tmpDir, ".itsybitsy", "agents");
+    const home = join(tmpDir, "home");
+    setUserHome(home);
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: tmpDir, name: "app" }] }));
   });
 
   afterEach(async () => {
+    resetUserHome();
     await rm(tmpDir, { recursive: true, force: true });
   });
 

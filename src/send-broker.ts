@@ -239,19 +239,11 @@ export interface SendCommand {
   repos: RepoEntry[];
 }
 
-/**
- * Does `target` resolve to the caller itself? Resolved with the CLI's own
- * resolver over the caller's repo only. That is enough: a target that resolves
- * to the caller does so in its own repo (a bare id or nickname is looked up
- * there first; `@<repo>/<id>`, `@<repo>` and `@coordinator` name that repo),
- * and that repo is readable inside the sandbox while other repos are not.
- */
+/** Use the same address scope as the CLI when deciding whether a send to self stays direct. */
 async function targetIsCaller(target: string, caller: ResolvedCallerContext, repos: RepoEntry[]): Promise<boolean> {
   if (typeof caller.meta.id !== "string") return false;
-  const ownRepo = repos.filter((r) => resolve(r.path) === resolve(caller.repoPath));
-  if (ownRepo.length === 0) return false;
   try {
-    const { agent } = await resolveSendTarget(target, ownRepo, join(caller.agentDir, "repo"));
+    const { agent } = await resolveSendTarget(target, repos, join(caller.agentDir, "repo"));
     return agent !== null && (await isAgentAt(agent, { id: caller.meta.id, repoPath: caller.repoPath, agentDir: caller.agentDir }));
   } catch {
     return false; // the watchdog refuses a send to its requester anyway

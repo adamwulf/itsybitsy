@@ -661,7 +661,7 @@ export async function rehireAgent(
   }
 
   const repos = await listRepos();
-  const repoInputs = repos.map((repo) => ({
+  const repoInputs = repos.filter((repo) => !opts.repoPath || repo.path === opts.repoPath).map((repo) => ({
     path: repo.path,
     name: repoDisplayName(repo),
   }));
@@ -2567,7 +2567,7 @@ export async function respawnAgent(agent: Agent): Promise<IbCommandResult> {
   const detachSession = `ib-respawn-${agent.id}`;
   const command = `sleep 1; ib respawn-self ${agent.id}`;
   const result = await nukeResumeSpawnCtx.run([
-    "tmux", "new-session", "-d", "-s", detachSession, command,
+    "tmux", "new-session", "-d", "-c", agent.repoPath, "-s", detachSession, command,
   ]);
   if (result.exitCode !== 0) {
     await logAgent(agentDir, `[respawn] failed to launch detached worker: ${result.stderr.trim()}`);
@@ -4954,22 +4954,14 @@ async function fireRemoveLeaveNotice(
   }
 }
 
-/**
- * Resolve an agent id/nickname to its FULL id (exact match only), using the
- * same matcher as `ib send` (`matchAgentById`). Returns `{ id }` on a match,
- * or `{ error }` on not-found. Used by `ib team add/remove`.
- */
+/** Resolve a team command operand before storing its bare membership id. */
 async function resolveFullAgentId(
   partial: string,
   repos: RepoEntry[],
 ): Promise<{ id: string } | { error: string }> {
-  const { matchAgentById } = await import("./resolve-target");
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
-  const match = matchAgentById(partial, agents);
-  if (!match) {
-    return { error: `Error: agent not found: ${partial}` };
-  }
-  return { id: match.id };
+  const { resolveAgentTarget } = await import("./resolve-target");
+  const { agent, error } = await resolveAgentTarget(partial, repos);
+  return agent ? { id: agent.id } : { error: error ?? `Agent not found: ${partial}` };
 }
 
 /**
@@ -5004,7 +4996,7 @@ export async function teamCreate(name: string, opts?: { createdBy?: string }): P
 
 /**
  * `ib team add <name> <agent-id>` (§16.3). Errors if the team does not exist;
- * resolves `<agent-id>` via the same partial matcher as `ib send`; no-op success
+ * resolves the agent address via the shared resolver; no-op success
  * if already a member; fires the JOIN notice (§16.4.1) on a real add.
  *
  * Internal-use `opts.suppressJoinNotice` (TUI team-creation wizard only — NOT a
@@ -5043,7 +5035,7 @@ export async function teamAdd(
 
 /**
  * `ib team remove <name> <agent-id>` (§16.3). Errors if the team does not exist;
- * resolves `<agent-id>` via the same partial matcher as `ib send`; no-op success
+ * resolves the agent address via the shared resolver; no-op success
  * if not a member; fires the per-agent LEAVE notice (§16.4.2) on a real removal.
  */
 export async function teamRemove(name: string, agentIdOrPartial: string, repos: RepoEntry[]): Promise<IbCommandResult> {
@@ -6033,7 +6025,7 @@ export function buildClaudePidBootstrapCommand(
  * 1.  Validate prompt (required)
  * 2.  Ensure .itsybitsy/agents/ and .itsybitsy/archive/ dirs exist
  * 3.  Auto-detect manager from cwd if not provided
- * 4.  Validate manager (resolve partial ID, check not a worker)
+ * 4.  Validate manager (resolve its address, check it can manage children)
  * 5.  Load config for model, maxAgents, permissions, prompts
  * 6.  Model fallback: --model > config.model > 'claude:opus'
  * 7.  Max agents check
@@ -6490,17 +6482,22 @@ async function spawnAgent(
     };
   }
 
+  const repos = await listRepos();
   // 4. Validate manager
   if (manager) {
-    // Resolve partial ID
-    const resolveResult = await resolveAgentId(agentsDir, manager);
-    if ("error" in resolveResult) {
-      const suffix = resolveResult.matches.length > 0
-        ? `: ${resolveResult.matches.join(", ")}`
-        : "";
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${resolveResult.error} for '${manager}'${suffix}` };
+    if (opts?.manager) {
+      const { resolveAgentTarget } = await import("./resolve-target");
+      const scope = repos.some((repo) => repo.path === rootRepoPath) ? repos :
+        [...repos, { path: rootRepoPath, name: basename(rootRepoPath) }];
+      const { agent, error } = await resolveAgentTarget(manager, scope, callerCwd);
+      if (!agent || agent.repoPath !== rootRepoPath) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: error ?? "Manager must belong to the new agent's repo" };
+      }
+      manager = agent.id;
+    } else {
+      const inferred = await resolveAgentId(agentsDir, manager);
+      if ("error" in inferred) return { ok: false, exitCode: 1, stdout: "", stderr: inferred.error };
     }
-    manager = resolveResult.resolved;
 
     // Check manager is not a worker. A per-agent `canSpawnChildren: true`
     // override lets a worker manage sub-agents — mirror the intercept-task

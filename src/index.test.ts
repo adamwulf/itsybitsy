@@ -578,14 +578,16 @@ describe("CLI arg parsing", () => {
     expect(exitCode).toBe(1);
   });
 
-  test("rehire passes the id as typed to rehireAgent", async () => {
+  test("rehire passes the resolved archive id and repository to rehireAgent", async () => {
+    const repo = await cli.addRepo("app");
+    await Bun.write(join(repo, ".itsybitsy", "archive", "retired-y", "meta.json"), JSON.stringify({ id: "agent-y" }));
     const result = await runCli(["rehire", "agent-y"], { actions: { rehireAgent: "record" } });
-    expect(onlyAction(result).args).toEqual(["agent-y"]);
+    expect(onlyAction(result).args).toEqual(["agent-y", { repoPath: repo }]);
   });
 
   test("rehire reports a missing retired agent", async () => {
     const { stderr, exitCode } = await runCli(["rehire", "nonexistent-id"], { actions: { rehireAgent: "real" } });
-    expect(stderr).toContain("Retired agent not found");
+    expect(stderr).toContain("Agent not found: nonexistent-id");
     expect(exitCode).toBe(1);
   });
 

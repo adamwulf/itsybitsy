@@ -364,7 +364,7 @@ export async function hookCodexPreToolUse(
     // must run before the pure path decision.  Codex agents otherwise receive
     // Bash(ib:*) and could bypass manager-only lifecycle restrictions.
     const ibDecision = toolName === "Bash"
-      ? await checkIbCommandAccess(String(toolInput.command ?? ""), agentId, ctxResolved.agentsDir)
+      ? await checkIbCommandAccess(String(toolInput.command ?? ""), agentId, ctxResolved.agentsDir, cwd)
       : null;
     const decision = ibDecision ?? checkCodexPreToolUse({ toolName, toolInput, cwd }, ctx, permissions.deny);
 

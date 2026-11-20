@@ -512,9 +512,10 @@ export async function notifySpawner(
   // @<repo-name> → resolve to that repo's per-repo coordinator.
   if (spawner.agent_id.startsWith("@")) {
     try {
-      if (!spawner.repo_path) return false;
+      const repo = (await listReposFn()).find((entry) => entry.path === spawner.repo_path);
+      if (!repo) return false;
       const { checkCoordinatorExists } = await import("./coordinator");
-      const coordStatus = await checkCoordinatorExists(spawner.repo_path);
+      const coordStatus = await checkCoordinatorExists(repo.path);
       if (!coordStatus.exists) return false;
       const coordinator = findAgent(allAgents, coordStatus.agentId, spawner.repo_path);
       if (!coordinator) return false;

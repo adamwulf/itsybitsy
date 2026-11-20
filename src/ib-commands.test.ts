@@ -11599,7 +11599,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("task", { manager: "nonexistent" });
     expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("No matching agent found");
+    expect(result.stderr).toContain("Agent not found: nonexistent");
   });
 
   test("noWorktree mode skips worktree creation", async () => {

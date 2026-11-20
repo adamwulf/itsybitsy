@@ -322,7 +322,8 @@ export async function hookAgyPreToolUse(
           : {};
       const command = typeof rc.CommandLine === "string" ? rc.CommandLine : "";
       if (command) {
-        ibDenial = await checkIbCommandAccess(command, agentId, ctxResolved.agentsDir);
+        ibDenial = await checkIbCommandAccess(command, agentId, ctxResolved.agentsDir,
+          typeof rc.Cwd === "string" ? rc.Cwd : ctx.worktreePath);
       }
     }
 

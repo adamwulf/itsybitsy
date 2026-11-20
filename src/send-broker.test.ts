@@ -419,14 +419,14 @@ describe("send broker", () => {
         expect(tmuxCalls).toEqual([]);
       });
 
-      test("the requester is recognized by its directory when its meta.json claims another id", async () => {
+      test("a requester claiming a different directory identity is not an addressable target", async () => {
         // meta.json is the agent's own to write; the seal check (stubbed here)
         // saw the right id a moment earlier.
         await writeAgent(senderRepo, SENDER_ID, { id: "decoy", tmux_session: "0" });
         const { deps } = server();
         await queue(ID_A, sendRequest(ID_A, { target: "decoy" }));
         await processSpawnRequests(SENDER_ID, senderRepo, deps);
-        expect((await result(ID_A)).stderr).toContain("cannot send to itself through its watchdog");
+        expect((await result(ID_A)).stderr).toContain("Agent not found: decoy");
         expect(await outbox("decoy")).toEqual([]);
       });
 

@@ -31,9 +31,8 @@ repo onto a machine that doesn't have it remains out of scope.
 - **Fallback when names differ:** none is automatic. The repo shows as two
   entries, and you fix it by registering it under the same name with
   `ib add <path> <name>`.
-- **Considered for later:** auto-matching by the normalized `origin` URL or
-  the git root commit. That costs a git call per repo, and forks share a root
-  commit, so it is left out of this phase (open question 1).
+- Adam decided this on 2026-11-20: equal registered names mean the same repo,
+  and nothing fancier is used.
 
 ### What the trusted link carries
 
@@ -196,9 +195,8 @@ Each phase gets the usual two-reviewer cycle before it is merged.
 
 ## Open questions (recommendation first)
 
-1. **Matching.** Match by registry name only, with no automatic fallback; you
-   align names with `ib add <path> <name>`. The alternative is to also match
-   by git `origin` URL.
+1. **Matching: DECIDED (Adam, 2026-11-20).** Repos match by registered repo
+   name only. There is no path matching and nothing fancier.
 2. **Permission.** Any paired machine may start agents here, with a log line
    and a notice on this machine. The alternative is a per-peer "may start
    agents here" switch in the Peers dialog.

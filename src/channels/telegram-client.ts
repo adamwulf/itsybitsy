@@ -26,6 +26,7 @@
 
 import { InjectionContext } from "../types";
 import type { FetchLike } from "../types";
+import { backoffDelayMs } from "./backoff";
 import type { TelegramUpdate, TelegramMessage, TelegramApiResponse, TelegramFile } from "./types";
 
 /** Hardcoded Bot API base URL. No env override (Phase 0 decision). */
@@ -36,28 +37,55 @@ export const TELEGRAM_API_BASE = "https://api.telegram.org";
  *  and the dispatcher fallback. */
 export const TELEGRAM_CHUNK_LIMIT = 4000;
 
-/** Exponential backoff bounds. Initial = 1s, capped at 30s. */
+/** Exponential backoff bounds for the `getUpdates` retry loop. Initial = 1s,
+ *  capped at 30s, with jitter (see backoff.ts). */
 const BACKOFF_INITIAL_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 
 /** Per-request fetch timeouts. A dead TCP socket (e.g. after a Wi-Fi switch)
  *  otherwise hangs the request indefinitely while the OS waits to surface a
  *  TCP keepalive failure. The hard timeouts surface the disconnect as an
- *  AbortError within seconds so the retry loop wakes up. */
-const GETUPDATES_TIMEOUT_BUFFER_MS = 10_000;
-const PROBE_TIMEOUT_MS = 10_000;
-const SENDMESSAGE_TIMEOUT_MS = 15_000;
-// The typing indicator only lasts ~5s server-side; a longer timeout adds no
-// value because the indicator would expire before the response mattered.
-const SENDCHATACTION_TIMEOUT_MS = 5_000;
-// getFile is a small JSON POST — same one-shot ceiling as sendMessage.
-const GETFILE_TIMEOUT_MS = 15_000;
-// Downloads and uploads can be megabytes over a slow link, so they need a
-// far more generous deadline than the small JSON methods. 120s is well above
-// what the 20 MB download / 50 MB upload caps need on a normal connection
-// while still surfacing a dead socket eventually.
-const DOWNLOAD_TIMEOUT_MS = 120_000;
-const SENDFILE_TIMEOUT_MS = 120_000;
+ *  AbortError within seconds so the retry loop wakes up. Production uses
+ *  these defaults; tests shorten them through `TelegramClientOptions.timeouts`. */
+export interface TelegramTimeouts {
+  /** Added to the long-poll `timeout` seconds for the `getUpdates` deadline. */
+  getUpdatesBufferMs: number;
+  probeMs: number;
+  /** `sendMessage` and `setMessageReaction`. */
+  sendMessageMs: number;
+  /** The typing indicator only lasts ~5s server-side; a longer timeout adds no
+   *  value because the indicator would expire before the response mattered. */
+  sendChatActionMs: number;
+  /** getFile is a small JSON POST — same one-shot ceiling as sendMessage. */
+  getFileMs: number;
+  /** Downloads and uploads can be megabytes over a slow link, so they need a
+   *  far more generous deadline than the small JSON methods. 120s is well
+   *  above what the 20 MB download / 50 MB upload caps need on a normal
+   *  connection while still surfacing a dead socket eventually. */
+  downloadMs: number;
+  sendFileMs: number;
+}
+
+export const DEFAULT_TELEGRAM_TIMEOUTS: Readonly<TelegramTimeouts> = Object.freeze({
+  getUpdatesBufferMs: 10_000,
+  probeMs: 10_000,
+  sendMessageMs: 15_000,
+  sendChatActionMs: 5_000,
+  getFileMs: 15_000,
+  downloadMs: 120_000,
+  sendFileMs: 120_000,
+});
+
+/** True when a failed Bot API call is worth retrying: a network-level failure
+ *  (status 0, the convention `getFile` / `sendPhoto` / `sendDocument` use for
+ *  a fetch throw), 429 Too Many Requests, or any 5xx (e.g. 502 Bad Gateway).
+ *  Every other status (400, 401, 403, 404, ...) is permanent for that request:
+ *  sending the same request again cannot succeed. A fetch THROW from
+ *  `sendMessage` / `setMessageReaction` is also transient; callers handle that
+ *  case in their catch. */
+export function isTransientStatus(status: number): boolean {
+  return status === 0 || status === 429 || status >= 500;
+}
 
 /** Bot API `getFile` download ceiling. The standard Bot API refuses to serve
  *  files larger than 20 MB via `getFile` (a local Bot API server would be
@@ -263,6 +291,9 @@ export interface TelegramClientOptions {
   token: string;
   /** Override base URL — reserved for tests. Production uses TELEGRAM_API_BASE. */
   baseUrl?: string;
+  /** Override per-request timeouts — reserved for tests (e.g. a fake Telegram
+   *  server that never answers). Production uses DEFAULT_TELEGRAM_TIMEOUTS. */
+  timeouts?: Partial<TelegramTimeouts>;
 }
 
 /** HTTP response shape that pairs the parsed body with status + headers, so
@@ -286,6 +317,7 @@ type AttemptOutcome<T> =
 export class TelegramClient {
   private readonly token: string;
   private readonly baseUrl: string;
+  private readonly timeouts: TelegramTimeouts;
 
   /** Tracks every error class seen by `getUpdates` since the last successful
    *  poll, so a streak of errors logs at most one line per unique class.
@@ -299,6 +331,7 @@ export class TelegramClient {
     if (!opts.token) throw new Error("TelegramClient: token is required");
     this.token = opts.token;
     this.baseUrl = opts.baseUrl ?? TELEGRAM_API_BASE;
+    this.timeouts = { ...DEFAULT_TELEGRAM_TIMEOUTS, ...opts.timeouts };
   }
 
   /** Long-poll for updates with built-in resilience.
@@ -326,7 +359,7 @@ export class TelegramClient {
     // Telegram holds the request for `timeout` seconds; we add 10s buffer for
     // network latency + response framing. Past that, the socket is presumed
     // dead and we abort the fetch so the retry loop can wake up.
-    const fetchTimeoutMs = longPollSec * 1_000 + GETUPDATES_TIMEOUT_BUFFER_MS;
+    const fetchTimeoutMs = longPollSec * 1_000 + this.timeouts.getUpdatesBufferMs;
 
     let attempt = 0;
 
@@ -400,7 +433,7 @@ export class TelegramClient {
     const url = this.urlFor("getUpdates");
     // 10s timeout — the probe uses `timeout: 0` server-side so it should return
     // promptly. A dead socket otherwise hangs forever.
-    const composedSignal = composeAbortSignal(opts.signal, PROBE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(opts.signal, this.timeouts.probeMs);
     const resp = await fetchCtx.fn(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -431,7 +464,7 @@ export class TelegramClient {
     const url = this.urlFor("sendMessage");
     // 15s per-attempt timeout — outbound is one-shot; a dead socket otherwise
     // stalls the outbox queue indefinitely.
-    const composedSignal = composeAbortSignal(undefined, SENDMESSAGE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.sendMessageMs);
     const resp = await fetchCtx.fn(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -462,7 +495,7 @@ export class TelegramClient {
     try {
       const body = JSON.stringify({ chat_id: opts.chat_id, action: opts.action });
       const url = this.urlFor("sendChatAction");
-      const composedSignal = composeAbortSignal(undefined, SENDCHATACTION_TIMEOUT_MS);
+      const composedSignal = composeAbortSignal(undefined, this.timeouts.sendChatActionMs);
       await fetchCtx.fn(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -495,7 +528,7 @@ export class TelegramClient {
       reaction,
     });
     const url = this.urlFor("setMessageReaction");
-    const composedSignal = composeAbortSignal(undefined, SENDMESSAGE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.sendMessageMs);
     const resp = await fetchCtx.fn(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -525,7 +558,7 @@ export class TelegramClient {
   async getFile(fileId: string): Promise<GetFileResult> {
     const body = JSON.stringify({ file_id: fileId });
     const url = this.urlFor("getFile");
-    const composedSignal = composeAbortSignal(undefined, GETFILE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.getFileMs);
     let resp: Response;
     try {
       resp = await fetchCtx.fn(url, {
@@ -566,7 +599,7 @@ export class TelegramClient {
    *  Returns the bytes as a Uint8Array on success. */
   async downloadFile(filePath: string): Promise<DownloadFileResult> {
     const url = this.fileUrlFor(filePath);
-    const composedSignal = composeAbortSignal(undefined, DOWNLOAD_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.downloadMs);
     let resp: Response;
     try {
       resp = await fetchCtx.fn(url, { method: "GET", signal: composedSignal });
@@ -647,7 +680,7 @@ export class TelegramClient {
     form.append(field, Bun.file(path));
 
     const url = this.urlFor(method);
-    const composedSignal = composeAbortSignal(undefined, SENDFILE_TIMEOUT_MS);
+    const composedSignal = composeAbortSignal(undefined, this.timeouts.sendFileMs);
     let resp: Response;
     try {
       // No explicit content-type header: the runtime derives the multipart
@@ -810,11 +843,11 @@ function composeAbortSignal(
   return AbortSignal.any([userSignal, timer]);
 }
 
-/** Standard exponential backoff capped at BACKOFF_MAX_MS. */
+/** Exponential backoff capped at BACKOFF_MAX_MS, with jitter so the poll loop
+ *  and the outbox do not retry in lockstep after a shared network drop. */
 function computeBackoff(attempt: number): number {
-  // attempt is 1-indexed in the retry loop. 1->1s, 2->2s, 3->4s ... cap 30s.
-  const exp = Math.min(BACKOFF_INITIAL_MS * 2 ** (attempt - 1), BACKOFF_MAX_MS);
-  return exp;
+  // attempt is 1-indexed in the retry loop. ~1s, ~2s, ~4s ... cap 30s.
+  return backoffDelayMs(attempt, { initialMs: BACKOFF_INITIAL_MS, maxMs: BACKOFF_MAX_MS });
 }
 
 /** Sleep that resolves on the AbortSignal too. Throws on abort so callers can

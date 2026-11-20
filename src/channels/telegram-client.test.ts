@@ -9,6 +9,7 @@ import {
   logCtx,
 } from "./telegram-client";
 import type { FetchLike } from "../types";
+import { randomCtx } from "./backoff";
 
 /** Build a Response object whose `.json()` resolves to `body`, with the
  *  given status and optional headers. */
@@ -132,12 +133,31 @@ describe("getUpdates", () => {
     });
     logs = [];
     logCtx.set((line) => logs.push(line));
+    // Pin the jitter draw so backoff delays are exact (0 → no reduction).
+    randomCtx.set(() => 0);
   });
 
   afterEach(() => {
     fetchCtx.reset();
     sleepCtx.reset();
     logCtx.reset();
+    randomCtx.reset();
+  });
+
+  test("backoff doubles from 1s, caps at 30s, and is jittered downward", async () => {
+    for (let i = 0; i < 7; i++) mock.enqueueResponse({}, 502);
+    mock.enqueueResponse({ ok: true, result: [] });
+    const client = new TelegramClient({ token: "T" });
+    await client.getUpdates();
+    expect(sleeps).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+
+    // A non-zero draw shortens each delay by up to 20%.
+    sleeps.length = 0;
+    randomCtx.set(() => 0.5);
+    mock.enqueueResponse({}, 502);
+    mock.enqueueResponse({ ok: true, result: [] });
+    await client.getUpdates();
+    expect(sleeps).toEqual([900]);
   });
 
   test("happy path returns parsed updates", async () => {

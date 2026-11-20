@@ -99,6 +99,24 @@ const DEFAULT_LOG = (line: string): void => {
   process.stderr.write(line + "\n");
 };
 
+/** Outbound connection health, read by `ib watch` for the header light, the
+ *  `?` help Telegram row and the status file (connection-status.ts). */
+export interface OutboxHealth {
+  /** Queued items (texts, reactions, files) not yet delivered, including the
+   *  one being sent. */
+  pending: number;
+  /** True while the head item failed transiently and the queue is waiting to
+   *  retry it (later items wait behind it to keep send order). */
+  stalled: boolean;
+  /** Token-safe label of the most recent transient failure, or null once a
+   *  send succeeds again. */
+  lastError: string | null;
+  /** Epoch ms of `lastError`, or null. */
+  lastErrorAt: number | null;
+}
+
+export type OutboxHealthChangeFn = (health: OutboxHealth) => void;
+
 /** Time to keep a `.result` file around after writing it, so `tgsend` (a
  *  separate process) has a window to read it before we clean up. */
 const RESULT_RETENTION_MS = 5_000;
@@ -156,6 +174,32 @@ export class TelegramOutbox {
     // tests doesn't shift our target. Same convention as boot.ts captures
     // the chat id once.
     this.dir = defaultOutboxDir();
+  }
+
+  /** Listeners for {@link onHealthChange}. */
+  private readonly healthListeners: Set<OutboxHealthChangeFn> = new Set();
+
+  /** Snapshot of outbound health. STUB — always healthy until the outbound
+   *  retry work lands. */
+  getHealth(): OutboxHealth {
+    return { pending: 0, stalled: false, lastError: null, lastErrorAt: null };
+  }
+
+  /** Subscribe to health changes (fired only when a field changes). Returns
+   *  an unsubscribe function. STUB — never fires until the outbound retry
+   *  work lands. */
+  onHealthChange(callback: OutboxHealthChangeFn): () => void {
+    this.healthListeners.add(callback);
+    return () => {
+      this.healthListeners.delete(callback);
+    };
+  }
+
+  /** The connection looks healthy again (the poll loop recovered, or the
+   *  machine woke from sleep): retry a stalled head item now instead of
+   *  waiting out its backoff. No-op when nothing is stalled. STUB. */
+  kick(): void {
+    /* stub */
   }
 
   /** Run the startup sweep and install the fs.watch. Returns once the watcher

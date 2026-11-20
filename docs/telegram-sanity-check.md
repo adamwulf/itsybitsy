@@ -148,8 +148,16 @@ emits exactly one and continues running the rest of the dashboard):
   4.8.
 - `Telegram routing disabled: bot token rejected (HTTP 401)` /
   `(HTTP 403)` — the token in config is wrong or the bot was deleted.
-- `Telegram routing disabled: probe failed (...)` — network error
-  reaching `api.telegram.org`. Check connectivity / DNS.
+- `Telegram routing disabled: probe failed (HTTP <status>)` — Telegram
+  answered with a 4xx other than 401/403/409/429 (404 usually means a
+  malformed token).
+- A network error, timeout, 429 or 5xx does NOT disable routing: the boot
+  retries with backoff (1 s doubling to 60 s) and `~/.itsybitsy/watch.log`
+  shows `Telegram connect failed (<reason>); retrying with backoff`, then
+  `Telegram connected after Ns` once it gets through. Meanwhile the header
+  light is yellow and `?` help shows `Telegram  connecting — <reason> (Ns
+  ago)`. If it never connects, check connectivity / DNS to
+  `api.telegram.org`.
 - `Telegram routing disabled: no recent inbound from an allowlisted
   private chat. DM your bot, then restart ib watch.` — the bot has no
   pending message from a chat that's in your allowlist. DM the bot from
@@ -234,7 +242,8 @@ While `ib watch` is running and a long-poll is in flight, quit it
 
 Expected: process exits within ~1-2s. The AbortController cancels the
 in-flight `getUpdates` fetch, the dispatcher loop unwinds, and the TUI
-exits.
+exits. `~/.itsybitsy/channels/telegram/status.json` is removed (a crash
+leaves it behind; readers discard it because its `pid` is gone).
 
 If it hangs for more than ~3s, the AbortController plumbing has a bug
 that the unit tests didn't catch. Report the symptom.
@@ -364,16 +373,27 @@ use the integration day-to-day.
   `restartSystemCoordinator` while messages are in flight, the dispatcher
   hits its "retry once after 2s, then reply 'coordinator offline'" path.
   Worth confirming this looks reasonable when it happens.
-- **Long polls during sleep/network change.** Close laptop → reopen → the
-  in-flight fetch fails (ETIMEDOUT or similar) → the outer retry loop
-  should backoff and recover. Watch `ib watch`'s stderr; one log line per
-  unique error class is expected, not one per attempt.
+- **Long polls during sleep/network change.** Close laptop for a minute
+  or more → reopen. Within ~5 s of waking, `~/.itsybitsy/watch.log` should
+  show `telegram: wake from sleep detected (slept ~Ns); reconnecting`: the
+  in-flight poll (or backoff wait) is dropped and a fresh poll starts at
+  once, rather than waiting out a 30 s backoff or a 35 s dead-socket
+  timeout, and a stalled outbox retries at once too. A DM sent right after
+  waking should reach the coordinator within seconds. A plain network
+  change without sleep has no wake line: the dead poll times out (≤35 s),
+  `telegram: disconnected (...)` and then `telegram: reconnected after Ns`
+  appear, one line per unique error class, not one per attempt. While
+  reconnecting the header light is yellow and `?` help shows
+  `Telegram  reconnecting — <reason> (Ns ago)`.
 - **Outbound during an outage.** `ib tgsend` while Telegram is down (or Wi-Fi
   is off) should print `queued: Telegram is unreachable (...)`, and the
   message should arrive on its own once the connection is back — exactly once,
-  and before anything sent after it. A message whose send timed out AFTER
-  Telegram received it can arrive twice (`sendMessage` has no idempotency
-  key); that is accepted over losing it.
+  and before anything sent after it. While the outbox is stalled the header
+  light is yellow and `?` help shows `Telegram  reconnecting — <reason> (Ns
+  ago); N queued`; the poll loop's recovery retries the stalled message at
+  once. A message whose send timed out AFTER Telegram received it can arrive
+  twice (`sendMessage` has no idempotency key); that is accepted over losing
+  it.
 - **Token in `config.json`.** Phase 2 added `ensureConfigFilePerms` to
   chmod the file to 0600 on every write. The token is sensitive — if you
   ever back up or share `~/.itsybitsy/config.json`, the bot token goes

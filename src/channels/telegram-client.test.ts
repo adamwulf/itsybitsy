@@ -845,6 +845,19 @@ describe("getUpdates per-request timeout & onPollOutcome", () => {
     await expect(client.probeOnce({ offset: -1, limit: 1, timeout: 0 })).rejects.toThrow(/timed out/i);
   });
 
+  test("probeOnce reports Retry-After on a 429 (header first, body fallback)", async () => {
+    const replies = [
+      new Response(JSON.stringify({ ok: false, error_code: 429 }), { status: 429, headers: { "retry-after": "9" } }),
+      new Response(JSON.stringify({ ok: false, error_code: 429, parameters: { retry_after: 4 } }), { status: 429 }),
+      new Response(JSON.stringify({ ok: false, description: "Bad Gateway" }), { status: 502 }),
+    ];
+    fetchCtx.set((async () => replies.shift()!) as FetchLike);
+    const client = new TelegramClient({ token: "T" });
+    expect(await client.probeOnce()).toEqual({ ok: false, status: 429, retryAfterSec: 9 });
+    expect(await client.probeOnce()).toEqual({ ok: false, status: 429, retryAfterSec: 4 });
+    expect(await client.probeOnce()).toEqual({ ok: false, status: 502, description: "Bad Gateway", retryAfterSec: null });
+  });
+
   test("sendMessage per-request timeout: TimeoutError surfaces", async () => {
     fetchCtx.set((async () => {
       throw new DOMException("The operation timed out.", "TimeoutError");

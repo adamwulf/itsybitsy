@@ -416,12 +416,14 @@ export class TelegramClient {
    *  HTTP status. The dispatcher only branches on 409 — other failures are
    *  logged via the API description and treated as "probe failed but go
    *  ahead and start the loop", since the loop has its own retry handling.
+   *  The boot (boot.ts) retries transient failures itself and reads
+   *  `retryAfterSec` (header, else body `parameters.retry_after`) on a 429.
    */
   async probeOnce(
     opts: { offset?: number; limit?: number; timeout?: number; signal?: AbortSignal } = {},
   ): Promise<
     | { ok: true; updates: TelegramUpdate[] }
-    | { ok: false; status: number; description?: string }
+    | { ok: false; status: number; description?: string; retryAfterSec: number | null }
   > {
     const params: Record<string, unknown> = {
       timeout: opts.timeout ?? 0,
@@ -446,9 +448,9 @@ export class TelegramClient {
     }
     const description = raw.body?.description;
     if (description !== undefined) {
-      return { ok: false, status: raw.status, description };
+      return { ok: false, status: raw.status, description, retryAfterSec: raw.retryAfterSec };
     }
-    return { ok: false, status: raw.status };
+    return { ok: false, status: raw.status, retryAfterSec: raw.retryAfterSec };
   }
 
   /** POST `sendMessage`. No retry loop — outbound is one-shot from the caller's
@@ -818,7 +820,10 @@ async function readRaw<T>(resp: Response): Promise<RawResponse<T>> {
   return { status, retryAfterSec, body };
 }
 
-function isAbortError(err: unknown): boolean {
+/** True for a cancelled fetch: a timer-fired `AbortSignal.timeout` or an
+ *  `AbortController` abort. Callers that own the user signal check it first to
+ *  tell "the caller cancelled" from "the request timed out". */
+export function isAbortError(err: unknown): boolean {
   if (err instanceof Error) {
     // `AbortSignal.timeout` surfaces as TimeoutError; an AbortController-fired
     // abort surfaces as AbortError. Both indicate a cancelled fetch.
@@ -851,11 +856,18 @@ function computeBackoff(attempt: number): number {
   return backoffDelayMs(attempt, { initialMs: BACKOFF_INITIAL_MS, maxMs: BACKOFF_MAX_MS });
 }
 
-/** Sleep that resolves on the AbortSignal too. Throws on abort so callers can
- *  unwind cleanly. */
-async function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+/** Sleep that ends early when the AbortSignal fires. Throws on abort so callers
+ *  can unwind cleanly. `sleep` defaults to this module's injectable
+ *  {@link sleepCtx}; the dispatcher passes its own so its tests fast-forward
+ *  through one context. Shared by `getUpdates`, the boot probe retry
+ *  (boot.ts) and the dispatcher's loop backoff. */
+export async function abortableSleep(
+  ms: number,
+  signal: AbortSignal | undefined,
+  sleep: SleepFn = sleepCtx.fn,
+): Promise<void> {
   if (!signal) {
-    await sleepCtx.fn(ms);
+    await sleep(ms);
     return;
   }
   if (signal.aborted) throw new DOMException("aborted", "AbortError");
@@ -870,8 +882,7 @@ async function abortableSleep(ms: number, signal: AbortSignal | undefined): Prom
       reject(new DOMException("aborted", "AbortError"));
     };
     signal.addEventListener("abort", onAbort, { once: true });
-    sleepCtx
-      .fn(ms)
+    sleep(ms)
       .then(() => {
         if (settled) return;
         settled = true;

@@ -38,7 +38,7 @@ import {
   type TelegramConnectionView,
 } from "./connection-view";
 import type { DispatcherStateChange, TelegramDispatcher } from "./dispatcher";
-import type { TelegramOutbox } from "./outbox";
+import type { OutboxHealth, TelegramOutbox } from "./outbox";
 import type { WakeEvent, WakeSource } from "./wake-detector";
 
 export interface ConnectionMonitorOptions {
@@ -74,6 +74,9 @@ export class TelegramConnectionMonitor {
 
   private boot: BootPhase = { phase: "connecting", lastError: null, lastErrorAt: null };
   private dispatcherStarted = false;
+  /** When the outbox's current stall label first appeared. See
+   *  `outboxHealth()`. */
+  private outboxErrorSince: { label: string; at: number | null } | null = null;
   private readonly unsubscribes: Array<() => void> = [];
   private current: TelegramConnectionView | null = null;
   private writeChain: Promise<void> = Promise.resolve();
@@ -165,8 +168,27 @@ export class TelegramConnectionMonitor {
       phase: "running",
       dispatcherStarted: this.dispatcherStarted,
       dispatcher: this.boot.dispatcher.getHealth(),
-      outbox: this.boot.outbox.getHealth(),
+      outbox: this.outboxHealth(this.boot.outbox),
     };
+  }
+
+  /** The outbox's health with `lastErrorAt` pinned to when its current
+   *  `lastError` label first appeared. The outbox refreshes `lastErrorAt` on
+   *  every stall retry without firing `onHealthChange`; passed through, every
+   *  backstop `refresh()` during a stall would publish (and write) a new view
+   *  and the help panel's age would restart at each retry. Pinned, a stall
+   *  reads like the dispatcher's `reasonAt`: "HTTP 502 (40s ago)" since the
+   *  stall began. */
+  private outboxHealth(outbox: TelegramOutbox): OutboxHealth {
+    const health = outbox.getHealth();
+    if (health.lastError === null) {
+      this.outboxErrorSince = null;
+      return health;
+    }
+    if (this.outboxErrorSince === null || this.outboxErrorSince.label !== health.lastError) {
+      this.outboxErrorSince = { label: health.lastError, at: health.lastErrorAt };
+    }
+    return { ...health, lastErrorAt: this.outboxErrorSince.at };
   }
 
   /** The outbox, once boot succeeded. */

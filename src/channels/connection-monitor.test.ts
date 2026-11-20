@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { TelegramConnectionMonitor } from "./connection-monitor";
 import type { TelegramConnectionView } from "./connection-view";
@@ -23,7 +23,9 @@ import {
   sleepCtx as dispatcherSleepCtx,
   logCtx as dispatcherLogCtx,
 } from "./dispatcher";
-import type { OutboxHealth, OutboxHealthChangeFn, TelegramOutbox } from "./outbox";
+import type { OutboxHealth, OutboxHealthChangeFn } from "./outbox";
+import { TelegramOutbox, setOutboxDir, resetOutboxDir } from "./outbox";
+import { resetMessageCache } from "./message-cache";
 import {
   TelegramClient,
   fetchCtx as clientFetchCtx,
@@ -251,6 +253,36 @@ describe("TelegramConnectionMonitor", () => {
     expect(h.monitor.view()?.state).toBe("connected");
   });
 
+  test("a stall keeps the time its label first appeared while the outbox refreshes lastErrorAt each retry", async () => {
+    const h = makeMonitor();
+    const d = makeFakeDispatcher();
+    const o = makeFakeOutbox();
+    h.monitor.attach(d.dispatcher, o.outbox);
+    d.transition("polling", null);
+    h.monitor.dispatcherStartSettled();
+
+    o.set({ pending: 1, stalled: true, lastError: "HTTP 502", lastErrorAt: 10_000 });
+    const views = h.views.length;
+    // Each stall retry: the real outbox moves lastErrorAt and fires no event.
+    o.setQuietly({ lastErrorAt: 12_000 });
+    h.monitor.refresh();
+    o.setQuietly({ lastErrorAt: 16_000 });
+    h.monitor.refresh();
+    expect(h.views.length).toBe(views);
+    expect(h.monitor.view()?.lastErrorAt).toBe(10_000);
+
+    // A new label is a new error: its own first time.
+    o.set({ lastError: "errno:ECONNRESET", lastErrorAt: 20_000 });
+    expect(h.monitor.view()?.lastErrorAt).toBe(20_000);
+    // After the stall ends, a later stall starts fresh even with the old label.
+    o.set({ stalled: false, lastError: null, lastErrorAt: null });
+    o.set({ stalled: true, lastError: "errno:ECONNRESET", lastErrorAt: 30_000 });
+    expect(h.monitor.view()?.lastErrorAt).toBe(30_000);
+    await h.monitor.flush();
+    const stallWrites = h.writes.filter((w) => w.state === "reconnecting");
+    expect(stallWrites.map((w) => w.lastErrorAt)).toEqual([10_000, 20_000, 30_000]);
+  });
+
   test("refresh() is the backstop for a change that fired no event", () => {
     const h = makeMonitor();
     const d = makeFakeDispatcher();
@@ -419,6 +451,96 @@ describe("TelegramConnectionMonitor with the real status file", () => {
     });
     await monitor.dispose();
     expect(await Bun.file(telegramStatusPath()).exists()).toBe(false);
+  });
+});
+
+describe("TelegramConnectionMonitor with a real TelegramOutbox", () => {
+  let root: string;
+  let outboxDir: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "tg-monitor-outbox-"));
+    outboxDir = join(root, "outbox");
+    setOutboxDir(outboxDir);
+    clientSleepCtx.set(async () => {}); // inline retries fast-forward
+    clientLogCtx.set(() => {});
+    resetMessageCache();
+  });
+
+  afterEach(async () => {
+    resetOutboxDir();
+    clientFetchCtx.reset();
+    clientSleepCtx.reset();
+    clientLogCtx.reset();
+    resetMessageCache();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a stalled outbox shows reconnecting; the poll loop's recovery kicks it and the message goes out", async () => {
+    const state = { down: true };
+    const sends: string[] = [];
+    clientFetchCtx.set(async (_input, init) => {
+      sends.push((JSON.parse(init!.body as string) as { text: string }).text);
+      if (state.down) {
+        return Response.json({ ok: false, error_code: 502, description: "Bad Gateway" }, { status: 502 });
+      }
+      return Response.json({ ok: true, result: { message_id: 77, chat: { id: 1 } } });
+    });
+    // A stall that only kick() can end inside the test.
+    const outbox = new TelegramOutbox({
+      client: new TelegramClient({ token: "T" }),
+      chatId: "1",
+      log: () => {},
+      stallBackoff: { initialMs: 60_000, maxMs: 60_000 },
+    });
+    const d = makeFakeDispatcher();
+    const views: TelegramConnectionView[] = [];
+    const monitor = new TelegramConnectionMonitor({
+      log: () => {},
+      onChange: (v) => views.push(v),
+      writeStatus: async () => {},
+      clearStatus: async () => {},
+    });
+    monitor.attach(d.dispatcher, outbox);
+    d.transition("polling", null);
+    monitor.dispatcherStartSettled();
+    await outbox.start();
+
+    // Drop a message the way `ib tgsend` does (.tmp + rename).
+    const base = `${Date.now()}-aaaaaa.txt`;
+    await mkdir(outboxDir, { recursive: true });
+    await writeFile(join(outboxDir, `${base}.tmp`), "hello after the outage");
+    await rename(join(outboxDir, `${base}.tmp`), join(outboxDir, base));
+
+    const startedAt = Date.now();
+    const waitUntil = async (pred: () => boolean, label: string) => {
+      while (!pred()) {
+        if (Date.now() - startedAt > 10_000) throw new Error(`timed out: ${label}`);
+        await new Promise<void>((r) => setTimeout(r, 5));
+      }
+    };
+    await waitUntil(() => monitor.view()?.state === "reconnecting", "stall shows as reconnecting");
+    expect(monitor.view()).toMatchObject({ state: "reconnecting", lastError: "HTTP 502", outboxPending: 1 });
+    const attemptsWhileStalled = sends.length;
+    expect(attemptsWhileStalled).toBeGreaterThan(0);
+
+    // The poll loop drops and recovers once Telegram is back.
+    state.down = false;
+    d.transition("retrying", "HTTP 502", Date.now());
+    expect(sends.length).toBe(attemptsWhileStalled); // nothing kicked yet
+    d.transition("polling", "reconnected after 3s");
+
+    await waitUntil(() => monitor.view()?.state === "connected" && monitor.view()?.outboxPending === 0, "delivered");
+    expect(sends.length).toBe(attemptsWhileStalled + 1);
+    expect(sends[sends.length - 1]).toBe("hello after the outage");
+    const result = JSON.parse(await readFile(join(outboxDir, `${base}.result`), "utf8")) as { ok: boolean; message: string };
+    expect(result).toEqual({ ok: true, message: "ok (message_id 77)" });
+    // Light path: connected → reconnecting (stall) → ... → connected.
+    expect(views.map((v) => v.state)).toContain("reconnecting");
+    expect(views[views.length - 1]!.state).toBe("connected");
+
+    await monitor.dispose();
+    await outbox.stop();
   });
 });
 

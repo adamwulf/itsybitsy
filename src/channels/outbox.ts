@@ -44,6 +44,13 @@
  *     `send recovered` line) and the queue keeps draining in order.
  *   - A permanent failure writes `{ok:false}` and the item is cleaned up, as
  *     before; the queue moves on.
+ *   - Reading the item file: only ENOENT means it is gone. Any other read
+ *     error (EMFILE, EACCES, EIO) holds the item like a transient failure.
+ *   - An upload (`sendPhoto`/`sendDocument`) whose inline attempts ALL time
+ *     out fails permanently: it cannot finish on this link, and holding it
+ *     would block every later item.
+ *   - A stalled head that leaves the queue without a Telegram answer (gone,
+ *     revalidation failed, upload timed out) ends the stall too.
  *
  * No duplicates:
  *
@@ -51,9 +58,9 @@
  *     write after every delivered chunk). A retry, in-process or after an
  *     `ib watch` restart, resumes after the last delivered chunk, and the final
  *     result lists the message ids of every chunk across resumes.
- *   - An item stays in `known` until its files are unlinked, and rescans are
- *     serialized, so a rescan can never re-enqueue an item that is being cleaned
- *     up (the old `failed to read <stem>.txt: ENOENT` 5s after a send).
+ *   - An item stays in `known` until its `.result` is unlinked, and rescans
+ *     are serialized, so a rescan can never re-enqueue an item that is being
+ *     cleaned up (the old `failed to read <stem>.txt: ENOENT` 5s after a send).
  *   - `known` also stops fs.watch, the safety rescan and the startup sweep from
  *     enqueuing one item twice; `kick()` and the stall timer only wake the
  *     single drain loop, they never enqueue.
@@ -81,11 +88,13 @@
  * dispatcher can render a text preview when the user reacts to it. That cache
  * is memory-only and best-effort — nothing about it can fail or alter a send.
  *
- * Atomic writes use `<path>.tmp` + `rename`. A final result is kept for ~5s so
- * the sender process can read it, then the item, its `.progress` and its
- * `.result` are unlinked.
+ * Atomic writes use `<path>.tmp` + `rename`. When an item finishes, its final
+ * result is written and the item and its `.progress` are unlinked at once, so
+ * a crash or restart can never send it again; the `.result` is kept for ~5s
+ * so the sender process can read it, then unlinked.
  *
- * On `start()` we sweep the directory: stale `.tmp`/`.result` files are
+ * On `start()` we sweep the directory: an item whose `.result` is final was
+ * already finished and is unlinked, not sent; stale `.tmp`/`.result` files are
  * unlinked, a `.progress` whose item is gone is unlinked (a `.progress` beside a
  * queued item is kept), and every queued item is enqueued in filename order.
  * Then we install an `fs.watch` plus a 0.5s safety rescan.
@@ -96,7 +105,7 @@ import { userHome } from "../home";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import type { TelegramClient } from "./telegram-client";
-import { classifyError, isTransientStatus, sleepCtx } from "./telegram-client";
+import { classifyError, isAbortError, isTransientStatus, sleepCtx } from "./telegram-client";
 import { backoffDelayMs, type BackoffOptions } from "./backoff";
 import { recordOutboundMessage } from "./message-cache";
 
@@ -193,6 +202,8 @@ interface ClientFailure {
   error_code?: number;
   description?: string;
   retryAfterSec: number | null;
+  /** sendPhoto/sendDocument: the fetch throw was the client's own timer. */
+  timedOut?: boolean;
 }
 
 /** One failed Bot API call, normalized. */
@@ -200,6 +211,12 @@ interface CallFailure {
   ok: false;
   /** Worth retrying: fetch throw, status 0, 429 or 5xx. */
   transient: boolean;
+  /** This attempt got no answer before the client's own timeout fired. */
+  timedOut: boolean;
+  /** Set by `callWithRetry`: all {@link INLINE_ATTEMPTS} attempts timed
+   *  out. An upload that times out every time cannot finish on this link
+   *  and fails permanently rather than holding the queue forever. */
+  everyAttemptTimedOut?: boolean;
   /** Short token-safe label for health and the status file: `HTTP 502`,
    *  `errno:ETIMEDOUT`, `errno:ConnectionRefused`. */
   label: string;
@@ -213,13 +230,22 @@ type CallResult<R> = { ok: true; value: R } | CallFailure;
 
 /** What processing one item came to. `finished` = a final result was written
  *  (sent, or failed permanently); `vanished` = the item file is gone;
- *  `transient` = inline retries exhausted, the item stays queued;
- *  `interrupted` = `stop()` was called between chunks. */
+ *  `transient` = inline retries exhausted (or the item could not be read),
+ *  the item stays queued; `interrupted` = `stop()` was called between
+ *  chunks. */
 type ItemOutcome =
   | { kind: "finished" }
   | { kind: "vanished" }
   | { kind: "transient"; failure: CallFailure }
   | { kind: "interrupted" };
+
+/** Reading an item file: its content, gone (ENOENT), or a read error that
+ *  says nothing about whether the item is still there (EMFILE, EACCES, EIO,
+ *  ...), which holds the item like a transient send failure. */
+type ItemRead =
+  | { kind: "ok"; content: string }
+  | { kind: "vanished" }
+  | { kind: "transient"; failure: CallFailure };
 
 /** Persisted progress of a multi-chunk text (`<base>.progress`). */
 interface TextProgress {
@@ -391,14 +417,23 @@ export class TelegramOutbox {
     }
     this.resolveStop();
     this.wakeStall?.();
+    // Finished items first: the in-flight request can outlast the caller's
+    // 2s race (a hung send waits out its timeout), and the process may exit
+    // before it settles.
+    await this.cleanupFinished();
     try {
       await this.drainDone;
     } catch {
       /* swallow — the loop logs its own errors */
     }
-    // Cancel pending cleanup timeouts and unlink immediately. We wrote
-    // these items' results ourselves; the sender process either already read
-    // the result or has given up by now.
+    // Anything that finished while we waited.
+    await this.cleanupFinished();
+  }
+
+  /** Cancel the pending cleanup timeouts and unlink those items' files now.
+   *  We wrote their results ourselves; the sender process either already
+   *  read the result or has given up by now. */
+  private async cleanupFinished(): Promise<void> {
     const timers = Array.from(this.cleanupTimers.entries());
     this.cleanupTimers.clear();
     for (const [base, timer] of timers) {
@@ -410,7 +445,10 @@ export class TelegramOutbox {
   /** Sweep the outbox dir at startup. Drops leftover `.tmp` / `.result` files
    *  and any `.progress` whose item is gone, then enqueues every queued item.
    *  A `.progress` beside a queued item is kept: it is how a restarted
-   *  `ib watch` resumes a multi-chunk text without resending chunks. */
+   *  `ib watch` resumes a multi-chunk text without resending chunks. An item
+   *  whose `.result` is FINAL (not the interim `queued` one) was already
+   *  finished — the previous run stopped between writing the result and
+   *  unlinking the item — so it is unlinked, never sent again. */
   private async sweep(): Promise<void> {
     let entries: string[];
     try {
@@ -420,18 +458,42 @@ export class TelegramOutbox {
     }
     entries.sort();
     const present = new Set(entries);
+    const done = new Set<string>();
+    for (const entry of entries) {
+      if (isQueuedFile(entry) && present.has(`${entry}.result`) && (await this.hasFinalResult(entry))) {
+        done.add(entry);
+      }
+    }
     for (const entry of entries) {
       if (entry.endsWith(".tmp") || entry.endsWith(".result")) {
         await unlinkSafe(join(this.dir, entry));
         continue;
       }
       if (entry.endsWith(".progress")) {
-        if (!present.has(entry.slice(0, -".progress".length))) {
+        const item = entry.slice(0, -".progress".length);
+        if (!present.has(item) || done.has(item)) {
           await unlinkSafe(join(this.dir, entry));
         }
         continue;
       }
-      if (isQueuedFile(entry)) this.enqueue(entry);
+      if (!isQueuedFile(entry)) continue;
+      if (done.has(entry)) {
+        this.log(`telegram outbox: ${entry} already finished before the restart; not sending it again`);
+        await unlinkSafe(join(this.dir, entry));
+        continue;
+      }
+      this.enqueue(entry);
+    }
+  }
+
+  /** True when `<base>.result` holds a final result (one without
+   *  `queued: true`). An unreadable or malformed result is not final. */
+  private async hasFinalResult(base: string): Promise<boolean> {
+    try {
+      const parsed = JSON.parse(await readFile(join(this.dir, `${base}.result`), "utf8")) as Record<string, unknown>;
+      return typeof parsed.ok === "boolean" && parsed.queued !== true;
+    } catch {
+      return false;
     }
   }
 
@@ -504,7 +566,7 @@ export class TelegramOutbox {
           const label = classifyError(err);
           outcome = {
             kind: "transient",
-            failure: { ok: false, transient: true, label, message: `outbox error: ${label}`, retryAfterSec: null },
+            failure: { ok: false, transient: true, timedOut: false, label, message: `outbox error: ${label}`, retryAfterSec: null },
           };
         }
         if (!this.started || outcome.kind === "interrupted") break;
@@ -515,7 +577,7 @@ export class TelegramOutbox {
         }
         // finished or vanished: the head is done with.
         this.queue.shift();
-        this.setHealth({ pending: this.queue.length });
+        this.setHealth({ pending: this.queue.length, ...this.endStallWithoutAnswer(base) });
       }
     } finally {
       this.drainRunning = false;
@@ -533,8 +595,9 @@ export class TelegramOutbox {
    *  chunks a `.progress` file records as delivered. `base` is the full
    *  dropped filename, e.g. `123-abc.txt`. */
   private async processText(base: string): Promise<ItemOutcome> {
-    const text = await this.readItem(base);
-    if (text === null) return { kind: "vanished" };
+    const read = await this.readItem(base);
+    if (read.kind !== "ok") return read;
+    const text = read.content;
 
     if (text.trim() === "") {
       await this.finish(base, { ok: false, message: "empty message" });
@@ -576,8 +639,9 @@ export class TelegramOutbox {
   /** Read and send one reaction descriptor. `base` is the full dropped
    *  filename, e.g. `123-abc.react.json`, holding JSON `{ message_id, emoji }`. */
   private async processReaction(base: string): Promise<ItemOutcome> {
-    const raw = await this.readItem(base);
-    if (raw === null) return { kind: "vanished" };
+    const read = await this.readItem(base);
+    if (read.kind !== "ok") return read;
+    const raw = read.content;
 
     let descriptor: { message_id: number; emoji: string | null };
     try {
@@ -627,8 +691,9 @@ export class TelegramOutbox {
    *  cryptic API failure. These checks rerun on every retry of a stalled item,
    *  so a file deleted meanwhile fails permanently instead of retrying. */
   private async processFile(base: string): Promise<ItemOutcome> {
-    const raw = await this.readItem(base);
-    if (raw === null) return { kind: "vanished" };
+    const read = await this.readItem(base);
+    if (read.kind !== "ok") return read;
+    const raw = read.content;
 
     let descriptor: { path: string; caption?: string; kind: "photo" | "document" };
     try {
@@ -666,6 +731,17 @@ export class TelegramOutbox {
         ? this.client.sendPhoto({ chat_id: this.chatId, path: descriptor.path, caption: descriptor.caption })
         : this.client.sendDocument({ chat_id: this.chatId, path: descriptor.path, caption: descriptor.caption }),
     );
+    if (!r.ok && r.transient && r.everyAttemptTimedOut) {
+      // Every attempt ran out of `sendFileMs` mid-upload: this file cannot
+      // finish on this link (e.g. 50 MB on a slow uplink), and each retry
+      // re-uploads all of it. Holding it would block every later item
+      // forever, so fail it and let the queue move on. Other transient
+      // failures (5xx, refused, 429) still stall.
+      const message = `${method} timed out ${INLINE_ATTEMPTS} times (upload too slow?); not retrying`;
+      await this.finish(base, { ok: false, message });
+      this.log(`telegram outbox: ${where}: failed (${message})`);
+      return { kind: "finished" };
+    }
     if (!r.ok && r.transient) return { kind: "transient", failure: r };
     if (r.ok) {
       await this.finish(base, { ok: true, message: "ok" });
@@ -725,21 +801,25 @@ export class TelegramOutbox {
    *  up to {@link INLINE_ATTEMPTS} attempts, waiting `backoffDelayMs` between
    *  them (at least `retry_after` on a 429). Returns the success, a permanent
    *  failure, or the last transient failure once the attempts run out (or
-   *  `stop()` is called). Any answer from Telegram, good or permanent, ends a
-   *  stall. */
+   *  `stop()` is called) — with `everyAttemptTimedOut` when all
+   *  {@link INLINE_ATTEMPTS} attempts timed out. Any answer from Telegram,
+   *  good or permanent, ends a stall. */
   private async callWithRetry<T extends { ok: true } | ClientFailure>(
     base: string,
     method: string,
     call: () => Promise<T>,
   ): Promise<CallResult<Extract<T, { ok: true }>>> {
+    let timeouts = 0;
     for (let attempt = 1; ; attempt++) {
       const r = await attemptCall(method, call);
       if (r.ok || !r.transient) {
         this.noteTelegramAnswered();
         return r;
       }
+      if (r.timedOut) timeouts += 1;
       await this.writeInterimResult(base, r);
-      if (attempt >= INLINE_ATTEMPTS || !this.started) return r;
+      if (attempt >= INLINE_ATTEMPTS) return { ...r, everyAttemptTimedOut: timeouts === attempt };
+      if (!this.started) return r;
       const delayMs = retryDelayMs(attempt, INLINE_BACKOFF, r.retryAfterSec);
       // A 429 asking for longer than the inline cap holds the queue right
       // away: the stall wait honors retry_after too, and unlike `sleepCtx` its
@@ -779,6 +859,22 @@ export class TelegramOutbox {
     this.setHealth({ stalled: false, lastError: null, lastErrorAt: null });
   }
 
+  /** The head left the queue (finished or vanished). If the queue is still
+   *  marked stalled, the head left WITHOUT a Telegram answer — an answer
+   *  clears the stall first (`noteTelegramAnswered`): its file vanished, its
+   *  revalidation failed, or an upload timed out every time. Nothing proved
+   *  Telegram is unreachable now, so end the streak: otherwise the light and
+   *  status file would say `reconnecting` with nothing queued until some
+   *  later send succeeded, and the next item would inherit a long backoff.
+   *  Returns the health patch (empty when not stalled). */
+  private endStallWithoutAnswer(base: string): Partial<OutboxHealth> {
+    if (!this.health.stalled) return {};
+    this.log(`telegram outbox: stalled item ${base} left the queue without a Telegram answer; clearing the stall`);
+    this.stallStreak = 0;
+    this.retryNotBefore = 0;
+    return { stalled: false, lastError: null, lastErrorAt: null };
+  }
+
   /** Wait before retrying a stalled head: capped, jittered backoff on the
    *  streak length (at least `retry_after` on a 429). Ends early on `kick()`
    *  or `stop()`. Uses a real timer so a test's fast-forwarded `sleepCtx`
@@ -816,14 +912,32 @@ export class TelegramOutbox {
     }
   }
 
-  /** Read an item file. Returns null (and drops the item) when it is gone. */
-  private async readItem(base: string): Promise<string | null> {
+  /** Read an item file. Only ENOENT means the item is gone (it is dropped).
+   *  Any other error (EMFILE, EACCES, EIO, ...) holds the item: the queue
+   *  stalls and retries it, and nothing is unlinked — a read error must never
+   *  delete a message that was not sent. */
+  private async readItem(base: string): Promise<ItemRead> {
     try {
-      return await readFile(join(this.dir, base), "utf8");
+      return { kind: "ok", content: await readFile(join(this.dir, base), "utf8") };
     } catch (err) {
-      this.log(`telegram outbox: failed to read ${base}: ${describeErr(err)}`);
-      await this.cleanupItem(base);
-      return null;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        this.log(`telegram outbox: failed to read ${base}: ${describeErr(err)}`);
+        await this.cleanupItem(base);
+        return { kind: "vanished" };
+      }
+      const why = code ?? classifyError(err);
+      return {
+        kind: "transient",
+        failure: {
+          ok: false,
+          transient: true,
+          timedOut: false,
+          label: `outbox read failed (${why})`,
+          message: `failed to read ${base}: ${why}`,
+          retryAfterSec: null,
+        },
+      };
     }
   }
 
@@ -898,9 +1012,18 @@ export class TelegramOutbox {
     await this.writeResult(base, { ok: true, queued: true, message: queuedTelegramUnreachable(failure.label) });
   }
 
-  /** Write the final result and schedule the item's cleanup. */
+  /** Write the final result, unlink the item and its `.progress` right away,
+   *  and schedule the `.result`'s cleanup. A finished item must never be sent
+   *  again: if it stayed on disk for the retention window, a crash or a quick
+   *  restart in that window would re-enqueue it (a file re-uploaded, a
+   *  reaction re-sent). Only the `.result` is kept, for the waiting client;
+   *  `known` keeps the name until the cleanup timer, so no rescan can enqueue
+   *  it meanwhile. A crash between the result write and the unlink is caught
+   *  by the startup sweep (an item with a FINAL `.result` is done). */
   private async finish(base: string, body: { ok: boolean; message: string }): Promise<void> {
     await this.writeResult(base, body);
+    await unlinkSafe(join(this.dir, base));
+    await unlinkSafe(join(this.dir, `${base}.progress`));
     this.scheduleCleanup(base);
   }
 
@@ -922,10 +1045,11 @@ export class TelegramOutbox {
     }
   }
 
-  /** Schedule the item and its sidecars for deletion ~5s out. The retention
+  /** Schedule the finished item's `.result` for deletion ~5s out (the item
+   *  and its `.progress` are already gone, see `finish`). The retention
    *  window gives the sender (`tgsend`/`tgreact`) time to read the result
-   *  before it disappears. The item stays in `known` until the files are
-   *  gone, so a rescan in the meantime cannot enqueue it again. */
+   *  before it disappears. The item stays in `known` until then, so a rescan
+   *  that listed it before the unlink cannot enqueue it again. */
   private scheduleCleanup(base: string): void {
     const timer = setTimeout(() => {
       this.cleanupTimers.delete(base);
@@ -951,9 +1075,9 @@ export class TelegramOutbox {
 
 /** Run one client call and normalize its outcome. A fetch throw is transient
  *  and labelled with `classifyError` (never `err.message`, which can embed the
- *  bot-token URL). An HTTP failure is transient when `isTransientStatus`
- *  says so; its label is `HTTP <status>` (or the client's token-safe
- *  description for status 0). */
+ *  bot-token URL); a timer abort is `errno:ETIMEDOUT` and `timedOut`. An
+ *  HTTP failure is transient when `isTransientStatus` says so; its label is
+ *  `HTTP <status>` (or the client's token-safe description for status 0). */
 async function attemptCall<T extends { ok: true } | ClientFailure>(
   method: string,
   call: () => Promise<T>,
@@ -963,7 +1087,15 @@ async function attemptCall<T extends { ok: true } | ClientFailure>(
     resp = await call();
   } catch (err) {
     const label = classifyError(err);
-    return { ok: false, transient: true, label, message: `${method} failed: ${label}`, retryAfterSec: null };
+    return {
+      ok: false,
+      transient: true,
+      // The outbound calls take no caller signal, so an abort is their timer.
+      timedOut: isAbortError(err),
+      label,
+      message: `${method} failed: ${label}`,
+      retryAfterSec: null,
+    };
   }
   if (resp.ok) return { ok: true, value: resp as Extract<T, { ok: true }> };
   const failure = resp as ClientFailure;
@@ -971,6 +1103,7 @@ async function attemptCall<T extends { ok: true } | ClientFailure>(
   return {
     ok: false,
     transient: isTransientStatus(failure.status),
+    timedOut: failure.timedOut === true,
     label: failure.status === 0 ? desc : `HTTP ${failure.status}`,
     message: `${method} failed: ${desc}`,
     retryAfterSec: failure.retryAfterSec,

@@ -9,7 +9,7 @@
 
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, readdir, writeFile, readFile } from "fs/promises";
+import { mkdtemp, rm, readdir, writeFile, readFile, chmod, mkdir, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
   TelegramOutbox,
@@ -1425,6 +1425,165 @@ describe("exhausted retries keep the item and hold the queue", () => {
     await outbox.stop();
   });
 
+  test("a read error other than ENOENT holds the item (never unlinks it); a retry then sends it", async () => {
+    const sent: string[] = [];
+    clientFetchCtx.set(async (_input, init) => {
+      sent.push((JSON.parse(init!.body as string) as { text: string }).text);
+      return okMessage(5);
+    });
+    const outbox = new TelegramOutbox({
+      client: new TelegramClient({ token: "T" }),
+      chatId: "1",
+      stallBackoff: KICK_ONLY,
+    });
+    // Unreadable before start(), so the very first read fails with EACCES.
+    await mkdir(outboxDir, { recursive: true });
+    const base = `${Date.now()}-e00001.txt`;
+    const itemPath = join(outboxDir, base);
+    await writeFile(itemPath, "hold me");
+    await chmod(itemPath, 0o000);
+    await outbox.start();
+
+    await waitFor(() => outbox.getHealth().stalled);
+    expect(outbox.getHealth()).toMatchObject({ pending: 1, stalled: true, lastError: "outbox read failed (EACCES)" });
+    expect(await readdir(outboxDir)).toContain(base);
+    expect(await readResultFile(base)).toBeNull();
+    expect(sent).toEqual([]);
+
+    await chmod(itemPath, 0o600);
+    outbox.kick();
+    expect(await waitForFinalResult(base)).toEqual({ ok: true, message: "ok (message_id 5)" });
+    expect(sent).toEqual(["hold me"]);
+
+    await outbox.stop();
+  });
+
+  test("a stalled head deleted by hand clears the stall (health event); the next item starts a fresh streak", async () => {
+    const state = { down: true };
+    const attempts: string[] = [];
+    const delivered: string[] = [];
+    makeOutage(state, attempts, delivered);
+    const logs: string[] = [];
+    const outbox = new TelegramOutbox({
+      client: new TelegramClient({ token: "T" }),
+      chatId: "1",
+      log: (line) => logs.push(line),
+      stallBackoff: KICK_ONLY,
+    });
+    const events: OutboxHealth[] = [];
+    outbox.onHealthChange((h) => events.push(h));
+    await outbox.start();
+
+    const t = Date.now();
+    const a = await drop(`${t}-v00001.txt`, "A");
+    await waitFor(() => outbox.getHealth().stalled);
+    await unlink(join(outboxDir, a));
+    outbox.kick();
+    await waitFor(() => outbox.getHealth().pending === 0);
+    expect(outbox.getHealth()).toEqual({ pending: 0, stalled: false, lastError: null, lastErrorAt: null });
+    expect(events.at(-1)).toEqual({ pending: 0, stalled: false, lastError: null, lastErrorAt: null });
+    expect(logs).toContain(`telegram outbox: stalled item ${a} left the queue without a Telegram answer; clearing the stall`);
+
+    // A later item is a new streak: its own stall line, and a recovery count
+    // that does not carry A's retries over.
+    const b = await drop(`${t + 1}-v00002.txt`, "B");
+    await waitFor(() => outbox.getHealth().stalled);
+    state.down = false;
+    outbox.kick();
+    expect(await waitForFinalResult(b)).toEqual({ ok: true, message: "ok (message_id 1)" });
+    expect(delivered).toEqual(["text:B"]);
+    expect(logs.filter((l) => l.includes("send stalled")).length).toBe(2);
+    expect(logs).toContain("telegram outbox: send recovered after 1 stalled retry");
+
+    await outbox.stop();
+  });
+
+  test("a stalled file whose path is deleted fails permanently and clears the stall", async () => {
+    const state = { down: true };
+    makeOutage(state, [], []);
+    const outbox = new TelegramOutbox({
+      client: new TelegramClient({ token: "T" }),
+      chatId: "1",
+      stallBackoff: KICK_ONLY,
+    });
+    await outbox.start();
+
+    const filePath = join(tmpRoot, "gone.bin");
+    await Bun.write(filePath, new Uint8Array([1]));
+    const f = await drop(`${Date.now()}-v00003.file.json`, JSON.stringify({ path: filePath, kind: "document" }));
+    await waitFor(() => outbox.getHealth().stalled);
+    await unlink(filePath);
+    outbox.kick();
+    expect(await waitForFinalResult(f)).toEqual({ ok: false, message: `file not found: ${filePath}` });
+    await waitFor(() => outbox.getHealth().pending === 0);
+    expect(outbox.getHealth()).toEqual({ pending: 0, stalled: false, lastError: null, lastErrorAt: null });
+
+    await outbox.stop();
+  });
+
+  test("an upload that times out on every inline attempt fails permanently, and the queue moves on", async () => {
+    let docCalls = 0;
+    const texts: string[] = [];
+    clientFetchCtx.set((async (input: Parameters<Parameters<typeof clientFetchCtx.set>[0]>[0], init?: RequestInit) => {
+      if (urlOf(input).endsWith("/sendDocument")) {
+        docCalls += 1;
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      }
+      texts.push((JSON.parse(init!.body as string) as { text: string }).text);
+      return okMessage(6);
+    }) as Parameters<typeof clientFetchCtx.set>[0]);
+    const logs: string[] = [];
+    const outbox = new TelegramOutbox({
+      client: new TelegramClient({ token: "T" }),
+      chatId: "1",
+      log: (line) => logs.push(line),
+      stallBackoff: KICK_ONLY,
+    });
+    await outbox.start();
+
+    const filePath = join(tmpRoot, "big.bin");
+    await Bun.write(filePath, new Uint8Array([1, 2, 3]));
+    const t = Date.now();
+    const f = await drop(`${t}-u00001.file.json`, JSON.stringify({ path: filePath, kind: "document" }));
+    const after = await drop(`${t + 1}-u00002.txt`, "after the upload");
+    expect(await waitForFinalResult(f)).toEqual({
+      ok: false,
+      message: "sendDocument timed out 3 times (upload too slow?); not retrying",
+    });
+    expect(await waitForFinalResult(after)).toEqual({ ok: true, message: "ok (message_id 6)" });
+    expect(docCalls).toBe(3);
+    expect(texts).toEqual(["after the upload"]);
+    expect(logs.some((l) => l.includes("send stalled"))).toBe(false);
+    expect(outbox.getHealth().stalled).toBe(false);
+
+    await outbox.stop();
+  });
+
+  test("an upload whose attempts are not ALL timeouts still stalls", async () => {
+    let docCalls = 0;
+    clientFetchCtx.set((async () => {
+      docCalls += 1;
+      if (docCalls === 2) return badGateway();
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    }) as Parameters<typeof clientFetchCtx.set>[0]);
+    const outbox = new TelegramOutbox({
+      client: new TelegramClient({ token: "T" }),
+      chatId: "1",
+      stallBackoff: KICK_ONLY,
+    });
+    await outbox.start();
+
+    const filePath = join(tmpRoot, "flaky.bin");
+    await Bun.write(filePath, new Uint8Array([1]));
+    const f = await drop(`${Date.now()}-u00003.file.json`, JSON.stringify({ path: filePath, kind: "photo" }));
+    await waitFor(() => outbox.getHealth().stalled);
+    expect(docCalls).toBe(3);
+    expect((await readResultFile(f))?.queued).toBe(true);
+    expect(await readdir(outboxDir)).toContain(f);
+
+    await outbox.stop();
+  });
+
   test("stop() during a stall leaves the item on disk with no final result", async () => {
     clientFetchCtx.set(async () => badGateway());
     const outbox = new TelegramOutbox({
@@ -1614,6 +1773,97 @@ describe("cleanup race (regression: ENOENT 5s after an ok send)", () => {
     expect(outbox.getHealth().pending).toBe(0);
 
     await outbox.stop();
+  });
+});
+
+describe("a finished item is never sent again", () => {
+  test("the item and its .progress are unlinked as soon as the final result is written; only the .result stays", async () => {
+    let calls = 0;
+    clientFetchCtx.set(async () => {
+      calls += 1;
+      return okMessage(calls);
+    });
+    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    await outbox.start();
+
+    const { TELEGRAM_CHUNK_LIMIT } = await import("./telegram-client");
+    const base = await drop(`${Date.now()}-f00001.txt`, "A".repeat(TELEGRAM_CHUNK_LIMIT) + "B");
+    expect(await waitForFinalResult(base)).toEqual({ ok: true, message: "ok (2 parts, message_ids 1, 2)" });
+    // Well inside the 5s retention window.
+    const entries = await readdir(outboxDir);
+    expect(entries).toContain(`${base}.result`);
+    expect(entries).not.toContain(base);
+    expect(entries).not.toContain(`${base}.progress`);
+    expect(outbox.getHealth().pending).toBe(0);
+
+    await outbox.stop();
+  });
+
+  test("a restart over an item with a FINAL .result unlinks it instead of sending it", async () => {
+    // The previous run stopped between writing the result and unlinking the
+    // item. An interim (queued) result does not count as finished.
+    await mkdir(outboxDir, { recursive: true });
+    const t = Date.now();
+    const done = `${t}-f00002.file.json`;
+    const queued = `${t + 1}-f00003.txt`;
+    const filePath = join(tmpRoot, "sent-once.bin");
+    await Bun.write(filePath, new Uint8Array([1]));
+    await writeFile(join(outboxDir, done), JSON.stringify({ path: filePath, kind: "document" }));
+    await writeFile(join(outboxDir, `${done}.result`), JSON.stringify({ ok: true, message: "ok" }));
+    await writeFile(join(outboxDir, queued), "still queued");
+    await writeFile(
+      join(outboxDir, `${queued}.result`),
+      JSON.stringify({ ok: true, queued: true, message: queuedTelegramUnreachable("HTTP 502") }),
+    );
+
+    const urls: string[] = [];
+    clientFetchCtx.set((async (input: Parameters<Parameters<typeof clientFetchCtx.set>[0]>[0]) => {
+      urls.push(urlOf(input));
+      return okMessage(9);
+    }) as Parameters<typeof clientFetchCtx.set>[0]);
+    const logs: string[] = [];
+    const outbox = new TelegramOutbox({
+      client: new TelegramClient({ token: "T" }),
+      chatId: "1",
+      log: (line) => logs.push(line),
+    });
+    await outbox.start();
+
+    expect(await waitForFinalResult(queued)).toEqual({ ok: true, message: "ok (message_id 9)" });
+    expect(urls.length).toBe(1);
+    expect(urls[0]!.endsWith("/sendMessage")).toBe(true);
+    expect(await readdir(outboxDir)).not.toContain(done);
+    expect(logs).toContain(`telegram outbox: ${done} already finished before the restart; not sending it again`);
+
+    await outbox.stop();
+  });
+
+  test("stop() cleans up finished items BEFORE it waits for the in-flight request", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let calls = 0;
+    clientFetchCtx.set(async () => {
+      calls += 1;
+      if (calls === 2) await gate; // B hangs until released
+      return okMessage(calls);
+    });
+    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    await outbox.start();
+
+    const t = Date.now();
+    const a = await drop(`${t}-f00004.txt`, "A");
+    await waitForFinalResult(a);
+    const b = await drop(`${t + 1}-f00005.txt`, "B");
+    await waitFor(() => calls === 2);
+
+    const stopping = outbox.stop();
+    await waitFor(async () => !(await readdir(outboxDir)).includes(`${a}.result`));
+    // B is still in flight and still queued on disk.
+    expect(await readdir(outboxDir)).toContain(b);
+    release();
+    await stopping;
   });
 });
 

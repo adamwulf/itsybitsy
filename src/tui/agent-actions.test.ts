@@ -1117,6 +1117,49 @@ describe("handleHelp", () => {
       "",
     ]);
   });
+
+  test("help shows a Telegram row last in Status, only with a connection view", () => {
+    const { ctx, dialogs } = makeMockCtx();
+    const helpLines = () => {
+      handleHelp(ctx);
+      return assertDialog(dialogs[dialogs.length - 1]!, "help").lines.map(stripAnsi);
+    };
+    const row = (key: string, desc: string) => `  ${key.padEnd(18)}${desc}`;
+
+    // No token → no view → no row.
+    ctx.telegramConnection = null;
+    expect(helpLines().join("\n")).not.toContain("Telegram");
+
+    ctx.telegramConnection = { state: "connected", lastError: null, lastErrorAt: null, outboxPending: 0 };
+    let lines = helpLines();
+    expect(lines.slice(0, 3)).toEqual(["Status", row("Telegram", "connected"), ""]);
+
+    ctx.collectorStatus = { light: "green", state: "ok", pid: 4242, heartbeatAgeMs: 2000, launches: 1 };
+    ctx.remoteControlStatus = { light: "green", state: "on" };
+    ctx.telegramConnection = {
+      state: "reconnecting",
+      lastError: "HTTP 502",
+      lastErrorAt: Date.now() - 40_000,
+      outboxPending: 2,
+    };
+    lines = helpLines();
+    expect(lines[1]).toContain("Collector");
+    expect(lines[2]).toBe(row("Remote Control", "on"));
+    expect(lines[3]).toMatch(/^ {2}Telegram {10}reconnecting — HTTP 502 \(4\ds ago\); 2 queued$/);
+    expect(lines[4]).toBe("");
+
+    // A long disabled reason continues on rows with an empty key.
+    ctx.telegramConnection = {
+      state: "disabled",
+      lastError: "no recent inbound from an allowlisted private chat. DM your bot, then restart ib watch.",
+      lastErrorAt: null,
+      outboxPending: 0,
+    };
+    lines = helpLines();
+    expect(lines[3]!.startsWith(row("Telegram", "disabled — no recent inbound"))).toBe(true);
+    expect(lines[4]!.startsWith(row("", ""))).toBe(true);
+    expect(lines[4]!.trim()).not.toBe("");
+  });
 });
 
 describe("handleFuzzyAgent nickname search", () => {

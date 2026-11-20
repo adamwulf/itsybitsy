@@ -63,6 +63,7 @@ import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
 import { collectorHealthDetail, type CollectorHealth } from "../sandbox-collector-light";
 import { remoteControlDetail, type RemoteControlStatus } from "../remote-control-light";
+import { telegramHelpDetail, type TelegramConnectionView } from "../channels/connection-view";
 
 const SCROLL_STEP = 10;
 
@@ -288,6 +289,9 @@ export interface ActionCtx {
   collectorStatus?: CollectorHealth | null;
   /** Latest system coordinator Remote Control probe; the help panel shows it. */
   remoteControlStatus?: RemoteControlStatus | null;
+  /** Latest Telegram connection view; null without a bot token. The help
+   *  panel shows it. */
+  telegramConnection?: TelegramConnectionView | null;
   pendingSelectNewestInRepo: string | null;
   showDialog(dialog: NonNullable<DialogState>): void;
   closeDialog(): void;
@@ -2227,13 +2231,17 @@ export function handleHelp(ctx: ActionCtx) {
   const kw = 18;
   const row = (key: string, desc: string) => `  ${BOLD}${pad(key, kw)}${RESET}${desc}`;
   const header = (title: string) => `${BOLD}${title}${RESET}`;
-  // The top-bar lights' details, first so a short terminal never clips them.
-  // Remote Control has a row only while its indicator is shown; a long detail
-  // continues on rows with an empty key.
+  // The top-bar lights' details, first so a short terminal never clips them,
+  // in header order. Remote Control has a row only while its indicator is
+  // shown, Telegram only with a bot token; a long detail continues on rows
+  // with an empty key.
   const statusRows = [
     ...(ctx.collectorStatus ? [row("Collector", collectorHealthDetail(ctx.collectorStatus))] : []),
     ...(ctx.remoteControlStatus
       ? remoteControlDetail(ctx.remoteControlStatus).map((line, i) => row(i === 0 ? "Remote Control" : "", line))
+      : []),
+    ...(ctx.telegramConnection
+      ? telegramHelpDetail(ctx.telegramConnection, Date.now()).map((line, i) => row(i === 0 ? "Telegram" : "", line))
       : []),
   ];
   ctx.showDialog({

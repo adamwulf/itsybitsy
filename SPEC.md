@@ -286,11 +286,9 @@ Merge and nuke continue to create historical archives without
 
 New retirements retain HEAD at `refs/itsybitsy/retired/<archive-key>/head`. Rehire tries that ref first and falls back to `refs/ittybitty/retired/<archive-key>/head` only if it is not found. A resolved ref with a mismatched HEAD is corrupt and never triggers fallback. Existing manifests accept either name; migration does not move refs.
 
-`ib rehire <agent-id>` accepts an immutable exact agent ID (not a nickname):
+`ib rehire <address>` resolves a local agent or archived identity using §12.3.1.
 
-1. Scan timestamped `archive/*` folders across registered repositories and
-   match `meta.json.id`. If an ID is retired more than once in one repository,
-   use the newest valid retirement manifest; reject cross-repository ambiguity.
+1. Scan timestamped `archive/*` folders in the selected repo for the resolved ID. Use the newest valid retirement manifest.
 2. Reject an active ID/nickname collision, live tmux session, conflicting
    `agent/<id>` branch, missing recovery manifest/ref, or malformed archive.
    Stale worktree metadata is pruned; an unclaimed orphan branch is replaced
@@ -1913,6 +1911,9 @@ Per-repo coordinators are stored in `.itsybitsy/agents/` like regular agents, bu
 
 #### 12.2.4 Permissions
 
+Manager-only command gates use §12.3.1 with the hook caller’s cwd. They check the manager within the selected agent’s repo and the spawner against its recorded repo path. The system coordinator has system-wide relationship authority after target resolution. Ambiguous and remote targets fail for it too.
+
+
 Per-repo coordinators get a restricted permission set — they can read the codebase and run `ib` commands, but cannot write code:
 
 ```json
@@ -1995,7 +1996,7 @@ Per-repo coordinators currently use the **standard watchdog behavior** — no co
 
 #### 12.3.1 CLI Addressing
 
-The `ib send` command uses a hybrid addressing scheme: `@`-prefixed targets for coordinator routing, and bare agent IDs for direct agent messaging. The `@` character is shell-safe (no quoting needed in bash).
+Agent commands accept an exact ID or nickname, optionally qualified by machine and registered repo. For sends, `@` also addresses coordinators and teams.
 
 **@-based targets** (checked before agent ID resolution):
 
@@ -2004,35 +2005,21 @@ The `ib send` command uses a hybrid addressing scheme: `@`-prefixed targets for 
 | `ib send @system "msg"` | System coordinator | Delivers directly to the `ib-coordinator` tmux session via `tmux send-keys`, identical to how messages are delivered to any other agent (§12.3.3). The `--from` flag value is rendered as a `[sent by agent <id>]:` prefix (or `[sent by @<sentinel>]:` for `@`-prefixed sentinel senders — see §4.1 step 4). Errors with exit code 1 if the coordinator session is not running. Output: `"Sent to system coordinator"` on success. |
 | `ib send @coordinator "msg"` | Own repo's coordinator | Detects the current repo from CWD (agent worktree or registered repo root), finds the coordinator agent for that repo (the agent with `agentType: "repo-coordinator"` in meta.json, via `checkCoordinatorExists`), and sends via `tmux send-keys`. Error if CWD is not in a registered repo or agent worktree. Error if no coordinator exists for the detected repo. |
 | `ib send @muse-ios "msg"` | Named repo's coordinator | Looks up the repo by name in the repo registry (`repos.json`), finds the coordinator agent for that repo, and sends via `tmux send-keys`. Error if no repo with that name is registered. Error if no coordinator exists for the named repo. |
-| `ib send @muse-ios/agent-a1b2 "msg"` | Agent in named repo | Looks up the repo by name, then resolves the agent ID within that repo only (exact match, then prefix match). Error if repo not found, agent not found, or ambiguous prefix match. |
+| `ib send @muse-ios/agent-a1b2 "msg"` | Agent in named repo | Looks up the repo by name, then resolves the agent ID or nickname exactly within that repo. |
 
-**Bare agent ID targets** (standard agent ID resolution):
+**Agent addresses**
 
-| Syntax | Description | Resolution |
-|--------|-------------|------------|
-| `ib send agent-a1b2 "msg"` | Same-repo or global agent | Resolution order below |
+| Form | Search scope |
+| --- | --- |
+| `agent` | Prefer a match in the caller’s local repo, including an agent worktree. Otherwise search all local repos and connected peers. |
+| `machine/agent` | Search every repo on the named machine, including when the caller is inside one of its repos. |
+| `machine/repo/agent` | Search only the registered repo on that machine. |
 
-Resolution rules for bare agent IDs (no `@` prefix):
+Machine names and registered repo names match case-insensitively. IDs and nicknames match exactly, with the ID taking precedence within a repo. A search outside the caller’s repo must have exactly one match. For example, `'foo' exists on laptop-a and laptop-b; use laptop-a/foo or laptop-b/foo`. If a machine has matches in several repos, each suggestion includes its registered repo name. An unsuccessful lookup reports `Agent not found` and names unreadable local agent directories when applicable.
 
-1. **Own-repo exact match**: If CWD is in a registered repo or agent worktree, search that repo's agents for an exact ID match
-2. **Own-repo prefix match**: Search the same repo for a unique prefix match
-3. **Global exact match**: Search all repos for an exact ID match
-4. **Global prefix match**: Search all repos for a unique prefix match
-5. **Error**: If no match found, or if prefix match is ambiguous (matches agents in multiple repos), print an error with the ambiguous matches
-
-Other commands (`ib retire`, `ib nuke`, `ib status`, `ib diff`, `ib merge`, etc.) continue to use standard agent ID resolution (bare IDs only) — `@`-based addressing is specific to `ib send`:
-
-| Command | Resolution | Notes |
-|---------|-----------|-------|
-| `ib retire itsybitsy` | Standard: exact match on agent ID | Retires per-repo coordinator |
-| `ib nuke itsybitsy` | Standard: exact match on agent ID | Kills coordinator + children (§1.8) |
-| `ib status itsybitsy` | Standard: exact match on agent ID | Shows coordinator's commits |
-
-The system coordinator has no agent ID and cannot be targeted by any standard CLI command (only via `@system` in `ib send`). It is not a regular agent — it has no agent directory, no meta.json, and no entry in any repo's `.itsybitsy/agents/`. To send messages to the system coordinator programmatically, use `ib send @system` (§12.3.3).
+Remote agents participate in resolution through the snapshot in §20.4. A remote send fails with `sending to agents on other machines is not supported yet`. Other agent commands fail with `remote agents are read-only`.
 
 **Reserved name `coordinator`**: The name `coordinator` is reserved and cannot be used as an agent ID. `newAgent()` rejects any attempt to create an agent with the ID `coordinator` — whether via `--name coordinator`, or because a repo's basename happens to be `coordinator` (in coordinator mode). This prevents confusion: if someone types `ib send coordinator` (without the `@`), they get "Agent not found" rather than silently messaging the wrong target. The old `ib send coordinator` special routing is removed — use `ib send @system` instead.
-
-**Prefix matching caveat**: If a repo is named `agent` and there's also an `agent-a1b2c3d4`, `ib send agent "msg"` is an exact match on the coordinator's ID (exact matches take priority over prefix). But `ib retire agent` also exact-matches the coordinator — there's no separate resolution for management commands vs messaging commands.
 
 #### 12.3.2 TUI Addressing
 
@@ -3044,7 +3031,7 @@ The legacy `"teams-tree"` focus target is retained in the `FocusTarget` union so
   Two remote agent rows that share a key (two peers with one name) have no repo to tell them apart: the current index is kept when the row there has the key, else the first such row wins. Everything keyed on the key alone still treats two rows as one: favorites, the Teams mirror, the info panel's `Full id:`.
 - **Selection change.** The dashboard tracks the selected agent by full id (`currentAgentKey`), so moving between two agents with the same bare id in two repos resets and reloads the right pane, the input draft and the info panel; the right-pane loaders' stale-load guards and log caches (`LoadedLogWindow.agentKey`) use the full id too. Input drafts are kept per full id, the agent's and the per-repo coordinator's (whose id is its folder's name, so two repos with one folder name have coordinators with one id).
 - **Questions** name their agent by repo and id: the reader tags each question with the `repoPath` of the `user-questions.json` it came from (`PendingQuestion.repoPath`, never stored). The QUESTIONS pane's per-agent list, answer, acknowledge and `g` act on the agent with that id in that repo, and the red name is `questionAgentKeys` (full ids).
-- Local message delivery uses the row key as its queue path (§4.1.1). CLI target lookup keeps the addressing forms in §4.1, and `teams.json` stores bare agent ids.
+- Local message delivery uses the recipient's stored queue key when present and the flat queue path for keyless agents (§4.1.1). CLI arguments accept the qualified forms in §12.3.1. Team membership in `teams.json` stores bare IDs.
 
 **Independent selection — the core invariant.** Toggling focus between Agents and Teams **must not change either panel's selection.** The two panels hold **independent selection state**: the Agents tree keeps its `AgentTreeComponent` selection; the Teams tree owns its own selection (a parallel component, §17.2). `FocusManager.cycle()`/`setFocus()` only move the *focus pointer* — they never call `selectAgent`/`moveSelection`/`moveToRepo` on either tree. This is already how focus works for every other panel; §17 only requires that the Teams toggle preserve it symmetrically.
 
@@ -3752,7 +3739,8 @@ ALPN `itsybitsy/peer/1` (`src/peers/peer-link.ts`), served by the accept loop an
 - Each peer keeps one live connection between polls and is redialed only once that connection has closed.
 - A peer never has two dials or requests in flight at once. A dial can take up to 30 s to fail, so ticks that come while one is pending skip that peer; other peers are polled as usual. A failed dial or request is retried on the next tick.
 - Each `agents` request has 15 s to be answered. A peer can keep its connection alive and still never answer (its `ib watch` event loop wedged while the network side runs on), so on timeout the poller closes that connection (code 0, `request timed out`), records `request timed out`, and the next tick redials. Closing the connection is what ends the timed-out request, so it never overlaps the next one. Until the timeout, a peer that was connected still shows as connected.
-- Per-peer state, in memory only (nothing is written to disk): connected or not, `lastOkAt`, `lastError` (one short line: the dial's error such as `timed out`, `request timed out`, `not a peer`, `closed by the other side`, `the other side reported: <reason>`, or a malformed reply), and the repo and agent lists from the most recent successful reply. Both lists survive a disconnect (§20.5). The service exposes it as `view().links`, in `peers.json` order, and notifies its listeners when something visible changes (connected, the error, the list, a name, or the set of peers); a poll that changes nothing but `lastOkAt` does not notify.
+- The poller keeps the following state in memory: connected or not, `lastOkAt`, `lastError` (one short line: the dial's error such as `timed out`, `request timed out`, `not a peer`, `closed by the other side`, `the other side reported: <reason>`, or a malformed reply), and the repo and agent lists from the most recent successful reply. Both lists survive a disconnect (§20.5). The service exposes it as `view().links`, in `peers.json` order, and notifies its listeners when something visible changes (connected, the error, the list, a name, or the set of peers); a poll that changes nothing but `lastOkAt` does not notify.
+- The endpoint-owning `ib watch` publishes each visible change to `~/.itsybitsy/peer/remote-agents.json` by renaming a temporary file in the same directory. The array has one entry per peer, `{name, id, connected, lastOkAt, agents: [{repo, id, nickname, state}]}`. Each agent’s `repo` is its registered name. Shutdown publishes the disconnected state. CLI readers count only connected entries and treat a missing or unreadable file as an empty list.
 - `watch.log` gets a line when a peer connects and when its error changes, not on every failed tick.
 - Stopping (on exit, or with the endpoint after an accept-loop failure) cancels the timer and closes every connection with code 0; a dial still in flight is closed when it lands. The state is kept, disconnected.
 

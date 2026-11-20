@@ -17,7 +17,7 @@
  *     falls back to "claude" behavior — preserves pre-Phase-1 back-compat.
  */
 
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
 import { makeAgent } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -66,6 +66,23 @@ import {
 import {
   spawnCtx as tmuxPollerSpawnCtx,
 } from "./tmux-poller";
+
+import { mkdtemp, rm } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { setUserHome, resetUserHome } from "./home";
+import { machineNameFile } from "./runtime-names";
+
+let home: string;
+beforeAll(async () => {
+  home = await mkdtemp(join(tmpdir(), "codex-wd-home-"));
+  setUserHome(home);
+  await Bun.write(machineNameFile(), "studio");
+});
+afterAll(async () => {
+  resetUserHome();
+  await rm(home, { recursive: true, force: true });
+});
 
 /** Build a recording spawn runner — same shape as src/watchdog.test.ts. */
 function mockSpawnRunner() {

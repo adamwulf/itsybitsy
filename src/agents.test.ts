@@ -1,3 +1,4 @@
+import { resetUserHome, setUserHome } from "./home";
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, readdir, unlink, utimes, writeFile, open, chmod } from "fs/promises";
@@ -7220,9 +7221,13 @@ describe("archive cleanup deletes meta.transient.json", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-archive-transient-"));
+    setUserHome(join(tempDir, "home"));
+    await Bun.write(join(tempDir, "home", ".itsybitsy", "machine-name"), "studio");
+    await Bun.write(join(tempDir, ".itsybitsy", "repo-id"), "deadbeef");
   });
 
   afterEach(async () => {
+    resetUserHome();
     await rm(tempDir, { recursive: true, force: true });
   });
 

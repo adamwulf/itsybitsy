@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { hookStatusline, statuslineRunnerCtx } from "./statusline";
 import { CLAUDE_RATE_LIMITS_FILE } from "../claude-rate-limits";
@@ -148,6 +148,20 @@ describe("hookStatusline", () => {
     expect(result.output).toBe("line from user-statusline\n");
     expect(runs).toEqual([{ command: "user-statusline", input: "not json" }]);
     expect(await Bun.file(recordPath("agent-a")).exists()).toBe(false);
+  });
+
+  test("CLI reports a missing machine identity and leaves the footer usable", async () => {
+    const file = join(home, ".itsybitsy", "machine-name");
+    await rm(file);
+    await writeUserSettings({ statusLine: { type: "command", command: "printf footer" } });
+    const result = await runIsolatedCli(["hooks", "statusline", "agent-cli"], {
+      cwd: projectDir, home, stdin: statuslineInput(),
+      allowedProcesses: [["/bin/sh", "-c", "printf footer"]],
+    });
+    expect(result.stderr).toContain(`Machine name is missing at ${join(await realpath(home), ".itsybitsy", "machine-name")}`);
+    expect(result.stdout).toBe("footer");
+    expect(await Bun.file(file).exists()).toBe(false);
+    expect(await Bun.file(recordPath("agent-cli")).exists()).toBe(false);
   });
 
   test("CLI: records the input and prints the user's statusline byte-for-byte", async () => {

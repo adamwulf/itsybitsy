@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { readdir } from "fs/promises";
+import { mkdir, readdir, rm } from "fs/promises";
 import { join } from "path";
 import { agentOutboxDir, readOutbox } from "./outbox";
 import { archiveAgent } from "./agent-lifecycle";
@@ -107,6 +107,42 @@ describe("fully qualified agent queues", () => {
     expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("alpha", "review"));
     await Bun.write(machineNameFile(), "work/laptop");
     expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("alpha", "review", "work-laptop"));
+  });
+
+  test("an absent registry permits the unregistered session key", async () => {
+    await rm(join(cli.home, ".itsybitsy", "repos.json"));
+    expect(await agentOutboxDir({ repoPath: repoA, id: "review", meta: { tmux_session: "itsybitsy-deadbeef-review" } }))
+      .toBe(queue("~deadbeef", "review"));
+  });
+
+  test.each(["invalid JSON", '{"repos":{}}', '{"repos":[{"name":"alpha"}]}', '{"repos":[{"name":"~deadbeef","path":"/repo"}]}'])
+    ("a corrupt registry fails queue lookup: %s", async (text) => {
+      await Bun.write(join(cli.home, ".itsybitsy", "repos.json"), text);
+      await expect(agentOutboxDir({ repoPath: repoA, id: "review", meta: { tmux_session: "itsybitsy-deadbeef-review" } }))
+        .rejects.toThrow("Cannot read repo registry");
+    });
+
+  test("a registry read error prevents fallback to the session key", async () => {
+    const file = join(cli.home, ".itsybitsy", "repos.json");
+    await rm(file);
+    await mkdir(file);
+    await expect(agentOutboxDir({ repoPath: repoA, id: "review", meta: { tmux_session: "itsybitsy-deadbeef-review" } }))
+      .rejects.toThrow("Cannot read repo registry");
+  });
+
+  test("both paths are reported for a duplicate registered name, ignoring case", async () => {
+    await cli.writeRegistry({ repos: [{ path: repoA, name: "ALPHA" }, { path: repoB, name: "alpha" }] });
+    for (const repoPath of [repoA, repoB]) {
+      await expect(agentOutboxDir(makeAgent({ repoPath, id: "review" }))).rejects.toThrow(`${repoA}, ${repoB}`);
+    }
+  });
+
+  test("teardown without metadata requires an existing repository identity", async () => {
+    await cli.writeRegistry({ repos: [] });
+    const file = join(repoA, ".itsybitsy", "repo-id");
+    await rm(file, { force: true });
+    await expect(agentOutboxDir({ repoPath: repoA, id: "review", meta: null })).rejects.toThrow(`Missing repository id in ${file}`);
+    expect(await Bun.file(file).exists()).toBe(false);
   });
 
   test("an unregistered agent without a repo id in its session fails clearly", async () => {

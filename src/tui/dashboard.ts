@@ -83,7 +83,7 @@ import { FocusManager } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
-import { loadMachineName } from "../machine-name";
+import { initializeMachineName } from "../machine-name";
 import {
   DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH,
   getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
@@ -4113,7 +4113,7 @@ export async function launchDashboard(): Promise<void> {
   // The first segment of every local agent key (SPEC §17.1): read from
   // ~/.itsybitsy/machine-name, or set once from the computer name. Before the
   // layout, so favorites and the first selection use it.
-  dashboard.setMachineName(await loadMachineName());
+  dashboard.setMachineName(await initializeMachineName());
   const savedLayout = await loadLayout();
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);

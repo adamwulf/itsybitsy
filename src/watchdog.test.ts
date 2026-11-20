@@ -142,6 +142,7 @@ beforeAll(async () => {
   outboxHome = mkdtempSync(join(tmpdir(), "ib-watchdog-home-"));
   setCoordinatorHome(outboxHome);
   setUserHome(outboxHome);
+  await Bun.write(join(outboxHome, ".itsybitsy", "machine-name"), "studio");
   await saveRegistry({ repos: [{ path: "/tmp/test", name: "test" }] });
 });
 
@@ -3342,15 +3343,20 @@ describe("runPerAgentWatchdog", () => {
       tmux_api_terms: false, tmux_api_safeguard: false,
     });
     expect((await sendMessage(target, "queued", { cwd: "/" })).ok).toBe(true);
+    const expectedDir = join(outboxHome, "agents", "studio", "~deadbeef", "review");
+    expect((await readOutbox(expectedDir)).map((m) => m.message)).toEqual(["queued"]);
+    const drainedDirs: string[] = [];
     setPerAgentReadMeta(async () => ({ meta: target.meta }));
     setPerAgentSleep(async () => { worktreeExists = false; });
     const messages: string[] = [];
     setPerAgentDrain(async (_agent, dir) => {
+      drainedDirs.push(dir);
       messages.push(...(await readOutbox(dir)).map((m) => m.message));
       worktreeExists = false;
     });
     setPerAgentReadState(async () => "running");
     await runPerAgentWatchdog(target.id, repo);
+    expect(drainedDirs).toEqual([expectedDir]);
     expect(messages).toEqual(["queued"]);
   });
 

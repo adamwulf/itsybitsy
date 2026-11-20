@@ -55,9 +55,10 @@ import {
  */
 let testHome: string;
 
-beforeAll(() => {
+beforeAll(async () => {
   testHome = mkdtempSync(join(tmpdir(), "ib-agent-status-home-"));
   setUserHome(testHome);
+  await Bun.write(join(testHome, ".itsybitsy", "machine-name"), "studio");
   setCoordinatorHome(join(testHome, ".itsybitsy"));
 });
 

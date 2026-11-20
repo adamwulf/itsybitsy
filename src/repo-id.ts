@@ -1,30 +1,31 @@
 import { mkdir } from "fs/promises";
 import * as runtimeNames from "./runtime-names";
 
-/**
- * Read the repo-id from .itsybitsy/repo-id (or create one).
- * Mirrors get_repo_id() in ib bash.
- */
-export async function getRepoId(repoPath: string): Promise<string> {
-  const repoIdFile = runtimeNames.repoIdFile(repoPath);
-  let existing = "";
+async function storedRepoId(repoPath: string): Promise<string | null> {
+  const file = runtimeNames.repoIdFile(repoPath);
+  let id: string;
   try {
-    existing = (await Bun.file(repoIdFile).text()).trim();
+    id = (await Bun.file(file).text()).trim();
   } catch (err) {
-    // Only a file that is genuinely absent may be (re)created. Any other read
-    // failure (a sandboxed agent's EPERM/EACCES, an I/O error) means an id may
-    // already exist that we simply cannot see; generating a new one would
-    // silently re-key every tmux session name (`itsybitsy-<repoId>-<agent>`)
-    // and sealed record of the repo. Fail loudly instead.
-    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      throw new Error(
-        `Cannot read repository id ${repoIdFile}: ${err instanceof Error ? err.message : String(err)}. ` +
-          `Refusing to generate a new id over one that may already exist.`,
-      );
-    }
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(`Cannot read repository id ${file}: ${err}. Refusing to generate a new id over one that may already exist.`);
   }
-  if (/^[0-9a-f]{8}$/.test(existing)) return existing;
-  if (existing) throw new Error(`Invalid repository id in ${repoIdFile}: expected 8 lowercase hexadecimal characters`);
+  if (!id) return null;
+  if (!/^[0-9a-f]{8}$/.test(id)) throw new Error(`Invalid repository id in ${file}: expected 8 lowercase hexadecimal characters`);
+  return id;
+}
+
+/** Teardown can identify an existing queue, but must never mint a new identity. */
+export async function readRepoId(repoPath: string): Promise<string> {
+  const id = await storedRepoId(repoPath);
+  if (!id) throw new Error(`Missing repository id in ${runtimeNames.repoIdFile(repoPath)}`);
+  return id;
+}
+
+export async function getRepoId(repoPath: string): Promise<string> {
+  const existing = await storedRepoId(repoPath);
+  if (existing) return existing;
+  const repoIdFile = runtimeNames.repoIdFile(repoPath);
 
   // Generate new 8 hex char ID
   const bytes = new Uint8Array(4);

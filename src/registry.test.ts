@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes } from "./registry";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, symlink } from "fs/promises";
+import { mkdtemp, open, rm, mkdir, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { createTeam } from "./teams";
@@ -32,6 +32,20 @@ describe("registry", () => {
     await saveRegistry(data);
     const loaded = await loadRegistry();
     expect(loaded.repos).toEqual(data.repos);
+  });
+
+  test("a reader holding the old registry sees a complete snapshot across a save", async () => {
+    const oldRegistry = { repos: [{ path: "/repo/a", name: "first" }] };
+    const newRegistry = { repos: [{ path: "/repo/b", name: "second" }] };
+    await saveRegistry(oldRegistry);
+    const reader = await open(join(tempDir, ".itsybitsy", "repos.json"), "r");
+    try {
+      await saveRegistry(newRegistry);
+      expect(JSON.parse(await reader.readFile("utf8"))).toEqual(oldRegistry);
+      expect(await loadRegistry()).toEqual(newRegistry);
+    } finally {
+      await reader.close();
+    }
   });
 
   test("addRepo adds a new repo", async () => {

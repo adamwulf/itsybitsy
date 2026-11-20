@@ -1,3 +1,4 @@
+import { initializeMachineName } from "./machine-name";
 import { getRepoId } from "./repo-id";
 export { getRepoId } from "./repo-id";
 import * as runtimeNames from "./runtime-names";
@@ -6925,6 +6926,9 @@ export async function newAgent(
       return { ok: false, exitCode: 1, stdout: "", stderr: `Error: agent name "${id}" collides with an existing agent nickname (${nickCollision.id})` };
     }
   }
+
+  // The watchdog broker also reaches this unsandboxed spawn path.
+  await initializeMachineName();
 
   // 10. Create agent directory
   await mkdir(agentDir, { recursive: true });

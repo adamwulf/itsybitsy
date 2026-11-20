@@ -29,9 +29,9 @@
 
 import { join } from "path";
 import { rename, unlink, stat, readFile, appendFile, open, mkdir, rmdir } from "fs/promises";
-import { listRepos } from "./registry";
-import { getRepoId } from "./repo-id";
-import { loadMachineName } from "./machine-name";
+import { readRegistryStrict } from "./registry";
+import { readRepoId } from "./repo-id";
+import { readMachineName } from "./machine-name";
 import { fullyQualifiedAgentId } from "./tui/row-keys";
 import type { AgentMeta } from "./agents";
 import { getCoordinatorHome } from "./coordinator";
@@ -48,7 +48,7 @@ export async function agentOutboxDir(agent: {
   meta: Pick<AgentMeta, "tmux_session"> | null;
 }): Promise<string> {
   const { repoPath, id: agentId, meta } = agent;
-  const repos = await listRepos();
+  const { repos } = await readRegistryStrict();
   let repo = repos.find((r) => r.path === repoPath);
   if (!repo && repos.length) {
     // A watchdog can start at the physical path of a registered symlink.
@@ -65,11 +65,17 @@ export async function agentOutboxDir(agent: {
     }
   }
   let name = repo?.name;
-  if (name === undefined) {
+  if (name !== undefined) {
+    const lower = name.toLowerCase();
+    const matches = repos.filter((entry) => entry.name.toLowerCase() === lower);
+    if (matches.length > 1) {
+      throw new Error(`Ambiguous queue for repo name '${name}' registered at: ${matches.map((entry) => entry.path).join(", ")}`);
+    }
+  } else {
     // Only teardown of artifacts without session metadata needs the repo-id
     // file. A live agent (including its sandboxed statusline) always uses the
     // id embedded by spawn, whether or not its caller can read that file.
-    const repoId = meta === null ? await getRepoId(repoPath) : /^itsybitsy-([0-9a-f]{8})-.+$/.exec(meta.tmux_session)?.[1];
+    const repoId = meta === null ? await readRepoId(repoPath) : /^itsybitsy-([0-9a-f]{8})-.+$/.exec(meta.tmux_session)?.[1];
     if (!repoId) {
       throw new Error(`Cannot locate queue for '${agentId}': repo '${repoPath}' is unregistered and tmux_session has no repository id`);
     }
@@ -80,7 +86,7 @@ export async function agentOutboxDir(agent: {
       throw new Error(`Invalid agent queue path component: ${JSON.stringify(part)}`);
     }
   }
-  return join(getCoordinatorHome(), "agents", fullyQualifiedAgentId(await loadMachineName(), name, agentId));
+  return join(getCoordinatorHome(), "agents", fullyQualifiedAgentId(await readMachineName(), name, agentId));
 }
 
 /**
@@ -289,7 +295,7 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
  * removes any latent footgun for a future caller that does pass it in).
  */
 export async function deleteAgentOutbox(dir: string): Promise<void> {
-  for (const p of [outboxPath(dir), outboxLockPath(dir)]) {
+  for (const p of [outboxPath(dir), outboxPath(dir) + ".tmp", outboxLockPath(dir)]) {
     try {
       await unlink(p);
     } catch {

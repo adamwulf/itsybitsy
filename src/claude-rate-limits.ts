@@ -17,7 +17,7 @@
 import { join } from "path";
 import { mkdir, readdir, rename, unlink } from "fs/promises";
 import { getCoordinatorHome } from "./coordinator";
-import { loadMachineName } from "./machine-name";
+import { readMachineName } from "./machine-name";
 import { formatResetTime } from "./usage";
 import type { UsageData, UsageResult } from "./usage";
 
@@ -237,7 +237,7 @@ async function subdirectories(dir: string): Promise<string[]> {
  */
 export async function readClaudeUsage(now: Date = new Date()): Promise<UsageResult> {
   const home = getCoordinatorHome();
-  const machineDir = join(home, "agents", await loadMachineName());
+  const machineDir = join(home, "agents", await readMachineName());
   const repoDirs = await subdirectories(machineDir);
   const agentDirs = (await Promise.all(repoDirs.map(subdirectories))).flat();
   const records = (await Promise.all(

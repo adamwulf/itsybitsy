@@ -1033,6 +1033,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     setCoordinatorHome(join(configTempDir, "coord-home"));
     // Agent seals belong to the fixture, not the developer's home directory.
     setUserHome(configTempDir);
+    await Bun.write(join(configTempDir, ".itsybitsy", "machine-name"), "studio");
     await (await import("../agent-types")).ensureAgentTypesDir();
   });
 
@@ -2440,12 +2441,15 @@ describe("Cross-repo send (E key)", () => {
     // watchdog), inflating sentMessages.
     const { setCoordinatorHome } = await import("../coordinator");
     setCoordinatorHome(join(sendRepoDir, "coord-home"));
+    setUserHome(sendRepoDir);
+    await Bun.write(join(sendRepoDir, ".itsybitsy", "machine-name"), "studio");
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
     const { resetCoordinatorHome } = await import("../coordinator");
     resetCoordinatorHome();
+    resetUserHome();
     await rm(sendRepoDir, { recursive: true, force: true });
   });
 
@@ -2762,12 +2766,15 @@ describe("DashboardComponent right pane and navigation features", () => {
     // developer's ~/.itsybitsy/config.json.
     configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
     setUserConfigPath(join(configTempDir, "config.json"));
+    setUserHome(configTempDir);
+    await Bun.write(join(configTempDir, ".itsybitsy", "machine-name"), "studio");
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
     resetDiffStatusSpawnRunner();
     resetUserConfigPath();
+    resetUserHome();
     await rm(configTempDir, { recursive: true, force: true });
   });
 
@@ -7796,6 +7803,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     beforeEach(async () => {
       homeTmp = await mkdtemp(join(tmpdir(), "dash-roster-home-"));
       setUserHome(homeTmp);
+      await Bun.write(join(homeTmp, ".itsybitsy", "machine-name"), "studio");
       // Stub the send spawn runner. These tests plant REAL agent dirs so the
       // roster wrappers can resolve bare ids, which means teamAdd/teamRemove's
       // join/leave fan-out reaches the real delivery path and spawns real tmux
@@ -7961,6 +7969,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     beforeEach(async () => {
       homeTmp = await mkdtemp(join(tmpdir(), "dash-member-home-"));
       setUserHome(homeTmp);
+      await Bun.write(join(homeTmp, ".itsybitsy", "machine-name"), "studio");
       setSendSpawnRunner(() => makeSpawnResult());
     });
     afterEach(async () => {

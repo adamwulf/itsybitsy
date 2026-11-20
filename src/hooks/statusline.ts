@@ -80,8 +80,8 @@ export async function hookStatusline(
           const { meta } = await readAgentMeta(agentDir(repo, agentId));
           if (meta) await recordClaudeRateLimits(await agentOutboxDir({ repoPath: repo, id: agentId, meta }), windows, now);
         }
-      } catch {
-        // Best effort: a failed write only skips this reading.
+      } catch (err) {
+        console.error(`Cannot record statusline usage: ${err instanceof Error ? err.message : err}`);
       }
     }
   }

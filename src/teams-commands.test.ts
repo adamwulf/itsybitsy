@@ -181,6 +181,7 @@ describe("teams: sendMessage threads team into the outbox", () => {
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     setUserHome(tempDir);
+    await Bun.write(join(tempDir, ".itsybitsy", "machine-name"), "studio");
     await saveRegistry({ repos: [{ name: "test", path: tempDir }] });
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
@@ -265,6 +266,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
     setUserHome(baseDir);
+    await Bun.write(join(baseDir, ".itsybitsy", "machine-name"), "studio");
     setCoordinatorHome(homeDir);
     await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
@@ -713,6 +715,7 @@ describe("teams: resolveTarget team branch", () => {
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
     setUserHome(baseDir);
+    await Bun.write(join(baseDir, ".itsybitsy", "machine-name"), "studio");
     setCoordinatorHome(homeDir);
     await Bun.write(join(homeDir, "machine-name"), "test-machine");
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });

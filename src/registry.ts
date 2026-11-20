@@ -1,6 +1,6 @@
-import { join, resolve, basename } from "path";
+import { join, resolve, basename, isAbsolute } from "path";
 import { userHome } from "./home";
-import { mkdir, realpath } from "fs/promises";
+import { mkdir, realpath, rename, unlink } from "fs/promises";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
 // because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
@@ -118,25 +118,47 @@ function registryPath(): string {
   return join(itsybitsyDir(), "repos.json");
 }
 
+/** Queue identity requires a complete registry. Only a fresh install (ENOENT) has no entries. */
+export async function readRegistryStrict(): Promise<RegistryData> {
+  const path = registryPath();
+  try {
+    const data = await Bun.file(path).json();
+    if (!Array.isArray(data?.repos)) throw new Error("expected a repos array");
+    for (const [index, repo] of data.repos.entries()) {
+      if (typeof repo?.path !== "string" || !isAbsolute(repo.path) ||
+          typeof repo.name !== "string" || !repo.name.trim() || repo.name.includes("/") ||
+          repo.name === "." || repo.name === ".." || repo.name.startsWith("~") ||
+          [repo.nickname, repo.defaultAgentType, repo.notes].some((v) => v !== undefined && typeof v !== "string")) {
+        throw new Error(`invalid repository entry at index ${index}`);
+      }
+    }
+    return { repos: data.repos };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { repos: [] };
+    throw new Error(`Cannot read repo registry ${path}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
+}
+
 export async function loadRegistry(): Promise<RegistryData> {
   try {
-    const file = Bun.file(registryPath());
-    if (!(await file.exists())) {
-      return { repos: [] };
-    }
-    const data = await file.json();
-    if (!data || !Array.isArray(data.repos)) {
-      return { repos: [] };
-    }
-    return { repos: data.repos } as RegistryData;
-  } catch { /* expected: file missing or malformed JSON */
+    const data = await Bun.file(registryPath()).json();
+    return { repos: Array.isArray(data?.repos) ? data.repos : [] };
+  } catch {
     return { repos: [] };
   }
 }
 
 export async function saveRegistry(data: RegistryData): Promise<void> {
   await mkdir(itsybitsyDir(), { recursive: true });
-  await Bun.write(registryPath(), JSON.stringify(data, null, 2) + "\n");
+  const path = registryPath();
+  const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Bun.write(tmp, JSON.stringify(data, null, 2) + "\n");
+    await rename(tmp, path);
+  } catch (err) {
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
 }
 
 /**

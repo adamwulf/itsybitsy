@@ -2053,6 +2053,8 @@ describe("retire → rehire recovery", () => {
     tempDir = await mkdtemp(join(tmpdir(), "rehire-integration-"));
     originalHome = process.env.HOME;
     process.env.HOME = join(tempDir, "home");
+    setUserHome(process.env.HOME);
+    await Bun.write(join(process.env.HOME, ".itsybitsy", "machine-name"), "studio");
     await git("init", tempDir);
     await git("-C", tempDir, "config", "user.email", "test@example.com");
     await git("-C", tempDir, "config", "user.name", "Test User");
@@ -2081,6 +2083,7 @@ describe("retire → rehire recovery", () => {
     resetSealDirectVerifyForTesting();
     resetSealCapabilityCommandForTesting();
     isPidAliveCtx.reset();
+    resetUserHome();
     process.env.HOME = originalHome;
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -6276,6 +6279,8 @@ describe("newAgent (native)", () => {
     const fakeHome = join(tempDir, "home");
     await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
     process.env.HOME = fakeHome;
+    setUserHome(fakeHome);
+    await Bun.write(join(fakeHome, ".itsybitsy", "machine-name"), "studio");
     await saveRegistry({ repos: [{ path: tempDir, name: basename(tempDir) }] });
     // Populate the embedded defaults (including _all.md and _non_coordinator.md).
     // ensureAgentTypesDir() writes all embedded files only on first run.
@@ -6309,6 +6314,7 @@ describe("newAgent (native)", () => {
     setSealDeleteForTesting(null);
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
+    resetUserHome();
     if (originalHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -10195,6 +10201,18 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(meta.worker).toBe(true);
   });
 
+  test("newAgent initializes the machine identity before creating its queue", async () => {
+    const file = join(tempDir, "home", ".itsybitsy", "machine-name");
+    await rm(file);
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("first spawn", { name: "first-agent" });
+    expect(result.ok).toBe(true);
+    const machine = (await Bun.file(file).text()).trim();
+    expect(machine).not.toBe("");
+    expect(await readdir(join(tempDir, "home", ".itsybitsy", "agents", machine, basename(tempDir))))
+      .toContain("first-agent");
+  });
+
   test("writes meta.json with state='creating' BEFORE git worktree add runs", async () => {
     // Verifies Fix 1: the early meta.json write happens before any slow step.
     // On large repos, `git worktree add` can take 60-90s. Without the early
@@ -11843,41 +11861,23 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   // --- Group K: repo name collision enforcement ---
 
   test("K1: rejects --name matching a repo display name (nickname)", async () => {
-    const originalHome = process.env.HOME;
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
-    process.env.HOME = fakeHome;
-    try {
-      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
-        repos: [{ path: "/tmp/some-repo", name: "some-repo", nickname: "my-agent" }],
-      }));
-      setNewAgentSpawnRunner(mockSpawnRunner());
-      const result = await callNewAgent("task", { name: "my-agent" });
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain('collides with registered repo name');
-    } finally {
-      process.env.HOME = originalHome;
-      await rm(fakeHome, { recursive: true, force: true });
-    }
+    await saveRegistry({
+      repos: [{ path: "/tmp/some-repo", name: "some-repo", nickname: "my-agent" }],
+    });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "my-agent" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('collides with registered repo name');
   });
 
   test("K2: rejects --name matching a repo basename", async () => {
-    const originalHome = process.env.HOME;
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
-    process.env.HOME = fakeHome;
-    try {
-      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
-        repos: [{ path: "/tmp/tools-repo", name: "tools" }],
-      }));
-      setNewAgentSpawnRunner(mockSpawnRunner());
-      const result = await callNewAgent("task", { name: "tools" });
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain('collides with registered repo name');
-    } finally {
-      process.env.HOME = originalHome;
-      await rm(fakeHome, { recursive: true, force: true });
-    }
+    await saveRegistry({
+      repos: [{ path: "/tmp/tools-repo", name: "tools" }],
+    });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "tools" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('collides with registered repo name');
   });
 
   test("K3: rejects --name 'system' as reserved", async () => {

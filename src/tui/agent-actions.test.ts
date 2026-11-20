@@ -2259,6 +2259,7 @@ async function setupTeamsFixture(): Promise<{
   await mkdir(homeDir, { recursive: true });
   await mkdir(repoDir, { recursive: true });
   setUserHome(baseDir);
+  await Bun.write(join(baseDir, ".itsybitsy", "machine-name"), "studio");
   setCoordinatorHome(homeDir);
   setUserConfigPath(join(homeDir, "config.json"));
   const repoEntry: RepoEntry = { path: repoDir, name: basename(repoDir) };

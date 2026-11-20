@@ -25,6 +25,8 @@ import {
 } from "./agent-lifecycle";
 import { isPidAliveCtx, killPidCtx, sleepMsCtx } from "./agents";
 import { setWatchLogPath, resetWatchLogPath } from "./watch-log";
+import { setUserHome, resetUserHome } from "./home";
+import { machineNameFile } from "./runtime-names";
 import type { SpawnFn, SpawnResult } from "./types";
 
 /** Create a temp directory for test isolation */
@@ -32,8 +34,17 @@ async function makeTempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "lifecycle-test-"));
 }
 
+async function makeTempRepo(): Promise<string> {
+  const repo = await makeTempDir();
+  setUserHome(join(repo, "home"));
+  await Bun.write(machineNameFile(), "studio");
+  await Bun.write(join(repo, ".itsybitsy", "repo-id"), "deadbeef");
+  return repo;
+}
+
 describe("agent-lifecycle", () => {
   afterEach(() => {
+    resetUserHome();
     spawnCtx.reset();
     resetSandboxProxyKillForTesting();
   });
@@ -128,7 +139,7 @@ describe("agent-lifecycle", () => {
 
   describe("archiveAgent", () => {
     test("archives output.log, agent.log, meta.json", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const repoPath = dir;
       const agentId = "agent-test";
       const agentDir = join(dir, ".itsybitsy", "agents", agentId);
@@ -166,7 +177,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("archives settings.local.json (move) and debug-logs/ (copy)", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
       const archiveDir = join(dir, ".itsybitsy", "archive");
       await mkdir(agentDir, { recursive: true });
@@ -195,7 +206,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("returns null if nothing to archive", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-empty");
       await mkdir(agentDir, { recursive: true });
 
@@ -207,7 +218,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("deletes outbox.jsonl and .outbox.lock (not archived)", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
       await mkdir(agentDir, { recursive: true });
       // The outbox queue now lives under the CENTRAL coordinator-home root.
@@ -224,10 +235,12 @@ describe("agent-lifecycle", () => {
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
         // Pending queue + held lock at teardown time, in the central location.
         await Bun.write(join(queueDir, "outbox.jsonl"), '{"id":"x","message":"m","fromAgent":"","raw":false,"enqueuedAtMs":1}\n');
+        await Bun.write(join(queueDir, "outbox.jsonl.tmp"), "undelivered");
         await Bun.write(join(queueDir, ".outbox.lock"), String(process.pid));
 
         await archiveAgent(dir, "agent-test", agentDir);
 
+        expect(await readdir(join(queueDir, ".."))).toEqual([]);
         // Both are deleted from the central outbox dir and NOT archived
         // (runtime state only, no historical value).
         expect(await Bun.file(join(queueDir, "outbox.jsonl")).exists()).toBe(false);
@@ -244,7 +257,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("removes the per-agent folder after a statusline rate-limit record was written", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
       await mkdir(agentDir, { recursive: true });
       const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
@@ -279,6 +292,8 @@ describe("agent-lifecycle", () => {
         setUserHome(join(dir, "home"));
         const repo = join(dir, "repo");
         await mkdir(repo);
+        await Bun.write(machineNameFile(), "studio");
+        await Bun.write(join(repo, ".itsybitsy", "repo-id"), "deadbeef");
         const git = async (...args: string[]) => {
           const proc = Bun.spawn(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
           const text = await new Response(proc.stdout).text();
@@ -374,7 +389,7 @@ describe("agent-lifecycle", () => {
       const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
       setCoordinatorHome(home);
       try {
-        const dir = await makeTempDir();
+        const dir = await makeTempRepo();
         const agentDir = join(dir, ".itsybitsy", "agents", "agent-arch");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-arch"}');
@@ -412,7 +427,7 @@ describe("agent-lifecycle", () => {
       const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
       setCoordinatorHome(home);
       try {
-        const dir = await makeTempDir();
+        const dir = await makeTempRepo();
         const agentDir = join(dir, ".itsybitsy", "agents", "agent-solo");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-solo"}');
@@ -438,7 +453,7 @@ describe("agent-lifecycle", () => {
       const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
       setCoordinatorHome(home);
       try {
-        const dir = await makeTempDir();
+        const dir = await makeTempRepo();
         const agentDir = join(dir, ".itsybitsy", "agents", "agent-empty");
         await mkdir(agentDir, { recursive: true }); // no output/agent/meta files
 
@@ -475,7 +490,7 @@ describe("agent-lifecycle", () => {
         } as SpawnResult;
       });
       try {
-        const dir = await makeTempDir();
+        const dir = await makeTempRepo();
         const agentDir = join(dir, ".itsybitsy", "agents", "agent-td");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-td"}');
@@ -500,7 +515,7 @@ describe("agent-lifecycle", () => {
     test("teardownAgent terminates the detached sandbox proxy", async () => {
       const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
       const home = await mkdtemp(join(tmpdir(), "lc-proxy-home-"));
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-proxy");
       await mkdir(agentDir, { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-proxy"}');

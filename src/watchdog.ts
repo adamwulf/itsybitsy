@@ -42,6 +42,7 @@ import type { CompactState } from "./auto-compact";
 import { readConfig } from "./config";
 import { isValidTmuxSession, tmuxSessionTarget } from "./validation";
 import { listRepos } from "./registry";
+import { initializeMachineName } from "./machine-name";
 import { OUTBOX_FILENAME, agentOutboxDir } from "./outbox";
 import { parseModel } from "./agent-cli";
 import type { AgentCli } from "./agent-cli";
@@ -1823,6 +1824,8 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     console.error(`[watchdog] Invalid tmux session name for agent ${agentId}: ${tmuxSession}`);
     return;
   }
+
+  await initializeMachineName();
 
   // Phase 6: classify the agent's CLI once. The permission auto-accept block
   // below is gated on this — codex agents launch with `-a never` + hooks that

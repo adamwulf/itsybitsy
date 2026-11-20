@@ -901,7 +901,7 @@ function floorLayout(roots: FloorLayoutRoots, baselinePaths: PathsConfig) {
   // write floor, so it is read+write.
   const homeVarFoldersWritable = join(root, "loose-home.txt");
   const homeClaudeWrite = join(root, ".claude/probe.txt"); // ~/.claude allowWrite
-  const homeItsybitsyWrite = join(root, ".itsybitsy/agents/probe.txt"); // ~/.itsybitsy/agents allowWrite
+  const homeItsybitsyWrite = join(root, ".itsybitsy/agents/studio/project/review/outbox.jsonl"); // ~/.itsybitsy/agents allowWrite
   const homeItsybitsyRead = join(root, ".itsybitsy/state.json"); // ~/.itsybitsy read, write denied
   // R3(i): ~/.itsybitsy/agent-types is under ~/.itsybitsy (read) but NOT
   // under ~/.itsybitsy/agents (write), so it is read-only — the floor grants

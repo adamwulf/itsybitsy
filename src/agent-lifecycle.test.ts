@@ -217,7 +217,7 @@ describe("agent-lifecycle", () => {
       const { agentOutboxDir } = await import("./outbox");
       const coordHome = join(dir, "home", ".itsybitsy");
       setCoordinatorHome(coordHome);
-      const queueDir = agentOutboxDir("agent-test");
+      const queueDir = await agentOutboxDir({ repoPath: dir, id: "agent-test", meta: null });
       await mkdir(queueDir, { recursive: true });
 
       try {
@@ -251,11 +251,11 @@ describe("agent-lifecycle", () => {
       const { agentOutboxDir } = await import("./outbox");
       const { recordClaudeRateLimits, CLAUDE_RATE_LIMITS_FILE } = await import("./claude-rate-limits");
       setCoordinatorHome(join(dir, "home", ".itsybitsy"));
-      const queueDir = agentOutboxDir("agent-test");
+      const queueDir = await agentOutboxDir({ repoPath: dir, id: "agent-test", meta: null });
 
       try {
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
-        await recordClaudeRateLimits("agent-test", { five_hour: { used_percentage: 9, resets_at: 1_900_000_000 } });
+        await recordClaudeRateLimits(queueDir, { five_hour: { used_percentage: 9, resets_at: 1_900_000_000 } });
         // A statusline run killed between its temp write and the rename.
         await Bun.write(join(queueDir, `${CLAUDE_RATE_LIMITS_FILE}.tmp.12345`), "{}");
 
@@ -263,7 +263,7 @@ describe("agent-lifecycle", () => {
 
         // Without the record removed first, the rmdir fails and the folder
         // stays for good (and every usage read scans it).
-        expect(await readdir(join(dir, "home", ".itsybitsy", "agents"))).toEqual([]);
+        expect(await readdir(join(queueDir, ".."))).toEqual([]);
       } finally {
         resetCoordinatorHome();
         await rm(dir, { recursive: true, force: true });

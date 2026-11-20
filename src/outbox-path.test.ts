@@ -1,122 +1,124 @@
-/**
- * Behavioral tests for the centralized per-agent outbox path.
- *
- * Two guarantees the outbox-path move depends on:
- *  1. `agentOutboxDir(id)` returns `<coordinator-home>/agents/<id>/` — i.e.
- *     the queue lives under `~/.itsybitsy/agents/<id>/`, not beside the
- *     per-worktree `meta.json`.
- *  2. `sendMessage(...)` enqueues into THAT central path — never into the
- *     per-worktree agent directory. This is what lets a codex agent under
- *     `-s workspace-write` deliver to any other agent (it has --add-dir on the
- *     coordinator home).
- */
-
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdir, mkdtemp, rm, readdir } from "fs/promises";
-import { tmpdir } from "os";
+import { readdir } from "fs/promises";
 import { join } from "path";
 import { agentOutboxDir, readOutbox } from "./outbox";
-import { setCoordinatorHome, resetCoordinatorHome, getCoordinatorHome } from "./coordinator";
-import { sendMessage, setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
-import { setUserConfigPath, resetUserConfigPath } from "./config";
-import { makeAgent as _makeAgent, makeSpawnResult } from "./test-utils";
-import type { AgentState } from "./parse-state";
+import { archiveAgent } from "./agent-lifecycle";
+import { writeAgentTransient } from "./agents";
+import { drainOutbox, setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
+import { setUserHome, resetUserHome } from "./home";
+import { createCliFixture, type CliFixture } from "./test-cli-runner";
+import { makeAgent, makeSpawnResult } from "./test-utils";
+import { machineNameFile } from "./runtime-names";
 
-describe("agentOutboxDir helper", () => {
-  let tempDir: string;
-
-  beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "outbox-path-helper-"));
-    setCoordinatorHome(tempDir);
-  });
-
-  afterEach(async () => {
-    resetCoordinatorHome();
-    await rm(tempDir, { recursive: true, force: true });
-  });
-
-  test("agentOutboxDir(id) returns join(getCoordinatorHome(), 'agents', id)", () => {
-    expect(agentOutboxDir("agent-abc")).toBe(join(getCoordinatorHome(), "agents", "agent-abc"));
-    expect(agentOutboxDir("agent-abc")).toBe(join(tempDir, "agents", "agent-abc"));
-  });
-
-  test("agentOutboxDir tracks setCoordinatorHome changes", () => {
-    const other = join(tempDir, "other-home");
-    setCoordinatorHome(other);
-    expect(agentOutboxDir("agent-xyz")).toBe(join(other, "agents", "agent-xyz"));
-  });
-});
-
-describe("sendMessage centralized outbox location", () => {
-  let baseDir: string;
-  let repoDir: string;
-  let coordHome: string;
-  let perWorktreeAgentDir: string;
-  let centralQueueDir: string;
+describe("fully qualified agent queues", () => {
+  let cli: CliFixture;
+  let repoA: string;
+  let repoB: string;
+  let calls: string[][];
+  const queue = (repo: string, id: string, machine = "studio") =>
+    join(cli.home, ".itsybitsy", "agents", machine, repo, id);
 
   beforeEach(async () => {
-    baseDir = await mkdtemp(join(tmpdir(), "outbox-path-send-"));
-    repoDir = join(baseDir, "repo");
-    coordHome = join(baseDir, ".itsybitsy");
-    perWorktreeAgentDir = join(repoDir, ".itsybitsy", "agents", "agent-target");
-    // Set the coordinator-home BEFORE computing centralQueueDir so
-    // agentOutboxDir resolves into our sandbox.
-    setCoordinatorHome(coordHome);
-    centralQueueDir = agentOutboxDir("agent-target");
-    await mkdir(perWorktreeAgentDir, { recursive: true });
-    await mkdir(coordHome, { recursive: true });
-    // Note: deliberately do NOT pre-create centralQueueDir — sendMessage's
-    // enqueue path mkdir's it on demand. We verify that BELOW.
-    setUserConfigPath(join(baseDir, "config.json"));
-    setSendSpawnRunner(() => makeSpawnResult());
+    cli = await createCliFixture();
+    setUserHome(cli.home);
+    await Bun.write(machineNameFile(), "studio");
+    // The paths end in the same basename, with distinct registry names and nicknames.
+    repoA = await cli.addRepo("shared");
+    repoB = await cli.addRepo("shared");
+    await cli.writeRegistry({ repos: [
+      { path: repoA, name: "alpha", nickname: "first" },
+      { path: repoB, name: "beta", nickname: "second" },
+    ] });
+    calls = [];
+    setSendSpawnRunner((cmd) => { calls.push(cmd); return makeSpawnResult(); });
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
-    resetUserConfigPath();
-    resetCoordinatorHome();
-    await rm(baseDir, { recursive: true, force: true });
+    resetUserHome();
+    await cli.cleanup();
   });
 
-  test("sendMessage writes to the central per-agent outbox dir, not the per-worktree path", async () => {
-    // Plant a live-watchdog transient so the message DEFERS into the queue
-    // instead of being drained inline (we want to inspect the file).
-    const { writeAgentTransient, isPidAliveCtx } = await import("./agents");
-    isPidAliveCtx.set(() => true);
-    try {
-      await writeAgentTransient(perWorktreeAgentDir, {
-        tmux_compacting: false,
-        tmux_rate_limited: false,
-        tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
-        has_background_tasks: false,
-        updated_at_ms: Date.now(),
-        watchdog_pid: 4242,
-      });
-      const agent = _makeAgent({
-        id: "agent-target",
-        repoPath: repoDir,
-        repoName: "r",
-        state: "running" as AgentState,
-      });
+  async function plant(repo: string, id: string, session: string, coordinator = false) {
+    const agent = await cli.addAgent(repo, id, {
+      tmux_session: session,
+      ...(coordinator ? { agentType: "repo-coordinator", worktree: false } : {}),
+    });
+    await writeAgentTransient(agent.agentDir, {
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), has_background_tasks: false,
+      tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false,
+      tmux_api_terms: false, tmux_api_safeguard: false,
+    });
+    return agent;
+  }
 
-      // Send with cwd: "/" so the sender resolves to "" (the human user) and we
-      // don't depend on cwd-detection inside the agent worktree.
-      await sendMessage(agent, "hello", { cwd: "/" });
+  async function send(target: string, message: string) {
+    const result = await cli.run(["send", target, message], {
+      cwd: repoA, actions: { sendMessage: "real" },
+    });
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  }
 
-      // The message must be queued in the CENTRAL location.
-      const centralQueue = await readOutbox(centralQueueDir);
-      expect(centralQueue.length).toBe(1);
-      expect(centralQueue[0]!.message).toBe("hello");
+  test("cross-repo send, drain and archive isolate identically named agents", async () => {
+    const a = await plant(repoA, "review", "session-A");
+    await plant(repoB, "review", "session-B");
+    const legacy = join(cli.home, ".itsybitsy", "agents", "review", "outbox.jsonl");
+    const legacyLine = JSON.stringify({ id: "legacy", message: "old", fromAgent: "", raw: true });
+    await Bun.write(legacy, legacyLine);
+    const aQueue = queue("alpha", "review");
+    const bQueue = queue("beta", "review");
+    await send("@first/review", "for A");
+    expect(await readOutbox(bQueue)).toEqual([]);
+    await send("@beta/review", "for B");
+    const pendingB = await readOutbox(bQueue);
+    expect(pendingB.map((m) => m.message)).toEqual(["for B"]);
+    expect((await readOutbox(aQueue)).map((m) => m.message)).toEqual(["for A"]);
+    expect(await readdir(a.agentDir)).not.toContain("outbox.jsonl");
 
-      // And it must NOT have appeared in the per-worktree agent dir.
-      const perWorktreeQueue = await readOutbox(perWorktreeAgentDir);
-      expect(perWorktreeQueue).toEqual([]);
-      // Belt-and-suspenders: the per-worktree dir must not contain outbox.jsonl
-      // at all (a leftover file would silently break drains).
-      const entries = await readdir(perWorktreeAgentDir);
-      expect(entries).not.toContain("outbox.jsonl");
-    } finally {
-      isPidAliveCtx.reset();
-    }
+    const agent = makeAgent({ id: "review", repoPath: repoA });
+    agent.meta.tmux_session = "session-A";
+    await drainOutbox(agent, await agentOutboxDir(agent));
+    const keys = calls.filter((cmd) => cmd.includes("send-keys"));
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys.every((cmd) => cmd.includes("=session-A:"))).toBe(true);
+    expect(keys.flat().join(" ")).toContain("for A");
+    expect(keys.flat().join(" ")).not.toContain("for B");
+    expect(await readOutbox(aQueue)).toEqual([]);
+    expect(await readOutbox(bQueue)).toEqual(pendingB);
+
+    await send("@alpha/review", "undelivered");
+    await archiveAgent(repoA, agent.id, a.agentDir);
+    expect(await Bun.file(join(aQueue, "outbox.jsonl")).exists()).toBe(false);
+    expect(await Bun.file(legacy).text()).toBe(legacyLine);
+    expect(await readOutbox(bQueue)).toEqual(pendingB);
+  });
+
+  test("same-basename repo coordinators each receive their own messages", async () => {
+    await plant(repoA, "shared", "session-A", true);
+    await plant(repoB, "shared", "session-B", true);
+    await send("@coordinator", "own coordinator");
+    await send("@beta", "other coordinator");
+    expect((await readOutbox(queue("alpha", "shared"))).map((m) => m.message)).toEqual(["own coordinator"]);
+    expect((await readOutbox(queue("beta", "shared"))).map((m) => m.message)).toEqual(["other coordinator"]);
+  });
+
+  test("machine identity separates otherwise identical queues", async () => {
+    expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("alpha", "review"));
+    await Bun.write(machineNameFile(), "work/laptop");
+    expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("alpha", "review", "work-laptop"));
+  });
+
+  test("an unregistered agent without a repo id in its session fails clearly", async () => {
+    await cli.writeRegistry({ repos: [] });
+    await expect(agentOutboxDir(makeAgent({ repoPath: repoB, id: "review" })))
+      .rejects.toThrow("unregistered and tmux_session has no repository id");
+  });
+
+  test("an unregistered repo with a registered repo's name uses its own repo id", async () => {
+    await cli.writeRegistry({ repos: [{ path: repoA, name: "shared" }] });
+    await Bun.write(join(repoB, ".itsybitsy", "repo-id"), "3fa9c2d1\n");
+    expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("shared", "review"));
+    expect(await agentOutboxDir({ repoPath: repoB, id: "review", meta: { tmux_session: "itsybitsy-3fa9c2d1-review" } })).toBe(queue("~3fa9c2d1", "review"));
   });
 });

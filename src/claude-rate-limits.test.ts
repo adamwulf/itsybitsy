@@ -1,3 +1,4 @@
+import { setUserHome, resetUserHome } from "./home";
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "fs/promises";
@@ -144,20 +145,27 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
 
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "claude-rate-limits-test-"));
+    setUserHome(home);
+    await Bun.write(join(home, ".itsybitsy", "machine-name"), "studio");
     setCoordinatorHome(home);
   });
 
   afterEach(async () => {
+    resetUserHome();
     resetCoordinatorHome();
     await rm(home, { recursive: true, force: true });
   });
 
+  function recordDir(id: string): string {
+    return id === "@system" ? home : join(home, "agents", "studio", "repo", id);
+  }
+
   function recordPath(agentId: string): string {
-    return join(home, "agents", agentId, CLAUDE_RATE_LIMITS_FILE);
+    return join(recordDir(agentId), CLAUDE_RATE_LIMITS_FILE);
   }
 
   test("writes the record under the agent's folder", async () => {
-    await recordClaudeRateLimits("agent-a", {
+    await recordClaudeRateLimits(recordDir("agent-a"), {
       five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 },
       seven_day: { used_percentage: 11, resets_at: NOW_S + 86_400 },
     }, NOW_MS);
@@ -172,11 +180,11 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
   test("keeps a window that a later input leaves out, so its reset stays visible", async () => {
     // A rate-limited agent: 5-hour window full. Claude Code then drops the
     // window from its input when the window resets.
-    await recordClaudeRateLimits("agent-a", {
+    await recordClaudeRateLimits(recordDir("agent-a"), {
       five_hour: { used_percentage: 100, resets_at: NOW_S + 60 },
       seven_day: { used_percentage: 50, resets_at: NOW_S + 86_400 },
     }, NOW_MS);
-    await recordClaudeRateLimits("agent-a", {
+    await recordClaudeRateLimits(recordDir("agent-a"), {
       seven_day: { used_percentage: 51, resets_at: NOW_S + 86_400 },
     }, NOW_MS + 120_000);
 
@@ -193,12 +201,12 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
 
   test("a plan that stops reporting a 5-hour window: old records end it, a new report revives it", async () => {
     // A session from before the plan change keeps its old 5-hour window.
-    await recordClaudeRateLimits("old-session", {
+    await recordClaudeRateLimits(recordDir("old-session"), {
       five_hour: { used_percentage: 1, resets_at: NOW_S - 3600 },
       seven_day: { used_percentage: 6, resets_at: NOW_S + 86_400 },
     }, NOW_MS - 7_200_000);
     // A session started since then only ever reports the weekly window.
-    await recordClaudeRateLimits("new-session", {
+    await recordClaudeRateLimits(recordDir("new-session"), {
       seven_day: { used_percentage: 15, resets_at: NOW_S + 86_400 },
     }, NOW_MS);
 
@@ -208,7 +216,7 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     expect(ended.data?.weeklyPct).toBe(15);
 
     // Any session reporting a live window brings the session reading back.
-    await recordClaudeRateLimits("new-session", {
+    await recordClaudeRateLimits(recordDir("new-session"), {
       five_hour: { used_percentage: 2, resets_at: NOW_S + 3600 },
     }, NOW_MS);
 
@@ -218,14 +226,14 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
   });
 
   test("combines the windows of all agents: the current window, its newest report", async () => {
-    await recordClaudeRateLimits("agent-a", {
+    await recordClaudeRateLimits(recordDir("agent-a"), {
       five_hour: { used_percentage: 20, resets_at: NOW_S + 3600 },
       seven_day: { used_percentage: 40, resets_at: NOW_S + 86_400 },
     }, NOW_MS - 600_000);
-    await recordClaudeRateLimits("agent-b", {
+    await recordClaudeRateLimits(recordDir("agent-b"), {
       five_hour: { used_percentage: 70, resets_at: NOW_S + 3600 },
     }, NOW_MS - 300_000);
-    await recordClaudeRateLimits("@system", {
+    await recordClaudeRateLimits(recordDir("@system"), {
       seven_day: { used_percentage: 45, resets_at: NOW_S + 86_400 },
     }, NOW_MS - 60_000);
 
@@ -241,17 +249,17 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     // since reached 100% (agent-busy). The idle session's statusline runs
     // again later (a mode toggle, a refreshInterval) with its old values, so
     // the write is skipped and its record keeps the older updatedAt.
-    await recordClaudeRateLimits("agent-idle-same-window", {
+    await recordClaudeRateLimits(recordDir("agent-idle-same-window"), {
       five_hour: { used_percentage: 2, resets_at: NOW_S + 3600 },
     }, NOW_MS - 900_000);
-    await recordClaudeRateLimits("agent-busy", {
+    await recordClaudeRateLimits(recordDir("agent-busy"), {
       five_hour: { used_percentage: 100, resets_at: NOW_S + 3600 },
     }, NOW_MS - 600_000);
-    await recordClaudeRateLimits("agent-idle-same-window", {
+    await recordClaudeRateLimits(recordDir("agent-idle-same-window"), {
       five_hour: { used_percentage: 2, resets_at: NOW_S + 3600 },
     }, NOW_MS - 5_000);
     // A session that last saw the previous window, written most recently.
-    await recordClaudeRateLimits("agent-idle-old-window", {
+    await recordClaudeRateLimits(recordDir("agent-idle-old-window"), {
       five_hour: { used_percentage: 3, resets_at: NOW_S - 14_400 },
     }, NOW_MS - 1_000);
 
@@ -266,13 +274,13 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     // carry the same resets_at. The footer showed 96%; the real usage was 20%.
     const resetsAt = 1795176000;
     const at = (s: number) => s * 1000;
-    await recordClaudeRateLimits("phase1-cleanup", { seven_day: { used_percentage: 96, resets_at: resetsAt } }, at(1794810325));
-    await recordClaudeRateLimits("older-idle-a", { seven_day: { used_percentage: 95, resets_at: resetsAt } }, at(1794805000));
-    await recordClaudeRateLimits("older-idle-b", { seven_day: { used_percentage: 93, resets_at: resetsAt } }, at(1794790000));
+    await recordClaudeRateLimits(recordDir("phase1-cleanup"), { seven_day: { used_percentage: 96, resets_at: resetsAt } }, at(1794810325));
+    await recordClaudeRateLimits(recordDir("older-idle-a"), { seven_day: { used_percentage: 95, resets_at: resetsAt } }, at(1794805000));
+    await recordClaudeRateLimits(recordDir("older-idle-b"), { seven_day: { used_percentage: 93, resets_at: resetsAt } }, at(1794790000));
     // Two agents wrote 19 and 20 in the same second; a later one wrote 20.
-    await recordClaudeRateLimits("today-a", { seven_day: { used_percentage: 19, resets_at: resetsAt } }, at(1794940000));
-    await recordClaudeRateLimits("today-b", { seven_day: { used_percentage: 20, resets_at: resetsAt } }, at(1794940000));
-    await recordClaudeRateLimits("today-c", { seven_day: { used_percentage: 20, resets_at: resetsAt } }, at(1794945000));
+    await recordClaudeRateLimits(recordDir("today-a"), { seven_day: { used_percentage: 19, resets_at: resetsAt } }, at(1794940000));
+    await recordClaudeRateLimits(recordDir("today-b"), { seven_day: { used_percentage: 20, resets_at: resetsAt } }, at(1794940000));
+    await recordClaudeRateLimits(recordDir("today-c"), { seven_day: { used_percentage: 20, resets_at: resetsAt } }, at(1794945000));
 
     const result = await readClaudeUsage(new Date(at(1794950256)));
     expect(result.error).toBe(false);
@@ -283,10 +291,10 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     // After a limit reset: the limited agent still holds 100% for the old
     // window, and another agent has started the new window at 2%. The old
     // window's usage must not count, or the watchdog never nudges.
-    await recordClaudeRateLimits("agent-limited", {
+    await recordClaudeRateLimits(recordDir("agent-limited"), {
       five_hour: { used_percentage: 100, resets_at: NOW_S - 60 },
     }, NOW_MS - 120_000);
-    await recordClaudeRateLimits("agent-fresh", {
+    await recordClaudeRateLimits(recordDir("agent-fresh"), {
       five_hour: { used_percentage: 2, resets_at: NOW_S + 5 * 3600 - 300 },
     }, NOW_MS - 300_000);
 
@@ -298,10 +306,10 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
   test("reports of one window with slightly different reset times are combined", async () => {
     // agent-b's later resets_at does not put agent-a's newer report in an
     // older window.
-    await recordClaudeRateLimits("agent-b", {
+    await recordClaudeRateLimits(recordDir("agent-b"), {
       five_hour: { used_percentage: 4, resets_at: NOW_S + 3630 },
     }, NOW_MS - 60_000);
-    await recordClaudeRateLimits("agent-a", {
+    await recordClaudeRateLimits(recordDir("agent-a"), {
       five_hour: { used_percentage: 90, resets_at: NOW_S + 3600 },
     }, NOW_MS);
 
@@ -312,31 +320,31 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
 
   test("does not rewrite the record when the windows are unchanged", async () => {
     const windows = { five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 } };
-    await recordClaudeRateLimits("agent-a", windows, NOW_MS);
-    await recordClaudeRateLimits("agent-a", windows, NOW_MS + 60_000);
+    await recordClaudeRateLimits(recordDir("agent-a"), windows, NOW_MS);
+    await recordClaudeRateLimits(recordDir("agent-a"), windows, NOW_MS + 60_000);
     expect((await Bun.file(recordPath("agent-a")).json()).updatedAt).toBe(NOW_S);
 
-    await recordClaudeRateLimits("agent-a", { five_hour: { used_percentage: 10, resets_at: NOW_S + 3600 } }, NOW_MS + 120_000);
+    await recordClaudeRateLimits(recordDir("agent-a"), { five_hour: { used_percentage: 10, resets_at: NOW_S + 3600 } }, NOW_MS + 120_000);
     expect((await Bun.file(recordPath("agent-a")).json()).updatedAt).toBe(NOW_S + 120);
   });
 
   test("deleteClaudeRateLimits removes the record and temp files only", async () => {
-    await recordClaudeRateLimits("agent-a", { five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 } }, NOW_MS);
-    const dir = join(home, "agents", "agent-a");
+    await recordClaudeRateLimits(recordDir("agent-a"), { five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 } }, NOW_MS);
+    const dir = recordDir("agent-a");
     await writeFile(join(dir, `${CLAUDE_RATE_LIMITS_FILE}.tmp.4242`), "{}");
     await writeFile(join(dir, "outbox.jsonl"), "");
 
     await deleteClaudeRateLimits(dir);
 
     expect((await readdir(dir)).sort()).toEqual(["outbox.jsonl"]);
-    await deleteClaudeRateLimits(join(home, "agents", "missing")); // no folder: no error
+    await deleteClaudeRateLimits(recordDir("missing")); // no folder: no error
   });
 
   test("skips unreadable records and folders without one", async () => {
-    await mkdir(join(home, "agents", "agent-empty"), { recursive: true });
-    await mkdir(join(home, "agents", "agent-bad"), { recursive: true });
+    await mkdir(recordDir("agent-empty"), { recursive: true });
+    await mkdir(recordDir("agent-bad"), { recursive: true });
     await writeFile(recordPath("agent-bad"), "{not json");
-    await recordClaudeRateLimits("agent-ok", {
+    await recordClaudeRateLimits(recordDir("agent-ok"), {
       seven_day: { used_percentage: 33, resets_at: NOW_S + 86_400 },
     }, NOW_MS);
 
@@ -345,8 +353,9 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
   });
 
   test("returns no reading and no error when nothing is recorded", async () => {
+    await recordClaudeRateLimits(join(home, "agents", "old-flat-agent"), { five_hour: { used_percentage: 99, resets_at: NOW_S + 3600 } });
     expect(await readClaudeUsage(new Date(NOW_MS))).toEqual({ data: null, error: false });
-    await mkdir(join(home, "agents", "agent-a"), { recursive: true });
+    await mkdir(recordDir("agent-a"), { recursive: true });
     expect(await readClaudeUsage(new Date(NOW_MS))).toEqual({ data: null, error: false });
   });
 });

@@ -62,7 +62,7 @@ function agyMeta(id: string, extra?: Record<string, unknown>) {
     meta: {
       id,
       session_id: `sid-${id}`,
-      tmux_session: `tmux-${id}`,
+      tmux_session: `itsybitsy-abcdef01-${id}`,
       prompt: "test",
       manager: null,
       created: "2026-09-01T00:00:00Z",
@@ -262,7 +262,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     const manager = {
       id: managerId,
       session_id: "sid-mgr",
-      tmux_session: "tmux-mgr-1",
+      tmux_session: "itsybitsy-abcdef01-mgr-1",
       prompt: "manage",
       manager: null,
       created: "2026-09-01T00:00:00Z",
@@ -303,7 +303,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     await runForTicks(3, { heartbeatExists: false });
 
     // The warning was enqueued to the manager's outbox exactly once.
-    const outboxPath = join(agentOutboxDir(managerId), OUTBOX_FILENAME);
+    const outboxPath = join(await agentOutboxDir({ repoPath: tempRepo, id: managerId, meta: manager }), OUTBOX_FILENAME);
     const outbox = await readFile(outboxPath, "utf8").catch(() => "");
     expect(outbox).toContain("hooks never fired");
     const lines = outbox.split("\n").filter((l) => l.trim().length > 0);

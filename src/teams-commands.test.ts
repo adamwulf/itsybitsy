@@ -180,9 +180,11 @@ describe("teams: sendMessage threads team into the outbox", () => {
     tempDir = await mkdtemp(join(tmpdir(), "team-send-thread-"));
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
+    setUserHome(tempDir);
+    await saveRegistry({ repos: [{ name: "test", path: tempDir }] });
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = agentOutboxDir("agent-abc");
+    queueDir = await agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner(() => makeSpawnResult());
@@ -192,6 +194,7 @@ describe("teams: sendMessage threads team into the outbox", () => {
   afterEach(async () => {
     resetSendSpawnRunner();
     resetUserConfigPath();
+    resetUserHome();
     resetCoordinatorHome();
     isPidAliveCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
@@ -240,7 +243,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
   // meta.json / meta.transient.json / agent.log — only the message queue
   // lives here.
   function queueDirOf(id: string): string {
-    return join(homeDir, "agents", id);
+    return join(homeDir, "agents", "test-machine", basename(repoDir), id);
   }
 
   // Plant an agent on disk so readAllAgents surfaces it, with a live-watchdog
@@ -263,6 +266,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     await mkdir(repoDir, { recursive: true });
     setUserHome(baseDir);
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
     setSendSpawnRunner(() => makeSpawnResult());
@@ -710,6 +714,7 @@ describe("teams: resolveTarget team branch", () => {
     await mkdir(repoDir, { recursive: true });
     setUserHome(baseDir);
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
     resetReadAgentMetaCache();
   });

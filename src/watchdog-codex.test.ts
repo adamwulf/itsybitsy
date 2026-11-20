@@ -99,7 +99,7 @@ function agentWithModel(id: string, state: AgentState, model: string): Agent {
     meta: {
       id,
       session_id: `sess-${id}`,
-      tmux_session: `tmux-${id}`,
+      tmux_session: `itsybitsy-abcd1234-${id}`,
       prompt: "test",
       manager: null,
       created: "2026-03-05T00:00:00Z",
@@ -164,7 +164,7 @@ describe("Phase 6 — handler-level cli gating", () => {
       const a1 = agentWithModel("a1", "rate_limited", "codex:gpt-5.4-mini");
       await tick([a1]);
 
-      expect(countEnterCalls(spawnMock, "tmux-a1")).toBe(0);
+      expect(countEnterCalls(spawnMock, a1.meta.tmux_session)).toBe(0);
       expect(fetchUsageCalls).toBe(0);
       // The tracker's bypass flag stays untouched — the codex early-return runs
       // before any state mutation in the handler body.
@@ -181,7 +181,7 @@ describe("Phase 6 — handler-level cli gating", () => {
       await tick([a1]);
 
       // At least one Enter — confirms the claude branch still runs.
-      expect(countEnterCalls(spawnMock, "tmux-a1")).toBeGreaterThanOrEqual(1);
+      expect(countEnterCalls(spawnMock, a1.meta.tmux_session)).toBeGreaterThanOrEqual(1);
       expect(getTracker("a1").rateLimitBypassed).toBe(true);
     });
 
@@ -197,7 +197,7 @@ describe("Phase 6 — handler-level cli gating", () => {
       const a1 = agentWithModel("a1", "rate_limited", "sonnet");
       await tick([a1]);
 
-      expect(countEnterCalls(spawnMock, "tmux-a1")).toBeGreaterThanOrEqual(1);
+      expect(countEnterCalls(spawnMock, a1.meta.tmux_session)).toBeGreaterThanOrEqual(1);
     });
 
     test("empty model string: falls back to claude (still sends Enter)", async () => {
@@ -208,7 +208,7 @@ describe("Phase 6 — handler-level cli gating", () => {
       const a1 = agentWithModel("a1", "rate_limited", "");
       await tick([a1]);
 
-      expect(countEnterCalls(spawnMock, "tmux-a1")).toBeGreaterThanOrEqual(1);
+      expect(countEnterCalls(spawnMock, a1.meta.tmux_session)).toBeGreaterThanOrEqual(1);
     });
 
     test("unknown cli prefix 'gemini:foo': parseModel throws, falls back to claude (still sends Enter)", async () => {
@@ -219,7 +219,7 @@ describe("Phase 6 — handler-level cli gating", () => {
       const a1 = agentWithModel("a1", "rate_limited", "gemini:foo");
       await tick([a1]);
 
-      expect(countEnterCalls(spawnMock, "tmux-a1")).toBeGreaterThanOrEqual(1);
+      expect(countEnterCalls(spawnMock, a1.meta.tmux_session)).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -327,7 +327,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
       meta: {
         id: "agent-codex1",
         session_id: "sid-codex",
-        tmux_session: "tmux-codex1",
+        tmux_session: "itsybitsy-abcd1234-codex1",
         prompt: "test",
         manager: null,
         created: "2026-03-05T00:00:00Z",
@@ -370,7 +370,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
       meta: {
         id: "agent-claude1",
         session_id: "sid-claude",
-        tmux_session: "tmux-claude1",
+        tmux_session: "itsybitsy-abcd1234-claude1",
         prompt: "test",
         manager: null,
         created: "2026-03-05T00:00:00Z",
@@ -419,7 +419,7 @@ describe("Phase 6 — runPerAgentWatchdog permission-accept gating", () => {
       meta: {
         id: "agent-legacy1",
         session_id: "sid-legacy",
-        tmux_session: "tmux-legacy1",
+        tmux_session: "itsybitsy-abcd1234-legacy1",
         prompt: "test",
         manager: null,
         created: "2026-03-05T00:00:00Z",

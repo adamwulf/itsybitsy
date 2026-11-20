@@ -37,6 +37,8 @@ describe("sanitizeMachineName", () => {
     expect(sanitizeMachineName("  Adam's MacBook Pro\n")).toBe("Adam's MacBook Pro");
     expect(sanitizeMachineName("Mac‮Book​\x07Air")).toBe("MacBookAir");
     expect(sanitizeMachineName("work/home")).toBe("work-home");
+    expect(sanitizeMachineName("..")).toBe("");
+    expect(sanitizeMachineName(".")).toBe("");
     expect(sanitizeMachineName("x".repeat(40))).toBe("x".repeat(32));
     // The cap counts characters, not UTF-16 units, and leaves no trailing space.
     expect(sanitizeMachineName(`${"🍎".repeat(31)} b`)).toBe("🍎".repeat(31));
@@ -76,6 +78,13 @@ describe("loadMachineName", () => {
 
   test("an empty computer name and hostname give the fallback name", async () => {
     expect(await loadMachineName(fakeDeps({ exitCode: 0, stdout: "\n" }, ".local").deps)).toBe(FALLBACK_MACHINE_NAME);
+  });
+
+  test("independent readers derive the same name when they cannot save it", async () => {
+    await writeFile(join(home, ".itsybitsy"), "blocks directory creation");
+    for (let i = 0; i < 2; i++) {
+      expect(await loadMachineName(fakeDeps({ exitCode: 1, stdout: "" }, "studio.local").deps)).toBe("studio");
+    }
   });
 
   test("an empty file is detected again", async () => {

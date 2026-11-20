@@ -99,7 +99,9 @@ function mockSendSpawnRunner(calls: { args: string[]; cwd: string }[]) {
 }
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
-  return _makeAgent({ id, repoPath, archived });
+  const agent = _makeAgent({ id, repoPath, archived });
+  agent.meta.tmux_session = `itsybitsy-abcdef01-${id}`;
+  return agent;
 }
 
 /**
@@ -1007,7 +1009,7 @@ describe("DashboardComponent dialog and action handlers", () => {
   let actionTempDir: string | null = null;
   let configTempDir: string;
   // Writable repo root for send tests: sendMessage ENQUEUES to the agent's
-  // CENTRAL outbox dir (`<coordinatorHome>/agents/<id>/`), and the recipient
+  // CENTRAL outbox dir (`<coordinatorHome>/agents/<machine>/<repo>/<agent>/`), and the recipient
   // log/state writes still target the per-worktree agent dir — so send targets
   // need a real (writable) repoPath rather than a synthetic /repos/... path.
   // The coordinator home itself is pinned to configTempDir/coord-home in
@@ -1022,9 +1024,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
     setUserConfigPath(join(configTempDir, "config.json"));
     sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-send-"));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // Per-agent outboxes now live under getCoordinatorHome() / agents / <machine> / <repo> / <agent>.
     // Without this isolation, dashboard sends from this test suite would
-    // accumulate in the developer's real ~/.itsybitsy/agents/agent-test/
+    // accumulate in the developer's real ~/.itsybitsy/agents/<machine>/<repo>/agent-test/
     // outbox.jsonl, then leak into the next test run when sendMessage drains
     // them inline (no live watchdog in test setup), inflating sentMessages.
     const { setCoordinatorHome } = await import("../coordinator");
@@ -1045,7 +1047,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Mandatory sandbox: a resumable agent carries an enabled sandbox + paths.
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-test",
-      tmux_session: "tmux-agent-test",
+      tmux_session: "itsybitsy-abcdef01-agent-test",
       worktree: false,
       agentType: "manager",
       sandbox: { enabled: true, rawAllow: [], domains: [] },
@@ -1226,7 +1228,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-one",
-      tmux_session: "tmux-agent-one",
+      tmux_session: "itsybitsy-abcdef01-agent-one",
     }));
 
     const noopSpawn = (cmd: string[]) => ({
@@ -1370,7 +1372,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await mkdir(join(agentsDir, "agent-test"), { recursive: true });
     await mkdir(join(agentsDir, "agent-manager"), { recursive: true });
     await Bun.write(join(agentsDir, "agent-test", "meta.json"), JSON.stringify({
-      id: "agent-test", tmux_session: "tmux-agent-test", manager: "",
+      id: "agent-test", tmux_session: "itsybitsy-abcdef01-agent-test", manager: "",
     }));
     await Bun.write(join(agentsDir, "agent-manager", "meta.json"), JSON.stringify({
       id: "agent-manager", tmux_session: "tmux-agent-manager",
@@ -2411,7 +2413,7 @@ describe("Cross-repo send (E key)", () => {
   let dashboard: DashboardComponent;
   let sentMessages: { target: string; message: string }[] = [];
   // Writable repo root for the full-flow send test — sendMessage enqueues to
-  // the target's CENTRAL outbox dir (`<coordinatorHome>/agents/<id>/`), so
+  // the target's CENTRAL outbox dir (`<coordinatorHome>/agents/<machine>/<repo>/<agent>/`), so
   // the send target needs both a real repoPath (for log/state writes) and a
   // pinned coordinator home (so the central queue dir resolves into the
   // sandbox, not the developer's real ~/.itsybitsy/).
@@ -2431,9 +2433,9 @@ describe("Cross-repo send (E key)", () => {
 
   beforeEach(async () => {
     sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-esend-"));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // Per-agent outboxes now live under getCoordinatorHome() / agents / <machine> / <repo> / <agent>.
     // Without this isolation, queued messages from the full-flow send test
-    // would land in the developer's real ~/.itsybitsy/agents/agent-b/ and
+    // would land in the developer's real ~/.itsybitsy/agents/<machine>/<repo>/agent-b/ and
     // leak into subsequent runs (sendMessage drains inline when no live
     // watchdog), inflating sentMessages.
     const { setCoordinatorHome } = await import("../coordinator");
@@ -2594,7 +2596,7 @@ describe("Cross-repo send (E key)", () => {
 
     // Verify message was sent to agent-b's tmux session
     expect(sentMessages.length).toBeGreaterThanOrEqual(1);
-    const msg = sentMessages.find((m) => m.target === "=tmux-agent-b:");
+    const msg = sentMessages.find((m) => m.target === "=itsybitsy-abcdef01-agent-b:");
     expect(msg).toBeDefined();
     expect(msg!.message).toContain("hello cross-repo");
   });

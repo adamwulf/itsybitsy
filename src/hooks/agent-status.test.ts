@@ -13,6 +13,7 @@ import {
 } from "./agent-status";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
+import { saveRegistry } from "../registry";
 import { makeSpawnResult } from "../test-utils";
 import { WATCHDOG_SENTINEL } from "../watchdog";
 import { setUserHome, resetUserHome } from "../home";
@@ -28,7 +29,7 @@ import {
  *
  * The temp dirs this file already creates cover the AGENT dir, but not the
  * outbox: `executeResultActions` delivers through `agentOutboxDir`, which is
- * `<itsybitsy home>/agents/<agent id>/` — a completely different tree. Left at
+ * `<itsybitsy home>/agents/<machine>/<repo>/<agent>/` — a completely different tree. Left at
  * its default that home is the developer's REAL `~/.itsybitsy`, so running this
  * file wrote `agents/test-agent-001/outbox.jsonl` and
  * `agents/manager-001/outbox.jsonl` straight into the user's live agent
@@ -205,7 +206,8 @@ async function createTempAgentDir(): Promise<{
   cleanup: () => Promise<void>;
 }> {
   const base = await mkdtemp(join(tmpdir(), "ib-hook-test-"));
-  const agentsDir = join(base, "agents");
+  const agentsDir = join(base, ".itsybitsy", "agents");
+  await saveRegistry({ repos: [{ path: base, name: "fixture" }] });
   const agentId = "test-agent-001";
   const agentDir = join(agentsDir, agentId);
   await mkdir(agentDir, { recursive: true });

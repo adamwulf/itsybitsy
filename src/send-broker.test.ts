@@ -69,7 +69,7 @@ describe("send broker", () => {
   };
 
   beforeEach(async () => {
-    // The outbox (`~/.itsybitsy/agents/<id>/`) and teams.json resolve under
+    // The outbox (`~/.itsybitsy/agents/<machine>/<repo>/<agent>/`) and teams.json resolve under
     // this home, never the real one.
     home = await mkdtemp(join(tmpdir(), "ib-send-home-"));
     setUserHome(home);
@@ -79,6 +79,8 @@ describe("send broker", () => {
       { path: senderRepo, name: "hunch" },
       { path: targetRepo, name: "iris" },
     ];
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({ repos }));
+    await Bun.write(join(home, ".itsybitsy", "machine-name"), "studio");
     agentDir = join(senderRepo, ".itsybitsy", "agents", SENDER_ID);
     await writeAgent(senderRepo, SENDER_ID, {});
     await writeAgent(targetRepo, TARGET_ID, {});
@@ -131,9 +133,9 @@ describe("send broker", () => {
     return dir;
   }
 
-  /** The messages queued for an agent (`~/.itsybitsy/agents/<id>/outbox.jsonl`). */
-  async function outbox(id: string): Promise<Array<Record<string, unknown>>> {
-    const file = Bun.file(join(home, ".itsybitsy", "agents", id, "outbox.jsonl"));
+  /** The messages queued for an agent (`~/.itsybitsy/agents/<machine>/<repo>/<agent>/outbox.jsonl`). */
+  async function outbox(id: string, repo = id === TARGET_ID ? "iris" : "hunch"): Promise<Array<Record<string, unknown>>> {
+    const file = Bun.file(join(home, ".itsybitsy", "agents", "studio", repo, id, "outbox.jsonl"));
     if (!(await file.exists())) return [];
     return (await file.text()).split("\n").filter(Boolean).map((line) => JSON.parse(line));
   }
@@ -710,8 +712,8 @@ describe("send broker", () => {
         sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
       });
       expect(out?.ok).toBe(true);
-      // Queued for the iris agent (outboxes are keyed by id), from the caller.
-      expect((await outbox(SENDER_ID)).map((m) => [m.message, m.fromAgent])).toEqual([[MESSAGE, SENDER_ID]]);
+      expect(await outbox(SENDER_ID)).toEqual([]);
+      expect((await outbox(SENDER_ID, "iris")).map((m) => [m.message, m.fromAgent])).toEqual([[MESSAGE, SENDER_ID]]);
     });
 
     test("a routed caller whose watchdog is not live sends directly (null)", async () => {

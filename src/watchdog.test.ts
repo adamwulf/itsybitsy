@@ -2,6 +2,8 @@ import { test, expect, describe, beforeEach, afterEach, beforeAll, afterAll, moc
 import { join } from "path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
+import { setUserHome, resetUserHome } from "./home";
+import { saveRegistry } from "./registry";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { claudeUsageFromRecord, readClaudeUsage, recordClaudeRateLimits, type ClaudeRateLimits } from "./claude-rate-limits";
 import { agentOutboxDir, readOutbox } from "./outbox";
@@ -78,8 +80,9 @@ import {
   resetWatchdogReadAck,
   type AgentTracker,
 } from "./watchdog";
-import { writeAgentState, resetListTmuxSessionsCache, type AgentAck } from "./agents";
+import { writeAgentTransient, writeAgentState, resetListTmuxSessionsCache, type AgentAck } from "./agents";
 import {
+  sendMessage,
   setSendSpawnRunner,
   resetSendSpawnRunner,
 } from "./ib-commands";
@@ -112,7 +115,7 @@ setDefaultTimeout(60_000);
  * Per-process itsybitsy home for the whole file.
  *
  * Every watchdog notification is delivered through the outbox, whose queue and
- * lock live at `<itsybitsy home>/agents/<agent id>/` (`agentOutboxDir`). Left
+ * lock live at `<itsybitsy home>/agents/<machine>/<repo>/<agent>/` (`agentOutboxDir`). Left
  * at its default that home is the developer's REAL `~/.itsybitsy`, which is
  * shared with every other `bun test` process on the machine — and the agent ids
  * here are generic ("a1", "mgr", "spawner"), so two suites running at once
@@ -135,12 +138,15 @@ setDefaultTimeout(60_000);
  */
 let outboxHome: string;
 
-beforeAll(() => {
+beforeAll(async () => {
   outboxHome = mkdtempSync(join(tmpdir(), "ib-watchdog-home-"));
   setCoordinatorHome(outboxHome);
+  setUserHome(outboxHome);
+  await saveRegistry({ repos: [{ path: "/tmp/test", name: "test" }] });
 });
 
 afterAll(() => {
+  resetUserHome();
   resetCoordinatorHome();
   rmSync(outboxHome, { recursive: true, force: true });
 });
@@ -3321,6 +3327,33 @@ describe("runPerAgentWatchdog", () => {
     clearAllAgentsCache();
   });
 
+  test("sender and watchdog share an unregistered agent's queue without reading repo-id", async () => {
+    const repo = join(outboxHome, "unregistered");
+    const target = makeAgent({ repoPath: repo, id: "review" });
+    target.meta.tmux_session = "itsybitsy-deadbeef-review";
+    const agentDir = join(repo, ".itsybitsy", "agents", target.id);
+    mkdirSync(agentDir, { recursive: true });
+    // A read of this file would fail getRepoId's validation. A sandboxed
+    // sender only has the recipient's session metadata, just like the drainer.
+    await Bun.write(join(repo, ".itsybitsy", "repo-id"), "unreadable to sender");
+    await writeAgentTransient(agentDir, {
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), has_background_tasks: false,
+      tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false,
+      tmux_api_terms: false, tmux_api_safeguard: false,
+    });
+    expect((await sendMessage(target, "queued", { cwd: "/" })).ok).toBe(true);
+    setPerAgentReadMeta(async () => ({ meta: target.meta }));
+    setPerAgentSleep(async () => { worktreeExists = false; });
+    const messages: string[] = [];
+    setPerAgentDrain(async (_agent, dir) => {
+      messages.push(...(await readOutbox(dir)).map((m) => m.message));
+      worktreeExists = false;
+    });
+    setPerAgentReadState(async () => "running");
+    await runPerAgentWatchdog(target.id, repo);
+    expect(messages).toEqual(["queued"]);
+  });
+
   describe("rate-limit recovery from real pane text", () => {
     const BASE_MS = 1_800_000_000_000;
     const banner = "  ⎿  You've hit your weekly limit · resets 7am (America/Chicago)";
@@ -3352,7 +3385,7 @@ describe("runPerAgentWatchdog", () => {
     async function runPolls(polls: Array<[number, string, number]>): Promise<Array<[number, string]>> {
       const sent: Array<[number, string]> = [];
       let poll = 0;
-      const outbox = agentOutboxDir("agent-test1");
+      const outbox = await agentOutboxDir({ repoPath: "/tmp/test", id: "agent-test1", meta: { tmux_session: "itsybitsy-abcdef01-test1" } });
       // Take what the last poll queued, as a real drain would, so that the next
       // identical nudge isn't dropped as a duplicate of a pending one.
       const takeQueued = async () => {

@@ -214,7 +214,7 @@ describe("buildCodexStartContent — launch line", () => {
   });
 
   test("always grants --add-dir <coordinatorHome> so codex can write centralized state", async () => {
-    // Per-agent outboxes (`<coordinatorHome>/agents/<id>/outbox.jsonl`),
+    // Per-agent outboxes (`<coordinatorHome>/agents/<machine>/<repo>/<agent>/outbox.jsonl`),
     // team channels (`<coordinatorHome>/teams/...`), and `teams.json` all
     // live under the coordinator home. The --add-dir flags are emitted on every
     // codex spawn regardless of sandbox mode, so the entire coordinator home

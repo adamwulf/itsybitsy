@@ -20,7 +20,12 @@ describe("hookStatusline", () => {
     home = await mkdtemp(join(tmpdir(), "statusline-hook-test-"));
     projectDir = join(home, "project");
     await mkdir(join(projectDir, ".claude"), { recursive: true });
+    for (const id of ["agent-a", "agent-cli"]) {
+      await Bun.write(join(projectDir, ".itsybitsy", "agents", id, "meta.json"), JSON.stringify({ id, tmux_session: `itsybitsy-deadbeef-${id}` }));
+    }
     setUserHome(home);
+    await Bun.write(join(home, ".itsybitsy", "machine-name"), "studio");
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({ repos: [{ name: "repo", path: projectDir }] }));
     setCoordinatorHome(join(home, ".itsybitsy"));
     const calls: { command: string; input: string }[] = [];
     runs = calls;
@@ -55,7 +60,8 @@ describe("hookStatusline", () => {
   }
 
   function recordPath(agentId: string): string {
-    return join(home, ".itsybitsy", "agents", agentId, CLAUDE_RATE_LIMITS_FILE);
+    if (agentId === "@system") return join(home, ".itsybitsy", CLAUDE_RATE_LIMITS_FILE);
+    return join(home, ".itsybitsy", "agents", "studio", "repo", agentId, CLAUDE_RATE_LIMITS_FILE);
   }
 
   test("records rate_limits and passes the user's statusline output through", async () => {
@@ -71,6 +77,13 @@ describe("hookStatusline", () => {
       five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 },
       seven_day: { used_percentage: 11, resets_at: NOW_S + 86_400 },
     });
+  });
+
+  test("a worktree statusline records usage for its owning repo", async () => {
+    const worktree = join(projectDir, ".itsybitsy", "agents", "agent-a", "repo");
+    await mkdir(worktree, { recursive: true });
+    await hookStatusline(statuslineInput({ workspace: { project_dir: worktree } }), "agent-a", NOW_MS);
+    expect(await Bun.file(recordPath("agent-a")).exists()).toBe(true);
   });
 
   test("the project's statusLine wins over the user's", async () => {

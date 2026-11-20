@@ -268,7 +268,7 @@ function makeMockCtx(overrides?: {
 
 // Per-test isolated repo root + coordinator home. sendMessage now writes a
 // real outbox.jsonl + .outbox.lock under the CENTRAL outbox dir
-// (`agentOutboxDir(id)` → `<coordinatorHome>/agents/<id>/`), so send-path
+// (`agentOutboxDir(agent)` → `<coordinatorHome>/agents/<machine>/<repo>/<agent>/`), so send-path
 // tests MUST pin both: a fresh repoPath (the agent's worktree, used for
 // log/state writes) AND a fresh coordinator home (so the central queue dir
 // resolves into the sandbox instead of the developer's real ~/.itsybitsy/).
@@ -747,6 +747,7 @@ describe("handleSend", () => {
 
   test("onSubmit calls sendMessage", async () => {
     const agent = makeAgent({ id: "agent-1", repoPath: sendRepoDir });
+    agent.meta.tmux_session = "itsybitsy-abcd1234-agent-1";
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
     handleSend(ctx);
     const d = assertDialog(dialogs[0]!, "textarea");

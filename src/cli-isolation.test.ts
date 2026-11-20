@@ -541,11 +541,12 @@ describe("CLI routing cannot reach a live agent", () => {
     // its message queued and nothing typed: sendMessage leaves delivery to it.
     const RECIPIENT = "agent-peer";
 
-    const outboxFile = (home: string, id: string) => join(home, ".itsybitsy", "agents", id, "outbox.jsonl");
+    const outboxFile = (home: string, id: string) => join(home, ".itsybitsy", "agents", "studio", home === live.home ? "live-repo" : "caller-repo", id, "outbox.jsonl");
     const readOutboxRecords = async (home: string, id: string) =>
       (await readFile(outboxFile(home, id), "utf-8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
 
     beforeEach(async () => {
+      for (const home of [cli.home, live.home]) await Bun.write(join(home, ".itsybitsy", "machine-name"), "studio");
       // The live recipient has the same id and already has a queue: a write that
       // followed the id, or a HOME it should not have, changes these bytes.
       await Bun.write(
@@ -572,7 +573,7 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(await readOutboxRecords(cli.home, RECIPIENT)).toEqual([
         expect.objectContaining({ message: "real delivery", fromAgent: "agent-caller", raw: false }),
       ]);
-      expect(await readdir(join(cli.home, ".itsybitsy", "agents"))).toEqual([RECIPIENT]);
+      expect(await readdir(join(cli.home, ".itsybitsy", "agents", "studio", "caller-repo"))).toEqual([RECIPIENT]);
       expect(calls).toEqual([]);
       expect(await queueEntries(caller)).toEqual([]);
       expect(await queueEntries(peer)).toEqual([]);

@@ -156,6 +156,13 @@ import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table
 // be declared stuck.
 setDefaultTimeout(60_000);
 
+/** Register the fixture's repo under a throwaway user home for real queue operations. */
+async function useFixtureRepo(repo: string, home = join(repo, ".itsybitsy", "test-home")) {
+  setUserHome(home);
+  await saveRegistry({ repos: [{ path: repo, name: "test-repo" }] });
+  await Bun.write(join(home, ".itsybitsy", "machine-name"), "test-machine");
+}
+
 function makeAgent(
   id: string,
   repoPath: string,
@@ -264,6 +271,7 @@ describe("ib-commands", () => {
     beforeEach(async () => {
       spawnCalls = [];
       tempDir = await mkdtemp(join(tmpdir(), "send-test-"));
+      await useFixtureRepo(tempDir);
       // Create agent directory for log writing
       await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-abc"), { recursive: true });
 
@@ -272,10 +280,10 @@ describe("ib-commands", () => {
       // user's ~/.itsybitsy/config.json.
       setUserConfigPath(join(tempDir, "config.json"));
 
-      // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>,
+      // Per-agent outboxes now live under getCoordinatorHome() / agents / <machine> / <repo> / <agent>,
       // not under the per-worktree agent dir. Without this isolation, queued
       // messages would accumulate in the developer's real
-      // ~/.itsybitsy/agents/agent-abc/outbox.jsonl and leak from one test into
+      // ~/.itsybitsy/agents/<machine>/<repo>/agent-abc/outbox.jsonl and leak from one test into
       // the next (sendMessage drains inline when no live watchdog), inflating
       // spawnCalls / corrupting prefix assertions.
       const { setCoordinatorHome } = await import("./coordinator");
@@ -288,6 +296,7 @@ describe("ib-commands", () => {
     });
 
     afterEach(async () => {
+      resetUserHome();
       resetSendSpawnRunner();
       resetUserConfigPath();
       const { resetCoordinatorHome } = await import("./coordinator");
@@ -935,12 +944,13 @@ describe("sendMessage outbox integration", () => {
   // / agent.log / state writes. The outbox queue itself now lives under the
   // CENTRAL coordinator-home root (see queueDir below).
   let agentDir: string;
-  // Central outbox queue dir — agentOutboxDir(id) under setCoordinatorHome.
+  // Central outbox queue dir — agentOutboxDir(agent) under setCoordinatorHome.
   let queueDir: string;
 
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-outbox-"));
+    await useFixtureRepo(tempDir);
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     // Point the coordinator-home to a sandbox subdir so agentOutboxDir() resolves
@@ -948,7 +958,7 @@ describe("sendMessage outbox integration", () => {
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = agentOutboxDir("agent-abc");
+    queueDir = await agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
@@ -958,6 +968,7 @@ describe("sendMessage outbox integration", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     resetSendSpawnRunner();
     resetUserConfigPath();
     const { resetCoordinatorHome } = await import("./coordinator");
@@ -1112,12 +1123,13 @@ describe("sendMessage send-time attachment staging", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-stage-"));
+    await useFixtureRepo(tempDir);
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = agentOutboxDir("agent-abc");
+    queueDir = await agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
@@ -1127,6 +1139,7 @@ describe("sendMessage send-time attachment staging", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     resetSendSpawnRunner();
     resetUserConfigPath();
     resetMessageAttachmentStagerForTesting();
@@ -1434,7 +1447,7 @@ describe("teamSend send-time attachment staging", () => {
   let originalHome: string | undefined;
 
   function queueDirOf(id: string): string {
-    return join(homeDir, "agents", id);
+    return join(homeDir, "agents", "test-machine", basename(repoDir), id);
   }
   function reposArg() {
     return [{ path: repoDir, name: basename(repoDir) }];
@@ -1469,6 +1482,7 @@ describe("teamSend send-time attachment staging", () => {
     process.env.HOME = baseDir;
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
     setSendSpawnRunner(() => makeSpawnResult());
@@ -1782,6 +1796,7 @@ describe("retireAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "kill-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
     // Mock both the lifecycle spawn runner and the kill/pause spawn runner
     const runner = mockSpawnFn(spawnCalls);
@@ -1790,6 +1805,7 @@ describe("retireAgent (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     lifecycleSpawnCtx.reset();
     resetKillPauseSpawnRunner();
     resetSandboxProxyKillForTesting();
@@ -1836,7 +1852,7 @@ describe("retireAgent (native)", () => {
   test("retire uses checked authenticated seal cleanup when direct deletion is denied", async () => {
     const id = "agent-retire-sealed";
     const sealHome = join(tempDir, "seal-home");
-    setUserHome(sealHome);
+    await useFixtureRepo(tempDir, sealHome);
     const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     const agent = makeAgent(id, tempDir, "running", {
       sandbox: { enabled: true, rawAllow: [], domains: [] },
@@ -2150,11 +2166,12 @@ describe("retire → rehire recovery", () => {
     });
   }
 
-  // The manager's CENTRAL outbox queue dir (getCoordinatorHome()/agents/<id>).
+  // The manager's CENTRAL outbox queue dir (getCoordinatorHome()/agents/<machine>/<repo>/<agent>).
   // With HOME=tempDir/home and no setCoordinatorHome override, this resolves under
   // tempDir/home/.itsybitsy.
-  function managerQueueDir(managerId: string): string {
-    return join(tempDir, "home", ".itsybitsy", "agents", managerId);
+  async function managerQueueDir(managerId: string): Promise<string> {
+    const { agentOutboxDir } = await import("./outbox");
+    return agentOutboxDir({ repoPath: tempDir, id: managerId, meta: { tmux_session: `itsybitsy-1a2b3c4d-${managerId}` } });
   }
 
   // Spawn runner matching the existing no-worktree success test: tmux
@@ -2196,7 +2213,7 @@ describe("retire → rehire recovery", () => {
     expect(result.stdout).toContain(`Rehired agent: ${agentId}`);
 
     const { readOutbox } = await import("./outbox");
-    const queue = await readOutbox(managerQueueDir(managerId));
+    const queue = await readOutbox(await managerQueueDir(managerId));
     expect(queue.length).toBe(1);
     expect(queue[0]!.message).toBe(`your sub agent ${agentId} has been rehired`);
     expect(queue[0]!.fromAgent).toBe(agentId);
@@ -2218,7 +2235,7 @@ describe("retire → rehire recovery", () => {
     expect(result.ok).toBe(true);
 
     const { readOutbox } = await import("./outbox");
-    expect(await readOutbox(managerQueueDir("agent-bystander"))).toEqual([]);
+    expect(await readOutbox(await managerQueueDir("agent-bystander"))).toEqual([]);
   });
 
   // The watchdog lifecycle broker rehires for a sandboxed agent, in that
@@ -2320,7 +2337,7 @@ describe("retire → rehire recovery", () => {
     expect(result.ok).toBe(true);
 
     const { readOutbox } = await import("./outbox");
-    expect(await readOutbox(managerQueueDir(managerId))).toEqual([]);
+    expect(await readOutbox(await managerQueueDir(managerId))).toEqual([]);
   });
 
   test("enabled rehire resumes when its sandboxed caller cannot read the new seal", async () => {
@@ -3028,6 +3045,7 @@ describe("nukeAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "nuke-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep") || cmd.includes("list-sessions")
@@ -3037,6 +3055,7 @@ describe("nukeAgent (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
@@ -3138,6 +3157,7 @@ describe("nukeAllAgents (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "nukeall-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep") || cmd.includes("list-sessions")
@@ -3147,6 +3167,7 @@ describe("nukeAllAgents (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
@@ -3207,6 +3228,7 @@ describe("nukeAllAgents (native)", () => {
 
 describe("resumeAgent (native)", () => {
   let tempDir: string;
+  let fixtureHome: string;
   let spawnCalls: string[][];
 
   // Default runner mimics the canonical "stopped agent, no live tmux" path:
@@ -3250,6 +3272,8 @@ describe("resumeAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "resume-test-"));
+    fixtureHome = await mkdtemp("/tmp/ib-home-");
+    await useFixtureRepo(tempDir, fixtureHome);
     spawnCalls = [];
     dispatcherDryRunCalls = [];
     const runner = makeDefaultResumeRunner(spawnCalls);
@@ -3275,6 +3299,8 @@ describe("resumeAgent (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
+    await rm(fixtureHome, { recursive: true, force: true });
     lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     resetSendSpawnRunner();
@@ -4600,6 +4626,7 @@ describe("mergeAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "merge-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
   });
 
@@ -4824,7 +4851,7 @@ describe("mergeAgent (native)", () => {
 
   test("succeeds with full merge sequence and includes merge commit SHA in stdout", async () => {
     const sealHome = join(tempDir, "seal-home");
-    setUserHome(sealHome);
+    await useFixtureRepo(tempDir, sealHome);
     const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     const agent = makeAgent("agent-abc", tempDir);
@@ -4868,7 +4895,7 @@ describe("mergeAgent (native)", () => {
 
   test("merge reports checked seal cleanup failure before removing agent state", async () => {
     const sealHome = join(tempDir, "seal-home");
-    setUserHome(sealHome);
+    await useFixtureRepo(tempDir, sealHome);
     const id = "agent-seal-cleanup-failure";
     const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -5814,7 +5841,7 @@ describe("mergeAgent --keep (real git)", () => {
     homeDir = await mkdtemp(join(tmpdir(), "merge-keep-home-"));
     originalHome = process.env.HOME;
     process.env.HOME = homeDir;
-    setUserHome(homeDir);
+    await useFixtureRepo(tempDir, homeDir);
     setUserConfigPath(join(homeDir, ".itsybitsy", "config.json"));
     await git("init", "-q", "-b", "main", tempDir);
     await git("-C", tempDir, "config", "user.email", "test@example.com");
@@ -6249,6 +6276,7 @@ describe("newAgent (native)", () => {
     const fakeHome = join(tempDir, "home");
     await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
     process.env.HOME = fakeHome;
+    await saveRegistry({ repos: [{ path: tempDir, name: basename(tempDir) }] });
     // Populate the embedded defaults (including _all.md and _non_coordinator.md).
     // ensureAgentTypesDir() writes all embedded files only on first run.
     await (await import("./agent-types")).ensureAgentTypesDir();
@@ -12892,13 +12920,14 @@ describe("reassignAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "reassign-test-"));
+    await useFixtureRepo(tempDir);
     // Mock send spawn runner so notifications don't actually send
     setSendSpawnRunner((cmd: string[]) => ({
       stdout: new Response("").body!,
       stderr: new Response("").body!,
       exited: Promise.resolve(cmd.includes("has-session") ? 1 : 0), // no tmux sessions
     } as SpawnResult));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // Per-agent outboxes now live under getCoordinatorHome() / agents / <machine> / <repo> / <agent>.
     // Isolate so the reassign-notification sendMessage calls don't bleed into
     // the developer's real ~/.itsybitsy/agents/.../outbox.jsonl or leak from
     // one test to the next (sendMessage drains inline when no live watchdog).
@@ -12907,6 +12936,7 @@ describe("reassignAgent (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     resetSendSpawnRunner();
     const { resetCoordinatorHome } = await import("./coordinator");
     resetCoordinatorHome();
@@ -15790,6 +15820,7 @@ describe("respawnSelf (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "respawn-self-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
     const runner = mockSpawnFn(spawnCalls);
     lifecycleSpawnCtx.set(runner);
@@ -15798,6 +15829,7 @@ describe("respawnSelf (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     lifecycleSpawnCtx.reset();
     resetKillPauseSpawnRunner();
     resetNukeResumeSpawnRunner();
@@ -15939,9 +15971,11 @@ describe("long-running-op guard", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "op-guard-test-"));
+    await useFixtureRepo(tempDir);
   });
 
   afterEach(async () => {
+    resetUserHome();
     isPidAliveCtx.reset();
     nowMsCtx.reset();
     lifecycleSpawnCtx.reset();
@@ -16314,12 +16348,12 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
   let originalHome: string | undefined;
   let spawnCalls: string[][];
 
-  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<id>/
+  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<machine>/<repo>/<agent>/
   // under our test setCoordinatorHome(homeDir)). The per-worktree agent dir
   // still hosts meta.json / meta.transient.json / agent.log — only the message
   // queue lives here.
   function queueDirOf(id: string): string {
-    return join(homeDir, "agents", id);
+    return join(homeDir, "agents", "test-machine", basename(repoDir), id);
   }
 
   // Plant a survivor agent so readAllAgents surfaces it and any notice to it
@@ -16375,6 +16409,7 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
 
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
 
@@ -16688,12 +16723,12 @@ describe("teamAdd suppressJoinNotice opt", () => {
   let originalHome: string | undefined;
   let repoEntry: import("./registry").RepoEntry;
 
-  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<id>/
+  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<machine>/<repo>/<agent>/
   // under our test setCoordinatorHome(homeDir)). The per-worktree agent dir
   // still hosts meta.json / meta.transient.json / agent.log — only the message
   // queue lives here.
   function queueDirOf(id: string): string {
-    return join(homeDir, "agents", id);
+    return join(homeDir, "agents", "test-machine", basename(repoDir), id);
   }
 
   // Plant a real agent so readAllAgents surfaces it. The transient with a
@@ -16725,6 +16760,7 @@ describe("teamAdd suppressJoinNotice opt", () => {
     process.env.HOME = baseDir;
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
     repoEntry = { path: repoDir, name: basename(repoDir) };
     await saveRegistry({ repos: [repoEntry] });

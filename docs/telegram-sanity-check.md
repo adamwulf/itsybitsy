@@ -73,11 +73,11 @@ fails, fix it before moving on.
 ### 4.1. Outbound (catches token/chat-id misconfiguration)
 
 `ib tgsend` writes to `~/.itsybitsy/channels/telegram/outbox/` and waits
-up to 1s for `ib watch` to send the message and write back a result. If
-no result appears, the message stays queued in the outbox dir and will be
-processed when `ib watch` next starts (assuming Telegram is configured).
-`ib tgsend` itself does not know the chat ID and never talks to Telegram —
-only `ib watch` does.
+up to 3s for `ib watch` to send the message and write back a result. If
+no result appears, the message stays queued in the outbox dir and `ib watch`
+sends it automatically: right away once a running `ib watch` can reach
+Telegram again, or when the next `ib watch` starts. `ib tgsend` itself does
+not know the chat ID and never talks to Telegram — only `ib watch` does.
 
 Make sure `ib watch` is running, then in a separate shell:
 
@@ -93,13 +93,30 @@ prints `ok (3 parts, message_ids 1584, 1585, 1586)` instead, one id per chunk.
 
 A bare `ok` (or `ok (3 parts)` with no ids) is still a SUCCESS — it means the
 send landed but the API response carried no usable `message_id`. Only the
-`queued`/error paths below mean the message did not go out.
+`queued:`/error paths below mean the message did not go out yet.
 
-If you see `queued (ib watch may not be running, or Telegram is not configured)`,
-either `ib watch` is not running or its Telegram subsystem failed to boot
-(see step 4.2's stderr lines). The message is still on disk under the
-outbox directory and will be sent the next time `ib watch` boots
-successfully.
+A line starting with `queued:` (exit 0) means the message is on disk and will
+be sent automatically; do NOT resend it by hand, or it arrives twice. The rest
+of the line says why it has not gone out:
+
+- `queued: ib watch is not running; it will be sent when ib watch starts` —
+  start `ib watch`.
+- `queued: Telegram is unreachable (HTTP 502); ib watch will send it
+  automatically when the connection recovers` — Telegram or the network is
+  failing (the label may also be `errno:...` or `TimeoutError`). `ib watch`'s
+  stderr shows one `telegram outbox: send stalled (...)` line, then
+  `telegram outbox: send recovered ...` when the queue drains. Later messages
+  wait behind the stalled one, so order is kept.
+- `queued: ib watch is still connecting to Telegram (...)` — `ib watch` has
+  not reached Telegram since it started.
+- `queued: Telegram routing is disabled in this ib watch (...)` — see step
+  4.2's "Telegram routing disabled" lines; the message waits for an `ib watch`
+  start that boots Telegram.
+- `queued: ib watch is connected and still sending earlier messages ...` — a
+  backlog or a slow upload; it goes out in order.
+
+An error (non-zero exit, e.g. `sendMessage failed: Bad Request: chat not
+found`) is permanent: Telegram refused this request, and it is not retried.
 
 ### 4.2. Inbound, single message (catches dispatcher startup, allowlist,
 channel-reminder format)
@@ -351,6 +368,12 @@ use the integration day-to-day.
   in-flight fetch fails (ETIMEDOUT or similar) → the outer retry loop
   should backoff and recover. Watch `ib watch`'s stderr; one log line per
   unique error class is expected, not one per attempt.
+- **Outbound during an outage.** `ib tgsend` while Telegram is down (or Wi-Fi
+  is off) should print `queued: Telegram is unreachable (...)`, and the
+  message should arrive on its own once the connection is back — exactly once,
+  and before anything sent after it. A message whose send timed out AFTER
+  Telegram received it can arrive twice (`sendMessage` has no idempotency
+  key); that is accepted over losing it.
 - **Token in `config.json`.** Phase 2 added `ensureConfigFilePerms` to
   chmod the file to 0600 on every write. The token is sensitive — if you
   ever back up or share `~/.itsybitsy/config.json`, the bot token goes

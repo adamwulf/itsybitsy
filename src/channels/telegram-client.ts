@@ -275,7 +275,7 @@ export interface SendDocumentOptions {
 }
 
 /** Result of `sendPhoto` / `sendDocument`. Mirrors {@link SendMessageResult}
- *  so the outbox's 429-retry logic reads the same shape. */
+ *  so the outbox's retry logic reads the same shape. */
 export type SendFileResult =
   | { ok: true; result: TelegramMessage }
   | {
@@ -452,8 +452,9 @@ export class TelegramClient {
   }
 
   /** POST `sendMessage`. No retry loop — outbound is one-shot from the caller's
-   *  perspective. Phase 6 (`ib tgsend`) wraps this with one 429-retry of its
-   *  own; the dispatcher (Phase 5) doesn't retry on outbound failures.
+   *  perspective. The outbox (outbox.ts) retries transient failures (see
+   *  `isTransientStatus`); the dispatcher (Phase 5) doesn't retry on outbound
+   *  failures.
    *
    *  Goes through `readRaw` so the `Retry-After` HTTP header is read alongside
    *  the body's `parameters.retry_after`. Callers honoring 429 backoff should
@@ -509,7 +510,7 @@ export class TelegramClient {
 
   /** POST `setMessageReaction`. No retry loop — outbound is one-shot from the
    *  caller's perspective, same contract as {@link sendMessage}. The outbox
-   *  wraps this with a single 429-retry of its own.
+   *  retries transient failures itself.
    *
    *  `emoji` is sent as a one-element `reaction` array `[{type:"emoji",emoji}]`;
    *  passing `null` sends an empty `reaction` array, which clears the bot's
@@ -647,7 +648,7 @@ export class TelegramClient {
    *
    *  Telegram recompresses photos sent this way — callers wanting exact bytes
    *  (e.g. a PNG diff) should use {@link sendDocument} instead. No retry loop;
-   *  the outbox wraps this with a single 429-retry. Never logs the URL. */
+   *  the outbox retries transient failures. Never logs the URL. */
   async sendPhoto(opts: SendPhotoOptions): Promise<SendFileResult> {
     return this.sendMultipartFile("sendPhoto", "photo", opts.chat_id, opts.path, opts.caption);
   }

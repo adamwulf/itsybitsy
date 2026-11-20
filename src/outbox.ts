@@ -8,7 +8,7 @@
  * time interleave their chunks and Enters and land as one merged prompt.
  *
  * Fix: every write path ENQUEUES to a per-agent `outbox.jsonl` under
- * `<coordinatorHome>/agents/<id>/` (computed via `agentOutboxDir(id)`). The
+ * `<coordinatorHome>/agents/<machine>/<repo>/<id>/` (computed via `agentOutboxDir(repoPath, id)`). The
  * queue was moved out of the per-worktree agent dir so codex agents running
  * with `-s workspace-write` can write to any other agent's outbox — codex
  * spawns add the entire `<coordinatorHome>` as a writable root, and the
@@ -29,6 +29,11 @@
 
 import { join } from "path";
 import { rename, unlink, stat, readFile, appendFile, open, mkdir, rmdir } from "fs/promises";
+import { listRepos } from "./registry";
+import { getRepoId } from "./repo-id";
+import { loadMachineName } from "./machine-name";
+import { fullyQualifiedAgentId } from "./tui/row-keys";
+import type { AgentMeta } from "./agents";
 import { getCoordinatorHome } from "./coordinator";
 
 /** Filename for the per-agent message queue. */
@@ -36,20 +41,42 @@ export const OUTBOX_FILENAME = "outbox.jsonl";
 /** Filename for the per-session delivery lock. */
 export const OUTBOX_LOCK_FILENAME = ".outbox.lock";
 
-/**
- * Per-agent outbox directory under the coordinator home
- * (`~/.itsybitsy/agents/<id>/`). Centralizing the queue out of each agent's
- * per-worktree directory lets a codex agent running with `-s workspace-write`
- * write to ANY other agent's outbox via `ib send` — codex agents are sandboxed
- * to their own worktree plus any roots passed via `--add-dir`, so we add this
- * single root to every codex spawn (see `buildCodexLaunchArgs`).
- *
- * The agent's own log, state, and meta still live under the per-worktree
- * `<repoPath>/.itsybitsy/agents/<id>/` — only the message-delivery queue and
- * its lock move here.
- */
-export function agentOutboxDir(agentId: string): string {
-  return join(getCoordinatorHome(), "agents", agentId);
+/** Shared queue identity for enqueue, drain, statusline and teardown. */
+export async function agentOutboxDir(agent: {
+  repoPath: string;
+  id: string;
+  meta: Pick<AgentMeta, "tmux_session"> | null;
+}): Promise<string> {
+  const { repoPath, id: agentId, meta } = agent;
+  const repos = await listRepos();
+  let repo = repos.find((r) => r.path === repoPath);
+  if (!repo && repos.length) {
+    // A watchdog can start at the physical path of a registered symlink.
+    // Metadata suffices to compare directories even inside a leaf's sandbox.
+    const physical = await stat(repoPath).catch(() => null);
+    if (physical) {
+      for (const entry of repos) {
+        const candidate = await stat(entry.path).catch(() => null);
+        if (candidate?.ino === physical.ino && candidate.dev === physical.dev) {
+          repo = entry;
+          break;
+        }
+      }
+    }
+  }
+  let name = repo?.name;
+  if (name === undefined) {
+    // Only teardown of artifacts without session metadata needs the repo-id
+    // file. A live agent (including its sandboxed statusline) always uses the
+    // id embedded by spawn, whether or not its caller can read that file.
+    const repoId = meta === null ? await getRepoId(repoPath) : /^itsybitsy-([0-9a-f]{8})-.+$/.exec(meta.tmux_session)?.[1];
+    if (!repoId) throw new Error(`Cannot locate queue for '${agentId}': repo '${repoPath}' is unregistered and tmux_session has no repository id`);
+    name = `~${repoId}`;
+  }
+  for (const part of [name, agentId]) {
+    if (!part || part === "." || part === ".." || part.includes("/")) throw new Error("Invalid agent queue path component");
+  }
+  return join(getCoordinatorHome(), "agents", fullyQualifiedAgentId(await loadMachineName(), name, agentId));
 }
 
 /**
@@ -92,7 +119,7 @@ export interface OutboxMessage {
   noPassthrough?: boolean;
 }
 
-/** Path to an agent/coordinator outbox file, given the directory that holds meta.json. */
+/** Path to an agent/coordinator outbox file, given its queue directory. */
 export function outboxPath(dir: string): string {
   return join(dir, OUTBOX_FILENAME);
 }
@@ -249,7 +276,7 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
  * any error (including ENOENT) is ignored.
  *
  * Also attempts to rmdir `dir` itself afterwards — when this is called against
- * the centralized per-agent outbox dir (`agentOutboxDir(id)`), that dir is
+ * the centralized per-agent outbox dir (`agentOutboxDir(repoPath, id)`), that dir is
  * ours to create and clean up. The rmdir is best-effort: ENOENT (already
  * gone) and ENOTEMPTY (something else dropped a file in there) are both
  * ignored. The coordinator's outbox lives in `getCoordinatorHome()` directly,

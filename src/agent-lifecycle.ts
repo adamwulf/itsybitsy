@@ -649,6 +649,8 @@ export async function archiveAgent(
     return { archivePath: null, prunedTeams };
   }
 
+  const { meta } = await readAgentMeta(agentDir);
+  const queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: meta?.tmux_session ? meta : null });
   await mkdir(archiveFolder, { recursive: true });
 
   // output.log — move
@@ -785,8 +787,8 @@ export async function archiveAgent(
   // best-effort rmdir's the per-agent outbox subdir. The statusline's Claude
   // rate-limit record lives in the same folder and must go first, or the
   // rmdir fails and the folder stays for good.
-  await deleteClaudeRateLimits(agentOutboxDir(agentId));
-  await deleteAgentOutbox(agentOutboxDir(agentId));
+  await deleteClaudeRateLimits(queueDir);
+  await deleteAgentOutbox(queueDir);
 
   return { archivePath: archiveFolder, prunedTeams };
 }

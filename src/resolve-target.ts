@@ -117,7 +117,7 @@ export async function resolveSendTarget(
     const coordResult = await checkCoordinatorExists(ownRepo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
       const { agents } = await readAgents();
-      const coordinator = agents.find((a) => a.id === coordResult.agentId);
+      const coordinator = agents.find((a) => a.repoPath === ownRepo.path && a.id === coordResult.agentId);
       return { agent: coordinator || null, isSystemCoordinator: false };
     }
     return { agent: null, isSystemCoordinator: false, error: `Error: no coordinator found for repo ${repoDisplayName(ownRepo)}` };
@@ -182,7 +182,7 @@ export async function resolveSendTarget(
     const coordResult = await checkCoordinatorExists(repo.path);
     if (coordResult.exists && coordResult.isCoordinator) {
       const { agents } = await readAgents();
-      const coordinator = agents.find((a) => a.id === coordResult.agentId);
+      const coordinator = agents.find((a) => a.repoPath === repo.path && a.id === coordResult.agentId);
       return { agent: coordinator || null, isSystemCoordinator: false };
     }
     return { agent: null, isSystemCoordinator: false, error: `Error: no coordinator found for repo ${repoName}` };

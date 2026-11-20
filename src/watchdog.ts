@@ -1868,14 +1868,6 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     archived: false,
     children: [],
   };
-  // The per-agent outbox now lives under the CENTRAL coordinator-home root
-  // (`agentOutboxDir(agentId)` → `~/.itsybitsy/agents/<id>/`), not under the
-  // per-worktree agent dir. We watch that dir for outbox appends and drain
-  // from it. Ensure it exists so fs.watch doesn't throw on a fresh agent
-  // whose first outbox enqueue hasn't happened yet.
-  const outboxQueueDir = agentOutboxDir(agentId);
-  try { mkdirSync(outboxQueueDir, { recursive: true }); } catch { /* best-effort */ }
-
   let drainQueued = false;
   const drainNow = async (): Promise<void> => {
     // Coalesce redundant triggers: if a drain is already queued/running, one
@@ -1890,8 +1882,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     await runSessionExclusive(agentId, async () => {
       drainQueued = false; // allow new triggers to queue once we're delivering
       try {
-        await perAgentDrainFn(drainAgent, outboxQueueDir);
-      } catch { /* never crash the watchdog on a drain error */ }
+        const dir = await agentOutboxDir(drainAgent);
+        watchQueue(dir);
+        await perAgentDrainFn(drainAgent, dir);
+      } catch (error) {
+        console.error(`[watchdog] Cannot drain queue for ${agentId}: ${error}`);
+      }
     });
   };
 
@@ -1901,16 +1897,21 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   // depend on fs.watch firing.
   let watcher: FSWatcher | null = null;
   let watchDebounce: ReturnType<typeof setTimeout> | null = null;
-  try {
-    watcher = watch(outboxQueueDir, (_event, filename) => {
-      // Only react to outbox changes (filename may be null on some platforms —
-      // in that case react to any change, the mutex + file lock keep it safe).
-      if (filename && filename !== OUTBOX_FILENAME) return;
-      if (watchDebounce) clearTimeout(watchDebounce);
-      watchDebounce = setTimeout(() => { void drainNow(); }, OUTBOX_WATCH_DEBOUNCE_MS);
-    });
-  } catch {
-    watcher = null; // fs.watch unavailable — per-tick draining still covers it
+  let watchedDir: string | undefined;
+  function watchQueue(dir: string): void {
+    if (dir === watchedDir) return;
+    watcher?.close();
+    watchedDir = dir;
+    try {
+      mkdirSync(dir, { recursive: true });
+      watcher = watch(dir, (_event, filename) => {
+        if (filename && filename !== OUTBOX_FILENAME) return;
+        if (watchDebounce) clearTimeout(watchDebounce);
+        watchDebounce = setTimeout(() => { void drainNow(); }, OUTBOX_WATCH_DEBOUNCE_MS);
+      });
+    } catch {
+      watcher = null; // fs.watch unavailable — per-tick draining still covers it
+    }
   }
 
   // ── Spawn-request broker ──────────────────────────────────────────────────

@@ -42,7 +42,8 @@ export const defaultMachineNameDeps: MachineNameDeps = {
  */
 export function sanitizeMachineName(raw: string): string {
   const cleaned = raw.replace(/[\p{Cc}\p{Cf}]/gu, "").replace(/\//g, "-").trim();
-  return Array.from(cleaned).slice(0, MAX_MACHINE_NAME).join("").trimEnd();
+  const name = Array.from(cleaned).slice(0, MAX_MACHINE_NAME).join("").trimEnd();
+  return name === "." || name === ".." ? "" : name;
 }
 
 /** The computer name, else the hostname without `.local`, else the fallback; sanitized. */

@@ -1,3 +1,5 @@
+import { getRepoId } from "./repo-id";
+export { getRepoId } from "./repo-id";
 import * as runtimeNames from "./runtime-names";
 /**
  * Async wrappers for ib mutation commands.
@@ -1680,11 +1682,6 @@ export async function resumeAgent(
       stderr: "Cannot resume worktree:false Claude agent: could not resolve the trusted running ib command",
     };
   }
-
-  // Ensure the central per-agent outbox dir exists before the agent starts so
-  // the first enqueue doesn't race a missing-dir append. Idempotent — no-op
-  // when the dir already exists.
-  await mkdir(agentOutboxDir(agent.id), { recursive: true });
 
   // Acquire the long-running-op guard at the VERY TOP — above the coordinator
   // early-return below — so coordinator resets are guarded against a double-R
@@ -4384,12 +4381,11 @@ export async function sendMessage(
   // coordinator has no agent dir, so its queue/lock live in the coordinator
   // home directly so all coordinator senders serialize against ONE queue).
   // Otherwise the per-agent queue lives under the CENTRAL outbox root
-  // (`agentOutboxDir(id)` → `~/.itsybitsy/agents/<id>/`) so codex agents
+  // (`agentOutboxDir(agent)` → `~/.itsybitsy/agents/<machine>/<repo>/<agent>/`) so codex agents
   // running under `-s workspace-write` can write to other agents' outboxes.
   // Log/state writes still target the per-worktree agent dir
   // (`deliverMessage`), which is correct for both cases.
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
-  const queueDir = opts?.outboxDir ?? agentOutboxDir(agent.id);
 
   // Resolve sender at ENQUEUE time (depends on the sender process's cwd).
   const fromId = resolveSenderId(agent.repoPath, opts);
@@ -4452,7 +4448,9 @@ export async function sendMessage(
   // missing, enqueueOutbox mkdir's the queue dir so a queued message is never
   // silently dropped. A genuine write failure surfaces as an error rather than
   // an unhandled rejection.
+  let queueDir: string;
   try {
+    queueDir = opts?.outboxDir ?? await agentOutboxDir(agent);
     await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough });
   } catch (err) {
     // Enqueue failed — nothing is queued. Undo any staged copies so an
@@ -5796,40 +5794,6 @@ async function countAgents(agentsDir: string): Promise<number> {
 }
 
 /**
- * Read the repo-id from .itsybitsy/repo-id (or create one).
- * Mirrors get_repo_id() in ib bash.
- */
-export async function getRepoId(repoPath: string): Promise<string> {
-  const repoIdFile = runtimeNames.repoIdFile(repoPath);
-  let existing = "";
-  try {
-    existing = (await Bun.file(repoIdFile).text()).trim();
-  } catch (err) {
-    // Only a file that is genuinely absent may be (re)created. Any other read
-    // failure (a sandboxed agent's EPERM/EACCES, an I/O error) means an id may
-    // already exist that we simply cannot see; generating a new one would
-    // silently re-key every tmux session name (`itsybitsy-<repoId>-<agent>`)
-    // and sealed record of the repo. Fail loudly instead.
-    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      throw new Error(
-        `Cannot read repository id ${repoIdFile}: ${err instanceof Error ? err.message : String(err)}. ` +
-          `Refusing to generate a new id over one that may already exist.`,
-      );
-    }
-  }
-  if (/^[0-9a-f]{8}$/.test(existing)) return existing;
-  if (existing) throw new Error(`Invalid repository id in ${repoIdFile}: expected 8 lowercase hexadecimal characters`);
-
-  // Generate new 8 hex char ID
-  const bytes = new Uint8Array(4);
-  crypto.getRandomValues(bytes);
-  const newId = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
-  await mkdir(runtimeNames.runtimeDir(repoPath), { recursive: true });
-  await Bun.write(repoIdFile, newId + "\n");
-  return newId;
-}
-
-/**
  * Build settings.local.json content for an agent worktree.
  * Mirrors build_agent_settings() + build_settings_json() in ib bash.
  */
@@ -6965,7 +6929,7 @@ export async function newAgent(
   // (so codex agents under `-s workspace-write` can write to other agents'
   // outboxes — see agentOutboxDir). mkdir it before the agent starts so the
   // first enqueue doesn't race a missing-dir append.
-  await mkdir(agentOutboxDir(id), { recursive: true });
+  await mkdir(await agentOutboxDir({ repoPath: rootRepoPath, id, meta: { tmux_session: tmuxSession } }), { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
   // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are

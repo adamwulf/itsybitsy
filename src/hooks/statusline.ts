@@ -15,6 +15,10 @@
  * only skips the record, and the user's statusline still runs.
  */
 
+import { getCoordinatorHome } from "../coordinator";
+import { agentOutboxDir } from "../outbox";
+import { readAgentMeta } from "../agents";
+import { matchWorktreeRepo, agentDir } from "../runtime-names";
 import { isValidAgentId } from "../validation";
 import { InjectionContext } from "../types";
 import { parseStatuslineRateLimits, recordClaudeRateLimits } from "../claude-rate-limits";
@@ -61,18 +65,25 @@ export async function hookStatusline(
     // Not JSON: nothing to record, but the user's statusline still runs.
   }
 
+  const projectDir = projectDirOf(input);
   if (agentId !== undefined && (isValidAgentId(agentId) || agentId === SYSTEM_AGENT_ID)) {
     const windows = parseStatuslineRateLimits(input);
     if (windows) {
       try {
-        await recordClaudeRateLimits(agentId, windows, now);
+        if (agentId === SYSTEM_AGENT_ID) {
+          await recordClaudeRateLimits(getCoordinatorHome(), windows, now);
+        } else if (projectDir) {
+          const repo = matchWorktreeRepo(projectDir)?.[1] ?? projectDir;
+          const { meta } = await readAgentMeta(agentDir(repo, agentId));
+          if (meta) await recordClaudeRateLimits(await agentOutboxDir({ repoPath: repo, id: agentId, meta }), windows, now);
+        }
       } catch {
         // Best effort: a failed write only skips this reading.
       }
     }
   }
 
-  const inner = await resolveUserStatusLine(projectDirOf(input));
+  const inner = await resolveUserStatusLine(projectDir);
   if (!inner) return { output: "", exitCode: 0 };
   try {
     const { stdout, exitCode } = await statuslineRunnerCtx.fn(inner.command, stdin);

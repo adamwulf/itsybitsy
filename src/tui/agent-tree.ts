@@ -4,13 +4,14 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { resolveAgentIcon, isVisibleUnderRunningFilter, subtreeHasNonStopped, type Agent, type FlatEntry, type PeerSectionEntry } from "../agents";
+import { resolveAgentIcon, isRunningState, isVisibleUnderRunningFilter, subtreeHasNonStopped, type Agent, type FlatEntry, type RemoteEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
-import { RESET, BOLD, DIM, GREEN, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
-import { isPeerSectionKind, peerEntryKey, remoteDisplayName } from "./peer-sections";
-import { peerLinkStateText } from "./peers-dialog";
+import { RESET, BOLD, DIM, ITALIC, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
+import { collectPeerRepos, peerEntryKey, remoteDisplayName, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
+import { repoDisplayName, type RepoEntry } from "../registry";
+import type { PeerLinkState } from "../peers/poller";
 import { localAgentKey, repoRowKey } from "./row-keys";
 import { FALLBACK_MACHINE_NAME } from "../machine-name";
 
@@ -182,8 +183,8 @@ const SYSTEM_COORDINATOR_ID = "__system-coordinator__";
 /**
  * The selection key of a row on the machine named `machine`, or null for an
  * inert one (parent-header). Every agent row is keyed by its fully qualified
- * id `<machine>/<repo>/<agent>` and a repo header by `<machine>/<repo>`
- * (src/tui/row-keys.ts); a peer-section row uses its peer's name as the
+ * id `<machine>/<repo>/<agent>` and a repo header by `/<lowercased repo>`
+ * (src/tui/row-keys.ts); a remote agent uses its peer's name as the
  * machine (peerEntryKey). The system coordinator keeps its sentinel.
  */
 function entryKey(f: FlatEntry, machine: string): string | null {
@@ -191,19 +192,18 @@ function entryKey(f: FlatEntry, machine: string): string | null {
     case "system-coordinator":
       return SYSTEM_COORDINATOR_ID;
     case "repo-header":
-      return repoRowKey(machine, f.repoRegistryName);
+      return repoRowKey(f.repoRegistryName);
     case "parent-header":
       return null;
     case "agent":
       return localAgentKey(machine, f.agent);
-    case "peer-header":
     case "remote-repo-header":
     case "remote-agent":
       return peerEntryKey(f);
   }
 }
 
-/** Widest state column of the peer sections: a remote state is the other install's text. */
+/** Widest state column for remote agents: a remote state is the other install's text. */
 const MAX_REMOTE_STATE_COL_WIDTH = 16;
 
 /**
@@ -224,34 +224,14 @@ function highlightRow(truncated: string, selected: boolean, width: number): stri
   return `${REVERSE}${truncated.replaceAll(RESET, RESET + REVERSE)}${" ".repeat(pad)}${RESET}`;
 }
 
-/**
- * A paired install's section header (SPEC §20.5): `◆ <name> · <state>`, the
- * state being `connected`, `last seen N ago` or `not connected yet`. A long
- * name is cut so the state stays on screen.
- */
-export function formatPeerHeaderRow(
-  entry: Extract<PeerSectionEntry, { kind: "peer-header" }>,
-  selected: boolean,
-  width: number,
-  now: number,
-): string {
-  const state = peerLinkStateText(entry, now);
-  const nameRoom = Math.max(1, width - visibleWidth(`◆  · ${state}`));
-  const name = truncateToWidth(entry.peerName, nameRoom, "…");
-  const stateColor = entry.connected ? GREEN : DIM;
-  const line = `${BOLD}◆ ${name}${RESET} ${DIM}·${RESET} ${stateColor}${state}${RESET}`;
-  return highlightRow(truncateToWidth(line, width, ""), selected, width);
-}
-
-/** A remote repo header, under its peer's header; dimmed while the peer is not connected. */
 export function formatRemoteRepoRow(
-  entry: Extract<PeerSectionEntry, { kind: "remote-repo-header" }>,
+  entry: Extract<RemoteEntry, { kind: "remote-repo-header" }>,
   selected: boolean,
   width: number,
 ): string {
-  const style = entry.stale ? DIM : BOLD;
-  const name = truncateToWidth(entry.repoName, Math.max(1, width - visibleWidth("  ▾ ")), "…");
-  return highlightRow(truncateToWidth(`  ${style}▾ ${name}${RESET}`, width, ""), selected, width);
+  const triangle = entry.agentCount ? "▾" : "▸";
+  const name = truncateToWidth(entry.repoName, Math.max(1, width - 2), "…");
+  return highlightRow(truncateToWidth(`${BOLD}${triangle} ${name}${RESET}`, width, ""), selected, width);
 }
 
 /**
@@ -262,31 +242,33 @@ export function formatRemoteRepoRow(
  * while the peer is not connected.
  */
 export function formatRemoteAgentRow(
-  entry: Extract<PeerSectionEntry, { kind: "remote-agent" }>,
+  entry: Extract<RemoteEntry, { kind: "remote-agent" }>,
   selected: boolean,
   width: number,
   nameColWidth: number,
   stateColWidth: number,
 ): string {
-  const prefix = `  ${entry.connector}`;
+  const prefix = entry.connector;
   const name = truncateToWidth(remoteDisplayName(entry.remote), Math.max(1, nameColWidth - visibleWidth(prefix)), "…");
   const namePad = " ".repeat(Math.max(0, nameColWidth - visibleWidth(prefix) - visibleWidth(name)));
   const fullState = displayState(entry.remote.state);
   const state = truncateToWidth(fullState, stateColWidth, "…");
   const statePad = " ".repeat(Math.max(0, stateColWidth - visibleWidth(state)));
   const line = entry.stale
-    ? `${DIM}${prefix}${name}${namePad}  ${state}${statePad}${RESET}`
-    : `${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${RESET}${statePad}`;
+    ? `${ITALIC}${DIM}${prefix}${name}${namePad}  ${state}${statePad}${RESET}`
+    : `${ITALIC}${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${statePad}${RESET}`;
   return highlightRow(truncateToWidth(line, width, ""), selected, width);
 }
 
 /** The name and state column widths for the visible remote agent rows at `width`. */
-function remoteColumnWidths(visible: FlatEntry[], width: number): { nameColWidth: number; stateColWidth: number } {
+function remoteColumnWidths(visible: FlatEntry[], width: number, localIndent: string): { nameColWidth: number; stateColWidth: number } {
   let nameColWidth = 0;
   let stateColWidth = MIN_STATE_COL_WIDTH;
+  let indent = localIndent;
   for (const item of visible) {
+    if (item.kind === "remote-repo-header") indent = "";
     if (item.kind !== "remote-agent") continue;
-    nameColWidth = Math.max(nameColWidth, visibleWidth(`  ${item.connector}${remoteDisplayName(item.remote)}`));
+    nameColWidth = Math.max(nameColWidth, visibleWidth(indent + item.connector + remoteDisplayName(item.remote)));
     stateColWidth = Math.max(stateColWidth, visibleWidth(displayState(item.remote.state)));
   }
   stateColWidth = Math.min(stateColWidth, MAX_REMOTE_STATE_COL_WIDTH);
@@ -410,19 +392,9 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
 /** Agent tree component with height constraint and scrolling */
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
-  /**
-   * The peer sections (SPEC §20.5), drawn below the local tree: built by
-   * src/tui/peer-sections.ts from the poller's state and set by the dashboard
-   * through setPeerSections. Kept apart from `_flatList`, so `flatList` (which
-   * favorites, the question jump and every other local lookup read) stays
-   * local-only, and no filter of the local tree touches them: the V filter
-   * does not apply, and the Favorites tab shows none except the selected-row
-   * carve-out. `visibleList` DOES include them: the `@` jump
-   * (agent-actions.ts handleFuzzyAgent) reads visibleList and stays local
-   * only because it keeps just the agent, repo-header and system-coordinator
-   * kinds — do not widen that filter.
-   */
-  private _peerList: PeerSectionEntry[] = [];
+  private peerRepos = new Map<string, PeerRepo>();
+  /** Local single-repo trees normally omit their header. Peering needs its registration, even when empty. */
+  registeredRepos: readonly RepoEntry[] = [];
   private selectedIndex = 0;
   private _maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
@@ -430,7 +402,7 @@ export class AgentTreeComponent implements Component {
   private selectedId: string | null = null;
   /**
    * The selected local row's repo path (a repo header's own, an agent's); null
-   * for the system coordinator, a peer-section row or no selection. Set with
+   * for the system coordinator, a remote row or no selection. Set with
    * selectedId. Rows share a key only for duplicate registry names from before
    * names were unique (SPEC §17.1 Row keys); the key plus this path names the
    * one row the user chose (matchesSelection), through refreshes, rows added
@@ -491,7 +463,7 @@ export class AgentTreeComponent implements Component {
 
   /**
    * This machine's name (src/machine-name.ts): the first segment of every
-   * local row key (SPEC §17.1, src/tui/row-keys.ts). The dashboard sets it at
+   * local agent key (SPEC §17.1, src/tui/row-keys.ts). The dashboard sets it at
    * startup, before any row is selected or favorited.
    */
   machineName: string = FALLBACK_MACHINE_NAME;
@@ -585,62 +557,57 @@ export class AgentTreeComponent implements Component {
     return this.favoriteAgentIds.has(this.agentKey(agent));
   }
 
-  /** The peer sections' rows, as last set. */
-  get peerList(): PeerSectionEntry[] {
-    return this._peerList;
-  }
-
-  /**
-   * Replace the peer sections (SPEC §20.5). The local rows keep their indices,
-   * since the sections come after them. A selected remote row is found again by
-   * its key; one that is gone moves the selection to the row now at its index,
-   * as a vanished local row does.
-   */
-  setPeerSections(list: PeerSectionEntry[]): void {
-    this._peerList = list;
+  setPeerLinks(links: readonly PeerLinkState[]): void {
+    this.peerRepos = collectPeerRepos(links);
     this.resyncAfterFilterChange();
   }
 
-  /** The local tree's rows (filters applied), then the peer sections' visible rows. */
-  get visibleList(): FlatEntry[] {
-    const local = this.localVisibleList();
-    const peers = this.visiblePeerEntries();
-    return peers.length === 0 ? local : [...local, ...peers];
+  private localRows(): FlatEntry[] {
+    const rows = this.flatList.filter((f) => f.kind !== "agent" || !f.agent.archived);
+    const repo = this.registeredRepos.length === 1 ? this.registeredRepos[0] : undefined;
+    if (!repo || (!this.peerRepos.size && this.selectedId !== repoRowKey(repo.name))
+        || rows.some((row) => row.kind === "repo-header")) return rows;
+    const agents = rows.filter((row) => row.kind === "agent");
+    const header: FlatEntry = { kind: "repo-header", repoName: repoDisplayName(repo), repoRegistryName: repo.name,
+      repoPath: repo.path, hasAgents: agents.length > 0, hasRunningAgents: agents.some((r) => isRunningState(r.agent.state)),
+      hasNonStoppedAgents: agents.some((r) => isVisibleUnderRunningFilter(r.agent.state)) };
+    const coordinator = rows.filter((r) => r.kind === "system-coordinator");
+    // A single root in the headerless layout has no leading connector.
+    const oneRoot = agents.filter((r) => r.depth === 0).length === 1;
+    return [...coordinator, header, ...agents.map((r) => oneRoot
+      ? { ...r, connector: r.depth === 0 ? "└── " : "    " + r.connector } : r)];
   }
 
-  /**
-   * The peer-section rows to show. All of them, except in the Favorites tab,
-   * which shows none: only the selected remote row stays (with its peer header,
-   * and its repo header for an agent), like the tab's other selected-row
-   * carve-out, so switching tabs never moves the global selection.
-   */
-  private visiblePeerEntries(): PeerSectionEntry[] {
-    if (!this.favoritesOnly) return this._peerList;
-    const key = this.hasSelection ? this.selectedId : null;
-    if (key === null) return [];
-    const index = this._peerList.findIndex((e) => peerEntryKey(e) === key);
-    if (index === -1) return [];
-    const selected = this._peerList[index]!;
-    const kept: PeerSectionEntry[] = [selected];
-    for (let i = index - 1; i >= 0; i--) {
-      const row = this._peerList[i]!;
-      if (row.peerId !== selected.peerId) break;
-      if (row.kind === "peer-header") {
-        kept.unshift(row);
-        break;
+  /** Insert each peer forest after its local agents. Unmatched repos follow in display order. */
+  private unifiedRows(local: FlatEntry[]): FlatEntry[] {
+    if (this.peerRepos.size === 0) return local;
+    const remaining = new Map(this.peerRepos);
+    const rows: FlatEntry[] = [];
+    const agentsFor = (repo: PeerRepo) => visibleRemoteAgents(repo, (row) => this.isSelectedRow(row)
+      || (!this.favoritesOnly && (this.repoFilter !== "running-only" || isVisibleUnderRunningFilter(row.remote.state))));
+    for (let i = 0; i < local.length; i++) {
+      const header = local[i]!;
+      const repo = header.kind === "repo-header" ? remaining.get(repoRowKey(header.repoRegistryName)) : undefined;
+      if (header.kind !== "repo-header" || !repo) {
+        rows.push(header);
+        continue;
       }
-      if (row.kind === "remote-repo-header" && selected.kind === "remote-agent" && kept.length === 1
-          && row.repoPath === selected.remote.repoPath) {
-        kept.unshift(row);
-      }
+      remaining.delete(repoRowKey(header.repoRegistryName));
+      const agents = agentsFor(repo);
+      rows.push(agents.length > 0 && !header.hasAgents ? { ...header, hasAgents: true } : header);
+      while (local[i + 1]?.kind === "agent") rows.push(local[++i]!);
+      for (const agent of agents) rows.push(agent);
     }
-    return kept;
+    for (const repo of remaining.values()) {
+      rows.push(repo.header);
+      for (const agent of agentsFor(repo)) rows.push(agent);
+    }
+    return rows;
   }
 
-  /** The local tree's visible rows: the V filter and the Favorites view applied. */
-  private localVisibleList(): FlatEntry[] {
-    const base = this.flatList.filter((f) => f.kind !== "agent" || !f.agent.archived);
-    if (this.repoFilter === "all" && !this.favoritesOnly) return base;
+  get visibleList(): FlatEntry[] {
+    const base = this.unifiedRows(this.localRows());
+    if (!this.peerRepos.size && this.repoFilter === "all" && !this.favoritesOnly) return base;
     // Running-only and the Favorites view can hide intermediate agents, so
     // they need a key → agent lookup over the whole flat list (the favorites
     // ancestor walk and the connector rebuild). Build it once per read —
@@ -652,10 +619,20 @@ export class AgentTreeComponent implements Component {
     if (this.repoFilter !== "all") entries = this.applyRepoFilter(entries);
     if (this.favoritesOnly) entries = this.dropAgentlessRepoHeaders(entries);
     entries = this.pruneEmptyParentHeaders(entries);
-    if (!needsLookup) return entries;
+
     // The precomputed connectors reference hidden ancestors, so rebuild them
     // against only the visible subset.
-    return recomputeConnectorsForVisible(entries, allAgents, this.machineName);
+    if (needsLookup) entries = recomputeConnectorsForVisible(entries, allAgents, this.machineName);
+    if (this.peerRepos.size > 0) {
+      // A following remote root continues the local roots' outermost branch.
+      let remoteFollows = false;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const row = entries[i]!;
+        if (row.kind !== "agent") remoteFollows = row.kind === "remote-agent";
+        else if (remoteFollows) entries[i] = { ...row, connector: row.connector.replace(/^└/, "├").replace(/^    /, "│   ") };
+      }
+    }
+    return entries;
   }
 
   /** Map every agent's fully qualified id in the flat list to the agent. */
@@ -718,9 +695,10 @@ export class AgentTreeComponent implements Component {
    */
   private dropAgentlessRepoHeaders(entries: FlatEntry[]): FlatEntry[] {
     return entries.filter((f, i) => {
-      if (f.kind !== "repo-header") return true;
+      if (f.kind !== "repo-header" && f.kind !== "remote-repo-header") return true;
       if (this.isSelectedRow(f)) return true;
-      return entries[i + 1]?.kind === "agent";
+      const next = entries[i + 1];
+      return next?.kind === "agent" || next?.kind === "remote-agent";
     });
   }
 
@@ -731,33 +709,18 @@ export class AgentTreeComponent implements Component {
    */
   private applyRepoFilter(entries: FlatEntry[]): FlatEntry[] {
     const sticky = this._stickyRevealedRepoPath;
-    return entries.filter((f) => {
-      if (f.kind === "system-coordinator") return true;
-      // Parent-directory group headers are a pure display device — they carry
-      // no running/stopped semantics and are never hidden by the V-filter.
-      if (f.kind === "parent-header") return true;
-      if (f.kind === "repo-header") {
-        // non-empty gates on any agents at all; running-only gates on any
-        // NON-STOPPED agent (a repo whose agents are all stopped is hidden).
-        const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasNonStoppedAgents;
-        if (passes) return true;
-        if (this.pinnedRepoPaths.has(f.repoPath)) return true;
-        return sticky !== null && f.repoPath === sticky;
-      }
-      // The V filter does not apply to peer sections (and they are added after
-      // this local pass anyway).
-      if (f.kind !== "agent") return true;
-      // Only hide individual agents in running-only mode.
-      if (this.repoFilter !== "running-only") return true;
-      // running-only hides ONLY stopped agents; every other state is shown.
-      if (isVisibleUnderRunningFilter(f.agent.state)) return true;
-      // Keep an agent visible if any descendant in its subtree is non-stopped,
-      // so managers retain their hierarchical context instead of having their
-      // surviving children orphaned under a hidden (stopped) parent.
-      if (subtreeHasNonStopped(f.agent)) return true;
-      // Keep the currently-selected agent visible even if it is stopped, so a
-      // filter flip doesn't yank the selection out from under the user.
-      return this.isSelectedRow(f);
+    const agentsVisible = entries.filter((f) => {
+      if (f.kind !== "agent" || this.repoFilter !== "running-only") return true;
+      // Keep local managers that provide context for a non-stopped descendant.
+      return isVisibleUnderRunningFilter(f.agent.state) || subtreeHasNonStopped(f.agent) || this.isSelectedRow(f);
+    });
+    return agentsVisible.filter((f, i) => {
+      if (f.kind !== "repo-header" && f.kind !== "remote-repo-header") return true;
+      const next = agentsVisible[i + 1];
+      if (next?.kind === "agent" || next?.kind === "remote-agent" || this.isSelectedRow(f)) return true;
+      if (f.kind === "remote-repo-header") return false;
+      const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasNonStoppedAgents;
+      return passes || this.pinnedRepoPaths.has(f.repoPath) || f.repoPath === sticky;
     });
   }
 
@@ -810,7 +773,7 @@ export class AgentTreeComponent implements Component {
     // Only stick if the matching repo-header would otherwise be filtered
     // out by the active filter — otherwise it's already visible on its own
     // merits and sticky would just hide stale state on the next toggle.
-    const header = this._flatList.find(
+    const header = this.localRows().find(
       (f) => f.kind === "repo-header" && f.repoPath === repoPath
     );
     if (!header || header.kind !== "repo-header") {
@@ -832,7 +795,7 @@ export class AgentTreeComponent implements Component {
    * Whether `f` is the row named by `key` and the remembered selectedRowRepo:
    * its key, and for a local row its repo too. Rows share a key only for
    * duplicate registry names from before names were unique (SPEC §17.1 Row
-   * keys); the repo tells them apart. A peer-section row has no repo, so its
+   * keys); the repo tells them apart. A remote row has no repo, so its
    * key alone names it.
    */
   private matchesSelection(f: FlatEntry, key: string | null): boolean {
@@ -929,9 +892,9 @@ export class AgentTreeComponent implements Component {
       // parent-header rows are inert (non-selectable) — nothing is "selected"
       // when the index happens to land on one.
       if (item.kind === "parent-header") return null;
-      // A peer-section row is its own selection kind, never `agent`: nothing
+      // A remote row is its own selection kind, never `agent`: nothing
       // that reads a local agent from the selection can be handed a remote one.
-      if (item.kind === "peer-header" || item.kind === "remote-repo-header" || item.kind === "remote-agent") {
+      if (item.kind === "remote-repo-header" || item.kind === "remote-agent") {
         return { kind: "remote", entry: item };
       }
       return { kind: "agent", agent: item.agent };
@@ -944,8 +907,8 @@ export class AgentTreeComponent implements Component {
     return sel?.kind === "agent" ? sel.agent : null;
   }
 
-  /** The selected peer-section row (SPEC §20.5), or null when the selection is local or empty. */
-  get selectedRemote(): PeerSectionEntry | null {
+  /** The selected remote row (SPEC §20.5), or null when the selection is local or empty. */
+  get selectedRemote(): RemoteEntry | null {
     const sel = this.selection;
     return sel?.kind === "remote" ? sel.entry : null;
   }
@@ -1002,7 +965,7 @@ export class AgentTreeComponent implements Component {
     // Repo headers may be filtered out by repoFilter; set selectedId first
     // so updateStickyReveal can decide whether to keep the header visible,
     // then re-find selectedIndex in the post-sticky visibleList.
-    const header = this._flatList.find(
+    const header = this.localRows().find(
       (f) => f.kind === "repo-header" && f.repoPath === repoPath
     );
     if (!header) return false;
@@ -1150,7 +1113,7 @@ export class AgentTreeComponent implements Component {
     if (anchors.length === 0) return;
 
     // Helper: get agent indices for the repo anchor at anchors[ai] (its local
-    // agents, or a remote repo's remote agents). When skipStopped is set,
+    // and remote agents). When skipStopped is set,
     // stopped agents are excluded so jumping always lands on a live
     // (non-stopped) agent.
     const agentsForAnchor = (ai: number, skipStopped: boolean): number[] => {
@@ -1161,9 +1124,7 @@ export class AgentTreeComponent implements Component {
       const result: number[] = [];
       for (let i = anchor.index + 1; i < endPos; i++) {
         const item = visible[i];
-        const state = anchor.kind === "repo-header"
-          ? (item?.kind === "agent" ? item.agent.state : null)
-          : (item?.kind === "remote-agent" ? item.remote.state : null);
+        const state = item?.kind === "agent" ? item.agent.state : item?.kind === "remote-agent" ? item.remote.state : null;
         if (state === null) continue;
         if (skipStopped && state === "stopped") continue;
         result.push(i);
@@ -1265,7 +1226,7 @@ export class AgentTreeComponent implements Component {
    * the first row that is, else -1. Rows share a key only for duplicates
    * registered before names were unique (two repos with one name, two peers
    * with one name; SPEC §17.1 Row keys); for local rows the repo tells them
-   * apart, and preferring the current index keeps a peer-section row in place.
+   * apart, and preferring the current index keeps a remote row in place.
    */
   private indexOfKey(rows: FlatEntry[], key: string, preferred: number): number {
     const at = rows[preferred];
@@ -1326,17 +1287,15 @@ export class AgentTreeComponent implements Component {
     const idx = this.indexOfKey(visible, selectedId, this.selectedIndex);
     if (idx !== -1) {
       this.selectedIndex = idx;
+      this.selectedRowRepo = AgentTreeComponent.rowRepoPath(visible[idx]!);
     } else {
-      // Selected item gone — clamp to valid range. A gone LOCAL row clamps
-      // within the local rows (the peer sections follow them), so retiring the
-      // bottom-most local agent lands on the local row above it, not on a peer
-      // header. With no local row left, or for a gone remote row, the range is
-      // the whole list.
-      const firstPeerRow = visible.findIndex((f) => isPeerSectionKind(f.kind));
-      const localRows = firstPeerRow === -1 ? visible.length : firstPeerRow;
-      const local = this.isLocalKey(selectedId);
-      const rows = local && localRows > 0 ? localRows : visible.length;
-      this.selectedIndex = Math.min(this.selectedIndex, rows - 1);
+      this.selectedIndex = Math.min(this.selectedIndex, visible.length - 1);
+      if (this.selectedRowRepo !== null || this.isLocalKey(selectedId)) {
+        const local = (row: FlatEntry) => row.kind === "agent" || row.kind === "repo-header" || row.kind === "system-coordinator";
+        const previous = visible.slice(0, this.selectedIndex + 1).findLastIndex(local);
+        const nearest = previous >= 0 ? previous : visible.findIndex(local);
+        if (nearest >= 0) this.selectedIndex = nearest;
+      }
       this.updateSelectedId();
     }
     this.ensureSelectedVisible();
@@ -1433,10 +1392,10 @@ export class AgentTreeComponent implements Component {
       }
     }
     const stateColWidth = computeStateColWidth(visible);
-    // The peer sections align their own columns, so the local ones are the
+    // Remote agents align their own columns, so the local ones are the
     // same with or without them.
-    const remoteColumns = remoteColumnWidths(visible, width);
-    const now = Date.now();
+    const remoteColumns = remoteColumnWidths(visible, width, repoIndent);
+    const remoteOnlyStart = visible.findIndex((row) => row.kind === "remote-repo-header");
 
     // Scroll indicator at top (indented with the subtree when grouping so it
     // doesn't float left of the rows it summarizes).
@@ -1446,13 +1405,11 @@ export class AgentTreeComponent implements Component {
 
     for (let i = start; i < end; i++) {
       const item = visible[i]!;
-      if (item.kind === "peer-header") {
-        lines.push(formatPeerHeaderRow(item, selectionActive && i === this.selectedIndex, width, now));
-      } else if (item.kind === "remote-repo-header") {
+      if (item.kind === "remote-repo-header") {
         lines.push(formatRemoteRepoRow(item, selectionActive && i === this.selectedIndex, width));
       } else if (item.kind === "remote-agent") {
         lines.push(formatRemoteAgentRow(
-          item, selectionActive && i === this.selectedIndex, width,
+          { ...item, connector: (remoteOnlyStart < 0 || i < remoteOnlyStart ? repoIndent : "") + item.connector }, selectionActive && i === this.selectedIndex, width,
           remoteColumns.nameColWidth, remoteColumns.stateColWidth,
         ));
       } else if (item.kind === "system-coordinator") {

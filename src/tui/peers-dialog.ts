@@ -202,7 +202,7 @@ export function formatSince(ms: number): string {
 
 /**
  * A peer's connection state as plain text: `connected`, `last seen N ago`, or
- * `not connected yet`. The dialog and the tree's peer headers both show it.
+ * `not connected yet`. The dialog and the remote agent info panel both show it.
  */
 export function peerLinkStateText(link: Pick<PeerLinkState, "connected" | "lastOkAt">, now: number): string {
   if (link.connected) return "connected";

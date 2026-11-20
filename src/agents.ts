@@ -2114,35 +2114,12 @@ export type FlatEntry =
   | { kind: "repo-header"; repoName: string; repoRegistryName: string; repoPath: string; hasAgents: boolean; hasRunningAgents: boolean; hasNonStoppedAgents: boolean }
   | { kind: "parent-header"; parentDir: string; displayName: string }
   | { kind: "system-coordinator"; state: string; age: string }
-  | PeerSectionEntry;
+  | RemoteEntry;
 
-/**
- * The rows of the Agents tree's peer sections (SPEC §20.5): a paired
- * install's header, then the repos and agents it last reported. Only
- * `AgentTreeComponent`'s peer sections hold them (src/tui/peer-sections.ts
- * builds them from the poller's state); `flattenAgentTree`, the watcher and
- * every local consumer never see one. They are kinds of their own, not flags
- * on the local ones, so no code that expects a local agent can be handed a
- * remote one: a remote agent is `remote`, never `agent`.
- *
- * `stale` (the peer is not connected) dims the last list received.
- */
-export type PeerSectionEntry =
-  | {
-      kind: "peer-header";
-      peerId: string;
-      /** The local name from peers.json. */
-      peerName: string;
-      connected: boolean;
-      lastOkAt: number | null;
-      lastError: string | null;
-      /** Repos and agents in the last list received; null until one arrives. */
-      repoCount: number | null;
-      agentCount: number | null;
-    }
-  /** `repoName` is the remote repo's display name shown; `repoRegistryName` keys the row (SPEC §20.5). */
-  | { kind: "remote-repo-header"; peerId: string; peerName: string; repoName: string; repoRegistryName: string; repoPath: string; agentCount: number; stale: boolean }
-  | { kind: "remote-agent"; peerId: string; peerName: string; remote: RemoteAgent; connector: string; stale: boolean };
+/** Read-only dashboard rows. A local repo always keeps its local header. */
+export type RemoteEntry =
+  | { kind: "remote-repo-header"; peerName: string; repoName: string; repoRegistryName: string; agentCount: number }
+  | { kind: "remote-agent"; peerId: string; peerName: string; remote: RemoteAgent; connector: string; stale: boolean; lastOkAt: number | null };
 
 /**
  * Whether an agent's render state should count as "actively working" for the

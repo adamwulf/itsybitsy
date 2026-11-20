@@ -12,7 +12,7 @@ import { RED, RESET, REVERSE, YELLOW } from "./colors";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import { keyOf, selectById } from "./test-tree-keys";
 import { localAgentKey } from "./row-keys";
-import { flattenPeerSections, peerEntryKey } from "./peer-sections";
+import { peerEntryKey } from "./peer-repos";
 
 function makeAgent(id: string, state: string = "running", overrides: Partial<Agent> = {}): Agent {
   return {
@@ -1712,8 +1712,8 @@ describe("fully qualified row keys", () => {
   test("the same agent id locally, on a peer, and on two peers is a row of its own each", () => {
     const { tree } = twoRepos();
     const remote = { id: "dup", nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", state: "running", agentType: "worker", manager: null };
-    const link = (id: string, name: string) => ({ id, name, connected: true, lastOkAt: 1, lastError: null, agents: [remote] });
-    tree.setPeerSections(flattenPeerSections([link("a1".repeat(32), "Laptop"), link("b2".repeat(32), "Desk")]));
+    const link = (id: string, name: string) => ({ id, name, connected: true, lastOkAt: 1, lastError: null, repos: [{ registryName: remote.repoRegistryName, displayName: remote.repoName }], agents: [remote] });
+    tree.setPeerLinks([link("a1".repeat(32), "Laptop"), link("b2".repeat(32), "Desk")]);
     const keys: string[] = [];
     for (let i = 0; i < tree.visibleList.length; i++) {
       tree.moveSelection(1);
@@ -1721,15 +1721,14 @@ describe("fully qualified row keys", () => {
       if (sel?.kind === "agent") keys.push(tree.agentKey(sel.agent));
       if (sel?.kind === "remote" && sel.entry.kind === "remote-agent") keys.push(peerEntryKey(sel.entry));
     }
-    expect(keys).toEqual(["studio/alpha/dup", "studio/alpha/kid", "studio/beta/dup", "Laptop/alpha/dup", "Desk/alpha/dup"]);
-    // Selecting a remote row never selects the local agent with that id.
-    expect(tree.selectedAgent).toBeNull();
+    expect(keys).toEqual(["studio/alpha/dup", "studio/alpha/kid", "Laptop/alpha/dup", "Desk/alpha/dup", "studio/beta/dup"]);
+    expect(tree.selectedAgent?.repoRegistryName).toBe("beta");
   });
 
   test("a vanished local row clamps within the local rows (local keys start with this machine's name)", () => {
     const { tree, betaDup } = twoRepos();
     const remote = { id: "x", nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null };
-    tree.setPeerSections(flattenPeerSections([{ id: "a1".repeat(32), name: "Laptop", connected: true, lastOkAt: 1, lastError: null, agents: [remote] }]));
+    tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, lastOkAt: 1, lastError: null, repos: [{ registryName: remote.repoRegistryName, displayName: remote.repoName }], agents: [remote] }]);
     tree.selectAgent(betaDup);
     tree.setFlatList(tree.flatList.filter((f) => !(f.kind === "agent" && f.agent === betaDup)));
     expect(tree.selection?.kind).toBe("repo-header");

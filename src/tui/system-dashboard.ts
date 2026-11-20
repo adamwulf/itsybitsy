@@ -78,7 +78,7 @@ export function buildDashboardRows(flatList: FlatEntry[]): SystemDashboardRow[] 
       // the system dashboard table doesn't render them.
       continue;
     }
-    // Peer-section rows live only in the Agents tree's peer sections; the
+    // Remote rows live only in the Agents tree; the
     // watcher's flat list (this table's input) never has one.
     if (entry.kind !== "agent") continue;
     const agent = entry.agent;

@@ -18,10 +18,8 @@
  *   "request timed out", and the next tick redials. Closing the connection is
  *   what ends the timed-out request, so it cannot overlap the next one.
  * - Per-peer state lives only in memory: connected or not, `lastOkAt`,
- *   `lastError`, and the last agent list received, which is kept after the
- *   peer drops (the tree's peer section, src/tui/peer-sections.ts, shows it
- *   dimmed with "last seen"). Nothing is written to
- *   disk.
+ *   `lastError`, and the last repo and agent lists received. The unified tree
+ *   keeps disconnected agents dimmed and shows last contact in their info panel.
  * - {@link PeerPoller.onChange} fires when what a reader can see changes:
  *   connected, the error, the agent list, the name, or the set of peers. A
  *   successful poll that changes nothing but `lastOkAt` does not fire it.
@@ -100,7 +98,7 @@ interface Link {
   lastError: string | null;
   repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
-  /** `agents` as JSON, to tell a changed list from the same one. */
+  /** The complete snapshot as JSON, to tell a changed list from the same one. */
   snapshotKey: string | null;
 }
 
@@ -312,11 +310,11 @@ export class PeerPoller {
         reject(new PeerRequestTimeout());
       });
       requestAgents(conn).then(
-        (agents) => {
+        (snapshot) => {
           if (settled) return;
           settled = true;
           cancel();
-          resolve(agents);
+          resolve(snapshot);
         },
         (err: unknown) => {
           if (settled) return;

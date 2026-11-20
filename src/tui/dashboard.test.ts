@@ -34,10 +34,10 @@ import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
-import { peerEntryKey } from "./peer-sections";
+import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
-import { DIM, RED } from "./colors";
+import { DIM, ITALIC, RED } from "./colors";
 import { getStateColors } from "./color-scheme";
 import * as agentActions from "./agent-actions";
 import * as paneManager from "./pane-manager";
@@ -8902,7 +8902,7 @@ const PEERS_OTHER = "0a".repeat(32);
 
 /**
  * A scripted stand-in for the peer service (src/peers/service.ts), for the
- * Peers dialog and the tree's peer sections. `set` changes its view and
+ * Peers dialog and the tree's remote rows. `set` changes its view and
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
@@ -9075,9 +9075,9 @@ describe("Peers dialog", () => {
       ],
       // E has no link state yet: the poller has not reached it.
       links: [
-        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), lastError: null, agents: [] },
-        { id: C, name: "C", connected: false, lastOkAt: Date.now() - 125_000, lastError: "closed by the other side", agents: [] },
-        { id: D, name: "D", connected: false, lastOkAt: null, lastError: "timed out", agents: null },
+        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] },
+        { id: C, name: "C", connected: false, lastOkAt: Date.now() - 125_000, lastError: "closed by the other side", repos: [], agents: [] },
+        { id: D, name: "D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
       ],
     });
     const rows = rendered(dashboard).map(stripAnsi);
@@ -9093,7 +9093,7 @@ describe("Peers dialog", () => {
     expect(rows[rows.findIndex((r) => r.includes("● connected")) + 1]).toContain(`C         ${"1b".repeat(5)}`);
 
     // A change from the service redraws the state.
-    service.set({ links: [{ id: OTHER, name: "Laptop B", connected: false, lastOkAt: Date.now() - 3_000, lastError: "not a peer", agents: [] }] });
+    service.set({ links: [{ id: OTHER, name: "Laptop B", connected: false, lastOkAt: Date.now() - 3_000, lastError: "not a peer", repos: [], agents: [] }] });
     const out = text(dashboard);
     expect(out).toContain(`Laptop B  ${OTHER_SHORT}  ● last seen 3s ago`);
     expect(out).toContain("not a peer");
@@ -9112,8 +9112,8 @@ describe("Peers dialog", () => {
     } as unknown as TUI);
     const service = new FakePeerService();
     dashboard.setPeerService(service);
-    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), lastError: null, agents: [] };
-    // The Teams tab draws no peer section (the Agents tab's case is under "Peer sections").
+    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] };
+    // The Teams tab draws only its local tree.
     dashboard.setSidebarMode("teams");
 
     // Closed: the poller's background changes draw nothing.
@@ -9364,7 +9364,7 @@ describe("Peers dialog", () => {
     const { dashboard, service } = open();
     service.set({
       peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }],
-      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, lastError: "e".repeat(160), agents: null }],
+      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, lastError: "e".repeat(160), repos: null, agents: null }],
     });
     const stages: PairStage[] = [
       { stage: "connecting" },
@@ -9387,22 +9387,20 @@ describe("Peers dialog", () => {
   });
 });
 
-// The Agents tree's peer sections and the read-only guard (SPEC §20.5). The
+// The unified Agents tree and the read-only guard (SPEC §20.5). The
 // poller's state comes from the scripted FakePeerService; tmux and git go
 // through recording fakes, so nothing here reaches a real session or worktree.
-describe("Peer sections in the Agents tree", () => {
+describe("Unified peer repos in the Agents tree", () => {
   const PEER_B = "0b".repeat(32);
   const PEER_C = "0c".repeat(32);
   const PEER_D = "0d".repeat(32);
   const WIDTH = 160;
-  /** The peers' names in links(): a peer-section row's key starts with its peer's name. */
+  /** The peers' names in links(): a remote row's key starts with its peer's name. */
   const PEER_NAMES: Record<string, string> = { [PEER_B]: "Laptop B", [PEER_C]: "Laptop C", [PEER_D]: "Laptop D" };
-  /** A remote agent's selection key (peer-sections.ts peerEntryKey): `<peer name>/<repo>/<id>`. */
+  /** A remote agent's selection key (peer-repos.ts peerEntryKey): `<peer name>/<repo>/<id>`. */
   const agentKey = (peer: string, repo: string, id: string) => `${PEER_NAMES[peer]}/${repo}/${id}`;
-  /** A remote repo header's key: `<peer name>/<repo>`. */
-  const repoKey = (peer: string, repo: string) => `${PEER_NAMES[peer]}/${repo}`;
-  /** A peer header's key: the peer's name. */
-  const peerKey = (peer: string) => PEER_NAMES[peer]!;
+  const repoKey = (repo: string) => `/${repo.toLowerCase()}`;
+  const repos = (...names: string[]) => names.map((name) => ({ registryName: name, displayName: name }));
   const WORKER_KEY = agentKey(PEER_B, "itsybitsy", "worker-abc");
 
   let origRows: number;
@@ -9437,14 +9435,15 @@ describe("Peer sections in the Agents tree", () => {
     return [
       {
         id: PEER_B, name: "Laptop B", connected: true, lastOkAt: now, lastError: null,
+        repos: repos("itsybitsy", "other-repo"),
         agents: [
           remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
           remote("manager-def", "itsybitsy", { state: "waiting", agentType: "manager" }),
           remote("agent-1", "other-repo", { state: "complete" }),
         ],
       },
-      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, lastError: "timed out", agents: [remote("agent-1", "app")] },
-      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, lastError: "timed out", agents: null },
+      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
+      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
     ];
   }
 
@@ -9494,37 +9493,94 @@ describe("Peer sections in the Agents tree", () => {
       .join(" ");
   }
 
-  test("below the unchanged local tree: one section per install — connected, unreachable (dimmed, last seen), never answered (header only) — nested by manager", () => {
-    const { dashboard, local } = setup();
+  test("remote-only repos follow local rows in display order, with italic agents and dim stale rows", () => {
+    const { dashboard } = setup();
     const raw = treeRows(dashboard);
-    const rows = raw.map((r) => stripAnsi(r).trimEnd());
-    // The local tree is exactly what it is without peers.
-    const alone = makeDashboard();
-    alone.onUpdate([local], [makeFlatAgent(local)], []);
-    expect(rows[0]).toBe(stripAnsi(treeRows(alone)[0]!).trimEnd());
-    expect(rows.slice(1)).toEqual([
-      "◆ Laptop B · connected",
-      "  ▾ itsybitsy",
-      "  └── manager-def   waiting",
-      "      └── abc-nick  running",
-      "  ▾ other-repo",
-      "  └── agent-1       complete",
-      "◆ Laptop C · last seen 2m ago",
-      "  ▾ app",
-      "  └── agent-1       running",
-      "◆ Laptop D · not connected yet",
+    expect(raw.map(stripAnsi).slice(1).map((r) => r.trimEnd().replace(/  +(waiting|running|complete)/, " $1"))).toEqual([
+      "▾ app", "└── agent-1 running",
+      "▾ itsybitsy", "└── manager-def waiting", "    └── abc-nick running",
+      "▾ other-repo", "└── agent-1 complete",
     ]);
-    // Connected rows carry their state color; the unreachable peer's list is dimmed.
-    expect(raw[3]).toContain(`${getStateColors().waiting}waiting`);
-    expect(raw[8]!.startsWith(`  ${DIM}`)).toBe(true);
-    expect(raw[9]!.startsWith(DIM)).toBe(true);
-    expect(raw[9]).not.toContain(getStateColors().running!);
+    expect(raw.map((r) => r.includes(ITALIC))).toEqual([false, false, true, false, true, true, false, true]);
+    expect(raw[2]).toContain(DIM);
+    expect(raw[2]).not.toContain(getStateColors().running!);
+    expect(raw[4]).toContain(getStateColors().waiting!);
+  });
+
+  test("matches registry name across paths and case, keeping local order, labels, actions and selection", () => {
+    const dashboard = makeDashboard();
+    const local = makeAgent("manager", "/here/app");
+    const localChild = makeAgent("kid", "/here/app");
+    const header = makeFlatRepoHeader("Local nickname", "/here/app", true, true, true, "App");
+    const localOnly = makeFlatRepoHeader("Only here", "/here/other");
+    const localRows = [header, { ...makeFlatAgent(local), connector: "└── " },
+      { ...makeFlatAgent(localChild), depth: 1, connector: "    └── " }, localOnly];
+    dashboard.onUpdate([local, localChild], localRows, []);
+    dashboard.agentTree.selectByRepoPath(header.repoPath);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    const peer = (index: number, registry: string) => ({
+      ...links()[index]!, repos: [...repos(registry), { registryName: "remote", displayName: "Empty remote" }],
+      agents: [remote("kid", registry, { manager: "manager" }), remote("manager", registry)],
+    });
+    service.set({ links: [peer(0, "APP"), peer(1, "app")] });
+    expect(dashboard.agentTree.selectedRepoPath).toBe(header.repoPath);
+    expect(dashboard.agentTree.visibleList.map((r) => {
+      if (r.kind === "agent") return r.connector + r.agent.id;
+      if (r.kind === "remote-agent") return r.connector + peerEntryKey(r);
+      if (r.kind === "repo-header" || r.kind === "remote-repo-header") return [r.kind, r.repoName];
+    })).toEqual([
+      ["repo-header", "Local nickname"], "├── manager", "│   └── kid",
+      "├── Laptop B/APP/manager", "│   └── Laptop B/APP/kid",
+      "└── Laptop C/app/manager", "    └── Laptop C/app/kid",
+      ["repo-header", "Only here"], ["remote-repo-header", "Empty remote"],
+    ]);
+    const newAgent = spyOn(agentActions, "handleNewAgent").mockImplementation(() => {});
+    try {
+      dashboard.handleInput("a");
+      expect(newAgent).toHaveBeenCalledWith(dashboard);
+      dashboard.handleInput(".");
+      expect(dashboard.agentTree.pinnedRepoPaths.has(header.repoPath)).toBe(true);
+    } finally {
+      newAgent.mockRestore();
+    }
+    // Dropping and restoring the local registration keeps the same selected header.
+    dashboard.onUpdate([], [localOnly], []);
+    expect(keyOf(dashboard)).toBe("/app");
+    dashboard.onUpdate([local, localChild], localRows, []);
+    expect(dashboard.agentTree.selectedRepoPath).toBe(header.repoPath);
+    service.set({ links: [] });
+    expect(dashboard.agentTree.selectedRepoPath).toBe(header.repoPath);
+  });
+
+  test("one empty local registration still owns its shared header under running-only", () => {
+    const dashboard = makeDashboard();
+    dashboard.setRepos([{ name: "APP", nickname: "Local app", path: "/here/empty" }]);
+    dashboard.onUpdate([], [], []);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    service.set({ links: [links()[1]!] });
+    dashboard.agentTree.setRepoFilter("running-only");
+    expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["repo-header", "remote-agent"]);
+    expect(dashboard.agentTree.selectByRepoPath("/here/empty")).toBe(true);
+    service.set({ links: [] });
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("Local app");
+  });
+
+  test("identical paths with different registry names keep separate headers", () => {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.onUpdate([], [makeFlatRepoHeader("Same label", "/local", false, false, false, "a")], []);
+    dashboard.setPeerService(service);
+    service.set({ links: [{ ...links()[0]!, repos: [{ registryName: "b", displayName: "Same label" }],
+      agents: [remote("worker", "Same label", { repoRegistryName: "b", repoPath: "/local" })] }] });
+    expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["repo-header", "remote-repo-header", "remote-agent"]);
   });
 
   test("a remote state that names an inherited property is drawn as text, never as the property", () => {
     const { dashboard, service } = setup();
     const odd = ["constructor", "toString", "__proto__", "hasOwnProperty"];
-    service.set({ links: [{ ...links()[0]!, agents: odd.map((state, i) => remote(`odd-${i}`, "app", { state })) }] });
+    service.set({ links: [{ ...links()[0]!, repos: repos("app"), agents: odd.map((state, i) => remote(`odd-${i}`, "app", { state })) }] });
     const rows = treeRows(dashboard).join("\n");
     for (const state of odd) expect(stripAnsi(rows)).toContain(state);
     expect(rows).not.toContain("function");
@@ -9536,11 +9592,11 @@ describe("Peer sections in the Agents tree", () => {
     expect(info).not.toContain("function");
   });
 
-  test("the V filter does not apply to peer sections", () => {
+  test("running-only hides stopped remote agents and their empty header", () => {
     const { dashboard, service } = setup();
-    service.set({ links: [{ ...links()[0]!, agents: [remote("old", "app", { state: "stopped" })] }] });
+    service.set({ links: [{ ...links()[0]!, repos: repos("app"), agents: [remote("old", "app", { state: "stopped" })] }] });
     dashboard.agentTree.setRepoFilter("running-only");
-    expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("old") && r.includes("stopped"))).toBe(true);
+    expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["agent"]);
   });
 
   for (const width of [40, 80]) {
@@ -9548,16 +9604,12 @@ describe("Peer sections in the Agents tree", () => {
       const { dashboard, service } = setup();
       const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
       const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
-      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), lastError: null, agents: [long, short] }] });
+      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
       const rows = treeRows(dashboard, width);
       expect(rows.filter((r) => visibleWidth(r) > width)).toEqual([]);
       const text = rows.map(stripAnsi);
       expect(text.find((r) => r.includes("short"))).toContain("running");
       expect(text.find((r) => r.includes("nnn"))).toContain("…");
-      // The 32-character peer name is cut at 40 columns so its state still shows.
-      const header = text.find((r) => r.startsWith("◆ PPP"))!.trimEnd();
-      expect(header).toEndWith(width === 40 ? "P… · connected" : `${"P".repeat(32)} · connected`);
-
       // The info panel and the whole screen fit too, with the long row selected.
       selectByKey(dashboard, `${"P".repeat(32)}/${"r".repeat(100)}/${"n".repeat(100)}`);
       dashboard.infoPanel.displayHeight = 20;
@@ -9615,7 +9667,7 @@ describe("Peer sections in the Agents tree", () => {
     const info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd()).filter((r) => r !== "");
     expect(info).toEqual([
       "Remote agent (read-only)",
-      "Peer: Laptop B",
+      "Machine: Laptop B · connected",
       "Id: worker-abc",
       "Full id: Laptop B/itsybitsy/worker-abc",
       "Nickname: abc-nick",
@@ -9630,25 +9682,18 @@ describe("Peer sections in the Agents tree", () => {
     // while j/k move through the sections.
     dashboard.jumpToMode("TREE");
     const tree = stripAnsi(dashboard.render(WIDTH).join("\n"));
-    expect(tree).toContain("◆ Laptop B · connected");
+    expect(tree).toContain("abc-nick");
     expect(tree).not.toContain(REMOTE_RIGHT_PANE_TEXT);
   });
 
-  test("a selected peer header or remote repo header shows its own placeholder and fields", () => {
+  test("a remote-only header keeps the repo placeholder, and a stale agent shows its last contact", () => {
     const { dashboard } = setup();
-    selectByKey(dashboard, repoKey(PEER_B, "itsybitsy"));
+    selectByKey(dashboard, repoKey("itsybitsy"));
     expect(paneText(dashboard.render(WIDTH), 2)).toBe("Remote repo on Laptop B (read-only)");
     dashboard.infoPanel.displayHeight = 20;
-    let info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd());
-    expect(info).toContain("Path: /remote/itsybitsy");
-    expect(info).toContain("Agents: 2");
-
-    selectByKey(dashboard, peerKey(PEER_C));
-    expect(paneText(dashboard.render(WIDTH), 2)).toBe("Paired install Laptop C (read-only)");
-    info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd());
-    expect(info).toContain("State: last seen 2m ago");
-    expect(info).toContain("Error: timed out");
-    expect(info).toContain("Agents: 1 in 1 repo");
+    expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Agents: 2");
+    selectByKey(dashboard, agentKey(PEER_C, "app", "agent-1"));
+    expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Machine: Laptop C · last seen 2m ago");
   });
 
   test("on a remote row no local path runs: no tmux setAgent, no git probe, no right-pane loader", async () => {
@@ -9723,37 +9768,33 @@ describe("Peer sections in the Agents tree", () => {
     }
   });
 
-  for (const [label, key] of [
-    ["remote repo header", repoKey(PEER_B, "itsybitsy")],
-    ["peer header", peerKey(PEER_B)],
-  ] as const) {
-    test(`the guard refuses the keys a local header has (x, r, D, ., f) on a ${label}`, () => {
-      const { dashboard } = setup();
-      selectByKey(dashboard, key);
-      const pinned = [...dashboard.agentTree.pinnedRepoPaths];
-      const handlers = Object.keys(agentActions)
-        .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
-        .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
-      try {
-        for (const k of ["x", "r", "D", ".", "f"]) {
-          resetNotice(dashboard);
-          dashboard.handleInput(k);
-          expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
-          expect(dashboard.dialog).toBeNull();
-        }
-        for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
-        expect([...dashboard.agentTree.pinnedRepoPaths]).toEqual(pinned);
-        expect(keyOf(dashboard)).toBe(key);
-      } finally {
-        for (const handler of handlers) handler.mockRestore();
+  test("all non-allowlisted keys are refused on a remote-only header before dispatch", () => {
+    const key = repoKey("itsybitsy");
+    const { dashboard } = setup();
+    selectByKey(dashboard, key);
+    const pinned = [...dashboard.agentTree.pinnedRepoPaths];
+    const handlers = Object.keys(agentActions)
+      .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
+      .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
+    try {
+      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => !isRemoteAllowedKey(k))) {
+        resetNotice(dashboard);
+        dashboard.handleInput(k);
+        expect(dashboard.notice).toBe(k === "a" ? "Starting agents on another machine comes in the next phase" : REMOTE_READ_ONLY_NOTICE);
+        expect(dashboard.dialog).toBeNull();
       }
-    });
-  }
+      for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
+      expect([...dashboard.agentTree.pinnedRepoPaths]).toEqual(pinned);
+      expect(keyOf(dashboard)).toBe(key);
+    } finally {
+      for (const handler of handlers) handler.mockRestore();
+    }
+  });
 
   test("one agent id in two repos of one peer: each row selects on its own, and the rows below stay reachable", () => {
     const { dashboard, service } = setup();
     const agents = () => [remote("dup", "alpha"), remote("dup", "beta", { state: "waiting" }), remote("after", "gamma")];
-    service.set({ links: [{ ...links()[0]!, agents: agents() }] });
+    service.set({ links: [{ ...links()[0]!, repos: repos("alpha", "beta", "gamma"), agents: agents() }] });
     const alpha = agentKey(PEER_B, "alpha", "dup");
     const beta = agentKey(PEER_B, "beta", "dup");
     selectByKey(dashboard, alpha);
@@ -9771,7 +9812,7 @@ describe("Peer sections in the Agents tree", () => {
     selectByKey(dashboard, alpha);
     dashboard.handleInput("J");
     expect(keyOf(dashboard)).toBe(beta);
-    service.set({ links: [{ ...links()[0]!, agents: agents() }] });
+    service.set({ links: [{ ...links()[0]!, repos: repos("alpha", "beta", "gamma"), agents: agents() }] });
     expect(keyOf(dashboard)).toBe(beta);
     dashboard.handleInput("3");
     expect(treeRows(dashboard).map((r) => stripAnsi(r).trim()).filter((r) => /▾|└──/.test(r))).toEqual([
@@ -9780,7 +9821,7 @@ describe("Peer sections in the Agents tree", () => {
     ]);
   });
 
-  test("a vanished bottom-most local agent selects the local row above it, not the first peer header", () => {
+  test("a vanished bottom-most local agent selects the local row above it", () => {
     const dashboard = makeDashboard();
     const a = makeAgent("agent-a", "/repos/local");
     const b = makeAgent("agent-b", "/repos/local");
@@ -9847,11 +9888,11 @@ describe("Peer sections in the Agents tree", () => {
     // j / k / ↓ / ↑ move one row; J / K jump between repo anchors, remote ones included.
     let d = onRemote();
     d.handleInput("j");
-    expect(keyOf(d)).toBe(repoKey(PEER_B, "other-repo"));
+    expect(keyOf(d)).toBe(repoKey("other-repo"));
     d.handleInput("k");
     expect(keyOf(d)).toBe(WORKER_KEY);
     d.handleInput("\x1b[B");
-    expect(keyOf(d)).toBe(repoKey(PEER_B, "other-repo"));
+    expect(keyOf(d)).toBe(repoKey("other-repo"));
     d.handleInput("\x1b[A");
     expect(keyOf(d)).toBe(WORKER_KEY);
     d.handleInput("J");
@@ -9948,14 +9989,13 @@ describe("Peer sections in the Agents tree", () => {
     dashboard.handleInput("3");
     const rows = treeRows(dashboard).map((r) => stripAnsi(r).trimEnd());
     expect(rows.filter((r) => /Laptop|▾|└──/.test(r))).toEqual([
-      "◆ Laptop B · connected",
-      "  ▾ itsybitsy",
-      "      └── abc-nick  running",
+      "▾ itsybitsy",
+      "└── abc-nick  running",
     ]);
     expect(keyOf(dashboard)).toBe(WORKER_KEY);
   });
 
-  test("a poller change re-renders while the Agents tab shows the sections; other changes do not", () => {
+  test("poll updates redraw only a visible change in the Agents tab or TREE mode", () => {
     const dashboard = makeDashboard();
     const counter = countingTui();
     dashboard.setTui(counter.tui);
@@ -9967,7 +10007,7 @@ describe("Peer sections in the Agents tree", () => {
     let renders = counter.renders();
     service.set({ links: links() });
     expect(counter.renders()).toBe(renders + 1);
-    expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("Laptop B"))).toBe(true);
+    expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("abc-nick"))).toBe(true);
 
     // Nothing the sections show: the same peers and lists, a dialog-only change.
     renders = counter.renders();
@@ -9977,11 +10017,18 @@ describe("Peer sections in the Agents tree", () => {
     service.set({ links: [{ ...connectedB, lastOkAt: connectedB.lastOkAt! + 5_000 }, ...service.state.links.slice(1)] });
     expect(counter.renders()).toBe(renders);
 
+    // Disk paths appear only in the selected agent's info. Poll errors appear only in Peers.
+    const b = service.state.links[0]!;
+    const c = service.state.links[1]!;
+    service.set({ links: [{ ...b, agents: b.agents!.map((agent) => ({ ...agent, repoPath: "/elsewhere" })) },
+      { ...c, lastError: "still unreachable" }, ...service.state.links.slice(2)] });
+    expect(counter.renders()).toBe(renders);
+
     // The Teams tab draws no section: rebuilt, but no render.
     dashboard.setSidebarMode("teams");
     service.set({ links: [{ ...service.state.links[0]!, connected: false }, ...service.state.links.slice(1)] });
     expect(counter.renders()).toBe(renders);
-    expect(dashboard.agentTree.peerList[0]).toMatchObject({ kind: "peer-header", connected: false });
+    expect(dashboard.agentTree.visibleList.find((r) => r.kind === "remote-agent" && r.peerId === PEER_B)).toMatchObject({ stale: true });
     // TREE mode draws the Agents tree in the main area, whatever the tab.
     dashboard.jumpToMode("TREE");
     renders = counter.renders();
@@ -9991,7 +10038,7 @@ describe("Peer sections in the Agents tree", () => {
 
   test("a selected remote row that its peer drops moves the selection, and the panes follow", () => {
     const { dashboard, service, local } = setup();
-    selectByKey(dashboard, peerKey(PEER_D));
+    selectByKey(dashboard, repoKey("other-repo"));
     service.set({ links: [] });
     expect(keyOf(dashboard)).toBeNull();
     expect(dashboard.selectedAgent).toBe(local);

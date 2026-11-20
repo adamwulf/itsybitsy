@@ -6,8 +6,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
-import type { Agent, FlatEntry, PeerSectionEntry } from "../agents";
-import { shortPeerId } from "../peers/store";
+import type { Agent, FlatEntry, RemoteEntry } from "../agents";
 import { peerLinkStateText } from "./peers-dialog";
 import { isPidAliveCtx, isPidAliveSinceCtx } from "../agents";
 import type { RepoHealthReport } from "../health-check";
@@ -23,7 +22,7 @@ import { cliDisplayName, kernelSandboxStatus, metadataCli } from "../agent-cli";
 import { resolvePathsConfig } from "../sandbox";
 import { FALLBACK_MACHINE_NAME } from "../machine-name";
 import { localAgentKey } from "./row-keys";
-import { peerEntryKey } from "./peer-sections";
+import { peerEntryKey } from "./peer-repos";
 
 /**
  * Team-mode payload for the info panel (SPEC §17.3c). Parallel to the
@@ -51,12 +50,12 @@ export class InfoPanelComponent implements Component {
   /** This machine's name, as the Agents tree's: the first segment of the "Full id:" row. */
   machineName: string = FALLBACK_MACHINE_NAME;
   /**
-   * The selected peer-section row (SPEC §20.5): a remote agent, a remote repo
-   * or a paired install's header. The dashboard's selection sync sets it, and
+   * The selected remote row (SPEC §20.5): a remote agent or a remote-only repo header.
+   * The dashboard's selection sync sets it, and
    * clears it on any local or empty selection. It is never an `Agent`, so
    * none of the local agent rows below (stoplights, git, paths) can show for it.
    */
-  remote: PeerSectionEntry | null = null;
+  remote: RemoteEntry | null = null;
   isSystemCoordinatorSelected = false;
   /**
    * Team mode (§17.3c): when set, the render branch shows team metadata. The
@@ -247,12 +246,12 @@ export class InfoPanelComponent implements Component {
   }
 
   /**
-   * A selected peer-section row (SPEC §20.5), read-only. A remote agent shows
+   * A selected remote row (SPEC §20.5), read-only. A remote agent shows
    * the fields its install sent: id, nickname, repo, state, type and manager,
    * with the peer's name. Every value is cut to the panel's width, so a long
    * remote value cannot break the layout.
    */
-  private renderRemoteInfo(entry: PeerSectionEntry, width: number): string[] {
+  private renderRemoteInfo(entry: RemoteEntry, width: number): string[] {
     const lines: string[] = [];
     const title = (text: string) => lines.push(truncateToWidth(`${BOLD}${text}${RESET} ${DIM}(read-only)${RESET}`, width, ""));
     const field = (label: string, value: string) => lines.push(truncateToWidth(`${DIM}${label}:${RESET} ${value}`, width, ""));
@@ -265,7 +264,8 @@ export class InfoPanelComponent implements Component {
           ? `${DIM}${state}${RESET} ${notConnected}`
           : `${remoteStateColor(state)}${state}${RESET}`;
         title("Remote agent");
-        field("Peer", entry.peerName);
+        const connection = peerLinkStateText({ connected: !entry.stale, lastOkAt: entry.lastOkAt }, Date.now());
+        field("Machine", `${entry.peerName} · ${connection}`);
         field("Id", agent.id);
         field("Full id", peerEntryKey(entry));
         field("Nickname", agent.nickname ?? "—");
@@ -280,18 +280,7 @@ export class InfoPanelComponent implements Component {
         title("Remote repo");
         field("Peer", entry.peerName);
         field("Repo", entry.repoName);
-        field("Path", entry.repoPath);
-        field("Agents", entry.stale ? `${entry.agentCount} ${notConnected}` : String(entry.agentCount));
-        break;
-      case "peer-header":
-        title("Paired install");
-        field("Peer", entry.peerName);
-        field("Id", shortPeerId(entry.peerId));
-        field("State", peerLinkStateText(entry, Date.now()));
-        if (!entry.connected && entry.lastError !== null) field("Error", entry.lastError);
-        if (entry.agentCount !== null) {
-          field("Agents", `${entry.agentCount} in ${entry.repoCount} repo${entry.repoCount === 1 ? "" : "s"}`);
-        }
+        field("Agents", String(entry.agentCount));
         break;
     }
     return padLines(lines, this.displayHeight);

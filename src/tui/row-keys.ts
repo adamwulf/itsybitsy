@@ -2,8 +2,7 @@
  * Row keys of the `ib watch` Agents tree (SPEC §17.1). Every agent row, local
  * or remote, is keyed by its fully qualified id `<machine>/<repo>/<agent>`, so
  * agents with the same id in two repos, or on two machines, are two rows. A
- * repo header is keyed `<machine>/<repo>`, a paired install's header by its
- * name, and the system coordinator by its own sentinel (agent-tree.ts).
+ * repo header is keyed by the lowercased registry name, and the system coordinator by its own sentinel (agent-tree.ts).
  *
  * - machine: this machine's name (src/machine-name.ts) for a local row, or the
  *   peer's name (the one typed when pairing) for a remote one.
@@ -32,9 +31,9 @@ export function localAgentKey(machine: string, agent: Pick<Agent, "repoRegistryN
   return fullyQualifiedAgentId(machine, agent.repoRegistryName, agent.id);
 }
 
-/** A repo header's key: `<machine>/<repo registry name>`. */
-export function repoRowKey(machine: string, repo: string): string {
-  return `${machine}/${repo}`;
+/** A leading slash keeps repo keys separate from qualified agent ids. */
+export function repoRowKey(repo: string): string {
+  return `/${repo.toLowerCase()}`;
 }
 
 /**

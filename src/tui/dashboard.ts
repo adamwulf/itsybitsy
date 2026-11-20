@@ -40,7 +40,7 @@ import {
   isCoordinatorRestartCommand,
   restartSystemCoordinatorFresh,
 } from "../coordinator";
-import type { Agent, FlatEntry, PeerSectionEntry, PendingQuestion } from "../agents";
+import type { Agent, FlatEntry, RemoteEntry, PendingQuestion } from "../agents";
 import { agentWorktreePath } from "../agents";
 import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from "../git-status";
 import { SplitPane } from "./split-pane";
@@ -108,7 +108,7 @@ import { telegramLight, type TelegramConnectionView } from "../channels/connecti
 import { buildPeersDialogContent, newPeersDialog, syncPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { PeerService, defaultPeerServiceDeps } from "../peers/service";
 import type { PeerLinkState } from "../peers/poller";
-import { flattenPeerSections, remoteDisplayName, samePeerLinks } from "./peer-sections";
+import { remoteDisplayName } from "./peer-repos";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -418,40 +418,36 @@ function padToWidth(str: string, width: number): string {
   return str + (needsReset ? RESET : "") + " ".repeat(width - vw);
 }
 
-/** The right pane's text for a selected peer-section row, in every mode (SPEC §20.5). */
+/** The right pane's text for a selected remote row, in every mode (SPEC §20.5). */
 export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 
-/** The center pane's text for a selected peer-section row (SPEC §20.5). */
-export function remoteCenterText(entry: PeerSectionEntry): string {
+/** The center pane's text for a selected remote row (SPEC §20.5). */
+export function remoteCenterText(entry: RemoteEntry): string {
   switch (entry.kind) {
     case "remote-agent":
       return `Remote agent on ${entry.peerName} (read-only)`;
     case "remote-repo-header":
       return `Remote repo on ${entry.peerName} (read-only)`;
-    case "peer-header":
-      return `Paired install ${entry.peerName} (read-only)`;
   }
 }
 
-/** The main-area title for a selected peer-section row: `<peer>/<agent or repo>`, or the peer. */
-function remoteTitle(entry: PeerSectionEntry): string {
+/** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
+function remoteTitle(entry: RemoteEntry): string {
   switch (entry.kind) {
     case "remote-agent":
       return `${entry.peerName}/${remoteDisplayName(entry.remote)}`;
     case "remote-repo-header":
       return `${entry.peerName}/${entry.repoName}`;
-    case "peer-header":
-      return entry.peerName;
   }
 }
 
 /**
- * The main area for a selected peer-section row (SPEC §20.5): the center
+ * The main area for a selected remote row (SPEC §20.5): the center
  * placeholder and the right pane's "not available" placeholder, side by side
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
  */
-function renderRemotePlaceholders(entry: PeerSectionEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
+function renderRemotePlaceholders(entry: RemoteEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
   const placeholder = (text: string, width: number) =>
@@ -502,7 +498,7 @@ class StatusBarComponent implements Component {
   version = "";
   repoHeaderSelected = false;
   /**
-   * A peer-section row is selected (SPEC §20.5): the footer lists only keys
+   * A remote row is selected (SPEC §20.5): the footer lists only keys
    * the read-only guard allows (isRemoteAllowedKey), not the agent actions it
    * would refuse.
    */
@@ -734,12 +730,12 @@ class DialogOverlayComponent implements Component {
   }
 }
 
-/** The notice for a key refused on a peer-section row (SPEC §20.5). */
+/** The notice for a key refused on a remote row (SPEC §20.5). */
 export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
 
 /**
  * The read-only guard's allowlist (SPEC §20.5): the only keys that work while
- * the effective selection is a peer-section row. Every other key, including
+ * the effective selection is a remote row. Every other key, including
  * any key added to the dashboard later, is refused, so no action can reach a
  * remote row by default.
  *
@@ -747,7 +743,7 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
  * - the sidebar tabs 1, 2 and 3;
  * - pane cycling: p and n (and ←/→, their arrow forms);
  * - the `@` jump: it lists only local rows (handleFuzzyAgent keeps only local
- *   kinds), so it is the quick way back from a peer section;
+ *   kinds), so it is the quick way back from a remote row;
  * - help `?`, the command palette `/` (whose commands pass this same guard) and Peers `I`;
  * - quit (Ctrl+C, which the TUI's input listener handles before the dashboard).
  *
@@ -833,7 +829,7 @@ export class DashboardComponent implements Component {
    * none unless the test sets a fake, so no test can bind a real endpoint.
    */
   peerService: PeersDialogService | null = null;
-  /** The poller state the Agents tree's peer sections were last built from. */
+  /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
@@ -1699,6 +1695,7 @@ export class DashboardComponent implements Component {
 
   setRepos(repos: RepoEntry[]) {
     this.repos = repos;
+    this.agentTree.registeredRepos = repos;
   }
 
   setDiffTool(tool: string | undefined) {
@@ -1851,74 +1848,65 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
-  /**
-   * Attach the peer service: the Peers dialog's, and the source of the Agents
-   * tree's peer sections (SPEC §20.5). Each change rebuilds the sections when
-   * what they show changed, and renders only when something on screen
-   * changed: the open dialog, or sections that can be seen.
-   */
+  /** Poll updates can affect the unified tree, a remote selection, and the Peers dialog. */
   setPeerService(service: PeersDialogService): void {
     this.peerService = service;
     service.onChange(() => {
-      const sectionsChanged = this.refreshPeerSections();
+      const changed = this.refreshPeerRepos();
       const dialog = this._dialog;
       if (dialog?.type === "peers") {
         syncPeersDialog(dialog);
         this.tui?.requestRender();
-      } else if (sectionsChanged && this.peerSectionsOnScreen()) {
+      } else if (changed) {
         this.tui?.requestRender();
       }
     });
-    this.refreshPeerSections();
+    this.refreshPeerRepos();
   }
 
-  /**
-   * Rebuild the Agents tree's peer sections from the poller's state when it
-   * changed in a way they show (samePeerLinks); the service also notifies for
-   * the dialog's own changes, which leave them alone. A selection that is, or
-   * was, a remote row is synced, since the row may have changed or gone.
-   * Returns whether the sections changed.
-   */
-  private refreshPeerSections(): boolean {
+  private refreshPeerRepos(): boolean {
     const links = this.peerService?.view().links ?? [];
-    if (samePeerLinks(this.peerLinks, links)) return false;
+    // Stable snapshot references from the poller make dialog-only changes cheap.
+    if (links.length === this.peerLinks.length && links.every((link, i) => {
+      const old = this.peerLinks[i]!;
+      return link.id === old.id && link.name === old.name && link.repos === old.repos && link.agents === old.agents
+        && link.connected === old.connected && (link.connected || link.lastOkAt === old.lastOkAt);
+    })) return false;
     this.peerLinks = links;
-    const wasRemote = this.remoteSelection !== null;
-    this.agentTree.setPeerSections(flattenPeerSections(links));
-    if (wasRemote || this.remoteSelection !== null) this.syncSelectedAgent();
-    return true;
+    const treeVisible = this.sidebarMode === "agents" || this.rightPane.mode === "TREE"
+      || (this.sidebarMode === "favorites" && this.remoteSelection !== null);
+    const width = this.rightPane.mode === "TREE" ? this.getMainWidth() : this.sidebarWidth;
+    const before = treeVisible ? this.agentTree.render(width) : [];
+    const previous = this.remoteSelection;
+    this.agentTree.setPeerLinks(links);
+    const selected = this.remoteSelection;
+    // The connector can change when another root appears. Only the tree displays it.
+    const details = (entry: RemoteEntry | null) => entry?.kind === "remote-agent"
+      ? [entry.peerName, entry.remote, entry.stale, entry.lastOkAt] : entry;
+    const selectionChanged = JSON.stringify(details(previous)) !== JSON.stringify(details(selected));
+    if (selectionChanged) this.syncSelectedAgent();
+    if (selectionChanged || !treeVisible) return selectionChanged;
+    const after = this.agentTree.render(width);
+    return before.length !== after.length || before.some((line, i) => line !== after[i]);
   }
 
-  /**
-   * Whether a change to the peer sections shows: the Agents tab draws them,
-   * TREE mode draws the Agents tree in the main area (the Favorites view draws
-   * none), or a remote row is selected, so the info panel and the main area
-   * show it.
-   */
-  private peerSectionsOnScreen(): boolean {
-    if (this.remoteSelection !== null) return true;
-    if (this.agentTree.favoritesOnly) return false;
-    return this.sidebarMode === "agents" || this.rightPane.mode === "TREE";
-  }
-
-  /**
-   * The effective selection when it is a peer-section row (SPEC §20.5), else
-   * null. Only the Agents tree has peer sections, so a Teams-tree selection is
-   * never remote.
-   */
-  get remoteSelection(): PeerSectionEntry | null {
+  /** Only the Agents tree can own a remote selection. */
+  get remoteSelection(): RemoteEntry | null {
     return this.activeSelectionSource === "agents" ? this.agentTree.selectedRemote : null;
   }
 
   /**
    * The read-only guard (SPEC §20.5): while the effective selection is a
-   * peer-section row, refuse `key` with a notice unless isRemoteAllowedKey
+   * remote row, refuse `key` with a notice unless isRemoteAllowedKey
    * allows it. Returns true when it refused. The key dispatch (handleInput)
    * and the command palette both go through it.
    */
   private refuseOnRemoteRow(key: string): boolean {
-    if (this.remoteSelection === null || isRemoteAllowedKey(key)) return false;
-    this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
+    const remote = this.remoteSelection;
+    if (remote === null || isRemoteAllowedKey(key)) return false;
+    this.setNotice(remote.kind === "remote-repo-header" && key === "a"
+      ? "Starting agents on another machine comes in the next phase"
+      : REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
 
@@ -2270,7 +2258,7 @@ export class DashboardComponent implements Component {
     const isCoordinator = !teamsActive && this.agentTree.isSystemCoordinatorSelected;
     const selectedRepoHeader = teamsActive ? null : this.agentTree.selectedRepoHeader;
     const selectedRepoPath = teamsActive ? null : this.agentTree.selectedRepoPath;
-    // A peer-section row (SPEC §20.5). It is none of the above: `selected`,
+    // A remote row (SPEC §20.5). It is none of the above: `selected`,
     // `isCoordinator` and the repo header are all empty for it, so every local
     // path below (tmux pollers, git probe, right-pane loaders, the per-repo
     // coordinator) sees no selection. Only the info panel and render() use it.
@@ -3557,10 +3545,10 @@ export class DashboardComponent implements Component {
     const isCoordinatorView =
       this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected;
     const isTreeMode = this.rightPane.mode === "TREE";
-    // A selected peer-section row (SPEC §20.5) draws two placeholders in the
+    // A selected remote row (SPEC §20.5) draws two placeholders in the
     // split layout, whatever the right-pane mode, except TREE: that mode draws
     // the tree itself in the main area (the sidebar hides its own), and it must
-    // stay on screen while j/k move through the peer sections.
+    // stay on screen while j/k move through the tree.
     const remote = this.remoteSelection;
     const remoteView = remote !== null && !isTreeMode;
     const isFullWidth = !remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode));
@@ -4123,7 +4111,7 @@ export async function launchDashboard(): Promise<void> {
   const telegramWake = tgToken !== "" ? new WakeDetector({ log: logToWatchLog }) : null;
 
   const dashboard = new DashboardComponent();
-  // The first segment of every local row key (SPEC §17.1): read from
+  // The first segment of every local agent key (SPEC §17.1): read from
   // ~/.itsybitsy/machine-name, or set once from the computer name. Before the
   // layout, so favorites and the first selection use it.
   dashboard.setMachineName(await loadMachineName());

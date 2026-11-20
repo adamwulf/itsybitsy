@@ -15,9 +15,9 @@
  */
 
 import { join } from "path";
-import { mkdir, readdir, rename, unlink } from "fs/promises";
+import { mkdir, readdir, rename } from "fs/promises";
+import { unlinkQueueFile } from "./outbox";
 import { getCoordinatorHome } from "./coordinator";
-import { readMachineName } from "./machine-name";
 import { formatResetTime } from "./usage";
 import type { UsageData, UsageResult } from "./usage";
 
@@ -134,22 +134,23 @@ function sameWindow(a: RateLimitWindow | undefined, b: RateLimitWindow | undefin
  * Delete an agent's record (and any temp file a killed statusline run left)
  * from its folder at teardown, so `deleteAgentOutbox` can remove the folder.
  */
-export async function deleteClaudeRateLimits(dir: string): Promise<void> {
+export async function deleteClaudeRateLimits(dir: string): Promise<string[]> {
+  const warnings: string[] = [];
   let entries: string[];
   try {
     entries = await readdir(dir);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    return;
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      warnings.push(`Warning: could not list usage files in ${dir}: ${(err as Error).message}`);
+    }
+    return warnings;
   }
   for (const entry of entries) {
-    if (entry !== CLAUDE_RATE_LIMITS_FILE && !entry.startsWith(`${CLAUDE_RATE_LIMITS_FILE}.tmp.`)) continue;
-    try {
-      await unlink(join(dir, entry));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (entry === CLAUDE_RATE_LIMITS_FILE || entry.startsWith(`${CLAUDE_RATE_LIMITS_FILE}.tmp.`)) {
+      await unlinkQueueFile(join(dir, entry), warnings);
     }
   }
+  return warnings;
 }
 
 /**
@@ -238,8 +239,8 @@ async function subdirectories(dir: string): Promise<string[]> {
  */
 export async function readClaudeUsage(now: Date = new Date()): Promise<UsageResult> {
   const home = getCoordinatorHome();
-  const machineDir = join(home, "agents", await readMachineName());
-  const repoDirs = await subdirectories(machineDir);
+  const machineDirs = await subdirectories(join(home, "agents"));
+  const repoDirs = (await Promise.all(machineDirs.map(subdirectories))).flat();
   const agentDirs = (await Promise.all(repoDirs.map(subdirectories))).flat();
   const records = (await Promise.all(
     [home, ...agentDirs].map((dir) => readRecord(join(dir, CLAUDE_RATE_LIMITS_FILE))),

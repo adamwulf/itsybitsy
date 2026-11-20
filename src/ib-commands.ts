@@ -544,7 +544,7 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
       ok: false,
       exitCode: 1,
       stdout: "",
-      stderr: `Could not retire agent '${agent.id}'`,
+      stderr: [`Could not retire agent '${agent.id}'`, ...teardown.warnings].join("\n"),
     };
   }
   const { prunedTeams } = teardown;
@@ -561,7 +561,7 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
     `tmux=${tmuxSession || "<none>"} pid=${agent.meta.claude_pid || "<none>"}`
   );
 
-  return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
+  return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: teardown.warnings.join("\n") };
 }
 
 /** Spawn context for git/tmux operations performed while reconstructing an agent. */
@@ -1457,7 +1457,7 @@ async function nukeAgentList(
     // Teardown — captures the pruned (team, id) pairs even on the failure path
     // (the prune ran inside archiveAgent regardless of the final dir-removal).
     try {
-      const { prunedTeams } = await teardownAgent(
+      const { prunedTeams, warnings } = await teardownAgent(
         repoPath,
         id,
         agentDir,
@@ -1476,6 +1476,7 @@ async function nukeAgentList(
           removeSandboxProfile(agentDir);
         },
       );
+      for (const warning of warnings) logWarning(warning);
       allPruned.push(...prunedTeams);
       killed++;
     } catch { /* teardown error — count as failure */
@@ -3891,13 +3892,12 @@ export async function mergeAgent(
     // 17-19. Archive artifacts, remove questions, remove agent dir. archiveAgent
     // also prunes this agent from every team (§16.5); hoist the pruned pairs out
     // of the timed block so the leave-notice fan-out below can see them.
-    let prunedTeams: Array<{ team: string; id: string }> = [];
-    await timed("merge", "archive", async () => {
+    const archived = await timed("merge", "archive", async () => {
       await logAgent(agentDir, "Merge complete - archiving and closing agent");
       const res = await archiveAgent(agent.repoPath, agent.id, agentDir);
-      prunedTeams = res.prunedTeams;
       await removeAgentQuestions(agent.repoPath, agent.id);
       try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      return res;
     });
 
     // 20. Scan for orphaned Claude processes
@@ -3905,12 +3905,12 @@ export async function mergeAgent(
 
     // merge = single-agent departure → per-agent leave notice to surviving
     // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
-    await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
+    await emitPerAgentLeaveNotice(archived.prunedTeams, await listRepos());
 
     const successStdout = mergedSha
       ? `Closed agent: ${agent.id} (merged to ${targetBranch} at ${mergedSha})`
       : `Closed agent: ${agent.id}`;
-    return { ok: true, exitCode: 0, stdout: successStdout, stderr: "" };
+    return { ok: true, exitCode: 0, stdout: successStdout, stderr: archived.warnings.join("\n") };
   } finally {
     // Clear the op marker on every return path. On the SUCCESS path the agent
     // dir was already removed at step 17-19, so this writes into a now-gone
@@ -6936,13 +6936,23 @@ export async function newAgent(
 
   // 10. Allocate lifecycle directories only after the queue identity is valid.
   const queueDir = queueDirForKey(queueKey, id);
+  await mkdir(dirname(queueDir), { recursive: true });
+  try {
+    await mkdir(queueDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Cannot spawn '${id}': queue directory already exists at ${queueDir}` };
+  }
+  // Only this spawn reserved the leaf. Release it on every refusal or thrown
+  // error until the verified tmux session takes ownership.
+  await using reservation = {
+    committed: false,
+    async [Symbol.asyncDispose]() {
+      if (!this.committed) await rm(queueDir, { recursive: true, force: true });
+    },
+  };
   await mkdir(archiveDir, { recursive: true });
   await mkdir(agentDir, { recursive: true });
-  // The per-agent outbox now lives under the CENTRAL coordinator-home root
-  // (so codex agents under `-s workspace-write` can write to other agents'
-  // outboxes — see agentOutboxDir). mkdir it before the agent starts so the
-  // first enqueue doesn't race a missing-dir append.
-  await mkdir(queueDir, { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
   // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are
@@ -7946,6 +7956,7 @@ ${qStartExitScript}
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start${suffix}` };
   }
 
+  reservation.committed = true;
   await logSpawn(agentDir, spawnerAgentDir, id, `spawn OK: agent ${id} running (tmux=${tmuxSession} workPath=${workPath})`);
 
   // 19. Output agent ID

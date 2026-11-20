@@ -3,7 +3,7 @@ import { mkdir, readdir, rm } from "fs/promises";
 import { join } from "path";
 import { agentOutboxDir, readOutbox, deleteAgentOutbox } from "./outbox";
 import { deleteClaudeRateLimits, CLAUDE_RATE_LIMITS_FILE } from "./claude-rate-limits";
-import { archiveAgent } from "./agent-lifecycle";
+import { archiveAgent, prepareAgentRetirement } from "./agent-lifecycle";
 import { writeAgentTransient } from "./agents";
 import { drainOutbox, sendMessage, setSendSpawnRunner, resetSendSpawnRunner } from "./ib-commands";
 import { setUserHome, resetUserHome } from "./home";
@@ -151,10 +151,53 @@ describe("fully qualified agent queues", () => {
       const dir = queue("alpha", "review");
       await mkdir(join(dir, file), { recursive: true });
       const remove = file.startsWith(CLAUDE_RATE_LIMITS_FILE) ? deleteClaudeRateLimits : deleteAgentOutbox;
-      await expect(remove(dir)).rejects.toThrow();
+      const warnings = await remove(dir);
+      expect(warnings.some((w) => w.startsWith(`Warning: could not unlink ${join(dir, file)}:`))).toBe(true);
       expect(await readdir(dir)).toContain(file);
     },
   );
+
+  test.each([true, false])("corrupt live metadata never selects a guessed queue (snapshot %p)", async (prepare) => {
+    const id = "review";
+    const key = "studio/original/review";
+    const planted = await cli.addAgent(repoA, id, { queue_key: key, tmux_session: "itsybitsy-deadbeef-review" });
+    const prepared = prepare ? await prepareAgentRetirement(repoA, id, planted.agentDir, false) : undefined;
+    const original = join(queue("original", id), "outbox.jsonl");
+    const other = join(queue("alpha", id), "outbox.jsonl");
+    await Bun.write(original, "original messages");
+    await Bun.write(other, "other agent's messages");
+    await Bun.write(join(planted.agentDir, "meta.json"), "{");
+    const result = await archiveAgent(repoA, id, planted.agentDir, prepared);
+    expect(await Bun.file(other).text()).toBe("other agent's messages");
+    if (prepare) {
+      expect(result.warnings).toEqual([]);
+      expect(await Bun.file(original).exists()).toBe(false);
+      expect((await Bun.file(join(result.archivePath!, "meta.json")).json()).queue_key).toBe(key);
+    } else {
+      expect(result.warnings.join("\n")).toContain("skipped queue cleanup");
+      expect(result.warnings.join("\n")).toContain(join(planted.agentDir, "meta.json"));
+      expect(await Bun.file(original).text()).toBe("original messages");
+    }
+  });
+
+  test.each(["missing", "unreadable"])("archive distinguishes %s metadata when a legacy queue exists", async (condition) => {
+    const id = "review";
+    const planted = await cli.addAgent(repoA, id);
+    const path = join(planted.agentDir, "meta.json");
+    await rm(path);
+    if (condition === "unreadable") await mkdir(path); // readAgentMeta gets EISDIR
+    await Bun.write(join(planted.agentDir, "output.log"), "captured output");
+    const file = join(queue("alpha", id), "outbox.jsonl");
+    await Bun.write(file, "pending legacy message");
+    const result = await archiveAgent(repoA, id, planted.agentDir);
+    if (condition === "missing") {
+      expect(result.warnings).toEqual([]);
+      expect(await Bun.file(file).exists()).toBe(false);
+    } else {
+      expect(result.warnings.join("\n")).toContain(path);
+      expect(await Bun.file(file).text()).toBe("pending legacy message");
+    }
+  });
 
   test("an absent registry permits the unregistered session key", async () => {
     await rm(join(cli.home, ".itsybitsy", "repos.json"));

@@ -290,23 +290,32 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
   await rename(tmpPath, path);
 }
 
-/** Remove delivery files and the per-agent directory. Missing files are safe to retry. */
-export async function deleteAgentOutbox(dir: string): Promise<void> {
-  for (const p of [outboxPath(dir), outboxPath(dir) + ".tmp", outboxLockPath(dir)]) {
-    try {
-      await unlink(p);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+/** Collect unlink failures so teardown can try each remaining file. */
+export async function unlinkQueueFile(path: string, warnings: string[]): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      warnings.push(`Warning: could not unlink ${path}: ${(err as Error).message}`);
     }
   }
-  // Never rmdir the coordinator home itself — that path is the system
-  // coordinator's outbox location, not an ephemeral per-agent subdir.
-  if (dir === getCoordinatorHome()) return;
-  try {
-    await rmdir(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+}
+
+export async function deleteAgentOutbox(dir: string): Promise<string[]> {
+  const warnings: string[] = [];
+  for (const path of [outboxPath(dir), outboxPath(dir) + ".tmp", outboxLockPath(dir)]) {
+    await unlinkQueueFile(path, warnings);
   }
+  if (dir !== getCoordinatorHome()) {
+    try {
+      await rmdir(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        warnings.push(`Warning: could not remove queue directory ${dir}: ${(err as Error).message}`);
+      }
+    }
+  }
+  return warnings;
 }
 
 /** A held lock — pass to `releaseOutboxLock` (always in a finally block). */

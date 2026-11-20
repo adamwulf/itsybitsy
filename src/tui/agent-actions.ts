@@ -345,7 +345,7 @@ function confirmRetire(ctx: ActionCtx, agent: Agent) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const result = await retireAgent(agent);
-        if (result.ok) ctx.setNotice(`Retired ${agent.id}`, "info");
+        if (result.ok) ctx.setNotice([`Retired ${agent.id}`, result.stderr].filter(Boolean).join("\n"), "info");
         else ctx.setNotice(`Retire failed: ${result.stderr || result.stdout}`, "error");
       });
     },
@@ -1315,7 +1315,7 @@ export function handleMerge(ctx: ActionCtx) {
             const notice = keep
               ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
               : `Merged ${agent.id}`;
-            ctx.setNotice(notice, "info");
+            ctx.setNotice([notice, result.stderr].filter(Boolean).join("\n"), "info");
           } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
         });
       },

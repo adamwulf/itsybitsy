@@ -244,6 +244,23 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     });
   });
 
+  test("aggregates old and new machine prefixes and the coordinator with a missing or changed machine name", async () => {
+    const file = join(home, ".itsybitsy", "machine-name");
+    const reader = () => readClaudeUsage(new Date(NOW_MS));
+    await rm(file);
+    await recordClaudeRateLimits(home, { seven_day: { resets_at: NOW_S + 86400, used_percentage: 75 } }, NOW_MS - 120_000);
+    expect((await reader()).data?.weeklyPct).toBe(75);
+    await recordClaudeRateLimits(recordDir("old"), { five_hour: { resets_at: NOW_S + 3600, used_percentage: 60 } }, NOW_MS);
+    await recordClaudeRateLimits(join(home, "agents", "renamed", "repo", "new"), {
+      five_hour: { resets_at: NOW_S + 3600, used_percentage: 40 },
+    }, NOW_MS - 60_000);
+    const missing = await reader();
+    expect(missing.data?.sessionPct).toBe(60);
+    expect(missing.data?.weeklyPct).toBe(75);
+    await Bun.write(file, "renamed");
+    expect(await reader()).toEqual(missing);
+  });
+
   test("an idle session re-running its statusline with old values does not win", async () => {
     // An idle session last saw 2% in the current window; the account has
     // since reached 100% (agent-busy). The idle session's statusline runs

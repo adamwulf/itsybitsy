@@ -10244,6 +10244,51 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(existsSync(join(home, "agents"))).toBe(false);
   });
 
+  test("a live coordinator keeps its queue when a second same-basename checkout takes its registry name", async () => {
+    const { addRepo, removeRepo } = await import("./registry");
+    const first = join(tempDir, "a", "project");
+    const second = join(tempDir, "b", "project");
+    await mkdir(first, { recursive: true });
+    await mkdir(second, { recursive: true });
+    let root = first;
+    lifecycleSpawnCtx.set((cmd) => makeSpawnResult(cmd.includes("--show-toplevel") ? root : ".git", 0));
+    const live = new Set<string>();
+    const spawn = mockSpawnRunner();
+    setNewAgentSpawnRunner((cmd) => {
+      if (cmd[0] === "tmux" && cmd[1] === "has-session") {
+        const target = cmd[cmd.indexOf("-t") + 1]!.slice(1, -1);
+        return makeSpawnResult("", live.has(target) ? 0 : 1);
+      }
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") live.add(cmd[cmd.indexOf("-s") + 1]!);
+      return spawn(cmd);
+    });
+    expect((await addRepo(first, "shared")).ok).toBe(true);
+    expect((await newAgent(first, "start", { type: "repo-coordinator", _cwd: first })).ok).toBe(true);
+    const queueDir = join(tempDir, "home", ".itsybitsy", "agents", "studio", "shared", "project");
+    const file = join(queueDir, "outbox.jsonl");
+    await Bun.write(file, "pending for first");
+    expect((await removeRepo(first)).ok).toBe(true);
+    expect((await addRepo(second, "shared")).ok).toBe(true);
+    root = second;
+    const refused = await newAgent(second, "start", { type: "repo-coordinator", _cwd: second });
+    expect(refused.ok).toBe(false);
+    expect(refused.stderr).toContain(`queue directory already exists at ${queueDir}`);
+    expect(existsSync(join(second, ".itsybitsy", "agents", "project"))).toBe(false);
+    expect(await Bun.file(file).text()).toBe("pending for first");
+    expect(live.size).toBe(1);
+  });
+
+  test("a failed worktree allocation releases the reserved queue for a retry", async () => {
+    const queueDir = join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir), "review");
+    setNewAgentSpawnRunner(mockSpawnRunner({ failWorktree: true }));
+    const failure = await callNewAgent("task", { name: "review" });
+    expect(failure.stderr).toContain("could not create worktree");
+    expect(existsSync(queueDir)).toBe(false);
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    expect((await callNewAgent("task", { name: "review" })).ok).toBe(true);
+    expect(existsSync(queueDir)).toBe(true);
+  });
+
   test("writes meta.json with state='creating' BEFORE git worktree add runs", async () => {
     // Verifies Fix 1: the early meta.json write happens before any slow step.
     // On large repos, `git worktree add` can take 60-90s. Without the early
@@ -11193,6 +11238,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(worktreeAdd).toBeUndefined();
 
     // Agent dir should be cleaned up
+    expect(existsSync(join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir), "test-held"))).toBe(false);
     const exists = await Bun.file(join(agentsDir, "test-held", "meta.json")).exists().catch(() => false);
     expect(exists).toBe(false);
   });
@@ -11200,6 +11246,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   test("cleans up on tmux new-session failure", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
     const result = await callNewAgent("task", { name: "test-fail-tmux" });
+    expect(existsSync(join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir), "test-fail-tmux"))).toBe(false);
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("tmux session");
 
@@ -16447,6 +16494,20 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
 
   // --- retireAgent ---------------------------------------------------------
 
+  test("retire finishes and reports every leftover queue or usage file", async () => {
+    const id = "agent-leaver";
+    const agentDir = await plantDeparting(id);
+    const dir = queueDirOf(id);
+    const leftovers = ["outbox.jsonl", "outbox.jsonl.tmp", "claude-rate-limits.json.tmp.123"];
+    for (const file of leftovers) await mkdir(join(dir, file));
+    await Bun.write(join(dir, ".outbox.lock"), "lock");
+    const result = await retireAgent(agentOf(id));
+    expect(result.ok).toBe(true);
+    for (const file of leftovers) expect(result.stderr).toContain(`Warning: could not unlink ${join(dir, file)}:`);
+    expect(existsSync(agentDir)).toBe(false);
+    expect(await readdir(dir)).not.toContain(".outbox.lock");
+  });
+
   test("retireAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
     const { createTeam, addMember, getTeam } = await import("./teams");
     const { readOutbox } = await import("./outbox");
@@ -16543,7 +16604,11 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
     lifecycleSpawnCtx.set(mergeRunner);
     setMergeSpawnRunner(mergeRunner);
 
+    const leftover = join(queueDirOf("agent-merged"), "outbox.jsonl.tmp");
+    await mkdir(leftover);
     const res = await mergeAgent(agentOf("agent-merged"), repoDir);
+    expect(res.stderr).toContain(`Warning: could not unlink ${leftover}:`);
+    expect(existsSync(join(repoDir, ".itsybitsy", "agents", "agent-merged"))).toBe(false);
     expect(res.ok).toBe(true);
 
     const team = await getTeam("backend");

@@ -1748,7 +1748,7 @@ function invalidateAgentMetaCache(agentDir: string): void {
 /** Read a single agent's meta.json. Returns meta or an error description.
  * Uses an mtime-keyed cache to avoid re-parsing on every refresh tick when
  * meta.json hasn't changed. */
-export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null; error?: string }> {
+export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null; error?: string; missing?: true }> {
   const metaPath = join(agentDir, "meta.json");
 
   // Single syscall: stat() returns mtimeMs and confirms existence.
@@ -1760,7 +1760,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
   } catch (err: unknown) {
     if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
       metaCache.delete(metaPath);
-      return { meta: null, error: `Missing ${metaPath}` };
+      return { meta: null, missing: true, error: `Missing ${metaPath}` };
     }
     return { meta: null, error: `Failed to read ${metaPath}: ${err}` };
   }
@@ -1856,6 +1856,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
     return { meta: copyAgentMeta(meta) };
   } catch (err) {
     metaCache.delete(metaPath);
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { meta: null, missing: true, error: `Missing ${metaPath}` };
     return { meta: null, error: `Failed to read ${metaPath}: ${err}` };
   }
 }

@@ -586,6 +586,7 @@ export async function captureTmuxOutputToFile(
  * emits NO notice and only performs the membership write.
  */
 export interface ArchiveAgentResult {
+  warnings: string[];
   /** Archive folder path, or null if there were no artifacts to archive. */
   archivePath: string | null;
   /** `(team, id)` pairs this agent was pruned from (empty if it was in no team). */
@@ -645,12 +646,26 @@ export async function archiveAgent(
     }
   }
 
-  if (!hasOutput && !hasLog && !hasMeta && !preparedRetirement) {
-    return { archivePath: null, prunedTeams };
+  const warnings: string[] = [];
+  const live = await readAgentMeta(agentDir);
+  if (!hasOutput && !hasLog && live.missing && !preparedRetirement) {
+    return { archivePath: null, prunedTeams, warnings };
   }
 
-  const { meta } = await readAgentMeta(agentDir);
-  const queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: meta?.queue_key !== undefined || meta?.tmux_session ? meta : null });
+  let identity = live;
+  if (!live.meta && preparedRetirement) {
+    const snapshot = await readAgentMeta(join(preparedRetirement.payloadDir, RUNTIME_DIR));
+    // A missing snapshot cannot turn an unreadable live identity into ENOENT.
+    if (!snapshot.missing) identity = snapshot;
+  }
+  let queueDir: string | undefined;
+  try {
+    if (!identity.meta && !identity.missing) throw new Error(identity.error);
+    const { meta } = identity;
+    queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: meta?.queue_key !== undefined || meta?.tmux_session ? meta : null });
+  } catch (err) {
+    warnings.push(`Warning: skipped queue cleanup for '${agentId}': ${(err as Error).message}`);
+  }
   await mkdir(archiveFolder, { recursive: true });
 
   // output.log — move
@@ -674,7 +689,7 @@ export async function archiveAgent(
   }
 
   // meta.json — copy
-  if (hasMeta) {
+  if (hasMeta && identity === live) {
     try {
       await cp(join(agentDir, "meta.json"), join(archiveFolder, "meta.json"));
     } catch { /* ignore */ }
@@ -787,10 +802,12 @@ export async function archiveAgent(
   // removes the per-agent outbox subdir. The statusline's Claude
   // rate-limit record lives in the same folder and must go first, or the
   // rmdir fails and the folder stays for good.
-  await deleteClaudeRateLimits(queueDir);
-  await deleteAgentOutbox(queueDir);
+  if (queueDir) {
+    warnings.push(...await deleteClaudeRateLimits(queueDir));
+    warnings.push(...await deleteAgentOutbox(queueDir));
+  }
 
-  return { archivePath: archiveFolder, prunedTeams };
+  return { archivePath: archiveFolder, prunedTeams, warnings };
 }
 
 // ── teardownAgent ────────────────────────────────────────────────────────────
@@ -831,7 +848,7 @@ export async function teardownAgent(
   logMsg: string = "Agent killed",
   preparedRetirement?: PreparedRetirement,
   beforeRemove?: () => Promise<void>,
-): Promise<{ ok: boolean; prunedTeams: Array<{ team: string; id: string }> }> {
+): Promise<{ ok: boolean; prunedTeams: Array<{ team: string; id: string }>; warnings: string[] }> {
   const tmuxSession = meta.tmux_session;
 
   if (!isValidTmuxSession(tmuxSession)) {
@@ -841,7 +858,7 @@ export async function teardownAgent(
     // silently left in its teams until a later lazy prune self-healed it.
     const prunedTeams = await pruneAgentFromAllTeams(agentId);
     logWarning(`[agent-lifecycle] Invalid tmux session name in meta for agent ${agentId}: ${tmuxSession}`);
-    return { ok: false, prunedTeams };
+    return { ok: false, prunedTeams, warnings: [] };
   }
 
   // 1. Log
@@ -922,7 +939,7 @@ export async function teardownAgent(
   // 8. Archive — also performs the eager team-membership prune (§16.5) and
   // returns the pruned (team, id) pairs, which we thread up to the command
   // layer so it can fan out the leave notice.
-  const { prunedTeams } = await archiveAgent(
+  const { prunedTeams, warnings } = await archiveAgent(
     repoPath,
     agentId,
     agentDir,
@@ -937,9 +954,9 @@ export async function teardownAgent(
   // 10. Remove agent directory
   try {
     await rm(agentDir, { recursive: true, force: true });
-    return { ok: true, prunedTeams };
+    return { ok: true, prunedTeams, warnings };
   } catch {
-    return { ok: false, prunedTeams };
+    return { ok: false, prunedTeams, warnings };
   }
 }
 

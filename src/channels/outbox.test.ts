@@ -1374,10 +1374,12 @@ describe("exhausted retries keep the item and hold the queue", () => {
 
     await drop(`${Date.now()}-k00001.txt`, "flooded");
     await waitFor(() => outbox.getHealth().stalled);
-    expect(calls).toBe(3);
+    // A retry_after above the inline cap stalls after ONE attempt: no inline
+    // hour-long sleep that stop() could not cancel.
+    expect(calls).toBe(1);
     outbox.kick(); // retry_after (1h) has not passed
     await new Promise<void>((r) => setTimeout(r, 200));
-    expect(calls).toBe(3);
+    expect(calls).toBe(1);
 
     await outbox.stop();
   });

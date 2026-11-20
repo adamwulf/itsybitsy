@@ -34,7 +34,8 @@
  *     failure: empty text, bad descriptor, file missing/unreadable/too large).
  *   - A transient failure is retried inline, up to {@link INLINE_ATTEMPTS}
  *     attempts per API call, with capped backoff (`backoffDelayMs`; on a 429 the
- *     wait is at least the server's `retry_after`).
+ *     wait is at least the server's `retry_after`, and a `retry_after` above
+ *     the inline cap stalls the queue at once instead of sleeping inline).
  *   - When the inline retries are exhausted the item STAYS ON DISK, the outbox
  *     is marked stalled (`getHealth()`), and the queue is held: no later item is
  *     sent before it. The head is retried forever with capped, jittered backoff
@@ -733,12 +734,17 @@ export class TelegramOutbox {
       }
       await this.writeInterimResult(base, r);
       if (attempt >= INLINE_ATTEMPTS || !this.started) return r;
+      const delayMs = retryDelayMs(attempt, INLINE_BACKOFF, r.retryAfterSec);
+      // A 429 asking for longer than the inline cap holds the queue right
+      // away: the stall wait honors retry_after too, and unlike `sleepCtx` its
+      // timer is cancelled by stop().
+      if (delayMs > INLINE_BACKOFF.maxMs) return r;
       // While stalled, each stall retry runs this loop again; the stall line
       // already covers those failures, so only a healthy queue logs retries.
       if (!this.health.stalled) {
         this.log(`telegram outbox: ${r.message}; retrying (attempt ${attempt + 1} of ${INLINE_ATTEMPTS})`);
       }
-      await Promise.race([sleepCtx.fn(retryDelayMs(attempt, INLINE_BACKOFF, r.retryAfterSec)), this.stopSignal]);
+      await Promise.race([sleepCtx.fn(delayMs), this.stopSignal]);
       if (!this.started) return r;
     }
   }

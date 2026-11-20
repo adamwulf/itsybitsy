@@ -13,9 +13,11 @@ Pairing works like this:
 3. You type that code into A.
 4. You give each side a name for the other.
 
-After pairing, each install trusts the other and can find it by key. Each
-`ib watch` sidebar tree then shows the other install's repos and agents, with
-one read-only section per install.
+After pairing, each install trusts the other and can find it by key. The
+`ib watch` sidebar shows one unified repo list, with remote agents in italic.
+Select a remote agent to see its machine and connection status on the info
+panel's Machine line. Open the Peers dialog to see the status of all paired
+machines.
 
 ## Research findings
 

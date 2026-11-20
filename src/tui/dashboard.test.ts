@@ -9694,7 +9694,7 @@ describe("Unified peer repos in the Agents tree", () => {
         expect(atState.includes(DIM)).toBe(stale);
         expect(atState.includes("\x1b[7m")).toBe(selected);
         expect(line).toEndWith("\x1b[0m");
-        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+        expect(visibleWidth(line)).toBe(width);
       };
       assertStyle(false, false);
       selectByKey(dashboard, `${name}/app/worker`);

@@ -28,9 +28,12 @@ repo onto a machine that doesn't have it remains out of scope.
   name is unique on each machine, so a name identifies at most one repo per
   machine.
 - Paths are never compared, because they normally differ between machines.
-- **Fallback when names differ:** none is automatic. The repo shows as two
-  entries. On the machine whose name needs changing, remove the registration
-  with `ib remove <path>`, then re-register it with `ib add <path> <name>`.
+- Different registry names produce two entries. To align them, first save any
+  notes, nickname, or default agent type you want to keep from the registration
+  you plan to remove. On that machine, run `ib remove <path>`, then
+  `ib add <path> <name>` with the matching name. Restore the saved settings
+  on the new registration, then reload or restart `ib watch` on that machine
+  so its dashboard and peers see the new name.
 - Adam decided this on 2026-11-20: equal registered names mean the same repo,
   and nothing fancier is used.
 
@@ -287,8 +290,7 @@ Each phase gets the usual two-reviewer cycle before it is merged.
 
 1. **Matching: DECIDED (Adam, 2026-11-20).** Repos match by registered repo
    name only, ignoring case. There is no path matching and nothing fancier.
-   To align names, run `ib remove <path>` on the machine whose registration
-   needs changing, then `ib add <path> <name>` with the matching name.
+   To align names, follow the steps under [Matching repos across machines](#matching-repos-across-machines).
 2. **Permission.** Any paired machine may start agents here, with a log line
    and a notice on this machine. The alternative is a per-peer "may start
    agents here" switch in the Peers dialog.

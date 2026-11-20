@@ -548,7 +548,7 @@ describe("watchdog", () => {
       setWatchdogCaptureTmux(async () => "⏵⏵ accept edits on · 1 shell");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", null); // no manager, but has spawner
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
       const agents = [spawner, a1];
 
       for (let i = 0; i < INITIAL_NOTIFY_TICKS + 5; i++) {
@@ -780,7 +780,9 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const worker = agent("w1", "waiting", "mgr");
 
-      await notifyManager(worker, "test message", [mgr, worker]);
+      const other = { ...mgr, repoPath: join(mgr.repoPath, "other"), meta: { ...mgr.meta, tmux_session: "wrong-manager" } };
+      await notifyManager(worker, "test message", [other, mgr, worker]);
+      expect(spawnMock.calls.some((c) => c.args.includes("=wrong-manager:"))).toBe(false);
 
       // Should have calls to tmux (has-session check + send-keys)
       const hasSessionCalls = spawnMock.calls.filter((c) =>
@@ -918,7 +920,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", "mgr");
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [mgr, spawner, a1],
@@ -934,7 +936,7 @@ describe("watchdog", () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", null);
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
@@ -961,7 +963,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "complete", "mgr");
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       // The watchdog "recently completed" is a delayed fallback — it only fires
       // after the agent has been continuously complete for
@@ -979,7 +981,7 @@ describe("watchdog", () => {
     test("complete: spawner notified when manager is null", async () => {
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "complete", null);
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
@@ -993,7 +995,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "unknown", "mgr");
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [mgr, spawner, a1],
@@ -1007,7 +1009,7 @@ describe("watchdog", () => {
     test("unknown: spawner notified when manager is null", async () => {
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "unknown", null);
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
@@ -1069,6 +1071,7 @@ describe("watchdog", () => {
       try {
         // Coordinator agent: id matches the repo basename.
         const coord = makeAgent({
+          repoPath: repoDir,
           id: repoBasename,
           state: "running",
           meta: {
@@ -1105,7 +1108,9 @@ describe("watchdog", () => {
         a1.meta.spawned_by = { agent_id: `@${repoBasename}`, repo_path: repoDir };
 
         const { notifySpawner } = await import("./watchdog");
-        const ok = await notifySpawner(a1, "hello @myrepo", [coord]);
+        const other = { ...coord, repoPath: pjoin(parentDir, "other", "myrepo"), meta: { ...coord.meta, tmux_session: "wrong-session" } };
+        const ok = await notifySpawner(a1, "hello @myrepo", [other, coord]);
+        expect(spawnMock.calls.some((c) => c.args.includes("=wrong-session:"))).toBe(false);
 
         expect(ok).toBe(true);
         const sendKeysCalls = spawnMock.calls.filter((c) =>
@@ -1810,7 +1815,7 @@ describe("watchdog", () => {
           state: "waiting",
           ack: { state: "waiting", by: "mgr", at: 1 },
         }));
-        const agents = [agent("mgr", "running"), a1];
+        const agents = [{ ...agent("mgr", "running"), repoPath: repo }, a1];
 
         await eligibleTick(agents, "a1");
         clearTrackers(); // a new watchdog process starts with a fresh tracker

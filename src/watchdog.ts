@@ -429,11 +429,11 @@ export function clearTrackers(): void {
  * Find an agent by ID in the agents list.
  * Used to look up a manager agent for sending notifications.
  */
-function findAgent(agents: Agent[], id: string): Agent | undefined {
+function findAgent(agents: Agent[], id: string, repoPath: string | null): Agent | undefined {
   for (const agent of agents) {
-    if (agent.id === id) return agent;
+    if (agent.id === id && agent.repoPath === repoPath) return agent;
     // Search children recursively
-    const found = findAgent(agent.children, id);
+    const found = findAgent(agent.children, id, repoPath);
     if (found) return found;
   }
   return undefined;
@@ -457,7 +457,7 @@ export async function notifyManager(
   const managerId = agent.meta.manager;
   if (!managerId) return false;
 
-  const manager = findAgent(allAgents, managerId);
+  const manager = findAgent(allAgents, managerId, agent.repoPath);
   if (!manager) return false;
 
   const result = await sendMessage(manager, message, { fromAgent: WATCHDOG_SENTINEL });
@@ -496,7 +496,7 @@ export async function notifySpawner(
   // already enforce mutual exclusivity by skipping notifySpawner when manager
   // is set. This guard remains so direct callers (and tests) still get the
   // same dedupe semantics as before.
-  if (spawner.agent_id === agent.meta.manager) return false;
+  if (spawner.agent_id === agent.meta.manager && spawner.repo_path === agent.repoPath) return false;
 
   // @system → deliver via the same direct-tmux path `ib send @system` uses.
   if (spawner.agent_id === "@system") {
@@ -511,22 +511,12 @@ export async function notifySpawner(
 
   // @<repo-name> → resolve to that repo's per-repo coordinator.
   if (spawner.agent_id.startsWith("@")) {
-    const repoName = spawner.agent_id.slice(1);
     try {
-      const { basename: pathBasename } = await import("path");
-      const repos = await listReposFn();
-      // Match by `basename(repo.path)`, NOT repo.name or repoDisplayName.
-      // This is the same invariant `getCoordinatorAgentId()` uses for the
-      // coordinator's actual agent ID. ib-commands stamps the @<repo-name>
-      // sentinel with basename(cwd) for the same reason. Any other lookup
-      // here (registry name, nickname) silently breaks for repos whose
-      // user-overridden name differs from the directory basename.
-      const repo = repos.find((r) => pathBasename(r.path) === repoName);
-      if (!repo) return false;
+      if (!spawner.repo_path) return false;
       const { checkCoordinatorExists } = await import("./coordinator");
-      const coordStatus = await checkCoordinatorExists(repo.path);
-      if (!coordStatus.exists || !coordStatus.agentId) return false;
-      const coordinator = findAgent(allAgents, coordStatus.agentId);
+      const coordStatus = await checkCoordinatorExists(spawner.repo_path);
+      if (!coordStatus.exists) return false;
+      const coordinator = findAgent(allAgents, coordStatus.agentId, spawner.repo_path);
       if (!coordinator) return false;
       const result = await sendMessage(coordinator, message, { fromAgent: WATCHDOG_SENTINEL });
       return result.ok;
@@ -537,7 +527,7 @@ export async function notifySpawner(
 
   // Real agent ID — existing path.
   try {
-    const spawnerAgent = findAgent(allAgents, spawner.agent_id);
+    const spawnerAgent = findAgent(allAgents, spawner.agent_id, spawner.repo_path);
     if (!spawnerAgent) return false;
     const result = await sendMessage(spawnerAgent, message, { fromAgent: WATCHDOG_SENTINEL });
     return result.ok;
@@ -1999,7 +1989,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         // failure must never crash the watchdog.
         try {
           const allAgents = await makeLazyAllAgents()();
-          const self = findAgent(allAgents, agentId);
+          const self = findAgent(allAgents, agentId, repoPath);
           if (self) {
             await notifyManager(
               self,

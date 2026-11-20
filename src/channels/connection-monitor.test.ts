@@ -558,43 +558,47 @@ describe("TelegramConnectionMonitor with a real TelegramOutbox", () => {
     monitor.attach(d.dispatcher, outbox);
     d.transition("polling", null);
     monitor.dispatcherStartSettled();
-    await outbox.start();
+    // Cleanup in finally: a failed assertion must not leak the rescan
+    // interval, the fs.watch or the 60 s stall timer into later tests.
+    try {
+      await outbox.start();
 
-    // Drop a message the way `ib tgsend` does (.tmp + rename).
-    const base = `${Date.now()}-aaaaaa.txt`;
-    await mkdir(outboxDir, { recursive: true });
-    await writeFile(join(outboxDir, `${base}.tmp`), "hello after the outage");
-    await rename(join(outboxDir, `${base}.tmp`), join(outboxDir, base));
+      // Drop a message the way `ib tgsend` does (.tmp + rename).
+      const base = `${Date.now()}-aaaaaa.txt`;
+      await mkdir(outboxDir, { recursive: true });
+      await writeFile(join(outboxDir, `${base}.tmp`), "hello after the outage");
+      await rename(join(outboxDir, `${base}.tmp`), join(outboxDir, base));
 
-    const startedAt = Date.now();
-    const waitUntil = async (pred: () => boolean, label: string) => {
-      while (!pred()) {
-        if (Date.now() - startedAt > 10_000) throw new Error(`timed out: ${label}`);
-        await new Promise<void>((r) => setTimeout(r, 5));
-      }
-    };
-    await waitUntil(() => monitor.view()?.state === "reconnecting", "stall shows as reconnecting");
-    expect(monitor.view()).toMatchObject({ state: "reconnecting", lastError: "HTTP 502", outboxPending: 1 });
-    const attemptsWhileStalled = sends.length;
-    expect(attemptsWhileStalled).toBeGreaterThan(0);
+      const startedAt = Date.now();
+      const waitUntil = async (pred: () => boolean, label: string) => {
+        while (!pred()) {
+          if (Date.now() - startedAt > 10_000) throw new Error(`timed out: ${label}`);
+          await new Promise<void>((r) => setTimeout(r, 5));
+        }
+      };
+      await waitUntil(() => monitor.view()?.state === "reconnecting", "stall shows as reconnecting");
+      expect(monitor.view()).toMatchObject({ state: "reconnecting", lastError: "HTTP 502", outboxPending: 1 });
+      const attemptsWhileStalled = sends.length;
+      expect(attemptsWhileStalled).toBeGreaterThan(0);
 
-    // The poll loop drops and recovers once Telegram is back.
-    state.down = false;
-    d.transition("retrying", "HTTP 502", Date.now());
-    expect(sends.length).toBe(attemptsWhileStalled); // nothing kicked yet
-    d.transition("polling", "reconnected after 3s");
+      // The poll loop drops and recovers once Telegram is back.
+      state.down = false;
+      d.transition("retrying", "HTTP 502", Date.now());
+      expect(sends.length).toBe(attemptsWhileStalled); // nothing kicked yet
+      d.transition("polling", "reconnected after 3s");
 
-    await waitUntil(() => monitor.view()?.state === "connected" && monitor.view()?.outboxPending === 0, "delivered");
-    expect(sends.length).toBe(attemptsWhileStalled + 1);
-    expect(sends[sends.length - 1]).toBe("hello after the outage");
-    const result = JSON.parse(await readFile(join(outboxDir, `${base}.result`), "utf8")) as { ok: boolean; message: string };
-    expect(result).toEqual({ ok: true, message: "ok (message_id 77)" });
-    // Light path: connected → reconnecting (stall) → ... → connected.
-    expect(views.map((v) => v.state)).toContain("reconnecting");
-    expect(views[views.length - 1]!.state).toBe("connected");
-
-    await monitor.dispose();
-    await outbox.stop();
+      await waitUntil(() => monitor.view()?.state === "connected" && monitor.view()?.outboxPending === 0, "delivered");
+      expect(sends.length).toBe(attemptsWhileStalled + 1);
+      expect(sends[sends.length - 1]).toBe("hello after the outage");
+      const result = JSON.parse(await readFile(join(outboxDir, `${base}.result`), "utf8")) as { ok: boolean; message: string };
+      expect(result).toEqual({ ok: true, message: "ok (message_id 77)" });
+      // Light path: connected → reconnecting (stall) → ... → connected.
+      expect(views.map((v) => v.state)).toContain("reconnecting");
+      expect(views[views.length - 1]!.state).toBe("connected");
+    } finally {
+      await monitor.dispose();
+      await outbox.stop();
+    }
   });
 });
 
@@ -645,17 +649,21 @@ describe("TelegramConnectionMonitor with a real dispatcher", () => {
       clearStatus: async () => {},
     });
     monitor.attach(dispatcher, o.outbox);
-    await dispatcher.start();
-    monitor.dispatcherStartSettled();
-    const startedAt = Date.now();
-    while (o.kicks() === 0 && Date.now() - startedAt < 2_000) {
-      await new Promise<void>((r) => setTimeout(r, 5));
+    try {
+      await dispatcher.start();
+      monitor.dispatcherStartSettled();
+      const startedAt = Date.now();
+      while (o.kicks() === 0 && Date.now() - startedAt < 2_000) {
+        await new Promise<void>((r) => setTimeout(r, 5));
+      }
+      expect(o.kicks()).toBe(1);
+      expect(logs[0]).toBe("telegram: disconnected (errno:ECONNRESET)");
+      expect(logs[1]).toMatch(/^telegram: reconnected after \d+s$/);
+      expect(monitor.view()?.state).toBe("connected");
+    } finally {
+      // A failed assertion must not leave the poll loop running.
+      await monitor.dispose();
+      await dispatcher.stop();
     }
-    expect(o.kicks()).toBe(1);
-    expect(logs[0]).toBe("telegram: disconnected (errno:ECONNRESET)");
-    expect(logs[1]).toMatch(/^telegram: reconnected after \d+s$/);
-    expect(monitor.view()?.state).toBe("connected");
-    await monitor.dispose();
-    await dispatcher.stop();
   });
 });

@@ -20,6 +20,7 @@ import {
   extractMessageId,
   queuedTelegramUnreachable,
   type OutboxHealth,
+  type OutboxOptions,
 } from "./outbox";
 import { randomCtx } from "./backoff";
 import {
@@ -45,6 +46,32 @@ setDefaultTimeout(30_000);
 let tmpRoot: string;
 let outboxDir: string;
 
+/** Every outbox a test built. afterEach stops them all, so a failed
+ *  assertion cannot leak a 0.5s rescan interval, an fs.watch or a stall
+ *  timer into later tests. `stop()` is idempotent, so tests that stop an
+ *  outbox themselves (to assert on what stop leaves behind) still can. */
+const liveOutboxes: TelegramOutbox[] = [];
+
+function newOutbox(opts: OutboxOptions): TelegramOutbox {
+  const outbox = new TelegramOutbox(opts);
+  liveOutboxes.push(outbox);
+  return outbox;
+}
+
+/** Gates that hold a stubbed request open. afterEach releases them before
+ *  stopping the outboxes, so a failed assertion cannot leave `stop()`
+ *  awaiting a request that never settles. */
+const openGates: Array<() => void> = [];
+
+function makeGate(): { wait: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const wait = new Promise<void>((r) => {
+    release = r;
+  });
+  openGates.push(release);
+  return { wait, release };
+}
+
 beforeEach(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "outbox-test-"));
   outboxDir = join(tmpRoot, "outbox");
@@ -57,6 +84,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const release of openGates.splice(0)) release();
+  for (const outbox of liveOutboxes.splice(0)) await outbox.stop();
   resetOutboxDir();
   resetMessageCache();
   clientFetchCtx.reset();
@@ -198,7 +227,7 @@ describe("startup sweep", () => {
     makeOkFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     await waitFor(() => captured.length >= 1, 2_000);
@@ -229,7 +258,7 @@ describe("startup sweep", () => {
     // and only touches .tmp/.result/.txt under outbox dir.
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     // Sweep ran inside start() — verify the .tmp and .result are gone.
@@ -247,7 +276,7 @@ describe("file-drop round trip via TelegramOutbox", () => {
     makeOkFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "777" });
+    const outbox = newOutbox({ client, chatId: "777" });
     await outbox.start();
 
     // Drop a message file the way `tgsend` would: write tmp + rename.
@@ -283,7 +312,7 @@ describe("file-drop round trip via TelegramOutbox", () => {
     makeOkFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "777" });
+    const outbox = newOutbox({ client, chatId: "777" });
     await outbox.start();
 
     const stem = `${Date.now()}-cccccc`;
@@ -379,7 +408,7 @@ describe("outbound message ids reach the result and the cache", () => {
   test("a single-chunk send echoes its id and caches its text", async () => {
     makeIdFetch(1584);
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    const outbox = newOutbox({ client, chatId: "900" });
     await outbox.start();
 
     const result = await dropAndRead(`${Date.now()}-aaa111`, "Ready to merge?");
@@ -399,7 +428,7 @@ describe("outbound message ids reach the result and the cache", () => {
     const captured: Array<{ text: string }> = [];
     makeIdFetch(200, captured);
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    const outbox = newOutbox({ client, chatId: "900" });
     await outbox.start();
 
     const { TELEGRAM_CHUNK_LIMIT } = await import("./telegram-client");
@@ -442,7 +471,7 @@ describe("outbound message ids reach the result and the cache", () => {
     });
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    const outbox = newOutbox({ client, chatId: "900" });
     await outbox.start();
 
     const result = await dropAndRead(`${Date.now()}-ccc333`, "retried text");
@@ -464,7 +493,7 @@ describe("outbound message ids reach the result and the cache", () => {
     );
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    const outbox = newOutbox({ client, chatId: "900" });
     await outbox.start();
 
     const result = await dropAndRead(`${Date.now()}-ddd444`, "no id available");
@@ -483,7 +512,7 @@ describe("outbound message ids reach the result and the cache", () => {
     );
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    const outbox = newOutbox({ client, chatId: "900" });
     await outbox.start();
 
     const result = await dropAndRead(`${Date.now()}-eee555`, "doomed");
@@ -501,7 +530,7 @@ describe("outbound message ids reach the result and the cache", () => {
   test("the cached text is capped on the send path", async () => {
     makeIdFetch(7000);
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "900" });
+    const outbox = newOutbox({ client, chatId: "900" });
     await outbox.start();
 
     await dropAndRead(`${Date.now()}-fff666`, "q".repeat(1_000));
@@ -536,7 +565,7 @@ describe("outbox queue serializes back-to-back drops", () => {
     });
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "777" });
+    const outbox = newOutbox({ client, chatId: "777" });
     await outbox.start();
 
     const { rename } = await import("fs/promises");
@@ -560,7 +589,7 @@ describe("stop() cancels pending cleanup timeouts and unlinks immediately", () =
     makeOkFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "777" });
+    const outbox = newOutbox({ client, chatId: "777" });
     await outbox.start();
 
     const { rename } = await import("fs/promises");
@@ -605,7 +634,7 @@ describe("outbox logging for transient failures", () => {
     });
 
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "777",
       log: (line) => logs.push(line),
@@ -639,7 +668,7 @@ describe("outbox logging for transient failures", () => {
     }) as Parameters<typeof clientFetchCtx.set>[0]);
 
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "SECRET_TOKEN_OUTBOX_TIMEOUT" }),
       chatId: "777",
       log: (line) => logs.push(line),
@@ -673,7 +702,7 @@ describe("outbox logging for transient failures", () => {
     }) as Parameters<typeof clientFetchCtx.set>[0]);
 
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "SECRET_TOKEN_OUTBOX_LOG" }),
       chatId: "777",
       log: (line) => logs.push(line),
@@ -698,7 +727,7 @@ describe("outbox logging for transient failures", () => {
       jsonResponse(400, { ok: false, error_code: 400, description: "Bad Request: chat not found" }),
     );
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "777",
       log: (line) => logs.push(line),
@@ -740,7 +769,7 @@ describe("reaction descriptors (.react.json)", () => {
     makeReactionFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     // Atomic drop: .tmp then rename to .react.json.
@@ -767,7 +796,7 @@ describe("reaction descriptors (.react.json)", () => {
     makeReactionFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-cccccc`;
@@ -790,7 +819,7 @@ describe("reaction descriptors (.react.json)", () => {
     makeReactionFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-dddddd`;
@@ -821,7 +850,7 @@ describe("reaction descriptors (.react.json)", () => {
     makeReactionFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-eeeeee`;
@@ -864,7 +893,7 @@ describe("reaction descriptors (.react.json)", () => {
     });
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const base = `${Date.now()}`;
@@ -917,7 +946,7 @@ describe("file descriptors (.file.json)", () => {
     makeFileFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-hhhhhh`;
@@ -944,7 +973,7 @@ describe("file descriptors (.file.json)", () => {
     makeFileFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-iiiiii`;
@@ -968,7 +997,7 @@ describe("file descriptors (.file.json)", () => {
     makeFileFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-jjjjjj`;
@@ -998,7 +1027,7 @@ describe("file descriptors (.file.json)", () => {
     makeFileFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-kkkkkk`;
@@ -1031,7 +1060,7 @@ describe("file descriptors (.file.json)", () => {
     makeFileFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-llllll`;
@@ -1066,7 +1095,7 @@ describe("file descriptors (.file.json)", () => {
     makeFileFetch(captured);
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const stem = `${Date.now()}-mmmmmm`;
@@ -1108,7 +1137,7 @@ describe("file descriptors (.file.json)", () => {
     });
 
     const client = new TelegramClient({ token: "T" });
-    const outbox = new TelegramOutbox({ client, chatId: "555" });
+    const outbox = newOutbox({ client, chatId: "555" });
     await outbox.start();
 
     const base = `${Date.now()}`;
@@ -1153,7 +1182,7 @@ describe("transient failures are retried inline", () => {
     });
 
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       log: (line) => logs.push(line),
@@ -1188,7 +1217,7 @@ describe("transient failures are retried inline", () => {
         : okMessage(8);
     });
 
-    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    const outbox = newOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     await outbox.start();
 
     const base = await drop(`${Date.now()}-a00002.txt`, "slow down");
@@ -1211,7 +1240,7 @@ describe("transient failures are retried inline", () => {
       return okMessage(9);
     }) as Parameters<typeof clientFetchCtx.set>[0]);
 
-    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    const outbox = newOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     await outbox.start();
 
     const base = await drop(`${Date.now()}-a00003.txt`, "after a refused connection");
@@ -1236,7 +1265,7 @@ describe("transient failures are retried inline", () => {
 
     const filePath = join(tmpRoot, "doc.bin");
     await Bun.write(filePath, new Uint8Array([1, 2, 3]));
-    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    const outbox = newOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     await outbox.start();
 
     const t = Date.now();
@@ -1260,7 +1289,7 @@ describe("transient failures are retried inline", () => {
       return jsonResponse(400, { ok: false, error_code: 400, description: "Bad Request: chat not found" });
     });
 
-    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    const outbox = newOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     await outbox.start();
 
     const base = await drop(`${Date.now()}-a00004.txt`, "doomed");
@@ -1308,7 +1337,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
     makeOutage(state, attempts, delivered);
 
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       log: (line) => logs.push(line),
@@ -1365,7 +1394,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
         { "retry-after": "3600" },
       );
     });
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,
@@ -1399,7 +1428,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
       }
       return okMessage(2);
     });
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,
@@ -1431,7 +1460,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
       sent.push((JSON.parse(init!.body as string) as { text: string }).text);
       return okMessage(5);
     });
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,
@@ -1464,7 +1493,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
     const delivered: string[] = [];
     makeOutage(state, attempts, delivered);
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       log: (line) => logs.push(line),
@@ -1501,7 +1530,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
   test("a stalled file whose path is deleted fails permanently and clears the stall", async () => {
     const state = { down: true };
     makeOutage(state, [], []);
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,
@@ -1533,7 +1562,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
       return okMessage(6);
     }) as Parameters<typeof clientFetchCtx.set>[0]);
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       log: (line) => logs.push(line),
@@ -1566,7 +1595,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
       if (docCalls === 2) return badGateway();
       throw new DOMException("The operation timed out.", "TimeoutError");
     }) as Parameters<typeof clientFetchCtx.set>[0]);
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,
@@ -1586,7 +1615,7 @@ describe("exhausted retries keep the item and hold the queue", () => {
 
   test("stop() during a stall leaves the item on disk with no final result", async () => {
     clientFetchCtx.set(async () => badGateway());
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,
@@ -1623,7 +1652,7 @@ describe("multi-chunk texts resume from the .progress sidecar", () => {
     const state = { failB: true, nextId: 10 };
     const seen: string[] = [];
     makeChunkFetch(state, seen);
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,
@@ -1654,7 +1683,7 @@ describe("multi-chunk texts resume from the .progress sidecar", () => {
     const state = { failB: true, nextId: 10 };
     const seen: string[] = [];
     makeChunkFetch(state, seen);
-    const first = new TelegramOutbox({
+    const first = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,
@@ -1667,7 +1696,7 @@ describe("multi-chunk texts resume from the .progress sidecar", () => {
 
     state.failB = false;
     const logs: string[] = [];
-    const second = new TelegramOutbox({
+    const second = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       log: (line) => logs.push(line),
@@ -1691,7 +1720,7 @@ describe("multi-chunk texts resume from the .progress sidecar", () => {
     const state = { failB: false, nextId: 501 };
     const seen: string[] = [];
     makeChunkFetch(state, seen);
-    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    const outbox = newOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     await outbox.start();
     expect(await readdir(outboxDir)).not.toContain("1-orphan.txt.progress");
 
@@ -1713,7 +1742,7 @@ describe("cleanup race (regression: ENOENT 5s after an ok send)", () => {
       return okMessage(calls);
     });
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       log: (line) => logs.push(line),
@@ -1747,7 +1776,7 @@ describe("cleanup race (regression: ENOENT 5s after an ok send)", () => {
       return okMessage(calls);
     });
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       log: (line) => logs.push(line),
@@ -1783,7 +1812,7 @@ describe("a finished item is never sent again", () => {
       calls += 1;
       return okMessage(calls);
     });
-    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    const outbox = newOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     await outbox.start();
 
     const { TELEGRAM_CHUNK_LIMIT } = await import("./telegram-client");
@@ -1822,7 +1851,7 @@ describe("a finished item is never sent again", () => {
       return okMessage(9);
     }) as Parameters<typeof clientFetchCtx.set>[0]);
     const logs: string[] = [];
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       log: (line) => logs.push(line),
@@ -1839,17 +1868,14 @@ describe("a finished item is never sent again", () => {
   });
 
   test("stop() cleans up finished items BEFORE it waits for the in-flight request", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
+    const { wait: gate, release } = makeGate();
     let calls = 0;
     clientFetchCtx.set(async () => {
       calls += 1;
       if (calls === 2) await gate; // B hangs until released
       return okMessage(calls);
     });
-    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    const outbox = newOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     await outbox.start();
 
     const t = Date.now();
@@ -1869,15 +1895,12 @@ describe("a finished item is never sent again", () => {
 
 describe("outbox health API", () => {
   test("pending counts undelivered items (the one in flight included); events fire only on change", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
+    const { wait: gate, release } = makeGate();
     clientFetchCtx.set(async () => {
       await gate;
       return okMessage(1);
     });
-    const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
+    const outbox = newOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     const events: OutboxHealth[] = [];
     const unsubscribe = outbox.onHealthChange((h) => events.push(h));
     await outbox.start();
@@ -1911,7 +1934,7 @@ describe("outbox health API", () => {
   test("a stall and its recovery each fire one health change", async () => {
     const state = { down: true };
     clientFetchCtx.set(async () => (state.down ? badGateway() : okMessage(5)));
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client: new TelegramClient({ token: "T" }),
       chatId: "1",
       stallBackoff: KICK_ONLY,

@@ -1037,6 +1037,31 @@ describe("DashboardComponent dialog and action handlers", () => {
     await (await import("../agent-types")).ensureAgentTypesDir();
   });
 
+  test("registry errors in repo settings surface a notice and leave failed notes available for retry", async () => {
+    const repo = { path: "/repos/test", name: "test", defaultAgentType: "worker", notes: "before" };
+    const registry = join(configTempDir, ".itsybitsy", "repos.json");
+    const view = makeDashboard();
+    view.setRepos([repo]);
+    view.onUpdate([], [makeFlatRepoHeader("test", repo.path, false, false, false)], [], []);
+    expect(view.agentTree.selectByRepoPath(repo.path)).toBe(true);
+    view.syncSelectedAgent();
+    await Bun.write(registry, "{");
+    view.handleInput("\t"); // focus the default type
+    view.handleInput("\x7f"); // clear type
+    await waitFor(() => view.notice?.includes(registry) === true);
+    expect(repo.defaultAgentType).toBe("worker");
+    view.setNotice("", "info");
+    view.handleInput("\t"); // focus notes
+    view.infoPanel.notesEditor.setText("new draft");
+    view.handleInput("\x1b[Z"); // blur notes
+    await waitFor(() => view.notice?.includes(registry) === true);
+    expect(repo.notes).toBe("before");
+    await Bun.write(registry, JSON.stringify({ repos: [repo] }));
+    view.handleInput("\t");
+    view.handleInput("\x1b[Z"); // retry the same draft
+    await waitFor(async () => (await Bun.file(registry).json()).repos[0].notes === "new draft");
+  });
+
   async function setupDashboardWithAgent(state = "running") {
     dashboard = makeDashboard();
     lastIbCall = null;

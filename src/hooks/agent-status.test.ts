@@ -1293,6 +1293,27 @@ describe("executeResultActions — watchdog attribution on delivery", () => {
       .map((c) => c[c.length - 1]!);
   }
 
+  test.each(["nudge", "notify_manager"] as const)("%s queues for its recipient's original identity", async (action) => {
+    const { writeAgentTransient } = await import("../agents");
+    const { readOutbox } = await import("../outbox");
+    const id = action === "nudge" ? ctx.agentId : "manager-001";
+    const recipientDir = join(ctx.agentsDir, id);
+    await mkdir(recipientDir, { recursive: true });
+    await writeMeta(ctx.agentDir, { id: ctx.agentId, tmux_session: "ib-self", manager: "manager-001" });
+    const key = `studio/fixture/${id}`;
+    await writeMeta(recipientDir, { id, tmux_session: "ib-recipient", queue_key: key });
+    await saveRegistry({ repos: [{ path: join(ctx.agentsDir, "../.."), name: "renamed" }] });
+    await writeAgentTransient(recipientDir, {
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), has_background_tasks: false,
+      tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
+    });
+    await executeResultActions({ state: "running", action, message: "queued by hook" }, ctx.agentDir, ctx.agentsDir);
+    const messages = await readOutbox(join(coordHome, "agents", key));
+    expect(messages.map((m) => m.message)).toEqual(["queued by hook"]);
+    expect(await readOutbox(join(coordHome, "agents", "studio", "renamed", id))).toEqual([]);
+    expect(deliveredPayloads()).toEqual([]);
+  });
+
   test("self-nudge is delivered with the [sent by watchdog]: prefix (not raw)", async () => {
     await writeMeta(ctx.agentDir, { id: ctx.agentId, tmux_session: "ib-test", state: "waiting" });
 

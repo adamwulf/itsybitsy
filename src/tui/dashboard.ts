@@ -2817,7 +2817,7 @@ export class DashboardComponent implements Component {
     if (!repoPath) return;
     const repo = this.repos.find((r) => r.path === repoPath);
     if (!repo) return;
-    const result = await setRepoDefaultAgentType(repoPath, newType);
+    const result = await setRepoDefaultAgentType(repoPath, newType).catch((err: Error) => ({ ok: false, message: err.message }));
     if (!result.ok) {
       this.setNotice(result.message, "error");
       return;
@@ -2835,11 +2835,12 @@ export class DashboardComponent implements Component {
   private async persistNotes(repoPath: string, notes: string): Promise<void> {
     const repo = this.repos.find((r) => r.path === repoPath);
     if (!repo) return;
-    const result = await setRepoNotes(repoPath, notes);
+    const result = await setRepoNotes(repoPath, notes).catch((err: Error) => ({ ok: false, message: err.message }));
     if (!result.ok) {
       this.setNotice(result.message, "error");
       return;
     }
+    if (this.notesEditorRepoPath === repoPath) this.notesEditorOriginal = notes;
     if (notes.length > 0) {
       repo.notes = notes;
     } else {
@@ -2856,7 +2857,6 @@ export class DashboardComponent implements Component {
     const current = this.infoPanel.notesEditor.getText();
     if (current === this.notesEditorOriginal) return;
     const repoPath = this.notesEditorRepoPath;
-    this.notesEditorOriginal = current;
     void this.persistNotes(repoPath, current);
   }
 
@@ -3088,7 +3088,6 @@ export class DashboardComponent implements Component {
       if (data === "\t" || matchesKey(data, Key.tab)) {
         if (this.infoPanel.subField === "default-type") {
           this.infoPanel.subField = "notes";
-          this.notesEditorOriginal = this.infoPanel.notesEditor.getText();
           this.tui?.requestRender();
           return;
         }
@@ -3132,7 +3131,7 @@ export class DashboardComponent implements Component {
       this.focusManager.current() === "info"
       && this.agentTree.selectedRepoHeader != null
     ) {
-      // Notes sub-field: Escape reverts to the snapshot taken on entry,
+      // Notes sub-field: Escape reverts to the last saved notes,
       // any other key is routed to the multi-line editor.
       if (this.infoPanel.subField === "notes") {
         if (matchesKey(data, Key.escape) || data === "\x1b") {

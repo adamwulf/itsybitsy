@@ -404,9 +404,11 @@ class RetryingProber {
         if (stop?.aborted) return { kind: "aborted" };
         // Woken mid-probe: the socket may be dead. Probe again now.
         if (attemptAbort.signal.aborted) continue;
-        // The probe's own timer fired (dead socket, outage). classifyError
-        // labels it TimeoutError; use the label the getUpdates loop uses.
-        // Never err.message: it can embed the token-bearing URL.
+        // The probe's own timer fired (dead socket, outage): errno:ETIMEDOUT,
+        // the label the getUpdates loop uses. classifyError gives the same
+        // for a TimeoutError; the isAbortError check also covers an
+        // AbortError that no stop or wake caused. Never err.message: it can
+        // embed the token-bearing URL.
         reason = isAbortError(err) ? "errno:ETIMEDOUT" : classifyError(err);
       }
 

@@ -2113,6 +2113,25 @@ describe("TelegramDispatcher", () => {
     expect(body.chat_id).toBe("100");
   });
 
+  test("a Telegram reply that fails transiently (502) is still logged", async () => {
+    // The client logs only PERMANENT statuses now (the outbox owns retry
+    // logging), so replyOnTelegram must log a non-ok answer itself.
+    mock.enqueueResponse({ ok: true, result: [] }); // probe
+    mock.enqueueResponse({
+      ok: true,
+      result: [update(1, { chat: { id: 100 }, from: { id: 7, username: "alice" }, text: "/clear" })],
+    });
+    mock.enqueueResponse({ ok: false, error_code: 502, description: "Bad Gateway" }, 502);
+
+    const d = makeDispatcher();
+    await d.start();
+    await waitFor(() => logs.some((l) => l.includes("replyOnTelegram failed")), 1_000);
+    await d.stop();
+
+    expect(logs).toContain("Telegram dispatcher: replyOnTelegram failed: Bad Gateway");
+    expect(logs.some((l) => l.includes("status=502"))).toBe(false);
+  });
+
   test("inbound '/restart' → triggers restartCoordinatorCtx and acks on Telegram, no coordinator send", async () => {
     mock.enqueueResponse({ ok: true, result: [] }); // probe
     mock.enqueueResponse({

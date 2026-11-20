@@ -1192,14 +1192,18 @@ export class TelegramDispatcher {
     }
   }
 
-  /** Reply to the configured chat. Errors are logged, never thrown. */
+  /** Reply to the configured chat. Errors are logged, never thrown. The
+   *  client logs only permanent HTTP failures (the outbox owns retry
+   *  logging), so a non-ok answer — a 502 included — is logged here. */
   private async replyOnTelegram(text: string): Promise<void> {
     try {
-      await this.client.sendMessage({ chat_id: this.chatId, text });
+      const sent = await this.client.sendMessage({ chat_id: this.chatId, text });
+      if (!sent.ok) {
+        logCtx.fn(`Telegram dispatcher: replyOnTelegram failed: ${sent.description ?? `HTTP ${sent.status}`}`);
+      }
     } catch (err) {
-      logCtx.fn(
-        `Telegram dispatcher: replyOnTelegram failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      // classifyError, never err.message: it can embed the bot-token URL.
+      logCtx.fn(`Telegram dispatcher: replyOnTelegram failed: ${classifyError(err)}`);
     }
   }
 

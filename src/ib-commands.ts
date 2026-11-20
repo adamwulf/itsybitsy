@@ -8927,11 +8927,15 @@ export async function uninstallInterceptHook(_repoPath: string, settingsPath?: s
  * How long `ib tgsend` / `ib tgreact` / `ib tgsendfile` wait for `ib watch`'s
  * result before reporting `queued:`. 3s rather than the old 1s: the outbox
  * picks a drop up within ~0.5s (fs.watch, or its safety rescan), a normal
- * round trip takes a few hundred ms, and the most common transient failure in
- * practice (a stale keep-alive socket, `errno:23`, after ~2 min idle) succeeds
- * on the first inline retry about 1s later. 3s covers all three, so that case
- * prints `ok (message_id N)` instead of `queued:`. Every `queued:` outcome pays
- * the full window, so it stays short. Tests shorten it.
+ * round trip takes a few hundred ms (a little more now that every outbound
+ * call opens a fresh connection), and a fast transient failure (a refused
+ * connection, a 502) is retried inline about 1s later. 3s covers all three, so
+ * those cases print `ok (message_id N)` instead of `queued:`. A request that
+ * HANGS cannot finish in 3s: it times out only after `sendMessageMs` (15s).
+ * That was the `errno:23` in watch.log 2026-11-20 — a timeout on a pooled
+ * keep-alive socket that died while idle, not a fast socket error; fresh
+ * connections per outbound call remove that cause. Every `queued:` outcome
+ * pays the full window, so it stays short. Tests shorten it.
  */
 export const TELEGRAM_RESULT_WAIT_MS = 3_000;
 export const telegramResultWaitCtx = new InjectionContext<number>(TELEGRAM_RESULT_WAIT_MS);
@@ -9034,7 +9038,10 @@ export async function describeQueuedTelegramItem(): Promise<string> {
     case "connecting":
       return `queued: ib watch is still connecting to Telegram${why}; it will send it automatically once connected`;
     case "connected":
-      return "queued: ib watch is connected and still sending earlier messages (or a slow upload); this one will go out automatically, in order";
+      // No claim about earlier messages: the item itself may be the one in
+      // flight (a slow upload, or a request waiting out its timeout), and the
+      // status file only turns `reconnecting` once its retries run out.
+      return "queued: ib watch is connected but Telegram has not confirmed this message yet; it stays queued and will be sent automatically, in order";
     case "disabled":
       return `queued: Telegram routing is disabled in this ib watch${why}; the message stays queued until an ib watch start connects to Telegram`;
   }

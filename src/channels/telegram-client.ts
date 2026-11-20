@@ -66,6 +66,23 @@ export interface TelegramTimeouts {
   sendFileMs: number;
 }
 
+/** Fetch options for the outbound Bot API calls — sendMessage,
+ *  setMessageReaction, sendPhoto, sendDocument: never reuse a pooled
+ *  keep-alive connection, always open a fresh one.
+ *
+ *  Root cause of the `errno:23` sends in watch.log 2026-11-20 (each after ~2
+ *  min idle): the send went out on a pooled socket whose network path had
+ *  died silently while idle (no FIN, no RST), so it hung for the full
+ *  `sendMessageMs` and then timed out (Bun's timeout DOMException carries
+ *  `code` 23). Bun honours `keepalive: false` — checked 2026-11-20 on Bun
+ *  1.3.10 against a local server: each request opens its own connection and
+ *  an existing pooled one is not reused; a server that goes silent on a
+ *  connection after one answer makes the default second request time out,
+ *  while `keepalive: false` succeeds. The cost is one TCP + TLS handshake per
+ *  send. Not used for getUpdates (one long-poll at a time; a dead socket ends
+ *  in its own timeout and is retried) or probeOnce. */
+export const OUTBOUND_FETCH_INIT: Readonly<Pick<RequestInit, "keepalive">> = Object.freeze({ keepalive: false });
+
 export const DEFAULT_TELEGRAM_TIMEOUTS: Readonly<TelegramTimeouts> = Object.freeze({
   getUpdatesBufferMs: 10_000,
   probeMs: 10_000,
@@ -137,12 +154,21 @@ export function chunk(text: string, limit: number = TELEGRAM_CHUNK_LIMIT): strin
  *  We don't try to be exhaustive — just stable enough that a streak of
  *  identical errors collapses to one log line. Exported so callers logging
  *  network failures elsewhere (e.g. the dispatcher's probe path) can avoid
- *  surfacing raw `err.message`, which may embed URL fragments. */
+ *  surfacing raw `err.message`, which may embed URL fragments.
+ *
+ *  The names are checked BEFORE `code`. A timer-fired abort
+ *  (`AbortSignal.timeout`) rejects with a `TimeoutError` DOMException whose
+ *  legacy `code` is 23 (TIMEOUT_ERR), and an AbortController abort is an
+ *  `AbortError` with `code` 20. Checking `code` first labelled a request that
+ *  hung for its whole timeout `errno:23`, which read like a fast socket error
+ *  (watch.log 2026-11-20). A timeout is `errno:ETIMEDOUT`, the label the boot
+ *  probe and the getUpdates loop already use. */
 export function classifyError(err: unknown): string {
   if (err instanceof Error) {
+    if (err.name === "TimeoutError") return "errno:ETIMEDOUT";
+    if (err.name === "AbortError") return "AbortError";
     const code = (err as Error & { code?: string }).code;
     if (code) return `errno:${code}`;
-    if (err.name === "AbortError") return "AbortError";
     if (err.name && err.name !== "Error") return err.name;
     // Match grammy-style messages best-effort.
     const msg = err.message ?? "";
@@ -150,9 +176,20 @@ export function classifyError(err: unknown): string {
     if (msg.includes("ECONNRESET")) return "errno:ECONNRESET";
     if (msg.includes("ENOTFOUND")) return "errno:ENOTFOUND";
     if (msg.includes("EAI_AGAIN")) return "errno:EAI_AGAIN";
-    return `Error:${msg.slice(0, 40)}`;
+    return `Error:${redactLabelText(msg).slice(0, 40)}`;
   }
-  return `unknown:${String(err).slice(0, 40)}`;
+  return `unknown:${redactLabelText(String(err)).slice(0, 40)}`;
+}
+
+/** Strip anything that could carry the bot token from free text before it
+ *  becomes a label: every URL becomes `<url>`, and a `bot<token>` word (the
+ *  token as it appears in a Bot API path, up to the next `/` or whitespace)
+ *  becomes `bot<redacted>`. Labels reach watch.log, status.json, the `?` help
+ *  row and `ib tgsend` output. */
+function redactLabelText(text: string): string {
+  return text
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S*/gi, "<url>")
+    .replace(/\bbot[^/\s]+/gi, "bot<redacted>");
 }
 
 /** Callback fired by `getUpdates` after each attempt. Used by the dispatcher's
@@ -275,7 +312,9 @@ export interface SendDocumentOptions {
 }
 
 /** Result of `sendPhoto` / `sendDocument`. Mirrors {@link SendMessageResult}
- *  so the outbox's retry logic reads the same shape. */
+ *  so the outbox's retry logic reads the same shape. A fetch throw is folded
+ *  into status 0; `timedOut` is true when that throw was the `sendFileMs`
+ *  timer (the upload could not finish in time). */
 export type SendFileResult =
   | { ok: true; result: TelegramMessage }
   | {
@@ -284,6 +323,7 @@ export type SendFileResult =
       error_code?: number;
       description?: string;
       retryAfterSec: number | null;
+      timedOut?: boolean;
     };
 
 export interface TelegramClientOptions {
@@ -466,19 +506,23 @@ export class TelegramClient {
     const body = JSON.stringify({ chat_id: opts.chat_id, text: opts.text });
     const url = this.urlFor("sendMessage");
     // 15s per-attempt timeout — outbound is one-shot; a dead socket otherwise
-    // stalls the outbox queue indefinitely.
+    // stalls the outbox queue indefinitely. A fresh connection per send
+    // (OUTBOUND_FETCH_INIT) keeps an idle pooled socket from being that
+    // dead socket.
     const composedSignal = composeAbortSignal(undefined, this.timeouts.sendMessageMs);
     const resp = await fetchCtx.fn(url, {
+      ...OUTBOUND_FETCH_INIT,
       method: "POST",
       headers: { "content-type": "application/json" },
       body,
       signal: composedSignal,
     });
     const raw = await readRaw<TelegramMessage>(resp);
-    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
-      return { ok: true, result: (raw.body.result ?? {}) as TelegramMessage };
+    if (accepted(raw)) {
+      noteUnreadableAcceptedBody("sendMessage", raw);
+      return { ok: true, result: (raw.body?.result ?? {}) as TelegramMessage };
     }
-    logCtx.fn(`telegram sendMessage: status=${raw.status}`);
+    logPermanentFailure("sendMessage", raw.status);
     return {
       ok: false,
       status: raw.status,
@@ -533,16 +577,18 @@ export class TelegramClient {
     const url = this.urlFor("setMessageReaction");
     const composedSignal = composeAbortSignal(undefined, this.timeouts.sendMessageMs);
     const resp = await fetchCtx.fn(url, {
+      ...OUTBOUND_FETCH_INIT,
       method: "POST",
       headers: { "content-type": "application/json" },
       body,
       signal: composedSignal,
     });
     const raw = await readRaw<boolean>(resp);
-    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
+    if (accepted(raw)) {
+      noteUnreadableAcceptedBody("setMessageReaction", raw);
       return { ok: true };
     }
-    logCtx.fn(`telegram setMessageReaction: status=${raw.status}`);
+    logPermanentFailure("setMessageReaction", raw.status);
     return {
       ok: false,
       status: raw.status,
@@ -688,24 +734,29 @@ export class TelegramClient {
     try {
       // No explicit content-type header: the runtime derives the multipart
       // boundary from the FormData body. Setting it manually breaks parsing.
-      resp = await fetchCtx.fn(url, { method: "POST", body: form, signal: composedSignal });
+      resp = await fetchCtx.fn(url, { ...OUTBOUND_FETCH_INIT, method: "POST", body: form, signal: composedSignal });
     } catch (err) {
       // Surface as a non-2xx-shaped failure so the outbox formats it uniformly.
-      // classifyError, never err.message (token-bearing URL safety).
-      logCtx.fn(`telegram ${method}: ${classifyError(err)}`);
+      // classifyError, never err.message (token-bearing URL safety). Not
+      // logged: status 0 is transient, and the outbox logs its retries.
+      // `timedOut` lets the outbox tell an upload that cannot finish in
+      // `sendFileMs` from other transient failures: there is no caller
+      // signal here, so any abort is our own timer.
       return {
         ok: false,
         status: 0,
         error_code: 0,
         description: classifyError(err),
         retryAfterSec: null,
+        timedOut: isAbortError(err),
       };
     }
     const raw = await readRaw<TelegramMessage>(resp);
-    if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
-      return { ok: true, result: (raw.body.result ?? {}) as TelegramMessage };
+    if (accepted(raw)) {
+      noteUnreadableAcceptedBody(method, raw);
+      return { ok: true, result: (raw.body?.result ?? {}) as TelegramMessage };
     }
-    logCtx.fn(`telegram ${method}: status=${raw.status}`);
+    logPermanentFailure(method, raw.status);
     return {
       ok: false,
       status: raw.status,
@@ -818,6 +869,34 @@ async function readRaw<T>(resp: Response): Promise<RawResponse<T>> {
     retryAfterSec = body.parameters.retry_after;
   }
   return { status, retryAfterSec, body };
+}
+
+/** True when an outbound call's answer means Telegram ACCEPTED the request
+ *  (sendMessage, setMessageReaction, sendPhoto, sendDocument). Telegram
+ *  answers 2xx only with `{ok:true}`, so any 2xx is a success unless its body
+ *  is a readable `ok:false` envelope. In particular a 2xx whose body could not
+ *  be read — truncated, reset mid-body, or the timeout fired mid-body — is
+ *  delivered, just without a message id. Treating it as a failure reported an
+ *  error for a message Telegram had delivered, and a manual resend arrived
+ *  twice. */
+function accepted<T>(raw: RawResponse<T>): boolean {
+  return raw.status >= 200 && raw.status < 300 && raw.body?.ok !== false;
+}
+
+/** Log a delivered call whose 2xx body could not be read, so an `ok` with no
+ *  message id has an explanation in watch.log. */
+function noteUnreadableAcceptedBody<T>(method: string, raw: RawResponse<T>): void {
+  if (raw.body === null) {
+    logCtx.fn(`telegram ${method}: HTTP ${raw.status} with an unreadable body; treating it as delivered`);
+  }
+}
+
+/** Log a failed outbound call only when it is PERMANENT. Transient failures
+ *  (status 0, 429, 5xx) are retried by the outbox, which owns their logging
+ *  (one `send stalled` line per streak); a line per attempt here flooded
+ *  watch.log during an outage. Status only — never the URL. */
+function logPermanentFailure(method: string, status: number): void {
+  if (!isTransientStatus(status)) logCtx.fn(`telegram ${method}: status=${status}`);
 }
 
 /** True for a cancelled fetch: a timer-fired `AbortSignal.timeout` or an

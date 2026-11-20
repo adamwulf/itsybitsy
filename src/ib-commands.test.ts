@@ -15078,14 +15078,14 @@ describe("telegramSend (native, file-drop client)", () => {
     });
   });
 
-  test("queued wording: connected but busy says it will go out in order", async () => {
+  test("queued wording: connected but unconfirmed says it will go out in order, and claims no earlier messages", async () => {
     const { ibCmds } = await loadDeps();
     ibCmds.telegramResultWaitCtx.set(TG_QUEUED_WAIT_MS);
     await writeStatus("connected", null);
     const result = await ibCmds.telegramSend("hello");
     expect(result.ok).toBe(true);
     expect(result.message).toBe(
-      "queued: ib watch is connected and still sending earlier messages (or a slow upload); this one will go out automatically, in order",
+      "queued: ib watch is connected but Telegram has not confirmed this message yet; it stays queued and will be sent automatically, in order",
     );
   });
 
@@ -15112,7 +15112,7 @@ describe("telegramSend (native, file-drop client)", () => {
     const { ibCmds } = await loadDeps();
     const stop = answerDrops(
       [
-        { ok: true, queued: true, message: "queued: Telegram is unreachable (errno:23); ib watch will send it automatically when the connection recovers" },
+        { ok: true, queued: true, message: "queued: Telegram is unreachable (errno:ConnectionRefused); ib watch will send it automatically when the connection recovers" },
         { ok: true, message: "ok (message_id 1584)" },
       ],
       150,

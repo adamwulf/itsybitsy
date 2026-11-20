@@ -103,7 +103,8 @@ of the line says why it has not gone out:
   start `ib watch`.
 - `queued: Telegram is unreachable (HTTP 502); ib watch will send it
   automatically when the connection recovers` — Telegram or the network is
-  failing (the label may also be `errno:...` or `TimeoutError`).
+  failing (the label may also be `errno:...`, e.g. `errno:ETIMEDOUT` for a
+  request that got no answer within its timeout).
   `~/.itsybitsy/watch.log` shows one `telegram outbox: send stalled (...)`
   line, then `telegram outbox: send recovered ...` when the queue drains.
   Later messages wait behind the stalled one, so order is kept.
@@ -113,8 +114,9 @@ of the line says why it has not gone out:
 - `queued: Telegram routing is disabled in this ib watch (...)` — see step
   4.2's "Telegram routing disabled" lines; the message waits for an `ib watch`
   start that boots Telegram.
-- `queued: ib watch is connected and still sending earlier messages ...` — a
-  backlog or a slow upload; it goes out in order.
+- `queued: ib watch is connected but Telegram has not confirmed this message
+  yet ...` — the send (or one ahead of it) is still in flight: a slow upload,
+  a backlog, or a request waiting out its timeout. It goes out in order.
 
 An error (non-zero exit, e.g. `sendMessage failed: Bad Request: chat not
 found`) is permanent: Telegram refused this request, and it is not retried.

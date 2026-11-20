@@ -1200,18 +1200,21 @@ describe("transient failures are retried inline", () => {
     await outbox.stop();
   });
 
-  test("a network throw then success delivers once", async () => {
+  test("a fast network throw (refused connection) then success delivers once", async () => {
+    // A fast failure. A HUNG request (the watch.log `errno:23` lines, really
+    // a timeout) is covered against a real server in
+    // outbox-fake-telegram.test.ts.
     let calls = 0;
     clientFetchCtx.set((async () => {
       calls += 1;
-      if (calls === 1) throw new TypeError("fetch failed");
+      if (calls === 1) throw Object.assign(new Error("Unable to connect"), { code: "ConnectionRefused" });
       return okMessage(9);
     }) as Parameters<typeof clientFetchCtx.set>[0]);
 
     const outbox = new TelegramOutbox({ client: new TelegramClient({ token: "T" }), chatId: "1" });
     await outbox.start();
 
-    const base = await drop(`${Date.now()}-a00003.txt`, "after errno:23");
+    const base = await drop(`${Date.now()}-a00003.txt`, "after a refused connection");
     expect(await waitForFinalResult(base)).toEqual({ ok: true, message: "ok (message_id 9)" });
     expect(calls).toBe(2);
 

@@ -149,8 +149,9 @@ export interface OutboxHealth {
    *  retry it (later items wait behind it to keep send order). */
   stalled: boolean;
   /** Token-safe label of the transient failure that stalled the queue (e.g.
-   *  `HTTP 502`, `errno:23`), or null once Telegram answers again. Inline
-   *  retries that recover on their own do not set it. */
+   *  `HTTP 502`, `errno:ETIMEDOUT`), or null once Telegram answers again (or
+   *  the stalled item leaves the queue without an answer). Inline retries
+   *  that recover on their own do not set it. */
   lastError: string | null;
   /** Epoch ms of `lastError`, or null. */
   lastErrorAt: number | null;
@@ -167,9 +168,14 @@ const RESULT_RETENTION_MS = 5_000;
  *  as a backup. The poll is cheap — readdir on a normally-empty dir. */
 const SAFETY_RESCAN_MS = 500;
 
-/** Attempts per Bot API call before the item stalls the queue. 3 covers the
- *  failures seen in practice — a stale keep-alive socket (`errno:23` after
- *  ~2 min idle) and short 502 bursts — without holding a healthy queue long. */
+/** Attempts per Bot API call before the item stalls the queue. 3 rides out
+ *  short 502 bursts and a single timed-out request without holding a healthy
+ *  queue long. (The `errno:23` lines in watch.log 2026-11-20 were not fast
+ *  socket errors: they were sends that hung for the full `sendMessageMs` on a
+ *  pooled keep-alive socket that died while idle, labelled by the timeout's
+ *  DOMException code. The client now opens a fresh connection per outbound
+ *  call — see `OUTBOUND_FETCH_INIT` in telegram-client.ts — and `classifyError`
+ *  labels a timeout `errno:ETIMEDOUT`.) */
 export const INLINE_ATTEMPTS = 3;
 
 /** Delays between inline attempts: ~1s, then ~2s (cap 8s). */
@@ -195,7 +201,7 @@ interface CallFailure {
   /** Worth retrying: fetch throw, status 0, 429 or 5xx. */
   transient: boolean;
   /** Short token-safe label for health and the status file: `HTTP 502`,
-   *  `errno:23`, `TimeoutError`. */
+   *  `errno:ETIMEDOUT`, `errno:ConnectionRefused`. */
   label: string;
   /** Per-item message, e.g. `sendMessage failed: Bad Gateway`. Written to the
    *  result file on a permanent failure and to the log. */

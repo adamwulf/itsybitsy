@@ -16,10 +16,12 @@ import { join } from "path";
 import { mkdtemp, rm, readFile, rename, writeFile, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import type { Server } from "bun";
-import { TelegramOutbox, setOutboxDir, resetOutboxDir } from "./outbox";
+import { TelegramOutbox, setOutboxDir, resetOutboxDir, type OutboxOptions } from "./outbox";
 import { TelegramClient, fetchCtx, sleepCtx, logCtx } from "./telegram-client";
 import { randomCtx } from "./backoff";
 import { resetMessageCache } from "./message-cache";
+import { setStatusDir, resetStatusDir } from "./connection-status";
+import { telegramSend, telegramResultWaitCtx } from "../ib-commands";
 
 setDefaultTimeout(30_000);
 
@@ -29,11 +31,21 @@ let tmpRoot: string;
 let outboxDir: string;
 let server: Server<undefined> | null = null;
 let sleeps: number[];
+/** Outboxes a test started; afterEach stops them even when an assertion
+ *  failed, so no rescan interval, fs.watch or stall timer leaks. */
+let outboxes: TelegramOutbox[] = [];
+
+function newOutbox(opts: OutboxOptions): TelegramOutbox {
+  const outbox = new TelegramOutbox(opts);
+  outboxes.push(outbox);
+  return outbox;
+}
 
 beforeEach(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "outbox-fake-tg-"));
   outboxDir = join(tmpRoot, "outbox");
   setOutboxDir(outboxDir);
+  setStatusDir(join(tmpRoot, "state")); // never the real ~/.itsybitsy
   fetchCtx.reset(); // real fetch
   sleeps = [];
   sleepCtx.set(async (ms) => {
@@ -45,9 +57,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const outbox of outboxes.splice(0)) await outbox.stop();
   server?.stop(true);
   server = null;
   resetOutboxDir();
+  resetStatusDir();
+  telegramResultWaitCtx.reset();
   sleepCtx.reset();
   logCtx.reset();
   randomCtx.reset();
@@ -132,7 +147,7 @@ describe("outbox against a fake Telegram server", () => {
     });
 
     const client = new TelegramClient({ token: TOKEN, baseUrl, timeouts: { sendMessageMs: 200 } });
-    const outbox = new TelegramOutbox({
+    const outbox = newOutbox({
       client,
       chatId: "1",
       log: () => {},
@@ -154,8 +169,37 @@ describe("outbox against a fake Telegram server", () => {
     // 502; then the reaction's timeout retry waits backoff 1s.
     expect(sleeps).toEqual([3_000, 2_000, 1_000]);
     expect(outbox.getHealth()).toEqual({ pending: 0, stalled: false, lastError: null, lastErrorAt: null });
+  });
 
-    await outbox.stop();
+  test("a request that never answers is a timeout (errno:ETIMEDOUT), and ib tgsend says so", async () => {
+    // The real shape of the `errno:23` lines in watch.log 2026-11-20: no fast
+    // socket error, just no answer until the client's own timeout fired. The
+    // label must say timeout, not the DOMException's legacy code 23.
+    const baseUrl = startServer(() => new Promise<Response>(() => {}));
+    const client = new TelegramClient({ token: TOKEN, baseUrl, timeouts: { sendMessageMs: 150 } });
+    const logs: string[] = [];
+    const outbox = newOutbox({
+      client,
+      chatId: "1",
+      log: (line) => logs.push(line),
+      stallBackoff: { initialMs: 60_000, maxMs: 60_000 },
+    });
+    await outbox.start();
+
+    telegramResultWaitCtx.set(2_000);
+    const result = await telegramSend("never answered");
+    expect(result).toEqual({
+      ok: true,
+      message:
+        "queued: Telegram is unreachable (errno:ETIMEDOUT); ib watch will send it automatically when the connection recovers",
+    });
+
+    const deadline = Date.now() + 10_000;
+    while (!outbox.getHealth().stalled && Date.now() < deadline) await new Promise<void>((r) => setTimeout(r, 10));
+    expect(outbox.getHealth()).toMatchObject({ pending: 1, stalled: true, lastError: "errno:ETIMEDOUT" });
+    expect(logs).toContain(
+      "telegram outbox: send stalled (sendMessage failed: errno:ETIMEDOUT); holding 1 queued item(s) in order, retrying with backoff",
+    );
   });
 
   test("CAVEAT: a timeout after Telegram accepted the message duplicates it on retry", async () => {
@@ -171,14 +215,12 @@ describe("outbox against a fake Telegram server", () => {
     });
 
     const client = new TelegramClient({ token: TOKEN, baseUrl, timeouts: { sendMessageMs: 200 } });
-    const outbox = new TelegramOutbox({ client, chatId: "1", log: () => {} });
+    const outbox = newOutbox({ client, chatId: "1", log: () => {} });
     await outbox.start();
 
     const base = `${Date.now()}-dddddd.txt`;
     await drop(base, "slow ack");
     expect(await finalResult(base)).toEqual({ ok: true, message: "ok (message_id 202)" });
     expect(delivered).toEqual(["slow ack", "slow ack"]);
-
-    await outbox.stop();
   });
 });

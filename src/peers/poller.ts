@@ -17,7 +17,7 @@
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
  *   "request timed out", and the next tick redials. Closing the connection is
  *   what ends the timed-out request, so it cannot overlap the next one.
- * - Per-peer state lives only in memory: connected or not, `lastOkAt`,
+ * - The poller tracks per-peer state: connected or not, `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
  *   keeps disconnected agents dimmed and shows last contact in their info panel.
  * - {@link PeerPoller.onChange} fires when what a reader can see changes:

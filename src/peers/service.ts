@@ -82,6 +82,7 @@ import {
   type PairStream,
 } from "./pairing";
 import { PEER_ALPN, serveTrustedConnection, type PeerSnapshot } from "./peer-link";
+import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
 
@@ -118,6 +119,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  writeRemoteAgents?(states: PeerLinkState[]): void;
   acquireLock(): Promise<EndpointLockResult>;
   releaseLock(): Promise<unknown>;
   loadIdentity(): Promise<PeerIdentity>;
@@ -143,6 +145,7 @@ export interface PeerServiceDeps {
  */
 export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot): PeerServiceDeps {
   return {
+    writeRemoteAgents,
     acquireLock: () => acquireEndpointLock(),
     releaseLock: () => releaseEndpointLock(),
     loadIdentity: loadOrCreateIdentity,
@@ -311,7 +314,18 @@ export class PeerService {
       setTimer: deps.setTimer,
       log: deps.log,
     });
-    this.poller.onChange(() => this.notify());
+    this.poller.onChange(() => {
+      this.publishRemoteAgents();
+      this.notify();
+    });
+  }
+
+  private publishRemoteAgents(): void {
+    try {
+      this.deps.writeRemoteAgents?.(this.poller.states());
+    } catch (err) {
+      this.deps.log(`peering: could not write remote-agents.json: ${errorDetail(err)}`);
+    }
   }
 
   /** Subscribe to every change of {@link view}. Returns the unsubscribe function. */
@@ -719,6 +733,7 @@ export class PeerService {
       return { kind: "disabled" };
     }
     this.lockHeld = true;
+    this.publishRemoteAgents(); // replace any snapshot left by the previous lock owner
     if (lock.takenFromPid !== undefined) {
       this.deps.log(`peering: took over the endpoint lock from pid ${lock.takenFromPid}, which is gone`);
     }

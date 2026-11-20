@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, open, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx, resetProcessStartEpochSecondsCache } from "../agents";
@@ -549,6 +549,37 @@ const REMOTE_AGENTS: RemoteAgent[] = [
 ];
 
 describe("PeerService at boot", () => {
+  test("the owning watch replaces remote-agents.json on visible changes only", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { writeRemoteAgents } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }));
+    const { service, endpoint, clock } = makeService({ writeRemoteAgents });
+    answerDials(endpoint, [{ ...REMOTE_AGENTS[0]!, repoName: "display only" }]);
+    await service.bootIfPaired();
+    const file = join(peerDir(), "remote-agents.json");
+    try {
+      await waitFor(() => service.view().links[0]?.connected === true, { message: "first snapshot" });
+      const first = JSON.parse(await readFile(file, "utf8"));
+      expect(first).toEqual([{ id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: clock.now(),
+        agents: [{ repo: "app", id: "agent-r1", nickname: null, state: "running" }] }]);
+      const original = await open(file);
+      try {
+        const inode = (await original.stat()).ino;
+        clock.advance(5000);
+        await waitFor(() => service.view().links[0]?.lastOkAt === clock.now(), { message: "identical snapshot" });
+        expect((await stat(file)).ino).toBe(inode);
+        expect(JSON.parse(await readFile(file, "utf8"))).toEqual(first);
+        await service.shutdown();
+        expect((await stat(file)).ino).not.toBe(inode);
+        expect(JSON.parse(await original.readFile("utf8"))).toEqual(first);
+        expect(JSON.parse(await readFile(file, "utf8"))[0].connected).toBe(false);
+      } finally {
+        await original.close();
+      }
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   test("binds when peers.json lists a peer, on both ALPNs, and starts polling it; a later dialog open does not rebind", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const { service, endpoint, binds, logs } = makeService();

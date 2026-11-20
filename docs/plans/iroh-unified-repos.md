@@ -1,6 +1,6 @@
 # iroh peering, next phase: one repo list across machines
 
-Status: plan, 2026-11-20. This phase follows [iroh-peering.md](iroh-peering.md)
+Phase 6 built, 2026-11-20. Phases 7 and 8 are pending. This phase follows [iroh-peering.md](iroh-peering.md)
 Phases 0–4, plus the self-heal and full-id work, all on `agent/iroh-peering`.
 
 It **supersedes** "remote agents shown as tree sections"
@@ -71,7 +71,7 @@ the reply change.
   - also dimmed when their peer is unreachable, showing the last list
     received (as today).
 - **Remote-only repos** still get a header. All agents under it are italic.
-- **Removed:** the peer sections (`peer-header`, `remote-repo-header`). Peer
+- The unified tree removes `peer-header`. A `remote-repo-header` now identifies a repo registered only on peers. Peer
   connection state stays visible in two places: the Peers dialog (`I`), and
   the info panel of a selected remote agent ("Machine: <name> · connected" or
   "last seen N ago").
@@ -84,7 +84,7 @@ the reply change.
   - Local repo actions (remove, rename, pin, fix, and so on) work only when
     the repo exists on this machine. On a remote-only header they are refused
     with a notice.
-  - `a` (new agent) works on every header.
+  - In Phase 6, `a` on a remote-only header explains that remote starts come in the next phase. Phase 7 enables the machine picker.
 - **V filter:** it now applies to remote agent rows too, because they live in
   the main tree (open question 3).
 - **Favorites and Teams tabs** stay local-only.
@@ -213,7 +213,7 @@ exactly.
 
 ## Phases
 
-6. **Unified tree:**
+6. **Unified tree (built):**
    - the `repos` list in the `agents` reply;
    - repo matching and merged headers;
    - italic (and dimmed when stale) remote rows under their repo;
@@ -286,7 +286,8 @@ Each phase gets the usual two-reviewer cycle before it is merged.
 ## Open questions (recommendation first)
 
 1. **Matching: DECIDED (Adam, 2026-11-20).** Repos match by registered repo
-   name only. There is no path matching and nothing fancier.
+   name only, ignoring case. There is no path matching and nothing fancier.
+   Align names with `ib add <path> <name>`.
 2. **Permission.** Any paired machine may start agents here, with a log line
    and a notice on this machine. The alternative is a per-peer "may start
    agents here" switch in the Peers dialog.

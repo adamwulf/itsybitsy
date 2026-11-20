@@ -153,8 +153,10 @@ emits exactly one and continues running the rest of the dashboard):
   `(HTTP 403)` — the token in config is wrong or the bot was deleted.
 - `Telegram routing disabled: probe failed (HTTP <status>)` — Telegram
   answered with a 4xx other than 401/403/409/429 (404 usually means a
-  malformed token).
-- A network error, timeout, 429 or 5xx does NOT disable routing: the boot
+  malformed token). It is never a 2xx: a 200 whose body was cut short is
+  retried (`HTTP 200 (bad body)`), and one cut short by the probe's own
+  timeout reads `errno:ETIMEDOUT`.
+- A network error, timeout, 429, 5xx or truncated 200 does NOT disable routing: the boot
   retries with backoff (1 s doubling to 60 s) and `~/.itsybitsy/watch.log`
   shows `Telegram connect failed (<reason>); retrying with backoff`, then
   `Telegram connected after Ns` once it gets through. Meanwhile the header

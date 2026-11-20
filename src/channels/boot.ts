@@ -9,8 +9,9 @@
  *      A 409 Conflict means another poller/webhook is active; 401/403 mean
  *      the token is rejected; any other 4xx is logged as `probe failed`.
  *      These are permanent: routing stays off until `ib watch` restarts.
- *      A TRANSIENT failure — a fetch throw or timeout, status 0, 429 or any
- *      5xx ({@link isTransientStatus}) — is NOT: the probe is retried with
+ *      A TRANSIENT failure — a fetch throw or timeout, status 0, 429, any
+ *      5xx ({@link isTransientStatus}), or a 2xx whose body could not be read
+ *      (`HTTP 200 (bad body)`) — is NOT: the probe is retried with
  *      capped, jittered backoff (1 s doubling to 60 s; a 429 waits at least
  *      its `Retry-After`) until it succeeds or `signal` fires. A Telegram
  *      outage at `ib watch` start used to disable routing for the whole
@@ -397,8 +398,17 @@ class RetryingProber {
           this.endStreak();
           return { kind: "ok", updates: probe.updates };
         }
-        if (!isTransientStatus(probe.status)) return { kind: "permanent", status: probe.status };
-        reason = probe.status === 429 ? "429 Too Many Requests" : `HTTP ${probe.status}`;
+        // A 2xx without an `ok:true` envelope (body truncated or reset
+        // mid-read) is transient: Telegram answers 2xx only with ok:true, so
+        // the answer was cut short, not refused.
+        const twoXx = probe.status >= 200 && probe.status < 300;
+        if (!twoXx && !isTransientStatus(probe.status)) return { kind: "permanent", status: probe.status };
+        reason =
+          probe.status === 429
+            ? "429 Too Many Requests"
+            : twoXx
+              ? `HTTP ${probe.status} (bad body)`
+              : `HTTP ${probe.status}`;
         if (probe.retryAfterSec !== null) retryAfterMs = probe.retryAfterSec * 1_000;
       } catch (err) {
         if (stop?.aborted) return { kind: "aborted" };

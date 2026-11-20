@@ -452,8 +452,10 @@ export class TelegramClient {
    *  rather than retrying forever. Network throws are surfaced as-is.
    *
    *  Returns `{ ok: true, updates }` on a successful 2xx response with a
-   *  parseable Telegram envelope, or `{ ok: false, status }` on any other
-   *  HTTP status. The dispatcher only branches on 409 — other failures are
+   *  parseable Telegram envelope, or `{ ok: false, status }` otherwise —
+   *  including a 2xx whose body could not be read (`status` 2xx), which boot
+   *  treats as transient. A body cut short by our own signal (timer, stop,
+   *  wake) throws that abort instead. The dispatcher only branches on 409 — other failures are
    *  logged via the API description and treated as "probe failed but go
    *  ahead and start the loop", since the loop has its own retry handling.
    *  The boot (boot.ts) retries transient failures itself and reads
@@ -483,6 +485,14 @@ export class TelegramClient {
       signal: composedSignal,
     });
     const raw = await readRaw<TelegramUpdate[]>(resp);
+    // readRaw swallows a body-read error. When the body could not be read
+    // because our signal fired mid-body (the probe timer, the caller's stop,
+    // or a wake), throw that abort, as a fetch throw before the headers
+    // would: a timeout then reads errno:ETIMEDOUT and a wake reaches boot's
+    // "probe again" path, instead of a bogus `HTTP 200` failure.
+    if (raw.body === null && composedSignal.aborted) {
+      throw composedSignal.reason ?? new DOMException("probe aborted", "AbortError");
+    }
     if (raw.status >= 200 && raw.status < 300 && raw.body?.ok === true) {
       return { ok: true, updates: (raw.body.result ?? []) as TelegramUpdate[] };
     }

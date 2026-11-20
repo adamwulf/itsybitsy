@@ -369,6 +369,107 @@ describe("bootTelegramSubsystem", () => {
     expect(h.logs[0]).toBe("Telegram connect failed (errno:ETIMEDOUT); retrying with backoff");
   });
 
+  test("step 1: a truncated 200 is retried (transient), not 'probe failed (HTTP 200)'", async () => {
+    await writeCachedChatId("100");
+    let calls = 0;
+    clientFetchCtx.set(async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response('{"ok":true,"result":[', { status: 200 })
+        : makeResponse({ ok: true, result: [] });
+    });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(calls).toBe(2);
+    expect(retries.map((r) => r.reason)).toEqual(["HTTP 200 (bad body)"]);
+    expect(h.logs[0]).toBe("Telegram connect failed (HTTP 200 (bad body)); retrying with backoff");
+  });
+
+  test("step 1: the probe timer firing mid-body (real fetch) is retried as errno:ETIMEDOUT", async () => {
+    // Headers and the first bytes arrive, then the body stalls until the
+    // client's 300 ms probe timer fires. The second probe answers in full.
+    await writeCachedChatId("100");
+    clientFetchCtx.reset(); // real fetch
+    let calls = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        calls += 1;
+        if (calls > 1) return Response.json({ ok: true, result: [] });
+        const stalled = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"ok":true,'));
+          },
+        });
+        return new Response(stalled, { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    try {
+      const retries: BootRetryInfo[] = [];
+      const result = await bootTelegramSubsystem({
+        token: "TEST_TOKEN",
+        access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+        buildClient: (token) => new TelegramClient({ token, baseUrl: server.url.origin, timeouts: { probeMs: 300 } }),
+        buildDispatcher: h.buildDispatcher,
+        buildOutbox: h.buildOutbox,
+        log: h.log,
+        onRetry: (info) => retries.push(info),
+      });
+      expect(result.ok).toBe(true);
+      expect(calls).toBe(2);
+      expect(retries.map((r) => r.reason)).toEqual(["errno:ETIMEDOUT"]);
+      expect(h.logs.some((l) => l.includes("routing disabled"))).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("step 1: a wake while the probe body is still arriving probes again at once (no failure counted)", async () => {
+    await writeCachedChatId("100");
+    const wake = makeFakeWake();
+    let calls = 0;
+    clientFetchCtx.set(async (_input, init) => {
+      calls += 1;
+      if (calls > 1) return makeResponse({ ok: true, result: [] });
+      // Headers are in; the body stalls on a dead socket until our signal
+      // fires, which errors the stream mid-read.
+      const sig = init?.signal as AbortSignal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"ok":true,'));
+          sig.addEventListener("abort", () => controller.error(sig.reason));
+        },
+      });
+      queueMicrotask(() => wake.fire());
+      return new Response(body, { status: 200 });
+    });
+    const retries: BootRetryInfo[] = [];
+    const result = await bootTelegramSubsystem({
+      token: "TEST_TOKEN",
+      access: { allowed_chat_ids: ["100"], allowed_user_ids: [] },
+      buildClient: h.buildClient,
+      buildDispatcher: h.buildDispatcher,
+      buildOutbox: h.buildOutbox,
+      log: h.log,
+      wake,
+      onRetry: (info) => retries.push(info),
+    });
+    expect(result.ok).toBe(true);
+    expect(calls).toBe(2);
+    expect(retries).toEqual([]);
+    expect(h.sleeps).toEqual([]);
+    expect(h.logs).toEqual([]);
+  });
+
   test("step 1: alternating error classes log one line per class", async () => {
     await writeCachedChatId("100");
     h.mock.enqueueResponse({ ok: false }, 502);

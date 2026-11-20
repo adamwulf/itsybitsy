@@ -233,9 +233,19 @@ exactly.
     - `remote-agents.json`, written by the poller;
     - the same resolver in every agent-taking command and in the hook gates.
 
+    6b also covers a bug that a review found on 2026-11-20. The watchdog
+    looks up who to notify by bare id:
+    - the manager is searched for across ALL repos (`src/watchdog.ts` ~460);
+    - the coordinator spawner is searched for by folder basename (~524–529),
+      even though `spawned_by.repo_path` already records its repo.
+
+    So it can notify the wrong agent. The fix scopes the manager lookup to the
+    agent's own repo and the spawner lookup to the recorded repo path.
+
     Tests: a unique name; a name ambiguous across two machines; a name
-    ambiguous across repos; each qualified form; an unknown name; and the
-    gate agreeing with the command.
+    ambiguous across repos; each qualified form; an unknown name; the gate
+    agreeing with the command; and notifications reaching the right manager
+    and spawner when same-id agents exist in two repos.
 7. **Remote new-agent:**
    - the `new-agent` op and the responder's checks and spawn, with `newAgent`
      injected;

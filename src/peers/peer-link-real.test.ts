@@ -167,7 +167,8 @@ test("an id not in peers.json is closed on the peer ALPN before anything is read
       await stream.finish();
       return stream.readToEnd(1_048_576);
     })().catch((err: Error) => err);
-    expect(reply).toBeInstanceOf(Error);
+    // Closing before reading can surface as either a stream error or an empty reply.
+    if (!(reply instanceof Error)) expect(reply).toHaveLength(0);
     await waitFor(() => conn.closeInfo() !== null, { message: "stranger closed" });
     expect(conn.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.notPeer, reason: "not a peer" });
     expect(b.snapshots()).toBe(0);

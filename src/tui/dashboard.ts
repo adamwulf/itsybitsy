@@ -1873,8 +1873,7 @@ export class DashboardComponent implements Component {
         && link.connected === old.connected && (link.connected || link.lastOkAt === old.lastOkAt);
     })) return false;
     this.peerLinks = links;
-    const treeVisible = this.sidebarMode === "agents" || this.rightPane.mode === "TREE"
-      || (this.sidebarMode === "favorites" && this.remoteSelection !== null);
+    const treeVisible = this.sidebarMode !== "teams" || this.rightPane.mode === "TREE";
     const width = this.rightPane.mode === "TREE" ? this.getMainWidth() : this.sidebarWidth;
     const before = treeVisible ? this.agentTree.render(width) : [];
     const previous = this.remoteSelection;
@@ -2252,12 +2251,12 @@ export class DashboardComponent implements Component {
     // unreachable from the Teams panel. When the Teams tree owns the active
     // selection we suppress them so a leftover repo-header selection in the
     // (inactive) Agents tree doesn't bleed into the main area.
-    const selected = teamsActive
-      ? teamMemberAgent
-      : this.agentTree.selectedAgent;
-    const isCoordinator = !teamsActive && this.agentTree.isSystemCoordinatorSelected;
-    const selectedRepoHeader = teamsActive ? null : this.agentTree.selectedRepoHeader;
-    const selectedRepoPath = teamsActive ? null : this.agentTree.selectedRepoPath;
+    const selection = teamsActive ? null : this.agentTree.selection;
+    const selected = selection?.kind === "agent" ? selection.agent : teamMemberAgent;
+    const isCoordinator = selection?.kind === "system-coordinator";
+    const repo = selection?.kind === "repo-header" ? selection : null;
+    const selectedRepoHeader = repo?.repoName ?? null;
+    const selectedRepoPath = repo?.repoPath ?? null;
     // A remote row (SPEC §20.5). It is none of the above: `selected`,
     // `isCoordinator` and the repo header are all empty for it, so every local
     // path below (tmux pollers, git probe, right-pane loaders, the per-repo
@@ -2282,7 +2281,7 @@ export class DashboardComponent implements Component {
     }
 
     this.rightPane.agent = selected;
-    this.rightPane.selectedRepoHeader = selectedRepoHeader;
+    this.rightPane.selectedRepo = repo;
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
     this.statusBar.remoteSelected = remote !== null;

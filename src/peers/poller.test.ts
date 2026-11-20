@@ -408,10 +408,15 @@ describe("PeerPoller", () => {
     rig.remote(P1).agents = [remoteAgent("agent-x", "complete")];
     rig.tick();
     await waitFor(() => rig.changes() === afterConnect + 1, { message: "a new list notifies" });
+    const unchangedAgents = rig.state(P1)!.agents;
     rig.remote(P1).repos.push({ registryName: "empty", displayName: "Empty" });
     rig.tick();
     await waitFor(() => rig.changes() === afterConnect + 2, { message: "a repo-only change notifies" });
     expect(rig.state(P1)?.repos).toEqual(rig.remote(P1).repos);
+    expect(rig.state(P1)?.agents).toEqual(unchangedAgents);
+    rig.tick();
+    await waitFor(() => rig.state(P1)?.lastOkAt === rig.clock.now(), { message: "identical reply processed" });
+    expect(rig.changes()).toBe(afterConnect + 2);
 
     rig.remote(P1).served[0]!.close(PEER_CLOSE.done, "bye");
     rig.setDial(async () => {

@@ -5,7 +5,7 @@
  */
 
 import type { Component } from "@mariozechner/pi-tui";
-import { truncateToWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Agent, FlatEntry, RemoteEntry } from "../agents";
 import { peerLinkStateText } from "./peers-dialog";
 import { isPidAliveCtx, isPidAliveSinceCtx } from "../agents";
@@ -22,7 +22,7 @@ import { cliDisplayName, kernelSandboxStatus, metadataCli } from "../agent-cli";
 import { resolvePathsConfig } from "../sandbox";
 import { FALLBACK_MACHINE_NAME } from "../machine-name";
 import { localAgentKey } from "./row-keys";
-import { peerEntryKey } from "./peer-repos";
+import { peerEntryKey, truncatePeerField } from "./peer-repos";
 
 /**
  * Team-mode payload for the info panel (SPEC §17.3c). Parallel to the
@@ -265,7 +265,8 @@ export class InfoPanelComponent implements Component {
           : `${remoteStateColor(state)}${state}${RESET}`;
         title("Remote agent");
         const connection = peerLinkStateText({ connected: !entry.stale, lastOkAt: entry.lastOkAt }, Date.now());
-        field("Machine", `${entry.peerName} · ${connection}`);
+        const nameWidth = width - visibleWidth(`Machine:  · ${connection}`);
+        field("Machine", `${truncatePeerField(entry.peerName, nameWidth)} · ${connection}`);
         field("Id", agent.id);
         field("Full id", peerEntryKey(entry));
         field("Nickname", agent.nickname ?? "—");

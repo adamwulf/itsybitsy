@@ -9,7 +9,7 @@ import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM, ITALIC, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
-import { collectPeerRepos, peerEntryKey, remoteDisplayName, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
+import { collectPeerRepos, peerEntryKey, remoteDisplayName, truncatePeerField, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import type { PeerLinkState } from "../peers/poller";
 import { localAgentKey, repoRowKey } from "./row-keys";
@@ -230,7 +230,7 @@ export function formatRemoteRepoRow(
   width: number,
 ): string {
   const triangle = entry.agentCount ? "▾" : "▸";
-  const name = truncateToWidth(entry.repoName, Math.max(1, width - 2), "…");
+  const name = truncatePeerField(entry.repoName, width - 2);
   return highlightRow(truncateToWidth(`${BOLD}${triangle} ${name}${RESET}`, width, ""), selected, width);
 }
 
@@ -249,10 +249,10 @@ export function formatRemoteAgentRow(
   stateColWidth: number,
 ): string {
   const prefix = entry.connector;
-  const name = truncateToWidth(remoteDisplayName(entry.remote), Math.max(1, nameColWidth - visibleWidth(prefix)), "…");
+  const name = truncatePeerField(remoteDisplayName(entry.remote), Math.max(1, nameColWidth - visibleWidth(prefix)));
   const namePad = " ".repeat(Math.max(0, nameColWidth - visibleWidth(prefix) - visibleWidth(name)));
   const fullState = displayState(entry.remote.state);
-  const state = truncateToWidth(fullState, stateColWidth, "…");
+  const state = truncatePeerField(fullState, stateColWidth);
   const statePad = " ".repeat(Math.max(0, stateColWidth - visibleWidth(state)));
   const line = entry.stale
     ? `${ITALIC}${DIM}${prefix}${name}${namePad}  ${state}${statePad}${RESET}`
@@ -392,6 +392,7 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
 /** Agent tree component with height constraint and scrolling */
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
+  private visibleCache: { inputs: unknown[]; rows: FlatEntry[] } | null = null;
   private peerRepos = new Map<string, PeerRepo>();
   /** Local single-repo trees normally omit their header. Peering needs its registration, even when empty. */
   registeredRepos: readonly RepoEntry[] = [];
@@ -516,6 +517,7 @@ export class AgentTreeComponent implements Component {
   setFlatList(list: FlatEntry[]) {
     const wasEmpty = this._flatList.length === 0;
     this._flatList = list;
+    this.visibleCache = null;
     // §17.1: setFlatList must NOT silently (re-)assert a selection. On first
     // populate (and any repopulate) the panel STAYS in whatever selection state
     // it was already in. Repopulating while in no-selection keeps it in
@@ -559,6 +561,7 @@ export class AgentTreeComponent implements Component {
 
   setPeerLinks(links: readonly PeerLinkState[]): void {
     this.peerRepos = collectPeerRepos(links);
+    this.visibleCache = null;
     this.resyncAfterFilterChange();
   }
 
@@ -606,6 +609,32 @@ export class AgentTreeComponent implements Component {
   }
 
   get visibleList(): FlatEntry[] {
+    // Local lists can be edited in place before the watcher publishes them.
+    // Cache the merged view for one published pair of local and peer snapshots.
+    if (this.peerRepos.size === 0) return this.buildVisibleList();
+    const single = this.registeredRepos.length === 1 ? this.registeredRepos[0] : undefined;
+    const inputs: unknown[] = [single?.name, single?.nickname, single?.path, this.repoFilter, this.favoritesOnly];
+    if (this.repoFilter !== "all" || this.favoritesOnly) {
+      inputs.push(this.machineName, this.hasSelection, this.selectedId, this.selectedRowRepo, this._stickyRevealedRepoPath);
+    }
+    // These public sets can change in place. Only the active filters depend on them.
+    if (this.repoFilter !== "all") {
+      inputs.push(this.pinnedRepoPaths.size);
+      for (const path of this.pinnedRepoPaths) inputs.push(path);
+    }
+    if (this.favoritesOnly) {
+      for (const id of this.favoriteAgentIds) inputs.push(id);
+    }
+    const cached = this.visibleCache;
+    if (cached && inputs.length === cached.inputs.length && inputs.every((v, i) => v === cached.inputs[i])) {
+      return cached.rows;
+    }
+    const rows = this.buildVisibleList();
+    this.visibleCache = { inputs, rows };
+    return rows;
+  }
+
+  private buildVisibleList(): FlatEntry[] {
     const base = this.unifiedRows(this.localRows());
     if (!this.peerRepos.size && this.repoFilter === "all" && !this.favoritesOnly) return base;
     // Running-only and the Favorites view can hide intermediate agents, so
@@ -1081,8 +1110,7 @@ export class AgentTreeComponent implements Component {
       this.selectedIndex = delta === 1 ? visible.length - 1 : 0;
     }
 
-    // A peer section's repo headers are anchors too (SPEC §20.5), after the
-    // local ones: J/K reach the remote repos the way they reach local ones.
+    // J/K treat local and remote-only repo headers as the same navigation anchors.
     const isRepoAnchor = (f: FlatEntry | undefined): boolean => f?.kind === "repo-header" || f?.kind === "remote-repo-header";
     const current = visible[this.selectedIndex];
     const isRepoHeader = !fromNoSelection && isRepoAnchor(current);

@@ -172,6 +172,7 @@ export interface ActionCtx {
   agentTree: {
     selectedAgent: Agent | null;
     selectedRepoHeader: string | null;
+    selectedRepoPath: string | null;
     isSystemCoordinatorSelected: boolean;
     flatList: FlatEntry[];
     visibleList: FlatEntry[];
@@ -2609,20 +2610,14 @@ export function handleOpenGhostty(ctx: ActionCtx) {
     })();
     return;
   }
-  // No agent selected — check for repo header
-  const repoHeader = ctx.agentTree.selectedRepoHeader;
-  if (repoHeader) {
-    const headerEntry = ctx.agentTree.flatList.find(
-      (f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header" && f.repoName === repoHeader
-    );
-    if (headerEntry) {
-      openPathInGhostty(headerEntry.repoPath).then((result) => {
-        ctx.setNotice(result.message, result.ok ? "info" : "error");
-      }).catch((err) => {
-        ctx.setNotice(`Ghostty error: ${err}`, "error");
-      });
-      return;
-    }
+  const repoPath = ctx.agentTree.selectedRepoPath;
+  if (repoPath) {
+    openPathInGhostty(repoPath).then((result) => {
+      ctx.setNotice(result.message, result.ok ? "info" : "error");
+    }).catch((err) => {
+      ctx.setNotice(`Ghostty error: ${err}`, "error");
+    });
+    return;
   }
   ctx.setNotice("No agent or repo selected", "error");
 }

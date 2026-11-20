@@ -252,7 +252,7 @@ describe("RightPaneComponent", () => {
       // Agent-specific: with a repo header (no agent) selected the pane shows
       // the repo summary instead of the log.
       const rp = new RightPaneComponent();
-      rp.selectedRepoHeader = "my-repo";
+      rp.selectedRepo = { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo" };
       rp.setMode(mode);
       expect(rp.render(40).map(stripAnsi).join("\n")).toContain("my-repo");
     }
@@ -758,7 +758,7 @@ describe("REPO mode with coordinator", () => {
   test("REPO mode renders split view when coordinator exists", () => {
     const rp = new RightPaneComponent();
     rp.displayHeight = 20;
-    rp.selectedRepoHeader = "my-repo";
+    rp.selectedRepo = { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo" };
     rp.repoCoordinatorAgent = makeAgent({ id: "coord-1", repoName: "my-repo", meta: { agentType: "repo-coordinator" } as any });
     rp.repoCoordinatorHasPolled = true;
     rp.repoCoordinatorOutput = "coordinator output";
@@ -812,8 +812,8 @@ describe("formatAgentRow favorite star", () => {
   });
 
   test("TREE and REPO rows star the favorites only (no filtering)", () => {
-    const fav = makeAgent({ id: "fav-1", repoName: "my-repo" });
-    const plain = makeAgent({ id: "plain-1", repoName: "my-repo" });
+    const fav = makeAgent({ id: "fav-1", repoName: "my-repo", repoPath: "/repos/my-repo" });
+    const plain = makeAgent({ id: "plain-1", repoName: "my-repo", repoPath: "/repos/my-repo" });
     const rp = new RightPaneComponent();
     rp.displayHeight = 20;
     rp.allAgents = [
@@ -823,7 +823,7 @@ describe("formatAgentRow favorite star", () => {
     ];
     rp.machineName = "studio";
     rp.favoriteAgentIds = new Set([localAgentKey("studio", fav)]);
-    rp.selectedRepoHeader = "my-repo";
+    rp.selectedRepo = { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo" };
     for (const mode of ["TREE", "REPO"] as const) {
       rp.setMode(mode);
       const text = rp.render(80).map(stripAnsi);

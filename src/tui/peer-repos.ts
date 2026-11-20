@@ -1,4 +1,6 @@
 /** Registered peer repos and their per-machine manager trees (SPEC §20.5). */
+import { truncateToWidth } from "@mariozechner/pi-tui";
+import { RESET } from "./colors";
 import type { RemoteEntry } from "../agents";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import type { RemoteAgent } from "../peers/peer-link";
@@ -16,6 +18,11 @@ export function peerEntryKey(entry: RemoteEntry): string {
   return entry.kind === "remote-agent"
     ? fullyQualifiedAgentId(entry.peerName, entry.remote.repoRegistryName, entry.remote.id)
     : repoRowKey(entry.repoRegistryName);
+}
+
+/** pi-tui inserts SGR 0 before the ellipsis even when truncating sanitized plain text. */
+export function truncatePeerField(text: string, width: number): string {
+  return truncateToWidth(text, Math.max(0, width), "…").replaceAll(RESET, "");
 }
 
 export function remoteDisplayName(remote: RemoteAgent): string {

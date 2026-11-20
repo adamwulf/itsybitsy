@@ -154,7 +154,7 @@ export interface LoadedLogWindow {
 export class RightPaneComponent implements Component {
   mode: PaneMode = "AGENT LOG";
   agent: Agent | null = null;
-  selectedRepoHeader: string | null = null;
+  selectedRepo: Extract<import("./selection").Selection, { kind: "repo-header" }> | null = null;
   questions: PendingQuestion[] = [];
   allAgents: FlatEntry[] = [];
   /** Fully qualified ids of the favorite agents — the TREE/REPO rows show a ★
@@ -331,20 +331,18 @@ export class RightPaneComponent implements Component {
   }
 
   private buildRepoSummary(): string[] {
-    const repoName = this.selectedRepoHeader!;
+    const { repoName, repoPath } = this.selectedRepo!;
     const repoAgents = this.allAgents.filter(
-      (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoName === repoName
+      (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoPath === repoPath
     );
     const stateCounts = new Map<string, number>();
     for (const { agent } of repoAgents) {
       stateCounts.set(agent.state, (stateCounts.get(agent.state) ?? 0) + 1);
     }
     const lines: string[] = [];
-    const headerEntry = this.allAgents.find((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header" && f.repoName === repoName);
-    const triangle = headerEntry?.hasAgents ? "▾" : "▸";
+    const triangle = repoAgents.length ? "▾" : "▸";
     lines.push(`${BOLD}${triangle} ${repoName}${RESET}`);
     lines.push("");
-    const repoPath = headerEntry?.repoPath ?? repoAgents[0]?.agent.repoPath ?? "";
     if (repoPath) {
       const encodedPath = repoPath.replace(/%/g, "%25").replace(/ /g, "%20").replace(/#/g, "%23").replace(/\?/g, "%3F");
       const hyperlink = `\x1b]8;;file://${encodedPath}\x07${repoPath}\x1b]8;;\x07`;
@@ -363,7 +361,7 @@ export class RightPaneComponent implements Component {
 
   updateContent() {
     // When a repo header is selected, show repo summary for agent-specific modes
-    if (this.selectedRepoHeader && !this.agent) {
+    if (this.selectedRepo && !this.agent) {
       if (AGENT_SPECIFIC_MODES.has(this.mode)) {
         this.content = this.buildRepoSummary();
         return;
@@ -440,10 +438,8 @@ export class RightPaneComponent implements Component {
         else { this.content = [`${DIM}Loading status...${RESET}`]; }
         break;
       case "REPO": {
-        const repoName = this.selectedRepoHeader;
-        if (!repoName) { this.content = [`${DIM}No repo selected${RESET}`]; break; }
-        const headerEntry = this.allAgents.find((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header" && f.repoName === repoName);
-        const repoPath = headerEntry?.repoPath ?? "";
+        if (!this.selectedRepo) { this.content = [`${DIM}No repo selected${RESET}`]; break; }
+        const { repoPath } = this.selectedRepo;
         this.content = [];
         if (repoPath) {
           const encodedPath = repoPath.replace(/%/g, "%25").replace(/ /g, "%20").replace(/#/g, "%23").replace(/\?/g, "%3F");
@@ -452,7 +448,7 @@ export class RightPaneComponent implements Component {
           this.content.push("");
         }
         const repoAgents = this.allAgents.filter(
-          (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoName === repoName
+          (f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent" && f.agent.repoPath === repoPath
         );
         if (repoAgents.length === 0) {
           this.content.push(`${DIM}No agents${RESET}`);

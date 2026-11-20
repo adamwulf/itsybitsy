@@ -158,6 +158,7 @@ function makeMockCtx(overrides?: {
     agentTree: {
       selectedAgent: overrides?.agent ?? null,
       selectedRepoHeader: overrides?.repoHeader ?? null,
+      selectedRepoPath: null,
       isSystemCoordinatorSelected: false,
       flatList: overrides?.flatList ?? [],
       visibleList: overrides?.flatList ?? [],

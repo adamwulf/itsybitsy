@@ -40,6 +40,7 @@ import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } f
 import { DIM, ITALIC, RED } from "./colors";
 import { getStateColors } from "./color-scheme";
 import * as agentActions from "./agent-actions";
+import * as ghostty from "../ghostty";
 import * as paneManager from "./pane-manager";
 
 // Many tests below simulate resize keystrokes, which call persistLayout() and
@@ -9567,6 +9568,83 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.agentTree.selectedRepoHeader).toBe("Local app");
   });
 
+  for (const hasLocalAgent of [false, true]) {
+    test(`synthesized header opens its local path and shows its local repo summary (local agent: ${hasLocalAgent})`, () => {
+      const dashboard = makeDashboard();
+      const repoPath = "/here/Local App";
+      dashboard.setRepos([{ name: "APP", nickname: "Local app", path: repoPath }]);
+      const agents = hasLocalAgent ? [makeAgent("local-worker", repoPath)] : [];
+      dashboard.onUpdate(agents, agents.map((agent) => makeFlatAgent(agent)), []);
+      const service = new FakePeerService();
+      dashboard.setPeerService(service);
+      service.set({ links: [links()[1]!] });
+      expect(dashboard.agentTree.selectByRepoPath(repoPath)).toBe(true);
+      dashboard.syncSelectedAgent();
+      const open = spyOn(ghostty, "openPathInGhostty").mockResolvedValue({ ok: true, message: "opened" });
+      try {
+        dashboard.handleInput("G");
+        expect(open).toHaveBeenCalledTimes(1);
+        expect(open).toHaveBeenCalledWith(repoPath);
+      } finally {
+        open.mockRestore();
+      }
+      for (const mode of ["REPO", "AGENT LOG"] as const) {
+        dashboard.rightPane.setMode(mode);
+        const rows = dashboard.rightPane.render(80).join("\n");
+        expect(rows).toContain("\x1b]8;;file:///here/Local%20App\x07/here/Local App\x1b]8;;\x07");
+        if (mode === "AGENT LOG") {
+          expect(stripAnsi(rows)).toContain(hasLocalAgent ? "▾ Local app" : "▸ Local app");
+          expect(stripAnsi(rows)).toContain(`Agents: ${agents.length}`);
+        }
+      }
+    });
+  }
+
+  test("Favorites repaints its selected local favorite when a peer adds or removes the single-repo header", () => {
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+    const local = makeAgent("fav", "/here/app");
+    dashboard.setRepos([{ name: "app", path: local.repoPath }]);
+    dashboard.onUpdate([local], [makeFlatAgent(local)], []);
+    dashboard.agentTree.addFavorite(dashboard.agentTree.agentKey(local));
+    dashboard.setSidebarMode("favorites");
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    const kinds = () => dashboard.agentTree.visibleList.map((row) => row.kind);
+    const before = counter.renders();
+    expect(kinds()).toEqual(["agent"]);
+    service.set({ links: [links()[1]!] });
+    expect(counter.renders()).toBe(before + 1);
+    expect(kinds()).toEqual(["repo-header", "agent"]);
+    service.set({ links: [] });
+    expect(counter.renders()).toBe(before + 2);
+    expect(kinds()).toEqual(["agent"]);
+    expect(dashboard.selectedAgent).toBe(local);
+  });
+
+  test("reuses merged rows across renders and invalidates on peer, local, filter and carve-out changes", () => {
+    const { dashboard, service, local } = setup();
+    const tree = dashboard.agentTree;
+    const initial = tree.visibleList;
+    treeRows(dashboard, 40);
+    treeRows(dashboard, 80);
+    expect(tree.visibleList).toBe(initial);
+    service.set({ links: [links()[1]!] });
+    const changed = tree.visibleList;
+    expect(changed).not.toBe(initial);
+    tree.setFlatList([makeFlatAgent(local)]);
+    expect(tree.visibleList).not.toBe(changed);
+    tree.setFavoritesOnly(true);
+    const favorites = tree.visibleList;
+    expect(favorites.map((r) => r.kind)).toEqual(["agent"]);
+    tree.deselect();
+    expect(tree.visibleList).toEqual([]);
+    expect(tree.visibleList).not.toBe(favorites);
+    tree.addFavorite(tree.agentKey(local));
+    expect(tree.visibleList.map((r) => r.kind)).toEqual(["agent"]);
+  });
+
   test("identical paths with different registry names keep separate headers", () => {
     const dashboard = makeDashboard();
     const service = new FakePeerService();
@@ -9600,6 +9678,42 @@ describe("Unified peer repos in the Agents tree", () => {
   });
 
   for (const width of [40, 80]) {
+    test(`at ${width} columns a truncated nickname preserves state styling through selection and disconnect`, () => {
+      const { dashboard, service } = setup();
+      const name = "P".repeat(32);
+      const agent = remote("worker", "app", { nickname: "long nickname ".repeat(12), state: "waiting" });
+      const peer = { ...links()[0]!, name, repos: repos("app"), agents: [agent] };
+      service.set({ links: [peer] });
+      const assertStyle = (stale: boolean, selected: boolean) => {
+        const line = treeRows(dashboard, width).find((row) => row.includes("long nickname"))!;
+        expect(stripAnsi(line)).toContain("…");
+        // SGR 0 clears all three attributes. Look after the last reset before the state.
+        const atState = line.slice(0, line.indexOf("waiting")).split("\x1b[0m").at(-1)!;
+        expect(line).toContain("waiting");
+        expect(atState).toContain(ITALIC);
+        expect(atState.includes(DIM)).toBe(stale);
+        expect(atState.includes("\x1b[7m")).toBe(selected);
+        expect(line).toEndWith("\x1b[0m");
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+      };
+      assertStyle(false, false);
+      selectByKey(dashboard, `${name}/app/worker`);
+      assertStyle(false, true);
+      dashboard.infoPanel.displayHeight = 20;
+      const machine = () => dashboard.infoPanel.render(width).map(stripAnsi).find((row) => row.startsWith("Machine:"))!.trimEnd();
+      const expectedLine = (connection: string) => {
+        const available = width - visibleWidth(`Machine:  · ${connection}`);
+        const label = available >= name.length ? name : name.slice(0, available - 1) + "…";
+        return `Machine: ${label} · ${connection}`;
+      };
+      expect(machine()).toBe(expectedLine("connected"));
+      service.set({ links: [{ ...peer, connected: false, lastOkAt: Date.now() - 125_000 }] });
+      assertStyle(true, true);
+      expect(machine()).toBe(expectedLine("last seen 2m ago"));
+      dashboard.handleInput("k");
+      assertStyle(true, false);
+    });
+
     test(`at ${width} columns every row fits, long remote values are cut, and short states stay on screen`, () => {
       const { dashboard, service } = setup();
       const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
@@ -9619,28 +9733,43 @@ describe("Unified peer repos in the Agents tree", () => {
     });
   }
 
-  test("a remote id equal to the local one, and the same id on two peers, are three rows that select on their own", () => {
+  test("same-id agents in a shared repo keep their own highlight and info when peer rows move or disconnect", () => {
     const { dashboard, service, local } = setup();
-    expect(treeRows(dashboard).map(stripAnsi).filter((r) => /\bagent-1\b/.test(r))).toHaveLength(3);
-    expect(dashboard.selectedAgent).toBe(local);
-
-    selectByKey(dashboard, agentKey(PEER_B, "other-repo", "agent-1"));
-    expect(dashboard.selectedAgent).toBeNull();
-    expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", peerId: PEER_B });
-    expect(treeRows(dashboard).filter((r) => r.includes("\x1b[7m")).map(stripAnsi)).toEqual([expect.stringContaining("complete")]);
-
-    selectByKey(dashboard, agentKey(PEER_C, "app", "agent-1"));
-    expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", peerId: PEER_C });
-    // A poller change that reorders the peers keeps the selection on C's row.
-    const [b, c, d] = service.state.links;
-    service.set({ links: [c!, b!, d!] });
-    expect(keyOf(dashboard)).toBe(agentKey(PEER_C, "app", "agent-1"));
-    expect(dashboard.selectedAgent).toBeNull();
-
-    // Back to the local agent-1: k until it is selected again.
-    for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
-    expect(dashboard.selectedAgent).toBe(local);
-    expect(keyOf(dashboard)).toBeNull();
+    const name = local.repoRegistryName;
+    dashboard.setRepos([{ name, path: local.repoPath }]);
+    const peer = (base: PeerLinkState, state: string): PeerLinkState => ({
+      ...base, connected: true, lastError: null, repos: repos(name), agents: [remote(local.id, name, { state })],
+    });
+    const [first, second] = links();
+    const b = peer(first!, "waiting");
+    const c = peer(second!, "complete");
+    service.set({ links: [b, c] });
+    expect(treeRows(dashboard).map(stripAnsi).filter((line) => line.includes(local.id))).toHaveLength(3);
+    selectByKey(dashboard, agentKey(PEER_B, name, local.id));
+    expect(dashboard.infoPanel.remote).toMatchObject({ peerId: PEER_B });
+    const key = agentKey(PEER_C, name, local.id);
+    selectByKey(dashboard, key);
+    const checkSelection = (linkState: string) => {
+      expect(keyOf(dashboard)).toBe(key);
+      const highlighted = treeRows(dashboard).filter((r) => r.includes("\x1b[7m")).map(stripAnsi);
+      expect(highlighted).toEqual([expect.stringContaining("complete")]);
+      dashboard.infoPanel.displayHeight = 20;
+      const info = dashboard.infoPanel.render(60).map(stripAnsi).join("\n");
+      expect(info).toContain(`Machine: Laptop C · ${linkState}`);
+      expect(info).toContain(`Full id: ${key}`);
+      expect(dashboard.selectedAgent).toBeNull();
+    };
+    checkSelection("connected");
+    const index = () => dashboard.agentTree.visibleList.findIndex((r) => r.kind === "remote-agent" && peerEntryKey(r) === key);
+    const originalIndex = index();
+    service.set({ links: [c] });
+    expect(index()).toBe(originalIndex - 1);
+    checkSelection("connected");
+    service.set({ links: [b, c] });
+    expect(index()).toBe(originalIndex);
+    checkSelection("connected");
+    service.set({ links: [b, { ...c, connected: false, lastOkAt: Date.now() - 125_000 }] });
+    checkSelection("last seen 2m ago");
   });
 
   test("the @ jump lists only local rows", () => {

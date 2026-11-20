@@ -155,6 +155,11 @@ decision now extends to queues and addressing.
   - `machine` is this machine's name;
   - `repo` is the registered repo name;
   - `agent` is the agent id.
+- Agents can be spawned in a repo that is not registered. For such a repo the
+  repo segment is `~<repoId>`, the 8-hex id from `<repo>/.itsybitsy/repo-id`.
+  `~` is outside the registry-name alphabet, so this segment can never equal
+  a registered name. If the repo is registered later, its queue moves to the
+  registered name, with no migration.
 - This is the same key the tree uses, so same-named agents in different repos
   or on different machines never share a queue.
 - There is no migration. Old flat `~/.itsybitsy/agents/<agent>/` dirs are

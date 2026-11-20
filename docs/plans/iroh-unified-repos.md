@@ -29,8 +29,8 @@ repo onto a machine that doesn't have it remains out of scope.
   machine.
 - Paths are never compared, because they normally differ between machines.
 - **Fallback when names differ:** none is automatic. The repo shows as two
-  entries, and you fix it by registering it under the same name with
-  `ib add <path> <name>`.
+  entries. On the machine whose name needs changing, remove the registration
+  with `ib remove <path>`, then re-register it with `ib add <path> <name>`.
 - Adam decided this on 2026-11-20: equal registered names mean the same repo,
   and nothing fancier is used.
 
@@ -287,7 +287,8 @@ Each phase gets the usual two-reviewer cycle before it is merged.
 
 1. **Matching: DECIDED (Adam, 2026-11-20).** Repos match by registered repo
    name only, ignoring case. There is no path matching and nothing fancier.
-   Align names with `ib add <path> <name>`.
+   To align names, run `ib remove <path>` on the machine whose registration
+   needs changing, then `ib add <path> <name>` with the matching name.
 2. **Permission.** Any paired machine may start agents here, with a log line
    and a notice on this machine. The alternative is a per-peer "may start
    agents here" switch in the Peers dialog.

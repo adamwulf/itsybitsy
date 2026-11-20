@@ -265,8 +265,8 @@ trust B. Pairing again fixes it. B already trusts A's id, so step 3 replies
 - A peer never has two dials in flight at once. A dial can take up to 30 s to
   fail, so ticks that come in while a dial is pending are skipped.
 - Each peer's state is kept in memory: connected, or last seen N ago plus the
-  last error. The state shows in that peer's tree section header and in the
-  Peers dialog. Nothing is written to disk.
+  last error. The Peers dialog shows the connection state and last error. Selecting a
+  remote agent shows the connection state on the info panel’s Machine line. Nothing is written to disk.
 - You only need to pair again if one side loses `secret.key` (which gives it a
   new id) or runs `ib peer remove`.
 - Removal is one-sided. After it, the other side's polls fail with "not a

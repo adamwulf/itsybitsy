@@ -1709,6 +1709,37 @@ describe("multi-chunk texts resume from the .progress sidecar", () => {
     await second.stop();
   });
 
+  test("a .progress read error other than ENOENT holds the item instead of resending delivered chunks", async () => {
+    await mkdir(outboxDir, { recursive: true });
+    const base = `${Date.now()}-m00004.txt`;
+    const progressPath = join(outboxDir, `${base}.progress`);
+    await writeFile(join(outboxDir, base), await twoChunkText());
+    await writeFile(progressPath, JSON.stringify({ sent: 1, message_ids: [500] }));
+    await chmod(progressPath, 0o000);
+
+    const state = { failB: false, nextId: 501 };
+    const seen: string[] = [];
+    makeChunkFetch(state, seen);
+    const outbox = newOutbox({
+      client: new TelegramClient({ token: "T" }),
+      chatId: "1",
+      stallBackoff: KICK_ONLY,
+    });
+    await outbox.start();
+
+    await waitFor(() => outbox.getHealth().stalled);
+    expect(outbox.getHealth().lastError).toBe("outbox read failed (EACCES)");
+    expect(seen).toEqual([]); // chunk A (already delivered) was not resent
+    expect(await readdir(outboxDir)).toContain(base);
+
+    await chmod(progressPath, 0o600);
+    outbox.kick();
+    expect(await waitForFinalResult(base)).toEqual({ ok: true, message: "ok (2 parts, message_ids 500, 501)" });
+    expect(seen).toEqual(["B"]);
+
+    await outbox.stop();
+  });
+
   test("the startup sweep keeps a .progress beside its item and drops an orphan one", async () => {
     const { mkdir } = await import("fs/promises");
     await mkdir(outboxDir, { recursive: true });

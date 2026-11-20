@@ -607,7 +607,9 @@ export class TelegramOutbox {
 
     const { chunk: chunkFn } = await import("./telegram-client");
     const chunks = chunkFn(text);
-    const progress = await this.readProgress(base, chunks.length);
+    const progressRead = await this.readProgress(base, chunks.length);
+    if (progressRead.kind === "transient") return progressRead;
+    const progress = progressRead.progress;
     if (progress.sent > 0 && progress.sent < chunks.length) {
       this.log(`telegram outbox: resuming ${base} at part ${progress.sent + 1} of ${chunks.length}`);
     }
@@ -926,29 +928,27 @@ export class TelegramOutbox {
         await this.cleanupItem(base);
         return { kind: "vanished" };
       }
-      const why = code ?? classifyError(err);
-      return {
-        kind: "transient",
-        failure: {
-          ok: false,
-          transient: true,
-          timedOut: false,
-          label: `outbox read failed (${why})`,
-          message: `failed to read ${base}: ${why}`,
-          retryAfterSec: null,
-        },
-      };
+      return { kind: "transient", failure: readFailure(base, err) };
     }
   }
 
-  /** Load a text's `.progress`, or a fresh one when there is none (or it does
-   *  not fit this text). */
-  private async readProgress(base: string, chunkCount: number): Promise<TextProgress> {
+  /** Load a text's `.progress`, or a fresh one when there is none (ENOENT)
+   *  or its content does not fit this text (logged; sends from part 1). Any
+   *  other read error (EMFILE, EACCES, EIO, ...) holds the item: sending from
+   *  part 1 would resend chunks that were already delivered. */
+  private async readProgress(
+    base: string,
+    chunkCount: number,
+  ): Promise<{ kind: "ok"; progress: TextProgress } | { kind: "transient"; failure: CallFailure }> {
+    const file = `${base}.progress`;
     let raw: string;
     try {
-      raw = await readFile(join(this.dir, `${base}.progress`), "utf8");
-    } catch {
-      return { sent: 0, message_ids: [] };
+      raw = await readFile(join(this.dir, file), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return { kind: "ok", progress: { sent: 0, message_ids: [] } };
+      }
+      return { kind: "transient", failure: readFailure(file, err) };
     }
     try {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -958,13 +958,13 @@ export class TelegramOutbox {
         typeof sent === "number" && Number.isInteger(sent) && sent >= 0 && sent <= chunkCount &&
         Array.isArray(ids) && ids.every((id) => typeof id === "number")
       ) {
-        return { sent, message_ids: ids as number[] };
+        return { kind: "ok", progress: { sent, message_ids: ids as number[] } };
       }
     } catch {
       /* fall through */
     }
-    this.log(`telegram outbox: ignoring unreadable ${base}.progress; sending from part 1`);
-    return { sent: 0, message_ids: [] };
+    this.log(`telegram outbox: ignoring unreadable ${file}; sending from part 1`);
+    return { kind: "ok", progress: { sent: 0, message_ids: [] } };
   }
 
   /** Atomically record a text's progress after a delivered chunk. */
@@ -1107,6 +1107,21 @@ async function attemptCall<T extends { ok: true } | ClientFailure>(
     label: failure.status === 0 ? desc : `HTTP ${failure.status}`,
     message: `${method} failed: ${desc}`,
     retryAfterSec: failure.retryAfterSec,
+  };
+}
+
+/** The transient failure for a read error other than ENOENT on an outbox
+ *  file (the item or its `.progress`): it says nothing about whether the
+ *  file is still there, so the item is held and retried. */
+function readFailure(file: string, err: unknown): CallFailure {
+  const why = (err as NodeJS.ErrnoException).code ?? classifyError(err);
+  return {
+    ok: false,
+    transient: true,
+    timedOut: false,
+    label: `outbox read failed (${why})`,
+    message: `failed to read ${file}: ${why}`,
+    retryAfterSec: null,
   };
 }
 

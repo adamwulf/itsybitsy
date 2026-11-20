@@ -18,7 +18,7 @@
 import { getCoordinatorHome } from "../coordinator";
 import { agentOutboxDir } from "../outbox";
 import { readAgentMeta } from "../agents";
-import { matchWorktreeRepo, agentDir } from "../runtime-names";
+import { agentDirSuffix, agentDir } from "../runtime-names";
 import { isValidAgentId } from "../validation";
 import { InjectionContext } from "../types";
 import { parseStatuslineRateLimits, recordClaudeRateLimits } from "../claude-rate-limits";
@@ -73,7 +73,10 @@ export async function hookStatusline(
         if (agentId === SYSTEM_AGENT_ID) {
           await recordClaudeRateLimits(getCoordinatorHome(), windows, now);
         } else if (projectDir) {
-          const repo = matchWorktreeRepo(projectDir)?.[1] ?? projectDir;
+          // Claude's project is either this agent's worktree or the shared
+          // repo itself. A registered repo can itself be another worktree.
+          const worktreeAt = (projectDir + "/").lastIndexOf(`${agentDirSuffix(agentId)}/repo/`);
+          const repo = worktreeAt < 0 ? projectDir : projectDir.slice(0, worktreeAt);
           const { meta } = await readAgentMeta(agentDir(repo, agentId));
           if (meta) await recordClaudeRateLimits(await agentOutboxDir({ repoPath: repo, id: agentId, meta }), windows, now);
         }

@@ -2320,6 +2320,9 @@ ${qAbsExitScript}
       await chmod(resumeScript, 0o755);
     }
 
+    // Create the same queue directory a fresh spawn provides before launch.
+    await mkdir(await agentOutboxDir(agent), { recursive: true });
+
     // Ensure tmux server is running
     const startServerResult = await nukeResumeSpawnCtx.run(["tmux", "start-server"]);
     if (startServerResult.exitCode !== 0) {

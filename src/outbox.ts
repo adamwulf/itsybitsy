@@ -8,7 +8,7 @@
  * time interleave their chunks and Enters and land as one merged prompt.
  *
  * Fix: every write path ENQUEUES to a per-agent `outbox.jsonl` under
- * `<coordinatorHome>/agents/<machine>/<repo>/<id>/` (computed via `agentOutboxDir(repoPath, id)`). The
+ * `<coordinatorHome>/agents/<machine>/<repo>/<id>/` (computed via `agentOutboxDir(agent)`). The
  * queue was moved out of the per-worktree agent dir so codex agents running
  * with `-s workspace-write` can write to any other agent's outbox — codex
  * spawns add the entire `<coordinatorHome>` as a writable root, and the
@@ -70,11 +70,15 @@ export async function agentOutboxDir(agent: {
     // file. A live agent (including its sandboxed statusline) always uses the
     // id embedded by spawn, whether or not its caller can read that file.
     const repoId = meta === null ? await getRepoId(repoPath) : /^itsybitsy-([0-9a-f]{8})-.+$/.exec(meta.tmux_session)?.[1];
-    if (!repoId) throw new Error(`Cannot locate queue for '${agentId}': repo '${repoPath}' is unregistered and tmux_session has no repository id`);
+    if (!repoId) {
+      throw new Error(`Cannot locate queue for '${agentId}': repo '${repoPath}' is unregistered and tmux_session has no repository id`);
+    }
     name = `~${repoId}`;
   }
   for (const part of [name, agentId]) {
-    if (!part || part === "." || part === ".." || part.includes("/")) throw new Error("Invalid agent queue path component");
+    if (!part || part === "." || part === ".." || part.includes("/")) {
+      throw new Error(`Invalid agent queue path component: ${JSON.stringify(part)}`);
+    }
   }
   return join(getCoordinatorHome(), "agents", fullyQualifiedAgentId(await loadMachineName(), name, agentId));
 }
@@ -276,7 +280,7 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
  * any error (including ENOENT) is ignored.
  *
  * Also attempts to rmdir `dir` itself afterwards — when this is called against
- * the centralized per-agent outbox dir (`agentOutboxDir(repoPath, id)`), that dir is
+ * the centralized per-agent outbox dir (`agentOutboxDir(agent)`), that dir is
  * ours to create and clean up. The rmdir is best-effort: ENOENT (already
  * gone) and ENOTEMPTY (something else dropped a file in there) are both
  * ignored. The coordinator's outbox lives in `getCoordinatorHome()` directly,

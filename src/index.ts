@@ -571,7 +571,7 @@ const COMMAND_HELP: Record<string, string> = {
   rehire:
     "Usage: ib rehire <agent-id>\n" +
     "  Reconstruct a retired agent and resume its original session.\n" +
-    "  Accepts an exact id or nickname and optional machine/repo qualification.",
+    "  Accepts an exact agent ID or nickname as agent, machine/agent, or machine/repo/agent.",
   nuke:
     "Usage: ib nuke <agent-id>\n" +
     "  Kill an agent AND archive its directory. Removes the tmux session and\n" +

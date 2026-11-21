@@ -1186,7 +1186,12 @@ describe("DashboardComponent dialog and action handlers", () => {
     const agent = makeAgent("agent-test", repo.path);
     const key = "studio/project/agent-test";
     const agentDir = join(repo.path, ".itsybitsy", "agents", agent.id);
-    agent.meta = { ...await Bun.file(join(agentDir, "meta.json")).json(), agentType: "repo-coordinator", queue_key: key };
+    agent.meta = {
+      ...await Bun.file(join(agentDir, "meta.json")).json(),
+      agentType: "repo-coordinator",
+      prompt: "Coordinate work in this repository.",
+      queue_key: key,
+    };
     await sealAgentRecord(repo.path, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir);
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
     const leftover = join(configTempDir, "coord-home", "agents", key, "outbox.jsonl");

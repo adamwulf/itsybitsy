@@ -1480,21 +1480,22 @@ This file is user-wide and persists across sessions. It is managed exclusively v
 }
 ```
 
-Each entry is an object with `path` (absolute path to the git repository root), `name` (the repository basename), and an optional `nickname` field for a user-defined display name.
+Each entry stores the absolute registration path in `path` and the registry name in `name`. For `ib add`, the registry name defaults to the basename of the registration path. An optional `nickname` supplies a user-defined display name.
+
+Coordinators take their names from the basename of the resolved Git repository root. For both new and registered entries, the registry compares those basenames ignoring case, using the registration path's basename whenever Git cannot resolve a root. A match takes precedence over a registry-name or nickname clash. The refusal identifies the existing repo by name and path and requires a repo root with a different basename.
 
 **Repo names are unique, case-insensitively.** A repo's `name` is the middle segment of its agents' row keys in `ib watch` (`<machine>/<repo>/<agent>`, §17.1), and what a peer is sent as `repoRegistryName` (§20.4). `checkNewRepoEntry` (which `ib add`, the folder browser's `[ Add ]` and its `[ New Repo ]` all go through) refuses a new entry whose name equals, ignoring case, a registered repo's `name` or `nickname`: `"<name>" is already the name of a registered repo (<path>) — repo names must be unique; <hint>`. The hint (also on the refusal of a team's name) is the way forward for the path taken:
 
-- `ib add` and the folder browser's `[ Add ]`: `use ib add <path> <name>` (§9.3), which registers the folder under a name of its own. `[ Add ]` keeps using the folder's name and shows this refusal.
+- `ib add` and the folder browser's `[ Add ]` show `use ib add <path> <name>` (§9.3). Choosing a different registry name resolves a name or nickname clash only when the folder basenames differ.
 - The folder browser's `[ New Repo ]`: `choose another folder name`, since it names the repo after the folder it creates (and checks before creating it).
 
 Only new entries are checked: duplicates registered before this rule stay as they are (no migration). A nickname rename (`r` on a repo header) does not change `name`, so it re-keys no row.
-Because coordinators are named after their repo folders, a new repo must also have a folder basename distinct from every registered repo’s basename, ignoring case, even when it has a custom registry name.
 
 ### 9.3 Registry Commands
 
 | Command | Description |
 |---------|-------------|
-| `ib add [path] [name]` | Add a repo to the registry. `path` defaults to the current working directory (`process.cwd()`, as given: not moved to the git root) and is stored resolved to an absolute path; it is not checked to exist or to be a git repository. The registry name defaults to the folder's name; `name` gives another one, needed when the folder's name is already registered. Errors if the resolved path is already registered, or is `$HOME`; if the name is not a valid repo name (`[A-Za-z0-9_-]`, 1–64), is `coordinator` (reserved for system coordinator addressing, §12.3.1), is a team's name, or is already a registered repo's name or nickname, ignoring case (§9.2; the refusal says `use ib add <path> <name>`). A `path` or `name` that starts with `-` (such as `ib add --name app-two`, which would otherwise register a nonexistent `<cwd>/--name`), or more than two arguments, is refused with the usage text on stderr (exit 1) and nothing is registered. |
+| `ib add [path] [name]` | Add a repo to the registry. `path` defaults to the current working directory (`process.cwd()`) and is stored as an absolute path, even for a subdirectory, a non-Git folder, or a path that does not exist. The optional `name` overrides the registry name. Registration fails for `$HOME`, an invalid name (allowed characters are `[A-Za-z0-9_-]`, length 1–64), the reserved name `coordinator` (§12.3.1), a team's name, or an already registered path. It also fails if the resolved repo root's basename or the registry name clashes under §9.2. For example, with the repo root `/a/app` registered, `ib add /b/app second` fails for another repo rooted at `/b/app`. A `path` or `name` that starts with `-` (such as `ib add --name app-two`, which would otherwise register a nonexistent `<cwd>/--name`), or more than two arguments, is refused with the usage text on stderr (exit 1) and nothing is registered. |
 | `ib remove <path\|name>` | Remove a repo from the registry. The argument is required (without it: `Usage: ib remove <path\|name>`, exit 1). A registered path (resolved to an absolute path) is removed directly; otherwise the argument is matched like every by-name lookup (`resolveRepo`: name or nickname ignoring case, or a path). Errors when nothing matches (`Repo not found: <arg>`) or when a name matches more than one repo (the candidates are listed). |
 | `ib list` | List all registered repos and their agents. |
 | `ib push <repo-id>` | Push the repo's `main` (or `master`) branch to every configured remote. Each remote is attempted independently and gets one status line (`✓ <remote>: pushed main` or `✗ <remote>: <git error>`); exits non-zero if any remote failed. |

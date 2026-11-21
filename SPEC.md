@@ -331,7 +331,11 @@ Nuke (`ib nuke <id>`) recursively kills a manager and all its descendants:
    non-rehirable archive. Nuke also accepts a childless worker, providing an
    explicit destructive escape hatch when a recoverable retirement cannot be
    prepared (for example, after its worktree was manually removed).
-3. Clean up orphaned tmux sessions (sessions with `itsybitsy-<repo-id>-` prefix that don't match any remaining agent in the same repository) [^callout]: The bash reference checks only sessions matching the current repo's prefix (`ittybitty-<repo-id>-`). The TypeScript `cleanupOrphanedTmuxSessions` checks all sessions starting with `itsybitsy-`, which may clean up sessions from other repos. The agent ID extraction logic (stripping the prefix) still works correctly cross-repo.
+3. Clean up orphaned tmux sessions with the repository's own
+   `itsybitsy-<repoId>-` prefix whose agent IDs are absent from its agents
+   directory. The sweep skips cleanup if it cannot read a valid repo ID or
+   list the agents directory. In that case, `ib state --cleanup` can still
+   report and remove untracked sessions.
 4. Scan and kill orphaned Claude processes
 
 Nuke-all (`ib nuke` with no agent ID) kills all agents in the repository. The `--force` flag skips confirmation but does not change what gets nuked.

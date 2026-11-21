@@ -112,6 +112,12 @@ describe("qualified agent addresses", () => {
     expect(await gate("missing/..")).toMatchObject({ decision: "deny", reason: expect.stringContaining("directory identity") });
   });
 
+  test("agy dispatch denies a command substitution opener split by a continuation", async () => {
+    const command = 'ib send foo "text $' + "\\" + '\n(printf marker)"';
+    const result = await dispatchHook("agy", "mgr", command, worktree);
+    expect(result).toMatchObject({ decision: "deny", reason: expect.stringContaining("command substitution") });
+  });
+
   test("the owning repo of an unregistered worktree precedes registered repos and peers", async () => {
     await cli.writeRegistry({ version: 1, repos: [{ path: web, name: "Web" }] });
     await cli.addAgent(web, "foo");

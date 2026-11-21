@@ -91,6 +91,15 @@ export function parseHeredocDelimiterWord(command: string, start: number): Hered
  * literal data, but the same `|` unquoted chains commands.
  */
 export function findShellMetachar(command: string): string | null {
+  const hit = scanShellMetachar(command);
+  if (hit) return hit;
+  // A continuation can join parts of an opener inside double quotes. Scan
+  // both spellings so joining cannot hide syntax visible in the original.
+  const joined = command.replace(/\\\r?\n/g, "");
+  return joined === command ? null : scanShellMetachar(joined);
+}
+
+function scanShellMetachar(command: string): string | null {
   let i = 0;
   const n = command.length;
 
@@ -249,7 +258,7 @@ export function findShellMetachar(command: string): string | null {
         const nl = command.indexOf("\n", j);
         const tailEnd = nl === -1 ? n : nl;
         const tail = command.substring(j, tailEnd);
-        const tailHit = findShellMetachar(tail);
+        const tailHit = scanShellMetachar(tail);
         if (tailHit) return tailHit;
 
         // No newline → no body → opener is malformed (bash would error)

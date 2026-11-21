@@ -1180,6 +1180,42 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
+  test.each(["repo header", "coordinator row"])("reset from the %s shows cleanup warnings even when respawn fails", async entry => {
+    await setupDashboardWithAgent();
+    const repo = { path: actionTempDir!, name: "project" };
+    const agent = makeAgent("agent-test", repo.path);
+    const key = "studio/project/agent-test";
+    const agentDir = join(repo.path, ".itsybitsy", "agents", agent.id);
+    agent.meta = { ...await Bun.file(join(agentDir, "meta.json")).json(), agentType: "repo-coordinator", queue_key: key };
+    await sealAgentRecord(repo.path, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir);
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
+    const leftover = join(configTempDir, "coord-home", "agents", key, "outbox.jsonl");
+    await mkdir(leftover, { recursive: true });
+    await Bun.write(join(configTempDir, ".itsybitsy", "repos.json"), "{");
+    setNewAgentCallerMetaReader(() => null);
+    setNewAgentSpawnRunner(() => makeSpawnResult(1));
+
+    dashboard.setRepos([repo]);
+    dashboard.setWatcher({ lastAgents: [agent], refresh: () => {}, setGroupByParent: () => {}, healthReports: new Map() } as any);
+    dashboard.onUpdate([agent], [
+      makeFlatRepoHeader(repo.name, repo.path, false, false, false),
+      makeFlatAgent(agent),
+    ], []);
+    if (entry === "repo header") expect(dashboard.agentTree.selectByRepoPath(repo.path)).toBe(true);
+    else expect(dashboard.agentTree.selectAgent(agent)).toBe(true);
+    dashboard.syncSelectedAgent();
+    try {
+      dashboard.handleInput("R");
+      await dashboard.flushPendingActions();
+    } finally {
+      resetNewAgentCallerMetaReader();
+    }
+    expect({ dialog: dashboard.dialog, notice: dashboard.notice }).toMatchObject({ dialog: { type: "cleanup-warnings" } });
+    const dialog = assertDialog(dashboard.dialog, "cleanup-warnings");
+    expect(dialog.text).toContain("Reset failed during respawn");
+    expect(dialog.text).toContain(`could not unlink ${leftover}:`);
+  });
+
   test.each([["x", "Retired"], ["m", "Merged"], ["!", "Nuked"]])("%s shows complete, scrollable cleanup warnings at 80 columns", async (key, summary) => {
     await setupDashboardWithAgent();
     if (key === "m") {

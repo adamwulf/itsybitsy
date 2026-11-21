@@ -10291,6 +10291,36 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(existsSync(join(home, "agents"))).toBe(false);
   });
 
+  test.each([true, false])("coordinator reset preserves teardown warnings (respawn succeeds: %p)", async succeeds => {
+    const id = basename(tempDir);
+    const options = { type: "repo-coordinator" };
+    setWatchdogSpawnFn(() => ({ pid: 99971 }));
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    expect((await callNewAgent("original coordinator", options)).ok).toBe(true);
+    const meta = await Bun.file(join(agentsDir, id, "meta.json")).json();
+    const leftover = join(tempDir, "home", ".itsybitsy", "agents", meta.queue_key, "outbox.jsonl");
+    await mkdir(leftover);
+    if (succeeds) {
+      // The old reservation remains, but respawn uses the new registration.
+      await saveRegistry({ repos: [{ path: tempDir, name: "renamed" }] });
+    }
+
+    spawnCalls = [];
+    setNukeResumeSpawnRunner(() => makeSpawnResult("", 1));
+    setKillPauseSpawnRunner(() => makeSpawnResult("", 1));
+    setNewAgentCallerMetaReader(() => null);
+    try {
+      const result = await resumeAgent(makeAgent(id, tempDir, "running", meta));
+      expect(result).toMatchObject({ ok: succeeds });
+      expect(result.stderr).toContain(`Warning: could not unlink ${leftover}:`);
+      expect(result.cleanupWarnings).toContain(leftover);
+      if (!succeeds) expect(result.stderr).toContain("Reset failed during respawn:");
+    } finally {
+      resetKillPauseSpawnRunner();
+      resetNewAgentCallerMetaReader();
+    }
+  });
+
   test("a live coordinator keeps its queue when a second same-basename checkout takes its registry name", async () => {
     const { addRepo, removeRepo } = await import("./registry");
     const first = join(tempDir, "a", "project");

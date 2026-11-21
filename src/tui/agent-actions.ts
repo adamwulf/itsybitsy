@@ -329,9 +329,19 @@ export function handleRetire(ctx: ActionCtx) {
   confirmRetire(ctx, agent);
 }
 
-function showTeardownResult(ctx: ActionCtx, summary: string, warnings: string) {
-  ctx.setNotice(summary, "info");
+function showTeardownResult(ctx: ActionCtx, summary: string, warnings: string, kind: "info" | "error" = "info") {
+  ctx.setNotice(summary, kind);
   if (warnings) ctx.showDialog({ type: "cleanup-warnings", text: `${summary}\n\n${warnings}`, offset: 0 });
+}
+
+function showCoordinatorResetResult(ctx: ActionCtx, agent: Agent, result: IbCommandResult) {
+  if (result.ok) {
+    showTeardownResult(ctx, `Reset coordinator ${agent.id}`, result.stderr);
+  } else if (result.cleanupWarnings) {
+    showTeardownResult(ctx, `Could not reset coordinator ${agent.id}`, result.stderr, "error");
+  } else {
+    ctx.setNotice(`Reset failed: ${result.stderr || result.stdout}`, "error");
+  }
 }
 
 /**
@@ -526,8 +536,7 @@ export function handleResume(ctx: ActionCtx) {
             .find(a => a.id === coordStatus.agentId);
           if (agent) {
             const result = await resumeAgent(agent);
-            if (result.ok) ctx.setNotice(`Reset coordinator ${agent.id}`, "info");
-            else ctx.setNotice(`Reset failed: ${result.stderr || result.stdout}`, "error");
+            showCoordinatorResetResult(ctx, agent, result);
           } else {
             ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`, "error");
           }
@@ -563,7 +572,8 @@ export function handleResume(ctx: ActionCtx) {
   ctx.setNotice(`Resuming ${agent.id}…`, "info");
   ctx.executeAndRefresh(async () => {
     const result = await resumeAgent(agent);
-    if (result.ok) ctx.setNotice(`Resumed ${agent.id}`, "info");
+    if (agent.meta.agentType === REPO_COORDINATOR_TYPE) showCoordinatorResetResult(ctx, agent, result);
+    else if (result.ok) ctx.setNotice(`Resumed ${agent.id}`, "info");
     else ctx.setNotice(`Resume failed: ${result.stderr || result.stdout}`, "error");
   });
 }

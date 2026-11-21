@@ -27,6 +27,9 @@ describe("qualified agent addresses", () => {
     app = await cli.addRepo("App", { nickname: "Application" });
     web = await cli.addRepo("Web");
     worktree = (await cli.addAgent(app, "mgr")).sessionCwd;
+    await Bun.write(join(worktree, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { allow: ["Bash(ib:*)"] },
+    }));
     await cli.addAgent(app, "foo", { manager: "mgr" });
   });
   afterEach(async () => {
@@ -88,9 +91,6 @@ describe("qualified agent addresses", () => {
     for (const cwd of [app, worktree]) {
       expect((await retire("foo", cwd)).actions[0]?.args[0]).toMatchObject({ repoPath: alias });
     }
-    await Bun.write(join(worktree, ".claude", "settings.local.json"), JSON.stringify({
-      permissions: { allow: ["Bash(ib:*)"] },
-    }));
     const aliasedWorktree = alias + worktree.slice(app.length);
     for (const kind of hookKinds) {
       expect(await dispatchHook(kind, "mgr", "ib retire foo", worktree, aliasedWorktree)).toMatchObject({ decision: "allow" });
@@ -112,15 +112,30 @@ describe("qualified agent addresses", () => {
     expect(await gate("missing/..")).toMatchObject({ decision: "deny", reason: expect.stringContaining("directory identity") });
   });
 
-  test("agy dispatch denies a command substitution opener split by a continuation", async () => {
+  test("all three dispatchers deny a substitution opener split by a continuation", async () => {
     const command = 'ib send foo "text $' + "\\" + '\n(printf marker)"';
-    const result = await dispatchHook("agy", "mgr", command, worktree);
-    expect(result).toMatchObject({ decision: "deny", reason: expect.stringContaining("command substitution") });
+    for (const kind of hookKinds) {
+      expect(await dispatchHook(kind, "mgr", command, worktree)).toMatchObject({
+        decision: "deny", reason: expect.stringContaining("command substitution"),
+      });
+    }
   });
 
-  test("agy dispatch allows a literal target on the next continued line", async () => {
-    const command = "ib retire " + "\\" + "\n  foo";
-    expect(await dispatchHook("agy", "mgr", command, worktree)).toMatchObject({ decision: "allow" });
+  test("all three dispatchers allow a literal target on the next continued line", async () => {
+    for (const kind of hookKinds) {
+      for (const indent of ["", "  "]) {
+        const command = "ib retire " + "\\" + "\n" + indent + "foo";
+        expect(await dispatchHook(kind, "mgr", command, worktree)).toMatchObject({ decision: "allow" });
+      }
+    }
+  });
+
+  test("agy checks joined shell syntax even for an allow-listed non-ib command", async () => {
+    expect(await dispatchHook("agy", "mgr", "ls .", worktree)).toMatchObject({ decision: "allow" });
+    const command = 'ls "text $' + "\\" + '\n(printf marker)"';
+    expect(await dispatchHook("agy", "mgr", command, worktree)).toMatchObject({
+      decision: "deny", reason: expect.stringContaining("run_command cannot contain shell metacharacters"),
+    });
   });
 
   test("the owning repo of an unregistered worktree precedes registered repos and peers", async () => {

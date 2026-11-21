@@ -1143,8 +1143,7 @@ async function readGitPipe(
   }
 }
 
-/** Resolve the main repository root, including from inside a linked worktree. */
-export async function resolveGitRoot(repoPath: string, signal?: AbortSignal): Promise<string | null> {
+async function runGitRootQuery(repoPath: string, flags: string[], signal?: AbortSignal) {
   const deadline = Promise.withResolvers<never>();
   const onAbort = () => deadline.reject(signal?.reason);
   const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
@@ -1153,25 +1152,49 @@ export async function resolveGitRoot(repoPath: string, signal?: AbortSignal): Pr
     signal?.throwIfAborted();
     signal?.addEventListener("abort", onAbort);
     proc = spawnCtx.runner(
-      ["git", "-C", repoPath, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"],
+      ["git", "-C", repoPath, "rev-parse", ...flags],
       { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
     );
     const [exitCode, stdout] = await Promise.race([
       Promise.all([proc.exited, readGitPipe(proc.stdout, readers), readGitPipe(proc.stderr, readers)]),
       deadline.promise,
     ]);
-    if (exitCode !== 0) return null;
-    const [commonDir, gitDir, topLevel] = stdout.trim().split("\n");
-    if (!commonDir || !gitDir || !topLevel) return null;
-    if (commonDir === ".git" || commonDir === gitDir) return topLevel;
-    return dirname(resolve(repoPath, commonDir));
-  } catch {
+    return { exitCode, stdout };
+  } catch (err) {
     // A wrapper's descendants can hold the pipes open after the wrapper dies.
     for (const reader of readers) void reader.cancel().catch(() => {});
     try { proc?.kill?.("SIGKILL"); } catch { /* the child may have already exited */ }
-    return null;
+    throw err;
   } finally {
     signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/** Resolve the main repository root, including from inside a linked worktree. */
+export async function resolveGitRoot(repoPath: string, signal?: AbortSignal): Promise<string | null> {
+  const query = (...flags: string[]) => runGitRootQuery(repoPath, flags, signal);
+  try {
+    const combined = await query("--git-common-dir", "--git-dir", "--show-toplevel");
+    if (combined.exitCode === 0) {
+      const fields = combined.stdout.replace(/\n$/, "").split("\n");
+      const [commonDir, gitDir, topLevel] = fields.map((field) => field.trim());
+      if (fields.length === 3 && commonDir && gitDir && topLevel) {
+        return commonDir === ".git" || commonDir === gitDir ? topLevel : dirname(resolve(repoPath, commonDir));
+      }
+    }
+
+    // A path can contain a newline, and --show-toplevel can fail inside a
+    // worktree's admin directory even when its common directory is usable.
+    const common = await query("--git-common-dir");
+    if (common.exitCode === 0) {
+      const commonDir = common.stdout.trim();
+      const gitDir = await query("--git-dir");
+      if (commonDir !== ".git" && commonDir !== gitDir.stdout.trim()) return dirname(resolve(repoPath, commonDir));
+    }
+    const top = await query("--show-toplevel");
+    return top.exitCode === 0 ? top.stdout.trim() : null;
+  } catch {
+    return null;
   }
 }
 

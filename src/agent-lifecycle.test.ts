@@ -640,7 +640,7 @@ describe("agent-lifecycle", () => {
       expect(cancelled).toBe(true);
     });
 
-    test("one git process resolves roots, subdirectories, linked worktrees, and symlinks", async () => {
+    test("Git root lookup uses one process for unambiguous results and separate queries when needed", async () => {
       const dir = await realpath(await makeTempDir());
       try {
         const root = join(dir, "project");
@@ -664,6 +664,18 @@ describe("agent-lifecycle", () => {
           expect(await resolveGitRoot(path)).toBe(root);
           expect(calls).toEqual([["git", "-C", path, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"]]);
         }
+
+        const newlineRoot = join(dir, "line\nbreak");
+        await mkdir(newlineRoot);
+        await Bun.$`git init --quiet`.cwd(newlineRoot);
+        calls.length = 0;
+        expect(await resolveGitRoot(newlineRoot)).toBe(newlineRoot);
+        expect(calls.slice(1).map((cmd) => cmd.slice(4))).toEqual([["--git-common-dir"], ["--git-dir"], ["--show-toplevel"]]);
+
+        const admin = (await Bun.$`git rev-parse --absolute-git-dir`.cwd(worktree).text()).trim();
+        calls.length = 0;
+        expect(await resolveGitRoot(admin)).toBe(root);
+        expect(calls.slice(1).map((cmd) => cmd.slice(4))).toEqual([["--git-common-dir"], ["--git-dir"]]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

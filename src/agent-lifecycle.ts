@@ -1123,17 +1123,37 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
 
 // ── resolveGitRoot ───────────────────────────────────────────────────────────
 
+const GIT_ROOT_TIMEOUT_MS = 2_000;
+
 /** Resolve the main repository root, including from inside a linked worktree. */
 export async function resolveGitRoot(repoPath: string): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"]);
-    if (result.exitCode !== 0) return null;
-    const [commonDir, gitDir, topLevel] = result.stdout.split("\n");
+    const proc = spawnCtx.runner(
+      ["git", "-C", repoPath, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"],
+      { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
+    );
+    const deadline = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), GIT_ROOT_TIMEOUT_MS);
+    });
+    const result = await Promise.race([
+      Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]),
+      deadline,
+    ]);
+    if (result === null) {
+      proc.kill?.("SIGKILL");
+      return null;
+    }
+    const [exitCode, stdout] = result;
+    if (exitCode !== 0) return null;
+    const [commonDir, gitDir, topLevel] = stdout.trim().split("\n");
     if (!commonDir || !gitDir || !topLevel) return null;
     if (commonDir === ".git" || commonDir === gitDir) return topLevel;
     return dirname(resolve(repoPath, commonDir));
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -7,6 +7,7 @@ import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { createTeam } from "./teams";
 import { setUserHome, resetUserHome } from "./home";
 import { createCliFixture } from "./test-cli-runner";
+import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 
 // Override registry path for tests
 let tempDir: string;
@@ -168,6 +169,27 @@ describe("registry", () => {
     expect(result.ok).toBe(false);
     expect(result.message).toContain(`folder name "App" is already used by registered repo "website" (${registered})`);
     expect(await listRepos()).toEqual([{ path: registered, name: "website" }]);
+  });
+
+  test("a stalled git root lookup is killed and falls back to the registered folder basename", async () => {
+    const existing = { path: join(tempDir, "offline", "app"), name: "website" };
+    await saveRegistry({ repos: [existing] });
+    const signals: (number | string | undefined)[] = [];
+    lifecycleSpawnCtx.set((cmd) => ({
+      stdout: null,
+      stderr: null,
+      exited: cmd[2] === existing.path ? new Promise<number>(() => {}) : Promise.resolve(128),
+      kill: (signal) => { signals.push(signal); },
+    }));
+    try {
+      const result = await addRepo(join(tempDir, "App"), "mobile");
+      expect(signals).toEqual(["SIGKILL"]);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(`folder name "App" is already used by registered repo "website" (${existing.path})`);
+      expect(await listRepos()).toEqual([existing]);
+    } finally {
+      lifecycleSpawnCtx.reset();
+    }
   });
 
   test("adding a different basename preserves existing duplicate names and folder basenames", async () => {

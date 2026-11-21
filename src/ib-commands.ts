@@ -38,6 +38,7 @@ import {
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
   readAllAgents,
+  readAgentsOfRepos,
   readRepoAgents,
   detectAgentStates,
   mutateAgentMeta,
@@ -4965,7 +4966,13 @@ async function resolveFullAgentId(
 ): Promise<{ id: string } | { error: string }> {
   const { resolveAgentTarget } = await import("./resolve-target");
   const { agent, error } = await resolveAgentTarget(partial, repos);
-  return agent ? { id: agent.id } : { error: error ?? `Agent not found: ${partial}` };
+  if (!agent) return { error: error ?? `Agent not found: ${partial}` };
+  const { agents, errors } = await readAgentsOfRepos(repos, false);
+  const rosterMember = new Map(agents.map((member) => [member.id, member])).get(agent.id);
+  if (errors.length || !rosterMember || !sameRepoPath(rosterMember.repoPath, agent.repoPath)) {
+    return { error: `Cannot store '${partial}' in the team roster: bare id '${agent.id}' does not identify this agent reliably` };
+  }
+  return { id: agent.id };
 }
 
 /**

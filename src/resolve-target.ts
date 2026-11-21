@@ -70,6 +70,10 @@ type TargetResult = ResolvedSendTarget & { error?: string };
 const failure = (error: string): TargetResult => ({ agent: null, isSystemCoordinator: false, error });
 const local = (agent: Agent): TargetResult => ({ agent, isSystemCoordinator: false });
 
+function suggestedAddress(address: string): string {
+  return /^[a-zA-Z0-9_@./-]+$/.test(address) ? address : shellQuote(address);
+}
+
 /** Resolve an address in the calling CLI or hook's cwd. Rehire can also address retired agents. */
 export async function resolveAgentTarget(
   target: string,
@@ -88,14 +92,32 @@ export async function resolveAgentTarget(
       basename(a.storageDir) === a.id), errors };
   }
 
+  function matchesInRepo(name: string, agents: Agent[]): Agent[] {
+    const first = matchAgentById(name, agents);
+    if (!first) return [];
+    if (purpose !== "rehire" || first.id === name) return [first];
+    const byId = new Map<string, Agent>();
+    for (const agent of agents) {
+      if (agent.meta.nickname === name && !byId.has(agent.id)) byId.set(agent.id, agent);
+    }
+    return [...byId.values()];
+  }
+
+  function resolveInRepo(name: string, matches: Agent[]): TargetResult | undefined {
+    if (!matches.length) return undefined;
+    const first = matches[0]!;
+    if (matches.length === 1) return local(first);
+    const forms = matches.map(({ id }) => suggestedAddress(`@${first.repoRegistryName}/${id}`)).sort();
+    return failure(`'${name}' matches several retired agent ids; use ${forms.join(" or ")}`);
+  }
+
   if (target === "@system") {
     return purpose === "send" ? { agent: null, isSystemCoordinator: true } : failure("Agent not found: @system");
   }
 
-  const ownRepo = findOwnRepo(cwd, repos);
-
   // @coordinator → own repo's coordinator
   if (target === "@coordinator") {
+    const ownRepo = findOwnRepo(cwd, repos);
     if (!ownRepo) {
       return { agent: null, isSystemCoordinator: false, error: "Error: @coordinator requires running from within a repo" };
     }
@@ -113,7 +135,8 @@ export async function resolveAgentTarget(
   if (target.startsWith("@")) {
     const segments = target.slice(1).split("/");
     if (segments.length > 2 || segments.some((part) => !part)) return failure(`Agent not found: ${target}`);
-    const [repoName, agentId] = segments as [string, string?];
+    const repoName = segments[0]!;
+    const agentId = segments[1];
 
     // Shared resolver: registry id / basename (case-insensitive) or path.
     const repoResolution = resolveRepo(repoName, repos, cwd);
@@ -150,7 +173,7 @@ export async function resolveAgentTarget(
     if (agentId) {
       // @<repo>/<agent-id> → agent in specific repo
       const { agents, errors } = await readAgents([repo]);
-      const match = matchAgentById(agentId, agents);
+      const match = resolveInRepo(agentId, matchesInRepo(agentId, agents));
       if (!match) {
         return {
           agent: null,
@@ -158,7 +181,7 @@ export async function resolveAgentTarget(
           error: `Agent not found: ${agentId} in repo ${repoName}${unreadableAgentsDirsNote(errors, [repo])}`,
         };
       }
-      return { agent: match, isSystemCoordinator: false };
+      return match;
     }
 
     // @<repo> → that repo's coordinator
@@ -178,12 +201,13 @@ export async function resolveAgentTarget(
   const repoName = parts.length === 3 ? parts[1]!.toLowerCase() : undefined;
 
   // A bare name first searches the caller's repo, including its worktrees.
+  const ownRepo = machine ? undefined : findOwnRepo(cwd, repos);
   let searched = repos;
   let ownErrors: AgentReadError[] = [];
-  if (!machine && ownRepo) {
+  if (ownRepo) {
     const { agents, errors } = await readAgents([ownRepo]);
-    const match = matchAgentById(name, agents);
-    if (match) return local(match);
+    const match = resolveInRepo(name, matchesInRepo(name, agents));
+    if (match) return match;
     ownErrors = errors;
     searched = repos.filter((r) => r !== ownRepo);
   }
@@ -200,8 +224,11 @@ export async function resolveAgentTarget(
   }
   const matches: { machine: string; repo: string; agent?: Agent }[] = [];
   for (const repo of searched) {
-    const agent = matchAgentById(name, agents.filter((a) => a.repoPath === repo.path));
-    if (agent) matches.push({ machine: localMachine, repo: repo.name, agent });
+    for (const agent of matchesInRepo(name, agents.filter((a) => a.repoPath === repo.path))) {
+      if (!matches.some((m) => m.agent?.id === agent.id && sameRepoPath(m.agent.repoPath, agent.repoPath))) {
+        matches.push({ machine: localMachine, repo: repo.name, agent });
+      }
+    }
   }
   for (const peer of peers) {
     const matchingRepos = new Set(peer.agents.filter((a) =>
@@ -219,9 +246,16 @@ export async function resolveAgentTarget(
     }
     matches.sort((a, b) => a.machine.localeCompare(b.machine) || a.repo.localeCompare(b.repo));
     const machines = [...new Set(matches.map((m) => m.machine))];
-    const forms = matches.map((m) => matches.some((other) => other !== m && other.machine === m.machine)
-      ? `${m.machine}/${m.repo}/${name}` : `${m.machine}/${name}`);
-    return failure(`'${name}' exists on ${machines.join(" and ")}; use ${forms.join(" or ")}`);
+    const first = matches[0]!;
+    if (first.agent && matches.every((m) => m.agent && sameRepoPath(m.agent.repoPath, first.agent!.repoPath))) {
+      return resolveInRepo(name, matches.map((m) => m.agent!))!;
+    }
+    const forms = matches.map((m) => {
+      if (purpose === "rehire" && m.agent) return `${m.machine}/${m.repo}/${m.agent.id}`;
+      return matches.some((other) => other !== m && other.machine === m.machine)
+        ? `${m.machine}/${m.repo}/${name}` : `${m.machine}/${name}`;
+    });
+    return failure(`'${name}' exists on ${machines.join(" and ")}; use ${forms.map(suggestedAddress).join(" or ")}`);
   }
   const agent = matches[0]!.agent;
   if (agent) return local(agent);

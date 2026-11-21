@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { symlink, rm, utimes } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, symlink, rm, utimes } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { hookAgyPreToolUse } from "./hooks/agy-pre-tool-use";
 import { setUserHome, resetUserHome } from "./home";
 import { addMember, getTeam } from "./teams";
 import { checkIbCommandAccess } from "./hooks/agent-path";
@@ -72,6 +73,27 @@ describe("qualified agent addresses", () => {
       expect((await retire("foo", cwd)).actions[0]?.args[0]).toMatchObject({ repoPath: alias });
       expect(await checkIbCommandAccess("ib retire foo", "mgr", join(app, ".itsybitsy", "agents"), cwd)).toBeNull();
     }
+  });
+
+  test("agy checks the same repo as the CLI when Cwd follows a symlink before going up", async () => {
+    await cli.addAgent(web, "foo", { manager: "someone-else" });
+    await mkdir(join(web, "nested"));
+    await symlink(join(web, "nested"), join(worktree, "link"));
+    expect((await retire("foo", web)).actions[0]?.args[0]).toMatchObject({ id: "foo", repoPath: web });
+    async function gate(Cwd: string, CommandLine = "ib retire foo") {
+      let output = "";
+      await hookAgyPreToolUse("mgr", {
+        rawStdin: JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine, Cwd } } }),
+        agentDirOverride: dirname(worktree),
+        skipMetaWrites: true,
+        write: (chunk) => { output += chunk; },
+      });
+      return JSON.parse(output);
+    }
+    expect(await gate(worktree)).toMatchObject({ decision: "allow" });
+    expect(await gate("link/..")).toMatchObject({ decision: "deny", reason: expect.stringContaining("manager or spawner") });
+    expect(await gate("link/..", "ls")).toMatchObject({ decision: "deny", reason: expect.stringContaining("Cwd rejected") });
+    expect(await gate("missing/..")).toMatchObject({ decision: "deny", reason: expect.stringContaining("directory identity") });
   });
 
   test("the owning repo of an unregistered worktree precedes registered repos and peers", async () => {

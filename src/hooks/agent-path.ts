@@ -7,6 +7,7 @@ import * as runtimeNames from "../runtime-names";
  * their own agent.log, and general system paths.
  */
 
+import { sameRepoPath } from "../repo-identity";
 import { join, resolve, dirname, basename } from "path";
 import { userHome } from "../home";
 import { lstatSync } from "fs";
@@ -1691,7 +1692,7 @@ export async function checkManagerCommandAccess(
    */
   async function hasAccess(meta: Record<string, unknown>): Promise<boolean> {
     // Allow if caller is the manager
-    if (targetRepo === callerRepoRoot && meta.manager === callingAgentId) {
+    if (sameRepoPath(targetRepo, callerRepoRoot, callingAgentId) && meta.manager === callingAgentId) {
       return true;
     }
     // `ib ack` is the manager's alone.
@@ -1705,7 +1706,7 @@ export async function checkManagerCommandAccess(
       if (
         sb.agent_id === callingAgentId &&
         typeof sb.repo_path === "string" &&
-        resolve(sb.repo_path) === callerRepoRoot
+        sameRepoPath(sb.repo_path, callerRepoRoot, callingAgentId)
       ) {
         return true;
       }
@@ -1721,7 +1722,7 @@ export async function checkManagerCommandAccess(
     if (sb.agent_id !== SYSTEM_AGENT_ID) {
       const repoName = sb.agent_id.slice(1);
       if (typeof sb.repo_path !== "string") return false;
-      if (resolve(sb.repo_path) !== callerRepoRoot) return false;
+      if (!sameRepoPath(sb.repo_path, callerRepoRoot, callingAgentId)) return false;
       if (callingAgentId !== repoName) return false;
       return callerIsCoordinator();
     }
@@ -1750,7 +1751,7 @@ export async function checkManagerCommandAccess(
       subcommand === "rehire" ? "rehire" : "agent");
     // A hidden archive could win the caller's bare-name search even when a
     // different repo or peer is visible. Only the watchdog can decide then.
-    if (subcommand === "rehire" && agent?.repoPath !== callerRepoRoot &&
+    if (subcommand === "rehire" && !sameRepoPath(callerRepoRoot, agent?.repoPath, callingAgentId) &&
         ((!targetId.startsWith("@") && !targetId.includes("/")) || error?.startsWith("Agent not found:")) &&
         await archiveHiddenBySandbox(callerRepoRoot)) return null;
     if (!agent) return denied(error ?? `Agent not found: ${targetId}`);
@@ -1767,7 +1768,7 @@ export async function checkManagerCommandAccess(
     if (!archived) return denied(`retired agent '${targetId}' not found in this repository`);
     meta = archived.meta as unknown as Record<string, unknown>;
   }
-  if (targetRepo === callerRepoRoot && await hasCoordinatorBypass(meta)) return null;
+  if (sameRepoPath(targetRepo, callerRepoRoot, callingAgentId) && await hasCoordinatorBypass(meta)) return null;
   if (await hasAccess(meta)) return null;
   const owners = subcommand === "ack" ? "manager" : "manager or spawner";
   return denied(`only the ${owners} of '${targetId}' can run 'ib ${subcommand}'`);

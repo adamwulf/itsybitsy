@@ -1,4 +1,7 @@
-import { basename } from "node:path";
+import { realpathSync } from "node:fs";
+import { canonicalRepoPath, sameRepoPath } from "./repo-identity";
+import { shellQuote } from "./validation";
+import { basename, resolve } from "node:path";
 import * as runtimeNames from "./runtime-names";
 import { loadMachineName } from "./machine-name";
 import { readConnectedPeers } from "./peers/remote-agents";
@@ -50,8 +53,17 @@ export interface ResolvedSendTarget {
 }
 
 export function findOwnRepo(cwd: string, repos: RepoEntry[]): RepoEntry | undefined {
-  return repos.filter((r) => cwd === r.path || cwd.startsWith(r.path + "/"))
-    .sort((a, b) => b.path.length - a.path.length)[0];
+  let path = resolve(cwd);
+  try { path = realpathSync.native(path); } catch { /* Work from the accessible prefix. */ }
+  const worktree = runtimeNames.matchWorktreePath(path);
+  if (worktree) {
+    const root = path.slice(0, worktree.index);
+    return repos.find((r) => sameRepoPath(r.path, root, worktree[1])) ?? { path: root, name: basename(root) };
+  }
+  return repos.map((repo) => ({ repo, root: canonicalRepoPath(repo.path) }))
+    .filter(({ repo, root }) => path === root || path.startsWith(root + "/") ||
+      path === repo.path || path.startsWith(repo.path + "/"))
+    .sort((a, b) => b.root.length - a.root.length)[0]?.repo;
 }
 
 type TargetResult = ResolvedSendTarget & { error?: string };

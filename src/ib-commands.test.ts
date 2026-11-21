@@ -3289,6 +3289,16 @@ describe("nukeAllAgents (native)", () => {
     expect(result.stdout).toContain("Nuked 0 agent(s)");
   });
 
+  test.each(["repo id", "agents directory"])("skips the orphan session sweep without a %s", async missing => {
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
+    const repoIdPath = join(tempDir, ".itsybitsy", "repo-id");
+    if (missing === "repo id") await mkdir(agentsDir);
+    else await Bun.write(repoIdPath, "abcd1234");
+    expect((await nukeAllAgents(tempDir)).ok).toBe(true);
+    expect(spawnCalls.some(cmd => cmd.includes("list-sessions"))).toBe(false);
+    if (missing === "repo id") expect(existsSync(repoIdPath)).toBe(false);
+  });
+
   test("skips directories without meta.json", async () => {
     await mkdir(join(tempDir, ".itsybitsy", "agents", "no-meta"), { recursive: true });
 

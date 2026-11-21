@@ -1,6 +1,6 @@
 import { fullyQualifiedAgentId } from "./tui/row-keys";
 import { initializeMachineName } from "./machine-name";
-import { getRepoId } from "./repo-id";
+import { getRepoId, readRepoId } from "./repo-id";
 export { getRepoId } from "./repo-id";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -1403,46 +1403,26 @@ async function resolveCodexGitRoots(
   return { ok: true, commonDir, profileGitRoots: { gitDir, commonDir } };
 }
 
-/**
- * Clean up orphaned tmux sessions — sessions with the itsybitsy- prefix
- * that don't correspond to any remaining agent directory.
- */
-async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
-  let cleaned = 0;
+/** Clean up orphaned tmux sessions belonging to this repository. */
+async function cleanupOrphanedTmuxSessions(repoPath: string, agentsDir: string): Promise<number> {
+  const repoId = await readRepoId(repoPath).catch(() => null);
+  if (!repoId) return 0;
+  const entries = await readdir(agentsDir, { withFileTypes: true }).catch(() => null);
+  if (!entries) return 0;
 
-  // Build list of remaining agent IDs
-  const knownIds: string[] = [];
-  try {
-    const entries = await readdir(agentsDir, { withFileTypes: true });
-    for (const e of entries) {
-      if (e.isDirectory()) knownIds.push(e.name);
-    }
-  } catch { /* agents dir may not exist */ }
-
-  // List tmux sessions
+  const prefix = runtimeNames.tmuxSessionName(repoId, "");
+  const knownIds = new Set(entries.filter(entry => entry.isDirectory()).map(entry => entry.name));
   const listResult = await nukeResumeSpawnCtx.run(["tmux", "list-sessions", "-F", "#{session_name}"]);
-  if (listResult.exitCode !== 0 || !listResult.stdout) return 0;
+  if (listResult.exitCode !== 0) return 0;
 
-  const sessions = listResult.stdout.split("\n").filter((s) => s.trim());
-  for (const session of sessions) {
-    if (!runtimeNames.isAgentTmuxSession(session)) continue;
-
-    // Extract agent ID: strip prefix (itsybitsy-<repoid>-<agentid>)
-    // The session format is: itsybitsy-<8hex>-<agentid>
-    // We need to match the agent ID portion against known IDs
-    const parts = session.split("-");
-    // Session: "itsybitsy-<repoid>-agent-<hex>" or "itsybitsy-<repoid>-<name>"
-    // The repo ID is parts[1], agent ID is everything after "itsybitsy-<repoid>-"
-    if (parts.length < 3) continue;
-    const agentId = parts.slice(2).join("-");
-
-    const isKnown = knownIds.includes(agentId);
-    if (!isKnown) {
-      const killResult = await nukeResumeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(session)]);
-      if (killResult.exitCode === 0) cleaned++;
-    }
+  let cleaned = 0;
+  for (const session of listResult.stdout.split("\n")) {
+    if (!session.startsWith(prefix)) continue;
+    const agentId = session.slice(prefix.length);
+    if (!agentId || knownIds.has(agentId)) continue;
+    const killResult = await nukeResumeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(session)]);
+    if (killResult.exitCode === 0) cleaned++;
   }
-
   return cleaned;
 }
 
@@ -1520,7 +1500,7 @@ async function nukeAgentList(
   }
 
   // Clean up orphaned tmux sessions
-  const orphansKilled = await cleanupOrphanedTmuxSessions(agentsDir);
+  const orphansKilled = await cleanupOrphanedTmuxSessions(repoPath, agentsDir);
 
   // Scan for orphaned Claude processes
   if (killed > 0 || orphansKilled > 0) {

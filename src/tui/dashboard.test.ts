@@ -1269,6 +1269,14 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.agentTree.selectByRepoPath(linkedSecond.path)).toBe(true);
     dashboard.syncSelectedAgent();
 
+    const kills: string[] = [];
+    setNukeResumeSpawnRunner(cmd => {
+      if (cmd[1] === "list-sessions") {
+        return makeSpawnResult(0, agents.map(agent => agent.meta.tmux_session).join("\n"));
+      }
+      if (cmd[1] === "kill-session") kills.push(cmd[cmd.indexOf("-t") + 1]!);
+      return makeSpawnResult();
+    });
     setNewAgentSpawnRunner(() => makeSpawnResult(1)); // Stop the reset at respawn.
     setNewAgentCallerMetaReader(() => null);
     try {
@@ -1279,6 +1287,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     }
     expect(dashboard.notice).toContain("Reset failed during respawn");
     expect(await Bun.file(a.metaPath).json()).toEqual(a.agent.meta);
+    expect(kills).toEqual([`=${b.agent.meta.tmux_session}:`]);
     const archive = join(b.agent.repoPath, ".itsybitsy", "archive");
     const entries = await readdir(archive);
     expect(entries).toHaveLength(1);

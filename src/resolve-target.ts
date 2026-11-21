@@ -109,6 +109,12 @@ export async function resolveAgentTarget(
     return [...byId.values()];
   }
 
+  function incompleteNickname(name: string, matches: Agent[], unreadable: string[]): TargetResult | undefined {
+    if (purpose !== "rehire" || !matches.some((a) =>
+      a.id !== name && unreadable.includes(runtimeNames.archiveDir(a.repoPath)))) return undefined;
+    return failure(`Cannot resolve '${target}'${unreadableAgentsDirsNote(unreadable)}`, unreadable);
+  }
+
   function resolveInRepo(name: string, matches: Agent[], registered = true): TargetResult | undefined {
     if (!matches.length) return undefined;
     const first = matches[0]!;
@@ -179,9 +185,10 @@ export async function resolveAgentTarget(
     if (agentId) {
       // @<repo>/<agent-id> → agent in specific repo
       const { agents, errors } = await readAgents([repo]);
-      const match = resolveInRepo(agentId, matchesInRepo(agentId, agents));
+      const matches = matchesInRepo(agentId, agents);
+      const unreadable = unreadableRepoDirs(errors, [repo]);
+      const match = incompleteNickname(agentId, matches, unreadable) ?? resolveInRepo(agentId, matches);
       if (!match) {
-        const unreadable = unreadableRepoDirs(errors, [repo]);
         return failure(`Agent not found: ${agentId} in repo ${repoName}${unreadableAgentsDirsNote(unreadable)}`, unreadable);
       }
       return match;
@@ -209,7 +216,9 @@ export async function resolveAgentTarget(
   let ownErrors: AgentReadError[] = [];
   if (ownRepo) {
     const { agents, errors } = await readAgents([ownRepo]);
-    const match = resolveInRepo(name, matchesInRepo(name, agents), repos.includes(ownRepo));
+    const matches = matchesInRepo(name, agents);
+    const match = incompleteNickname(name, matches, unreadableRepoDirs(errors, [ownRepo])) ??
+      resolveInRepo(name, matches, repos.includes(ownRepo));
     if (match) return match;
     ownErrors = errors;
     searched = repos.filter((r) => r !== ownRepo);
@@ -240,6 +249,8 @@ export async function resolveAgentTarget(
     ).map((a) => a.repo));
     for (const repo of matchingRepos) matches.push({ machine: peer.name, repo });
   }
+  const incomplete = incompleteNickname(name, matches.flatMap((m) => m.agent ? [m.agent] : []), unreadable);
+  if (incomplete) return incomplete;
   if (matches.length === 0) {
     return failure(`Agent not found: ${target}${note}`, unreadable);
   }

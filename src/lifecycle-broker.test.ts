@@ -245,6 +245,46 @@ describe("lifecycle broker", () => {
       expect((await result(ID_A)).ok).toBe(owned);
     });
 
+    test("a reused nickname defers to the watchdog when the caller's archive is hidden", async () => {
+      await Bun.write(join(home, ".itsybitsy", "machine-name"), "laptop");
+      await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({
+        version: 1, repos: [{ path: repo, name: "test" }],
+      }));
+      await writeAgent("active-id", { nickname: "reused", manager: "someone-else" });
+      await writeArchive(CHILD_ID, { nickname: "reused", manager: MANAGER_ID });
+      const worktree = join(agentDir, "repo");
+      await mkdir(worktree);
+      const archive = join(repo, ".itsybitsy", "archive");
+      const targets = ["reused", "@test/reused", "laptop/reused", "laptop/test/reused"];
+      await chmod(archive, 0o000);
+      setSandboxedProcessOverride(() => true);
+      try {
+        for (const target of targets) {
+          expect(await checkIbCommandAccess(`ib rehire ${target}`, MANAGER_ID, agentsDir, worktree)).toBeNull();
+        }
+        expect(await checkIbCommandAccess("ib rehire active-id", MANAGER_ID, agentsDir, worktree)).toMatchObject({
+          decision: "deny", reason: expect.stringContaining("manager or spawner"),
+        });
+      } finally {
+        await chmod(archive, 0o755);
+        setSandboxedProcessOverride(null);
+      }
+
+      const { deps, rehired } = server();
+      for (const [index, target] of targets.entries()) {
+        const id = (index + 1).toString(16).repeat(32);
+        await queue(id, retireRequest(id, { op: "rehire", target }));
+        await processSpawnRequests(MANAGER_ID, repo, deps);
+        expect(await result(id)).toMatchObject({
+          ok: false, stderr: expect.stringContaining(`@test/active-id or @test/${CHILD_ID}`),
+        });
+      }
+      expect(rehired).toEqual([]);
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire", target: `@test/${CHILD_ID}` }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([{ agentId: CHILD_ID, opts: { repoPath: repo } }]);
+    });
+
     test("does not create a qualified name for the requester's unregistered repo", async () => {
       await writeArchive(CHILD_ID, { manager: MANAGER_ID });
       const { deps, rehired } = server();

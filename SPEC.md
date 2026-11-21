@@ -1911,7 +1911,7 @@ Per-repo coordinators are stored in `.itsybitsy/agents/` like regular agents, bu
 
 #### 12.2.4 Permissions
 
-Manager-only command gates use §12.3.1 with the hook caller’s cwd. They check the manager within the selected agent’s repo and the spawner against its recorded repo path. The hook requires a literal manager-only verb and target and honors command help after the unconditional restrictions. Targeted `ack` requires the child’s manager. The system coordinator has system-wide relationship authority for other manager-only commands after target resolution. Ambiguous and remote targets fail for it too.
+Manager-only command gates use §12.3.1 with the hook caller’s cwd. The Claude path hook binds the calling agent to a registered repo before it checks the command. The CLI can resolve a bare address from an unregistered worktree, while a command gated by that hook requires registration. They check the manager within the selected agent’s repo and the spawner against its recorded repo path. The hook requires a literal manager-only verb and target and honors command help after the unconditional restrictions. Targeted `ack` requires the child’s manager. The system coordinator has system-wide relationship authority for other manager-only commands after target resolution. Ambiguous and remote targets fail for it too.
 
 
 Per-repo coordinators get a restricted permission set — they can read the codebase and run `ib` commands, but cannot write code:

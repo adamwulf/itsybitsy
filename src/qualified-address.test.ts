@@ -38,6 +38,23 @@ describe("qualified agent addresses", () => {
   const retire = (address: string, cwd = cli.cwd) =>
     cli.run(["retire", address], { cwd, actions: { retireAgent: "record" } });
 
+  const hookKinds = ["claude", "codex", "agy"] as const;
+  async function dispatchHook(kind: typeof hookKinds[number], id: string, command: string, cwd: string, requestedCwd = cwd) {
+    const argv = kind === "claude" ? ["hook-check-path", id] : ["hooks", `${kind}-pre-tool-use`, id];
+    const stdin = kind === "agy"
+      ? { toolCall: { name: "run_command", args: { CommandLine: command, Cwd: requestedCwd } } }
+      : { tool_name: "Bash", tool_input: { command }, cwd: requestedCwd };
+    const result = await cli.run(argv, {
+      cwd, stdin: JSON.stringify(stdin), allowedProcesses: [["git", "worktree", "list", "--porcelain"], ["git", "rev-parse", "--git-common-dir"]],
+    });
+    expect(result.exitCode).toBe(0);
+    const output = JSON.parse(result.stdout);
+    return kind === "agy" ? output : {
+      decision: output.hookSpecificOutput.permissionDecision,
+      reason: output.hookSpecificOutput.permissionDecisionReason,
+    };
+  }
+
   test("a unique local bare name resolves with no peer cache or with a disconnected peer", async () => {
     expect((await retire("foo")).actions[0]?.args[0]).toMatchObject({ id: "foo", repoPath: app });
     await peer(false);
@@ -71,7 +88,16 @@ describe("qualified agent addresses", () => {
     await cli.addAgent(web, "foo");
     for (const cwd of [app, worktree]) {
       expect((await retire("foo", cwd)).actions[0]?.args[0]).toMatchObject({ repoPath: alias });
-      expect(await checkIbCommandAccess("ib retire foo", "mgr", join(app, ".itsybitsy", "agents"), cwd)).toBeNull();
+    }
+    await Bun.write(join(worktree, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { allow: ["Bash(ib:*)"] },
+    }));
+    const aliasedWorktree = alias + worktree.slice(app.length);
+    for (const kind of hookKinds) {
+      expect(await dispatchHook(kind, "mgr", "ib retire foo", worktree, aliasedWorktree)).toMatchObject({ decision: "allow" });
+      expect(await dispatchHook(kind, "mgr", "ib retire laptop-a/Web/foo", worktree, aliasedWorktree)).toMatchObject({
+        decision: "deny", reason: expect.stringContaining("manager or spawner"),
+      });
     }
   });
 
@@ -101,6 +127,10 @@ describe("qualified agent addresses", () => {
     await cli.addAgent(web, "foo");
     await peer();
     expect((await retire("foo", worktree)).actions[0]?.args[0]).toMatchObject({ repoPath: app });
+    // The Claude hook authenticates against the registry before the resolver is called.
+    expect(await dispatchHook("claude", "mgr", "ib retire foo", worktree)).toMatchObject({
+      decision: "deny", reason: expect.stringContaining("registered"),
+    });
   });
 
   test("machine-wide searches refuse partial visibility even with a visible local match", async () => {
@@ -180,7 +210,14 @@ describe("qualified agent addresses", () => {
 
   test("targeted ack requires the child's manager even for the system coordinator", async () => {
     const system = join(cli.home, ".itsybitsy");
-    expect((await checkIbCommandAccess("ib ack @App/foo", "@system", join(system, "agents"), system))?.decision).toBe("deny");
+    for (const kind of hookKinds) {
+      // The system coordinator uses Claude. Other dispatchers reject its id
+      // before opening an agent session.
+      const reason = kind === "claude" ? /only the manager/ : /invalid agent[- ]id/i;
+      expect(await dispatchHook(kind, "@system", "ib ack @App/foo", system)).toMatchObject({
+        decision: "deny", reason: expect.stringMatching(reason),
+      });
+    }
     const result = await cli.run(["ack", "@App/foo"], { cwd: system });
     expect(result.stderr).toContain("only foo's manager (mgr)");
     expect(result.exitCode).toBe(1);

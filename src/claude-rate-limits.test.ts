@@ -252,11 +252,11 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     expect((await reader()).data?.weeklyPct).toBe(75);
     await recordClaudeRateLimits(recordDir("old"), { five_hour: { resets_at: NOW_S + 3600, used_percentage: 60 } }, NOW_MS);
     await recordClaudeRateLimits(join(home, "agents", "renamed", "repo", "new"), {
-      five_hour: { resets_at: NOW_S + 3600, used_percentage: 40 },
+      seven_day: { resets_at: NOW_S + 86400, used_percentage: 90 },
     }, NOW_MS - 60_000);
     const missing = await reader();
     expect(missing.data?.sessionPct).toBe(60);
-    expect(missing.data?.weeklyPct).toBe(75);
+    expect(missing.data?.weeklyPct).toBe(90);
     await Bun.write(file, "renamed");
     expect(await reader()).toEqual(missing);
   });

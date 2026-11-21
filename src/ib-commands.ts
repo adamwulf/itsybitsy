@@ -1,6 +1,7 @@
 import { fullyQualifiedAgentId } from "./tui/row-keys";
 import { initializeMachineName } from "./machine-name";
 import { getRepoId, readRepoId } from "./repo-id";
+import { canonicalRepoPath, sameRepoPath } from "./repo-identity";
 export { getRepoId } from "./repo-id";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -627,7 +628,7 @@ function selectRetirementArchive(
         : "Retired agent not found",
     };
   }
-  const repoPaths = new Set(recoverable.map((match) => resolve(match.repoPath)));
+  const repoPaths = new Set(recoverable.map((match) => canonicalRepoPath(match.repoPath)));
   if (repoPaths.size > 1) {
     return {
       error:
@@ -1025,7 +1026,7 @@ export async function rehireAgent(
   }
 
   const restoredRepo = repos.find(
-    (repo) => resolve(repo.path) === resolve(repoPath),
+    (repo) => sameRepoPath(repo.path, repoPath),
   );
   const restoredAgent: Agent = {
     id: agentId,
@@ -1108,7 +1109,7 @@ export async function rehireAgent(
   const managerId = archived.meta.manager;
   const managerAgent = managerId
     ? activeAgents.find(
-      (a) => a.id === managerId && resolve(a.repoPath) === resolve(repoPath),
+      (a) => a.id === managerId && sameRepoPath(a.repoPath, repoPath),
     )
     : undefined;
   if (managerAgent) {
@@ -3273,7 +3274,7 @@ export async function ackAgent(agent: Agent, opts: AckAgentOptions = {}): Promis
 async function ackAgentForCaller(agent: Agent, caller: ResolvedCallerContext | null, skipUnavailable = false): Promise<IbCommandResult> {
   const fail = (stderr: string): IbCommandResult => ({ ok: false, exitCode: 1, stdout: "", stderr });
   const callerId = caller && typeof caller.meta.id === "string" ? caller.meta.id : "";
-  const sameRepo = !!caller?.repoPath && resolve(caller.repoPath) === resolve(agent.repoPath);
+  const sameRepo = !!caller?.repoPath && sameRepoPath(agent.repoPath, caller.repoPath, callerId);
   if (!callerId || !sameRepo || agent.archived || agent.meta.manager !== callerId) {
     return fail(
       agent.meta.manager
@@ -6332,7 +6333,7 @@ async function spawnAgent(
   //    Coordinators are top-level agents — never auto-detect a manager (SPEC §12.2.3)
   if (!manager && !coordinatorMode) {
     const sameRepoCaller = callerContext?.repoPath &&
-      resolve(callerContext.repoPath) === resolve(rootRepoPath);
+      sameRepoPath(rootRepoPath, callerContext.repoPath);
     const callerId = callerContext && typeof callerContext.meta.id === "string"
       ? callerContext.meta.id
       : "";
@@ -6487,10 +6488,10 @@ async function spawnAgent(
   if (manager) {
     if (opts?.manager) {
       const { resolveAgentTarget } = await import("./resolve-target");
-      const scope = repos.some((repo) => repo.path === rootRepoPath) ? repos :
+      const scope = repos.some((repo) => sameRepoPath(repo.path, rootRepoPath)) ? repos :
         [...repos, { path: rootRepoPath, name: basename(rootRepoPath) }];
       const { agent, error } = await resolveAgentTarget(manager, scope, callerCwd);
-      if (!agent || agent.repoPath !== rootRepoPath) {
+      if (!agent || !sameRepoPath(agent.repoPath, rootRepoPath)) {
         return { ok: false, exitCode: 1, stdout: "", stderr: error ?? "Manager must belong to the new agent's repo" };
       }
       manager = agent.id;

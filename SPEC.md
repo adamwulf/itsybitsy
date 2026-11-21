@@ -1375,7 +1375,7 @@ Both bash and TS resolve relative `common_dir` paths to absolute before taking t
 
 ### 8.7 Dashboard Reassign
 
-Press `r` on an agent in `ib watch` and choose a parent from the same repo or select **(No parent)** to make the agent top-level. The picker passes the selected Agent and the chosen parent's literal ID, or `null`, to `reassignAgent`.
+Press `r` on an agent in `ib watch` and choose a parent from the same repo or select **(No parent - make root)** to make the agent top-level. The picker passes the selected Agent and the chosen parent's literal ID, or `null`, to `reassignAgent`.
 
 The picker excludes the agent itself, its descendants, workers, and archived agents. Before writing the change, `reassignAgent` checks the records in the selected agent's repo. It rejects missing records, self-assignment, cycles, an ineligible parent, and selecting the current parent again.
 

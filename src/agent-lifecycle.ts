@@ -6,6 +6,7 @@ import * as runtimeNames from "./runtime-names";
  */
 
 import { join, dirname, resolve } from "path";
+import type { ReadableStreamDefaultReader } from "node:stream/web";
 import {
   readdir,
   mkdir,

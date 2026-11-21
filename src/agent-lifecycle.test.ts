@@ -643,21 +643,26 @@ describe("agent-lifecycle", () => {
     test("Git root lookup uses one process for unambiguous results and separate queries when needed", async () => {
       const dir = await realpath(await makeTempDir());
       try {
+        const gitConfig = join(dir, "gitconfig");
+        await Bun.write(gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n[core]\n\thooksPath = /dev/null\n");
+        // Use only fixture-owned configuration. Inherited GIT_DIR, GIT_WORK_TREE
+        // or GIT_INDEX_FILE could otherwise redirect a write out of this fixture.
+        const env = { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: "1" };
+        const git = (cwd: string, ...args: string[]) => Bun.$`git ${args}`.cwd(cwd).env(env).quiet();
         const root = join(dir, "project");
         const subdir = join(root, "src");
         const worktree = join(dir, "linked");
         const alias = join(dir, "alias");
         await mkdir(subdir, { recursive: true });
-        await Bun.$`git init --quiet`.cwd(root);
-        await Bun.$`git -c user.name=Test -c user.email=test@example.com -c commit.gpgSign=false commit --quiet --allow-empty -m Initial`.cwd(root);
-        await Bun.$`git worktree add --quiet --detach ${worktree}`.cwd(root);
+        await git(root, "init");
+        await git(root, "commit", "--allow-empty", "-m", "Initial");
+        await git(root, "worktree", "add", "--detach", worktree);
         await symlink(worktree, alias);
 
-        const run = spawnCtx.runner;
         const calls: string[][] = [];
         spawnCtx.set((cmd, opts) => {
           calls.push(cmd);
-          return run(cmd, opts);
+          return Bun.spawn(cmd, { ...opts, env }) as SpawnResult;
         });
         for (const path of [root, subdir, worktree, alias]) {
           calls.length = 0;
@@ -667,12 +672,12 @@ describe("agent-lifecycle", () => {
 
         const newlineRoot = join(dir, "line\nbreak");
         await mkdir(newlineRoot);
-        await Bun.$`git init --quiet`.cwd(newlineRoot);
+        await git(newlineRoot, "init");
         calls.length = 0;
         expect(await resolveGitRoot(newlineRoot)).toBe(newlineRoot);
         expect(calls.slice(1).map((cmd) => cmd.slice(4))).toEqual([["--git-common-dir"], ["--git-dir"], ["--show-toplevel"]]);
 
-        const admin = (await Bun.$`git rev-parse --absolute-git-dir`.cwd(worktree).text()).trim();
+        const admin = (await git(worktree, "rev-parse", "--absolute-git-dir").text()).trim();
         calls.length = 0;
         expect(await resolveGitRoot(admin)).toBe(root);
         expect(calls.slice(1).map((cmd) => cmd.slice(4))).toEqual([["--git-common-dir"], ["--git-dir"]]);

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { sameRepoPath } from "./repo-identity";
 import * as runtimeNames from "./runtime-names";
 /**
  * ib — Cross-repo agent management dashboard
@@ -1179,7 +1180,7 @@ export async function main() {
         const agentsToShow: { agent: Agent; depth: number }[] = [];
         for (const root of roots) {
           if (manager) {
-            if (root.repoPath !== manager.repoPath) continue;
+            if (!sameRepoPath(root.repoPath, manager.repoPath)) continue;
             if (root.id === manager.id) {
               for (const child of root.children) {
                 collectAgents(child, 1, null, agentsToShow);
@@ -1229,7 +1230,7 @@ export async function main() {
         const agentsToShow: { agent: Agent; depth: number }[] = [];
         for (const root of repoRoots) {
           if (manager) {
-            if (root.repoPath !== manager.repoPath) continue;
+            if (!sameRepoPath(root.repoPath, manager.repoPath)) continue;
             // When filtering by manager, show direct children of the manager
             if (root.id === manager.id) {
               for (const child of root.children) {
@@ -1312,7 +1313,7 @@ export async function main() {
         const rows: { agent: Agent; depth: number }[] = [];
         for (const root of repoRoots) {
           if (manager) {
-            if (root.repoPath !== manager.repoPath) continue;
+            if (!sameRepoPath(root.repoPath, manager.repoPath)) continue;
             if (root.id === manager.id) {
               for (const child of root.children) {
                 collectAgents(child, 1, null, rows);
@@ -2202,7 +2203,7 @@ export async function main() {
             repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })),
             false,
           );
-          let repoAgents = agents.filter((a) => a.repoPath === ownRepo.path);
+          let repoAgents = agents.filter((a) => sameRepoPath(a.repoPath, ownRepo.path));
           // Live state so only non-stopped agents are touched.
           await detectAgentStates(repoAgents, { reap: false });
           repoAgents = repoAgents

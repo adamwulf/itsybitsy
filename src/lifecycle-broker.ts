@@ -61,6 +61,7 @@ import * as runtimeNames from "./runtime-names";
  *     directory for a symlink after the check, while the merge runs.
  */
 
+import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
 import { lstat } from "fs/promises";
 import { basename, join, resolve } from "path";
@@ -249,7 +250,7 @@ export async function routeLifecycleThroughWatchdog(
 ): Promise<IbCommandResult | null> {
   const caller = await resolveRoutedCaller(deps);
   if (!caller) return null;
-  if (command.op !== "rehire" && command.targetRepoPath && command.targetRepoPath !== caller.repoPath) {
+  if (command.op !== "rehire" && command.targetRepoPath && !sameRepoPath(command.targetRepoPath, caller.repoPath)) {
     return brokerFail(`A sandboxed agent can ${command.op} only agents in its own repo`);
   }
   return requestLifecycleViaWatchdog(command, { ...deps, resolveCaller: async () => caller });
@@ -306,7 +307,7 @@ async function authorizeLifecycle(
  * id can match.
  */
 async function findAgentInRepo(repoPath: string, agentId: string): Promise<Agent | null> {
-  const repo = (await listRepos()).find((entry) => resolve(entry.path) === resolve(repoPath));
+  const repo = (await listRepos()).find((entry) => sameRepoPath(entry.path, repoPath));
   const name = repo ? repoDisplayName(repo) : basename(repoPath);
   const { agents } = await readAllAgents([{ path: repoPath, name }], false);
   const directory = runtimeNames.agentDir(repoPath, agentId);
@@ -334,10 +335,10 @@ export async function handleLifecycleRequest(
   if (op === "rehire") {
     const { resolveAgentTarget } = await import("./resolve-target");
     const repos = await listRepos();
-    if (!repos.some((r) => r.path === ctx.repoPath)) repos.push({ path: ctx.repoPath, name: basename(ctx.repoPath) });
+    if (!repos.some((r) => sameRepoPath(r.path, ctx.repoPath))) repos.push({ path: ctx.repoPath, name: basename(ctx.repoPath) });
     const { agent, error } = await resolveAgentTarget(target, repos, join(ctx.agentDir, "repo"), "rehire");
     if (!agent) return brokerFail(error ?? `Agent not found: ${target}`);
-    if (agent.repoPath !== ctx.repoPath) return brokerFail("A sandboxed agent can rehire only agents in its own repo");
+    if (!sameRepoPath(agent.repoPath, ctx.repoPath)) return brokerFail("A sandboxed agent can rehire only agents in its own repo");
     target = agent.id;
   }
 

@@ -24,6 +24,7 @@
  * Output contract: `{"decision":"allow"|"deny","reason":"…"}`.
  */
 
+import { resolve } from "node:path";
 import { join } from "path";
 import { isValidAgentId } from "../validation";
 import { mutateAgentMeta } from "../agents";
@@ -323,7 +324,7 @@ export async function hookAgyPreToolUse(
       const command = typeof rc.CommandLine === "string" ? rc.CommandLine : "";
       if (command) {
         ibDenial = await checkIbCommandAccess(command, agentId, ctxResolved.agentsDir,
-          typeof rc.Cwd === "string" ? rc.Cwd : ctx.worktreePath);
+          resolve(ctx.worktreePath, typeof rc.Cwd === "string" ? rc.Cwd : "."));
       }
     }
 

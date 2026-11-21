@@ -47,6 +47,7 @@ import * as runtimeNames from "./runtime-names";
  * any file the watchdog can read).
  */
 
+import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
 import { join, resolve } from "path";
 import type { Agent } from "./agents";
@@ -132,7 +133,7 @@ interface AgentLocation {
  * the tmux session that its UNSANDBOXED watchdog types it into.
  */
 async function isAgentAt(agent: Agent, self: AgentLocation): Promise<boolean> {
-  if (agent.id === self.id && resolve(agent.repoPath) === resolve(self.repoPath)) return true;
+  if (agent.id === self.id && sameRepoPath(agent.repoPath, self.repoPath)) return true;
   return isSameDirectory(agent.storageDir ?? runtimeNames.agentDir(agent.repoPath, agent.id), self.agentDir);
 }
 

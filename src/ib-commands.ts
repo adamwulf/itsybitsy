@@ -903,7 +903,9 @@ export async function rehireAgent(
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
         throw new Error(
           `Archived queue key '${queueKey}' is already reserved at ${queueDir}. ` +
-          "Check for a live owner with 'ib list' before moving aside a stale directory and retrying.",
+          "Check 'ib list' for a live owner first. Move the directory aside and retry only after verifying " +
+          "that the retirement warning names this path and that no active agent's meta.json in any " +
+          "unregistered repo still uses this key.",
         );
       }
       reservedQueue = queueDir;

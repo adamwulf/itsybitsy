@@ -2700,7 +2700,11 @@ describe("retire → rehire recovery", () => {
     const result = await rehireAgent(id);
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain(`Archived queue key '${queueKey}' is already reserved at ${queue}`);
-    expect(result.stderr).toContain("Check for a live owner with 'ib list' before moving aside a stale directory and retrying");
+    expect(result.stderr).toContain("Check 'ib list' for a live owner first.");
+    expect(result.stderr).toContain(
+      "Move the directory aside and retry only after verifying that the retirement warning names this path " +
+      "and that no active agent's meta.json in any unregistered repo still uses this key.",
+    );
     expect(await readOutbox(queue)).toEqual([message]);
     expect(existsSync(join(tempDir, ".itsybitsy", "agents", id, "meta.json"))).toBe(false);
   });

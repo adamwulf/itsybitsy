@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, symlink, rm, utimes } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { hookAgyPreToolUse } from "./hooks/agy-pre-tool-use";
+import { join } from "node:path";
 import { setUserHome, resetUserHome } from "./home";
 import { addMember, getTeam } from "./teams";
 import { checkIbCommandAccess } from "./hooks/agent-path";
@@ -106,16 +105,7 @@ describe("qualified agent addresses", () => {
     await mkdir(join(web, "nested"));
     await symlink(join(web, "nested"), join(worktree, "link"));
     expect((await retire("foo", web)).actions[0]?.args[0]).toMatchObject({ id: "foo", repoPath: web });
-    async function gate(Cwd: string, CommandLine = "ib retire foo") {
-      let output = "";
-      await hookAgyPreToolUse("mgr", {
-        rawStdin: JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine, Cwd } } }),
-        agentDirOverride: dirname(worktree),
-        skipMetaWrites: true,
-        write: (chunk) => { output += chunk; },
-      });
-      return JSON.parse(output);
-    }
+    const gate = (cwd: string, command = "ib retire foo") => dispatchHook("agy", "mgr", command, worktree, cwd);
     expect(await gate(worktree)).toMatchObject({ decision: "allow" });
     expect(await gate("link/..")).toMatchObject({ decision: "deny", reason: expect.stringContaining("manager or spawner") });
     expect(await gate("link/..", "ls")).toMatchObject({ decision: "deny", reason: expect.stringContaining("Cwd rejected") });

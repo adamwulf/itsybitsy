@@ -244,6 +244,20 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
     });
   });
 
+  test("combines flat legacy usage with qualified agent usage", async () => {
+    // A legacy agent ID can also be a machine prefix for newer agents.
+    await recordClaudeRateLimits(join(home, "agents", "studio"), {
+      five_hour: { resets_at: NOW_S + 3600, used_percentage: 65 },
+    }, NOW_MS);
+    await recordClaudeRateLimits(recordDir("agent-new"), {
+      five_hour: { resets_at: NOW_S + 3600, used_percentage: 20 },
+      seven_day: { resets_at: NOW_S + 86400, used_percentage: 70 },
+    }, NOW_MS);
+    const { data } = await readClaudeUsage(new Date(NOW_MS));
+    expect(data?.sessionPct).toBe(65);
+    expect(data?.weeklyPct).toBe(70);
+  });
+
   test("aggregates old and new machine prefixes and the coordinator with a missing or changed machine name", async () => {
     const file = join(home, ".itsybitsy", "machine-name");
     const reader = () => readClaudeUsage(new Date(NOW_MS));
@@ -370,8 +384,8 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
   });
 
   test("returns no reading and no error when nothing is recorded", async () => {
-    await recordClaudeRateLimits(join(home, "agents", "old-flat-agent"), { five_hour: { used_percentage: 99, resets_at: NOW_S + 3600 } });
     expect(await readClaudeUsage(new Date(NOW_MS))).toEqual({ data: null, error: false });
+    await mkdir(join(home, "agents", "old-flat-agent"), { recursive: true });
     await mkdir(recordDir("agent-a"), { recursive: true });
     expect(await readClaudeUsage(new Date(NOW_MS))).toEqual({ data: null, error: false });
   });

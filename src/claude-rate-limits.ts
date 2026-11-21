@@ -239,11 +239,12 @@ async function subdirectories(dir: string): Promise<string[]> {
  */
 export async function readClaudeUsage(now: Date = new Date()): Promise<UsageResult> {
   const home = getCoordinatorHome();
-  const machineDirs = await subdirectories(join(home, "agents"));
-  const repoDirs = (await Promise.all(machineDirs.map(subdirectories))).flat();
-  const agentDirs = (await Promise.all(repoDirs.map(subdirectories))).flat();
+  // The first level can hold a flat legacy record and qualified repo folders.
+  const topLevelDirs = await subdirectories(join(home, "agents"));
+  const repoDirs = (await Promise.all(topLevelDirs.map(subdirectories))).flat();
+  const qualifiedAgentDirs = (await Promise.all(repoDirs.map(subdirectories))).flat();
   const records = (await Promise.all(
-    [home, ...agentDirs].map((dir) => readRecord(join(dir, CLAUDE_RATE_LIMITS_FILE))),
+    [home, ...topLevelDirs, ...qualifiedAgentDirs].map((dir) => readRecord(join(dir, CLAUDE_RATE_LIMITS_FILE))),
   )).filter((record): record is ClaudeRateLimitsRecord => record !== null);
   if (records.length === 0) return { data: null, error: false };
   const fiveHour = combineWindows(records, "five_hour");

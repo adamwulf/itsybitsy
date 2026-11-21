@@ -6166,6 +6166,23 @@ export async function newAgent(
   prompt: string,
   opts?: NewAgentOptions
 ): Promise<IbCommandResult> {
+  const cleanupWarnings: string[] = [];
+  try {
+    const result = await spawnAgent(repoPath, prompt, opts, cleanupWarnings);
+    result.stderr = [result.stderr, ...cleanupWarnings].filter(Boolean).join("\n");
+    return result;
+  } catch (err) {
+    for (const warning of cleanupWarnings) logWarning(warning);
+    throw err;
+  }
+}
+
+async function spawnAgent(
+  repoPath: string,
+  prompt: string,
+  opts: NewAgentOptions | undefined,
+  cleanupWarnings: string[],
+): Promise<IbCommandResult> {
   // 1. Validate prompt
   if (!prompt || !prompt.trim()) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: prompt required" };
@@ -6945,7 +6962,12 @@ export async function newAgent(
   await using reservation = {
     committed: false,
     async [Symbol.asyncDispose]() {
-      if (!this.committed) await rm(queueDir, { recursive: true, force: true });
+      if (this.committed) return;
+      try {
+        await rm(queueDir, { recursive: true, force: true });
+      } catch (err) {
+        cleanupWarnings.push(`Warning: could not remove reserved queue directory ${queueDir}: ${err}`);
+      }
     },
   };
   await mkdir(archiveDir, { recursive: true });

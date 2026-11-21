@@ -13,7 +13,7 @@ import {
   lstat,
 } from "fs/promises";
 import { tmpdir } from "os";
-import { chmodSync, existsSync, realpathSync, symlinkSync } from "fs";
+import { chmodSync, existsSync, renameSync, writeFileSync, realpathSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
 import {
   isPidAliveCtx,
@@ -10301,6 +10301,22 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     spawnCalls = [];
     expect((await callNewAgent("replacement", options)).ok).toBe(true);
     expect(existsSync(queue)).toBe(true);
+  });
+
+  test("a reservation cleanup warning preserves the worktree failure", async () => {
+    const parent = join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir));
+    const spawn = mockSpawnRunner({ failWorktree: true });
+    setNewAgentSpawnRunner(cmd => {
+      if (cmd.includes("worktree") && cmd.includes("add")) {
+        renameSync(parent, parent + ".held");
+        writeFileSync(parent, "obstruct removal of the queue leaf");
+      }
+      return spawn(cmd);
+    });
+    const failed = await callNewAgent("task", { name: "review" });
+    expect(failed.ok).toBe(false);
+    expect(failed.stderr).toContain("could not create worktree");
+    expect(failed.stderr).toContain(`Warning: could not remove reserved queue directory ${join(parent, "review")}:`);
   });
 
   test("a failed worktree allocation releases the reserved queue for a retry", async () => {

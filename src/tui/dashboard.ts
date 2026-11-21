@@ -830,6 +830,7 @@ export class DashboardComponent implements Component {
   /** Snapshot of notes text taken when the user entered the notes sub-field — used to revert on Escape. */
   private notesEditorOriginal: string = "";
   _dialog: DialogState = null;
+  private pendingCleanupWarnings: Array<Extract<DialogState, { type: "cleanup-warnings" }>> = [];
   private overlayHandle: OverlayHandle | null = null;
   private dialogOverlay: DialogOverlayComponent;
   /**
@@ -1930,6 +1931,14 @@ export class DashboardComponent implements Component {
   }
 
   showDialog(dialog: NonNullable<DialogState>) {
+    if (dialog.type === "cleanup-warnings" && (this._dialog || this.pendingCleanupWarnings.length > 0)) {
+      this.pendingCleanupWarnings.push(dialog);
+      return;
+    }
+    this.openDialog(dialog);
+  }
+
+  private openDialog(dialog: NonNullable<DialogState>) {
     // Replacing the Peers dialog closes it: pairing is accepted only while it is open.
     if (this._dialog?.type === "peers" && dialog !== this._dialog) this._dialog.service.closeDialog();
     this._dialog = dialog;
@@ -1956,6 +1965,14 @@ export class DashboardComponent implements Component {
     this.overlayHandle?.hide();
     this.overlayHandle = null;
     this.tui?.requestRender();
+    if (this.pendingCleanupWarnings.length > 0) {
+      // A dialog may synchronously hand off to another dialog as it closes.
+      queueMicrotask(() => {
+        if (this._dialog) return;
+        const next = this.pendingCleanupWarnings.shift();
+        if (next) this.openDialog(next);
+      });
+    }
   }
 
   setNotice(text: string, kind: "info" | "error") {

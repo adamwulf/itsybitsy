@@ -1216,6 +1216,50 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dialog.text).toContain(`could not unlink ${leftover}:`);
   });
 
+  test("cleanup warnings wait for a send draft opened while teardown runs", async () => {
+    await setupDashboardWithAgent();
+    const departing = dashboard.agentTree.selectedAgent!;
+    const recipient = makeAgent("agent-recipient", sendRepoDir);
+    dashboard.onUpdate([departing, recipient], [makeFlatAgent(departing), makeFlatAgent(recipient)], []);
+    expect(dashboard.agentTree.selectAgent(departing)).toBe(true);
+    dashboard.syncSelectedAgent();
+
+    const leftover = join(configTempDir, "coord-home", "agents", "studio", "~abcdef01", departing.id, "outbox.jsonl");
+    await mkdir(leftover, { recursive: true });
+    const teardownStarted = Promise.withResolvers<void>();
+    const finishProbe = Promise.withResolvers<number>();
+    lifecycleSpawnCtx.set(cmd => {
+      if (cmd[0] === "tmux" && cmd[1] === "has-session") {
+        teardownStarted.resolve();
+        return { ...makeSpawnResult(1), exited: finishProbe.promise };
+      }
+      return makeSpawnResult();
+    });
+
+    dashboard.handleInput("!");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    await teardownStarted.promise;
+    try {
+      expect(dashboard.agentTree.selectAgent(recipient)).toBe(true);
+      dashboard.syncSelectedAgent();
+      dashboard.handleInput("s");
+      const draft = assertDialog(dashboard.dialog, "textarea");
+      for (const ch of "message in progress") dashboard.handleInput(ch);
+      finishProbe.resolve(1);
+      await dashboard.flushPendingActions();
+
+      expect(dashboard.dialog).toBe(draft);
+      expect(draft.buffer.getText()).toBe("message in progress");
+      dashboard.handleInput("\x1b");
+      await Promise.resolve();
+      const warnings = assertDialog(dashboard.dialog, "cleanup-warnings");
+      expect(warnings.text).toContain(`could not unlink ${leftover}:`);
+    } finally {
+      finishProbe.resolve(1);
+    }
+  });
+
   test.each([["x", "Retired"], ["m", "Merged"], ["!", "Nuked"]])("%s shows complete, scrollable cleanup warnings at 80 columns", async (key, summary) => {
     await setupDashboardWithAgent();
     if (key === "m") {

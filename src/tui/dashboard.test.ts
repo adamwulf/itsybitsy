@@ -1009,8 +1009,8 @@ describe("DashboardComponent dialog and action handlers", () => {
   let actionTempDir: string | null = null;
   let configTempDir: string;
   // Writable repo root for send tests: sendMessage ENQUEUES to the agent's
-  // CENTRAL outbox dir (`<coordinatorHome>/agents/<machine>/<repo>/<agent>/`), and the recipient
-  // log/state writes still target the per-worktree agent dir — so send targets
+  // flat outbox dir (`<coordinatorHome>/agents/<agent>/`). The recipient's
+  // log and state writes go to the per-worktree agent dir, so send targets
   // need a real (writable) repoPath rather than a synthetic /repos/... path.
   // The coordinator home itself is pinned to configTempDir/coord-home in
   // beforeEach so the central queue stays inside the sandbox.
@@ -2646,7 +2646,7 @@ describe("Cross-repo send (E key)", () => {
   let dashboard: DashboardComponent;
   let sentMessages: { target: string; message: string }[] = [];
   // Writable repo root for the full-flow send test — sendMessage enqueues to
-  // the target's CENTRAL outbox dir (`<coordinatorHome>/agents/<machine>/<repo>/<agent>/`), so
+  // the target's flat outbox dir (`<coordinatorHome>/agents/<agent>/`), so
   // the send target needs both a real repoPath (for log/state writes) and a
   // pinned coordinator home (so the central queue dir resolves into the
   // sandbox, not the developer's real ~/.itsybitsy/).
@@ -2666,9 +2666,9 @@ describe("Cross-repo send (E key)", () => {
 
   beforeEach(async () => {
     sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-esend-"));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <machine> / <repo> / <agent>.
+    // These keyless fixtures use getCoordinatorHome() / agents / <agent>.
     // Without this isolation, queued messages from the full-flow send test
-    // would land in the developer's real ~/.itsybitsy/agents/<machine>/<repo>/agent-b/ and
+    // would land in the developer's real ~/.itsybitsy/agents/agent-b/ and
     // leak into subsequent runs (sendMessage drains inline when no live
     // watchdog), inflating sentMessages.
     const { setCoordinatorHome } = await import("../coordinator");

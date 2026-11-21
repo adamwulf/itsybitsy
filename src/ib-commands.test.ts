@@ -280,10 +280,10 @@ describe("ib-commands", () => {
       // user's ~/.itsybitsy/config.json.
       setUserConfigPath(join(tempDir, "config.json"));
 
-      // Per-agent outboxes now live under getCoordinatorHome() / agents / <machine> / <repo> / <agent>,
-      // not under the per-worktree agent dir. Without this isolation, queued
+      // Keyless fixtures use getCoordinatorHome() / agents / <agent>.
+      // Without this isolation, queued
       // messages would accumulate in the developer's real
-      // ~/.itsybitsy/agents/<machine>/<repo>/agent-abc/outbox.jsonl and leak from one test into
+      // ~/.itsybitsy/agents/agent-abc/outbox.jsonl and leak from one test into
       // the next (sendMessage drains inline when no live watchdog), inflating
       // spawnCalls / corrupting prefix assertions.
       const { setCoordinatorHome } = await import("./coordinator");
@@ -13122,7 +13122,7 @@ describe("reassignAgent (native)", () => {
       stderr: new Response("").body!,
       exited: Promise.resolve(cmd.includes("has-session") ? 1 : 0), // no tmux sessions
     } as SpawnResult));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <machine> / <repo> / <agent>.
+    // Keyless fixtures use getCoordinatorHome() / agents / <agent>.
     // Isolate so the reassign-notification sendMessage calls don't bleed into
     // the developer's real ~/.itsybitsy/agents/.../outbox.jsonl or leak from
     // one test to the next (sendMessage drains inline when no live watchdog).

@@ -28,8 +28,8 @@ import {
  * Per-process itsybitsy home for the whole file.
  *
  * The temp dirs this file already creates cover the AGENT dir, but not the
- * outbox: `executeResultActions` delivers through `agentOutboxDir`, which is
- * `<itsybitsy home>/agents/<machine>/<repo>/<agent>/` — a completely different tree. Left at
+ * outbox. `executeResultActions` uses `agentOutboxDir` under the coordinator
+ * home. Keyless fixtures use `<itsybitsy home>/agents/<agent>/`. Left at
  * its default that home is the developer's REAL `~/.itsybitsy`, so running this
  * file wrote `agents/test-agent-001/outbox.jsonl` and
  * `agents/manager-001/outbox.jsonl` straight into the user's live agent

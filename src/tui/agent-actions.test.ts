@@ -29,7 +29,7 @@ import {
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
-import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
+import { readTeams, createTeam, addMember, removeMember, deleteTeam } from "../teams";
 import { teamLogPath, channelPath, appendChannelMessage, appendTeamLog } from "../team-channel";
 import { existsSync } from "node:fs";
 import { saveRegistry, loadRegistry } from "../registry";
@@ -3012,6 +3012,35 @@ describe("handleAddAgentToTeam", () => {
     } finally {
       process.chdir(previous);
     }
+  });
+
+  test("the roster summary counts no writes when another edit already made the requested changes", async () => {
+    tmuxSpawnCtx.set(noopSpawnRunner);
+    const leaving = "agent-leaving";
+    const joining = "agent-joining";
+    await plantTestAgent(fx.repoDir, leaving);
+    await plantTestAgent(fx.repoDir, joining);
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", leaving);
+    const repos = [fx.repoEntry];
+    const lastAgents = [leaving, joining].map((id) => makeAgent({ id, repoPath: fx.repoDir }));
+    const roster = makeMockCtx({ repos, lastAgents });
+    handleManageRoster(roster.ctx, "backend");
+    await roster.flushActions();
+    const editor = assertDialog(roster.dialogs[0]!, "multi-select");
+    expect(editor.checked).toEqual([true, false]);
+    const dialogCtx: DialogCtx = { _dialog: editor, repos, tui: null, closeDialog: () => {} };
+    handleDialogInput(dialogCtx, " ");
+    handleDialogInput(dialogCtx, "j");
+    handleDialogInput(dialogCtx, " ");
+
+    await removeMember("backend", leaving);
+    await addMember("backend", joining);
+    handleDialogInput(dialogCtx, "\r");
+    await roster.flushActions();
+
+    expect((await readTeams()).teams["backend"]!.members).toEqual([joining]);
+    expect(roster.notices).toEqual(["Updated @backend: no changes"]);
   });
 });
 

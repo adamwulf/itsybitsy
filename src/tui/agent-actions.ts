@@ -1103,15 +1103,17 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
             stderr.includes(`team @${teamName} not found`);
           for (const agent of toAdd) {
             const r = await teamAdd(teamName, agent, ctx.repos);
-            if (r.ok) added++;
-            else if (isTeamGone(r.stderr)) { teamGone = true; break; }
+            if (r.ok) {
+              if (r.added) added++;
+            } else if (isTeamGone(r.stderr)) { teamGone = true; break; }
             else failures++;
           }
           if (!teamGone) {
             for (const agent of toRemove) {
               const r = await teamRemove(teamName, agent, ctx.repos);
-              if (r.ok) removed++;
-              else if (isTeamGone(r.stderr)) { teamGone = true; break; }
+              if (r.ok) {
+                if (r.removed) removed++;
+              } else if (isTeamGone(r.stderr)) { teamGone = true; break; }
               else failures++;
             }
           }

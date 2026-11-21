@@ -5039,7 +5039,7 @@ export async function teamAdd(
   target: TeamMemberTarget,
   repos: RepoEntry[],
   opts?: { suppressJoinNotice?: boolean },
-): Promise<IbCommandResult> {
+): Promise<IbCommandResult & { added?: boolean }> {
   const n = normalizeTeamName(name);
   if (!(await getTeam(n))) {
     return teamErr(`Error: team @${n} not found`);
@@ -5054,12 +5054,12 @@ export async function teamAdd(
     return teamErr(`Error: team @${n} not found`);
   }
   if (!added) {
-    return teamOk(`agent ${id} is already in @${n}`);
+    return { ...teamOk(`agent ${id} is already in @${n}`), added };
   }
   // Persist-then-notify (§16.4.1): membership write committed under the lock;
   // fan the join notice to the post-write snapshot. Best-effort.
   await fireJoinNotice(n, team, id, repos, opts?.suppressJoinNotice === true);
-  return teamOk(`Added ${id} to @${n}`);
+  return { ...teamOk(`Added ${id} to @${n}`), added };
 }
 
 /**
@@ -5067,7 +5067,7 @@ export async function teamAdd(
  * resolves the agent address via the shared resolver; no-op success
  * if not a member; fires the per-agent LEAVE notice (§16.4.2) on a real removal.
  */
-export async function teamRemove(name: string, target: TeamMemberTarget, repos: RepoEntry[]): Promise<IbCommandResult> {
+export async function teamRemove(name: string, target: TeamMemberTarget, repos: RepoEntry[]): Promise<IbCommandResult & { removed?: boolean }> {
   const n = normalizeTeamName(name);
   if (!(await getTeam(n))) {
     return teamErr(`Error: team @${n} not found`);
@@ -5078,19 +5078,19 @@ export async function teamRemove(name: string, target: TeamMemberTarget, repos: 
 }
 
 /** Remove an exact roster entry, including one whose agent is no longer visible. */
-export async function teamRemoveStoredMember(name: string, id: string, repos: RepoEntry[]): Promise<IbCommandResult> {
+export async function teamRemoveStoredMember(name: string, id: string, repos: RepoEntry[]): Promise<IbCommandResult & { removed?: boolean }> {
   const n = normalizeTeamName(name);
   const { removed, team } = await removeMember(n, id);
   if (!team) {
     return teamErr(`Error: team @${n} not found`);
   }
   if (!removed) {
-    return teamOk(`agent ${id} was not in @${n}`);
+    return { ...teamOk(`agent ${id} was not in @${n}`), removed };
   }
   // Persist-then-notify (§16.4.2): leave notice to the post-write snapshot
   // (the departed id is already absent). Best-effort.
   await fireRemoveLeaveNotice(n, team, id, repos);
-  return teamOk(`Removed ${id} from @${n}`);
+  return { ...teamOk(`Removed ${id} from @${n}`), removed };
 }
 
 /**

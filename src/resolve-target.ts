@@ -20,7 +20,7 @@ const MAX_NAMED_UNREADABLE_DIRS = 3;
  * read; a single unreadable `meta.json` is not named.
  */
 function unreadableAgentsDirsNote(errors: AgentReadError[], searched: RepoEntry[]): string {
-  const agentsDirs = new Set(searched.map((r) => runtimeNames.agentsDir(r.path)));
+  const agentsDirs = new Set(searched.flatMap((r) => [runtimeNames.agentsDir(r.path), runtimeNames.archiveDir(r.path)]));
   const unreadable = [...new Set(errors.map((e) => e.agentDir))].filter((dir) => agentsDirs.has(dir));
   if (unreadable.length === 0) return "";
   const named = unreadable.slice(0, MAX_NAMED_UNREADABLE_DIRS).join(", ");
@@ -194,6 +194,10 @@ export async function resolveAgentTarget(
 
   searched = includesLocal ? searched.filter((r) => !repoName || r.name.toLowerCase() === repoName) : [];
   const { agents, errors } = await readAgents(searched);
+  const note = unreadableAgentsDirsNote([...ownErrors, ...errors], ownRepo ? [...searched, ownRepo] : searched);
+  if (note && !repoName) {
+    return failure(`Cannot resolve '${target}'${note}; use machine/repo/agent`);
+  }
   const matches: { machine: string; repo: string; agent?: Agent }[] = [];
   for (const repo of searched) {
     const agent = matchAgentById(name, agents.filter((a) => a.repoPath === repo.path));
@@ -206,7 +210,6 @@ export async function resolveAgentTarget(
     for (const repo of matchingRepos) matches.push({ machine: peer.name, repo });
   }
   if (matches.length === 0) {
-    const note = unreadableAgentsDirsNote([...ownErrors, ...errors], repos);
     return failure(`Agent not found: ${target}${note}`);
   }
   if (matches.length > 1) {

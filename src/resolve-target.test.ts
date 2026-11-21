@@ -556,7 +556,7 @@ describe("Group L: unreadable agents directories in not-found errors", () => {
     const result = await resolveTarget("cli-email-client", repos, repoA.path);
     expect(result.agent).toBeNull();
     expect(errorOutput).toEqual([
-      `Agent not found: cli-email-client (could not read ${unreadable}; a sandbox may block it)`,
+      `Cannot resolve 'cli-email-client' (could not read ${unreadable}; a sandbox may block it); use machine/repo/agent`,
     ]);
   });
 
@@ -611,7 +611,7 @@ describe("Group L: unreadable agents directories in not-found errors", () => {
     const unreadable = all.map(makeAgentsDirUnreadable);
     await resolveTarget("cli-email-client", all, "/tmp/outside");
     expect(errorOutput).toEqual([
-      `Agent not found: cli-email-client (could not read ${unreadable.slice(0, 3).join(", ")} +2 more; a sandbox may block it)`,
+      `Cannot resolve 'cli-email-client' (could not read ${unreadable.slice(0, 3).join(", ")} +2 more; a sandbox may block it); use machine/repo/agent`,
     ]);
   });
 
@@ -621,7 +621,7 @@ describe("Group L: unreadable agents directories in not-found errors", () => {
     expect(result).toEqual({
       agent: null,
       isSystemCoordinator: false,
-      error: `Agent not found: cli-email-client (could not read ${unreadable}; a sandbox may block it)`,
+      error: `Cannot resolve 'cli-email-client' (could not read ${unreadable}; a sandbox may block it); use machine/repo/agent`,
     });
     expect(errorOutput).toEqual([]);
   });

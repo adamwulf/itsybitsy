@@ -707,6 +707,9 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
     for (const command of ["ib retire", "ib re\\\ntire other", "ib retire oth\\\ner", "ib $verb other", "ib retire $target"]) {
       expect((await dispatch(command)).decision).toBe("deny");
     }
+    await Bun.write(join(agentDir, "..", "child", "meta.json"), JSON.stringify({ id: "child", manager: "agent-test01" }));
+    expect((await dispatch("ib retire child \\\n  --force")).decision).toBe("allow");
+    expect((await dispatch("ib retire child \\\n  --force\nib list")).decision).toBe("deny");
     expect((await dispatch("ib retire --help")).decision).toBe("allow");
   });
 

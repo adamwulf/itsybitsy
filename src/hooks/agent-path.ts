@@ -1617,7 +1617,7 @@ export async function checkIbCommandAccess(
   // `&&`, a pipe, or a newline.  The scanner is quote/heredoc aware, so
   // punctuation in a quoted message remains usable.
   if (!system && /(?:^|[;&|\n]\s*)ib\s+/.test(normalizedCommand)) {
-    const shellHit = findShellMetachar(normalizedCommand);
+    const shellHit = findShellMetachar(command);
     if (shellHit) {
       return {
         decision: "deny",
@@ -1633,11 +1633,16 @@ export async function checkIbCommandAccess(
   const invalid = { decision: "deny", reason: "Access denied: ib requires a literal command and agent target" } as const;
   if (!verb) return invalid;
   if (!IB_MANAGER_ONLY_COMMANDS.has(verb)) return null;
-  if (/\\\r?\n/.test(maskHeredocBodies(command))) return invalid;
-  const args = words.slice(2).map(literalWord);
+  // Authorize from the original literal operands. The normalized command
+  // identifies a wrapped verb, but a continuation in a trailing flag cannot
+  // change a verb or target that was already complete.
+  const rawWords = tokenizeBashPaths(maskHeredocBodies(command));
+  if (!rawWords || basename(literalWord(rawWords[0] ?? "") ?? "") !== "ib" ||
+      literalWord(rawWords[1] ?? "") !== verb) return invalid;
+  const args = rawWords.slice(2).map(literalWord);
   if (args.every((arg) => arg !== undefined) && args.some((arg) => arg === "--help" || arg === "-h")) return null;
   if (verb === "ack" && !args.length) return null;
-  const parsed = parseManagerOperand(words);
+  const parsed = parseManagerOperand(rawWords);
   if (!parsed) return invalid;
   return checkManagerCommandAccess(parsed.subcommand, parsed.targetId, callingAgentId, agentsDir, { cwd });
 }

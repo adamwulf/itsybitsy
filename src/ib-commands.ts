@@ -4975,12 +4975,20 @@ async function resolveFullAgentId(
   } else {
     agent = target;
   }
-  const { agents, errors } = await readAgentsOfRepos(repos, false);
-  const rosterMember = new Map(agents.map((member) => [member.id, member])).get(agent.id);
-  if (errors.length || !rosterMember || !sameRepoPath(rosterMember.repoPath, agent.repoPath) ||
+  const label = typeof target === "string" ? target : `${target.repoPath}/${target.id}`;
+  const error = `Cannot store '${label}' in the team roster: bare id '${agent.id}' does not identify this agent reliably`;
+  const index = repos.findLastIndex((repo) => sameRepoPath(repo.path, agent.repoPath));
+  if (index === -1) return { error };
+  // Entries before the selected repo cannot override it in a last-wins map.
+  const [selected, later] = await Promise.all([
+    readAgentsOfRepos([repos[index]!], false),
+    readAgentsOfRepos(repos.slice(index + 1), false),
+  ]);
+  const hasId = (member: Agent) => member.id === agent.id;
+  const rosterMember = later.agents.findLast(hasId) ?? selected.agents.findLast(hasId);
+  if (later.errors.length || !rosterMember || !sameRepoPath(rosterMember.repoPath, agent.repoPath) ||
       (rosterMember.storageDir && basename(rosterMember.storageDir) !== agent.id)) {
-    const label = typeof target === "string" ? target : `${target.repoPath}/${target.id}`;
-    return { error: `Cannot store '${label}' in the team roster: bare id '${agent.id}' does not identify this agent reliably` };
+    return { error };
   }
   return { id: agent.id };
 }

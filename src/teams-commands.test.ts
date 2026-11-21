@@ -397,6 +397,28 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(await readOutbox(queueDirOf("agent-a"))).toEqual([]);
   });
 
+  test("roster changes require visibility only in repos that can override the selected agent", async () => {
+    await teamCreate("backend");
+    await plantAgent("agent-a");
+    const [selected] = repos();
+    const hidden = { path: join(baseDir, "hidden"), name: "hidden" };
+    await Bun.write(join(hidden.path, ".itsybitsy", "agents"), "not a directory");
+    const target = `@${selected!.name}/agent-a`;
+    const members = async () => (await getTeam("backend"))?.members;
+    const earlier = [hidden, selected!];
+    expect((await teamAdd("backend", target, earlier)).ok).toBe(true);
+    expect(await members()).toEqual(["agent-a"]);
+    expect((await teamRemove("backend", target, earlier)).ok).toBe(true);
+    expect(await members()).toEqual([]);
+
+    const later = [selected!, hidden];
+    expect((await teamAdd("backend", target, later)).stderr).toContain("does not identify this agent reliably");
+    expect(await members()).toEqual([]);
+    await addMember("backend", "agent-a");
+    expect((await teamRemove("backend", target, later)).stderr).toContain("does not identify this agent reliably");
+    expect(await members()).toEqual(["agent-a"]);
+  });
+
   // --- teamRemove ---------------------------------------------------------
 
   test("teamRemove errors when the team does not exist", async () => {

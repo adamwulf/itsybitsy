@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { hasLiveEndpointOwner } from "./endpoint-lock";
+import { PEER_POLL_INTERVAL_MS } from "./poller";
 import { join } from "node:path";
 import { peerDir } from "../runtime-names";
 import type { PeerLinkState } from "./poller";
@@ -39,7 +42,12 @@ export function writeRemoteAgents(states: PeerLinkState[]): void {
 
 export async function readConnectedPeers(): Promise<CachedPeer[]> {
   try {
-    const peers = await Bun.file(cachePath()).json();
+    const file = await open(cachePath(), "r");
+    let peers;
+    try {
+      if (!await hasLiveEndpointOwner((await file.stat()).mtimeMs, 3 * PEER_POLL_INTERVAL_MS)) return [];
+      peers = JSON.parse(await file.readFile("utf8"));
+    } finally { await file.close(); }
     if (!Array.isArray(peers)) return [];
     return peers.filter((p) => p?.connected === true && typeof p.name === "string" &&
       Array.isArray(p.agents) && p.agents.every((a: CachedAgent) =>

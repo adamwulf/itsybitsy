@@ -61,7 +61,7 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
-import { acquireEndpointLock, releaseEndpointLock, type EndpointLockResult } from "./endpoint-lock";
+import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
 import { generatePairCode } from "./pair-code";
@@ -120,6 +120,7 @@ export interface ServiceEndpoint {
 
 export interface PeerServiceDeps {
   writeRemoteAgents?(states: PeerLinkState[]): void;
+  renewLease?(): Promise<void>;
   acquireLock(): Promise<EndpointLockResult>;
   releaseLock(): Promise<unknown>;
   loadIdentity(): Promise<PeerIdentity>;
@@ -146,6 +147,7 @@ export interface PeerServiceDeps {
 export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot): PeerServiceDeps {
   return {
     writeRemoteAgents,
+    renewLease: renewEndpointLease,
     acquireLock: () => acquireEndpointLock(),
     releaseLock: () => releaseEndpointLock(),
     loadIdentity: loadOrCreateIdentity,
@@ -308,7 +310,10 @@ export class PeerService {
 
   constructor(private readonly deps: PeerServiceDeps) {
     this.poller = new PeerPoller({
-      readPeers: deps.readPeers,
+      readPeers: async () => {
+        await deps.renewLease?.();
+        return deps.readPeers();
+      },
       dial: (id) => this.dialPeer(id),
       now: deps.now,
       setTimer: deps.setTimer,

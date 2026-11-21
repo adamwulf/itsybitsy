@@ -27,7 +27,7 @@
  */
 
 import { open, readFile, unlink } from "node:fs/promises";
-import { isPidAliveSinceUncached, selfProcessStartEpochSeconds } from "../agents";
+import { isPidAliveSinceUncached, isPidAliveCtx, processStartEpochSecondsCtx, selfProcessStartEpochSeconds } from "../agents";
 import { peerEndpointLockFile } from "../runtime-names";
 import { ensurePeerDir } from "./peer-dir";
 
@@ -82,6 +82,32 @@ async function readLock(path: string): Promise<string | null> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
+}
+
+/** The watch owner refreshes its lock on every poll, including identical snapshots. */
+export async function renewEndpointLease(): Promise<void> {
+  const lock = await open(peerEndpointLockFile(), "r+");
+  try {
+    if (await lock.readFile("utf8") === formatOwner(currentEndpointLockOwner())) {
+      const now = new Date();
+      await lock.utimes(now, now);
+    }
+  } finally { await lock.close(); }
+}
+
+/** If a sandbox hides process birth times, a fresh owner heartbeat bounds stale visibility. */
+export async function hasLiveEndpointOwner(snapshotMtime: number, maxLeaseAge: number): Promise<boolean> {
+  const lock = await open(peerEndpointLockFile(), "r");
+  try {
+    const owner = parseOwner(await lock.readFile("utf8"));
+    if (!owner || !isPidAliveCtx.fn(owner.pid)) return false;
+    const stat = await lock.stat();
+    if (stat.birthtimeMs > snapshotMtime) return false;
+    const start = owner.startEpoch === undefined ? null : processStartEpochSecondsCtx.fn(owner.pid);
+    if (start !== null) return start === owner.startEpoch;
+    const age = Date.now() - stat.mtimeMs;
+    return age >= -1 && age <= maxLeaseAge;
+  } finally { await lock.close(); }
 }
 
 /** Remove the lock only if it still holds exactly `expected`. Returns true when this call removed it. */

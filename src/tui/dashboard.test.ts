@@ -1284,13 +1284,19 @@ describe("DashboardComponent dialog and action handlers", () => {
       const rows = render();
       expect(rows[0]).toContain(summary);
       expect(paths.some(path => !rows.join("").includes(`could not unlink ${path}:`))).toBe(true);
-      for (;;) {
+      let stabilized = false;
+      // Each additional wrapped row consumes at least one character or newline.
+      for (let presses = 0; presses < dialog.text.length; presses++) {
         const offset = dialog.offset;
         dashboard.handleInput("j");
         const viewport = render();
-        if (dialog.offset === offset) break;
+        if (dialog.offset === offset) {
+          stabilized = true;
+          break;
+        }
         rows.push(viewport.at(-1)!);
       }
+      expect(stabilized).toBe(true);
       expect(dialog.offset).toBeGreaterThan(0);
       const text = rows.join("");
       for (const path of paths) expect(text).toContain(`could not unlink ${path}:`);

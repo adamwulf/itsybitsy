@@ -2091,7 +2091,7 @@ describe("retire → rehire recovery", () => {
   // "successfully resumes a retired no-worktree Claude agent" test above.
   async function plantRehirableArchive(
     agentId: string,
-    opts: { manager?: string | null; includeSettings?: boolean; worker?: boolean } = {},
+    opts: { manager?: string | null; includeSettings?: boolean; worker?: boolean; queueKey?: string } = {},
   ): Promise<{ archiveKey: string; archiveDir: string }> {
     const archiveKey = `20260703-120000-${agentId}`;
     const archiveDir = join(tempDir, ".itsybitsy", "archive", archiveKey);
@@ -2099,6 +2099,7 @@ describe("retire → rehire recovery", () => {
     const meta = makeAgent(agentId, tempDir, "stopped", {
       tmux_session: `itsybitsy-1a2b3c4d-${agentId}`,
       worktree: false,
+      queue_key: opts.queueKey,
       model: "claude:sonnet",
       claude_pid: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -2652,6 +2653,52 @@ describe("retire → rehire recovery", () => {
     expect(await git("-C", tempDir, "rev-parse", manifest.headRef)).toBe(
       manifest.gitHead,
     );
+  });
+
+  test("rehire accepts messages after resume preflight fails", async () => {
+    const id = "agent-return";
+    const queueKey = `original-host/original-repo/${id}`;
+    const { archiveDir } = await plantRehirableArchive(id, { queueKey });
+    const archiveMetaPath = join(archiveDir, "meta.json");
+    const archiveMeta = await Bun.file(archiveMetaPath).json();
+    delete archiveMeta.session_id;
+    await Bun.write(archiveMetaPath, JSON.stringify(archiveMeta));
+    setRehireSpawnRunner(successRunner());
+    setNukeResumeSpawnRunner(successRunner());
+
+    const result = await rehireAgent(id);
+    expect(result.ok).toBe(false);
+    expect(result.stdout).toContain("Reconstructed stopped agent");
+    expect(result.stderr).toContain("session_id");
+    const meta = await Bun.file(join(tempDir, ".itsybitsy", "agents", id, "meta.json")).json();
+    expect(meta.queue_key).toBe(queueKey);
+
+    setSendSpawnRunner(() => makeSpawnResult(1)); // No running tmux session.
+    try {
+      const sent = await sendMessage(makeAgent(id, tempDir, "stopped", meta), "for the next resume", {
+        cwd: "/",
+        stageAttachments: true, // Dashboard sends acknowledge a durable enqueue.
+      });
+      expect(sent.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+    const { readOutbox } = await import("./outbox");
+    const queue = join(tempDir, "home", ".itsybitsy", "agents", queueKey);
+    expect((await readOutbox(queue)).map(message => message.message)).toEqual(["for the next resume"]);
+  });
+
+  test("a failed reconstruction releases the queue it reserved", async () => {
+    const id = "agent-return";
+    const queueKey = `studio/registered/${id}`;
+    const { archiveDir } = await plantRehirableArchive(id, { queueKey });
+    await rm(join(archiveDir, "exit-check.sh"));
+    setRehireSpawnRunner(successRunner());
+
+    const result = await rehireAgent(id);
+    expect(result.stderr).toContain("retirement archive is missing exit-check.sh");
+    expect(existsSync(join(tempDir, "home", ".itsybitsy", "agents", queueKey))).toBe(false);
+    expect(existsSync(join(tempDir, ".itsybitsy", "agents", id))).toBe(false);
   });
 
   test("successfully resumes a retired no-worktree Claude agent", async () => {

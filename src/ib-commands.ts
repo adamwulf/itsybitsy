@@ -861,9 +861,12 @@ export async function rehireAgent(
     }
   }
 
+  let agentDirCreated = false;
+  let worktreeAttempted = false;
   let worktreeCreated = false;
+  let reservedQueue: string | undefined;
   const rollback = async () => {
-    if (manifest.worktree) {
+    if (worktreeAttempted) {
       if (worktreeCreated) {
         await rehireSpawnCtx.run([
           "git", "-C", repoPath, "worktree", "remove", worktreePath, "--force",
@@ -873,13 +876,30 @@ export async function rehireAgent(
         "git", "-C", repoPath, "branch", "-D", branchName,
       ]).catch(() => {});
     }
-    await rm(agentDir, { recursive: true, force: true }).catch(() => {});
+    if (agentDirCreated) await rm(agentDir, { recursive: true, force: true }).catch(() => {});
+    if (reservedQueue) {
+      await rm(reservedQueue, { recursive: true, force: true }).catch(err => {
+        warnings.push(`Warning: could not remove reserved queue directory ${reservedQueue}: ${err}`);
+      });
+    }
   };
 
   try {
-    await mkdir(agentDir, { recursive: true });
+    await mkdir(agentsDir, { recursive: true });
+    await mkdir(agentDir);
+    agentDirCreated = true;
+
+    // The restored agent can receive messages as soon as its meta is visible.
+    // Reserve the stored key before publishing it, including when resume fails.
+    if (archived.meta.queue_key !== undefined) {
+      const queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: archived.meta });
+      await mkdir(dirname(queueDir), { recursive: true });
+      await mkdir(queueDir);
+      reservedQueue = queueDir;
+    }
 
     if (manifest.worktree) {
+      worktreeAttempted = true;
       const worktreeResult = await rehireSpawnCtx.run([
         "git", "-C", repoPath, "worktree", "add", worktreePath,
         "-b", branchName, retainedRef!,
@@ -984,7 +1004,10 @@ export async function rehireAgent(
       ok: false,
       exitCode: 1,
       stdout: "",
-      stderr: `Could not reconstruct agent '${agentId}': ${err instanceof Error ? err.message : String(err)}`,
+      stderr: [
+        `Could not reconstruct agent '${agentId}': ${err instanceof Error ? err.message : String(err)}`,
+        ...warnings,
+      ].join("\n"),
     };
   }
 

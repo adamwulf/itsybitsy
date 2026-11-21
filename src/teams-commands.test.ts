@@ -54,6 +54,7 @@ import {
 import { createTeam, getTeam, addMember } from "./teams";
 import { readChannel, channelPath } from "./team-channel";
 import { resolveTarget } from "./index";
+import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 import { setUserHome, resetUserHome } from "./home";
 
 // A fresh transient that makes sendMessage believe a live watchdog will drain,
@@ -272,12 +273,14 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     setUserConfigPath(join(homeDir, "config.json"));
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
     setSendSpawnRunner(() => makeSpawnResult());
+    tmuxSpawnCtx.set(() => makeSpawnResult());
     isPidAliveCtx.set(() => true);
     resetReadAgentMetaCache();
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
+    tmuxSpawnCtx.reset();
     resetUserConfigPath();
     resetCoordinatorHome();
     isPidAliveCtx.reset();

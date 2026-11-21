@@ -2953,6 +2953,7 @@ describe("handleAddAgentToTeam", () => {
   });
 
   test("team actions keep the selected twin's repo when both are used from the same cwd", async () => {
+    tmuxSpawnCtx.set(noopSpawnRunner);
     const web = join(fx.baseDir, "web");
     await plantTestAgent(fx.repoDir, "agent-twin");
     await plantTestAgent(web, "agent-twin");

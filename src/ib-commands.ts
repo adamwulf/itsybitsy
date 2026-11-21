@@ -662,12 +662,15 @@ export async function rehireAgent(
   }
 
   const repos = await listRepos();
-  const repoInputs = repos.filter((repo) => !opts.repoPath || repo.path === opts.repoPath).map((repo) => ({
+  const repoInputs = repos.map((repo) => ({
     path: repo.path,
     name: repoDisplayName(repo),
   }));
+  if (opts.repoPath && !repos.some((r) => sameRepoPath(r.path, opts.repoPath))) {
+    repoInputs.push({ path: opts.repoPath, name: basename(opts.repoPath) });
+  }
   const { agents: activeAgents } = await readAllAgents(repoInputs, false);
-  const activeId = activeAgents.find((agent) => agent.id === agentId);
+  const activeId = activeAgents.find((agent) => agent.id === agentId && (!opts.repoPath || sameRepoPath(agent.repoPath, opts.repoPath)));
   if (activeId) {
     return {
       ok: false,

@@ -2277,6 +2277,19 @@ describe("retire → rehire recovery", () => {
     }
   });
 
+  test("a repo-scoped rehire checks active nicknames across the registry", async () => {
+    const other = join(tempDir, "other-repo");
+    const id = "archived-id";
+    await plantRehirableArchive(id);
+    await Bun.write(join(other, ".itsybitsy", "agents", "other-id", "meta.json"),
+      JSON.stringify({ id: "other-id", nickname: id }));
+    await Bun.write(join(tempDir, "home", ".itsybitsy", "repos.json"), JSON.stringify({
+      version: 1, repos: [{ name: "one", path: tempDir }, { name: "two", path: other }],
+    }));
+    const result = await rehireAgent(id, { repoPath: tempDir });
+    expect(result.stderr).toContain("collides with active nickname on 'other-id'");
+  });
+
   for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
     test(`rehire migrates a legacy worktree:false ${legacyRole} archive without agentType or isolated settings`, async () => {
       const agentId = `agent-legacy-shared-${legacyRole}`;

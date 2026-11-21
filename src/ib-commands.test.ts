@@ -10278,6 +10278,31 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(live.size).toBe(1);
   });
 
+  test("sending to a saved retired recipient leaves its key free for a fresh spawn", async () => {
+    const id = "review";
+    const options = { name: id, noWorktree: true };
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    expect((await callNewAgent("original", options)).ok).toBe(true);
+    const meta = await Bun.file(join(agentsDir, id, "meta.json")).json();
+    const saved = makeAgent(id, tempDir, "running", meta);
+    const queue = join(tempDir, "home", ".itsybitsy", "agents", meta.queue_key);
+    setKillPauseSpawnRunner(() => makeSpawnResult("", 1));
+    try {
+      const retired = await retireAgent(saved);
+      expect(retired.stderr).toBe("");
+      expect(retired.ok).toBe(true);
+    } finally {
+      resetKillPauseSpawnRunner();
+    }
+    const late = await sendMessage(saved, "from the open dialog", { cwd: "/" });
+    expect(late.ok).toBe(false);
+    expect(late.stderr).toContain(`agent ${meta.queue_key} no longer exists`);
+    expect(existsSync(queue)).toBe(false);
+    spawnCalls = [];
+    expect((await callNewAgent("replacement", options)).ok).toBe(true);
+    expect(existsSync(queue)).toBe(true);
+  });
+
   test("a failed worktree allocation releases the reserved queue for a retry", async () => {
     const queueDir = join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir), "review");
     setNewAgentSpawnRunner(mockSpawnRunner({ failWorktree: true }));

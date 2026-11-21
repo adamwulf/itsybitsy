@@ -120,6 +120,7 @@ describe("fully qualified agent queues", () => {
     await Bun.write(join(planted.agentDir, "meta.json"), JSON.stringify(agent.meta));
 
     const dir = queue("alpha", id);
+    await mkdir(dir, { recursive: true });
     await cli.writeRegistry({ repos: [{ path: repoA, name: "renamed" }] });
     await rm(machineNameFile());
     await send("@renamed/review", "while registered");

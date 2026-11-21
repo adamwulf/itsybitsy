@@ -175,6 +175,7 @@ export function outboxLockPath(dir: string): string {
 export async function enqueueOutbox(
   dir: string,
   msg: Omit<OutboxMessage, "id" | "enqueuedAtMs"> & { id?: string; enqueuedAtMs?: number },
+  reservedKey?: string,
 ): Promise<OutboxMessage> {
   // Best-effort dedupe: if an identical pending message from the same sender is
   // already queued, return it instead of appending a second copy. Matches on
@@ -204,16 +205,18 @@ export async function enqueueOutbox(
     // the dedupe match above stable against pre-existing queued messages.
     noPassthrough: msg.noPassthrough === true ? true : undefined,
   };
-  // Ensure the agent/coordinator directory exists before appending. In
-  // production this dir always exists (created at spawn); creating it here is a
-  // no-message-loss safeguard so a queued message is never silently dropped on
-  // a missing dir (e.g. a synthetic-agent send target). mkdir recursive is a
-  // no-op when the dir already exists.
-  await mkdir(dir, { recursive: true });
-  // Single-line append. The trailing newline keeps each record on its own line
-  // so a partial write (extremely unlikely for a sub-PIPE_BUF line) is detected
-  // as an unparseable trailing fragment and skipped, never merged into another.
-  await appendFile(outboxPath(dir), JSON.stringify(record) + "\n");
+  // A stored key identifies a leaf reserved at spawn. A late send to a
+  // retired recipient must not recreate that reservation.
+  if (reservedKey === undefined) await mkdir(dir, { recursive: true });
+  // Append one newline-terminated record so a torn write can be skipped.
+  try {
+    await appendFile(outboxPath(dir), JSON.stringify(record) + "\n");
+  } catch (err) {
+    if (reservedKey !== undefined && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`agent ${reservedKey} no longer exists`);
+    }
+    throw err;
+  }
   return record;
 }
 

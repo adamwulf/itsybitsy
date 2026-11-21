@@ -4451,14 +4451,11 @@ export async function sendMessage(
     noPassthrough = staged.noPassthrough ?? staged.staged;
   }
 
-  // Enqueue. The agent dir is created by spawn; for the rare case it is
-  // missing, enqueueOutbox mkdir's the queue dir so a queued message is never
-  // silently dropped. A genuine write failure surfaces as an error rather than
-  // an unhandled rejection.
   let queueDir: string;
   try {
     queueDir = opts?.outboxDir ?? await agentOutboxDir(agent);
-    await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough });
+    const reservedKey = opts?.outboxDir === undefined ? agent.meta.queue_key : undefined;
+    await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough }, reservedKey);
   } catch (err) {
     // Enqueue failed — nothing is queued. Undo any staged copies so an
     // abandoned attempt leaves no unused attachment behind (no partial copy).

@@ -3332,7 +3332,10 @@ describe("runPerAgentWatchdog", () => {
     const repo = join(outboxHome, "unregistered");
     const target = makeAgent({ repoPath: repo, id: "review" });
     target.meta.tmux_session = "itsybitsy-deadbeef-review";
-    if (key) target.meta.queue_key = key;
+    if (key) {
+      target.meta.queue_key = key;
+      mkdirSync(join(outboxHome, "agents", key), { recursive: true });
+    }
     const agentDir = join(repo, ".itsybitsy", "agents", target.id);
     mkdirSync(agentDir, { recursive: true });
     // A read of this file would fail getRepoId's validation. A sandboxed

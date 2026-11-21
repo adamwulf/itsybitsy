@@ -1301,6 +1301,7 @@ describe("executeResultActions — watchdog attribution on delivery", () => {
     await mkdir(recipientDir, { recursive: true });
     await writeMeta(ctx.agentDir, { id: ctx.agentId, tmux_session: "ib-self", manager: "manager-001" });
     const key = `studio/fixture/${id}`;
+    await mkdir(join(coordHome, "agents", key), { recursive: true });
     await writeMeta(recipientDir, { id, tmux_session: "ib-recipient", queue_key: key });
     await saveRegistry({ repos: [{ path: join(ctx.agentsDir, "../.."), name: "renamed" }] });
     await writeAgentTransient(recipientDir, {

@@ -186,24 +186,32 @@ describe("fully qualified agent queues", () => {
     }
   });
 
-  test.each(["missing", "unreadable"])("archive distinguishes %s metadata when a legacy queue exists", async (condition) => {
-    const id = "review";
-    const planted = await cli.addAgent(repoA, id);
-    const path = join(planted.agentDir, "meta.json");
-    await rm(path);
-    if (condition === "unreadable") await mkdir(path); // readAgentMeta gets EISDIR
-    await Bun.write(join(planted.agentDir, "output.log"), "captured output");
-    const file = join(cli.home, ".itsybitsy", "agents", id, "outbox.jsonl");
-    await Bun.write(file, "pending legacy message");
-    const result = await archiveAgent(repoA, id, planted.agentDir);
-    if (condition === "missing") {
-      expect(result.warnings).toEqual([]);
-      expect(await Bun.file(file).exists()).toBe(false);
-    } else {
-      expect(result.warnings.join("\n")).toContain(path);
-      expect(await Bun.file(file).text()).toBe("pending legacy message");
-    }
-  });
+  test.each(["missing", "unreadable", "missing with a missing snapshot"])(
+    "archive preserves a same-named legacy queue when its own metadata is %s", async condition => {
+      const id = "review";
+      const a = await cli.addAgent(repoA, id, { queue_key: "studio/alpha/review" });
+      await plant(repoB, id, "session-B");
+      await send("@beta/review", "pending legacy message");
+      const dir = join(cli.home, ".itsybitsy", "agents", id);
+      const pending = await readOutbox(dir);
+
+      const prepared = condition === "missing with a missing snapshot"
+        ? await prepareAgentRetirement(repoA, id, a.agentDir, false)
+        : undefined;
+      if (prepared) await rm(join(prepared.payloadDir, "runtime", "meta.json"));
+      const metaPath = join(a.agentDir, "meta.json");
+      await rm(metaPath);
+      if (condition === "unreadable") await mkdir(metaPath); // readAgentMeta gets EISDIR
+      await Bun.write(join(a.agentDir, "output.log"), "captured output");
+
+      const result = await archiveAgent(repoA, id, a.agentDir, prepared);
+      expect(result.warnings.join("\n")).toContain("skipped queue cleanup");
+      expect(result.warnings.join("\n")).toContain(metaPath);
+      expect(pending.map(m => m.message)).toEqual(["pending legacy message"]);
+      expect(await readOutbox(dir)).toEqual(pending);
+      expect(await Bun.file(join(result.archivePath!, "output.log")).text()).toBe("captured output");
+    },
+  );
 
   test("same-id keyless agents share the flat queue across repos", async () => {
     const id = "review";

@@ -648,22 +648,21 @@ export async function archiveAgent(
 
   const warnings: string[] = [];
   const live = await readAgentMeta(agentDir);
-  if (!hasOutput && !hasLog && live.missing && !preparedRetirement) {
-    return { archivePath: null, prunedTeams, warnings };
-  }
-
   let identity = live;
   if (!live.meta && preparedRetirement) {
     const snapshot = await readAgentMeta(join(preparedRetirement.payloadDir, RUNTIME_DIR));
-    // A missing snapshot cannot turn an unreadable live identity into ENOENT.
+    // A missing snapshot adds no information about the live metadata.
     if (!snapshot.missing) identity = snapshot;
   }
   let queueDir: string | undefined;
   try {
-    if (!identity.meta && !identity.missing) throw new Error(identity.error);
+    if (!identity.meta) throw new Error(identity.error ?? "No readable agent metadata");
     queueDir = agentOutboxDir({ id: agentId, meta: identity.meta });
   } catch (err) {
     warnings.push(`Warning: skipped queue cleanup for '${agentId}': ${(err as Error).message}`);
+  }
+  if (!hasOutput && !hasLog && live.missing && !preparedRetirement) {
+    return { archivePath: null, prunedTeams, warnings };
   }
   await mkdir(archiveFolder, { recursive: true });
 

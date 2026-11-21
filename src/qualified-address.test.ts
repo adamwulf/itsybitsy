@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { symlink, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { setUserHome, resetUserHome } from "./home";
+import { addMember, getTeam } from "./teams";
 import { checkIbCommandAccess } from "./hooks/agent-path";
 import { createCliFixture, type CliFixture } from "./test-cli-runner";
 
@@ -10,7 +12,8 @@ describe("qualified agent addresses", () => {
   let web: string;
   let worktree: string;
 
-  async function peer(connected = true) {
+  async function peer(connected = true, ownerPid = process.pid) {
+    await Bun.write(join(cli.home, ".itsybitsy", "peer", "endpoint.lock"), String(ownerPid));
     await Bun.write(join(cli.home, ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify([{
       name: "laptop-b", id: "peer-id", connected, lastOkAt: 15,
       agents: [{ repo: "remote", id: "remote-id", nickname: "foo", state: "waiting" }],
@@ -41,6 +44,110 @@ describe("qualified agent addresses", () => {
     expect((await retire("remote-id")).stderr.trim()).toBe("Agent not found: remote-id");
   });
 
+  test("an unclean endpoint owner exit leaves no connected peers", async () => {
+    const owner = Bun.spawn(["/bin/sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      await peer(true, owner.pid);
+      expect((await retire("foo")).stderr).toContain("exists on laptop-a and laptop-b");
+    } finally {
+      owner.kill(9);
+      await owner.exited;
+    }
+    expect((await retire("foo")).actions[0]?.args[0]).toMatchObject({ repoPath: app });
+  });
+
+  test("a stale endpoint lease is ignored when the process birth time is unavailable", async () => {
+    await peer();
+    const lock = join(cli.home, ".itsybitsy", "peer", "endpoint.lock");
+    await utimes(lock, new Date(0), new Date(0));
+    expect((await retire("foo")).actions[0]?.args[0]).toMatchObject({ repoPath: app });
+  });
+
+  test("an alias of the owning repo retains same-repo precedence and ownership", async () => {
+    const alias = join(cli.root, "aliased-app");
+    await symlink(app, alias);
+    await cli.writeRegistry({ version: 1, repos: [{ path: alias, name: "App" }, { path: web, name: "Web" }] });
+    await cli.addAgent(web, "foo");
+    for (const cwd of [app, worktree]) {
+      expect((await retire("foo", cwd)).actions[0]?.args[0]).toMatchObject({ repoPath: alias });
+      expect(await checkIbCommandAccess("ib retire foo", "mgr", join(app, ".itsybitsy", "agents"), cwd)).toBeNull();
+    }
+  });
+
+  test("the owning repo of an unregistered worktree precedes registered repos and peers", async () => {
+    await cli.writeRegistry({ version: 1, repos: [{ path: web, name: "Web" }] });
+    await cli.addAgent(web, "foo");
+    await peer();
+    expect((await retire("foo", worktree)).actions[0]?.args[0]).toMatchObject({ repoPath: app });
+  });
+
+  test("machine-wide searches refuse partial visibility even with a visible local match", async () => {
+    const dir = join(web, ".itsybitsy", "agents");
+    await rm(dir, { recursive: true });
+    await Bun.write(dir, "unlistable");
+    for (const [target, cwd] of [["foo", cli.cwd], ["laptop-a/foo", app]] as const) {
+      const result = await retire(target, cwd);
+      expect(result.actions).toEqual([]);
+      expect(result.stderr).toContain(dir);
+      expect(result.stderr).toContain("machine/repo/agent");
+    }
+    expect((await retire("laptop-a/App/foo")).actions[0]?.args[0]).toMatchObject({ repoPath: app });
+  });
+
+  test("empty @ address segments cannot dispatch to the team or coordinator", async () => {
+    expect((await cli.run(["team", "create", "crew"])).exitCode).toBe(0);
+    await addMember("crew", "foo");
+    await cli.addAgent(app, "App", { agentType: "repo-coordinator" });
+    for (const argv of [["send", "@crew/", "hi"], ["retire", "@App/"]]) {
+      const actions = { teamSend: "record", retireAgent: "record" } as const;
+      const valid = argv.map((arg) => arg.endsWith("/") ? arg.slice(0, -1) : arg);
+      expect((await cli.run(valid, { actions })).actions).toHaveLength(1);
+      const result = await cli.run(argv, { actions });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.trim()).toBe(`Agent not found: ${argv[1]}`);
+      expect(result.actions).toEqual([]);
+    }
+  });
+
+  test("team add and remove reject a selection whose stored id routes to another repo", async () => {
+    await cli.addAgent(web, "foo");
+    expect((await cli.run(["team", "create", "crew"])).exitCode).toBe(0);
+    const wrongRepo = "laptop-a/App/foo";
+    const add = await cli.run(["team", "add", "crew", wrongRepo]);
+    expect(add.exitCode).toBe(1);
+    expect(add.stderr).toContain("bare id 'foo'");
+    expect((await getTeam("crew"))?.members).toEqual([]);
+    await addMember("crew", "foo"); // The stored id routes to Web.
+    const remove = await cli.run(["team", "remove", "crew", wrongRepo]);
+    expect(remove.exitCode).toBe(1);
+    expect(remove.stderr).toContain("bare id 'foo'");
+    expect((await getTeam("crew"))?.members).toEqual(["foo"]);
+  });
+
+  test("rehire deduplicates repeated archive ids and reports reusable nicknames", async () => {
+    async function archive(key: string, id: string) {
+      await Bun.write(join(web, ".itsybitsy", "archive", key, "meta.json"), JSON.stringify({ id, nickname: "former" }));
+    }
+    await archive("first", "old-one");
+    await archive("second", "old-one");
+    const rehire = (target: string) => cli.run(["rehire", target], { cwd: web, actions: { rehireAgent: "record" } });
+    expect((await rehire("former")).actions[0]?.args[0]).toBe("old-one");
+    await archive("third", "old-two");
+    for (const target of ["former", "@Web/former", "laptop-a/Web/former"]) {
+      const result = await rehire(target);
+      expect(result.stderr).toContain("@Web/old-one or @Web/old-two");
+      expect(result.actions).toEqual([]);
+    }
+  });
+
+  test("targeted ack requires the child's manager even for the system coordinator", async () => {
+    const system = join(cli.home, ".itsybitsy");
+    expect((await checkIbCommandAccess("ib ack @App/foo", "@system", join(system, "agents"), system))?.decision).toBe("deny");
+    const result = await cli.run(["ack", "@App/foo"], { cwd: system });
+    expect(result.stderr).toContain("only foo's manager (mgr)");
+    expect(result.exitCode).toBe(1);
+  });
+
   test("a unique remote id or nickname produces the command-specific error", async () => {
     await peer();
     expect((await retire("remote-id")).stderr.trim()).toBe("remote agents are read-only");
@@ -59,6 +166,16 @@ describe("qualified agent addresses", () => {
       "'foo' exists on laptop-a and laptop-b; use laptop-a/App/foo or laptop-a/Web/foo or laptop-b/foo");
     expect((await retire("laptop-a/foo", app)).stderr.trim()).toBe(
       "'foo' exists on laptop-a; use laptop-a/App/foo or laptop-a/Web/foo");
+  });
+
+  test("ambiguity suggestions shell-quote spaces and apostrophes", async () => {
+    await peer();
+    const file = join(cli.home, ".itsybitsy", "machine-name");
+    for (const [machine, quoted] of [["Studio Mac", "'Studio Mac/foo'"], ["Adam's Mac", "'Adam'\\''s Mac/foo'"]] as const) {
+      await Bun.write(file, machine);
+      const [, suggestions] = (await retire("foo")).stderr.trim().split("; use ");
+      expect(suggestions?.split(" or ").sort()).toEqual([quoted, "laptop-b/foo"]);
+    }
   });
 
   test("qualified local names ignore machine and registry name case and preserve exact id and nickname case", async () => {

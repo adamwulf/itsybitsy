@@ -1259,13 +1259,9 @@ Removes a key from the config file, reverting it to its built-in default.
 
 ## 8. Supplementary Behaviors
 
-### 8.1 Partial ID Resolution
+### 8.1 Agent Address Resolution
 
-Agent IDs can be specified as partial strings. Resolution:
-
-1. **Exact match** — check agent directory, then tmux sessions (`itsybitsy-*-<partial>`)
-2. **Substring match** — scan all agent directories and tmux sessions for the pattern, extracting agent IDs from session names (format: `itsybitsy-<repoid>-<agentid>`)
-3. If 0 matches → error. If 1 match → use it. If 2+ matches → error listing all matches.
+Agent operands use exact IDs or nicknames and the qualification and ambiguity rules in §12.3.1.
 
 ### 8.2 Agent Logging
 
@@ -1385,7 +1381,7 @@ Reassigns an agent to a different parent manager (or makes it a root manager wit
 
 **Validation:**
 
-1. Resolve both agent ID and new parent ID (partial ID resolution)
+1. Resolve both the agent and new parent by exact ID or nickname under §12.3.1.
 2. Agent must exist
 3. Cannot reassign an agent to itself
 4. New parent must exist (unless `--none`)

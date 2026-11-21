@@ -1530,7 +1530,7 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
     `killed=${killed} failed=${failed} orphans=${orphansKilled}`
   );
 
-  return { ok: true, exitCode: 0, stdout, stderr: "" };
+  return { ok: true, exitCode: 0, stdout, stderr: warnings.join("\n") };
 }
 
 /**
@@ -1566,7 +1566,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
     `[nuke-all] repo=${repoPath} killed=${killed} failed=${failed} orphans=${orphansKilled}`
   );
 
-  return { ok: true, exitCode: 0, stdout, stderr: "" };
+  return { ok: true, exitCode: 0, stdout, stderr: warnings.join("\n") };
 }
 
 /**

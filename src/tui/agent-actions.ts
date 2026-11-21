@@ -504,10 +504,9 @@ export function handleResume(ctx: ActionCtx) {
   }
 
   // Repo header selected: spawn or reset per-repo coordinator
-  const repoHeader = ctx.agentTree.selectedRepoHeader;
-  if (!ctx.agentTree.selectedAgent && repoHeader) {
-    const repo = ctx.repos.find((r) => repoDisplayName(r) === repoHeader);
-    if (!repo) return;
+  const repoPath = ctx.agentTree.selectedRepoPath;
+  if (repoPath) {
+    const repoName = ctx.agentTree.selectedRepoHeader ?? basename(repoPath);
 
     // UI-layer in-flight guard for the SPAWN path. The durable op-guard inside
     // resumeAgent() covers the reset case, but a first-time coordinator spawn
@@ -515,17 +514,17 @@ export function handleResume(ctx: ActionCtx) {
     // it. Without this, two rapid 'R' presses both see `exists:false` and both
     // newAgent() into the same deterministic dir → partial/duplicate spawn.
     // Keyed per-repo and released in the finally below; intentionally narrow.
-    const spawnKey = `repo:${repo.path}`;
+    const spawnKey = `repo:${repoPath}`;
     if (coordinatorSpawnsInFlight.has(spawnKey)) {
-      ctx.setNotice(`Coordinator action already in progress for ${repoDisplayName(repo)}…`, "error");
+      ctx.setNotice(`Coordinator action already in progress for ${repoName}…`, "error");
       return;
     }
     coordinatorSpawnsInFlight.add(spawnKey);
 
-    ctx.setNotice(`Resetting coordinator for ${repoDisplayName(repo)}…`, "info");
+    ctx.setNotice(`Resetting coordinator for ${repoName}…`, "info");
     ctx.executeAndRefresh(async () => {
       try {
-        const coordStatus = await checkCoordinatorExists(repo.path);
+        const coordStatus = await checkCoordinatorExists(repoPath);
         if (coordStatus.exists) {
           // Coordinator exists — full reset (kill + respawn). Allowed regardless
           // of state: a running coordinator with stale permissions/hooks is the
@@ -533,9 +532,9 @@ export function handleResume(ctx: ActionCtx) {
           // and routes to the reset path. The durable op-guard inside
           // resumeAgent() (kind `restarting`) refuses a concurrent reset and
           // surfaces "Agent is currently restarting…" as the failure stderr.
-          const repoPath = canonicalizeSandboxPath(repo.path);
+          const canonicalRepoPath = canonicalizeSandboxPath(repoPath);
           const agent = (ctx.watcher?.lastAgents ?? [])
-            .find(a => a.id === coordStatus.agentId && canonicalizeSandboxPath(a.repoPath) === repoPath);
+            .find(a => a.id === coordStatus.agentId && canonicalizeSandboxPath(a.repoPath) === canonicalRepoPath);
           if (agent) {
             const result = await resumeAgent(agent);
             showCoordinatorResetResult(ctx, agent, result);
@@ -544,7 +543,7 @@ export function handleResume(ctx: ActionCtx) {
           }
         } else {
           // No coordinator — spawn one
-          const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: REPO_COORDINATOR_TYPE });
+          const result = await newAgent(repoPath, "You are the per-repo coordinator. Await instructions.", { type: REPO_COORDINATOR_TYPE });
           if (result.ok) ctx.setNotice(`Spawned coordinator ${result.stdout}`, "info");
           else ctx.setNotice(`Spawn failed: ${result.stderr || result.stdout}`, "error");
         }

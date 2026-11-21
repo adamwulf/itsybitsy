@@ -95,6 +95,7 @@ function noopSpawnRunner(): SpawnResult {
 function makeMockCtx(overrides?: {
   agent?: Agent | null;
   repoHeader?: string | null;
+  repoPath?: string;
   repos?: RepoEntry[];
   flatList?: FlatEntry[];
   leftWidth?: number;
@@ -158,7 +159,7 @@ function makeMockCtx(overrides?: {
     agentTree: {
       selectedAgent: overrides?.agent ?? null,
       selectedRepoHeader: overrides?.repoHeader ?? null,
-      selectedRepoPath: null,
+      selectedRepoPath: overrides?.repoPath ?? null,
       isSystemCoordinatorSelected: false,
       flatList: overrides?.flatList ?? [],
       visibleList: overrides?.flatList ?? [],
@@ -628,7 +629,7 @@ describe("handleResume", () => {
       // so handleResume takes the SPAWN branch (the path the durable guard
       // can't cover).
       const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-doublepress", name: "my-repo" }];
-      const { ctx } = makeMockCtx({ repoHeader: "my-repo", repos });
+      const { ctx } = makeMockCtx({ repoHeader: "my-repo", repoPath: repos[0]!.path, repos });
 
       // Hold each executeAndRefresh body pending so the in-flight key stays set
       // across the second synchronous press (mirrors the real race: the first
@@ -651,7 +652,7 @@ describe("handleResume", () => {
 
     test("in-flight key is released after the spawn body completes", async () => {
       const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-release", name: "my-repo" }];
-      const { ctx, flushActions } = makeMockCtx({ repoHeader: "my-repo", repos });
+      const { ctx, flushActions } = makeMockCtx({ repoHeader: "my-repo", repoPath: repos[0]!.path, repos });
 
       // The default makeMockCtx executeAndRefresh runs the body to completion
       // (checkCoordinatorExists → exists:false → newAgent stubbed by the noop
@@ -667,7 +668,7 @@ describe("handleResume", () => {
 
     test("in-flight key is released even when the spawn body THROWS", async () => {
       const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-throw", name: "my-repo" }];
-      const { ctx, flushActions } = makeMockCtx({ repoHeader: "my-repo", repos });
+      const { ctx, flushActions } = makeMockCtx({ repoHeader: "my-repo", repoPath: repos[0]!.path, repos });
 
       // Force the spawn body to throw: checkCoordinatorExists → exists:false →
       // newAgent rejects because its spawn runner throws. The body's `finally`

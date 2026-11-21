@@ -1221,10 +1221,11 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dialog.text).toContain(`could not unlink ${leftover}:`);
   });
 
-  test("reset from a repo header tears down only that repo's same-named coordinator", async () => {
+  test.each([false, true])("reset from a repo header tears down only that repo's same-named coordinator (duplicate display names: %p)", async duplicateNames => {
     await setupDashboardWithAgent();
-    const first = { path: join(actionTempDir!, "first", "project"), name: "first" };
-    const second = { path: join(actionTempDir!, "second", "project"), name: "second" };
+    const nickname = duplicateNames ? "shared" : undefined;
+    const first = { path: join(actionTempDir!, "first", "project"), name: "first", nickname };
+    const second = { path: join(actionTempDir!, "second", "project"), name: "second", nickname };
     await mkdir(first.path, { recursive: true });
     await mkdir(second.path, { recursive: true });
 
@@ -1237,7 +1238,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     async function plantCoordinator(repo: typeof first, repoId: string) {
       const repoPath = await realpath(repo.path);
       const agent = makeAgent("project", repoPath);
-      agent.repoName = repo.name;
+      agent.repoName = repo.nickname ?? repo.name;
       agent.repoRegistryName = repo.name;
       Object.assign(agent.meta, {
         agentType: "repo-coordinator",
@@ -1261,9 +1262,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     dashboard.setRepos(repos);
     dashboard.setWatcher({ lastAgents: agents, refresh: () => {}, setGroupByParent: () => {}, healthReports: new Map() } as any);
     dashboard.onUpdate(agents, [
-      makeFlatRepoHeader(first.name, first.path, false, false, false),
+      makeFlatRepoHeader(a.agent.repoName, first.path, false, false, false, first.name),
       makeFlatAgent(a.agent),
-      makeFlatRepoHeader(linkedSecond.name, linkedSecond.path, false, false, false),
+      makeFlatRepoHeader(b.agent.repoName, linkedSecond.path, false, false, false, linkedSecond.name),
       makeFlatAgent(b.agent),
     ], []);
     expect(dashboard.agentTree.selectByRepoPath(linkedSecond.path)).toBe(true);

@@ -431,7 +431,7 @@ export function handleNuke(ctx: ActionCtx) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const result = await nukeAgent(agent);
-        if (result.ok) ctx.setNotice(`Nuked ${agent.id}`, "info");
+        if (result.ok) showTeardownResult(ctx, `Nuked ${agent.id}`, result.stderr);
         else ctx.setNotice(`Nuke failed: ${result.stderr || result.stdout}`, "error");
       });
     },
@@ -452,7 +452,7 @@ export function handleNukeAll(ctx: ActionCtx) {
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {
           const result = await nukeAllAgents(repo.path);
-          if (result.ok) ctx.setNotice(`Nuked all agents in ${repoDisplayName(repo)}`, "info");
+          if (result.ok) showTeardownResult(ctx, `Nuked all agents in ${repoDisplayName(repo)}`, result.stderr);
           else ctx.setNotice(`Nuke-all failed: ${result.stderr || result.stdout}`, "error");
         });
       },
@@ -477,7 +477,7 @@ export function handleNukeAll(ctx: ActionCtx) {
           ctx.closeDialog();
           ctx.executeAndRefresh(async () => {
             const result = await nukeAllAgents(repo.path);
-            if (result.ok) ctx.setNotice(`Nuked all agents in ${repoDisplayName(repo)}`, "info");
+            if (result.ok) showTeardownResult(ctx, `Nuked all agents in ${repoDisplayName(repo)}`, result.stderr);
             else ctx.setNotice(`Nuke-all failed: ${result.stderr || result.stdout}`, "error");
           });
         },

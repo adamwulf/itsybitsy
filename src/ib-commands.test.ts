@@ -16549,6 +16549,20 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
     expect(await readdir(dir)).not.toContain(".outbox.lock");
   });
 
+  test.each(["nuke", "nuke-all"])("%s returns each cleanup warning once", async command => {
+    const id = "agent-leaver";
+    await plantDeparting(id);
+    const dir = queueDirOf(id);
+    const children = ["outbox.jsonl", "claude-rate-limits.json"];
+    for (const child of children) await mkdir(join(dir, child));
+    const result = command === "nuke" ? await nukeAgent(agentOf(id)) : await nukeAllAgents(repoDir);
+    expect(result.ok).toBe(true);
+    for (const child of children) {
+      const prefix = `Warning: could not unlink ${join(dir, child)}:`;
+      expect(result.stderr.split("\n").filter(line => line.startsWith(prefix))).toHaveLength(1);
+    }
+  });
+
   test("retireAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
     const { createTeam, addMember, getTeam } = await import("./teams");
     const { readOutbox } = await import("./outbox");

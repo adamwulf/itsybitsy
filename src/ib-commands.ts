@@ -1420,7 +1420,8 @@ async function nukeAgentList(
   repoPath: string,
   agentsDir: string,
   agentIds: string[],
-): Promise<{ killed: number; failed: number; orphansKilled: number }> {
+): Promise<{ killed: number; failed: number; orphansKilled: number; warnings: string[] }> {
+  const warnings: string[] = [];
   let killed = 0;
   let failed = 0;
 
@@ -1457,7 +1458,7 @@ async function nukeAgentList(
     // Teardown — captures the pruned (team, id) pairs even on the failure path
     // (the prune ran inside archiveAgent regardless of the final dir-removal).
     try {
-      const { prunedTeams, warnings } = await teardownAgent(
+      const { prunedTeams, warnings: cleanupWarnings } = await teardownAgent(
         repoPath,
         id,
         agentDir,
@@ -1476,7 +1477,7 @@ async function nukeAgentList(
           removeSandboxProfile(agentDir);
         },
       );
-      for (const warning of warnings) logWarning(warning);
+      warnings.push(...cleanupWarnings);
       allPruned.push(...prunedTeams);
       killed++;
     } catch { /* teardown error — count as failure */
@@ -1496,7 +1497,7 @@ async function nukeAgentList(
   // system sender, to surviving teammates only (§16.5). Best-effort.
   await emitCoalescedLeaveNotice(allPruned, await listRepos());
 
-  return { killed, failed, orphansKilled };
+  return { killed, failed, orphansKilled, warnings };
 }
 
 /**
@@ -1514,7 +1515,7 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   // Get all descendants (includes the agent itself)
   const descendants = await getDescendantsRecursive(agentsDir, agent.id);
 
-  const { killed, failed, orphansKilled } = await nukeAgentList(agent.repoPath, agentsDir, descendants);
+  const { killed, failed, orphansKilled, warnings } = await nukeAgentList(agent.repoPath, agentsDir, descendants);
 
   if (failed > 0 && killed === 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `All ${failed} agent(s) failed to kill` };
@@ -1551,7 +1552,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
     }
   } catch { /* agents dir may not exist */ }
 
-  const { killed, failed, orphansKilled } = await nukeAgentList(repoPath, agentsDir, agentsToKill);
+  const { killed, failed, orphansKilled, warnings } = await nukeAgentList(repoPath, agentsDir, agentsToKill);
 
   if (failed > 0 && killed === 0 && agentsToKill.length > 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `All ${failed} agent(s) failed to kill` };

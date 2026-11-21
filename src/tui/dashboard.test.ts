@@ -1180,7 +1180,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
-  test.each([["x", "Retired"], ["m", "Merged"]])("%s shows complete, scrollable cleanup warnings at 80 columns", async (key, summary) => {
+  test.each([["x", "Retired"], ["m", "Merged"], ["!", "Nuked"]])("%s shows complete, scrollable cleanup warnings at 80 columns", async (key, summary) => {
     await setupDashboardWithAgent();
     if (key === "m") {
       await mkdir(join(actionTempDir!, ".itsybitsy", "agents", "agent-test", "repo"), { recursive: true });

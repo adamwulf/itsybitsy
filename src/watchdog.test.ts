@@ -7,7 +7,7 @@ import { saveRegistry } from "./registry";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { claudeUsageFromRecord, readClaudeUsage, recordClaudeRateLimits, type ClaudeRateLimits } from "./claude-rate-limits";
 import { agentOutboxDir, readOutbox } from "./outbox";
-import { makeAgent, makeSpawnResult } from "./test-utils";
+import { makeAgent, makeSpawnResult, waitFor } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
 import {
@@ -3329,7 +3329,7 @@ describe("runPerAgentWatchdog", () => {
     clearAllAgentsCache();
   });
 
-  test.each([undefined, "spawn-host/original-registration/review"])("sender and watchdog use the same queue (stored key %p)", async (key) => {
+  test.each([undefined, "spawn-host/original-registration/review"])("watchdog drains a newly queued send between polls (stored key %p)", async (key) => {
     const repo = join(outboxHome, "unregistered");
     const target = makeAgent({ repoPath: repo, id: "review" });
     target.meta.tmux_session = "itsybitsy-deadbeef-review";
@@ -3347,27 +3347,48 @@ describe("runPerAgentWatchdog", () => {
       tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false,
       tmux_api_terms: false, tmux_api_safeguard: false,
     });
-    expect((await sendMessage(target, "queued", { cwd: "/" })).ok).toBe(true);
     const expectedDir = join(outboxHome, "agents", key ?? "review");
-    expect((await readOutbox(expectedDir)).map((m) => m.message)).toEqual(["queued"]);
     const drainedDirs: string[] = [];
-    setPerAgentReadMeta(async () => ({ meta: target.meta }));
-    setPerAgentSleep(async () => { worktreeExists = false; });
     const tmuxCalls: string[][] = [];
+    const isTextSend = (cmd: string[]) => cmd.includes("send-keys") && cmd.includes("-l");
+    let pollPaused = false;
+    let deliveredByWatch = false;
+    const stopPolling = Promise.withResolvers<void>();
+    setPerAgentReadMeta(async () => ({ meta: target.meta }));
+    setPerAgentReadState(async () => "running");
+    setPerAgentSleep(async () => {
+      pollPaused = true;
+      await stopPolling.promise;
+    });
     setSendSpawnRunner(cmd => {
       tmuxCalls.push(cmd);
       return makeSpawnResult();
     });
     setPerAgentDrain(async (agent, dir) => {
       drainedDirs.push(dir);
+      const callsBeforeDrain = tmuxCalls.length;
       await drainOutbox(agent, dir);
-      worktreeExists = false;
+      if (tmuxCalls.slice(callsBeforeDrain).some(isTextSend)) deliveredByWatch = true;
     });
-    setPerAgentReadState(async () => "running");
-    await runPerAgentWatchdog(target.id, repo);
-    expect(drainedDirs).toEqual([expectedDir]);
-    expect(await readOutbox(expectedDir)).toEqual([]);
-    const sends = tmuxCalls.filter(cmd => cmd.includes("send-keys") && cmd.includes("-l"));
+
+    const watchdog = runPerAgentWatchdog(target.id, repo);
+    try {
+      // The first empty drain installs fs.watch. Hold the next poll so only
+      // an event from the watched directory can deliver the new message.
+      await waitFor(() => pollPaused, { message: "watchdog paused between polls" });
+      expect(await readOutbox(expectedDir)).toEqual([]);
+      expect(tmuxCalls.filter(isTextSend)).toEqual([]);
+      expect((await sendMessage(target, "queued", { cwd: "/" })).ok).toBe(true);
+      await waitFor(() => deliveredByWatch, { message: `fs.watch delivery from ${expectedDir}` });
+      expect(await readOutbox(expectedDir)).toEqual([]);
+    } finally {
+      worktreeExists = false;
+      stopPolling.resolve();
+      await watchdog;
+    }
+    expect(drainedDirs.length).toBeGreaterThanOrEqual(2);
+    expect(drainedDirs.every(dir => dir === expectedDir)).toBe(true);
+    const sends = tmuxCalls.filter(isTextSend);
     expect(sends).toHaveLength(1);
     expect(sends[0]).toContain(`=${target.meta.tmux_session}:`);
     expect(sends[0]?.at(-1)).toContain("queued");

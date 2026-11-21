@@ -1893,8 +1893,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 
   // Event-driven drain via fs.watch on the central outbox dir. Debounced so a
   // burst of appends coalesces into one drain. If fs.watch is unavailable or
-  // throws, fall back silently to per-tick draining — the test suite does not
-  // depend on fs.watch firing.
+  // throws, fall back silently to per-tick draining.
   let watcher: FSWatcher | null = null;
   let watchDebounce: ReturnType<typeof setTimeout> | null = null;
   let watchedDir: string | undefined;

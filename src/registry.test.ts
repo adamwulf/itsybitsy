@@ -125,11 +125,11 @@ describe("registry", () => {
   });
 
   test("ib add (addRepo, basename) refuses a name already registered, case-insensitively", async () => {
-    const first = join(tempDir, "a", "app");
+    const first = join(tempDir, "a", "website");
     const second = join(tempDir, "b", "App");
     await mkdir(first, { recursive: true });
     await mkdir(second, { recursive: true });
-    expect((await addRepo(first)).ok).toBe(true);
+    expect((await addRepo(first, "app")).ok).toBe(true);
     const result = await addRepo(second);
     expect(result.ok).toBe(false);
     expect(result.message).toBe(`"App" is already the name of a registered repo (${first}) — repo names must be unique; use ib add <path> <name>`);
@@ -152,13 +152,14 @@ describe("registry", () => {
     expect((await addRepo(dir, "three")).ok).toBe(true);
   });
 
-  test("duplicate names already registered are left alone", async () => {
-    await saveRegistry({ repos: [{ path: "/x/one", name: "app" }, { path: "/y/one", name: "app" }] });
-    expect((await listRepos()).length).toBe(2);
+  test("adding a different basename preserves existing duplicate names and folder basenames", async () => {
+    const existing = [{ path: "/x/one", name: "app" }, { path: "/y/one", name: "app" }];
+    await saveRegistry({ repos: existing });
+    expect(await listRepos()).toEqual(existing);
     const dir = join(tempDir, "other");
     await mkdir(dir);
     expect((await addRepo(dir)).ok).toBe(true);
-    expect((await listRepos()).map((r) => r.name)).toEqual(["app", "app", "other"]);
+    expect(await listRepos()).toEqual([...existing, { path: dir, name: "other" }]);
   });
 
   test("addRepo rejects 'coordinator' basename", async () => {
@@ -662,13 +663,12 @@ describe("registry team-name collision refusal", () => {
   });
 });
 
-// `ib add [path] [name]` through the isolated CLI: a folder whose name is
-// already registered can still be added, under a name of its own (SPEC §9.3).
 describe("ib add [path] [name] (CLI)", () => {
-  test("a taken folder name is refused with the way forward, and the name argument registers it", async () => {
+  test("a taken registry name is refused with the way forward, and the name argument registers it", async () => {
     const cli = await createCliFixture();
     try {
-      await cli.addRepo("app");
+      const first = join(cli.root, "website");
+      expect((await cli.run(["add", first, "app"])).exitCode).toBe(0);
       const second = join(cli.root, "elsewhere", "app");
       await mkdir(second, { recursive: true });
 
@@ -682,6 +682,27 @@ describe("ib add [path] [name] (CLI)", () => {
       expect(added.stdout).toContain(`Added: app-two (${second})`);
       const registry = await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).json();
       expect(registry.repos.map((r: { name: string }) => r.name)).toEqual(["app", "app-two"]);
+    } finally {
+      await cli.cleanup();
+    }
+  });
+
+  test("a folder basename already registered at another path is refused with or without a custom name", async () => {
+    const cli = await createCliFixture();
+    try {
+      const first = join(cli.root, "app");
+      const second = join(cli.root, "elsewhere", "App");
+      await mkdir(first);
+      await mkdir(second, { recursive: true });
+      expect((await cli.run(["add", first, "website"])).exitCode).toBe(0);
+
+      for (const args of [["add", second], ["add", second, "app-two"]]) {
+        const result = await cli.run(args);
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toContain(`folder name "App" is already used by registered repo "website" (${first})`);
+      }
+      const registry = await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).json();
+      expect(registry.repos).toEqual([{ path: first, name: "website" }]);
     } finally {
       await cli.cleanup();
     }

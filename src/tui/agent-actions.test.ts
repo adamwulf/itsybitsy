@@ -3571,6 +3571,27 @@ describe("handleFolderBrowser", () => {
       createRepoSpawnCtx.reset();
     }
   });
+
+  test.each(["Add", "New Repo"])("[ %s ] refuses a folder basename registered at another path", async (action) => {
+    const parent = join(fx.baseDir, "elsewhere");
+    const target = join(parent, "Repo");
+    await mkdir(parent);
+    const { ctx, dialogs, notices } = makeMockCtx({ repos: [fx.repoEntry] });
+    await handleFolderBrowser(ctx);
+    const browser = assertDialog(dialogs[0]!, "folder-browser");
+    if (action === "Add") {
+      await mkdir(target);
+      browser.onSelect(target);
+    } else {
+      browser.onNewRepo(parent);
+      assertDialog(dialogs[1]!, "input").onSubmit("Repo");
+    }
+
+    const notice = await waitForValue(() => notices[0], { message: "the registration refusal", timeoutMs: WAIT_MS });
+    expect(notice).toContain(`folder name "Repo" is already used by registered repo "${fx.repoEntry.name}" (${fx.repoDir})`);
+    expect((await loadRegistry()).repos).toEqual([fx.repoEntry]);
+    expect(existsSync(target)).toBe(action === "Add");
+  });
 });
 
 describe("handleSend — attachment staging + acceptance-gated draft", () => {

@@ -1488,6 +1488,7 @@ Each entry is an object with `path` (absolute path to the git repository root), 
 - The folder browser's `[ New Repo ]`: `choose another folder name`, since it names the repo after the folder it creates (and checks before creating it).
 
 Only new entries are checked: duplicates registered before this rule stay as they are (no migration). A nickname rename (`r` on a repo header) does not change `name`, so it re-keys no row.
+Because coordinators are named after their repo folders, a new repo must also have a folder basename distinct from every registered repo’s basename, ignoring case, even when it has a custom registry name.
 
 ### 9.3 Registry Commands
 

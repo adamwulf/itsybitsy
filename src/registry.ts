@@ -226,6 +226,13 @@ export async function checkNewRepoEntry(
     return `Already registered: ${resolvedPath}`;
   }
 
+  const folderName = basename(resolvedPath);
+  const lowerFolderName = folderName.toLowerCase();
+  const existing = registry.repos.find((r) => basename(r.path).toLowerCase() === lowerFolderName);
+  if (existing) {
+    return `Cannot register ${resolvedPath}: its folder name "${folderName}" is already used by registered repo "${existing.name}" (${existing.path}). A repo's coordinator is named after its folder, so two registered repos cannot share a folder name.`;
+  }
+
   // Repo names are unique, case-insensitively: a repo's name is the middle
   // segment of its agents' row keys in `ib watch` (`<machine>/<repo>/<agent>`,
   // SPEC §17.1). A nickname counts as a name, since it is what the tree shows.

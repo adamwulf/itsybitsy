@@ -111,10 +111,9 @@ export async function resolveAgentTarget(
   // @<repo-name> → that repo's coordinator
   // @<repo-name>/<agent-id> → agent in specific repo
   if (target.startsWith("@")) {
-    const afterAt = target.substring(1);
-    const slashIdx = afterAt.indexOf("/");
-    const repoName = slashIdx >= 0 ? afterAt.substring(0, slashIdx) : afterAt;
-    const agentId = slashIdx >= 0 ? afterAt.substring(slashIdx + 1) : null;
+    const segments = target.slice(1).split("/");
+    if (segments.length > 2 || segments.some((part) => !part)) return failure(`Agent not found: ${target}`);
+    const [repoName, agentId] = segments as [string, string?];
 
     // Shared resolver: registry id / basename (case-insensitive) or path.
     const repoResolution = resolveRepo(repoName, repos, cwd);

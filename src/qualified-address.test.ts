@@ -118,6 +118,11 @@ describe("qualified agent addresses", () => {
     expect(result).toMatchObject({ decision: "deny", reason: expect.stringContaining("command substitution") });
   });
 
+  test("agy dispatch allows a literal target on the next continued line", async () => {
+    const command = "ib retire " + "\\" + "\n  foo";
+    expect(await dispatchHook("agy", "mgr", command, worktree)).toMatchObject({ decision: "allow" });
+  });
+
   test("the owning repo of an unregistered worktree precedes registered repos and peers", async () => {
     await cli.writeRegistry({ version: 1, repos: [{ path: web, name: "Web" }] });
     await cli.addAgent(web, "foo");

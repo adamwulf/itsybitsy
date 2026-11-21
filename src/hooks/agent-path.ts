@@ -1328,9 +1328,14 @@ const IB_MANAGER_ONLY_COMMANDS = new Set([
  * flags and shell quoting around machine names containing spaces.
  */
 export function parseIbCommand(command: string): { subcommand: string; targetId: string } | null {
-  const words = tokenizeBashPaths(maskHeredocBodies(command.trim()));
-  if (!words) return null;
-  return parseManagerOperand(words);
+  const words = tokenizeIbOperands(command);
+  return words ? parseManagerOperand(words) : null;
+}
+
+/** A continuation surrounded by whitespace contributes no shell word. */
+function tokenizeIbOperands(command: string): string[] | undefined {
+  return tokenizeBashPaths(maskHeredocBodies(command))
+    ?.filter((word) => !/^(?:\\\n)+$/.test(word));
 }
 
 /** Accept only literal shell words in positions used to authorize an action. */
@@ -1636,7 +1641,7 @@ export async function checkIbCommandAccess(
   // Authorize from the original literal operands. The normalized command
   // identifies a wrapped verb, but a continuation in a trailing flag cannot
   // change a verb or target that was already complete.
-  const rawWords = tokenizeBashPaths(maskHeredocBodies(command));
+  const rawWords = tokenizeIbOperands(command);
   if (!rawWords || basename(literalWord(rawWords[0] ?? "") ?? "") !== "ib" ||
       literalWord(rawWords[1] ?? "") !== verb) return invalid;
   const args = rawWords.slice(2).map(literalWord);

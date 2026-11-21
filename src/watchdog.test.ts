@@ -960,14 +960,16 @@ describe("watchdog", () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", null);
+      spawner.repoPath += "-other";
+      a1.repoRegistryName = "Source";
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
-        () => countSendKeysWithText(spawnMock, "you spawned recently started waiting") > 0,
+        () => countSendKeysWithText(spawnMock, "@Source/a1 you spawned recently started waiting") > 0,
         "spawner notified that a1 started waiting",
       );
-      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "@Source/a1 you spawned recently started waiting")).toBeGreaterThan(0);
     });
 
     test("waiting: no notification when neither manager nor spawner is set", async () => {
@@ -1005,14 +1007,16 @@ describe("watchdog", () => {
     test("complete: spawner notified when manager is null", async () => {
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "complete", null);
+      spawner.repoPath += "-other";
+      a1.repoRegistryName = "Source";
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
-        () => countSendKeysWithText(spawnMock, "you spawned recently completed") > 0,
+        () => countSendKeysWithText(spawnMock, "@Source/a1 you spawned recently completed") > 0,
         "spawner notified that a1 completed",
       );
-      expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "@Source/a1 you spawned recently completed")).toBeGreaterThan(0);
     });
 
     test("unknown: manager wins — spawner is NOT notified", async () => {
@@ -1033,14 +1037,16 @@ describe("watchdog", () => {
     test("unknown: spawner notified when manager is null", async () => {
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "unknown", null);
+      spawner.repoPath += "-other";
+      a1.repoRegistryName = "Source";
       a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
-        () => countSendKeysWithText(spawnMock, "you spawned has an unknown state") > 0,
+        () => countSendKeysWithText(spawnMock, "@Source/a1 you spawned has an unknown state") > 0,
         "spawner notified that a1's state is unknown",
       );
-      expect(countSendKeysWithText(spawnMock, "you spawned has an unknown state")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "@Source/a1 you spawned has an unknown state")).toBeGreaterThan(0);
     });
   });
 

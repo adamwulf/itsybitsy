@@ -10,6 +10,7 @@ import * as runtimeNames from "./runtime-names";
  * Phase 15-B: complete/running/creating/compacting/stopped/rate_limited handlers.
  */
 
+import { sameRepoPath } from "./repo-identity";
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
@@ -429,9 +430,16 @@ export function clearTrackers(): void {
  * Find an agent by ID in the agents list.
  * Used to look up a manager agent for sending notifications.
  */
+function spawnerChildAddress(agent: Agent, allAgents: Agent[]): string {
+  if (sameRepoPath(agent.repoPath, agent.meta.spawned_by?.repo_path)) return agent.id;
+  // The per-agent watchdog constructs its own Agent without registry metadata.
+  const repo = agent.repoRegistryName || findAgent(allAgents, agent.id, agent.repoPath)?.repoRegistryName;
+  return repo ? `@${repo}/${agent.id}` : `${agent.id} (repo ${agent.repoPath})`;
+}
+
 function findAgent(agents: Agent[], id: string, repoPath: string | null): Agent | undefined {
   for (const agent of agents) {
-    if (agent.id === id && agent.repoPath === repoPath) return agent;
+    if (agent.id === id && sameRepoPath(agent.repoPath, repoPath)) return agent;
     // Search children recursively
     const found = findAgent(agent.children, id, repoPath);
     if (found) return found;
@@ -496,7 +504,7 @@ export async function notifySpawner(
   // already enforce mutual exclusivity by skipping notifySpawner when manager
   // is set. This guard remains so direct callers (and tests) still get the
   // same dedupe semantics as before.
-  if (spawner.agent_id === agent.meta.manager && spawner.repo_path === agent.repoPath) return false;
+  if (spawner.agent_id === agent.meta.manager && sameRepoPath(agent.repoPath, spawner.repo_path)) return false;
 
   // @system → deliver via the same direct-tmux path `ib send @system` uses.
   if (spawner.agent_id === "@system") {
@@ -512,7 +520,7 @@ export async function notifySpawner(
   // @<repo-name> → resolve to that repo's per-repo coordinator.
   if (spawner.agent_id.startsWith("@")) {
     try {
-      const repo = (await listReposFn()).find((entry) => entry.path === spawner.repo_path);
+      const repo = (await listReposFn()).find((entry) => sameRepoPath(entry.path, spawner.repo_path));
       if (!repo) return false;
       const { checkCoordinatorExists } = await import("./coordinator");
       const coordStatus = await checkCoordinatorExists(repo.path);
@@ -757,7 +765,7 @@ async function handleWaiting(
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `Agent ${agent.id} you spawned recently started waiting for input (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
+        `Agent ${spawnerChildAddress(agent, allAgents)} you spawned recently started waiting for input (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
         allAgents,
       );
     } else {
@@ -825,7 +833,7 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `Agent ${agent.id} you spawned has an unknown state - may need attention (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
+        `Agent ${spawnerChildAddress(agent, allAgents)} you spawned has an unknown state - may need attention (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
         allAgents,
       );
     } else {
@@ -930,7 +938,7 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `Agent ${agent.id} you spawned recently completed`,
+        `Agent ${spawnerChildAddress(agent, allAgents)} you spawned recently completed`,
         allAgents,
       );
     } else {

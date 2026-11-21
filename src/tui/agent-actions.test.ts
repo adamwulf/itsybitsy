@@ -24,7 +24,7 @@ import {
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
   effectiveSpawnCapability, handleAnswerQuestion, handleAcknowledgeQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
-  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam, handleManageTeamMember,
+  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageRoster, handleManageTeam, handleManageTeamMember,
   handleFolderBrowser, newRepoPrompt, newAgentFormTypeOrder,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
@@ -2952,23 +2952,61 @@ describe("handleAddAgentToTeam", () => {
     expect(assertDialog(dialogs[1]!, "multi-select").checked).toEqual([true]);
   });
 
-  test("same id in two repos: adding the twin that is not the member reports 'already in' and changes nothing", async () => {
-    // The roster holds the bare id once and cannot hold both twins, so the add
-    // entry offered to the non-member twin is a reported no-op.
+  test("team actions keep the selected twin's repo when both are used from the same cwd", async () => {
+    const web = join(fx.baseDir, "web");
     await plantTestAgent(fx.repoDir, "agent-twin");
+    await plantTestAgent(web, "agent-twin");
     await createTeam("backend", "user", 1700000000);
-    await addMember("backend", "agent-twin");
     const twinA = makeAgent({ id: "agent-twin", repoPath: fx.repoDir, repoName: "api" });
-    const twinB = makeAgent({ id: "agent-twin", repoPath: "/repos/web", repoName: "web" });
-    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: twinA, repos: [fx.repoEntry], lastAgents: [twinA, twinB] });
-    const d = await openPicker(ctx, dialogs);
-    expect(d.allItems).toEqual(["backend", "+ Create new team…"]);
-    d.onSelect(0);
-    await flushActions();
-    expect(notices).toEqual(["agent agent-twin is already in @backend"]);
-    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-twin"]);
-    // No second join was logged.
-    expect(await readTeamAuditLog("backend")).not.toContain("joined");
+    const twinB = makeAgent({ id: "agent-twin", repoPath: web, repoName: "web" });
+    const repos = [fx.repoEntry, { path: web, name: "web" }];
+    const lastAgents = [twinA, twinB];
+    const members = async () => (await readTeams()).teams["backend"]!.members;
+    const previous = process.cwd();
+    process.chdir(fx.repoDir);
+    try {
+      for (const [agent, accepted] of [[twinA, false], [twinB, true]] as const) {
+        const add = makeMockCtx({ agent, repos, lastAgents });
+        (await openPicker(add.ctx, add.dialogs)).onSelect(0);
+        await add.flushActions();
+        expect(await members()).toEqual(accepted ? ["agent-twin"] : []);
+        expect(add.notices[0]).toContain(accepted ? "Added agent-twin" : "does not identify this agent reliably");
+      }
+
+      for (const [agent, accepted] of [[twinA, false], [twinB, true]] as const) {
+        const remove = makeMockCtx({ agent, repos, lastAgents });
+        handleManageTeamMember(remove.ctx, "backend", agent);
+        assertDialog(remove.dialogs[0]!, "select").onSelect(0);
+        assertDialog(remove.dialogs[1]!, "confirm").onYes();
+        await remove.flushActions();
+        expect(await members()).toEqual(accepted ? [] : ["agent-twin"]);
+        expect(remove.notices[0]).toContain(accepted ? "Removed agent-twin" : "does not identify this agent reliably");
+      }
+
+      await addMember("backend", "agent-twin");
+      const roster = makeMockCtx({ repos, lastAgents });
+      handleManageRoster(roster.ctx, "backend");
+      await roster.flushActions();
+      const editor = assertDialog(roster.dialogs[0]!, "multi-select");
+      expect(editor.checked).toEqual([false, true]);
+      editor.onSubmit([]);
+      await roster.flushActions();
+      expect(await members()).toEqual([]);
+      expect(roster.notices[0]).toContain("-1");
+
+      const create = makeMockCtx({ agent: twinB, repos, lastAgents });
+      const picker = await openPicker(create.ctx, create.dialogs);
+      picker.onSelect(picker.allItems.length - 1);
+      assertDialog(create.dialogs[1]!, "input").onSubmit("new-team");
+      await create.flushActions();
+      const selected = assertDialog(create.dialogs[2]!, "multi-select");
+      expect(selected.checked).toEqual([false, true]);
+      selected.onSubmit([1]);
+      await create.flushActions();
+      expect((await readTeams()).teams["new-team"]!.members).toEqual(["agent-twin"]);
+    } finally {
+      process.chdir(previous);
+    }
   });
 });
 

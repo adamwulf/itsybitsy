@@ -4959,19 +4959,28 @@ async function fireRemoveLeaveNotice(
   }
 }
 
-/** Resolve a team command operand before storing its bare membership id. */
+type TeamMemberTarget = string | Pick<Agent, "id" | "repoPath">;
+
+/** Resolve CLI operands, or validate the exact agent already selected in the dashboard. */
 async function resolveFullAgentId(
-  partial: string,
+  target: TeamMemberTarget,
   repos: RepoEntry[],
 ): Promise<{ id: string } | { error: string }> {
-  const { resolveAgentTarget } = await import("./resolve-target");
-  const { agent, error } = await resolveAgentTarget(partial, repos);
-  if (!agent) return { error: error ?? `Agent not found: ${partial}` };
+  let agent: Pick<Agent, "id" | "repoPath">;
+  if (typeof target === "string") {
+    const { resolveAgentTarget } = await import("./resolve-target");
+    const resolved = await resolveAgentTarget(target, repos);
+    if (!resolved.agent) return { error: resolved.error ?? `Agent not found: ${target}` };
+    agent = resolved.agent;
+  } else {
+    agent = target;
+  }
   const { agents, errors } = await readAgentsOfRepos(repos, false);
   const rosterMember = new Map(agents.map((member) => [member.id, member])).get(agent.id);
   if (errors.length || !rosterMember || !sameRepoPath(rosterMember.repoPath, agent.repoPath) ||
       (rosterMember.storageDir && basename(rosterMember.storageDir) !== agent.id)) {
-    return { error: `Cannot store '${partial}' in the team roster: bare id '${agent.id}' does not identify this agent reliably` };
+    const label = typeof target === "string" ? target : `${target.repoPath}/${target.id}`;
+    return { error: `Cannot store '${label}' in the team roster: bare id '${agent.id}' does not identify this agent reliably` };
   }
   return { id: agent.id };
 }
@@ -5019,7 +5028,7 @@ export async function teamCreate(name: string, opts?: { createdBy?: string }): P
  */
 export async function teamAdd(
   name: string,
-  agentIdOrPartial: string,
+  target: TeamMemberTarget,
   repos: RepoEntry[],
   opts?: { suppressJoinNotice?: boolean },
 ): Promise<IbCommandResult> {
@@ -5027,7 +5036,7 @@ export async function teamAdd(
   if (!(await getTeam(n))) {
     return teamErr(`Error: team @${n} not found`);
   }
-  const resolved = await resolveFullAgentId(agentIdOrPartial, repos);
+  const resolved = await resolveFullAgentId(target, repos);
   if ("error" in resolved) return teamErr(resolved.error);
   const id = resolved.id;
 
@@ -5050,12 +5059,12 @@ export async function teamAdd(
  * resolves the agent address via the shared resolver; no-op success
  * if not a member; fires the per-agent LEAVE notice (§16.4.2) on a real removal.
  */
-export async function teamRemove(name: string, agentIdOrPartial: string, repos: RepoEntry[]): Promise<IbCommandResult> {
+export async function teamRemove(name: string, target: TeamMemberTarget, repos: RepoEntry[]): Promise<IbCommandResult> {
   const n = normalizeTeamName(name);
   if (!(await getTeam(n))) {
     return teamErr(`Error: team @${n} not found`);
   }
-  const resolved = await resolveFullAgentId(agentIdOrPartial, repos);
+  const resolved = await resolveFullAgentId(target, repos);
   if ("error" in resolved) return teamErr(resolved.error);
   const id = resolved.id;
 

@@ -1,3 +1,4 @@
+import { sameRepoPath } from "../repo-identity";
 import * as runtimeNames from "../runtime-names";
 /**
  * Agent action handlers — extracted from DashboardComponent.
@@ -770,7 +771,7 @@ function isRosterMember(team: Team, agent: Agent, live: Agent[]): boolean {
   for (const a of live) {
     if (a.id === agent.id) resolved = a;
   }
-  return !resolved || resolved.repoPath === agent.repoPath;
+  return !resolved || sameRepoPath(resolved.repoPath, agent.repoPath);
 }
 
 /**
@@ -793,7 +794,7 @@ function showTeamPicker(ctx: ActionCtx, agent: Agent, teams: Array<{ name: strin
     ...joinable.map((t) => ({ label: t.name, run: () => runAddMember(ctx, agent, t.name) })),
     ...joined.map((t) => ({
       label: `Remove from @${t.name}`,
-      run: () => confirmRemoveMember(ctx, t.name, agent.id, `${agent.repoName}/${agent.id}`),
+      run: () => confirmRemoveMember(ctx, t.name, agent, `${agent.repoName}/${agent.id}`),
     })),
     { label: "+ Create new team…", run: () => runCreateTeam(ctx, "", agent) },
   ];
@@ -817,11 +818,12 @@ function showTeamPicker(ctx: ActionCtx, agent: Agent, teams: Array<{ name: strin
  * Confirm, then remove one member from a team via `teamRemove` (the CLI path),
  * so the audit log, the channel record and the "left the team" notices match
  * `ib team remove <name> <agent-id>` exactly (§16.4.2). `label` is the
- * `<repo>/<id>` form shown to the user; `memberId` is the bare roster id.
+ * `<repo>/<id>` form shown to the user. `member` carries the selected repo when
+ * the agent is live. A stale roster entry only has its stored id.
  * Shared by the manage-team picker, the agent's team picker and the
  * team-member picker.
  */
-function confirmRemoveMember(ctx: ActionCtx, teamName: string, memberId: string, label: string) {
+function confirmRemoveMember(ctx: ActionCtx, teamName: string, member: Agent | string, label: string) {
   ctx.showDialog({
     type: "confirm",
     prompt: `Remove ${label} from @${teamName}?`,
@@ -831,7 +833,7 @@ function confirmRemoveMember(ctx: ActionCtx, teamName: string, memberId: string,
     onYes: () => {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
-        const result = await teamRemove(teamName, memberId, ctx.repos);
+        const result = await teamRemove(teamName, member, ctx.repos);
         if (result.ok) ctx.setNotice(result.stdout || `Removed ${label} from @${teamName}`, "info");
         else ctx.setNotice(result.stderr || result.stdout || `Remove failed`, "error");
       });
@@ -910,7 +912,7 @@ function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent
   }
 
   const items = liveAgents.map((a) => `${a.repoName}/${a.id} (${displayState(a.state)})`);
-  const checked = liveAgents.map((a) => preCheckAgent?.id === a.id);
+  const checked = liveAgents.map((a) => preCheckAgent?.id === a.id && sameRepoPath(a.repoPath, preCheckAgent.repoPath));
 
   ctx.showDialog({
     type: "multi-select",
@@ -947,7 +949,7 @@ function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent
         for (const i of checkedIndices) {
           const agent = liveAgents[i];
           if (!agent) continue;
-          const addResult = await teamAdd(teamName, agent.id, ctx.repos, { suppressJoinNotice: true });
+          const addResult = await teamAdd(teamName, agent, ctx.repos, { suppressJoinNotice: true });
           if (addResult.ok) addedCount++;
           else addFailures++;
         }
@@ -1032,7 +1034,7 @@ function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: nu
  */
 function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
   ctx.executeAndRefresh(async () => {
-    const result = await teamAdd(teamName, agent.id, ctx.repos);
+    const result = await teamAdd(teamName, agent, ctx.repos);
     if (result.ok) ctx.setNotice(result.stdout || `Added ${agent.id} to @${teamName}`, "info");
     else ctx.setNotice(result.stderr || result.stdout || `Add to team failed`, "error");
   });
@@ -1071,10 +1073,8 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
       ctx.setNotice("No agents to manage", "error");
       return;
     }
-    const memberSet = new Set(team.members);
-    const liveIds = new Set(liveAgents.map((a) => a.id));
     const items = liveAgents.map((a) => `${a.repoName}/${a.id} (${displayState(a.state)})`);
-    const checked = liveAgents.map((a) => memberSet.has(a.id));
+    const checked = liveAgents.map((a) => isRosterMember(team, a, liveAgents));
 
     ctx.showDialog({
       type: "multi-select",
@@ -1084,23 +1084,9 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
       selectedIndex: 0,
       onSubmit: (checkedIndices: number[]) => {
         ctx.closeDialog();
-        const nextMemberIds = new Set<string>();
-        for (const i of checkedIndices) {
-          const a = liveAgents[i];
-          if (a) nextMemberIds.add(a.id);
-        }
-        const toAdd: string[] = [];
-        const toRemove: string[] = [];
-        for (const id of nextMemberIds) {
-          if (!memberSet.has(id)) toAdd.push(id);
-        }
-        // Only remove ids the dialog actually showed — a stale id in
-        // team.members with no live Agent record cannot have been
-        // unchecked by the user; treating its absence as "remove" would
-        // conflate "row didn't exist" with "user opted out."
-        for (const id of memberSet) {
-          if (liveIds.has(id) && !nextMemberIds.has(id)) toRemove.push(id);
-        }
+        const nextChecked = new Set(checkedIndices);
+        const toAdd = liveAgents.filter((_, i) => !checked[i] && nextChecked.has(i));
+        const toRemove = liveAgents.filter((_, i) => checked[i] && !nextChecked.has(i));
         if (toAdd.length === 0 && toRemove.length === 0) {
           ctx.setNotice(`Roster unchanged for @${teamName}`, "info");
           return;
@@ -1116,15 +1102,15 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
           // instead of silently rolling up into the failure count.
           const isTeamGone = (stderr: string): boolean =>
             stderr.includes(`team @${teamName} not found`);
-          for (const id of toAdd) {
-            const r = await teamAdd(teamName, id, ctx.repos);
+          for (const agent of toAdd) {
+            const r = await teamAdd(teamName, agent, ctx.repos);
             if (r.ok) added++;
             else if (isTeamGone(r.stderr)) { teamGone = true; break; }
             else failures++;
           }
           if (!teamGone) {
-            for (const id of toRemove) {
-              const r = await teamRemove(teamName, id, ctx.repos);
+            for (const agent of toRemove) {
+              const r = await teamRemove(teamName, agent, ctx.repos);
               if (r.ok) removed++;
               else if (isTeamGone(r.stderr)) { teamGone = true; break; }
               else failures++;
@@ -1178,7 +1164,7 @@ export function handleManageTeam(ctx: ActionCtx, teamName: string) {
     const memberItems = team.members.map((id) => {
       const agent = byId.get(id);
       const label = agent ? `${agent.repoName}/${id}` : id;
-      return { memberId: id, label };
+      return { member: agent ?? id, label };
     });
     const items = [
       `Disband team @${teamName}`,
@@ -1196,7 +1182,7 @@ export function handleManageTeam(ctx: ActionCtx, teamName: string) {
           return;
         }
         const member = memberItems[index - 1]!;
-        confirmRemoveMember(ctx, teamName, member.memberId, member.label);
+        confirmRemoveMember(ctx, teamName, member.member, member.label);
       },
     });
   });
@@ -1231,7 +1217,7 @@ export function handleManageTeamMember(ctx: ActionCtx, teamName: string, agent: 
     selectedIndex: 0,
     onSelect: (index: number) => {
       ctx.closeDialog();
-      if (index === 0) confirmRemoveMember(ctx, teamName, agent.id, label);
+      if (index === 0) confirmRemoveMember(ctx, teamName, agent, label);
       else if (index === 1 && canRetire) confirmRetire(ctx, agent);
     },
   });

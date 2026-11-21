@@ -1758,7 +1758,7 @@ export async function checkManagerCommandAccess(
     if (opts.callerMeta && agent.id !== targetId) return denied(`Agent not found: ${targetId}`);
     targetRepo = agent.repoPath;
     targetId = agent.id;
-    if (callingAgentId === SYSTEM_AGENT_ID) return null;
+    if (callingAgentId === SYSTEM_AGENT_ID && subcommand !== "ack") return null;
     if (!agent.archived) meta = agent.meta as unknown as Record<string, unknown>;
   }
   if (!meta) {

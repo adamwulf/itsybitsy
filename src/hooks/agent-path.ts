@@ -1773,13 +1773,14 @@ export async function checkManagerCommandAccess(
     const { resolveAgentTarget } = await import("../resolve-target");
     // Broker requests already bind the canonical id to the requester's repo.
     const repos = opts.callerMeta ? [{ path: callerRepoRoot, name: basename(callerRepoRoot) }] : await listRepos();
-    const { agent, error } = await resolveAgentTarget(targetId, repos, opts.cwd ?? callerRepoRoot,
+    const { agent, error, incompleteVisibility } = await resolveAgentTarget(targetId, repos, opts.cwd ?? callerRepoRoot,
       subcommand === "rehire" ? "rehire" : "agent");
-    // A hidden archive could win the caller's bare-name search even when a
-    // different repo or peer is visible. Only the watchdog can decide then.
-    if (subcommand === "rehire" && !sameRepoPath(callerRepoRoot, agent?.repoPath, callingAgentId) &&
-        ((!targetId.startsWith("@") && !targetId.includes("/")) || error?.startsWith("Agent not found:")) &&
-        await archiveHiddenBySandbox(callerRepoRoot)) return null;
+    // A sandbox-hidden archive can change resolution. Rehire's watchdog
+    // resolves the original address and checks ownership against the archive.
+    if (subcommand === "rehire" && incompleteVisibility?.unreadableDirs.some((dir) => {
+      const repoRoot = dirname(dirname(dir));
+      return dir === runtimeNames.archiveDir(repoRoot) && sameRepoPath(repoRoot, callerRepoRoot, callingAgentId);
+    }) && await archiveHiddenBySandbox(callerRepoRoot)) return null;
     if (!agent) return denied(error ?? `Agent not found: ${targetId}`);
     if (opts.callerMeta && agent.id !== targetId) return denied(`Agent not found: ${targetId}`);
     targetRepo = agent.repoPath;

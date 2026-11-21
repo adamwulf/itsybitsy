@@ -12,16 +12,13 @@ import { normalizeTeamName, getTeam } from "./teams";
 /** How many unreadable directories a not-found error names before "+N more". */
 const MAX_NAMED_UNREADABLE_DIRS = 3;
 
-/**
- * The tail of an "Agent not found" error when the agents directory of a
- * searched repo could not be listed. Inside an itsybitsy sandbox, another
- * repo's `.itsybitsy/agents` is not readable (EPERM), so an agent that exists
- * there would otherwise look absent. Empty when every searched directory was
- * read; a single unreadable `meta.json` is not named.
- */
-function unreadableAgentsDirsNote(errors: AgentReadError[], searched: RepoEntry[]): string {
-  const agentsDirs = new Set(searched.flatMap((r) => [runtimeNames.agentsDir(r.path), runtimeNames.archiveDir(r.path)]));
-  const unreadable = [...new Set(errors.map((e) => e.agentDir))].filter((dir) => agentsDirs.has(dir));
+/** List failures on a repository's storage directories, excluding individual records. */
+function unreadableRepoDirs(errors: AgentReadError[], searched: RepoEntry[]): string[] {
+  const dirs = new Set(searched.flatMap((r) => [runtimeNames.agentsDir(r.path), runtimeNames.archiveDir(r.path)]));
+  return [...new Set(errors.map((e) => e.agentDir))].filter((dir) => dirs.has(dir));
+}
+
+function unreadableAgentsDirsNote(unreadable: string[]): string {
   if (unreadable.length === 0) return "";
   const named = unreadable.slice(0, MAX_NAMED_UNREADABLE_DIRS).join(", ");
   const more = unreadable.length > MAX_NAMED_UNREADABLE_DIRS ? ` +${unreadable.length - MAX_NAMED_UNREADABLE_DIRS} more` : "";
@@ -66,8 +63,17 @@ export function findOwnRepo(cwd: string, repos: RepoEntry[]): RepoEntry | undefi
     .sort((a, b) => b.root.length - a.root.length)[0]?.repo;
 }
 
-type TargetResult = ResolvedSendTarget & { error?: string };
-const failure = (error: string): TargetResult => ({ agent: null, isSystemCoordinator: false, error });
+type TargetResult = ResolvedSendTarget & {
+  error?: string;
+  incompleteVisibility?: { unreadableDirs: string[] };
+};
+
+function failure(error: string, unreadableDirs: string[] = []): TargetResult {
+  const result: TargetResult = { agent: null, isSystemCoordinator: false, error };
+  if (unreadableDirs.length) result.incompleteVisibility = { unreadableDirs };
+  return result;
+}
+
 const local = (agent: Agent): TargetResult => ({ agent, isSystemCoordinator: false });
 
 function suggestedAddress(address: string): string {
@@ -175,11 +181,8 @@ export async function resolveAgentTarget(
       const { agents, errors } = await readAgents([repo]);
       const match = resolveInRepo(agentId, matchesInRepo(agentId, agents));
       if (!match) {
-        return {
-          agent: null,
-          isSystemCoordinator: false,
-          error: `Agent not found: ${agentId} in repo ${repoName}${unreadableAgentsDirsNote(errors, [repo])}`,
-        };
+        const unreadable = unreadableRepoDirs(errors, [repo]);
+        return failure(`Agent not found: ${agentId} in repo ${repoName}${unreadableAgentsDirsNote(unreadable)}`, unreadable);
       }
       return match;
     }
@@ -218,9 +221,10 @@ export async function resolveAgentTarget(
 
   searched = includesLocal ? searched.filter((r) => !repoName || r.name.toLowerCase() === repoName) : [];
   const { agents, errors } = await readAgents(searched);
-  const note = unreadableAgentsDirsNote([...ownErrors, ...errors], ownRepo ? [...searched, ownRepo] : searched);
+  const unreadable = unreadableRepoDirs([...ownErrors, ...errors], ownRepo ? [...searched, ownRepo] : searched);
+  const note = unreadableAgentsDirsNote(unreadable);
   if (note && !repoName) {
-    return failure(`Cannot resolve '${target}'${note}; use machine/repo/agent`);
+    return failure(`Cannot resolve '${target}'${note}; use machine/repo/agent`, unreadable);
   }
   const matches: { machine: string; repo: string; agent?: Agent }[] = [];
   for (const repo of searched) {
@@ -237,7 +241,7 @@ export async function resolveAgentTarget(
     for (const repo of matchingRepos) matches.push({ machine: peer.name, repo });
   }
   if (matches.length === 0) {
-    return failure(`Agent not found: ${target}${note}`);
+    return failure(`Agent not found: ${target}${note}`, unreadable);
   }
   if (matches.length > 1) {
     if (!machine && matches.some((m) => m.agent)) {
@@ -278,7 +282,7 @@ export async function resolveTarget(
   repos: RepoEntry[],
   cwd: string = process.cwd(),
 ): Promise<ResolvedSendTarget> {
-  const { error, ...resolved } = await resolveSendTarget(target, repos, cwd);
+  const { error, incompleteVisibility: _, ...resolved } = await resolveSendTarget(target, repos, cwd);
   if (error) console.error(error);
   return resolved;
 }

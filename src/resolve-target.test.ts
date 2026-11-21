@@ -622,6 +622,7 @@ describe("Group L: unreadable agents directories in not-found errors", () => {
       agent: null,
       isSystemCoordinator: false,
       error: `Cannot resolve 'cli-email-client' (could not read ${unreadable}; a sandbox may block it); use machine/repo/agent`,
+      incompleteVisibility: { unreadableDirs: [unreadable] },
     });
     expect(errorOutput).toEqual([]);
   });

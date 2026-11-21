@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
+import { chmod, mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { basename, join } from "path";
 import type { Agent, AgentMeta } from "./agents";
@@ -14,6 +14,7 @@ import {
   routeLifecycleThroughWatchdog,
   type LifecycleServerDeps,
 } from "./lifecycle-broker";
+import { checkIbCommandAccess } from "./hooks/agent-path";
 import { setSandboxedProcessOverride } from "./sandbox-detect";
 import { processSpawnRequests, spawnRequestDir, spawnResultDir, type SpawnServerDeps } from "./spawn-broker";
 import { runPerAgentWatchdog } from "./watchdog";
@@ -217,6 +218,31 @@ describe("lifecycle broker", () => {
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(rehired).toEqual([{ agentId: CHILD_ID, opts: { repoPath: repo } }]);
       expect(await result(ID_A)).toMatchObject({ ok: true, stdout: `Rehired agent: ${CHILD_ID}` });
+    });
+
+    test.each([true, false])("a hidden archive defers machine-qualified rehire to the watchdog (owned=%s)", async (owned) => {
+      await Bun.write(join(home, ".itsybitsy", "machine-name"), "laptop");
+      await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({
+        version: 1, repos: [{ path: repo, name: "test" }],
+      }));
+      await writeArchive(CHILD_ID, { manager: owned ? MANAGER_ID : "someone-else" });
+      const worktree = join(agentDir, "repo");
+      await mkdir(worktree);
+      const archive = join(repo, ".itsybitsy", "archive");
+      const target = `laptop/${CHILD_ID}`;
+      await chmod(archive, 0o000);
+      setSandboxedProcessOverride(() => true);
+      try {
+        expect(await checkIbCommandAccess(`ib rehire ${target}`, MANAGER_ID, agentsDir, worktree)).toBeNull();
+      } finally {
+        await chmod(archive, 0o755);
+        setSandboxedProcessOverride(null);
+      }
+      const { deps, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire", target }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual(owned ? [{ agentId: CHILD_ID, opts: { repoPath: repo } }] : []);
+      expect((await result(ID_A)).ok).toBe(owned);
     });
 
     test("does not create a qualified name for the requester's unregistered repo", async () => {

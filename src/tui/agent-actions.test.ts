@@ -3228,17 +3228,20 @@ describe("handleManageTeam", () => {
   });
 
   test("confirming Remove calls teamRemove which prunes the roster + fires the leave notice", async () => {
-    // teamRemove resolves the member id via readAllAgents, so we plant real
-    // agent dirs on disk for both members. The live `lastAgents` is unrelated
-    // (it only drives the picker's label format) but we keep it consistent
-    // with the planted dirs.
+    tmuxSpawnCtx.set(noopSpawnRunner);
+    const web = join(fx.baseDir, "web");
     await plantTestAgent(fx.repoDir, "agent-aaa");
-    await plantTestAgent(fx.repoDir, "agent-bbb");
+    await plantTestAgent(web, "agent-bbb");
     await createTeam("backend", "user", 1700000000);
     await addMember("backend", "agent-aaa");
     await addMember("backend", "agent-bbb");
-    const lastAgents = [mkAgent("agent-aaa", "api"), mkAgent("agent-bbb", "web")];
-    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+    const lastAgents = [
+      makeAgent({ id: "agent-aaa", repoPath: fx.repoDir, repoName: "api" }),
+      makeAgent({ id: "agent-bbb", repoPath: web, repoName: "web" }),
+    ];
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({
+      repos: [fx.repoEntry, { path: web, name: "web" }], lastAgents,
+    });
     handleManageTeam(ctx, "backend");
     await flushActions();
     const picker = assertDialog(dialogs[0]!, "select");
@@ -3253,6 +3256,7 @@ describe("handleManageTeam", () => {
     const reg = await readTeams();
     expect(reg.teams["backend"]!.members).toEqual(["agent-aaa"]);
     expect(notices.some((n) => n.includes("Removed") && n.includes("backend"))).toBe(true);
+    expect(await readTeamAuditLog("backend")).toContain("agent agent-bbb left");
   });
 
   test("cancelling the Remove confirm leaves the roster intact", async () => {

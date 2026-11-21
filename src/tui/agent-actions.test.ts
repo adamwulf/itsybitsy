@@ -3576,7 +3576,9 @@ describe("handleFolderBrowser", () => {
     const parent = join(fx.baseDir, "elsewhere");
     const target = join(parent, "Repo");
     await mkdir(parent);
-    const { ctx, dialogs, notices } = makeMockCtx({ repos: [fx.repoEntry] });
+    const existing = { path: fx.repoDir, name: "website" };
+    await saveRegistry({ repos: [existing] });
+    const { ctx, dialogs, notices } = makeMockCtx({ repos: [existing] });
     await handleFolderBrowser(ctx);
     const browser = assertDialog(dialogs[0]!, "folder-browser");
     if (action === "Add") {
@@ -3588,9 +3590,10 @@ describe("handleFolderBrowser", () => {
     }
 
     const notice = await waitForValue(() => notices[0], { message: "the registration refusal", timeoutMs: WAIT_MS });
-    expect(notice).toContain(`folder name "Repo" is already used by registered repo "${fx.repoEntry.name}" (${fx.repoDir})`);
-    expect((await loadRegistry()).repos).toEqual([fx.repoEntry]);
+    expect(notice).toContain(`folder name "Repo" is already used by registered repo "${existing.name}" (${existing.path})`);
+    expect((await loadRegistry()).repos).toEqual([existing]);
     expect(existsSync(target)).toBe(action === "Add");
+    expect(existsSync(join(target, ".git"))).toBe(false);
   });
 });
 

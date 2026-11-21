@@ -4095,9 +4095,9 @@ describe("resumeAgent (native)", () => {
         spawnCalls.push(cmd);
         const cmdStr = cmd.join(" ");
         if (cmdStr.includes("tmux has-session")) return makeSpawnResult(1);
-        if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+        if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(0, `.git\n.git\n${coordTempDir}`);
+        if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
         if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, coordTempDir);
-        if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
         if (cmdStr.includes("capture-pane")) return makeSpawnResult(0, "Claude Code v1.0");
         return makeSpawnResult(0);
       };
@@ -6266,12 +6266,14 @@ describe("newAgent (native)", () => {
         return makeSpawnResult("", 0);
       }
 
-      // git rev-parse --git-common-dir (resolveGitRoot)
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${tempDir}`, 0);
+
+      // git rev-parse --git-common-dir
       if (cmdStr.includes("--git-common-dir")) {
         return makeSpawnResult(".git", 0);
       }
 
-      // git rev-parse --show-toplevel (resolveGitRoot)
+      // git rev-parse --show-toplevel
       if (cmdStr.includes("--show-toplevel")) {
         return makeSpawnResult(tempDir, 0);
       }
@@ -6397,9 +6399,7 @@ describe("newAgent (native)", () => {
     // Also set the lifecycle spawn runner (used by resolveGitRoot)
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(tempDir, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${tempDir}`, 0);
       return makeSpawnResult("", 0);
     });
   });
@@ -10886,9 +10886,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -10927,9 +10925,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -11869,9 +11865,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -12034,9 +12028,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -12082,9 +12074,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -14861,9 +14851,9 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
       }
       if (cmdStr.includes("worktree remove")) return makeSpawnResult(0);
       if (cmdStr.includes("branch -D")) return makeSpawnResult(0);
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(0, `.git\n.git\n${tempDir}`);
+      if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
       if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, tempDir);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
       if (cmdStr.includes("which gh")) return makeSpawnResult(1);
       if (cmdStr.includes("git") && cmd[cmd.length - 1] === "remote") return makeSpawnResult(0);
       if (cmdStr.includes("capture-pane")) return makeSpawnResult(0, "Claude Code v1.0");
@@ -14916,9 +14906,7 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, tempDir);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(0, `.git\n.git\n${tempDir}`);
       return makeSpawnResult(0);
     });
   });

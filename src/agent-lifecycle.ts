@@ -1123,31 +1123,14 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
 
 // ── resolveGitRoot ───────────────────────────────────────────────────────────
 
-/**
- * Resolve the root repository path (handles worktrees).
- * Uses git -C repoPath rev-parse --show-toplevel, with git-common-dir
- * fallback for worktree resolution.
- */
+/** Resolve the main repository root, including from inside a linked worktree. */
 export async function resolveGitRoot(repoPath: string): Promise<string | null> {
   try {
-    // Get the common git directory (shared across all worktrees)
-    const commonResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--git-common-dir"]);
-    if (commonResult.exitCode !== 0) {
-      // Fallback
-      const topResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--show-toplevel"]);
-      return topResult.exitCode === 0 ? topResult.stdout : null;
-    }
-
-    const commonDir = commonResult.stdout;
-    const gitDirResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--git-dir"]);
-
-    // If common_dir is ".git" or matches --git-dir, we're in the main repo
-    if (commonDir === ".git" || commonDir === gitDirResult.stdout) {
-      const topResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--show-toplevel"]);
-      return topResult.exitCode === 0 ? topResult.stdout : null;
-    }
-
-    // common_dir points to the shared .git directory — resolve to absolute, then go up one level
+    const result = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"]);
+    if (result.exitCode !== 0) return null;
+    const [commonDir, gitDir, topLevel] = result.stdout.split("\n");
+    if (!commonDir || !gitDir || !topLevel) return null;
+    if (commonDir === ".git" || commonDir === gitDir) return topLevel;
     return dirname(resolve(repoPath, commonDir));
   } catch {
     return null;

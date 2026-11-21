@@ -2263,9 +2263,9 @@ describe("DashboardComponent dialog and action handlers", () => {
         if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
         return makeResult("", 0);
       }
-      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeResult(`.git\n.git\n${newAgentTempDir}`, 0);
+      if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
-      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("which gh")) return makeResult("", 1);
       if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
       if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
@@ -2373,9 +2373,9 @@ describe("DashboardComponent dialog and action handlers", () => {
         if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
         return makeResult("", 0);
       }
-      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeResult(`.git\n.git\n${newAgentTempDir}`, 0);
+      if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
-      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("which gh")) return makeResult("", 1);
       if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
       if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
@@ -2455,9 +2455,9 @@ describe("DashboardComponent dialog and action handlers", () => {
           if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
           return makeResult("", 0);
         }
-        if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+        if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeResult(`.git\n.git\n${newAgentTempDir}`, 0);
+        if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeResult(".git", 0);
         if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
-        if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
         if (cmdStr.includes("which gh")) return makeResult("", 1);
         if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
         if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
@@ -2560,9 +2560,9 @@ describe("DashboardComponent dialog and action handlers", () => {
       });
       if (cmdStr.includes("is-inside-work-tree")) return makeResult("true\n", 0);
       if (cmdStr.includes("status --porcelain")) return makeResult(" M dirty-file.ts\n", 0);
-      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeResult(`.git\n.git\n${newAgentTempDir}`, 0);
+      if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
-      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("worktree add")) return makeResult("fatal: simulated failure\n", 1);
       return makeResult("", 0);
     };

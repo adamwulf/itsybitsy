@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach, beforeEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir, realpath, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
   logAgent,
@@ -626,71 +626,43 @@ describe("agent-lifecycle", () => {
   // ── resolveGitRoot ─────────────────────────────────────────────────────
 
   describe("resolveGitRoot", () => {
-    test("resolves a valid git repo root", async () => {
-      // Use the current repo as test target
-      const calls: string[][] = [];
-      spawnCtx.set((cmd: string[]) => {
-        calls.push(cmd);
-        const cmdStr = cmd.join(" ");
-        let stdout = "";
-        if (cmdStr.includes("--git-common-dir")) {
-          stdout = ".git";
-        } else if (cmdStr.includes("--show-toplevel")) {
-          stdout = "/repos/myproject";
-        } else if (cmdStr.includes("--git-dir")) {
-          stdout = ".git";
-        }
-        return {
-          stdout: new Response(stdout).body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
-      });
+    test("one git process resolves roots, subdirectories, linked worktrees, and symlinks", async () => {
+      const dir = await realpath(await makeTempDir());
+      try {
+        const root = join(dir, "project");
+        const subdir = join(root, "src");
+        const worktree = join(dir, "linked");
+        const alias = join(dir, "alias");
+        await mkdir(subdir, { recursive: true });
+        await Bun.$`git init --quiet`.cwd(root);
+        await Bun.$`git -c user.name=Test -c user.email=test@example.com -c commit.gpgSign=false commit --quiet --allow-empty -m Initial`.cwd(root);
+        await Bun.$`git worktree add --quiet --detach ${worktree}`.cwd(root);
+        await symlink(worktree, alias);
 
-      const result = await resolveGitRoot("/repos/myproject");
-      expect(result).toBe("/repos/myproject");
+        const run = spawnCtx.runner;
+        const calls: string[][] = [];
+        spawnCtx.set((cmd, opts) => {
+          calls.push(cmd);
+          return run(cmd, opts);
+        });
+        for (const path of [root, subdir, worktree, alias]) {
+          calls.length = 0;
+          expect(await resolveGitRoot(path)).toBe(root);
+          expect(calls).toEqual([["git", "-C", path, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"]]);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
 
-    test("resolves worktree with relative commonDir to absolute root", async () => {
-      spawnCtx.set((cmd: string[]) => {
-        const cmdStr = cmd.join(" ");
-        let stdout = "";
-        if (cmdStr.includes("--git-common-dir")) {
-          // Worktree: commonDir is relative path back to main repo's .git
-          stdout = "../../.git";
-        } else if (cmdStr.includes("--git-dir")) {
-          stdout = "/repos/myproject/.git/worktrees/my-worktree";
-        }
-        return {
-          stdout: new Response(stdout).body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
-      });
-
-      // repoPath is the worktree; "../../.git" resolves relative to it
-      const result = await resolveGitRoot("/repos/myproject/worktrees/my-worktree");
-      expect(result).toBe("/repos/myproject");
-    });
-
-    test("resolves worktree with absolute commonDir", async () => {
-      spawnCtx.set((cmd: string[]) => {
-        const cmdStr = cmd.join(" ");
-        let stdout = "";
-        if (cmdStr.includes("--git-common-dir")) {
-          stdout = "/repos/myproject/.git";
-        } else if (cmdStr.includes("--git-dir")) {
-          stdout = "/repos/myproject/.git/worktrees/my-worktree";
-        }
-        return {
-          stdout: new Response(stdout).body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
-      });
-
-      const result = await resolveGitRoot("/some/worktree/path");
-      expect(result).toBe("/repos/myproject");
+    test.each(["../../.git", "/repos/myproject/.git"])("resolves worktree common dir %s", async (commonDir) => {
+      const worktree = "/repos/myproject/worktrees/my-worktree";
+      spawnCtx.set(() => ({
+        stdout: new Response([commonDir, "/repos/myproject/.git/worktrees/my-worktree", worktree].join("\n")).body,
+        stderr: null,
+        exited: Promise.resolve(0),
+      }));
+      expect(await resolveGitRoot(worktree)).toBe("/repos/myproject");
     });
 
     test("returns null for non-git directory", async () => {

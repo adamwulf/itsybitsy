@@ -672,7 +672,7 @@ const BASH_PATH_SYNTAX_DENY_REASON =
  * Only shell whitespace separates words; Unicode spaces are filename content.
  * Callers mask heredoc bodies before tokenizing because those bodies are data.
  */
-function tokenizeBashPaths(command: string): string[] | null {
+function tokenizeBashPaths(command: string, skipLeadingContinuations = false): string[] | null {
   const tokens: string[] = [];
   let token = "";
   let quote: "'" | '"' | null = null;
@@ -681,6 +681,9 @@ function tokenizeBashPaths(command: string): string[] | null {
     if (c === "\\" && quote !== "'") {
       const next = command[++i];
       if (next === undefined) return null;
+      // Outside quotes, Bash removes a continuation without starting a word.
+      // Keep continuations inside a word visible to literal-operand checks.
+      if (skipLeadingContinuations && !token && quote === null && next === "\n") continue;
       token += c + next;
     } else if (quote !== null) {
       token += c;
@@ -1332,10 +1335,8 @@ export function parseIbCommand(command: string): { subcommand: string; targetId:
   return words ? parseManagerOperand(words) : null;
 }
 
-/** A continuation surrounded by whitespace contributes no shell word. */
-function tokenizeIbOperands(command: string): string[] | undefined {
-  return tokenizeBashPaths(maskHeredocBodies(command))
-    ?.filter((word) => !/^(?:\\\n)+$/.test(word));
+function tokenizeIbOperands(command: string): string[] | null {
+  return tokenizeBashPaths(maskHeredocBodies(command), true);
 }
 
 /** Accept only literal shell words in positions used to authorize an action. */

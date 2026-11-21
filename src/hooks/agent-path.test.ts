@@ -1599,6 +1599,18 @@ describe("checkPathAccess — .agents/ boundary-file write protection", () => {
 // ── parseIbCommand ───────────────────────────────────────────────────────────
 
 describe("parseIbCommand", () => {
+  test("joins an empty-word continuation and keeps continuations inside operands invalid", () => {
+    const continuation = "\\" + "\n";
+    for (const indent of ["", "  "]) {
+      expect(parseIbCommand("ib retire " + continuation + indent + "foo")).toEqual({
+        subcommand: "retire", targetId: "foo",
+      });
+    }
+    expect(parseIbCommand("i" + continuation + "b retire foo")).toBeNull();
+    expect(parseIbCommand("ib re" + continuation + "tire foo")).toBeNull();
+    expect(parseIbCommand("ib retire fo" + continuation + "o")).toBeNull();
+  });
+
   test("parses ib retire <id>", () => {
     const result = parseIbCommand("ib retire agent-abc12345");
     expect(result).toEqual({ subcommand: "retire", targetId: "agent-abc12345" });

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
 import type { Agent, AgentMeta } from "./agents";
 import { resetUserHome, setUserHome } from "./home";
 import { hasLiveWatchdog } from "./ib-commands";
@@ -217,6 +217,16 @@ describe("lifecycle broker", () => {
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(rehired).toEqual([{ agentId: CHILD_ID, opts: { repoPath: repo } }]);
       expect(await result(ID_A)).toMatchObject({ ok: true, stdout: `Rehired agent: ${CHILD_ID}` });
+    });
+
+    test("does not create a qualified name for the requester's unregistered repo", async () => {
+      await writeArchive(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, rehired } = server();
+      const name = basename(repo);
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire", target: `@${name}/${CHILD_ID}` }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`no repo or team named: ${name}`);
     });
 
     test("an archive that belonged to another manager is refused", async () => {

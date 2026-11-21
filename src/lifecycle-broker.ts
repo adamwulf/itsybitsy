@@ -335,7 +335,6 @@ export async function handleLifecycleRequest(
   if (op === "rehire") {
     const { resolveAgentTarget } = await import("./resolve-target");
     const repos = await listRepos();
-    if (!repos.some((r) => sameRepoPath(r.path, ctx.repoPath))) repos.push({ path: ctx.repoPath, name: basename(ctx.repoPath) });
     const { agent, error } = await resolveAgentTarget(target, repos, join(ctx.agentDir, "repo"), "rehire");
     if (!agent) return brokerFail(error ?? `Agent not found: ${target}`);
     if (!sameRepoPath(agent.repoPath, ctx.repoPath)) return brokerFail("A sandboxed agent can rehire only agents in its own repo");

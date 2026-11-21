@@ -2167,9 +2167,8 @@ describe("retire → rehire recovery", () => {
     });
   }
 
-  // The manager's CENTRAL outbox queue dir (getCoordinatorHome()/agents/<machine>/<repo>/<agent>).
-  // With HOME=tempDir/home and no setCoordinatorHome override, this resolves under
-  // tempDir/home/.itsybitsy.
+  // The keyless manager fixture uses the flat queue at
+  // tempDir/home/.itsybitsy/agents/<agent>.
   async function managerQueueDir(managerId: string): Promise<string> {
     const { agentOutboxDir } = await import("./outbox");
     return agentOutboxDir({ id: managerId, meta: null });

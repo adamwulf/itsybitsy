@@ -4,9 +4,9 @@
  * Claude Code sends `rate_limits` to its statusLine command (Pro/Max accounts,
  * after the session's first API response). Every Claude session ib launches
  * runs `ib hooks statusline <id>` (src/hooks/statusline.ts), which records the
- * two windows here in `~/.itsybitsy/agents/<machine>/<repo>/<id>/claude-rate-limits.json`. The
- * `ib watch` status bar and the watchdog's rate-limit recovery combine the
- * records of all agents (see `combineWindows`).
+ * two windows in `claude-rate-limits.json` in the agent's queue directory
+ * (SPEC §4.1.1). The `ib watch` status bar and the watchdog's rate-limit
+ * recovery combine the records of all agents (see `combineWindows`).
  *
  * ib used to call the Anthropic usage API with the OAuth token from the macOS
  * keychain (`security find-generic-password`). On recent macOS a keychain read

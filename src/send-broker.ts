@@ -2,9 +2,8 @@ import * as runtimeNames from "./runtime-names";
 /**
  * Watchdog send broker — how a SANDBOXED agent sends to an agent in another repo.
  *
- * For an agent target, writing the message is not the problem: agent outboxes
- * live in `~/.itsybitsy/agents/<machine>/<repo>/<id>/` (outbox.ts), which the sandbox grants.
- * Finding the target is. `ib send` resolves it by listing the
+ * The sandbox grants writes to the recipient's queue directory (SPEC §4.1.1).
+ * `ib send` resolves the recipient by listing the
  * `.itsybitsy/agents` directory of every registered repo. A worktree agent's
  * profile grants that directory for its own repo only, so every other repo
  * fails with EPERM and the target is reported as not found. `@system` is new

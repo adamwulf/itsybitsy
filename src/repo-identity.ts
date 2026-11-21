@@ -1,6 +1,6 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { agentDir, agentsDir } from "./runtime-names";
+import { agentDir, agentDirSuffix, agentsDir } from "./runtime-names";
 
 /** A sandbox may grant access to agents/ while denying realpath of its repo root. */
 export function canonicalRepoPath(path: string, id?: string): string {
@@ -9,7 +9,7 @@ export function canonicalRepoPath(path: string, id?: string): string {
   const accessible = id ? agentDir(path, id) : dir;
   try {
     const actual = realpathSync.native(accessible);
-    const suffix = id ? `/.itsybitsy/agents/${id}` : "/.itsybitsy/agents";
+    const suffix = id ? agentDirSuffix(id) : agentsDir("/");
     if (actual.endsWith(suffix) && !lstatSync(dir).isSymbolicLink() &&
         !lstatSync(dirname(dir)).isSymbolicLink() && (!id || !lstatSync(accessible).isSymbolicLink())) {
       return actual.slice(0, -suffix.length) || "/";

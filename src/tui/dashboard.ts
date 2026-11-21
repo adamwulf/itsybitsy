@@ -46,7 +46,7 @@ import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
-import { wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
@@ -681,6 +681,15 @@ class DialogOverlayComponent implements Component {
           return truncateToWidth(`${prefix}${item}${suffix}`, innerWidth, "");
         });
         return { title: `${dialog.prompt}`, contentLines: [headerLine, queryLine, ...itemLines] };
+      }
+      case "cleanup-warnings": {
+        const rows = dialog.text.split("\n").flatMap(line => wrapSingleLine(line, innerWidth));
+        const height = Math.max(1, (process.stdout.rows || 24) - 4);
+        dialog.offset = Math.min(dialog.offset, Math.max(0, rows.length - height));
+        const content = rows.slice(dialog.offset, dialog.offset + height);
+        const hint = rows.length > height ? "↑/↓ scroll · Esc close" : "Esc close";
+        content.push(`${DIM}${truncateToWidth(hint, innerWidth, "")}${RESET}`);
+        return { title: "Cleanup warnings", contentLines: content };
       }
       case "help": {
         const lines = dialog.lines.map((line) => truncateToWidth(line, innerWidth, ""));

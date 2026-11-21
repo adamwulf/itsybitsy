@@ -329,6 +329,11 @@ export function handleRetire(ctx: ActionCtx) {
   confirmRetire(ctx, agent);
 }
 
+function showTeardownResult(ctx: ActionCtx, summary: string, warnings: string) {
+  ctx.setNotice(summary, "info");
+  if (warnings) ctx.showDialog({ type: "cleanup-warnings", text: `${summary}\n\n${warnings}`, offset: 0 });
+}
+
 /**
  * The retire flow for one agent: a confirm dialog, then `retireAgent`. Shared
  * by `x` on an agent (`handleRetire`) and the "Retire" row of the team-member
@@ -345,7 +350,7 @@ function confirmRetire(ctx: ActionCtx, agent: Agent) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const result = await retireAgent(agent);
-        if (result.ok) ctx.setNotice([`Retired ${agent.id}`, result.stderr].filter(Boolean).join("\n"), "info");
+        if (result.ok) showTeardownResult(ctx, `Retired ${agent.id}`, result.stderr);
         else ctx.setNotice(`Retire failed: ${result.stderr || result.stdout}`, "error");
       });
     },
@@ -1315,7 +1320,7 @@ export function handleMerge(ctx: ActionCtx) {
             const notice = keep
               ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
               : `Merged ${agent.id}`;
-            ctx.setNotice([notice, result.stderr].filter(Boolean).join("\n"), "info");
+            showTeardownResult(ctx, notice, result.stderr);
           } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
         });
       },

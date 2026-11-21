@@ -1180,6 +1180,48 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
+  test.each([["x", "Retired"], ["m", "Merged"]])("%s shows complete, scrollable cleanup warnings at 80 columns", async (key, summary) => {
+    await setupDashboardWithAgent();
+    if (key === "m") {
+      await mkdir(join(actionTempDir!, ".itsybitsy", "agents", "agent-test", "repo"), { recursive: true });
+    }
+    const dir = join(configTempDir, "coord-home", "agents", "studio", "~abcdef01", "agent-test");
+    const paths = ["outbox.jsonl", "claude-rate-limits.json"].map(name => join(dir, name));
+    for (const path of paths) await mkdir(path, { recursive: true });
+
+    dashboard.handleInput(key);
+    await dashboard.flushPendingActions();
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    await dashboard.flushPendingActions();
+    const dialog = assertDialog(dashboard.dialog, "cleanup-warnings");
+
+    const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+    Object.defineProperty(process.stdout, "rows", { value: 10, configurable: true });
+    try {
+      const render = () => ((dashboard as any).dialogOverlay.render(80) as string[])
+        .slice(1, -2).map(row => stripAnsi(row).slice(3, -1).trimEnd());
+      const rows = render();
+      expect(rows[0]).toContain(summary);
+      expect(paths.some(path => !rows.join("").includes(`could not unlink ${path}:`))).toBe(true);
+      for (;;) {
+        const offset = dialog.offset;
+        dashboard.handleInput("j");
+        const viewport = render();
+        if (dialog.offset === offset) break;
+        rows.push(viewport.at(-1)!);
+      }
+      expect(dialog.offset).toBeGreaterThan(0);
+      const text = rows.join("");
+      for (const path of paths) expect(text).toContain(`could not unlink ${path}:`);
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+    } finally {
+      if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+      else Reflect.deleteProperty(process.stdout, "rows");
+    }
+  });
+
   test("retire confirm dialog: Enter on default Cancel dismisses", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("x");

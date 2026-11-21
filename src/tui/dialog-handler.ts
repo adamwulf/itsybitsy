@@ -84,6 +84,7 @@ export type DialogState =
       onCancel?: () => void;
     } & DialogCommon)
   | ({ type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void } & DialogCommon)
+  | ({ type: "cleanup-warnings"; text: string; offset: number } & DialogCommon)
   | ({ type: "help"; lines: string[] } & DialogCommon)
   | ({
       type: "textarea";
@@ -239,6 +240,14 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // the draft) or closes the dialog on success, so the success close always lands
   // on THIS dialog, never a later one.
   if ((dialog.type === "input" || dialog.type === "textarea") && dialog.inFlight) {
+    return true;
+  }
+
+  if (dialog.type === "cleanup-warnings") {
+    if (data === "j" || matchesKey(data, Key.down)) dialog.offset++;
+    else if (data === "k" || matchesKey(data, Key.up)) dialog.offset = Math.max(0, dialog.offset - 1);
+    else if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) ctx.closeDialog();
+    ctx.tui?.requestRender();
     return true;
   }
 

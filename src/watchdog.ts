@@ -1419,6 +1419,22 @@ export function resetPerAgentSleep(): void {
   sleepFn = (ms) => Bun.sleep(ms);
 }
 
+type OutboxWatch = (
+  dir: string,
+  listener: (event: string, filename: string | null) => void,
+) => Pick<FSWatcher, "close">;
+
+let watchOutboxFn: OutboxWatch = watch;
+
+/** Override the outbox directory watcher for testing. */
+export function setPerAgentOutboxWatch(fn: OutboxWatch): void {
+  watchOutboxFn = fn;
+}
+
+export function resetPerAgentOutboxWatch(): void {
+  watchOutboxFn = watch;
+}
+
 /** Injectable sleep for global watchdog testing */
 let watchdogSleepFn: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms);
 
@@ -1894,7 +1910,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   // Event-driven drain via fs.watch on the central outbox dir. Debounced so a
   // burst of appends coalesces into one drain. If fs.watch is unavailable or
   // throws, fall back silently to per-tick draining.
-  let watcher: FSWatcher | null = null;
+  let watcher: ReturnType<OutboxWatch> | null = null;
   let watchDebounce: ReturnType<typeof setTimeout> | null = null;
   let watchedDir: string | undefined;
   function watchQueue(dir: string): void {
@@ -1903,7 +1919,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     watchedDir = dir;
     try {
       mkdirSync(dir, { recursive: true });
-      watcher = watch(dir, (_event, filename) => {
+      watcher = watchOutboxFn(dir, (_event, filename) => {
         if (filename && filename !== OUTBOX_FILENAME) return;
         if (watchDebounce) clearTimeout(watchDebounce);
         watchDebounce = setTimeout(() => { void drainNow(); }, OUTBOX_WATCH_DEBOUNCE_MS);

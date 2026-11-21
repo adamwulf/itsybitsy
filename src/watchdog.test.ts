@@ -6,7 +6,7 @@ import { setUserHome, resetUserHome } from "./home";
 import { saveRegistry } from "./registry";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { claudeUsageFromRecord, readClaudeUsage, recordClaudeRateLimits, type ClaudeRateLimits } from "./claude-rate-limits";
-import { agentOutboxDir, readOutbox } from "./outbox";
+import { agentOutboxDir, OUTBOX_FILENAME, readOutbox } from "./outbox";
 import { makeAgent, makeSpawnResult, waitFor } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -50,6 +50,8 @@ import {
   resetPerAgentReadMeta,
   setPerAgentSleep,
   resetPerAgentSleep,
+  setPerAgentOutboxWatch,
+  resetPerAgentOutboxWatch,
   setPerAgentReadState,
   resetPerAgentReadState,
   setPerAgentDrain,
@@ -2238,6 +2240,8 @@ describe("watchdog", () => {
         expect(nudges()[0]).toContain(`Usage has refreshed ${expectedText}`);
       });
 
+      const usageRecordDir = (id: string) => agentOutboxDir({ id, meta: null });
+
       test("a manual weekly reset nudges once a newer record reports the drop", async () => {
         // Real records under the test home. Idle agents keep the reading from
         // before the user reset the weekly limit (same resets_at); a newer
@@ -2246,19 +2250,19 @@ describe("watchdog", () => {
         const recordIds = ["rl-idle-a", "rl-idle-b", "rl-fresh"];
         setWatchdogFetchUsage(() => readClaudeUsage(new Date(now)));
         try {
-          await recordClaudeRateLimits("rl-idle-a", { seven_day: live(96) }, now - 1_200_000);
-          await recordClaudeRateLimits("rl-idle-b", { seven_day: live(100) }, now - 600_000);
+          await recordClaudeRateLimits(usageRecordDir("rl-idle-a"), { seven_day: live(96) }, now - 1_200_000);
+          await recordClaudeRateLimits(usageRecordDir("rl-idle-b"), { seven_day: live(100) }, now - 600_000);
           await tick([agent("a1", "rate_limited")]);
           expect(nudges()).toEqual([]);
 
           now += 5_000;
-          await recordClaudeRateLimits("rl-fresh", { seven_day: live(20) }, now);
+          await recordClaudeRateLimits(usageRecordDir("rl-fresh"), { seven_day: live(20) }, now);
           await tick([agent("a1", "rate_limited")]);
 
           expect(nudges().length).toBe(1);
           expect(nudges()[0]).toContain("Usage has refreshed (weekly 20%)");
         } finally {
-          for (const id of recordIds) rmSync(agentOutboxDir(id), { recursive: true, force: true });
+          for (const id of recordIds) rmSync(usageRecordDir(id), { recursive: true, force: true });
         }
       });
 
@@ -2274,17 +2278,17 @@ describe("watchdog", () => {
         const recordIds = ["rl-earlier", "rl-later"];
         setWatchdogFetchUsage(() => readClaudeUsage(new Date(now)));
         try {
-          await recordClaudeRateLimits("rl-earlier", windows(60), now - 600_000);
+          await recordClaudeRateLimits(usageRecordDir("rl-earlier"), windows(60), now - 600_000);
           await tick([agent("a1", "rate_limited")]);
           expect(nudges()).toEqual([]);
 
           now += 5_000;
-          await recordClaudeRateLimits("rl-later", windows(59), now);
+          await recordClaudeRateLimits(usageRecordDir("rl-later"), windows(59), now);
           await tick([agent("a1", "rate_limited")]);
 
           expect(nudges()).toEqual([]);
         } finally {
-          for (const id of recordIds) rmSync(agentOutboxDir(id), { recursive: true, force: true });
+          for (const id of recordIds) rmSync(usageRecordDir(id), { recursive: true, force: true });
         }
       });
 
@@ -3325,6 +3329,7 @@ describe("runPerAgentWatchdog", () => {
     resetWatchdogSpawnRunner();
     resetPerAgentReadState();
     resetPerAgentDrain();
+    resetPerAgentOutboxWatch();
     resetPerAgentSpawnBroker();
     clearAllAgentsCache();
   });
@@ -3342,13 +3347,15 @@ describe("runPerAgentWatchdog", () => {
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify(target.meta));
     // Neither the flat queue nor the stored key requires a repo identity read.
     await Bun.write(join(repo, ".itsybitsy", "repo-id"), "unreadable to sender");
-    await writeAgentTransient(agentDir, {
-      watchdog_pid: process.pid, updated_at_ms: Date.now(), has_background_tasks: false,
-      tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false,
-      tmux_api_terms: false, tmux_api_safeguard: false,
-    });
+    // The first tick writes a heartbeat that the sender checks against wall time.
+    currentTime = Date.now();
     const expectedDir = join(outboxHome, "agents", key ?? "review");
     const drainedDirs: string[] = [];
+    const watchers: Array<{ dir: string; notify: (event: string, filename: string | null) => void }> = [];
+    setPerAgentOutboxWatch((dir, notify) => {
+      watchers.push({ dir, notify });
+      return { close: () => {} };
+    });
     const tmuxCalls: string[][] = [];
     const isTextSend = (cmd: string[]) => cmd.includes("send-keys") && cmd.includes("-l");
     let pollPaused = false;
@@ -3373,14 +3380,22 @@ describe("runPerAgentWatchdog", () => {
 
     const watchdog = runPerAgentWatchdog(target.id, repo);
     try {
-      // The first empty drain installs fs.watch. Hold the next poll so only
-      // an event from the watched directory can deliver the new message.
+      // The first empty drain registers the watcher. Hold the next poll
+      // and fire the registered callback independently of OS events.
       await waitFor(() => pollPaused, { message: "watchdog paused between polls" });
+      expect(watchers.map(({ dir }) => dir)).toEqual([expectedDir]);
       expect(await readOutbox(expectedDir)).toEqual([]);
-      expect(tmuxCalls.filter(isTextSend)).toEqual([]);
       expect((await sendMessage(target, "queued", { cwd: "/" })).ok).toBe(true);
-      await waitFor(() => deliveredByWatch, { message: `fs.watch delivery from ${expectedDir}` });
+      expect((await readOutbox(expectedDir)).map(message => message.message)).toEqual(["queued"]);
+      expect(tmuxCalls.filter(isTextSend)).toEqual([]);
+
+      watchers[0]!.notify("rename", OUTBOX_FILENAME);
+      await waitFor(() => deliveredByWatch, { message: `watch callback delivery from ${expectedDir}` });
       expect(await readOutbox(expectedDir)).toEqual([]);
+      const sends = tmuxCalls.filter(isTextSend);
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain(`=${target.meta.tmux_session}:`);
+      expect(sends[0]?.at(-1)).toContain("queued");
     } finally {
       worktreeExists = false;
       stopPolling.resolve();
@@ -3388,10 +3403,6 @@ describe("runPerAgentWatchdog", () => {
     }
     expect(drainedDirs.length).toBeGreaterThanOrEqual(2);
     expect(drainedDirs.every(dir => dir === expectedDir)).toBe(true);
-    const sends = tmuxCalls.filter(isTextSend);
-    expect(sends).toHaveLength(1);
-    expect(sends[0]).toContain(`=${target.meta.tmux_session}:`);
-    expect(sends[0]?.at(-1)).toContain("queued");
   });
 
   describe("rate-limit recovery from real pane text", () => {

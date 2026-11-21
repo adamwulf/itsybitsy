@@ -153,7 +153,13 @@ commands were explicitly left on bare ids "for now". SPEC §17.1 recorded
 this: "CLI commands (`ib send`, …) and `teams.json` keep bare ids". That
 decision now extends to queues and addressing.
 
-**The message queue key.**
+**The message queue key (superseded by [SPEC §4.1.1](../../SPEC.md#411-per-agent-outbox-queue-serialized-delivery)).**
+A stored `meta.queue_key` stays fixed, including when the repo is registered
+later. Agents without a stored key keep using the flat
+`~/.itsybitsy/agents/<agent>/` folder, which same-ID legacy agents share
+across repos.
+
+Original proposal:
 - A queue lives at `~/.itsybitsy/agents/<machine>/<repo>/<agent>/`:
   - `machine` is this machine's name;
   - `repo` is the registered repo name;

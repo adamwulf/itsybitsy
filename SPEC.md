@@ -1373,31 +1373,13 @@ When running from a worktree, the root repository is found via:
 
 Both bash and TS resolve relative `common_dir` paths to absolute before taking the parent directory. Bash uses `cd "$root_path" && pwd`; TS uses `resolve(repoPath, commonDir)` then `dirname()`. This ensures a correct absolute path regardless of worktree layout or relative `--git-common-dir` output.
 
-### 8.7 Reassign Command
+### 8.7 Dashboard Reassign
 
-`ib reassign <agent-id> <new-parent-id>` or `ib reassign <agent-id> --none`
+Press `r` on an agent in `ib watch` and choose a parent from the same repo or select **(No parent)** to make the agent top-level. The picker passes the selected Agent and the chosen parent's literal ID, or `null`, to `reassignAgent`.
 
-Reassigns an agent to a different parent manager (or makes it a root manager with `--none`).
+The picker excludes the agent itself, its descendants, workers, and archived agents. Before writing the change, `reassignAgent` checks the records in the selected agent's repo. It rejects missing records, self-assignment, cycles, an ineligible parent, and selecting the current parent again.
 
-**Validation:**
-
-1. Resolve both the agent and new parent by exact ID or nickname under §12.3.1.
-2. Agent must exist
-3. Cannot reassign an agent to itself
-4. New parent must exist (unless `--none`)
-5. New parent cannot be a leaf agent (`canSpawnChildren: false`)
-6. New parent cannot be a descendant of the agent (circular dependency check)
-7. No-op if agent already has the requested parent
-
-**On success:**
-
-1. Update `meta.json` — set `manager` to the new parent ID (or `null` for `--none`)
-2. Log the change to the agent's `agent.log`
-3. Notify the old parent: `"[watchdog for <id>]: Agent reassigned to manager '<new>'"`
-4. Notify the new parent: `"[watchdog for <id>]: Agent reassigned to you (was under <old>)"`
-5. Notify the agent itself: `"[watchdog]: You've been reassigned from <old> to <new>"`
-
-Notifications are sent via `ib send` (bash) / `sendMessage` (TS) and suppressed if the target agent doesn't exist or isn't running.
+On success it updates `meta.manager`, logs the change, and sends best-effort notices to the agent and its old and new parents in the same repo.
 
 ### 8.8 Post-Create-Agent Hook
 
@@ -1901,7 +1883,7 @@ Per-repo coordinators are stored in `.itsybitsy/agents/` like regular agents, bu
 
 **Retiring/Archiving**: Per-repo coordinators follow the standard retire/archive flow (§1.4, §1.7). `ib retire <repo-basename>` retires only the coordinator itself (standard §1.4 behavior). To recursively tear down a coordinator and all its children, use `ib nuke <repo-basename>` (§1.8). The `manager: "<repo-basename>"` field in children's meta.json links them to the coordinator for the nuke traversal.
 
-**Expanded same-repo authority**: Per-repo coordinators may run `ib retire`, `ib rehire`, and `ib reassign` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking that the caller's own meta.json has `agentType: "repo-coordinator"` before falling back to the standard manager/spawner check. The other manager-relationship operations (`merge`, `resume`, `pause`) still require the standard manager/spawner relationship. `nuke` is **not** available to coordinators (or any agent) at all — it is a user-only command (§1.8). Cross-repo `retire`/`rehire`/`reassign` is not permitted through this coordinator bypass. Coordinators cannot retire, rehire, or reassign other coordinators via the bypass.
+**Expanded same-repo authority**: Per-repo coordinators may run `ib retire` and `ib rehire` on ANY non-coordinator agent within their own repo, regardless of the target's `manager` field. This is enforced in `checkIbCommandAccess` (src/hooks/agent-path.ts) by checking that the caller's own meta.json has `agentType: "repo-coordinator"` before falling back to the standard manager/spawner check. The other manager-relationship operations (`merge`, `resume`, `pause`) still require the standard manager/spawner relationship. `nuke` is **not** available to coordinators (or any agent) at all — it is a user-only command (§1.8). Cross-repo `retire`/`rehire` is not permitted through this coordinator bypass. Coordinators cannot retire or rehire other coordinators via the bypass.
 
 **Resuming**: Standard resume flow (§1.6). Per-repo coordinators can be paused and resumed like any agent.
 

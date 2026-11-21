@@ -5074,7 +5074,7 @@ export async function teamRemove(name: string, target: TeamMemberTarget, repos: 
   }
   const resolved = await resolveFullAgentId(target, repos);
   if ("error" in resolved) return teamErr(resolved.error);
-  return teamRemoveStoredMember(n, resolved.id, repos);
+  return teamRemoveStoredMember(name, resolved.id, repos);
 }
 
 /** Remove an exact roster entry, including one whose agent is no longer visible. */

@@ -1471,8 +1471,8 @@ the compiled `ib` inside a real agent profile.
 an agent in another repo: both `ib send cli-email-client ...` and
 `ib send @iris/cli-email-client ...` printed `Agent not found`, although the
 agent existed. For an agent target, writing the message was not the problem:
-agent outboxes are in `~/.itsybitsy/agents/<machine>/<repo>/<agent>/` (§4C.1), which every agent
-can write. Finding the target was. (`@system` is different; see "New reach"
+agent outboxes are under `~/.itsybitsy/agents/` (SPEC §4.1.1), which every
+agent can write (§4C.1). Finding the target was. (`@system` is different; see "New reach"
 below.) `resolveTarget` calls `readAllAgents`, which lists the
 `.itsybitsy/agents` directory of every registered repo. A worktree agent's
 profile grants `REPOAGENTS` of its own repo only, so the other repos fail with

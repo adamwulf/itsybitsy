@@ -247,14 +247,14 @@ describe("recordClaudeRateLimits / readClaudeUsage", () => {
   test("combines flat legacy usage with qualified agent usage", async () => {
     // A legacy agent ID can also be a machine prefix for newer agents.
     await recordClaudeRateLimits(join(home, "agents", "studio"), {
-      five_hour: { resets_at: NOW_S + 3600, used_percentage: 65 },
+      five_hour: { resets_at: NOW_S + 3600, used_percentage: 20 },
     }, NOW_MS);
     await recordClaudeRateLimits(recordDir("agent-new"), {
-      five_hour: { resets_at: NOW_S + 3600, used_percentage: 20 },
+      five_hour: { resets_at: NOW_S + 3600, used_percentage: 65 },
       seven_day: { resets_at: NOW_S + 86400, used_percentage: 70 },
-    }, NOW_MS);
+    }, NOW_MS - 60_000);
     const { data } = await readClaudeUsage(new Date(NOW_MS));
-    expect(data?.sessionPct).toBe(65);
+    expect(data?.sessionPct).toBe(20);
     expect(data?.weeklyPct).toBe(70);
   });
 

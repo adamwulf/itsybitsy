@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, spyOn } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir, realpath, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentFileWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
@@ -1219,6 +1219,70 @@ describe("DashboardComponent dialog and action handlers", () => {
     const dialog = assertDialog(dashboard.dialog, "cleanup-warnings");
     expect(dialog.text).toContain("Reset failed during respawn");
     expect(dialog.text).toContain(`could not unlink ${leftover}:`);
+  });
+
+  test("reset from a repo header tears down only that repo's same-named coordinator", async () => {
+    await setupDashboardWithAgent();
+    const first = { path: join(actionTempDir!, "first", "project"), name: "first" };
+    const second = { path: join(actionTempDir!, "second", "project"), name: "second" };
+    await mkdir(first.path, { recursive: true });
+    await mkdir(second.path, { recursive: true });
+
+    // The registry path may have a different spelling from the watched path.
+    const linkedParent = join(actionTempDir!, "linked");
+    await mkdir(linkedParent);
+    const linkedSecond = { ...second, path: join(linkedParent, "project") };
+    await symlink(second.path, linkedSecond.path);
+
+    async function plantCoordinator(repo: typeof first, repoId: string) {
+      const repoPath = await realpath(repo.path);
+      const agent = makeAgent("project", repoPath);
+      agent.repoName = repo.name;
+      agent.repoRegistryName = repo.name;
+      Object.assign(agent.meta, {
+        agentType: "repo-coordinator",
+        prompt: "Coordinate work in this repository.",
+        worktree: false,
+        sandbox: { enabled: false, rawAllow: [], domains: [] },
+        tmux_session: `itsybitsy-${repoId}-project`,
+        queue_key: `studio/${repo.name}/project`,
+      });
+      const metaPath = join(repoPath, ".itsybitsy", "agents", agent.id, "meta.json");
+      await Bun.write(join(repoPath, ".itsybitsy", "repo-id"), repoId);
+      await Bun.write(metaPath, JSON.stringify(agent.meta));
+      return { agent, metaPath };
+    }
+
+    const a = await plantCoordinator(first, "a1b2c3d4");
+    const b = await plantCoordinator(second, "e5f6a7b8");
+    const agents = [a.agent, b.agent];
+    const repos = [first, linkedSecond];
+    await Bun.write(join(configTempDir, ".itsybitsy", "repos.json"), JSON.stringify({ repos }));
+    dashboard.setRepos(repos);
+    dashboard.setWatcher({ lastAgents: agents, refresh: () => {}, setGroupByParent: () => {}, healthReports: new Map() } as any);
+    dashboard.onUpdate(agents, [
+      makeFlatRepoHeader(first.name, first.path, false, false, false),
+      makeFlatAgent(a.agent),
+      makeFlatRepoHeader(linkedSecond.name, linkedSecond.path, false, false, false),
+      makeFlatAgent(b.agent),
+    ], []);
+    expect(dashboard.agentTree.selectByRepoPath(linkedSecond.path)).toBe(true);
+    dashboard.syncSelectedAgent();
+
+    setNewAgentSpawnRunner(() => makeSpawnResult(1)); // Stop the reset at respawn.
+    setNewAgentCallerMetaReader(() => null);
+    try {
+      dashboard.handleInput("R");
+      await dashboard.flushPendingActions();
+    } finally {
+      resetNewAgentCallerMetaReader();
+    }
+    expect(dashboard.notice).toContain("Reset failed during respawn");
+    expect(await Bun.file(a.metaPath).json()).toEqual(a.agent.meta);
+    const archive = join(b.agent.repoPath, ".itsybitsy", "archive");
+    const entries = await readdir(archive);
+    expect(entries).toHaveLength(1);
+    expect(await Bun.file(join(archive, entries[0]!, "meta.json")).json()).toEqual(b.agent.meta);
   });
 
   test("cleanup warnings wait for a send draft opened while teardown runs", async () => {

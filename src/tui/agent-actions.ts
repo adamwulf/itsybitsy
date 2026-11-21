@@ -11,6 +11,7 @@ import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
+import { canonicalizeSandboxPath } from "../sandbox";
 import { createRepo } from "../create-repo";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
@@ -532,8 +533,9 @@ export function handleResume(ctx: ActionCtx) {
           // and routes to the reset path. The durable op-guard inside
           // resumeAgent() (kind `restarting`) refuses a concurrent reset and
           // surfaces "Agent is currently restarting…" as the failure stderr.
+          const repoPath = canonicalizeSandboxPath(repo.path);
           const agent = (ctx.watcher?.lastAgents ?? [])
-            .find(a => a.id === coordStatus.agentId);
+            .find(a => a.id === coordStatus.agentId && canonicalizeSandboxPath(a.repoPath) === repoPath);
           if (agent) {
             const result = await resumeAgent(agent);
             showCoordinatorResetResult(ctx, agent, result);

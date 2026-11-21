@@ -1328,11 +1328,27 @@ const IB_MANAGER_ONLY_COMMANDS = new Set([
  * flags and shell quoting around machine names containing spaces.
  */
 export function parseIbCommand(command: string): { subcommand: string; targetId: string } | null {
-  const parts = tokenizeBashPaths(command.trim())?.map((word) => splitShellWord(word).join(""));
-  if (!parts || parts[0] !== "ib" || !parts[1]) return null;
-  const subcommand = parts[1];
-  const targetId = subcommand === "merge" ? parts.slice(2).find((p) => !p.startsWith("-")) : parts[2];
-  return targetId === undefined ? null : { subcommand, targetId };
+  const words = tokenizeBashPaths(maskHeredocBodies(command.trim()));
+  if (!words) return null;
+  return parseManagerOperand(words);
+}
+
+/** Accept only literal shell words in positions used to authorize an action. */
+function literalWord(raw: string): string | undefined {
+  if (!/^(?:[\w@./:+%-]|\\[^\r\n]|'[^']*'|"(?:[^"\\$`]|\\["\\$`])*")+$/.test(raw)) return undefined;
+  return splitShellWord(raw).join("");
+}
+
+function parseManagerOperand(words: string[]): { subcommand: string; targetId: string } | null {
+  if (basename(literalWord(words[0] ?? "") ?? "") !== "ib") return null;
+  const subcommand = literalWord(words[1] ?? "");
+  if (!subcommand) return null;
+  for (const raw of words.slice(2)) {
+    const targetId = literalWord(raw);
+    if (!targetId) return null;
+    if (subcommand !== "merge" || !targetId.startsWith("-")) return { subcommand, targetId };
+  }
+  return null;
 }
 
 /**
@@ -1515,7 +1531,7 @@ export async function checkIbCommandAccess(
   // Shell line continuations are removed before execution. Normalize them
   // before authorization so a continued `ib sandbox seal ...` cannot evade
   // the internal-command guard.
-  const normalizedCommand = command.replace(/\\\r?\n/g, " ");
+  const normalizedCommand = command.replace(/\\\r?\n/g, "");
 
   // Seal is an internal tmux-server operation.  It must never be reachable
   // from an agent's Bash(ib:*) allowance: the command writes the protected
@@ -1610,9 +1626,19 @@ export async function checkIbCommandAccess(
     }
   }
 
-  const parsed = parseIbCommand(normalizedCommand);
-  if (!parsed) return null;
-  if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
+  const words = tokenizeBashPaths(maskHeredocBodies(normalizedCommand));
+  if (!words) return { decision: "deny", reason: "Access denied: cannot parse the ib command" };
+  if (basename(literalWord(words[0] ?? "") ?? "") !== "ib" || words.length === 1) return null;
+  const verb = literalWord(words[1]!);
+  const invalid = { decision: "deny", reason: "Access denied: ib requires a literal command and agent target" } as const;
+  if (!verb) return invalid;
+  if (!IB_MANAGER_ONLY_COMMANDS.has(verb)) return null;
+  if (/\\\r?\n/.test(maskHeredocBodies(command))) return invalid;
+  const args = words.slice(2).map(literalWord);
+  if (args.every((arg) => arg !== undefined) && args.some((arg) => arg === "--help" || arg === "-h")) return null;
+  if (verb === "ack" && !args.length) return null;
+  const parsed = parseManagerOperand(words);
+  if (!parsed) return invalid;
   return checkManagerCommandAccess(parsed.subcommand, parsed.targetId, callingAgentId, agentsDir, { cwd });
 }
 

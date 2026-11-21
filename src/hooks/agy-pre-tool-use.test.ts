@@ -698,6 +698,18 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
     expect(parsed.reason).toContain("manager or spawner");
   });
 
+  test("manager ownership and literal operands are enforced by run_command dispatch", async () => {
+    async function dispatch(CommandLine: string) {
+      return run(JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine, Cwd: join(agentDir, "repo") } } }));
+    }
+    await Bun.write(join(agentDir, "..", "other", "meta.json"), JSON.stringify({ id: "other", manager: "another" }));
+    expect((await dispatch("ib retire other <<'NOTE'\ntext with an unmatched ' quote\nNOTE")).reason).toContain("manager or spawner");
+    for (const command of ["ib retire", "ib re\\\ntire other", "ib retire oth\\\ner", "ib $verb other", "ib retire $target"]) {
+      expect((await dispatch(command)).decision).toBe("deny");
+    }
+    expect((await dispatch("ib retire --help")).decision).toBe("allow");
+  });
+
   test("run_command 'ib peer id' is denied — ib peer is user-only (checkIbCommandAccess parity)", async () => {
     const parsed = await run(JSON.stringify({
       toolCall: { name: "run_command", args: { CommandLine: "ib peer id", Cwd: join(agentDir, "repo") } },

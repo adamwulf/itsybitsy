@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, open, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx, resetProcessStartEpochSecondsCache } from "../agents";
@@ -7,6 +7,7 @@ import { resetUserHome, setUserHome } from "../home";
 import { peerDir, peerEndpointLockFile, peersFile } from "../runtime-names";
 import { makeAgent, waitFor } from "../test-utils";
 import { acquireEndpointLock, releaseEndpointLock } from "./endpoint-lock";
+import { readConnectedPeers } from "./remote-agents";
 import { loadOrCreateIdentity } from "./identity";
 import { IrohError, irohAddonLoaderCtx } from "./iroh";
 import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, PairProtocolError, decodePairMessage, encodePairMessage } from "./pairing";
@@ -549,10 +550,10 @@ const REMOTE_AGENTS: RemoteAgent[] = [
 ];
 
 describe("PeerService at boot", () => {
-  test("the owning watch replaces remote-agents.json on visible changes only", async () => {
+  test("the owning watch renews the lease each poll and replaces the snapshot only on visible changes", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
-    const { writeRemoteAgents } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }));
-    const { service, endpoint, clock } = makeService({ writeRemoteAgents });
+    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }));
+    const { service, endpoint, clock } = makeService({ writeRemoteAgents, renewLease });
     answerDials(endpoint, [{ ...REMOTE_AGENTS[0]!, repoName: "display only" }]);
     await service.bootIfPaired();
     const file = join(peerDir(), "remote-agents.json");
@@ -564,9 +565,19 @@ describe("PeerService at boot", () => {
       const original = await open(file);
       try {
         const inode = (await original.stat()).ino;
+        expect(await readConnectedPeers()).toEqual(first);
+        starts.set(process.pid, ME_START + 1);
+        expect(await readConnectedPeers()).toEqual([]);
+        starts.delete(process.pid); // ps is unavailable to the reader.
+        await utimes(peerEndpointLockFile(), new Date(0), new Date(0));
+        expect(await readConnectedPeers()).toEqual([]);
+        starts.set(process.pid, ME_START); // watch uses its real process start.
         clock.advance(5000);
         await waitFor(() => service.view().links[0]?.lastOkAt === clock.now(), { message: "identical snapshot" });
         expect((await stat(file)).ino).toBe(inode);
+        starts.delete(process.pid);
+        expect(await readConnectedPeers()).toEqual(first);
+        starts.set(process.pid, ME_START);
         expect(JSON.parse(await readFile(file, "utf8"))).toEqual(first);
         await service.shutdown();
         expect((await stat(file)).ino).not.toBe(inode);

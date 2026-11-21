@@ -2688,6 +2688,23 @@ describe("retire → rehire recovery", () => {
     expect((await readOutbox(queue)).map(message => message.message)).toEqual(["for the next resume"]);
   });
 
+  test("rehire reports an occupied archived queue and preserves its messages", async () => {
+    const id = "agent-return";
+    const queueKey = `studio/registered/${id}`;
+    await plantRehirableArchive(id, { queueKey });
+    const queue = join(tempDir, "home", ".itsybitsy", "agents", queueKey);
+    const { enqueueOutbox, readOutbox } = await import("./outbox");
+    const message = await enqueueOutbox(queue, { message: "already queued", fromAgent: "", raw: false });
+    setRehireSpawnRunner(successRunner());
+
+    const result = await rehireAgent(id);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(`Archived queue key '${queueKey}' is already reserved at ${queue}`);
+    expect(result.stderr).toContain("Check for a live owner with 'ib list' before moving aside a stale directory and retrying");
+    expect(await readOutbox(queue)).toEqual([message]);
+    expect(existsSync(join(tempDir, ".itsybitsy", "agents", id, "meta.json"))).toBe(false);
+  });
+
   test("a failed reconstruction releases the queue it reserved", async () => {
     const id = "agent-return";
     const queueKey = `studio/registered/${id}`;

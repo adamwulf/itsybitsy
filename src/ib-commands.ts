@@ -893,10 +893,19 @@ export async function rehireAgent(
 
     // The restored agent can receive messages as soon as its meta is visible.
     // Reserve the stored key before publishing it, including when resume fails.
-    if (archived.meta.queue_key !== undefined) {
+    const queueKey = archived.meta.queue_key;
+    if (queueKey !== undefined) {
       const queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: archived.meta });
       await mkdir(dirname(queueDir), { recursive: true });
-      await mkdir(queueDir);
+      try {
+        await mkdir(queueDir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        throw new Error(
+          `Archived queue key '${queueKey}' is already reserved at ${queueDir}. ` +
+          "Check for a live owner with 'ib list' before moving aside a stale directory and retrying.",
+        );
+      }
       reservedQueue = queueDir;
     }
 

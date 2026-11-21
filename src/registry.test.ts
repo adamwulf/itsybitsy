@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes } from "./registry";
 import { join } from "path";
 import { chmod, mkdtemp, open, stat, rm, mkdir, symlink } from "fs/promises";
@@ -175,19 +175,36 @@ describe("registry", () => {
     const existing = { path: join(tempDir, "offline", "app"), name: "website" };
     await saveRegistry({ repos: [existing] });
     const signals: (number | string | undefined)[] = [];
-    lifecycleSpawnCtx.set((cmd) => ({
-      stdout: null,
-      stderr: null,
-      exited: cmd[2] === existing.path ? new Promise<number>(() => {}) : Promise.resolve(128),
-      kill: (signal) => { signals.push(signal); },
-    }));
+    const cancelled: string[] = [];
+    const started = Promise.withResolvers<void>();
+    const exit = Promise.withResolvers<number>();
+    const deadline = new AbortController();
+    const timer = spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    lifecycleSpawnCtx.set((cmd) => {
+      if (cmd[2] !== existing.path) return { stdout: null, stderr: null, exited: Promise.resolve(128) };
+      started.resolve();
+      return {
+        stdout: new ReadableStream({ cancel() { cancelled.push("stdout"); } }),
+        stderr: new ReadableStream({ cancel() { cancelled.push("stderr"); } }),
+        exited: exit.promise,
+        kill: (signal) => { signals.push(signal); },
+      };
+    });
     try {
-      const result = await addRepo(join(tempDir, "App"), "mobile");
+      const registration = addRepo(join(tempDir, "App"), "mobile");
+      await started.promise;
+      expect(timer.mock.calls).toEqual([[2_000], [2_000]]);
+      deadline.abort();
+      const result = await registration;
       expect(signals).toEqual(["SIGKILL"]);
+      expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
+      expect(Bun.peek(exit.promise)).toBe(exit.promise);
       expect(result.ok).toBe(false);
       expect(result.message).toContain(`folder name "App" is already used by registered repo "website" (${existing.path})`);
       expect(await listRepos()).toEqual([existing]);
     } finally {
+      exit.resolve(137);
+      timer.mockRestore();
       lifecycleSpawnCtx.reset();
     }
   });

@@ -447,6 +447,17 @@ describe("watchdog", () => {
       expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(0);
     });
 
+    test("a running child of a same-id manager in another repo leaves the waiter eligible", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const waiter = agent("a1", "waiting", "mgr");
+      const foreign = agent("child", "running", "a1");
+      foreign.repoPath += "-other";
+      foreign.meta.state = "running";
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) await tick([mgr, waiter, foreign]);
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently started waiting")).toBe(1);
+    });
+
     test("only waiting children → notification fires after threshold", async () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const mgr = agent("mgr", "running");

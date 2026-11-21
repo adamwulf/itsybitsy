@@ -722,7 +722,7 @@ async function handleWaiting(
   // empty. A future maintainer must not replace this with an agent.children
   // walk or the CLI watchdog path will silently break.
   const allAgents = await getAllAgents();
-  if (anyChildActive(agent.id, allAgents)) return;
+  if (anyChildActive(agent, allAgents)) return;
 
   // Acknowledged by the manager: no reminders for this waiting episode.
   if (await ackSuppresses(agent, tracker, "waiting")) return;

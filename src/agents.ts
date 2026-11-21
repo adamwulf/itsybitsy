@@ -4,6 +4,7 @@ import * as runtimeNames from "./runtime-names";
  * Also reads user-questions.json for pending questions.
  */
 
+import { sameRepoPath } from "./repo-identity";
 import { join, dirname, basename } from "path";
 import { readdir, link, rename, stat, unlink, open } from "fs/promises";
 import { randomUUID } from "crypto";
@@ -1638,9 +1639,9 @@ export function isDeadPane(tmuxOutput: string): boolean {
  *
  * Used for notification suppression in both the stop hook and the watchdog.
  */
-export function anyChildActive(parentId: string, allAgents: Agent[]): boolean {
+export function anyChildActive(parent: Pick<Agent, "id" | "repoPath">, allAgents: Agent[]): boolean {
   return allAgents.some((a) =>
-    a.meta.manager === parentId &&
+    a.meta.manager === parent.id && sameRepoPath(a.repoPath, parent.repoPath) &&
     !a.archived &&
     (a.meta.state === "running" || isRecentlyCreated(a.meta.created_epoch))
   );

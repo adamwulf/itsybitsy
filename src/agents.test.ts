@@ -2975,7 +2975,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(true);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(true);
   });
 
   test("returns true for recently created child (creating)", () => {
@@ -2984,7 +2984,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "p1", state: "waiting", created_epoch: recent } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(true);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(true);
   });
 
   test("returns false for child with meta.state === waiting (not recently created)", () => {
@@ -2992,7 +2992,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "p1", state: "waiting", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(false);
   });
 
   test("returns false for child with meta.state === complete", () => {
@@ -3000,7 +3000,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "p1", state: "complete", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(false);
   });
 
   test("skips archived children even when state === running", () => {
@@ -3009,7 +3009,7 @@ describe("anyChildActive", () => {
       archived: true,
       meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(false);
   });
 
   test("skips children whose manager field does not match", () => {
@@ -3017,7 +3017,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "other-parent", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(false);
   });
 
   test("returns true when at least one of many children is active", () => {
@@ -3029,11 +3029,11 @@ describe("anyChildActive", () => {
       id: "c2",
       meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [waitingChild, runningChild])).toBe(true);
+    expect(anyChildActive({ id: "p1", repoPath: runningChild.repoPath }, [waitingChild, runningChild])).toBe(true);
   });
 
   test("returns false when allAgents is empty", () => {
-    expect(anyChildActive("p1", [])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: "/repo" }, [])).toBe(false);
   });
 });
 

@@ -4969,7 +4969,8 @@ async function resolveFullAgentId(
   if (!agent) return { error: error ?? `Agent not found: ${partial}` };
   const { agents, errors } = await readAgentsOfRepos(repos, false);
   const rosterMember = new Map(agents.map((member) => [member.id, member])).get(agent.id);
-  if (errors.length || !rosterMember || !sameRepoPath(rosterMember.repoPath, agent.repoPath)) {
+  if (errors.length || !rosterMember || !sameRepoPath(rosterMember.repoPath, agent.repoPath) ||
+      (rosterMember.storageDir && basename(rosterMember.storageDir) !== agent.id)) {
     return { error: `Cannot store '${partial}' in the team roster: bare id '${agent.id}' does not identify this agent reliably` };
   }
   return { id: agent.id };

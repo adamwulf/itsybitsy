@@ -103,11 +103,11 @@ export async function resolveAgentTarget(
     return [...byId.values()];
   }
 
-  function resolveInRepo(name: string, matches: Agent[]): TargetResult | undefined {
+  function resolveInRepo(name: string, matches: Agent[], registered = true): TargetResult | undefined {
     if (!matches.length) return undefined;
     const first = matches[0]!;
     if (matches.length === 1) return local(first);
-    const forms = matches.map(({ id }) => suggestedAddress(`@${first.repoRegistryName}/${id}`)).sort();
+    const forms = matches.map(({ id }) => suggestedAddress(registered ? `@${first.repoRegistryName}/${id}` : id)).sort();
     return failure(`'${name}' matches several retired agent ids; use ${forms.join(" or ")}`);
   }
 
@@ -206,7 +206,7 @@ export async function resolveAgentTarget(
   let ownErrors: AgentReadError[] = [];
   if (ownRepo) {
     const { agents, errors } = await readAgents([ownRepo]);
-    const match = resolveInRepo(name, matchesInRepo(name, agents));
+    const match = resolveInRepo(name, matchesInRepo(name, agents), repos.includes(ownRepo));
     if (match) return match;
     ownErrors = errors;
     searched = repos.filter((r) => r !== ownRepo);

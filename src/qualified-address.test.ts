@@ -162,6 +162,22 @@ describe("qualified agent addresses", () => {
     }
   });
 
+  test("rehire suggestions from an unregistered worktree round-trip as bare immutable ids", async () => {
+    await cli.writeRegistry({ version: 1, repos: [{ path: web, name: "Web" }] });
+    for (const id of ["first-id", "second-id"]) {
+      await Bun.write(join(app, ".itsybitsy", "archive", `20261121-120000-${id}`, "meta.json"),
+        JSON.stringify({ id, nickname: "former" }));
+    }
+    const run = (target: string) => cli.run(["rehire", target], { cwd: worktree, actions: { rehireAgent: "record" } });
+    const ambiguous = await run("former");
+    expect(ambiguous.exitCode).toBe(1);
+    const suggestions = ambiguous.stderr.trim().split("; use ")[1]?.split(" or ");
+    expect(suggestions).toEqual(["first-id", "second-id"]);
+    for (const id of suggestions!) {
+      expect((await run(id)).actions[0]?.args).toEqual([id, { repoPath: app }]);
+    }
+  });
+
   test("targeted ack requires the child's manager even for the system coordinator", async () => {
     const system = join(cli.home, ".itsybitsy");
     expect((await checkIbCommandAccess("ib ack @App/foo", "@system", join(system, "agents"), system))?.decision).toBe("deny");

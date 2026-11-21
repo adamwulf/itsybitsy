@@ -1074,19 +1074,19 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
       return;
     }
     const items = liveAgents.map((a) => `${a.repoName}/${a.id} (${displayState(a.state)})`);
-    const checked = liveAgents.map((a) => isRosterMember(team, a, liveAgents));
+    const initialChecked = liveAgents.map((a) => isRosterMember(team, a, liveAgents));
 
     ctx.showDialog({
       type: "multi-select",
       prompt: `Manage roster: @${teamName}`,
       items,
-      checked,
+      checked: [...initialChecked],
       selectedIndex: 0,
       onSubmit: (checkedIndices: number[]) => {
         ctx.closeDialog();
         const nextChecked = new Set(checkedIndices);
-        const toAdd = liveAgents.filter((_, i) => !checked[i] && nextChecked.has(i));
-        const toRemove = liveAgents.filter((_, i) => checked[i] && !nextChecked.has(i));
+        const toAdd = liveAgents.filter((_, i) => !initialChecked[i] && nextChecked.has(i));
+        const toRemove = liveAgents.filter((_, i) => initialChecked[i] && !nextChecked.has(i));
         if (toAdd.length === 0 && toRemove.length === 0) {
           ctx.setNotice(`Roster unchanged for @${teamName}`, "info");
           return;

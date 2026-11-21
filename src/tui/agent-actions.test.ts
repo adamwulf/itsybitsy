@@ -2984,16 +2984,20 @@ describe("handleAddAgentToTeam", () => {
         expect(remove.notices[0]).toContain(accepted ? "Removed agent-twin" : "does not identify this agent reliably");
       }
 
-      await addMember("backend", "agent-twin");
-      const roster = makeMockCtx({ repos, lastAgents });
-      handleManageRoster(roster.ctx, "backend");
-      await roster.flushActions();
-      const editor = assertDialog(roster.dialogs[0]!, "multi-select");
-      expect(editor.checked).toEqual([false, true]);
-      editor.onSubmit([]);
-      await roster.flushActions();
-      expect(await members()).toEqual([]);
-      expect(roster.notices[0]).toContain("-1");
+      for (const added of [true, false]) {
+        const roster = makeMockCtx({ repos, lastAgents });
+        handleManageRoster(roster.ctx, "backend");
+        await roster.flushActions();
+        const editor = assertDialog(roster.dialogs[0]!, "multi-select");
+        expect(editor.checked).toEqual([false, !added]);
+        const dialogCtx: DialogCtx = { _dialog: editor, repos, tui: null, closeDialog: () => {} };
+        handleDialogInput(dialogCtx, "j");
+        handleDialogInput(dialogCtx, " ");
+        handleDialogInput(dialogCtx, "\r");
+        await roster.flushActions();
+        expect(await members()).toEqual(added ? ["agent-twin"] : []);
+        expect(roster.notices[0]).toContain(added ? "+1" : "-1");
+      }
 
       const create = makeMockCtx({ agent: twinB, repos, lastAgents });
       const picker = await openPicker(create.ctx, create.dialogs);

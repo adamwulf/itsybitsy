@@ -958,7 +958,7 @@ describe("sendMessage outbox integration", () => {
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = await agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
+    queueDir = agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
@@ -1129,7 +1129,7 @@ describe("sendMessage send-time attachment staging", () => {
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = await agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
+    queueDir = agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
@@ -1446,7 +1446,7 @@ describe("teamSend send-time attachment staging", () => {
   let repoDir: string;
 
   function queueDirOf(id: string): string {
-    return join(homeDir, "agents", "test-machine", basename(repoDir), id);
+    return join(homeDir, "agents", id);
   }
   function reposArg() {
     return [{ path: repoDir, name: basename(repoDir) }];
@@ -2172,7 +2172,7 @@ describe("retire → rehire recovery", () => {
   // tempDir/home/.itsybitsy.
   async function managerQueueDir(managerId: string): Promise<string> {
     const { agentOutboxDir } = await import("./outbox");
-    return agentOutboxDir({ repoPath: tempDir, id: managerId, meta: { tmux_session: `itsybitsy-1a2b3c4d-${managerId}` } });
+    return agentOutboxDir({ id: managerId, meta: null });
   }
 
   // Spawn runner matching the existing no-worktree success test: tmux
@@ -16543,12 +16543,12 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
   let repoDir: string;
   let spawnCalls: string[][];
 
-  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<machine>/<repo>/<agent>/
+  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<agent>/
   // under our test setCoordinatorHome(homeDir)). The per-worktree agent dir
   // still hosts meta.json / meta.transient.json / agent.log — only the message
   // queue lives here.
   function queueDirOf(id: string): string {
-    return join(homeDir, "agents", "test-machine", basename(repoDir), id);
+    return join(homeDir, "agents", id);
   }
 
   // Plant a survivor agent so readAllAgents surfaces it and any notice to it
@@ -16947,12 +16947,12 @@ describe("teamAdd suppressJoinNotice opt", () => {
   let repoDir: string;
   let repoEntry: import("./registry").RepoEntry;
 
-  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<machine>/<repo>/<agent>/
+  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<agent>/
   // under our test setCoordinatorHome(homeDir)). The per-worktree agent dir
   // still hosts meta.json / meta.transient.json / agent.log — only the message
   // queue lives here.
   function queueDirOf(id: string): string {
-    return join(homeDir, "agents", "test-machine", basename(repoDir), id);
+    return join(homeDir, "agents", id);
   }
 
   // Plant a real agent so readAllAgents surfaces it. The transient with a

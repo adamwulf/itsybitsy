@@ -78,7 +78,7 @@ export async function hookStatusline(
           const worktreeAt = (projectDir + "/").lastIndexOf(`${agentDirSuffix(agentId)}/repo/`);
           const repo = worktreeAt < 0 ? projectDir : projectDir.slice(0, worktreeAt);
           const { meta } = await readAgentMeta(agentDir(repo, agentId));
-          if (meta) await recordClaudeRateLimits(await agentOutboxDir({ repoPath: repo, id: agentId, meta }), windows, now);
+          if (meta) await recordClaudeRateLimits(agentOutboxDir({ id: agentId, meta }), windows, now);
         }
       } catch (err) {
         console.error(`Cannot record statusline usage: ${err instanceof Error ? err.message : err}`);

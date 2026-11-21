@@ -1882,7 +1882,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     await runSessionExclusive(agentId, async () => {
       drainQueued = false; // allow new triggers to queue once we're delivering
       try {
-        const dir = await agentOutboxDir(drainAgent);
+        const dir = agentOutboxDir(drainAgent);
         watchQueue(dir);
         await perAgentDrainFn(drainAgent, dir);
       } catch (error) {

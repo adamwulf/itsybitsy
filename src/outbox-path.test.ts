@@ -1,6 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdir, readdir, rm } from "fs/promises";
 import { join } from "path";
+import { existsSync } from "fs";
 import { agentOutboxDir, readOutbox, deleteAgentOutbox } from "./outbox";
 import { deleteClaudeRateLimits, CLAUDE_RATE_LIMITS_FILE } from "./claude-rate-limits";
 import { archiveAgent, prepareAgentRetirement } from "./agent-lifecycle";
@@ -40,11 +41,13 @@ describe("fully qualified agent queues", () => {
     await cli.cleanup();
   });
 
-  async function plant(repo: string, id: string, session: string, coordinator = false) {
+  async function plant(repo: string, id: string, session: string, opts: { coordinator?: boolean; key?: string } = {}) {
     const agent = await cli.addAgent(repo, id, {
       tmux_session: session,
-      ...(coordinator ? { agentType: "repo-coordinator", worktree: false } : {}),
+      queue_key: opts.key,
+      ...(opts.coordinator ? { agentType: "repo-coordinator", worktree: false } : {}),
     });
+    if (opts.key) await mkdir(join(cli.home, ".itsybitsy", "agents", opts.key), { recursive: true });
     await writeAgentTransient(agent.agentDir, {
       watchdog_pid: process.pid, updated_at_ms: Date.now(), has_background_tasks: false,
       tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false,
@@ -62,8 +65,8 @@ describe("fully qualified agent queues", () => {
   }
 
   test("cross-repo send, drain and archive isolate identically named agents", async () => {
-    const a = await plant(repoA, "review", "session-A");
-    await plant(repoB, "review", "session-B");
+    const a = await plant(repoA, "review", "session-A", { key: "studio/alpha/review" });
+    await plant(repoB, "review", "session-B", { key: "studio/beta/review" });
     const legacy = join(cli.home, ".itsybitsy", "agents", "review", "outbox.jsonl");
     const legacyLine = JSON.stringify({ id: "legacy", message: "old", fromAgent: "", raw: true });
     await Bun.write(legacy, legacyLine);
@@ -79,7 +82,8 @@ describe("fully qualified agent queues", () => {
 
     const agent = makeAgent({ id: "review", repoPath: repoA });
     agent.meta.tmux_session = "session-A";
-    await drainOutbox(agent, await agentOutboxDir(agent));
+    agent.meta.queue_key = "studio/alpha/review";
+    await drainOutbox(agent, agentOutboxDir(agent));
     const keys = calls.filter((cmd) => cmd.includes("send-keys"));
     expect(keys.length).toBeGreaterThan(0);
     expect(keys.every((cmd) => cmd.includes("=session-A:"))).toBe(true);
@@ -96,18 +100,20 @@ describe("fully qualified agent queues", () => {
   });
 
   test("same-basename repo coordinators each receive their own messages", async () => {
-    await plant(repoA, "shared", "session-A", true);
-    await plant(repoB, "shared", "session-B", true);
+    await plant(repoA, "shared", "session-A", { coordinator: true, key: "studio/alpha/shared" });
+    await plant(repoB, "shared", "session-B", { coordinator: true, key: "studio/beta/shared" });
     await send("@coordinator", "own coordinator");
     await send("@beta", "other coordinator");
     expect((await readOutbox(queue("alpha", "shared"))).map((m) => m.message)).toEqual(["own coordinator"]);
     expect((await readOutbox(queue("beta", "shared"))).map((m) => m.message)).toEqual(["other coordinator"]);
   });
 
-  test("machine identity separates otherwise identical queues", async () => {
-    expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("alpha", "review"));
-    await Bun.write(machineNameFile(), "work/laptop");
-    expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("alpha", "review", "work-laptop"));
+  test("stored machine identities separate otherwise identical queues", () => {
+    const dirFor = (machine: string) => agentOutboxDir({
+      id: "review", meta: { queue_key: `${machine}/alpha/review` },
+    });
+    expect(dirFor("studio")).toBe(queue("alpha", "review"));
+    expect(dirFor("work-laptop")).toBe(queue("alpha", "review", "work-laptop"));
   });
 
   test("send, inline drain and archive follow the saved key across registration and machine changes", async () => {
@@ -116,11 +122,10 @@ describe("fully qualified agent queues", () => {
     const agent = makeAgent({ repoPath: repoA, id });
     agent.meta.queue_key = key;
     agent.meta.tmux_session = "itsybitsy-deadbeef-review";
-    const planted = await plant(repoA, id, agent.meta.tmux_session);
+    const planted = await plant(repoA, id, agent.meta.tmux_session, { key });
     await Bun.write(join(planted.agentDir, "meta.json"), JSON.stringify(agent.meta));
 
     const dir = queue("alpha", id);
-    await mkdir(dir, { recursive: true });
     await cli.writeRegistry({ repos: [{ path: repoA, name: "renamed" }] });
     await rm(machineNameFile());
     await send("@renamed/review", "while registered");
@@ -143,7 +148,7 @@ describe("fully qualified agent queues", () => {
     "refuses an invalid stored key without falling back (%p)", async (key) => {
       const agent = makeAgent({ repoPath: repoA, id: "review" });
       Object.assign(agent.meta, { queue_key: key });
-      await expect(agentOutboxDir(agent)).rejects.toThrow("Invalid queue key");
+      expect(() => agentOutboxDir(agent)).toThrow("Invalid queue key");
     },
   );
 
@@ -188,7 +193,7 @@ describe("fully qualified agent queues", () => {
     await rm(path);
     if (condition === "unreadable") await mkdir(path); // readAgentMeta gets EISDIR
     await Bun.write(join(planted.agentDir, "output.log"), "captured output");
-    const file = join(queue("alpha", id), "outbox.jsonl");
+    const file = join(cli.home, ".itsybitsy", "agents", id, "outbox.jsonl");
     await Bun.write(file, "pending legacy message");
     const result = await archiveAgent(repoA, id, planted.agentDir);
     if (condition === "missing") {
@@ -200,52 +205,33 @@ describe("fully qualified agent queues", () => {
     }
   });
 
-  test("an absent registry permits the unregistered session key", async () => {
-    await rm(join(cli.home, ".itsybitsy", "repos.json"));
-    expect(await agentOutboxDir({ repoPath: repoA, id: "review", meta: { tmux_session: "itsybitsy-deadbeef-review" } }))
-      .toBe(queue("~deadbeef", "review"));
-  });
+  test("same-id keyless agents share the flat queue across repos", async () => {
+    const id = "review";
+    const a = await plant(repoA, id, "session-A");
+    await plant(repoB, id, "session-B");
+    const dir = join(cli.home, ".itsybitsy", "agents", id);
+    expect(existsSync(dir)).toBe(false);
 
-  test.each(["invalid JSON", '{"repos":{}}', '{"repos":[{"name":"alpha"}]}', '{"repos":[{"name":"~deadbeef","path":"/repo"}]}'])
-    ("a corrupt registry fails queue lookup: %s", async (text) => {
-      await Bun.write(join(cli.home, ".itsybitsy", "repos.json"), text);
-      await expect(agentOutboxDir({ repoPath: repoA, id: "review", meta: { tmux_session: "itsybitsy-deadbeef-review" } }))
-        .rejects.toThrow("Cannot read repo registry");
-    });
+    await send("@first/review", "for A");
+    await send("@beta/review", "for B");
+    expect((await readOutbox(dir)).map(m => m.message)).toEqual(["for A", "for B"]);
 
-  test("a registry read error prevents fallback to the session key", async () => {
-    const file = join(cli.home, ".itsybitsy", "repos.json");
-    await rm(file);
-    await mkdir(file);
-    await expect(agentOutboxDir({ repoPath: repoA, id: "review", meta: { tmux_session: "itsybitsy-deadbeef-review" } }))
-      .rejects.toThrow("Cannot read repo registry");
-  });
+    // Legacy lookup needs neither the machine name nor a usable registry.
+    await rm(machineNameFile());
+    await Bun.write(join(cli.home, ".itsybitsy", "repos.json"), "{");
+    await rm(join(a.agentDir, "meta.transient.json"));
+    const agentA = makeAgent({ id, repoPath: repoA });
+    agentA.meta.tmux_session = "session-A";
+    expect((await sendMessage(agentA, "inline", { cwd: "/" })).ok).toBe(true);
+    const typed = calls.filter(cmd => cmd.includes("-l")).map(cmd => cmd.at(-1));
+    expect(typed).toEqual(["[sent by user]: for A", "[sent by user]: for B", "[sent by user]: inline"]);
+    expect(await readOutbox(dir)).toEqual([]);
 
-  test("both paths are reported for a duplicate registered name, ignoring case", async () => {
-    await cli.writeRegistry({ repos: [{ path: repoA, name: "ALPHA" }, { path: repoB, name: "alpha" }] });
-    for (const repoPath of [repoA, repoB]) {
-      await expect(agentOutboxDir(makeAgent({ repoPath, id: "review" }))).rejects.toThrow(`${repoA}, ${repoB}`);
-    }
-  });
-
-  test("teardown without metadata requires an existing repository identity", async () => {
-    await cli.writeRegistry({ repos: [] });
-    const file = join(repoA, ".itsybitsy", "repo-id");
-    await rm(file, { force: true });
-    await expect(agentOutboxDir({ repoPath: repoA, id: "review", meta: null })).rejects.toThrow(`Missing repository id in ${file}`);
-    expect(await Bun.file(file).exists()).toBe(false);
-  });
-
-  test("an unregistered agent without a repo id in its session fails clearly", async () => {
-    await cli.writeRegistry({ repos: [] });
-    await expect(agentOutboxDir(makeAgent({ repoPath: repoB, id: "review" })))
-      .rejects.toThrow("unregistered and tmux_session has no repository id");
-  });
-
-  test("an unregistered repo with a registered repo's name uses its own repo id", async () => {
-    await cli.writeRegistry({ repos: [{ path: repoA, name: "shared" }] });
-    await Bun.write(join(repoB, ".itsybitsy", "repo-id"), "3fa9c2d1\n");
-    expect(await agentOutboxDir(makeAgent({ repoPath: repoA, id: "review" }))).toBe(queue("shared", "review"));
-    expect(await agentOutboxDir({ repoPath: repoB, id: "review", meta: { tmux_session: "itsybitsy-3fa9c2d1-review" } })).toBe(queue("~3fa9c2d1", "review"));
+    const agentB = makeAgent({ id, repoPath: repoB });
+    agentB.meta.tmux_session = "session-B";
+    expect((await sendMessage(agentB, "leftover", { cwd: "/" })).ok).toBe(true);
+    expect((await readOutbox(dir)).map(m => m.message)).toEqual(["leftover"]);
+    await archiveAgent(repoA, id, a.agentDir);
+    expect(existsSync(dir)).toBe(false);
   });
 });

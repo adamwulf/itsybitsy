@@ -228,7 +228,7 @@ describe("agent-lifecycle", () => {
       const { agentOutboxDir } = await import("./outbox");
       const coordHome = join(dir, "home", ".itsybitsy");
       setCoordinatorHome(coordHome);
-      const queueDir = await agentOutboxDir({ repoPath: dir, id: "agent-test", meta: null });
+      const queueDir = agentOutboxDir({ id: "agent-test", meta: null });
       await mkdir(queueDir, { recursive: true });
 
       try {
@@ -264,7 +264,7 @@ describe("agent-lifecycle", () => {
       const { agentOutboxDir } = await import("./outbox");
       const { recordClaudeRateLimits, CLAUDE_RATE_LIMITS_FILE } = await import("./claude-rate-limits");
       setCoordinatorHome(join(dir, "home", ".itsybitsy"));
-      const queueDir = await agentOutboxDir({ repoPath: dir, id: "agent-test", meta: null });
+      const queueDir = agentOutboxDir({ id: "agent-test", meta: null });
 
       try {
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');

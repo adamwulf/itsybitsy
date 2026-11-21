@@ -115,10 +115,14 @@ describe("send broker", () => {
    */
   async function writeAgent(repo: string, id: string, meta: Record<string, unknown>): Promise<string> {
     const dir = join(repo, ".itsybitsy", "agents", id);
+    const queueKey = `studio/${repo === targetRepo ? "iris" : "hunch"}/${id}`;
     await mkdir(dir, { recursive: true });
+    await mkdir(join(home, ".itsybitsy", "agents", queueKey), { recursive: true });
     await Bun.write(
       join(dir, "meta.json"),
-      JSON.stringify({ id, tmux_session: `itsybitsy-test-${id}`, created_epoch: 0, worktree: true, ...meta }),
+      JSON.stringify({
+        id, tmux_session: `itsybitsy-test-${id}`, created_epoch: 0, worktree: true, queue_key: queueKey, ...meta,
+      }),
     );
     await Bun.write(
       join(dir, "meta.transient.json"),

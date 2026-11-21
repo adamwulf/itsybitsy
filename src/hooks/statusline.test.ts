@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { hookStatusline, statuslineRunnerCtx } from "./statusline";
 import { CLAUDE_RATE_LIMITS_FILE } from "../claude-rate-limits";
@@ -61,7 +61,7 @@ describe("hookStatusline", () => {
 
   function recordPath(agentId: string): string {
     if (agentId === "@system") return join(home, ".itsybitsy", CLAUDE_RATE_LIMITS_FILE);
-    return join(home, ".itsybitsy", "agents", "studio", "repo", agentId, CLAUDE_RATE_LIMITS_FILE);
+    return join(home, ".itsybitsy", "agents", agentId, CLAUDE_RATE_LIMITS_FILE);
   }
 
   test("records rate_limits and passes the user's statusline output through", async () => {
@@ -160,7 +160,7 @@ describe("hookStatusline", () => {
     expect(await Bun.file(recordPath("agent-a")).exists()).toBe(false);
   });
 
-  test("CLI reports a missing machine identity and leaves the footer usable", async () => {
+  test("CLI records flat usage for a keyless agent without a machine name", async () => {
     const file = join(home, ".itsybitsy", "machine-name");
     await rm(file);
     await writeUserSettings({ statusLine: { type: "command", command: "printf footer" } });
@@ -168,10 +168,10 @@ describe("hookStatusline", () => {
       cwd: projectDir, home, stdin: statuslineInput(),
       allowedProcesses: [["/bin/sh", "-c", "printf footer"]],
     });
-    expect(result.stderr).toContain(`Machine name is missing at ${join(await realpath(home), ".itsybitsy", "machine-name")}`);
+    expect(result.stderr).toBe("");
     expect(result.stdout).toBe("footer");
     expect(await Bun.file(file).exists()).toBe(false);
-    expect(await Bun.file(recordPath("agent-cli")).exists()).toBe(false);
+    expect(await Bun.file(recordPath("agent-cli")).exists()).toBe(true);
   });
 
   test("CLI: records the input and prints the user's statusline byte-for-byte", async () => {

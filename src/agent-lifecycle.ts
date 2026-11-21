@@ -661,8 +661,7 @@ export async function archiveAgent(
   let queueDir: string | undefined;
   try {
     if (!identity.meta && !identity.missing) throw new Error(identity.error);
-    const { meta } = identity;
-    queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: meta?.queue_key !== undefined || meta?.tmux_session ? meta : null });
+    queueDir = agentOutboxDir({ id: agentId, meta: identity.meta });
   } catch (err) {
     warnings.push(`Warning: skipped queue cleanup for '${agentId}': ${(err as Error).message}`);
   }

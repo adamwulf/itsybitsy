@@ -185,7 +185,7 @@ describe("teams: sendMessage threads team into the outbox", () => {
     await saveRegistry({ repos: [{ name: "test", path: tempDir }] });
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = await agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
+    queueDir = agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner(() => makeSpawnResult());
@@ -244,7 +244,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
   // meta.json / meta.transient.json / agent.log — only the message queue
   // lives here.
   function queueDirOf(id: string): string {
-    return join(homeDir, "agents", "test-machine", basename(repoDir), id);
+    return join(homeDir, "agents", id);
   }
 
   // Plant an agent on disk so readAllAgents surfaces it, with a live-watchdog

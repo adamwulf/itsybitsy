@@ -895,7 +895,7 @@ export async function rehireAgent(
     // Reserve the stored key before publishing it, including when resume fails.
     const queueKey = archived.meta.queue_key;
     if (queueKey !== undefined) {
-      const queueDir = await agentOutboxDir({ repoPath, id: agentId, meta: archived.meta });
+      const queueDir = agentOutboxDir({ id: agentId, meta: archived.meta });
       await mkdir(dirname(queueDir), { recursive: true });
       try {
         await mkdir(queueDir);
@@ -2355,7 +2355,7 @@ ${qAbsExitScript}
     }
 
     // Create the same queue directory a fresh spawn provides before launch.
-    await mkdir(await agentOutboxDir(agent), { recursive: true });
+    await mkdir(agentOutboxDir(agent), { recursive: true });
 
     // Ensure tmux server is running
     const startServerResult = await nukeResumeSpawnCtx.run(["tmux", "start-server"]);
@@ -4417,7 +4417,7 @@ export async function sendMessage(
   // coordinator has no agent dir, so its queue/lock live in the coordinator
   // home directly so all coordinator senders serialize against ONE queue).
   // Otherwise the per-agent queue lives under the CENTRAL outbox root
-  // (`agentOutboxDir(agent)` → `~/.itsybitsy/agents/<machine>/<repo>/<agent>/`) so codex agents
+  // (selected by `agentOutboxDir`) so codex agents
   // running under `-s workspace-write` can write to other agents' outboxes.
   // Log/state writes still target the per-worktree agent dir
   // (`deliverMessage`), which is correct for both cases.
@@ -4482,7 +4482,7 @@ export async function sendMessage(
 
   let queueDir: string;
   try {
-    queueDir = opts?.outboxDir ?? await agentOutboxDir(agent);
+    queueDir = opts?.outboxDir ?? agentOutboxDir(agent);
     const reservedKey = opts?.outboxDir === undefined ? agent.meta.queue_key : undefined;
     await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough }, reservedKey);
   } catch (err) {

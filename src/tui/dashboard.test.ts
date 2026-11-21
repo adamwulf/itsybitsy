@@ -1024,9 +1024,9 @@ describe("DashboardComponent dialog and action handlers", () => {
     configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
     setUserConfigPath(join(configTempDir, "config.json"));
     sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-send-"));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <machine> / <repo> / <agent>.
+    // The keyless fixtures use getCoordinatorHome() / agents / <agent>.
     // Without this isolation, dashboard sends from this test suite would
-    // accumulate in the developer's real ~/.itsybitsy/agents/<machine>/<repo>/agent-test/
+    // accumulate in the developer's real ~/.itsybitsy/agents/agent-test/
     // outbox.jsonl, then leak into the next test run when sendMessage drains
     // them inline (no live watchdog in test setup), inflating sentMessages.
     const { setCoordinatorHome } = await import("../coordinator");
@@ -1303,7 +1303,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(dashboard.agentTree.selectAgent(departing)).toBe(true);
     dashboard.syncSelectedAgent();
 
-    const leftover = join(configTempDir, "coord-home", "agents", "studio", "~abcdef01", departing.id, "outbox.jsonl");
+    const leftover = join(configTempDir, "coord-home", "agents", departing.id, "outbox.jsonl");
     await mkdir(leftover, { recursive: true });
     const teardownStarted = Promise.withResolvers<void>();
     const finishProbe = Promise.withResolvers<number>();
@@ -1344,7 +1344,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     if (key === "m") {
       await mkdir(join(actionTempDir!, ".itsybitsy", "agents", "agent-test", "repo"), { recursive: true });
     }
-    const dir = join(configTempDir, "coord-home", "agents", "studio", "~abcdef01", "agent-test");
+    const dir = join(configTempDir, "coord-home", "agents", "agent-test");
     const paths = ["outbox.jsonl", "claude-rate-limits.json"].map(name => join(dir, name));
     for (const path of paths) await mkdir(path, { recursive: true });
 

@@ -8,7 +8,9 @@
  * time interleave their chunks and Enters and land as one merged prompt.
  *
  * Fix: every write path ENQUEUES to a per-agent `outbox.jsonl` under
- * `<coordinatorHome>/agents/<machine>/<repo>/<id>/` (computed via `agentOutboxDir(agent)`). The
+ * `<coordinatorHome>/agents/<machine>/<repo>/<id>/` for keyed agents.
+ * Keyless agents keep `<coordinatorHome>/agents/<id>/` so their existing
+ * watchdogs can deliver messages. Both paths come from `agentOutboxDir`. The
  * queue was moved out of the per-worktree agent dir so codex agents running
  * with `-s workspace-write` can write to any other agent's outbox — codex
  * spawns add the entire `<coordinatorHome>` as a writable root, and the
@@ -22,19 +24,16 @@
  * pass that path explicitly via `sendMessage`'s `outboxDir` opt.
  *
  * There is intentionally NO central dispatcher: the queue and lock are keyed
- * per-agent (i.e. per tmux session), so busy multi-agent communication has no
- * single bottleneck. This is distinct from the Telegram channel outbox in
+ * per-agent, so busy multi-agent communication has no single bottleneck. This is distinct from the Telegram channel outbox in
  * `src/channels/outbox.ts`, which is unrelated.
  */
 
 import { join } from "path";
 import { rename, unlink, stat, readFile, appendFile, open, mkdir, rmdir } from "fs/promises";
-import { readRegistryStrict, type RepoEntry } from "./registry";
-import { readRepoId } from "./repo-id";
-import { readMachineName } from "./machine-name";
-import { fullyQualifiedAgentId } from "./tui/row-keys";
+import type { RepoEntry } from "./registry";
 import type { AgentMeta } from "./agents";
 import { getCoordinatorHome } from "./coordinator";
+import { isValidAgentId } from "./validation";
 
 /** Filename for the per-agent message queue. */
 export const OUTBOX_FILENAME = "outbox.jsonl";
@@ -45,8 +44,7 @@ export const OUTBOX_LOCK_FILENAME = ".outbox.lock";
 export async function registeredQueueRepo(repoPath: string, repos: RepoEntry[]): Promise<string | undefined> {
   let repo = repos.find((r) => r.path === repoPath);
   if (!repo && repos.length) {
-    // A watchdog can start at the physical path of a registered symlink.
-    // Metadata suffices to compare directories even inside a leaf's sandbox.
+    // The checkout path may differ from the registered path through a symlink.
     const physical = await stat(repoPath).catch(() => null);
     if (physical) {
       for (const entry of repos) {
@@ -67,21 +65,7 @@ export async function registeredQueueRepo(repoPath: string, repos: RepoEntry[]):
   return name;
 }
 
-type QueueAgent = { repoPath: string; id: string; meta: Pick<AgentMeta, "queue_key" | "tmux_session"> | null };
-
-/** Pre-key agents use their session's repo id. Only archive artifacts without a session need the repo-id file. */
-async function legacyQueueKey({ repoPath, id, meta }: QueueAgent): Promise<string> {
-  const { repos } = await readRegistryStrict();
-  let repo = await registeredQueueRepo(repoPath, repos);
-  if (repo === undefined) {
-    const repoId = meta !== null
-      ? /^itsybitsy-([0-9a-f]{8})-.+$/.exec(meta.tmux_session)?.[1]
-      : await readRepoId(repoPath);
-    if (!repoId) throw new Error(`Cannot locate queue for '${id}': repo '${repoPath}' is unregistered and tmux_session has no repository id`);
-    repo = `~${repoId}`;
-  }
-  return fullyQualifiedAgentId(await readMachineName(), repo, id);
-}
+type QueueAgent = { id: string; meta: Pick<AgentMeta, "queue_key"> | null };
 
 /** Validate persisted metadata before interpreting it as a relative path. */
 export function queueDirForKey(key: string, agentId: string): string {
@@ -93,10 +77,11 @@ export function queueDirForKey(key: string, agentId: string): string {
   return join(getCoordinatorHome(), "agents", key);
 }
 
-/** All queue users prefer the immutable identity captured at spawn. */
-export async function agentOutboxDir(agent: QueueAgent): Promise<string> {
-  const stored = agent.meta?.queue_key;
-  return queueDirForKey(stored === undefined ? await legacyQueueKey(agent) : stored, agent.id);
+/** Agents without a stored key keep the queue their original watchdog uses. */
+export function agentOutboxDir({ id, meta }: QueueAgent): string {
+  if (meta?.queue_key !== undefined) return queueDirForKey(meta.queue_key, id);
+  if (!isValidAgentId(id)) throw new Error(`Invalid agent id for queue: ${JSON.stringify(id)}`);
+  return join(getCoordinatorHome(), "agents", id);
 }
 
 /**

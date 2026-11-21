@@ -313,7 +313,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     await runForTicks(3, { heartbeatExists: false });
 
     // The warning was enqueued to the manager's outbox exactly once.
-    const outboxPath = join(await agentOutboxDir({ repoPath: tempRepo, id: managerId, meta: manager }), OUTBOX_FILENAME);
+    const outboxPath = join(agentOutboxDir({ id: managerId, meta: null }), OUTBOX_FILENAME);
     const outbox = await readFile(outboxPath, "utf8").catch(() => "");
     expect(outbox).toContain("hooks never fired");
     const lines = outbox.split("\n").filter((l) => l.trim().length > 0);

@@ -269,7 +269,7 @@ function makeMockCtx(overrides?: {
 
 // Per-test isolated repo root + coordinator home. sendMessage now writes a
 // real outbox.jsonl + .outbox.lock under the CENTRAL outbox dir
-// (`agentOutboxDir(agent)` → `<coordinatorHome>/agents/<machine>/<repo>/<agent>/`), so send-path
+// (under `<coordinatorHome>/agents/`), so send-path
 // tests MUST pin both: a fresh repoPath (the agent's worktree, used for
 // log/state writes) AND a fresh coordinator home (so the central queue dir
 // resolves into the sandbox instead of the developer's real ~/.itsybitsy/).

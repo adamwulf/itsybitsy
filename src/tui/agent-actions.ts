@@ -758,9 +758,8 @@ export function handleAddAgentToTeam(ctx: ActionCtx, memberRowAgent?: Agent) {
  * a member id to ONE live agent through an `id → Agent` map in which the last
  * agent with that id wins. This uses the same rule over the same list the
  * Teams tree is built from, so the picker calls an agent a member exactly when
- * the Teams tree shows it under that team. (`handleManageRoster` and the
- * create wizard's pre-check do NOT follow that rule: they match the bare id,
- * so they check every live agent that has it.)
+ * the Teams tree shows it under that team. Manage roster checks the same
+ * live member. The create wizard prechecks the selected repo and id.
  *
  * When the id is not in `live` at all (no watcher update yet), the bare id is
  * all there is to go by.

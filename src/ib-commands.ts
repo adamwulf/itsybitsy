@@ -4273,9 +4273,9 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
 const DRAIN_SETTLE_GAP_MS = 250;
 
 /**
- * Drain the outbox for `agent` under the per-session lock: pop queued messages
- * one at a time and `deliverMessage` each, with a short settle gap between
- * consecutive messages so they land as DISTINCT prompts.
+ * Drain the outbox for `agent` under the queue directory's lock. Pop queued
+ * messages one at a time and `deliverMessage` each, with a short settle gap
+ * between consecutive messages so they land as distinct prompts.
  *
  * Correctness guarantees:
  *   - Only the lock holder delivers, so two drains can never interleave their
@@ -4351,7 +4351,7 @@ export async function hasLiveWatchdog(agentDir: string): Promise<boolean> {
  *    sender process — see `resolveSenderId`).
  * 2. ENQUEUE the message to the agent's `outbox.jsonl`.
  * 3. If a live watchdog exists, RETURN immediately — the watchdog drains the
- *    queue under the per-session lock. Otherwise drain inline under the lock
+ *    queue under its directory lock. Otherwise drain inline under the same lock
  *    (the sender becomes the drainer for this batch). This preserves the
  *    historical behavior of `ib send` to a stopped/complete agent (which
  *    restarts it) and the coordinator path.

@@ -17,15 +17,14 @@
  * per-worktree agent dir is invisible to other sandboxes. A single drainer —
  * the agent's own watchdog (`runPerAgentWatchdog`), or a lock-guarded inline
  * fallback when no live watchdog exists — pops messages one at a time and
- * types them. A per-session advisory lock (`.outbox.lock`) guarantees only one
- * drainer ever writes to a given session, so two `send-keys`/`Enter` sequences
- * can never interleave. The system coordinator's outbox is the one exception:
- * it lives in `<coordinatorHome>` directly (not under `agents/`), and callers
- * pass that path explicitly via `sendMessage`'s `outboxDir` opt.
+ * types them. One advisory lock (`.outbox.lock`) per queue directory keeps
+ * drainers from interleaving their `send-keys`/`Enter` sequences. Keyless
+ * agents with the same ID share that lock across their tmux sessions.
+ * The system coordinator's queue directory is `<coordinatorHome>` itself.
+ * Its senders pass that path via `sendMessage`'s `outboxDir` option.
  *
- * There is intentionally NO central dispatcher: the queue and lock are keyed
- * per-agent, so busy multi-agent communication has no single bottleneck. This is distinct from the Telegram channel outbox in
- * `src/channels/outbox.ts`, which is unrelated.
+ * There is no central dispatcher. Each queue is drained independently.
+ * The Telegram channel outbox lives in `src/channels/outbox.ts`.
  */
 
 import { join } from "path";
@@ -37,7 +36,7 @@ import { isValidAgentId } from "./validation";
 
 /** Filename for the per-agent message queue. */
 export const OUTBOX_FILENAME = "outbox.jsonl";
-/** Filename for the per-session delivery lock. */
+/** Filename for the delivery lock in each queue directory. */
 export const OUTBOX_LOCK_FILENAME = ".outbox.lock";
 
 /** Resolve the registered segment from one registry snapshot, including symlinked repos. */
@@ -136,7 +135,7 @@ export function outboxLockPath(dir: string): string {
 
 /**
  * Append one message to the outbox. A single small `appendFile` of one line is
- * atomic on POSIX (O_APPEND), and the per-session lock around the DRAIN means a
+ * atomic on POSIX (O_APPEND), and the queue directory's lock around the drain means a
  * concurrent drainer never truncates a half-written line: the drainer reads the
  * whole file, parses complete lines, and rewrites only the not-yet-delivered
  * remainder. An append that lands mid-drain is simply picked up next drain.
@@ -251,7 +250,7 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
 /**
  * Rewrite the outbox to exactly `remaining`, atomically (tmp + rename).
  *
- * IMPORTANT (no double-delivery, no loss): callers hold the per-session lock,
+ * IMPORTANT (no double-delivery, no loss): callers hold the queue directory's lock,
  * read the batch, deliver one message, then call this with the messages that
  * have NOT yet been delivered. To account for appends that arrived mid-drain
  * (other processes can append even while we hold the lock — the lock guards
@@ -353,7 +352,7 @@ function tokenFromBody(body: string): string {
 }
 
 /**
- * Acquire the per-session advisory delivery lock via exclusive file creation
+ * Acquire the queue directory's advisory delivery lock via exclusive file creation
  * (O_CREAT|O_EXCL). On EEXIST the lock is held by someone else; retry with
  * backoff up to `timeoutMs`. Writes `<pid>:<token>` into the lock file (token
  * for ownership verification on release, pid for debuggability). Returns the

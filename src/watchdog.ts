@@ -1871,7 +1871,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   // permission auto-accept Enter), in EITHER direction. Those bare writes
   // bypass `deliverMessage` and the file `.outbox.lock`, so the mutex (not the
   // file lock) is what keeps them from interleaving with a delivered message's
-  // chunks+Enter. `drainOutbox` ALSO takes the per-session file lock, which
+  // chunks+Enter. `drainOutbox` also takes the queue directory's file lock, which
   // serializes the drain against any inline sender in another process.
   const drainAgent: Agent = {
     id: agentId,

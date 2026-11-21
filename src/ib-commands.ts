@@ -6426,24 +6426,17 @@ async function spawnAgent(
     // as spawner.
     //
     // The stored agent_id is the `@<repo-name>` sentinel (not the coordinator's
-    // actual agent_id) so the watchdog routes notifications through resolveTarget,
+    // actual agent_id) so the watchdog looks up the current coordinator in repo_path,
     // which is robust to the coordinator being killed and re-created.
     if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
       try {
         const repos = await listRepos();
-        const repoMatch = repos.find(r => r.path === cwd);
+        const repoMatch = repos.find(r => sameRepoPath(r.path, cwd));
         if (repoMatch) {
           const coordStatus = await checkCoordinatorExists(cwd);
           if (coordStatus.exists && coordStatus.agentId) {
-            // Stamp with `basename(cwd)` — the same invariant that
-            // `getCoordinatorAgentId()` uses for the coordinator's actual
-            // agent ID. The access checks in agent-path.ts and the
-            // routing in notifySpawner @<repo-name> both compare the
-            // sentinel suffix against the coordinator's agent ID, so
-            // they must use the same source of truth. Using the registry
-            // `name` (or worse, the nickname) would silently break access
-            // any time a user passed a custom name via `ib add <path>
-            // <custom-name>` or set a nickname.
+            // The ownership gate checks the coordinator id in the sentinel.
+            // notifySpawner finds the current coordinator by its recorded repo_path.
             spawnedBy = {
               agent_id: `@${basename(cwd)}`,
               repo_path: cwd,

@@ -17,7 +17,7 @@ import {
   readlink,
   symlink,
 } from "fs/promises";
-import { SpawnContext } from "./types";
+import { SpawnContext, type SpawnResult } from "./types";
 import {
   isValidAgentId,
   isValidTmuxSession,
@@ -1123,32 +1123,52 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
 
 // ── resolveGitRoot ───────────────────────────────────────────────────────────
 
+async function readGitPipe(
+  stream: ReadableStream<Uint8Array> | null,
+  readers: ReadableStreamDefaultReader<Uint8Array>[],
+): Promise<string> {
+  if (!stream) return "";
+  const reader = stream.getReader();
+  readers.push(reader);
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 /** Resolve the main repository root, including from inside a linked worktree. */
 export async function resolveGitRoot(repoPath: string, signal?: AbortSignal): Promise<string | null> {
-  const deadline = Promise.withResolvers<null>();
-  const onAbort = () => deadline.resolve(null);
+  const deadline = Promise.withResolvers<never>();
+  const onAbort = () => deadline.reject(signal?.reason);
+  const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  let proc: SpawnResult | undefined;
   try {
     signal?.throwIfAborted();
     signal?.addEventListener("abort", onAbort);
-    const proc = spawnCtx.runner(
+    proc = spawnCtx.runner(
       ["git", "-C", repoPath, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"],
       { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
     );
-    const result = await Promise.race([
-      Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]),
+    const [exitCode, stdout] = await Promise.race([
+      Promise.all([proc.exited, readGitPipe(proc.stdout, readers), readGitPipe(proc.stderr, readers)]),
       deadline.promise,
     ]);
-    if (result === null) {
-      proc.kill?.("SIGKILL");
-      return null;
-    }
-    const [exitCode, stdout] = result;
     if (exitCode !== 0) return null;
     const [commonDir, gitDir, topLevel] = stdout.trim().split("\n");
     if (!commonDir || !gitDir || !topLevel) return null;
     if (commonDir === ".git" || commonDir === gitDir) return topLevel;
     return dirname(resolve(repoPath, commonDir));
   } catch {
+    // A wrapper's descendants can hold the pipes open after the wrapper dies.
+    for (const reader of readers) void reader.cancel().catch(() => {});
+    try { proc?.kill?.("SIGKILL"); } catch { /* the child may have already exited */ }
     return null;
   } finally {
     signal?.removeEventListener("abort", onAbort);

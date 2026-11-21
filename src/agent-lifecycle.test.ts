@@ -626,6 +626,20 @@ describe("agent-lifecycle", () => {
   // ── resolveGitRoot ─────────────────────────────────────────────────────
 
   describe("resolveGitRoot", () => {
+    test("a pipe read error kills git and cancels its other open pipe", async () => {
+      const signals: (number | string | undefined)[] = [];
+      let cancelled = false;
+      spawnCtx.set(() => ({
+        stdout: new ReadableStream({ start(controller) { controller.error(new Error("pipe read failed")); } }),
+        stderr: new ReadableStream({ cancel() { cancelled = true; } }),
+        exited: new Promise<number>(() => {}),
+        kill: (signal) => { signals.push(signal); },
+      }));
+      expect(await resolveGitRoot("/project")).toBeNull();
+      expect(signals).toEqual(["SIGKILL"]);
+      expect(cancelled).toBe(true);
+    });
+
     test("one git process resolves roots, subdirectories, linked worktrees, and symlinks", async () => {
       const dir = await realpath(await makeTempDir());
       try {

@@ -20,7 +20,7 @@ import {
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
-  teamCreate, teamAdd, teamDelete, teamRemove,
+  teamCreate, teamAdd, teamDelete, teamRemove, teamRemoveStoredMember,
   writeMetaJsonAtomic, sealAgentRecord,
 } from "../ib-commands";
 import { sanitizeAgentNameInput } from "../validation";
@@ -815,11 +815,9 @@ function showTeamPicker(ctx: ActionCtx, agent: Agent, teams: Array<{ name: strin
 }
 
 /**
- * Confirm, then remove one member from a team via `teamRemove` (the CLI path),
- * so the audit log, the channel record and the "left the team" notices match
- * `ib team remove <name> <agent-id>` exactly (§16.4.2). `label` is the
- * `<repo>/<id>` form shown to the user. `member` carries the selected repo when
- * the agent is live. A stale roster entry only has its stored id.
+ * Confirm, then remove one member with the shared audit and notice flow
+ * (§16.4.2). A live row carries its selected repo. An unresolved roster row
+ * carries the exact stored id and needs no address lookup.
  * Shared by the manage-team picker, the agent's team picker and the
  * team-member picker.
  */
@@ -833,7 +831,9 @@ function confirmRemoveMember(ctx: ActionCtx, teamName: string, member: Agent | s
     onYes: () => {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
-        const result = await teamRemove(teamName, member, ctx.repos);
+        const result = typeof member === "string"
+          ? await teamRemoveStoredMember(teamName, member, ctx.repos)
+          : await teamRemove(teamName, member, ctx.repos);
         if (result.ok) ctx.setNotice(result.stdout || `Removed ${label} from @${teamName}`, "info");
         else ctx.setNotice(result.stderr || result.stdout || `Remove failed`, "error");
       });
@@ -1144,7 +1144,7 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
  * Reads the team via `getTeam` so an empty team (no members) just shows the
  * "Disband team @<name>" option with no remove rows. If the team vanished
  * between display and selection, the underlying handlers (`handleDisbandTeam`
- * for disband, `teamRemove` for member-removal) surface the not-found state
+ * for disband and the team removal helpers) surface the not-found state
  * exactly as if it had vanished mid-`x`.
  *
  * Note on `x` on a team MEMBER row in the Teams tree: that path is NOT routed

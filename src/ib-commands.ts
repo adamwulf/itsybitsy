@@ -5074,8 +5074,12 @@ export async function teamRemove(name: string, target: TeamMemberTarget, repos: 
   }
   const resolved = await resolveFullAgentId(target, repos);
   if ("error" in resolved) return teamErr(resolved.error);
-  const id = resolved.id;
+  return teamRemoveStoredMember(n, resolved.id, repos);
+}
 
+/** Remove an exact roster entry, including one whose agent is no longer visible. */
+export async function teamRemoveStoredMember(name: string, id: string, repos: RepoEntry[]): Promise<IbCommandResult> {
+  const n = normalizeTeamName(name);
   const { removed, team } = await removeMember(n, id);
   if (!team) {
     return teamErr(`Error: team @${n} not found`);

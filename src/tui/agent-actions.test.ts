@@ -3263,6 +3263,30 @@ describe("handleManageTeam", () => {
     expect(await readTeamAuditLog("backend")).toContain("agent agent-bbb left");
   });
 
+  test("confirming an unresolved row removes only the stored ID even if another member has that nickname", async () => {
+    tmuxSpawnCtx.set(noopSpawnRunner);
+    const survivor = "agent-live";
+    const dir = await plantTestAgent(fx.repoDir, survivor);
+    const metaPath = join(dir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ ...await Bun.file(metaPath).json(), nickname: "stale-with-nickname" }));
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", survivor);
+    const lastAgents = [makeAgent({ id: survivor, repoPath: fx.repoDir })];
+    for (const id of ["stale-with-nickname", "stale-without-match"]) {
+      await addMember("backend", id);
+      const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+      handleManageTeam(ctx, "backend");
+      await flushActions();
+      const picker = assertDialog(dialogs[0]!, "select");
+      picker.onSelect(picker.items.indexOf(`Remove ${id}`));
+      assertDialog(dialogs[1]!, "confirm").onYes();
+      await flushActions();
+      expect((await readTeams()).teams["backend"]!.members).toEqual([survivor]);
+      expect(notices).toEqual([`Removed ${id} from @backend`]);
+      expect(await readTeamAuditLog("backend")).toContain(`agent ${id} left`);
+    }
+  });
+
   test("cancelling the Remove confirm leaves the roster intact", async () => {
     await plantTestAgent(fx.repoDir, "agent-aaa");
     await createTeam("backend", "user", 1700000000);

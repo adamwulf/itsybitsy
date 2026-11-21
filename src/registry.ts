@@ -189,7 +189,7 @@ export const ADD_NAME_HINT = "use ib add <path> <name>";
 export const NEW_REPO_NAME_HINT = "choose another folder name";
 
 async function coordinatorFolderName(path: string): Promise<string> {
-  return getCoordinatorAgentId((await resolveGitRoot(path)) || path);
+  return getCoordinatorAgentId((await resolveGitRoot(path, AbortSignal.timeout(2_000))) || path);
 }
 
 /**

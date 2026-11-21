@@ -1123,22 +1123,20 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
 
 // ── resolveGitRoot ───────────────────────────────────────────────────────────
 
-const GIT_ROOT_TIMEOUT_MS = 2_000;
-
 /** Resolve the main repository root, including from inside a linked worktree. */
-export async function resolveGitRoot(repoPath: string): Promise<string | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+export async function resolveGitRoot(repoPath: string, signal?: AbortSignal): Promise<string | null> {
+  const deadline = Promise.withResolvers<null>();
+  const onAbort = () => deadline.resolve(null);
   try {
+    signal?.throwIfAborted();
+    signal?.addEventListener("abort", onAbort);
     const proc = spawnCtx.runner(
       ["git", "-C", repoPath, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"],
       { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
     );
-    const deadline = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), GIT_ROOT_TIMEOUT_MS);
-    });
     const result = await Promise.race([
       Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]),
-      deadline,
+      deadline.promise,
     ]);
     if (result === null) {
       proc.kill?.("SIGKILL");
@@ -1153,7 +1151,7 @@ export async function resolveGitRoot(repoPath: string): Promise<string | null> {
   } catch {
     return null;
   } finally {
-    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 

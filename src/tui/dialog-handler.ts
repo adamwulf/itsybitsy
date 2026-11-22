@@ -130,6 +130,7 @@ export type DialogState =
       remoteStartDenial: string | null;
       machines(): { id: string | null; name: string }[];
       machine: { id: string | null; name: string } | null;
+      machineChanged?: boolean;
       inFlight?: string;
       error?: string;
       buffer: TextBuffer;
@@ -551,7 +552,7 @@ export function syncNewAgentMachine(form: Extract<DialogState, { type: "new-agen
   form.machine = selected;
   const hasPicker = machines.some(machine => machine.id !== null);
   if (changed) {
-    form.error = selected ? `Machine changed to ${selected.name}. Review before creating the agent.` : `No connected machine has ${form.repoName}`;
+    form.machineChanged = true;
     form.focused = hasPicker ? "machine" : "agentType";
   } else if (!hasPicker && form.focused === "machine") {
     form.focused = "agentType";
@@ -618,9 +619,12 @@ function handleNewAgentFormDialog(
       if (!n) return;
       const index = isMachine ? machines.findIndex(m => m.id === d.machine?.id) : d.availableTypes.indexOf(d.agentType);
       const next = index < 0 ? (delta > 0 ? 0 : n - 1) : (index + delta + n) % n;
-      if (isMachine) d.machine = machines[next]!;
-      else d.agentType = d.availableTypes[next]!;
-      d.error = undefined;
+      if (isMachine) {
+        d.machine = machines[next]!;
+        d.machineChanged = false;
+      } else {
+        d.agentType = d.availableTypes[next]!;
+      }
       ctx.tui?.requestRender();
     };
     if (matchesKey(data, Key.tab)) { nextFocus(); }
@@ -1138,6 +1142,11 @@ export function buildNewAgentFormContent(
     const focused = dialog.focused === "machine";
     const line = focused ? `${BOLD}${GREEN}Machine: ${dialog.machine.name}${RESET}` : `${DIM}Machine:${RESET} ${dialog.machine.name}`;
     lines.push(truncateToWidth(line + (focused && machines.length > 1 ? cycleText : ""), innerWidth, ""));
+  }
+  if (!dialog.machine) {
+    lines.push(...wordWrapLines(`No connected machine has ${dialog.repoName}`, innerWidth));
+  } else if (dialog.machineChanged) {
+    lines.push(...wordWrapLines(`Machine changed to ${dialog.machine.name}. Review before creating the agent.`, innerWidth));
   }
   const cycleHint = dialog.availableTypes.length > 1
     ? cycleText

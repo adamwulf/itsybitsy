@@ -1903,8 +1903,9 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
           ctx.setNotice(`Created agent ${cleanRemoteText(id)} on ${target.name}`, "info");
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
-          if (ctx.dialog === form) form.error = detail;
-          else ctx.setNotice(`Remote start on ${target.name}: ${detail}`, "error");
+          const message = `Remote start on ${target.name}: ${detail}`;
+          if (ctx.dialog === form) form.error = message;
+          else ctx.setNotice(message, "error");
         } finally {
           ctx.remoteStartPending = false;
           form.inFlight = undefined;

@@ -10188,7 +10188,7 @@ describe("Unified peer repos in the Agents tree", () => {
     form.focused = "create";
     const start = spyOn(service, "startRemoteAgent").mockRejectedValueOnce(new Error("Type unavailable"));
     dashboard.handleInput("\r");
-    await waitFor(() => form.error === "Type unavailable");
+    await waitFor(() => form.error === "Remote start on Laptop C: Type unavailable");
     expect(dashboard.dialog).toBe(form);
     expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain("Type unavailable");
     expect(form.buffer.getText()).toBe(prompt);
@@ -10199,6 +10199,28 @@ describe("Unified peer repos in the Agents tree", () => {
     await waitFor(() => dashboard.dialog === null);
     expect(start.mock.calls).toEqual(Array(2).fill([PEER_C, { repo: "itsybitsy", type: "worker", name: "builder", prompt }]));
     expect(dashboard.notice).toBe(`Created agent ${longId.slice(0, 79)}… on Laptop C`);
+  });
+
+  test.each(["failure first", "peer update first"])("renders both the original peer failure and the new machine (%s)", async order => {
+    const { dashboard, service } = setup();
+    const [b, c] = links();
+    const replacement = { ...c!, repos: repos("itsybitsy"), connected: true };
+    service.set({ links: [b!, replacement] });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    const pending = Promise.withResolvers<string>();
+    spyOn(service, "startRemoteAgent").mockReturnValue(pending.promise);
+    form.onSubmit("", "worker", "hello");
+    if (order === "peer update first") service.set({ links: [replacement] });
+    pending.reject(new Error("Type unavailable"));
+    await waitFor(() => !dashboard.remoteStartPending);
+    if (order === "failure first") service.set({ links: [replacement] });
+    form.focused = "agentType";
+    dashboard.handleInput(" ");
+    const rendered = buildNewAgentFormContent(form, 80).contentLines.map(stripAnsi);
+    expect(rendered).toContain("Remote start on Laptop B: Type unavailable");
+    expect(rendered).toContain("Machine changed to Laptop C. Review before creating the agent.");
   });
 
   test.each(["success", "failure"])("a detached %s is reported without replacing the next dialog", async outcome => {
@@ -10283,11 +10305,11 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ links: [second, { ...b!, connected: false }] });
     expect(form.machine?.id).toBe(PEER_C);
     expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("machine");
-    expect(form.error).toContain("Machine changed to Laptop C");
+    expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain("Machine changed to Laptop C");
     service.set({ links: [{ ...second, repos: [] }] });
     expect(form.machine).toBeNull();
     expect(form.buffer.getText()).toBe("x");
-    expect(form.error).toContain("No connected machine");
+    expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain("No connected machine");
     const start = spyOn(service, "startRemoteAgent");
     form.focused = "cancel";
     dashboard.handleInput("\t");

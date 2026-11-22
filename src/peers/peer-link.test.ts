@@ -355,7 +355,10 @@ describe("trusted new-agent responder", () => {
   }
 
   test.each([
-    ["unregistered repo", { repo: "/local/app", type: "_all" }, "Repo is not registered"],
+    ["non-string repo", { repo: 42 }, "Invalid repo registry name"],
+    ["path instead of repo name", { repo: "/local/app" }, "Invalid repo registry name"],
+    ["non-string type", { type: 42 }, "unknown or not spawnable"],
+    ["unregistered repo", { repo: "missing", type: "_all" }, "Repo is not registered"],
     ["unknown type", { type: "absent", prompt: "" }, "unknown or not spawnable"],
     ["layer-only type", { type: "_all" }, "unknown or not spawnable"],
     ["repo coordinator", { type: "repo-coordinator", name: "!" }, "repo-coordinator"],
@@ -443,7 +446,7 @@ describe("trusted new-agent responder", () => {
     side.a.close(0, "done");
   });
 
-  test("passes plain text and only type and name to newAgent and announces the id", async () => {
+  test("matches a mixed-case registry name, passes only type and name, and announces the id", async () => {
     const { side, spawn, notice } = receiver();
     const prompt = "a".repeat(5000);
     const reply = decodeText(await rawRequest(side.a, encode({ ...request, name: "builder", prompt, model: "other", permissions: ["all"] })));

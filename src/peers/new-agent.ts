@@ -1,6 +1,7 @@
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { validateAgentName, type newAgent } from "../ib-commands";
+import { isValidRepoName } from "../validation";
 import type { RepoEntry } from "../registry";
 import { NEW_AGENT_MAX_REQUEST_BYTES } from "./peer-link";
 
@@ -17,8 +18,9 @@ export async function acceptRemoteAgent(
   deps: RemoteSpawnDeps,
   log: (line: string) => void,
 ): Promise<string> {
+  if (typeof repo !== "string" || !isValidRepoName(repo)) throw new Error("Invalid repo registry name");
   const repos = await deps.listRepos();
-  const registered = typeof repo === "string" && repos.find(r => r.name.toLowerCase() === repo.toLowerCase());
+  const registered = repos.find(r => r.name.toLowerCase() === repo.toLowerCase());
   if (!registered) throw new Error("Repo is not registered on this machine");
   if (typeof type !== "string" || !listSpawnableTypeNamesSync().includes(type)) {
     throw new Error("Agent type is unknown or not spawnable on this machine");

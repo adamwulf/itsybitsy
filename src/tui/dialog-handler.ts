@@ -128,8 +128,8 @@ export type DialogState =
       agentType: string;
       availableTypes: string[];
       machines(): { id: string | null; name: string }[];
-      machine: { id: string | null; name: string };
-      inFlight?: boolean;
+      machine: { id: string | null; name: string } | null;
+      inFlight?: string;
       error?: string;
       buffer: TextBuffer;
       focused: "name" | "machine" | "agentType" | "prompt" | "create" | "cancel";
@@ -541,6 +541,22 @@ function handleTextareaDialog(
 
 // --- New agent form dialog ---
 
+/** Keep an open draft on its selected peer id. A new target needs a fresh Create action. */
+export function syncNewAgentMachine(form: Extract<DialogState, { type: "new-agent-form" }>): boolean {
+  const machines = form.machines();
+  const selected = machines.find(machine => machine.id === form.machine?.id) ?? machines[0] ?? null;
+  const changed = selected?.id !== form.machine?.id;
+  form.machine = selected;
+  const hasPicker = machines.some(machine => machine.id !== null);
+  if (changed) {
+    form.error = selected ? `Machine changed to ${selected.name}. Review before creating the agent.` : `No connected machine has ${form.repoName}`;
+    form.focused = hasPicker ? "machine" : "agentType";
+  } else if (!hasPicker && form.focused === "machine") {
+    form.focused = "agentType";
+  }
+  return changed;
+}
+
 function handleNewAgentFormDialog(
   ctx: DialogCtx,
   d: Extract<NonNullable<DialogState>, { type: "new-agent-form" }>,
@@ -549,19 +565,19 @@ function handleNewAgentFormDialog(
   const focusOrder: Array<typeof d.focused> = ["name", "agentType", "prompt", "cancel", "create"];
   const machines = d.machines();
   if (machines.some(m => m.id !== null)) focusOrder.splice(1, 0, "machine");
-  const promptEmpty = () => d.buffer.getText().trim().length === 0;
+  const createDisabled = () => !d.machine || d.buffer.getText().trim().length === 0;
   const onAsyncRender = () => ctx.tui?.requestRender();
   const nextFocus = () => {
     const idx = focusOrder.indexOf(d.focused);
     let next = (idx + 1) % focusOrder.length;
-    if (focusOrder[next] === "create" && promptEmpty()) next = (next + 1) % focusOrder.length;
+    if (focusOrder[next] === "create" && createDisabled()) next = (next + 1) % focusOrder.length;
     d.focused = focusOrder[next]!;
     ctx.tui?.requestRender();
   };
   const prevFocus = () => {
     const idx = focusOrder.indexOf(d.focused);
     let prev = (idx - 1 + focusOrder.length) % focusOrder.length;
-    if (focusOrder[prev] === "create" && promptEmpty()) prev = (prev - 1 + focusOrder.length) % focusOrder.length;
+    if (focusOrder[prev] === "create" && createDisabled()) prev = (prev - 1 + focusOrder.length) % focusOrder.length;
     d.focused = focusOrder[prev]!;
     ctx.tui?.requestRender();
   };
@@ -594,7 +610,7 @@ function handleNewAgentFormDialog(
       const isMachine = d.focused === "machine";
       const n = isMachine ? machines.length : d.availableTypes.length;
       if (!n) return;
-      const index = isMachine ? machines.findIndex(m => m.id === d.machine.id) : d.availableTypes.indexOf(d.agentType);
+      const index = isMachine ? machines.findIndex(m => m.id === d.machine?.id) : d.availableTypes.indexOf(d.agentType);
       const next = index < 0 ? (delta > 0 ? 0 : n - 1) : (index + delta + n) % n;
       if (isMachine) d.machine = machines[next]!;
       else d.agentType = d.availableTypes[next]!;
@@ -615,7 +631,7 @@ function handleNewAgentFormDialog(
   } else if (d.focused === "create") {
     if (matchesKey(data, Key.enter)) {
       const promptText = d.buffer.getText().trim();
-      if (promptText.length > 0) {
+      if (d.machine && promptText.length > 0) {
         d.onSubmit(d.name, d.agentType, promptText);
       }
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) { nextFocus(); }
@@ -1112,7 +1128,7 @@ export function buildNewAgentFormContent(
 
   const machines = dialog.machines();
   const cycleText = ` ${DIM}[Space/Enter/→ next, Shift+Space/← prev]${RESET}`;
-  if (machines.some(m => m.id !== null)) {
+  if (dialog.machine && machines.some(m => m.id !== null)) {
     const focused = dialog.focused === "machine";
     const line = focused ? `${BOLD}${GREEN}Machine: ${dialog.machine.name}${RESET}` : `${DIM}Machine:${RESET} ${dialog.machine.name}`;
     lines.push(truncateToWidth(line + (focused && machines.length > 1 ? cycleText : ""), innerWidth, ""));
@@ -1125,7 +1141,7 @@ export function buildNewAgentFormContent(
     ? `${BOLD}${GREEN}Type: ${typeValue}${RESET}${cycleHint}`
     : `${DIM}Type:${RESET} ${typeValue}`;
   lines.push(truncateToWidth(typeLabel, innerWidth, ""));
-  if (dialog.machine.id !== null) {
+  if (dialog.machine && dialog.machine.id !== null) {
     lines.push(...wordWrapLines(`Attachments are not sent to ${dialog.machine.name}. Local paths stay in the prompt.`, innerWidth));
   }
   lines.push("");
@@ -1138,14 +1154,14 @@ export function buildNewAgentFormContent(
   if (hasScrollIndicator) { lines.push(`${DIM}↑${RESET}`); }
 
   const promptText = dialog.buffer.getText().trim();
-  const createEnabled = promptText.length > 0;
+  const createEnabled = dialog.machine !== null && promptText.length > 0;
   const createLabel = dialog.focused === "create"
     ? (createEnabled ? `${BOLD}${GREEN}[ Create ]${RESET}` : `${BOLD}${DIM}[ Create ]${RESET}`)
     : (createEnabled ? `[ Create ]` : `${DIM}[ Create ]${RESET}`);
   const cancelLabel = dialog.focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
   lines.push(`  ${cancelLabel}   ${createLabel}`);
 
-  if (dialog.inFlight) lines.push(`Starting agent on ${dialog.machine.name}…`);
+  if (dialog.inFlight) lines.push(`Starting agent on ${dialog.inFlight}…`);
   if (dialog.error) lines.push(...wordWrapLines(dialog.error, innerWidth).map(line => `${RED}${line}${RESET}`));
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }

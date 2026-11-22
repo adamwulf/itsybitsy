@@ -10160,15 +10160,15 @@ describe("Unified peer repos in the Agents tree", () => {
     if (!count) return;
     const types = [...form.availableTypes];
     dashboard.handleInput(" ");
-    expect(form.machine.id).toBe(PEER_B);
+    expect(form.machine?.id).toBe(PEER_B);
     expect(text()).toContain("Attachments are not sent to Laptop B");
     expect(form.availableTypes).toEqual(types);
     dashboard.handleInput("\x1b[D");
-    expect(form.machine.id).toBeNull();
+    expect(form.machine?.id).toBeNull();
     dashboard.handleInput("\x1b[D");
-    expect(form.machine.id).toBe(count === 1 ? PEER_B : PEER_C);
+    expect(form.machine?.id).toBe(count === 1 ? PEER_B : PEER_C);
     dashboard.handleInput("\r");
-    expect(form.machine.id).toBeNull();
+    expect(form.machine?.id).toBeNull();
   });
 
   test("a on a remote-only header starts on its first connected peer, preserves the draft on failure and submits once", async () => {
@@ -10197,6 +10197,62 @@ describe("Unified peer repos in the Agents tree", () => {
     await waitFor(() => dashboard.dialog === null);
     expect(start.mock.calls).toEqual(Array(2).fill([PEER_C, { repo: "itsybitsy", type: "worker", name: "builder", prompt }]));
     expect(dashboard.notice).toBe("Created agent builder on Laptop C");
+  });
+
+  test("losing the selected peer on a shared repo makes the local replacement visible", () => {
+    const dashboard = makeDashboard();
+    dashboard.setRepos([{ name: "itsybitsy", path: "/local/project" }]);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    service.set({ links: links() });
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    dashboard.handleInput("\t");
+    dashboard.handleInput(" ");
+    expect(form.machine?.id).toBe(PEER_B);
+    form.focused = "create";
+    service.set({ links: [] });
+    expect(form.machine).toEqual({ id: null, name: "This machine" });
+    const text = buildNewAgentFormContent(form, 70).contentLines.join(" ");
+    expect(text).toContain("Machine changed to This machine");
+    expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("agentType");
+  });
+
+  test("peer updates keep the open draft, reconcile by id, and disable Create when its last host vanishes", () => {
+    const { dashboard, service } = setup();
+    const [b, c] = links();
+    const second = { ...c!, connected: true, repos: repos("itsybitsy") };
+    service.set({ links: [b!, second] });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    form.buffer.handleInput("x");
+    service.set({ links: [second, { ...b!, name: "Renamed" }] });
+    expect(form.machine).toEqual({ id: PEER_B, name: "Renamed" });
+    form.focused = "create";
+    service.set({ links: [second, { ...b!, connected: false }] });
+    expect(form.machine?.id).toBe(PEER_C);
+    expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("machine");
+    expect(form.error).toContain("Machine changed to Laptop C");
+    service.set({ links: [{ ...second, repos: [] }] });
+    expect(form.machine).toBeNull();
+    expect(form.buffer.getText()).toBe("x");
+    expect(form.error).toContain("No connected machine");
+    const start = spyOn(service, "startRemoteAgent");
+    form.focused = "cancel";
+    dashboard.handleInput("\t");
+    expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("name"); // disabled Create is skipped
+    form.onSubmit("", "worker", "x");
+    expect(start).not.toHaveBeenCalled();
+    service.set({ links: [b!] });
+    expect(form.machine?.id).toBe(PEER_B);
+    expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("machine");
+    // A change unseen by the listener must still be reconciled before submission.
+    service.state.links = [second];
+    form.onSubmit("", "worker", "x");
+    expect(start).not.toHaveBeenCalled();
+    expect(form.machine?.id).toBe(PEER_C);
+    expect(form.buffer.getText()).toBe("x");
   });
 
   test("a on a disconnected remote-only header identifies the unavailable repo", () => {

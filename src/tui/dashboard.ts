@@ -67,7 +67,7 @@ import type { Team } from "../teams";
 import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH,
-  handleDialogInput, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
+  handleDialogInput, syncNewAgentMachine, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
   buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
 import {
@@ -1869,9 +1869,7 @@ export class DashboardComponent implements Component {
         syncPeersDialog(dialog);
         this.tui?.requestRender();
       } else if (changed || dialog?.type === "new-agent-form") {
-        if (dialog?.type === "new-agent-form" && dialog.focused === "machine" && !dialog.machines().some(m => m.id !== null)) {
-          dialog.focused = "agentType";
-        }
+        if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
         this.tui?.requestRender();
       }
     });

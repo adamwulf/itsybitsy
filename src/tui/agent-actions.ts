@@ -43,7 +43,7 @@ import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import type { ConfigResult } from "../config";
-import { fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
+import { syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { fullyQualifiedAgentId } from "./row-keys";
 import type { PaneMode, TailLogMode } from "./pane-manager";
@@ -1875,10 +1875,14 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
     buffer: new TextBuffer(),
     focused: "name",
     onSubmit: async (name, agentType, prompt) => {
+      if (form.inFlight) return;
+      if (syncNewAgentMachine(form) || !form.machine) {
+        ctx.tui?.requestRender();
+        return;
+      }
       const target = form.machine;
       if (target.id !== null && service) {
-        if (form.inFlight) return;
-        form.inFlight = true;
+        form.inFlight = target.name;
         form.error = undefined;
         ctx.tui?.requestRender();
         try {
@@ -1890,7 +1894,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
         } catch (err) {
           form.error = err instanceof Error ? err.message : String(err);
         } finally {
-          form.inFlight = false;
+          form.inFlight = undefined;
           ctx.tui?.requestRender();
         }
         return;

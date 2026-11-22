@@ -552,6 +552,13 @@ const REMOTE_AGENTS: RemoteAgent[] = [
 ];
 
 describe("PeerService at boot", () => {
+  test.skipIf(process.env.IB_LIVE_CALLER !== "1")("reads launchd from the production macOS ps columns", async () => {
+    expect(await remoteStartDenialAtStartup({
+      stdinTTY: true, stdoutTTY: true, env: {}, cwd: "/", pid: 1,
+      resolveCaller: async () => "no-agent",
+    })).toBeNull();
+  });
+
   test.each([
     ["human", true, true, undefined, null],
     ["agent", true, true, undefined, "Only a human"],
@@ -566,6 +573,8 @@ describe("PeerService at boot", () => {
     ["agy", true, true, undefined, "disabled under agy"],
     ["ancestry error", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["missing parent", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["kernel agent", true, true, undefined, "disabled under codex"],
+    ["missing kernel name", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["missing executable", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["early PID zero", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["cycle", true, true, undefined, "Cannot verify dashboard process ancestry"],
@@ -574,12 +583,20 @@ describe("PeerService at boot", () => {
   ] as const)("classifies the %s dashboard once for the service lifetime", async (kind, stdinTTY, stdoutTTY, tmux, reason) => {
     let evidence = kind as string;
     const input = { stdinTTY, stdoutTTY, env: { TMUX: tmux }, cwd: "/app", pid: 30,
-      readProcessTable: () => {
+      readProcessTable: (command: string[]) => {
+        expect(command).toEqual(["/bin/ps", "-axww", "-o", "pid=PID,ppid=PPID,ucomm=KERNEL,comm=COMMAND"]);
         if (evidence === "ancestry error") throw new Error("ps failed");
         const parent = evidence === "missing parent" ? 999 : evidence === "early PID zero" ? 0 : evidence === "cycle" ? 30 : 1;
         const exe = ["claude", "codex", "agy"].includes(evidence) ? evidence : "Terminal";
-        if (evidence === "missing executable") return "30 20 /bin/ib\n20 1   \n1 0 /sbin/launchd";
-        return `30 20 /bin/ib\n20 10 /bin/zsh\n10 ${parent} /Applications/My Apps/${exe}\n1 0 /sbin/launchd`;
+        const kernel = evidence === "missing kernel name" ? "" : evidence === "kernel agent" ? "codex" : "My Terminal";
+        const commandName = evidence === "missing executable" ? "" : `/Applications/My Apps/${exe}`;
+        return [
+          "PID PPID KERNEL           COMMAND",
+          " 30   20 ib               /bin/ib",
+          " 20   10 zsh              /bin/zsh",
+          ` 10 ${String(parent).padStart(4)} ${kernel.padEnd(16)} ${commandName}`,
+          "  1    0 launchd          /sbin/launchd",
+        ].join("\n");
       },
       resolveCaller: async (): Promise<"agent" | "no-agent" | "unverifiable"> => {
         if (evidence === "resolver error") throw new Error("unavailable");

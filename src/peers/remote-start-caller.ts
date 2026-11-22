@@ -7,12 +7,12 @@ interface DashboardCaller {
   env: NodeJS.ProcessEnv;
   cwd: string;
   pid: number;
-  readProcessTable(): string;
+  readProcessTable?(command: string[]): string;
   resolveCaller: typeof resolveDashboardCaller;
 }
 
-function readProcessTable(): string {
-  const ps = Bun.spawnSync(["/bin/ps", "-axww", "-o", "pid=,ppid=,comm="], {
+function readProcessTable(command: string[]): string {
+  const ps = Bun.spawnSync(command, {
     stdout: "pipe", stderr: "pipe", timeout: 2_000, env: { LC_ALL: "C" },
   });
   if (ps.exitCode !== 0 || ps.stdout.length > 4 * 1024 * 1024) throw new Error("Incomplete process table");
@@ -20,21 +20,30 @@ function readProcessTable(): string {
 }
 
 /** One ps snapshot. Require an unbroken chain from this process through PID 1. */
-function readAncestors(pid: number, readTable: () => string): Map<number, string> | null {
-  const processes = new Map<number, { parent: number; executable: string }>();
+function readAncestors(pid: number, readTable: NonNullable<DashboardCaller["readProcessTable"]>): Map<number, string[]> | null {
+  const processes = new Map<number, { parent: number; names: string[] }>();
   try {
-    for (const line of readTable().split("\n")) {
-      const fields = /^(\d+)\s+(\d+)\s+(.+)$/.exec(line.trim());
-      if (fields) processes.set(Number(fields[1]), { parent: Number(fields[2]), executable: basename(fields[3]!) });
+    // ps pads columns in bytes. Use the headings so spaces within either name
+    // are preserved and a blank field cannot borrow text from the next one.
+    const [header, ...rows] = readTable(["/bin/ps", "-axww", "-o", "pid=PID,ppid=PPID,ucomm=KERNEL,comm=COMMAND"]).split("\n");
+    if (!header || !/^\s*PID\s+PPID\s+KERNEL\s+COMMAND\s*$/.test(header)) return null;
+    const kernel = header.indexOf("KERNEL");
+    const command = header.indexOf("COMMAND");
+    for (const line of rows) {
+      const bytes = Buffer.from(line);
+      const ids = /^\s*(\d+)\s+(\d+)\s+$/.exec(bytes.toString("utf8", 0, kernel));
+      if (!ids) continue;
+      const names = [bytes.toString("utf8", kernel, command).trim(), bytes.toString("utf8", command).trim()];
+      processes.set(Number(ids[1]), { parent: Number(ids[2]), names: names.map(name => basename(name)) });
     }
   } catch {
     return null;
   }
-  const ancestry = new Map<number, string>();
+  const ancestry = new Map<number, string[]>();
   while (pid > 0 && !ancestry.has(pid)) {
     const process = processes.get(pid);
-    if (!process?.executable) break;
-    ancestry.set(pid, process.executable);
+    if (!process || process.names.some(name => !name)) break;
+    ancestry.set(pid, process.names);
     if (pid === 1) return ancestry;
     pid = process.parent;
   }
@@ -45,7 +54,7 @@ function readAncestors(pid: number, readTable: () => string): Map<number, string
 export async function remoteStartDenialAtStartup(input?: DashboardCaller): Promise<string | null> {
   const unverified = "Cannot verify the dashboard caller’s agent metadata for remote starts";
   try {
-    const { stdinTTY, stdoutTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable } = input ?? {
+    const { stdinTTY, stdoutTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable = readProcessTable } = input ?? {
       stdinTTY: process.stdin.isTTY, stdoutTTY: process.stdout.isTTY, env: process.env,
       cwd: process.cwd(), pid: process.pid, readProcessTable, resolveCaller: resolveDashboardCaller,
     };
@@ -53,10 +62,9 @@ export async function remoteStartDenialAtStartup(input?: DashboardCaller): Promi
     if (env.TMUX !== undefined) return "Remote starts are disabled inside tmux";
     const ancestors = readAncestors(pid, readTable);
     if (!ancestors) return "Cannot verify dashboard process ancestry for remote starts";
-    for (const executable of ancestors.values()) {
-      if (["claude", "codex", "agy"].includes(executable.toLowerCase())) {
-        return `Remote starts are disabled under ${executable}`;
-      }
+    for (const names of ancestors.values()) {
+      const agent = names.find(name => ["claude", "codex", "agy"].includes(name.toLowerCase()));
+      if (agent) return `Remote starts are disabled under ${agent}`;
     }
     const caller = await resolveCaller(cwd, new Set(ancestors.keys()));
     if (caller === "no-agent") return null;

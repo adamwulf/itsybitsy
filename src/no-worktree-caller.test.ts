@@ -42,7 +42,7 @@ describe("trusted no-worktree caller attribution", () => {
   async function dashboardDenial(cwd: string) {
     return remoteStartDenialAtStartup({
       stdinTTY: true, stdoutTTY: true, env: {}, cwd, pid: 500,
-      readProcessTable: () => "500 400 ib\n400 300 sh\n300 1 Terminal\n1 0 launchd",
+      readProcessTable: () => "PID PPID KERNEL   COMMAND\n500  400 ib       ib\n400  300 sh       sh\n300    1 Terminal Terminal\n  1    0 launchd  launchd",
       resolveCaller: (path, ancestry) => resolveDashboardCaller(path, ancestry, deps()),
     });
   }

@@ -3,7 +3,7 @@ import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "../coordinator-t
 import { validateAgentName, type newAgent } from "../ib-commands";
 import { isValidRepoName } from "../validation";
 import type { RepoEntry } from "../registry";
-import { NEW_AGENT_MAX_REQUEST_BYTES } from "./peer-link";
+import { cleanRemoteText, NEW_AGENT_MAX_REQUEST_BYTES } from "./peer-link";
 
 export interface RemoteSpawnDeps {
   listRepos(): Promise<RepoEntry[]>;
@@ -41,6 +41,6 @@ export async function acceptRemoteAgent(
   const id = result.stdout.trim();
   const notice = `${peerName} started agent ${id} in ${registered.name}`;
   log(notice);
-  deps.notice(notice);
+  deps.notice(`${peerName} started agent ${cleanRemoteText(id)} in ${registered.name}`);
   return id;
 }

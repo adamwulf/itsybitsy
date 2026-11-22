@@ -32,6 +32,7 @@
  */
 
 import { repoDisplayName, type RepoEntry } from "../registry";
+import { isValidAgentId } from "../validation";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { PairProtocolError, type PairCloseInfo, type PairConnection, type PairStream } from "./pairing";
@@ -314,7 +315,7 @@ export async function requestNewAgent(
     await stream.writeAll(bytes);
     await stream.finish();
     const reply = decodeObject(await stream.readToEnd(PEER_MAX_REPLY_BYTES), "reply");
-    if (reply.ok === true && typeof reply.id === "string" && cleanField(reply.id)) return cleanField(reply.id);
+    if (reply.ok === true && typeof reply.id === "string" && isValidAgentId(reply.id)) return reply.id;
     if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
     throw new PeerProtocolError("malformed new-agent reply");
   };

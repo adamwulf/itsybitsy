@@ -332,6 +332,13 @@ test("a new-agent stream without a reply times out at 30 s", async () => {
   expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.done });
 });
 
+test.each(["", "bad/id", "agent\u001b[32m", "white space"])("rejects a malformed success id %j as a protocol error", async id => {
+  const side = serve({ startAgent: async () => id });
+  await expect(requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "hi" }, side.clock.setTimer))
+    .rejects.toBeInstanceOf(PeerProtocolError);
+  side.a.close(0, "done");
+});
+
 describe("trusted new-agent responder", () => {
   const request = { op: "new-agent", repo: "ApP", type: "worker", prompt: "build it" };
   let home: string;
@@ -435,6 +442,15 @@ describe("trusted new-agent responder", () => {
     spawn.mockRejectedValue(new Error("spawn failed"));
     expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "spawn failed" });
     expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    side.a.close(0, "done");
+  });
+
+  test("a long valid id is returned intact and bounded in the receiving notice", async () => {
+    const { side, spawn, notice } = receiver();
+    const id = "w".repeat(256);
+    spawn.mockResolvedValue({ ok: true, exitCode: 0, stdout: id, stderr: "" });
+    expect(await requestNewAgent(side.a, request, side.clock.setTimer)).toBe(id);
+    expect(notice.mock.calls[0]?.[0]).toBe(`Alice started agent ${"w".repeat(79)}… in app`);
     side.a.close(0, "done");
   });
 

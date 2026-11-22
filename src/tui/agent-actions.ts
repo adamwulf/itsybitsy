@@ -35,6 +35,7 @@ import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
+import { cleanRemoteText } from "../peers/peer-link";
 import type { PeersDialogService } from "./peers-dialog";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
@@ -1885,7 +1886,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
             repo: registryName, type: agentType, name: name.trim() || undefined, prompt,
           });
           ctx.closeDialog();
-          ctx.setNotice(`Created agent ${id} on ${target.name}`, "info");
+          ctx.setNotice(`Created agent ${cleanRemoteText(id)} on ${target.name}`, "info");
         } catch (err) {
           form.error = err instanceof Error ? err.message : String(err);
         } finally {

@@ -205,15 +205,18 @@ test("after the responder removes a peer, the next request on the existing conne
 test("a trusted loopback new-agent stream starts the stubbed agent and returns its id", async () => {
   const net = makeNetwork(await loadIroh());
   const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, stdout: "worker-23\n", stderr: "", exitCode: 0 }));
+  const type = "receiver-fixture-only";
+  const listSpawnableTypes = mock(() => [type]);
   const notice = mock((_line: string) => {});
   const a = await net.makeSide("a", []);
-  const b = await net.makeSide("b", [], { listSpawnableTypes: () => ["worker"], listRepos: async () => [{ name: "App", path: "/b/app" }], newAgent, notice });
+  const b = await net.makeSide("b", [], { listSpawnableTypes, listRepos: async () => [{ name: "App", path: "/b/app" }], newAgent, notice });
   await pairBoth(a, b);
   await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
   const prompt = "read this ".repeat(800);
-  expect(await a.service.startRemoteAgent(b.id, { repo: "app", type: "worker", prompt })).toBe("worker-23");
-  expect(newAgent.mock.calls).toEqual([["/b/app", prompt, { type: "worker", name: undefined }]]);
+  expect(await a.service.startRemoteAgent(b.id, { repo: "app", type, prompt })).toBe("worker-23");
+  expect(listSpawnableTypes.mock.calls).toEqual([[]]);
+  expect(newAgent.mock.calls).toEqual([["/b/app", prompt, { type, name: undefined }]]);
   expect(b.logs).toContain("A started agent worker-23 in App");
   expect(notice.mock.calls).toEqual([["A started agent worker-23 in App"]]);
 });

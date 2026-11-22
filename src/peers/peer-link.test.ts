@@ -18,7 +18,6 @@ import {
   PEER_CLOSE,
   PEER_MAX_REPLY_BYTES,
   NEW_AGENT_MAX_REQUEST_BYTES,
-  NEW_AGENT_TIMEOUT_MS,
   requestNewAgent,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
@@ -276,6 +275,32 @@ describe("serveTrustedConnection", () => {
     await side.done;
   });
 
+  test.each([262144, 262145])("reads at most 262144 bytes for a %i-byte encoded new-agent request", async size => {
+    const startAgent = mock(async () => "agent-id");
+    const side = serve({ startAgent });
+    const accept = side.b.acceptBi.bind(side.b);
+    const limits: number[] = [];
+    spyOn(side.b, "acceptBi").mockImplementationOnce(async () => {
+      const stream = await accept();
+      const read = stream.readToEnd.bind(stream);
+      spyOn(stream, "readToEnd").mockImplementation(limit => { limits.push(limit); return read(limit); });
+      return stream;
+    });
+    const request = { op: "new-agent", repo: "app", type: "worker", prompt: "é" };
+    request.prompt += "x".repeat(size - encode(request).length);
+    const reply = await rawRequest(side.a, encode(request));
+    expect(limits).toEqual([262144]);
+    if (size === 262144) {
+      expect(decodeText(reply)).toEqual({ ok: true, id: "agent-id" });
+      expect(startAgent).toHaveBeenCalledTimes(1);
+    } else {
+      expect(reply).toBeInstanceOf(Error);
+      expect(startAgent).not.toHaveBeenCalled();
+      expect(side.a.closeInfo()).toMatchObject({ code: PEER_CLOSE.error });
+    }
+    side.a.close(0, "done");
+  });
+
   for (const [label, bytes, reason] of [
     ["new-agent over 256 KB", encode({ op: "new-agent", prompt: "a".repeat(NEW_AGENT_MAX_REQUEST_BYTES) }), `request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`],
     ["unknown op over 4096 bytes", encode({ op: "unknown", pad: "a".repeat(4096) }), "request longer than 4096 bytes"],
@@ -325,7 +350,7 @@ test("a new-agent stream without a reply times out at 30 s", async () => {
   const pending = requestNewAgent(link.a, { repo: "app", type: "worker", prompt: "hello" }, clock.setTimer);
   const stream = await link.b.acceptBi();
   expect(decodeText(await stream.readToEnd(4096))).toEqual({ op: "new-agent", repo: "app", type: "worker", prompt: "hello" });
-  clock.advance(NEW_AGENT_TIMEOUT_MS - 1);
+  clock.advance(29_999);
   expect(link.a.closeInfo()).toBeNull();
   clock.advance(1);
   await expect(pending).rejects.toThrow("timed out after 30 s");

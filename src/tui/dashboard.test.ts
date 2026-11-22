@@ -10223,6 +10223,23 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(rendered).toContain("Machine changed to Laptop C. Review before creating the agent.");
   });
 
+  test("the pending remote start status fits the 66-column form", async () => {
+    const { dashboard, service } = setup();
+    const name = "界".repeat(16);
+    service.set({ links: [{ ...links()[0]!, name }] });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    const pending = Promise.withResolvers<string>();
+    spyOn(service, "startRemoteAgent").mockReturnValue(pending.promise);
+    const submitted = form.onSubmit("", "worker", "hello");
+    const lines = buildNewAgentFormContent(form, 66).contentLines;
+    expect(lines.map(stripAnsi).join(" ")).toContain(`Starting agent on ${name}… (Esc to dismiss)`);
+    expect(Math.max(...lines.map(visibleWidth))).toBeLessThanOrEqual(66);
+    pending.resolve("worker");
+    await submitted;
+  });
+
   test.each(["success", "failure"])("a detached %s is reported without replacing the next dialog", async outcome => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, repoKey("itsybitsy"));

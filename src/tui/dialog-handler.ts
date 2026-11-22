@@ -1178,7 +1178,7 @@ export function buildNewAgentFormContent(
   const cancelLabel = dialog.focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
   lines.push(`  ${cancelLabel}   ${createLabel}`);
 
-  if (dialog.inFlight) lines.push(`Starting agent on ${dialog.inFlight}… (Esc to dismiss)`);
+  if (dialog.inFlight) lines.push(...wordWrapLines(`Starting agent on ${dialog.inFlight}… (Esc to dismiss)`, innerWidth));
   if (dialog.error) lines.push(...wordWrapLines(dialog.error, innerWidth).map(line => `${RED}${line}${RESET}`));
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }

@@ -555,14 +555,16 @@ describe("PeerService at boot", () => {
   test.each([
     ["human", true, true, undefined, null],
     ["agent", true, true, undefined, "Only a human"],
-    ["system coordinator", true, true, "/tmp/tmux-501/default,13,0", "itsybitsy tmux"],
+    ["system coordinator", true, true, "/tmp/tmux-501/default,13,0", "inside tmux"],
+    ["custom tmux directory", true, true, "/other/tmp/server,12,0", "inside tmux"],
+    ["empty tmux variable", true, true, "", "inside tmux"],
     ["non-TTY input", false, true, undefined, "interactive terminal"],
     ["non-TTY output", true, false, undefined, "interactive terminal"],
-    ["malformed tmux", true, true, "?", "Cannot verify"],
+    ["malformed tmux", true, true, "?", "inside tmux"],
     ["resolver error", true, true, undefined, "Cannot verify"],
   ] as const)("classifies the %s dashboard once for the service lifetime", async (kind, stdinTTY, stdoutTTY, tmux, reason) => {
     let evidence = kind as string;
-    const input = { stdinTTY, stdoutTTY, env: { TMUX: tmux }, uid: 501, cwd: "/app",
+    const input = { stdinTTY, stdoutTTY, env: { TMUX: tmux }, cwd: "/app",
       resolveCaller: async () => {
         if (evidence === "resolver error") throw new Error("unavailable");
         return evidence === "agent" ? { meta: {}, repoPath: "/app", agentDir: "/app/agent" } : null;

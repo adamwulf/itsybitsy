@@ -447,14 +447,14 @@ function canonicalizeWithinOnce(
  * `${TMUX_TMPDIR:-/tmp}/tmux-<uid>`. resolveTmuxSocketDir canonicalizes it; the
  * hook-side table builder canonicalizes it without opening it (it is a deny root).
  */
-export function tmuxSocketDirPath(uid: number, env: NodeJS.ProcessEnv = process.env): string {
-  const tmux = env.TMUX;
+export function tmuxSocketDirPath(uid: number): string {
+  const tmux = process.env.TMUX;
   if (tmux && tmux.length > 0) {
     const socketPath = tmux.split(",")[0];
     if (socketPath && socketPath.length > 0) return dirname(socketPath);
   }
-  const base = env.TMUX_TMPDIR && env.TMUX_TMPDIR.length > 0
-    ? env.TMUX_TMPDIR
+  const base = process.env.TMUX_TMPDIR && process.env.TMUX_TMPDIR.length > 0
+    ? process.env.TMUX_TMPDIR
     : "/tmp";
   return join(base, `tmux-${uid}`);
 }
@@ -473,8 +473,8 @@ export function tmuxSocketDirPath(uid: number, env: NodeJS.ProcessEnv = process.
  * without pulling in the heavy ib-commands module; ib-commands re-exports it so
  * existing callers keep working.
  */
-export function resolveTmuxSocketDir(uid: number, env: NodeJS.ProcessEnv = process.env): string {
-  return canonicalizeSandboxPath(tmuxSocketDirPath(uid, env));
+export function resolveTmuxSocketDir(uid: number): string {
+  return canonicalizeSandboxPath(tmuxSocketDirPath(uid));
 }
 
 function expandHome(entry: string, home: string): string {

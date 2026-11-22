@@ -108,8 +108,8 @@ the reply change.
   The form says so when a remote machine is selected.
 - **Submitting to a remote machine.** The form sends `new-agent` over the
   trusted link and waits up to 30 s.
-  - On success it closes and shows "Created agent <id> on <peer>". The row
-    appears on the next poll, within 5 s.
+  - On success it closes and shows "Created agent <id> on <peer>". The receiver refreshes its agent list immediately. The row normally appears
+    within a few seconds as polling picks up that refresh.
   - On failure it shows the error.
 
 ### Remote new-agent request
@@ -326,7 +326,7 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
    - Set Machine to B, pick a type and type a prompt.
    - A should show "Created agent <id> on <B>".
    - B should show "<A> started agent <id> in <repo>".
-   - The new row should appear in italic on A within about 5 s.
+   - The new row should appear in italic on A within a few seconds.
 7. **Refusals.**
    - A remote start with `repo-coordinator`, or a type that B lacks, should show B's error on A.
    - So should a repo that B does not have. One way to test this: unregister the repo on B while A's form is open.

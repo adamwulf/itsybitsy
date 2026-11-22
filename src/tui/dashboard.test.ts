@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, spyOn } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, mock, spyOn } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, readdir, realpath, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -10238,6 +10238,17 @@ describe("Unified peer repos in the Agents tree", () => {
     const text = buildNewAgentFormContent(form, 70).contentLines.join(" ");
     expect(text).toContain("Machine changed to This machine");
     expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("agentType");
+  });
+
+  test("an incoming successful start requests a watcher refresh without waiting for the scan", () => {
+    const dashboard = makeDashboard();
+    const scan = Promise.withResolvers<void>();
+    const refresh = mock(() => scan.promise);
+    dashboard.watcher = { refresh } as unknown as NonNullable<DashboardComponent["watcher"]>;
+    expect(dashboard.remoteAgentStarted("Laptop B started agent builder in app")).toBeUndefined();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(dashboard.notice).toBe("Laptop B started agent builder in app");
+    scan.resolve();
   });
 
   test("peer updates keep the open draft, reconcile by id, and disable Create when its last host vanishes", () => {

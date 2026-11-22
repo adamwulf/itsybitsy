@@ -4193,7 +4193,7 @@ export async function launchDashboard(): Promise<void> {
   // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
   // and never carries a state that detection has not filled in yet.
   const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () =>
-    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [])));
+    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? []), message => dashboard.setNotice(message, "info")));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read

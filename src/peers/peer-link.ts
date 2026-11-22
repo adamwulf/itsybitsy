@@ -312,7 +312,7 @@ export async function requestNewAgent(
     await stream.writeAll(bytes);
     await stream.finish();
     const reply = decodeObject(await stream.readToEnd(PEER_MAX_REPLY_BYTES), "reply");
-    if (reply.ok === true && typeof reply.id === "string" && cleanRemoteText(reply.id)) return cleanRemoteText(reply.id);
+    if (reply.ok === true && typeof reply.id === "string" && cleanField(reply.id)) return cleanField(reply.id);
     if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
     throw new PeerProtocolError("malformed new-agent reply");
   };
@@ -335,11 +335,11 @@ export async function requestNewAgent(
 // ---------------------------------------------------------------------------
 
 export interface PeerResponderDeps {
-  /** Whether `id` is in `peers.json`, re-read on every call. A failed read must answer false. */
-  isPeer(id: string): Promise<boolean>;
+  /** Paired name for this id, re-read on every call. A failed read returns null. */
+  peerName(id: string): Promise<string | null>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
-  startAgent?(request: Record<string, unknown>, peerId: string): Promise<string>;
+  startAgent?(request: Record<string, unknown>, peerName: string): Promise<string>;
   /** watch.log in `ib watch`. */
   log(line: string): void;
 }
@@ -352,7 +352,7 @@ export interface PeerResponderDeps {
  */
 export async function serveTrustedConnection(conn: PairConnection, deps: PeerResponderDeps): Promise<void> {
   const from = shortPeerId(conn.remoteId);
-  if (!(await deps.isPeer(conn.remoteId))) {
+  if ((await deps.peerName(conn.remoteId)) === null) {
     deps.log(`peer link: closed a connection from ${from}: not a peer`);
     closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
     return;
@@ -365,7 +365,7 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
     } catch {
       return; // the connection closed
     }
-    if (!(await deps.isPeer(conn.remoteId))) {
+    if ((await deps.peerName(conn.remoteId)) === null) {
       deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
       closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
       return;
@@ -393,7 +393,8 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   // Again now, right before answering: the stream was accepted on its first
   // frame, and a client can hold it open across `ib peer remove` before it
   // finishes the request. The answer reflects peers.json as of this moment.
-  if (!(await deps.isPeer(conn.remoteId))) {
+  const peerName = await deps.peerName(conn.remoteId);
+  if (peerName === null) {
     deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
     closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
     return;
@@ -410,7 +411,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   } else if (request.op === "new-agent") {
     try {
       if (!deps.startAgent) throw new Error("Remote starts are unavailable");
-      const id = await deps.startAgent(request, conn.remoteId);
+      const id = await deps.startAgent(request, peerName);
       reply = encodeJson({ ok: true, id });
     } catch (err) {
       const error = cleanRemoteText(errorDetail(err));

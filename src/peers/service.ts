@@ -81,6 +81,9 @@ import {
   type PairStage,
   type PairStream,
 } from "./pairing";
+import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
+import { newAgent } from "../ib-commands";
+import { listRepos } from "../registry";
 import { PEER_ALPN, serveTrustedConnection, type PeerSnapshot } from "./peer-link";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
@@ -119,6 +122,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[]): void;
   renewLease?(): Promise<void>;
   acquireLock(): Promise<EndpointLockResult>;
@@ -144,8 +148,9 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot): PeerServiceDeps {
+export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void): PeerServiceDeps {
   return {
+    remoteSpawn: { listRepos, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
     acquireLock: () => acquireEndpointLock(),
@@ -819,8 +824,11 @@ export class PeerService {
         return;
       }
       if (alpn === PEER_ALPN) {
+        const remoteSpawn = this.deps.remoteSpawn;
         await serveTrustedConnection(toPairConnection(conn), {
-          isPeer: (id) => this.isPeer(id),
+          peerName: (id) => this.peerName(id),
+          startAgent: remoteSpawn && ((request, name) =>
+            acceptRemoteAgent(request, name, remoteSpawn, this.deps.log)),
           snapshot: this.deps.snapshot,
           log: this.deps.log,
         });
@@ -834,12 +842,12 @@ export class PeerService {
   }
 
   /** The trusted ALPN's allowlist: `peers.json`, re-read on every call. A failed read refuses. */
-  private async isPeer(id: string): Promise<boolean> {
+  private async peerName(id: string): Promise<string | null> {
     try {
-      return (await this.deps.readPeers()).some((peer) => peer.id === id);
+      return (await this.deps.readPeers()).find((peer) => peer.id === id)?.name ?? null;
     } catch (err) {
       this.deps.log(`peer link: could not read peers.json, so refusing: ${errorDetail(err)}`);
-      return false;
+      return null;
     }
   }
 

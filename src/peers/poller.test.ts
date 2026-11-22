@@ -67,10 +67,10 @@ function makeRig(initialPeers: Peer[]) {
     const link = createMemoryLink(SELF, id);
     r.served.push(link.b);
     void serveTrustedConnection(link.b, {
-      isPeer: async () => {
+      peerName: async () => {
         // A wedged remote: the per-request check never returns, so no reply is sent.
         if (r.stalled) await new Promise(() => {});
-        return r.allowed;
+        return r.allowed ? "paired" : null;
       },
       snapshot: () => {
         r.requests++;

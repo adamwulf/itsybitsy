@@ -14,7 +14,7 @@ import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, PairProtocolError, decod
 import {
   PEER_ALPN,
   PEER_CLOSE,
-  PEER_MAX_REQUEST_BYTES,
+  NEW_AGENT_MAX_REQUEST_BYTES,
   encodePeerRequest,
   requestAgents,
   serveTrustedConnection,
@@ -1500,7 +1500,7 @@ function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
 describe("toPairConnection maps iroh's TooLong to PairProtocolError", () => {
   for (const [alpn, reason] of [
     [PAIR_ALPN, `message longer than ${PAIR_MAX_MESSAGE_BYTES} bytes`],
-    [PEER_ALPN, `request longer than ${PEER_MAX_REQUEST_BYTES} bytes`],
+    [PEER_ALPN, `request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`],
   ] as const) {
     test(`on the ${alpn} ALPN: an over-long message closes the connection with code 3 and says why`, async () => {
       // A listed peer, so the trusted ALPN reads its request at all.

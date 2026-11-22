@@ -12,7 +12,7 @@
  *     a stream opened before the removal) rather than the next dial.
  *
  * Each request uses its own bi stream: the dialer writes one JSON object and
- * calls `finish`; the responder reads it with `readToEnd(4096)`, writes one
+ * calls `finish`; the responder reads the bounded request, writes one
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. No framing code.
  *
@@ -20,7 +20,7 @@
  *   responder → {"op":"agents","repos":[{registryName, displayName}, …],"agents":[{id, nickname, repoName, repoRegistryName, repoPath, state, agentType, manager}, …]}
  *             | {"op":"error","reason":"…"}   (an unknown op, a list over 1 MB, an internal error)
  *
- * A request over 4096 bytes, or one that is not UTF-8, not JSON, not an object
+ * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
  * reason. The agent list carries exactly the eight fields above, never
  * prompts, logs or tmux output, and never the system coordinator.
@@ -38,8 +38,17 @@ import { PairProtocolError, type PairCloseInfo, type PairConnection, type PairSt
 import { shortPeerId } from "./store";
 
 export const PEER_ALPN = "itsybitsy/peer/1";
-/** Longest request the responder reads (`readToEnd` limit). */
+/** All requests except new-agent. */
 export const PEER_MAX_REQUEST_BYTES = 4096;
+export const NEW_AGENT_MAX_REQUEST_BYTES = 256 * 1024;
+export const NEW_AGENT_TIMEOUT_MS = 30_000;
+
+export interface RemoteNewAgentRequest {
+  repo: string;
+  type: string;
+  name?: string;
+  prompt: string;
+}
 /** Longest reply the dialer reads (`readToEnd` limit), and the cap on the agent list. */
 export const PEER_MAX_REPLY_BYTES = 1_048_576;
 
@@ -175,11 +184,13 @@ function decodeObject(bytes: Uint8Array, what: string): Record<string, unknown> 
   return value as Record<string, unknown>;
 }
 
-/** Parse a request. Only its op is read; an unknown op is the caller's to answer. */
-export function decodePeerRequest(bytes: Uint8Array): { op: string } {
+/** Keep the payload untrusted until the handler validates its fields. */
+export function decodePeerRequest(bytes: Uint8Array): Record<string, unknown> & { op: string } {
   const message = decodeObject(bytes, "request");
   if (typeof message.op !== "string") throw new PeerProtocolError("request has no op");
-  return { op: message.op };
+  const limit = message.op === "new-agent" ? NEW_AGENT_MAX_REQUEST_BYTES : PEER_MAX_REQUEST_BYTES;
+  if (bytes.length > limit) throw new PeerProtocolError(`request longer than ${limit} bytes`);
+  return { ...message, op: message.op };
 }
 
 /**
@@ -288,6 +299,37 @@ export async function requestAgents(conn: PairConnection): Promise<PeerSnapshot>
   return decodeAgentsReply(bytes);
 }
 
+/** Use a separate stream on the live trusted connection. Never retry a spawn. */
+export async function requestNewAgent(
+  conn: PairConnection,
+  { repo, type, name, prompt }: RemoteNewAgentRequest,
+  setTimer: (ms: number, fn: () => void) => () => void,
+): Promise<string> {
+  const bytes = encodeJson({ op: "new-agent", repo, type, name, prompt });
+  if (bytes.length > NEW_AGENT_MAX_REQUEST_BYTES) throw new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
+  const exchange = async () => {
+    const stream = await conn.openBi();
+    await stream.writeAll(bytes);
+    await stream.finish();
+    const reply = decodeObject(await stream.readToEnd(PEER_MAX_REPLY_BYTES), "reply");
+    if (reply.ok === true && typeof reply.id === "string" && cleanRemoteText(reply.id)) return cleanRemoteText(reply.id);
+    if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
+    throw new PeerProtocolError("malformed new-agent reply");
+  };
+  let cancel: (() => void) | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    cancel = setTimer(NEW_AGENT_TIMEOUT_MS, () => {
+      reject(new Error("Remote agent request timed out after 30 s. Check the peer for the agent."));
+      closeQuietly(conn, PEER_CLOSE.done, "request timed out");
+    });
+  });
+  try {
+    return await Promise.race([exchange(), timeout]);
+  } finally {
+    cancel?.();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Responder
 // ---------------------------------------------------------------------------
@@ -297,6 +339,7 @@ export interface PeerResponderDeps {
   isPeer(id: string): Promise<boolean>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
+  startAgent?(request: Record<string, unknown>, peerId: string): Promise<string>;
   /** watch.log in `ib watch`. */
   log(line: string): void;
 }
@@ -333,13 +376,13 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
 
 /** One request on its own stream. Every error stays here. */
 async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps): Promise<void> {
-  let op: string;
+  let request: ReturnType<typeof decodePeerRequest>;
   try {
-    op = decodePeerRequest(await stream.readToEnd(PEER_MAX_REQUEST_BYTES)).op;
+    request = decodePeerRequest(await stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES));
   } catch (err) {
     if (err instanceof PeerProtocolError || err instanceof PairProtocolError) {
       // PairProtocolError is the seam's readToEnd past its limit.
-      const reason = err instanceof PairProtocolError ? `request longer than ${PEER_MAX_REQUEST_BYTES} bytes` : err.message;
+      const reason = err instanceof PairProtocolError ? `request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes` : err.message;
       deps.log(`peer link: ${reason}, from ${from}; closing`);
       closeQuietly(conn, PEER_CLOSE.error, reason);
     }
@@ -357,15 +400,25 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   }
 
   let reply: Uint8Array;
-  if (op === "agents") {
+  if (request.op === "agents") {
     try {
       reply = encodeAgentsReply(deps.snapshot());
     } catch (err) {
       deps.log(`peer link: could not build the agent list for ${from}: ${errorDetail(err)}`);
       reply = encodeErrorReply("internal error");
     }
+  } else if (request.op === "new-agent") {
+    try {
+      if (!deps.startAgent) throw new Error("Remote starts are unavailable");
+      const id = await deps.startAgent(request, conn.remoteId);
+      reply = encodeJson({ ok: true, id });
+    } catch (err) {
+      const error = cleanRemoteText(errorDetail(err));
+      deps.log(`peer link: new-agent from ${from} failed: ${error}`);
+      reply = encodeJson({ ok: false, error });
+    }
   } else {
-    reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(op))}`);
+    reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);
   }
   try {
     await stream.writeAll(reply);

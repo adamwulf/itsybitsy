@@ -12,6 +12,9 @@ import { irohAddonLoaderCtx } from "./iroh";
 import {
   PEER_CLOSE,
   PEER_MAX_REPLY_BYTES,
+  NEW_AGENT_MAX_REQUEST_BYTES,
+  NEW_AGENT_TIMEOUT_MS,
+  requestNewAgent,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
   PeerProtocolError,
@@ -24,7 +27,7 @@ import {
   type PeerSnapshot,
   type RemoteAgent,
 } from "./peer-link";
-import { createMemoryLink, type MemoryConnection } from "./test-pair-transport";
+import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test-pair-transport";
 
 const ID_A = "a1".repeat(32);
 const ID_B = "b2".repeat(32);
@@ -264,6 +267,8 @@ describe("serveTrustedConnection", () => {
   });
 
   for (const [label, bytes, reason] of [
+    ["new-agent over 256 KB", encode({ op: "new-agent", prompt: "a".repeat(NEW_AGENT_MAX_REQUEST_BYTES) }), `request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`],
+    ["unknown op over 4096 bytes", encode({ op: "unknown", pad: "a".repeat(4096) }), "request longer than 4096 bytes"],
     ["not JSON", encode("{"), "request is not JSON"],
     ["not an object", encode([1, 2]), "request is not a JSON object"],
     ["no op", encode({ agents: true }), "request has no op"],
@@ -301,4 +306,18 @@ describe("serveTrustedConnection", () => {
     await waitFor(() => side.b.closeInfo() !== null, { message: "B sees the close" });
     expect(side.logs.filter((line) => line.includes("closing"))).toEqual([]);
   });
+});
+
+
+test("a new-agent stream without a reply times out at 30 s", async () => {
+  const link = createMemoryLink(ID_A, ID_B);
+  const clock = createFakeClock();
+  const pending = requestNewAgent(link.a, { repo: "app", type: "worker", prompt: "hello" }, clock.setTimer);
+  const stream = await link.b.acceptBi();
+  expect(decodeText(await stream.readToEnd(4096))).toEqual({ op: "new-agent", repo: "app", type: "worker", prompt: "hello" });
+  clock.advance(NEW_AGENT_TIMEOUT_MS - 1);
+  expect(link.a.closeInfo()).toBeNull();
+  clock.advance(1);
+  await expect(pending).rejects.toThrow("timed out after 30 s");
+  expect(link.b.closeInfo()?.code).toBe(PEER_CLOSE.done);
 });

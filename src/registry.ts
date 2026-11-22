@@ -1,6 +1,8 @@
 import { join, resolve, basename, isAbsolute } from "path";
 import { userHome } from "./home";
 import { mkdir, open, realpath, rename, stat, unlink } from "fs/promises";
+import { resolveGitRoot } from "./agent-lifecycle";
+import { getCoordinatorAgentId } from "./coordinator";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
 // because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
@@ -186,6 +188,10 @@ export const ADD_NAME_HINT = "use ib add <path> <name>";
 /** The way forward from a taken name for [ New Repo ], which names the repo after the folder it creates. */
 export const NEW_REPO_NAME_HINT = "choose another folder name";
 
+async function coordinatorFolderName(path: string): Promise<string> {
+  return getCoordinatorAgentId((await resolveGitRoot(path)) || path);
+}
+
 /**
  * Why `repoName` at `resolvedPath` cannot be added to `registry`, or null if
  * it can. These are addRepo's rules, kept in one place so createRepo can check
@@ -226,11 +232,12 @@ export async function checkNewRepoEntry(
     return `Already registered: ${resolvedPath}`;
   }
 
-  const folderName = basename(resolvedPath);
+  const folderName = await coordinatorFolderName(resolvedPath);
   const lowerFolderName = folderName.toLowerCase();
-  const existing = registry.repos.find((r) => basename(r.path).toLowerCase() === lowerFolderName);
-  if (existing) {
-    return `Cannot register ${resolvedPath}: its folder name "${folderName}" is already used by registered repo "${existing.name}" (${existing.path}). A repo's coordinator is named after its folder, so two registered repos cannot share a folder name.`;
+  for (const existing of registry.repos) {
+    if ((await coordinatorFolderName(existing.path)).toLowerCase() === lowerFolderName) {
+      return `Cannot register ${resolvedPath}: its repo root folder name "${folderName}" is already used by registered repo "${existing.name}" (${existing.path}). A repo's coordinator is named after its folder, so two registered repos cannot share a folder name.`;
+    }
   }
 
   // Repo names are unique, case-insensitively: a repo's name is the middle

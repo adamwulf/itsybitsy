@@ -152,6 +152,24 @@ describe("registry", () => {
     expect((await addRepo(dir, "three")).ok).toBe(true);
   });
 
+  test("a symlink to a second git repo collides with a registered subdirectory by root basename", async () => {
+    const first = join(tempDir, "client-a", "app");
+    const registered = join(first, "src");
+    const second = join(tempDir, "client-b", "App");
+    const alias = join(tempDir, "mobile");
+    await mkdir(registered, { recursive: true });
+    await mkdir(second, { recursive: true });
+    await Bun.$`git init --quiet`.cwd(first);
+    await Bun.$`git init --quiet`.cwd(second);
+    await symlink(second, alias);
+
+    expect((await addRepo(registered, "website")).ok).toBe(true);
+    const result = await addRepo(alias, "phone");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(`folder name "App" is already used by registered repo "website" (${registered})`);
+    expect(await listRepos()).toEqual([{ path: registered, name: "website" }]);
+  });
+
   test("adding a different basename preserves existing duplicate names and folder basenames", async () => {
     const existing = [{ path: "/x/one", name: "app" }, { path: "/y/one", name: "app" }];
     await saveRegistry({ repos: existing });
@@ -668,16 +686,17 @@ describe("ib add [path] [name] (CLI)", () => {
     const cli = await createCliFixture();
     try {
       const first = join(cli.root, "website");
-      expect((await cli.run(["add", first, "app"])).exitCode).toBe(0);
       const second = join(cli.root, "elsewhere", "app");
+      const options = { allowedProcesses: [first, second].map(path => ["git", "-C", path, "rev-parse"]) };
+      expect((await cli.run(["add", first, "app"], options)).exitCode).toBe(0);
       await mkdir(second, { recursive: true });
 
-      const refused = await cli.run(["add", second]);
+      const refused = await cli.run(["add", second], options);
       expect(refused.exitCode).toBe(1);
       expect(refused.stdout).toContain(`"app" is already the name of a registered repo`);
       expect(refused.stdout).toContain("use ib add <path> <name>");
 
-      const added = await cli.run(["add", second, "app-two"]);
+      const added = await cli.run(["add", second, "app-two"], options);
       expect(added.exitCode).toBe(0);
       expect(added.stdout).toContain(`Added: app-two (${second})`);
       const registry = await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).json();
@@ -692,12 +711,13 @@ describe("ib add [path] [name] (CLI)", () => {
     try {
       const first = join(cli.root, "app");
       const second = join(cli.root, "elsewhere", "App");
+      const options = { allowedProcesses: [first, second].map(path => ["git", "-C", path, "rev-parse"]) };
       await mkdir(first);
       await mkdir(second, { recursive: true });
-      expect((await cli.run(["add", first, "website"])).exitCode).toBe(0);
+      expect((await cli.run(["add", first, "website"], options)).exitCode).toBe(0);
 
       for (const args of [["add", second], ["add", second, "app-two"]]) {
-        const result = await cli.run(args);
+        const result = await cli.run(args, options);
         expect(result.exitCode).toBe(1);
         expect(result.stdout).toContain(`folder name "App" is already used by registered repo "website" (${first})`);
       }

@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { resolveCallerAgentContext } from "../ib-commands";
+import { resolveDashboardCaller } from "../no-worktree-caller";
 
 interface DashboardCaller {
   stdinTTY?: boolean;
@@ -8,7 +8,7 @@ interface DashboardCaller {
   cwd: string;
   pid: number;
   readProcessTable(): string;
-  resolveCaller: typeof resolveCallerAgentContext;
+  resolveCaller: typeof resolveDashboardCaller;
 }
 
 function readProcessTable(): string {
@@ -43,11 +43,11 @@ function readAncestors(pid: number, readTable: () => string): Map<number, string
 
 /** Evaluated once by launchDashboard. Only null enables outbound remote starts. */
 export async function remoteStartDenialAtStartup(input?: DashboardCaller): Promise<string | null> {
-  const unverified = "Cannot verify the dashboard caller for remote starts";
+  const unverified = "Cannot verify the dashboard caller’s agent metadata for remote starts";
   try {
     const { stdinTTY, stdoutTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable } = input ?? {
       stdinTTY: process.stdin.isTTY, stdoutTTY: process.stdout.isTTY, env: process.env,
-      cwd: process.cwd(), pid: process.pid, readProcessTable, resolveCaller: resolveCallerAgentContext,
+      cwd: process.cwd(), pid: process.pid, readProcessTable, resolveCaller: resolveDashboardCaller,
     };
     if (stdinTTY !== true || stdoutTTY !== true) return "Remote starts require an interactive terminal";
     if (env.TMUX !== undefined) return "Remote starts are disabled inside tmux";
@@ -58,7 +58,10 @@ export async function remoteStartDenialAtStartup(input?: DashboardCaller): Promi
         return `Remote starts are disabled under ${executable}`;
       }
     }
-    return await resolveCaller(cwd) === null ? null : "Only a human can start an agent on another machine";
+    const caller = await resolveCaller(cwd, new Set(ancestors.keys()));
+    if (caller === "no-agent") return null;
+    if (caller === "agent") return "Only a human can start an agent on another machine";
+    return unverified;
   } catch {
     return unverified;
   }

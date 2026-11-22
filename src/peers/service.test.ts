@@ -568,6 +568,7 @@ describe("PeerService at boot", () => {
     ["missing parent", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["early PID zero", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["cycle", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["damaged metadata", true, true, undefined, "Cannot verify"],
     ["resolver error", true, true, undefined, "Cannot verify"],
   ] as const)("classifies the %s dashboard once for the service lifetime", async (kind, stdinTTY, stdoutTTY, tmux, reason) => {
     let evidence = kind as string;
@@ -578,9 +579,10 @@ describe("PeerService at boot", () => {
         const exe = ["claude", "codex", "agy"].includes(evidence) ? evidence : "Terminal";
         return `30 20 /bin/ib\n20 10 /bin/zsh\n10 ${parent} /Applications/My Apps/${exe}\n1 0 /sbin/launchd`;
       },
-      resolveCaller: async () => {
+      resolveCaller: async (): Promise<"agent" | "no-agent" | "unverifiable"> => {
         if (evidence === "resolver error") throw new Error("unavailable");
-        return evidence === "agent" ? { meta: {}, repoPath: "/app", agentDir: "/app/agent" } : null;
+        if (evidence === "damaged metadata") return "unverifiable";
+        return evidence === "agent" ? "agent" : "no-agent";
       },
     };
     const decision = await remoteStartDenialAtStartup(input);

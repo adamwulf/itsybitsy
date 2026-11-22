@@ -12,6 +12,8 @@ export interface NoWorktreeCaller {
 }
 
 interface CallerDeps {
+  /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
+  dashboardAncestry?: ReadonlySet<number>;
   registryHome?: string;
   /**
    * Canonical repo roots to search instead of every registered repo. The hooks
@@ -54,13 +56,19 @@ function processIdentityCurrent(pid: number, epoch: number | undefined): boolean
   } catch { return false; }
 }
 
-async function registeredRoots(registryHome: string): Promise<string[]> {
+async function registeredRoots(registryHome: string, strict: boolean): Promise<string[]> {
   // Unlike the display-oriented registry reader, malformed/unreadable policy
   // must not silently become an empty registry and misclassify an agent as a
   // human. Missing registry is the ordinary pre-registration human case.
   const file = Bun.file(join(registryHome, ".itsybitsy", "repos.json"));
-  if (!(await file.exists())) return [];
-  const registry = await file.json();
+  if (!strict && !(await file.exists())) return [];
+  let registry;
+  try {
+    registry = await file.json();
+  } catch (err) {
+    if (strict && (err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
   if (!registry || !Array.isArray(registry.repos)) throw new Error("Cannot verify caller: invalid repository registry");
   const roots = new Set<string>();
   for (const entry of registry.repos) {
@@ -70,7 +78,7 @@ async function registeredRoots(registryHome: string): Promise<string[]> {
     try {
       roots.add(await realpath(entry.path));
     } catch (error) {
-      if (!isSkippableRepoError(error)) throw error;
+      if (!isSkippableRepoError(error, strict)) throw error;
     }
   }
   return [...roots];
@@ -86,9 +94,9 @@ async function registeredRoots(registryHome: string): Promise<string[]> {
  * it can read, so the record that identifies it is never the one skipped.
  * Malformed registry data and every other I/O error still throw (fail closed).
  */
-function isSkippableRepoError(error: unknown): boolean {
+function isSkippableRepoError(error: unknown, strict: boolean): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return code === "ENOENT" || code === "EPERM" || code === "EACCES";
+  return code === "ENOENT" || (!strict && (code === "EPERM" || code === "EACCES"));
 }
 
 function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
@@ -163,12 +171,13 @@ export async function resolveNoWorktreeCaller(
 ): Promise<NoWorktreeCaller | null> {
   const candidates: NoWorktreeCaller[] = [];
   // HOME is model-controlled. Resolve the operator home from the OS account.
-  const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir);
-  if (await isRegisteredAgentWorktree(cwd, roots)) return null;
+  const strict = deps.dashboardAncestry !== undefined;
+  const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir, strict);
+  if (!strict && await isRegisteredAgentWorktree(cwd, roots)) return null;
   for (const repoPath of roots) {
     const agentsDir = runtimeNames.agentsDir(repoPath);
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
-      if (error.code === "ENOTDIR" || isSkippableRepoError(error)) return [];
+      if ((!strict && error.code === "ENOTDIR") || isSkippableRepoError(error, strict)) return [];
       throw error;
     });
     for (const entry of entries) {
@@ -177,8 +186,18 @@ export async function resolveNoWorktreeCaller(
       let meta: Record<string, unknown>;
       try {
         meta = await Bun.file(join(agentDir, "meta.json")).json();
-      } catch { continue; }
-      if (!meta || Array.isArray(meta) || meta.id !== entry.name || meta.worktree !== false) continue;
+      } catch (err) {
+        if (strict) throw err;
+        continue;
+      }
+      if (!meta || Array.isArray(meta) || meta.id !== entry.name || (strict && typeof meta.worktree !== "boolean")) {
+        if (strict) throw new Error("Invalid agent metadata");
+        continue;
+      }
+      if (meta.worktree !== false) continue;
+      if (strict && (typeof meta.claude_pid !== "string" || (meta.claude_pid !== "" && !/^\d+$/.test(meta.claude_pid)))) {
+        throw new Error("Invalid agent process identity");
+      }
       candidates.push({ meta, agentDir, repoPath });
     }
   }
@@ -187,7 +206,7 @@ export async function resolveNoWorktreeCaller(
   const readParents = deps.readParents ?? readParentPids;
   const identityCurrent = deps.identityCurrent ?? processIdentityCurrent;
   const pid = deps.pid ?? process.pid;
-  const before = ancestorPids(pid, readParents());
+  const before = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
   const matches = candidates.filter(({ meta }) => {
     const rawPid = meta.claude_pid;
     if (typeof rawPid !== "string" || !/^\d+$/.test(rawPid)) return false;
@@ -202,9 +221,29 @@ export async function resolveNoWorktreeCaller(
   if (typeof epoch !== "number" || !Number.isFinite(epoch) || epoch <= 0 || !identityCurrent(cliPid, epoch)) {
     throw new Error("Cannot verify no-worktree caller process identity; resume the agent before spawning children");
   }
-  const after = ancestorPids(pid, readParents());
+  const after = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
   if (!after.has(cliPid) || !identityCurrent(cliPid, epoch)) {
     throw new Error("Cannot verify no-worktree caller: process identity changed");
   }
   return caller;
+}
+
+/** The dashboard distinguishes a clean negative lookup from an unreadable identity. */
+export async function resolveDashboardCaller(
+  cwd: string,
+  ancestry: ReadonlySet<number>,
+  deps: Pick<CallerDeps, "registryHome" | "identityCurrent"> = {},
+): Promise<"agent" | "no-agent" | "unverifiable"> {
+  try {
+    const path = await realpath(cwd);
+    const worktree = runtimeNames.matchWorktreeCaller(path);
+    if (worktree) {
+      const meta = await Bun.file(join(runtimeNames.worktreeAgentDir(path), "meta.json")).json();
+      return meta?.id === worktree[2] && meta.worktree === true ? "agent" : "unverifiable";
+    }
+    const caller = await resolveNoWorktreeCaller(path, { ...deps, dashboardAncestry: ancestry });
+    return caller === null ? "no-agent" : "agent";
+  } catch {
+    return "unverifiable";
+  }
 }

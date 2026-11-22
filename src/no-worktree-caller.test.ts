@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { chmod, mkdtemp, mkdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { resolveNoWorktreeCaller } from "./no-worktree-caller";
+import { remoteStartDenialAtStartup } from "./peers/remote-start-caller";
+import { resolveDashboardCaller, resolveNoWorktreeCaller } from "./no-worktree-caller";
 
 describe("trusted no-worktree caller attribution", () => {
   let repo: string;
@@ -37,6 +38,33 @@ describe("trusted no-worktree caller attribution", () => {
     await Bun.write(join(gitDir, "gitdir"), `${join(cwd, ".git")}\n`);
     return { cwd, gitDir };
   }
+
+  async function dashboardDenial(cwd: string) {
+    return remoteStartDenialAtStartup({
+      stdinTTY: true, stdoutTTY: true, env: {}, cwd, pid: 500,
+      readProcessTable: () => "500 400 ib\n400 300 sh\n300 1 Terminal\n1 0 launchd",
+      resolveCaller: (path, ancestry) => resolveDashboardCaller(path, ancestry, deps()),
+    });
+  }
+
+  test.each(["missing", "invalid JSON", "invalid shape"])("the dashboard denies %s metadata in a worktree and in a shared repo", async damage => {
+    const { cwd } = await worktree();
+    const file = join(cwd, "..", "meta.json");
+    if (damage === "missing") await rm(file);
+    else await Bun.write(file, damage === "invalid JSON" ? "{" : "{}");
+    for (const path of [cwd, repo]) {
+      expect(await dashboardDenial(path)).toContain("Cannot verify the dashboard caller’s agent metadata");
+    }
+  });
+
+  test("the dashboard allows an explicit no-agent result and denies a verified shared-repo caller", async () => {
+    await record(repo, "other", { claude_pid: "900" });
+    expect(await dashboardDenial(repo)).toBeNull();
+    await record();
+    expect(await dashboardDenial(repo)).toContain("Only a human");
+    const { cwd } = await worktree();
+    expect(await dashboardDenial(cwd)).toContain("Only a human");
+  });
 
   test.each([true, false])("registered worktree skips ps despite unrelated no-worktree records (canSpawnChildren=%s)", async (canSpawnChildren) => {
     await record(repo, "unrelated-shared-agent");

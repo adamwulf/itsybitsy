@@ -82,7 +82,7 @@ import {
   type PairStream,
 } from "./pairing";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
-import { newAgent } from "../ib-commands";
+import { newAgent, resolveCallerAgentContext } from "../ib-commands";
 import { listRepos } from "../registry";
 import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
 import { writeRemoteAgents } from "./remote-agents";
@@ -122,6 +122,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  resolveCaller: typeof resolveCallerAgentContext;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[]): void;
   renewLease?(): Promise<void>;
@@ -150,6 +151,7 @@ export interface PeerServiceDeps {
  */
 export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void): PeerServiceDeps {
   return {
+    resolveCaller: resolveCallerAgentContext,
     remoteSpawn: { listRepos, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
@@ -618,6 +620,13 @@ export class PeerService {
   }
 
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
+    let caller;
+    try {
+      caller = await this.deps.resolveCaller(process.cwd());
+    } catch {
+      throw new Error("Cannot verify the caller for a remote agent start");
+    }
+    if (caller !== null) throw new Error("Only a human can start an agent on another machine");
     if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");

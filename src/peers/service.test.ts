@@ -176,6 +176,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
   const calls = { loadIdentity: 0, readPeers: 0 };
   const clock = createFakeClock();
   const service = new PeerService({
+      resolveCaller: async () => null,
     acquireLock: () => acquireEndpointLock(),
     releaseLock: () => releaseEndpointLock(),
     loadIdentity: () => {
@@ -550,6 +551,16 @@ const REMOTE_AGENTS: RemoteAgent[] = [
 ];
 
 describe("PeerService at boot", () => {
+  test.each(["agent", "unverifiable"])("remote start rejects an %s caller before contacting the peer", async kind => {
+    const { service, endpoint } = makeService({ resolveCaller: async () => {
+      if (kind === "unverifiable") throw new Error("Cannot verify ancestry");
+      return { meta: { id: "worker" }, agentDir: "/worker", repoPath: "/app" };
+    } });
+    await expect(service.startRemoteAgent(ID_REMOTE, { repo: "app", type: "worker", prompt: "hello" }))
+      .rejects.toThrow(kind === "agent" ? "Only a human" : "Cannot verify the caller");
+    expect(endpoint.connects).toEqual([]);
+  });
+
   test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const { service, endpoint } = makeService();

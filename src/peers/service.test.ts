@@ -1,3 +1,4 @@
+import { remoteStartDenialAtStartup } from "./remote-start-caller";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -176,7 +177,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
   const calls = { loadIdentity: 0, readPeers: 0 };
   const clock = createFakeClock();
   const service = new PeerService({
-      resolveCaller: async () => null,
+      remoteStartDenial: null,
     acquireLock: () => acquireEndpointLock(),
     releaseLock: () => releaseEndpointLock(),
     loadIdentity: () => {
@@ -363,7 +364,7 @@ describe("PeerService binding", () => {
   test("the real defaults are never reached: the addon loader throws in this file", async () => {
     // Guard for the tests above: they inject bindEndpoint, so the addon is never needed.
     const { defaultPeerServiceDeps } = await import("./service");
-    const deps = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {});
+    const deps = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null);
     await expect(deps.bindEndpoint(new Uint8Array(32), [PAIR_ALPN])).rejects.toThrow("a service test loaded the iroh addon");
   });
 });
@@ -551,14 +552,30 @@ const REMOTE_AGENTS: RemoteAgent[] = [
 ];
 
 describe("PeerService at boot", () => {
-  test.each(["agent", "unverifiable"])("remote start rejects an %s caller before contacting the peer", async kind => {
-    const { service, endpoint } = makeService({ resolveCaller: async () => {
-      if (kind === "unverifiable") throw new Error("Cannot verify ancestry");
-      return { meta: { id: "worker" }, agentDir: "/worker", repoPath: "/app" };
-    } });
-    await expect(service.startRemoteAgent(ID_REMOTE, { repo: "app", type: "worker", prompt: "hello" }))
-      .rejects.toThrow(kind === "agent" ? "Only a human" : "Cannot verify the caller");
-    expect(endpoint.connects).toEqual([]);
+  test.each([
+    ["human", true, true, undefined, null],
+    ["agent", true, true, undefined, "Only a human"],
+    ["system coordinator", true, true, "/tmp/tmux-501/default,13,0", "itsybitsy tmux"],
+    ["non-TTY input", false, true, undefined, "interactive terminal"],
+    ["non-TTY output", true, false, undefined, "interactive terminal"],
+    ["malformed tmux", true, true, "?", "Cannot verify"],
+    ["resolver error", true, true, undefined, "Cannot verify"],
+  ] as const)("classifies the %s dashboard once for the service lifetime", async (kind, stdinTTY, stdoutTTY, tmux, reason) => {
+    let evidence = kind as string;
+    const input = { stdinTTY, stdoutTTY, env: { TMUX: tmux }, uid: 501, cwd: "/app",
+      resolveCaller: async () => {
+        if (evidence === "resolver error") throw new Error("unavailable");
+        return evidence === "agent" ? { meta: {}, repoPath: "/app", agentDir: "/app/agent" } : null;
+      },
+    };
+    const decision = await remoteStartDenialAtStartup(input);
+    const { service } = makeService({ remoteStartDenial: decision });
+    if (reason === null) expect(decision).toBeNull();
+    else expect(decision).toContain(reason);
+    evidence = reason ? "human" : "agent";
+    Object.assign(input, { stdinTTY: !!reason, stdoutTTY: !!reason, env: {} });
+    const request = { repo: "app", type: "worker", prompt: "hello" };
+    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow(reason ?? "no longer paired");
   });
 
   test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {
@@ -591,7 +608,7 @@ describe("PeerService at boot", () => {
 
   test("the owning watch renews the lease each poll and replaces the snapshot only on visible changes", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
-    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {});
+    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null);
     const { service, endpoint, clock } = makeService({ writeRemoteAgents, renewLease });
     answerDials(endpoint, [{ ...REMOTE_AGENTS[0]!, repoName: "display only" }]);
     await service.bootIfPaired();
@@ -659,7 +676,7 @@ describe("PeerService at boot", () => {
       loads++;
       throw new Error("loaded");
     });
-    const realBind = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}).bindEndpoint;
+    const realBind = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null).bindEndpoint;
     for (const setup of [async () => {}, async () => {
       await mkdir(peerDir(), { recursive: true });
       await writeFile(peersFile(), "[]\n");

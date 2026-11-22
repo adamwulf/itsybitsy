@@ -127,6 +127,7 @@ export type DialogState =
       name: string;
       agentType: string;
       availableTypes: string[];
+      remoteStartDenial: string | null;
       machines(): { id: string | null; name: string }[];
       machine: { id: string | null; name: string } | null;
       inFlight?: string;
@@ -558,6 +559,10 @@ export function syncNewAgentMachine(form: Extract<DialogState, { type: "new-agen
   return changed;
 }
 
+function canCreateAgent(form: Extract<DialogState, { type: "new-agent-form" }>): boolean {
+  return !!form.machine && (form.machine.id === null || form.remoteStartDenial === null) && !!form.buffer.getText().trim();
+}
+
 function handleNewAgentFormDialog(
   ctx: DialogCtx,
   d: Extract<NonNullable<DialogState>, { type: "new-agent-form" }>,
@@ -566,7 +571,7 @@ function handleNewAgentFormDialog(
   const focusOrder: Array<typeof d.focused> = ["name", "agentType", "prompt", "cancel", "create"];
   const machines = d.machines();
   if (machines.some(m => m.id !== null)) focusOrder.splice(1, 0, "machine");
-  const createDisabled = () => !d.machine || d.buffer.getText().trim().length === 0;
+  const createDisabled = () => !canCreateAgent(d);
   const onAsyncRender = () => ctx.tui?.requestRender();
   const nextFocus = () => {
     const idx = focusOrder.indexOf(d.focused);
@@ -632,7 +637,7 @@ function handleNewAgentFormDialog(
   } else if (d.focused === "create") {
     if (matchesKey(data, Key.enter)) {
       const promptText = d.buffer.getText().trim();
-      if (d.machine && promptText.length > 0) {
+      if (!createDisabled()) {
         d.onSubmit(d.name, d.agentType, promptText);
       }
     } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) { nextFocus(); }
@@ -1143,6 +1148,7 @@ export function buildNewAgentFormContent(
     : `${DIM}Type:${RESET} ${typeValue}`;
   lines.push(truncateToWidth(typeLabel, innerWidth, ""));
   if (dialog.machine && dialog.machine.id !== null) {
+    if (dialog.remoteStartDenial) lines.push(...wordWrapLines(dialog.remoteStartDenial, innerWidth));
     lines.push(...wordWrapLines(`Attachments are not sent to ${dialog.machine.name}. Local paths stay in the prompt.`, innerWidth));
   }
   lines.push("");
@@ -1154,8 +1160,7 @@ export function buildNewAgentFormContent(
   lines.push(...outputLines);
   if (hasScrollIndicator) { lines.push(`${DIM}↑${RESET}`); }
 
-  const promptText = dialog.buffer.getText().trim();
-  const createEnabled = dialog.machine !== null && promptText.length > 0;
+  const createEnabled = canCreateAgent(dialog);
   const createLabel = dialog.focused === "create"
     ? (createEnabled ? `${BOLD}${GREEN}[ Create ]${RESET}` : `${BOLD}${DIM}[ Create ]${RESET}`)
     : (createEnabled ? `[ Create ]` : `${DIM}[ Create ]${RESET}`);

@@ -76,7 +76,7 @@ function makeNetwork(iroh: Iroh) {
     const logs: string[] = [];
     let snapshots = 0;
     const service = new PeerService({
-      resolveCaller: async () => null,
+      remoteStartDenial: null,
       remoteSpawn,
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,

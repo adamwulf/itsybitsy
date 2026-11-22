@@ -1869,6 +1869,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
   const form: Extract<DialogState, { type: "new-agent-form" }> = {
     type: "new-agent-form",
     repoName: displayName,
+    remoteStartDenial: service?.remoteStartDenial ?? null,
     machines,
     machine,
     name: "",
@@ -1884,6 +1885,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
       }
       const target = form.machine;
       if (target.id !== null && service) {
+        if (form.remoteStartDenial !== null) return;
         if (ctx.remoteStartPending) {
           form.error = "A remote agent start is already pending";
           ctx.tui?.requestRender();

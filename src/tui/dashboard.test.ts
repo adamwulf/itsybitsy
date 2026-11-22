@@ -9150,6 +9150,7 @@ const PEERS_OTHER = "0a".repeat(32);
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
+  remoteStartDenial: string | null = null;
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
   state: PeerServiceView = {
     status: { kind: "listening" },
@@ -10219,6 +10220,21 @@ describe("Unified peer repos in the Agents tree", () => {
     await waitFor(() => !dashboard.remoteStartPending);
     expect(dashboard.dialog).toBe(second);
     expect(dashboard.notice).toBe(outcome === "success" ? "Created agent builder on Laptop B" : "Remote start on Laptop B: spawn failed");
+  });
+
+  test("a denied remote-start decision is displayed and prevents form submission", () => {
+    const { dashboard, service } = setup();
+    service.remoteStartDenial = "Remote starts require an interactive terminal";
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    form.buffer.handleInput("x");
+    expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain(service.remoteStartDenial);
+    const start = spyOn(service, "startRemoteAgent");
+    form.focused = "create";
+    dashboard.handleInput("\r");
+    form.onSubmit("", "worker", "x");
+    expect(start).not.toHaveBeenCalled();
   });
 
   test("losing the selected peer on a shared repo makes the local replacement visible", () => {

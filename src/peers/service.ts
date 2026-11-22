@@ -82,7 +82,7 @@ import {
   type PairStream,
 } from "./pairing";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
-import { newAgent, resolveCallerAgentContext } from "../ib-commands";
+import { newAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
 import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
@@ -123,7 +123,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
-  resolveCaller: typeof resolveCallerAgentContext;
+  remoteStartDenial: string | null;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[]): void;
   renewLease?(): Promise<void>;
@@ -150,9 +150,9 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void): PeerServiceDeps {
+export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: string | null): PeerServiceDeps {
   return {
-    resolveCaller: resolveCallerAgentContext,
+    remoteStartDenial,
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
@@ -316,7 +316,10 @@ export class PeerService {
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
 
+  readonly remoteStartDenial: string | null;
+
   constructor(private readonly deps: PeerServiceDeps) {
+    this.remoteStartDenial = deps.remoteStartDenial;
     this.poller = new PeerPoller({
       readPeers: async () => {
         await deps.renewLease?.();
@@ -621,13 +624,7 @@ export class PeerService {
   }
 
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
-    let caller;
-    try {
-      caller = await this.deps.resolveCaller(process.cwd());
-    } catch {
-      throw new Error("Cannot verify the caller for a remote agent start");
-    }
-    if (caller !== null) throw new Error("Only a human can start an agent on another machine");
+    if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
     if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");

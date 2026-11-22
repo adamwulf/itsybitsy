@@ -26,6 +26,7 @@ import { wordWrapSingleLine, wrapSingleLine } from "./wrap";
 
 /** What the dialog needs from the endpoint service (src/peers/service.ts PeerService). */
 export interface PeersDialogService {
+  readonly remoteStartDenial: string | null;
   view(): PeerServiceView;
   startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;
   openDialog(): void;

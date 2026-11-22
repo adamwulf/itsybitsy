@@ -10236,13 +10236,22 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.handleInput("a");
     const second = assertDialog(dashboard.dialog, "new-agent-form");
     second.onSubmit("", "worker", "another draft");
-    expect(second.error).toContain("already pending");
+    const rendered = () => buildNewAgentFormContent(second, 70).contentLines.map(stripAnsi).join(" ");
+    expect(rendered()).toContain("already pending");
     expect(start).toHaveBeenCalledTimes(1);
     if (outcome === "success") pending.resolve("builder");
     else pending.reject(new Error("spawn failed"));
     await waitFor(() => !dashboard.remoteStartPending);
     expect(dashboard.dialog).toBe(second);
     expect(dashboard.notice).toBe(outcome === "success" ? "Created agent builder on Laptop B" : "Remote start on Laptop B: spawn failed");
+    expect(rendered()).not.toContain("already pending");
+    start.mockResolvedValueOnce("second-agent");
+    second.buffer.handleInput("x");
+    second.focused = "create";
+    dashboard.handleInput("\r");
+    await waitFor(() => dashboard.dialog === null);
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(dashboard.notice).toBe("Created agent second-agent on Laptop B");
   });
 
   test("a denied remote-start decision is displayed and prevents form submission", () => {

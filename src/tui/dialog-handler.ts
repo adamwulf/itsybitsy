@@ -128,6 +128,7 @@ export type DialogState =
       agentType: string;
       availableTypes: string[];
       remoteStartDenial: string | null;
+      readonly otherRemoteStartPending: boolean;
       machines(): { id: string | null; name: string }[];
       machine: { id: string | null; name: string } | null;
       machineChanged?: boolean;
@@ -561,7 +562,7 @@ export function syncNewAgentMachine(form: Extract<DialogState, { type: "new-agen
 }
 
 function canCreateAgent(form: Extract<DialogState, { type: "new-agent-form" }>): boolean {
-  return !!form.machine && (form.machine.id === null || form.remoteStartDenial === null) && !!form.buffer.getText().trim();
+  return !!form.machine && (form.machine.id === null || (form.remoteStartDenial === null && !form.otherRemoteStartPending)) && !!form.buffer.getText().trim();
 }
 
 function handleNewAgentFormDialog(
@@ -1157,6 +1158,7 @@ export function buildNewAgentFormContent(
     : `${DIM}Type:${RESET} ${typeValue}`;
   lines.push(truncateToWidth(typeLabel, innerWidth, ""));
   if (dialog.machine && dialog.machine.id !== null) {
+    if (dialog.otherRemoteStartPending) lines.push(...wordWrapLines("A remote agent start is already pending", innerWidth));
     if (dialog.remoteStartDenial) lines.push(...wordWrapLines(dialog.remoteStartDenial, innerWidth));
     lines.push(...wordWrapLines(`Attachments are not sent to ${dialog.machine.name}. Local paths stay in the prompt.`, innerWidth));
   }

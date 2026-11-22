@@ -42,6 +42,8 @@ export const PEER_ALPN = "itsybitsy/peer/1";
 export const PEER_MAX_REQUEST_BYTES = 4096;
 export const NEW_AGENT_MAX_REQUEST_BYTES = 256 * 1024;
 export const NEW_AGENT_TIMEOUT_MS = 30_000;
+// Leave the responder time to return an uncertain outcome before the dialer gives up.
+const RESPONDER_START_TIMEOUT_MS = 25_000;
 
 export interface RemoteNewAgentRequest {
   repo: string;
@@ -339,6 +341,7 @@ export interface PeerResponderDeps {
   peerName(id: string): Promise<string | null>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
+  setTimer(ms: number, fn: () => void): () => void;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** watch.log in `ib watch`. */
   log(line: string): void;
@@ -371,6 +374,27 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
       return;
     }
     void serveRequest(conn, stream, from, deps);
+  }
+}
+
+async function startAgentWithDeadline(
+  deps: PeerResponderDeps, request: Record<string, unknown>, peerId: string,
+): Promise<string> {
+  if (!deps.startAgent) throw new Error("Remote starts are unavailable");
+  let expired = false;
+  const deadline = Promise.withResolvers<never>();
+  const cancel = deps.setTimer(RESPONDER_START_TIMEOUT_MS, () => {
+    expired = true;
+    deadline.reject(new Error("Remote start outcome unknown after 25 s. Check the peer for the agent."));
+  });
+  try {
+    const spawn = deps.startAgent(request, async () => {
+      const name = await deps.peerName(peerId);
+      return expired ? null : name;
+    });
+    return await Promise.race([spawn, deadline.promise]);
+  } finally {
+    cancel();
   }
 }
 
@@ -410,8 +434,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     }
   } else if (request.op === "new-agent") {
     try {
-      if (!deps.startAgent) throw new Error("Remote starts are unavailable");
-      const id = await deps.startAgent(request, () => deps.peerName(conn.remoteId));
+      const id = await startAgentWithDeadline(deps, request, conn.remoteId);
       reply = encodeJson({ ok: true, id });
     } catch (err) {
       const error = cleanRemoteText(errorDetail(err));

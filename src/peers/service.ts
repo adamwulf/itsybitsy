@@ -842,6 +842,7 @@ export class PeerService {
       if (alpn === PEER_ALPN) {
         const remoteSpawn = this.deps.remoteSpawn;
         await serveTrustedConnection(toPairConnection(conn), {
+          setTimer: this.deps.setTimer,
           peerName: (id) => this.peerName(id),
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),

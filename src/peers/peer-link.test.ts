@@ -72,7 +72,9 @@ function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot; st
   const logs: string[] = [];
   let snapshots = 0;
   let checks = 0;
+  const clock = createFakeClock();
   const done = serveTrustedConnection(link.b, {
+    setTimer: clock.setTimer,
     startAgent: options.startAgent,
     peerName: async (id) => {
       checks++;
@@ -85,6 +87,7 @@ function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot; st
     log: (line) => logs.push(line),
   });
   return {
+    clock,
     a: link.a,
     b: link.b,
     peers,
@@ -400,6 +403,26 @@ describe("trusted new-agent responder", () => {
     const { side, deps, spawn } = receiver();
     await expect(acceptRemoteAgent({ ...request, prompt: "é".repeat(131073) }, async () => "Alice", deps, () => {})).rejects.toThrow("256 KB");
     expect(spawn).not.toHaveBeenCalled();
+    side.a.close(0, "done");
+  });
+
+  test("polls while spawn is pending and returns an uncertain outcome at the responder deadline", async () => {
+    const { side, spawn } = receiver();
+    spawn.mockImplementation(() => new Promise(() => {}));
+    const pending = rawRequest(side.a, encode(request));
+    await waitFor(() => spawn.mock.calls.length === 1);
+    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    side.clock.advance(25_000);
+    expect(decodeText(await pending)).toEqual({ ok: false, error: expect.stringContaining("outcome unknown") });
+    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    side.a.close(0, "done");
+  });
+
+  test("a throwing spawn gets an error reply and leaves the connection usable", async () => {
+    const { side, spawn } = receiver();
+    spawn.mockRejectedValue(new Error("spawn failed"));
+    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "spawn failed" });
+    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
     side.a.close(0, "done");
   });
 

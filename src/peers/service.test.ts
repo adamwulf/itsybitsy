@@ -533,7 +533,7 @@ function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: stri
   endpoint.connectImpl = async (id) => {
     const link = createMemoryLink("00".repeat(32), id);
     served.push(link.b);
-    void serveTrustedConnection(link.b, { peerName: async () => "paired", snapshot: () => ({ repos: [], agents }), log: () => {} });
+    void serveTrustedConnection(link.b, { setTimer: createFakeClock().setTimer, peerName: async () => "paired", snapshot: () => ({ repos: [], agents }), log: () => {} });
     const conn = serviceConnection(link.a, PEER_ALPN);
     return {
       ...conn,
@@ -568,6 +568,7 @@ describe("PeerService at boot", () => {
     endpoint.connectImpl = async id => {
       const link = createMemoryLink("00".repeat(32), id);
       void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer,
         peerName: async () => "paired", snapshot: () => ({ repos: [], agents: [] }), log: () => {},
         startAgent: async request => { starts.push(request); return "my-agent"; },
       });

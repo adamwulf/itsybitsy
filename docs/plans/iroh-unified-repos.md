@@ -1,6 +1,6 @@
 # iroh peering, next phase: one repo list across machines
 
-Phase 6 built, 2026-11-20. Phases 7 and 8 are pending. This phase follows [iroh-peering.md](iroh-peering.md)
+Phase 6 built 2026-11-20; 6a/6b merged 2026-11-21. Phase 7 in progress (build plan below); Phase 8 is Adam's two-laptop checklist. This phase follows [iroh-peering.md](iroh-peering.md)
 Phases 0–4, plus the self-heal and full-id work, all on `agent/iroh-peering`.
 
 It **supersedes** "remote agents shown as tree sections"
@@ -271,6 +271,74 @@ exactly.
    appear.
 
 Each phase gets the usual two-reviewer cycle before it is merged.
+
+### Phase 7 build plan (started 2026-11-21)
+
+Adam's go-ahead came on 2026-11-21, relayed by @system. One Codex worker builds Phase 7 in the order below and commits after each step. Then two Codex reviewers check it, and review rounds continue until a round finds no code issues.
+
+Open question 2 is built as recommended: any paired peer may start agents here, and this machine gets a `watch.log` line and a notice.
+
+1. **Wire.**
+   - Add `{"op":"new-agent",...}` and its reply to `peer-link.ts`.
+   - The responder reads the request up to 256 KB, then applies the 4 KB cap to every op except `new-agent`.
+   - The dialer sends a `new-agent` request on its own bi stream over the trusted ALPN and waits up to 30 s.
+2. **Responder.**
+   - Run the five checks in order: allowlist, repo registered here, type spawnable and not `repo-coordinator`, name valid, prompt non-empty and within the cap.
+   - Then call an injected `newAgent(repoPath, prompt, { type, name })` with no other options.
+   - Log a `watch.log` line and raise the notice "<peer> started agent <id> in <repo>".
+3. **PeerService API.** Add a method `startRemoteAgent(peerId, request)` that the dashboard calls.
+4. **Form.**
+   - Show the Machine field in the New Agent dialog only when a connected peer has the repo.
+   - The default is this machine, or the first such peer when the repo exists only on peers.
+   - The field cycles like Type.
+   - When a peer is selected:
+     - show a note that attachments are not sent;
+     - submitting closes the dialog with "Created agent <id> on <peer>", or shows the error.
+   - Pressing `a` on a remote-only header opens the form with that peer selected. This replaces the Phase 6 notice.
+5. **Docs.** Update SPEC, the implementation notes and this plan.
+
+**Done when:**
+- every responder refusal has a test;
+- a real-endpoint loopback test starts an agent through a stubbed `newAgent`;
+- the form is tested with zero, one and two connected peers;
+- the full suite and `bunx tsc` pass;
+- agents still cannot reach the op. No CLI path exists, `ib peer` stays human-only, and the hook gates are unchanged.
+
+### Phase 8 checklist (Adam, two laptops)
+
+Do this on the same build on both laptops, after `agent/iroh-peering` is on main and installed.
+
+1. **Install.** On each laptop, rebuild and install `ib`, then restart `ib watch`.
+2. **Pair.**
+   - In `ib watch` on laptop A, press `I`.
+   - Paste B's id, which B shows under `I`.
+   - Type the 8-character code that B shows into A.
+   - Name each side.
+   - Both Peers dialogs should then show the other laptop as connected.
+3. **Merged repos.**
+   - Register one repo under the SAME name on both laptops.
+   - It should appear once in the tree.
+   - Its remote agents should be drawn in italic below the local ones.
+4. **Remote-only repo.** A repo registered only on B should show a header on A with only italic rows.
+5. **Read-only guard.** On A, select a remote agent. Send, retire and merge should all be refused with a notice. The info panel should show "Machine: <B> · connected".
+6. **Remote start.**
+   - On A, press `a` on the shared repo.
+   - Set Machine to B, pick a type and type a prompt.
+   - A should show "Created agent <id> on <B>".
+   - B should show "<A> started agent <id> in <repo>".
+   - The new row should appear in italic on A within about 5 s.
+7. **Refusals.**
+   - A remote start with `repo-coordinator`, or a type that B lacks, should show B's error on A.
+   - So should a repo that B does not have. One way to test this: unregister the repo on B while A's form is open.
+8. **Offline.**
+   - Quit `ib watch` on B.
+   - Within a few polls, A should dim B's rows.
+   - A remote start to B should fail within 30 s with a clear error.
+   - Restart B, and A should reconnect without any action.
+9. **Names.**
+   - Create an agent with the same name on both laptops.
+   - On A, `ib send <name>` should go to A's own agent, because the same repo comes first.
+   - From outside that repo, the send should fail and list the qualified forms.
 
 ## Cross-cutting checklist
 

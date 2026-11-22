@@ -57,6 +57,12 @@ describe("trusted no-worktree caller attribution", () => {
     }
   });
 
+  test.each(["0", "1", "9007199254740992"])("the dashboard treats damaged PID %s as unverifiable", async claude_pid => {
+    await record(repo, "manager", { claude_pid });
+    expect(await resolveDashboardCaller(repo, new Set([500, 1]), deps())).toBe("unverifiable");
+    expect(await resolveNoWorktreeCaller(repo, deps())).toBeNull();
+  });
+
   test("the dashboard allows an explicit no-agent result and denies a verified shared-repo caller", async () => {
     await record(repo, "other", { claude_pid: "900" });
     expect(await dashboardDenial(repo)).toBeNull();

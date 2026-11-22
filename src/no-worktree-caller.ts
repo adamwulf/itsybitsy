@@ -195,8 +195,11 @@ export async function resolveNoWorktreeCaller(
         continue;
       }
       if (meta.worktree !== false) continue;
-      if (strict && (typeof meta.claude_pid !== "string" || (meta.claude_pid !== "" && !/^\d+$/.test(meta.claude_pid)))) {
-        throw new Error("Invalid agent process identity");
+      if (strict && meta.claude_pid !== "") {
+        const pid = Number(meta.claude_pid);
+        if (typeof meta.claude_pid !== "string" || !/^\d+$/.test(meta.claude_pid) || !Number.isSafeInteger(pid) || pid <= 1) {
+          throw new Error("Invalid agent process identity");
+        }
       }
       candidates.push({ meta, agentDir, repoPath });
     }

@@ -6508,7 +6508,6 @@ async function spawnAgent(
     };
   }
 
-  const repos = await listRepos();
   // 4. Validate manager
   if (manager) {
     if (opts?.manager) {

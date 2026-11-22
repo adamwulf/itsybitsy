@@ -3,7 +3,7 @@ import { canonicalRepoPath, sameRepoPath } from "./repo-identity";
 import { shellQuote } from "./validation";
 import { basename, resolve } from "node:path";
 import * as runtimeNames from "./runtime-names";
-import { loadMachineName } from "./machine-name";
+import { readMachineName } from "./machine-name";
 import { readConnectedPeers } from "./peers/remote-agents";
 import type { Agent, AgentReadError } from "./agents";
 import { repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
@@ -75,6 +75,14 @@ function failure(error: string, unreadableDirs: string[] = []): TargetResult {
 }
 
 const local = (agent: Agent): TargetResult => ({ agent, isSystemCoordinator: false });
+
+async function readAddressMachineName(): Promise<string | TargetResult> {
+  try {
+    return await readMachineName();
+  } catch (error) {
+    return failure(error instanceof Error ? error.message : String(error));
+  }
+}
 
 function suggestedAddress(address: string): string {
   return /^[a-zA-Z0-9_@./-]+$/.test(address) ? address : shellQuote(address);
@@ -223,7 +231,8 @@ export async function resolveAgentTarget(
     ownErrors = errors;
     searched = repos.filter((r) => r !== ownRepo);
   }
-  const [localMachine, connected] = await Promise.all([machine ? loadMachineName() : "", readConnectedPeers()]);
+  const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", readConnectedPeers()]);
+  if (typeof localMachine !== "string") return localMachine;
   const includesLocal = !machine || localMachine.toLowerCase() === machine;
   const peers = connected.filter((p) => !machine || p.name.toLowerCase() === machine);
   if (!includesLocal && !peers.length) return failure(`Unknown machine: ${parts[0]}`);
@@ -256,7 +265,8 @@ export async function resolveAgentTarget(
   }
   if (matches.length > 1) {
     if (!machine && matches.some((m) => m.agent)) {
-      const localName = await loadMachineName();
+      const localName = await readAddressMachineName();
+      if (typeof localName !== "string") return localName;
       for (const m of matches) if (m.agent) m.machine = localName;
     }
     matches.sort((a, b) => a.machine.localeCompare(b.machine) || a.repo.localeCompare(b.repo));

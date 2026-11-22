@@ -64,6 +64,16 @@ describe("qualified agent addresses", () => {
     expect((await retire("remote-id")).stderr.trim()).toBe("Agent not found: remote-id");
   });
 
+  test("address resolution only reads the install's machine name", async () => {
+    const machineFile = join(cli.home, ".itsybitsy", "machine-name");
+    await rm(machineFile);
+    expect((await retire("foo")).actions[0]?.args[0]).toMatchObject({ repoPath: app });
+    const qualified = await retire("laptop-a/foo");
+    expect(qualified.actions).toEqual([]);
+    expect(qualified.stderr).toContain("Machine name is missing");
+    expect(await Bun.file(machineFile).exists()).toBe(false);
+  });
+
   test("an unclean endpoint owner exit leaves no connected peers", async () => {
     const owner = Bun.spawn(["/bin/sleep", "30"], { stdout: "ignore", stderr: "ignore" });
     try {

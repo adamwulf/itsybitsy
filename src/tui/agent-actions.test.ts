@@ -156,6 +156,8 @@ function makeMockCtx(overrides?: {
   let leftWidth = overrides?.leftWidth ?? 60;
 
   const ctx: ActionCtx = {
+    peerService: null,
+    remoteSelection: null,
     agentTree: {
       selectedAgent: overrides?.agent ?? null,
       selectedRepoHeader: overrides?.repoHeader ?? null,

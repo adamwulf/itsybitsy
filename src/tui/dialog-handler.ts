@@ -4,10 +4,10 @@
  */
 
 import { matchesKey, Key, fuzzyFilter, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { wrapSingleLine } from "./wrap";
+import { wrapSingleLine, wordWrapLines } from "./wrap";
 import { buildFolderItems } from "./folder-browser";
 import type { FolderItem } from "./folder-browser";
-import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
+import { RESET, BOLD, DIM, REVERSE, GREEN, RED, DIM_GRAY } from "./colors";
 import { resolvePasteText, cancelPaste, sanitizePasteForSingleLine } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { sanitizeAgentNameInput } from "../validation";
@@ -127,8 +127,12 @@ export type DialogState =
       name: string;
       agentType: string;
       availableTypes: string[];
+      machines(): { id: string | null; name: string }[];
+      machine: { id: string | null; name: string };
+      inFlight?: boolean;
+      error?: string;
       buffer: TextBuffer;
-      focused: "name" | "agentType" | "prompt" | "create" | "cancel";
+      focused: "name" | "machine" | "agentType" | "prompt" | "create" | "cancel";
       onSubmit: (name: string, agentType: string, prompt: string) => void;
     } & DialogCommon)
   | ({
@@ -239,7 +243,7 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // the pending send. The submit closure clears `inFlight` on failure (re-enabling
   // the draft) or closes the dialog on success, so the success close always lands
   // on THIS dialog, never a later one.
-  if ((dialog.type === "input" || dialog.type === "textarea") && dialog.inFlight) {
+  if ((dialog.type === "input" || dialog.type === "textarea" || dialog.type === "new-agent-form") && dialog.inFlight) {
     return true;
   }
 
@@ -543,6 +547,8 @@ function handleNewAgentFormDialog(
   data: string
 ): boolean {
   const focusOrder: Array<typeof d.focused> = ["name", "agentType", "prompt", "cancel", "create"];
+  const machines = d.machines();
+  if (machines.some(m => m.id !== null)) focusOrder.splice(1, 0, "machine");
   const promptEmpty = () => d.buffer.getText().trim().length === 0;
   const onAsyncRender = () => ctx.tui?.requestRender();
   const nextFocus = () => {
@@ -583,25 +589,23 @@ function handleNewAgentFormDialog(
         ctx.tui?.requestRender();
       }
     }
-  } else if (d.focused === "agentType") {
-    // Step the selected type one position through availableTypes, wrapping
-    // at both ends. When the current value is not in the list, forward lands
-    // on the first entry and backward on the last.
-    const cycleAgentType = (delta: 1 | -1) => {
-      const n = d.availableTypes.length;
-      if (n === 0) return;
-      const currentIdx = d.availableTypes.indexOf(d.agentType);
-      const nextIdx = currentIdx < 0
-        ? (delta > 0 ? 0 : n - 1)
-        : (currentIdx + delta + n) % n;
-      d.agentType = d.availableTypes[nextIdx]!;
+  } else if (d.focused === "machine" || d.focused === "agentType") {
+    const cycle = (delta: 1 | -1) => {
+      const isMachine = d.focused === "machine";
+      const n = isMachine ? machines.length : d.availableTypes.length;
+      if (!n) return;
+      const index = isMachine ? machines.findIndex(m => m.id === d.machine.id) : d.availableTypes.indexOf(d.agentType);
+      const next = index < 0 ? (delta > 0 ? 0 : n - 1) : (index + delta + n) % n;
+      if (isMachine) d.machine = machines[next]!;
+      else d.agentType = d.availableTypes[next]!;
+      d.error = undefined;
       ctx.tui?.requestRender();
     };
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
     // Left/Right also work on terminals that cannot distinguish Shift+Space.
-    else if (matchesKey(data, Key.shift("space")) || matchesKey(data, Key.left)) { cycleAgentType(-1); }
-    else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || matchesKey(data, Key.right)) { cycleAgentType(1); }
+    else if (matchesKey(data, Key.shift("space")) || matchesKey(data, Key.left)) { cycle(-1); }
+    else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || matchesKey(data, Key.right)) { cycle(1); }
   } else if (d.focused === "prompt") {
     if (matchesKey(data, Key.tab)) { nextFocus(); }
     else if (matchesKey(data, Key.shift("tab"))) { prevFocus(); }
@@ -1106,14 +1110,24 @@ export function buildNewAgentFormContent(
   const nameValue = dialog.focused === "name" ? `${dialog.name}█` : (dialog.name || `${DIM}(optional)${RESET}`);
   lines.push(`${nameLabel}  ${truncateToWidth(nameValue, innerWidth - 8, "")}`);
 
+  const machines = dialog.machines();
+  const cycleText = ` ${DIM}[Space/Enter/→ next, Shift+Space/← prev]${RESET}`;
+  if (machines.some(m => m.id !== null)) {
+    const focused = dialog.focused === "machine";
+    const line = focused ? `${BOLD}${GREEN}Machine: ${dialog.machine.name}${RESET}` : `${DIM}Machine:${RESET} ${dialog.machine.name}`;
+    lines.push(truncateToWidth(line + (focused && machines.length > 1 ? cycleText : ""), innerWidth, ""));
+  }
   const cycleHint = dialog.availableTypes.length > 1
-    ? ` ${DIM}[Space/Enter/→ next, Shift+Space/← prev]${RESET}`
+    ? cycleText
     : "";
   const typeValue = dialog.agentType || "manager";
   const typeLabel = dialog.focused === "agentType"
     ? `${BOLD}${GREEN}Type: ${typeValue}${RESET}${cycleHint}`
     : `${DIM}Type:${RESET} ${typeValue}`;
   lines.push(truncateToWidth(typeLabel, innerWidth, ""));
+  if (dialog.machine.id !== null) {
+    lines.push(...wordWrapLines(`Attachments are not sent to ${dialog.machine.name}. Local paths stay in the prompt.`, innerWidth));
+  }
   lines.push("");
 
   const promptLabel = dialog.focused === "prompt" ? `${BOLD}Prompt:${RESET} ${DIM}(required)${RESET}` : `${DIM}Prompt: (required)${RESET}`;
@@ -1131,6 +1145,8 @@ export function buildNewAgentFormContent(
   const cancelLabel = dialog.focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
   lines.push(`  ${cancelLabel}   ${createLabel}`);
 
+  if (dialog.inFlight) lines.push(`Starting agent on ${dialog.machine.name}…`);
+  if (dialog.error) lines.push(...wordWrapLines(dialog.error, innerWidth).map(line => `${RED}${line}${RESET}`));
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }
 

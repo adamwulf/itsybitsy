@@ -503,6 +503,7 @@ class StatusBarComponent implements Component {
    * would refuse.
    */
   remoteSelected = false;
+  remoteRepoSelected = false;
   hasResolvableWarnings = false;
 
   invalidate(): void {}
@@ -528,7 +529,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       row1Left = `${DIM}j/k: select    J/K: repo    p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers    (read-only remote agent)${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -1867,7 +1868,10 @@ export class DashboardComponent implements Component {
       if (dialog?.type === "peers") {
         syncPeersDialog(dialog);
         this.tui?.requestRender();
-      } else if (changed) {
+      } else if (changed || dialog?.type === "new-agent-form") {
+        if (dialog?.type === "new-agent-form" && dialog.focused === "machine" && !dialog.machines().some(m => m.id !== null)) {
+          dialog.focused = "agentType";
+        }
         this.tui?.requestRender();
       }
     });
@@ -1913,9 +1917,8 @@ export class DashboardComponent implements Component {
   private refuseOnRemoteRow(key: string): boolean {
     const remote = this.remoteSelection;
     if (remote === null || isRemoteAllowedKey(key)) return false;
-    this.setNotice(remote.kind === "remote-repo-header" && key === "a"
-      ? "Starting agents on another machine comes in the next phase"
-      : REMOTE_READ_ONLY_NOTICE, "error");
+    if (remote.kind === "remote-repo-header" && key === "a") return false;
+    this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
 
@@ -2311,6 +2314,7 @@ export class DashboardComponent implements Component {
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
     this.statusBar.remoteSelected = remote !== null;
+    this.statusBar.remoteRepoSelected = remote?.kind === "remote-repo-header";
 
     // Wire info panel
     this.infoPanel.agent = selected;
@@ -4290,7 +4294,7 @@ export async function launchDashboard(): Promise<void> {
   });
 
   const typePickerKeyboard = new TypePickerKeyboard(terminal, () =>
-    dashboard.dialog?.type === "new-agent-form" && dashboard.dialog.focused === "agentType");
+    dashboard.dialog?.type === "new-agent-form" && (dashboard.dialog.focused === "agentType" || dashboard.dialog.focused === "machine"));
   const stopTerminal = installTerminalCleanup(() => {
     typePickerKeyboard.stop();
     tui.stop();

@@ -330,10 +330,9 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
    - A remote start with `repo-coordinator`, or a type that B lacks, should show B's error on A.
    - So should a repo that B does not have. One way to test this: unregister the repo on B while A's form is open.
 8. **Offline.**
-   - Quit `ib watch` on B.
-   - Within a few polls, A should dim B's rows.
-   - A remote start to B should fail within 30 s with a clear error.
-   - Restart B, and A should reconnect without any action.
+   - Open the form on A, select B, enter a draft, then quit `ib watch` on B. After polling detects the disconnect, A should dim B's rows and keep the draft. The form should show the replacement machine, or disable Create if the repo has no connected host.
+   - Restart B and wait for A to reconnect. Submit a remote start to B, then quit B while the request is pending. A should show an error within 30 s.
+   - Restart B again and verify that A reconnects automatically.
 9. **Names.**
    - Create an agent with the same name on both laptops.
    - On A, `ib send <name>` should go to A's own agent, because the same repo comes first.

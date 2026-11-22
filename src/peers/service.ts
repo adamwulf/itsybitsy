@@ -84,7 +84,7 @@ import {
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { newAgent } from "../ib-commands";
 import { listRepos } from "../registry";
-import { PEER_ALPN, serveTrustedConnection, type PeerSnapshot } from "./peer-link";
+import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
@@ -615,6 +615,13 @@ export class PeerService {
     this.install(session);
     void session.start();
     return null;
+  }
+
+  async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
+    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    return requestNewAgent(conn, request, this.deps.setTimer);
   }
 
   /** The code typed at A's prompt. */

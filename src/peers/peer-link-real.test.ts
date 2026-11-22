@@ -6,7 +6,7 @@
  * poll timer is sped up 50x so a tick is 100 ms.
  */
 
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, mock, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import { loadOrCreateIdentity } from "./identity";
 import { loadIroh, type Iroh } from "./iroh";
 import { generatePairCode } from "./pair-code";
 import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer-link";
+import type { RemoteSpawnDeps } from "./new-agent";
 import { PeerService } from "./service";
 import { addPeer, readPeers, removePeer, shortPeerId } from "./store";
 
@@ -68,13 +69,14 @@ interface Side {
 /** Direct addresses by endpoint id, so a dial by id can reach another loopback endpoint. */
 function makeNetwork(iroh: Iroh) {
   const addresses = new Map<string, string[]>();
-  async function makeSide(label: string, agents: Agent[]): Promise<Side> {
+  async function makeSide(label: string, agents: Agent[], remoteSpawn?: RemoteSpawnDeps): Promise<Side> {
     const home = await mkdtemp(join(tmpdir(), `ib-peer-link-real-${label}-`));
     homes.push(home);
     const id = (await inHome(home, loadOrCreateIdentity)).id;
     const logs: string[] = [];
     let snapshots = 0;
     const service = new PeerService({
+      remoteSpawn,
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
       loadIdentity: () => inHome(home, loadOrCreateIdentity),
@@ -197,4 +199,20 @@ test("after the responder removes a peer, the next request on the existing conne
   expect(link(a)).toMatchObject({ connected: false, agents: list });
   // Refused by the per-request check on the live connection, not at a new accept.
   expect(b.logs).toContain(`peer link: refused a request from ${shortPeerId(a.id)}: no longer a peer; closing`);
+});
+
+test("a trusted loopback new-agent stream starts the stubbed agent and returns its id", async () => {
+  const net = makeNetwork(await loadIroh());
+  const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, stdout: "worker-23\n", stderr: "", exitCode: 0 }));
+  const notice = mock((_line: string) => {});
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", [], { listRepos: async () => [{ name: "App", path: "/b/app" }], newAgent, notice });
+  await pairBoth(a, b);
+  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
+  const prompt = "read this ".repeat(800);
+  expect(await a.service.startRemoteAgent(b.id, { repo: "app", type: "worker", prompt })).toBe("worker-23");
+  expect(newAgent.mock.calls).toEqual([["/b/app", prompt, { type: "worker", name: undefined }]]);
+  expect(b.logs).toContain("A started agent worker-23 in App");
+  expect(notice.mock.calls).toEqual([["A started agent worker-23 in App"]]);
 });

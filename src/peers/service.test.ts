@@ -550,6 +550,33 @@ const REMOTE_AGENTS: RemoteAgent[] = [
 ];
 
 describe("PeerService at boot", () => {
+  test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint } = makeService();
+    const starts: unknown[] = [];
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        peerName: async () => "paired", snapshot: () => ({ repos: [], agents: [] }), log: () => {},
+        startAgent: async request => { starts.push(request); return "my-agent"; },
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    const request = { repo: "app", type: "worker", prompt: "hello" };
+    try {
+      await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("disconnected");
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      expect(await service.startRemoteAgent(ID_REMOTE, request)).toBe("my-agent");
+      await writeFile(peersFile(), "[]");
+      await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("no longer paired");
+      expect(starts).toEqual([{ op: "new-agent", ...request }]);
+      expect(endpoint.connects).toEqual([ID_REMOTE]);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   test("the owning watch renews the lease each poll and replaces the snapshot only on visible changes", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {});

@@ -121,10 +121,9 @@ the reply change.
 - **Responder checks, in order:**
   1. The allowlist, re-checked as for every request.
   2. The repo name is registered here.
-  3. The type exists, is spawnable, and is not `repo-coordinator`. No
-     coordinators are started remotely.
+  3. The type exists, is spawnable, and is neither coordinator type.
   4. The name passes the existing agent-name validation.
-  5. The prompt is non-empty and within the cap.
+  5. The prompt is non-empty and within the cap. The responder rechecks pairing immediately before spawn.
 - **Spawning.** The responder then calls the same
   `newAgent(repo.path, prompt, { type, name })` that pressing `a` in its own
   `ib watch` calls.

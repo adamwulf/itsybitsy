@@ -1,6 +1,6 @@
 # iroh peering, next phase: one repo list across machines
 
-Phase 6 built 2026-11-20; 6a/6b merged 2026-11-21. Phase 7 in progress (build plan below); Phase 8 is Adam's two-laptop checklist. This phase follows [iroh-peering.md](iroh-peering.md)
+Phase 6 built 2026-11-20; 6a/6b merged 2026-11-21. Phase 7 implemented 2026-11-21, pending review and full verification outside the sandbox. Phase 8 is Adam's two-laptop checklist. This phase follows [iroh-peering.md](iroh-peering.md)
 Phases 0–4, plus the self-heal and full-id work, all on `agent/iroh-peering`.
 
 It **supersedes** "remote agents shown as tree sections"
@@ -87,7 +87,7 @@ the reply change.
   - Local repo actions (remove, rename, pin, fix, and so on) work only when
     the repo exists on this machine. On a remote-only header they are refused
     with a notice.
-  - In Phase 6, `a` on a remote-only header explains that remote starts come in the next phase. Phase 7 enables the machine picker.
+  - In Phase 7, `a` on a remote-only header opens the machine picker with the first connected host selected.
 - **V filter:** it now applies to remote agent rows too, because they live in
   the main tree (open question 3).
 - **Favorites and Teams tabs** stay local-only.
@@ -255,7 +255,7 @@ exactly.
     ambiguous across repos; each qualified form; an unknown name; the gate
     agreeing with the command; and notifications reaching the right manager
     and spawner when same-id agents exist in two repos.
-7. **Remote new-agent:**
+7. **Remote new-agent (implemented):**
    - the `new-agent` op and the responder's checks and spawn, with `newAgent`
      injected;
    - the 256 KB request cap for this op;
@@ -272,7 +272,7 @@ exactly.
 
 Each phase gets the usual two-reviewer cycle before it is merged.
 
-### Phase 7 build plan (started 2026-11-21)
+### Phase 7 build plan (implemented 2026-11-21)
 
 Adam's go-ahead came on 2026-11-21, relayed by @system. One Codex worker builds Phase 7 in the order below and commits after each step. Then two Codex reviewers check it, and review rounds continue until a round finds no code issues.
 
@@ -365,9 +365,8 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
 1. **Matching: DECIDED (Adam, 2026-11-20).** Repos match by registered repo
    name only, ignoring case. There is no path matching and nothing fancier.
    To align names, follow the steps under [Matching repos across machines](#matching-repos-across-machines).
-2. **Permission: DECIDED (Adam, 2026-11-21).** Any paired machine may start
-   agents here, with a `watch.log` line and a notice on this machine. Later,
-   remote starts will be gated through the agent-type `.md` files; nothing is
-   built for that yet.
+2. **Permission: DECIDED (Adam, 2026-11-21), implemented in Phase 7.** Any paired machine may start
+   agents here, with a `watch.log` line and a notice on this machine. A future
+   change will gate remote starts through the agent-type `.md` files.
 3. **V filter.** It now applies to remote agent rows, because they are in the
    main tree.

@@ -266,8 +266,9 @@ export async function resolveAgentTarget(
   if (matches.length > 1) {
     if (!machine && matches.some((m) => m.agent)) {
       const localName = await readAddressMachineName();
-      if (typeof localName !== "string") return localName;
-      for (const m of matches) if (m.agent) m.machine = localName;
+      if (typeof localName === "string") {
+        for (const m of matches) if (m.agent) m.machine = localName;
+      }
     }
     matches.sort((a, b) => a.machine.localeCompare(b.machine) || a.repo.localeCompare(b.repo));
     const machines = [...new Set(matches.map((m) => m.machine))];
@@ -276,11 +277,13 @@ export async function resolveAgentTarget(
       return resolveInRepo(name, matches.map((m) => m.agent!))!;
     }
     const forms = matches.map((m) => {
+      if (m.agent && !m.machine) return `@${m.repo}/${purpose === "rehire" ? m.agent.id : name}`;
       if (purpose === "rehire" && m.agent) return `${m.machine}/${m.repo}/${m.agent.id}`;
       return matches.some((other) => other !== m && other.machine === m.machine)
         ? `${m.machine}/${m.repo}/${name}` : `${m.machine}/${name}`;
     });
-    return failure(`'${name}' exists on ${machines.join(" and ")}; use ${forms.map(suggestedAddress).join(" or ")}`);
+    const description = machines.includes("") ? "is ambiguous" : `exists on ${machines.join(" and ")}`;
+    return failure(`'${name}' ${description}; use ${forms.map(suggestedAddress).join(" or ")}`);
   }
   const agent = matches[0]!.agent;
   if (agent) return local(agent);

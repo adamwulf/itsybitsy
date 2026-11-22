@@ -71,6 +71,13 @@ describe("qualified agent addresses", () => {
     const qualified = await retire("laptop-a/foo");
     expect(qualified.actions).toEqual([]);
     expect(qualified.stderr).toContain("Machine name is missing");
+    await cli.addAgent(web, "foo");
+    const ambiguous = await retire("foo");
+    expect(ambiguous.exitCode).toBe(1);
+    expect(ambiguous.actions).toEqual([]);
+    expect(ambiguous.stderr.trim()).toBe("'foo' is ambiguous; use @App/foo or @Web/foo");
+    expect((await retire("@App/foo")).actions[0]?.args[0]).toMatchObject({ repoPath: app });
+    expect((await retire("@Web/foo")).actions[0]?.args[0]).toMatchObject({ repoPath: web });
     expect(await Bun.file(machineFile).exists()).toBe(false);
   });
 

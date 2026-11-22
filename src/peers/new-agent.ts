@@ -1,5 +1,5 @@
 import { listSpawnableTypeNamesSync } from "../agent-types";
-import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { validateAgentName, type newAgent } from "../ib-commands";
 import type { RepoEntry } from "../registry";
 import { NEW_AGENT_MAX_REQUEST_BYTES } from "./peer-link";
@@ -23,7 +23,7 @@ export async function acceptRemoteAgent(
   if (typeof type !== "string" || !listSpawnableTypeNamesSync().includes(type)) {
     throw new Error("Agent type is unknown or not spawnable on this machine");
   }
-  if (type === REPO_COORDINATOR_TYPE) throw new Error("Cannot start a repo-coordinator remotely");
+  if (type === REPO_COORDINATOR_TYPE || type === SYSTEM_COORDINATOR_TYPE) throw new Error(`Cannot start a ${type} remotely`);
   if (name !== undefined) {
     if (typeof name !== "string") throw new Error("Agent name must be a string");
     const reason = validateAgentName(name, repos);

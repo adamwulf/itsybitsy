@@ -386,6 +386,15 @@ describe("trusted new-agent responder", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  test("rejects a system coordinator even when the local layer is spawnable", async () => {
+    await Bun.write(join(home, ".itsybitsy", "agent-types", "system-coordinator.md"), "---\nspawnable: true\n---\n");
+    const { side, spawn } = receiver();
+    const reply = decodeText(await rawRequest(side.a, encode({ ...request, type: SYSTEM_COORDINATOR_TYPE })));
+    expect(reply).toEqual({ ok: false, error: "Cannot start a system-coordinator remotely" });
+    expect(spawn).not.toHaveBeenCalled();
+    side.a.close(0, "done");
+  });
+
   test("revocation during registry lookup prevents the spawn", async () => {
     const { side, deps, spawn } = receiver();
     const registry = Promise.withResolvers<Awaited<ReturnType<typeof deps.listRepos>>>();

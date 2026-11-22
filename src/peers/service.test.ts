@@ -566,6 +566,7 @@ describe("PeerService at boot", () => {
     ["agy", true, true, undefined, "disabled under agy"],
     ["ancestry error", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["missing parent", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["missing executable", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["early PID zero", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["cycle", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["damaged metadata", true, true, undefined, "Cannot verify"],
@@ -577,6 +578,7 @@ describe("PeerService at boot", () => {
         if (evidence === "ancestry error") throw new Error("ps failed");
         const parent = evidence === "missing parent" ? 999 : evidence === "early PID zero" ? 0 : evidence === "cycle" ? 30 : 1;
         const exe = ["claude", "codex", "agy"].includes(evidence) ? evidence : "Terminal";
+        if (evidence === "missing executable") return "30 20 /bin/ib\n20 1   \n1 0 /sbin/launchd";
         return `30 20 /bin/ib\n20 10 /bin/zsh\n10 ${parent} /Applications/My Apps/${exe}\n1 0 /sbin/launchd`;
       },
       resolveCaller: async (): Promise<"agent" | "no-agent" | "unverifiable"> => {

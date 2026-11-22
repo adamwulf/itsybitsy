@@ -24,7 +24,7 @@ function readAncestors(pid: number, readTable: () => string): Map<number, string
   const processes = new Map<number, { parent: number; executable: string }>();
   try {
     for (const line of readTable().split("\n")) {
-      const fields = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+      const fields = /^(\d+)\s+(\d+)\s+(.+)$/.exec(line.trim());
       if (fields) processes.set(Number(fields[1]), { parent: Number(fields[2]), executable: basename(fields[3]!) });
     }
   } catch {

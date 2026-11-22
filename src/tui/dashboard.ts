@@ -839,6 +839,7 @@ export class DashboardComponent implements Component {
    * sets the real one (src/peers/service.ts); a dashboard built in a test has
    * none unless the test sets a fake, so no test can bind a real endpoint.
    */
+  remoteStartPending = false;
   peerService: PeersDialogService | null = null;
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];

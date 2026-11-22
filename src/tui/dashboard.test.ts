@@ -10199,6 +10199,28 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toBe("Created agent builder on Laptop C");
   });
 
+  test.each(["success", "failure"])("a detached %s is reported without replacing the next dialog", async outcome => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const first = assertDialog(dashboard.dialog, "new-agent-form");
+    const pending = Promise.withResolvers<string>();
+    const start = spyOn(service, "startRemoteAgent").mockReturnValue(pending.promise);
+    first.onSubmit("builder", "worker", "hello");
+    dashboard.handleInput("\x1b");
+    expect(dashboard.dialog).toBeNull();
+    dashboard.handleInput("a");
+    const second = assertDialog(dashboard.dialog, "new-agent-form");
+    second.onSubmit("", "worker", "another draft");
+    expect(second.error).toContain("already pending");
+    expect(start).toHaveBeenCalledTimes(1);
+    if (outcome === "success") pending.resolve("builder");
+    else pending.reject(new Error("spawn failed"));
+    await waitFor(() => !dashboard.remoteStartPending);
+    expect(dashboard.dialog).toBe(second);
+    expect(dashboard.notice).toBe(outcome === "success" ? "Created agent builder on Laptop B" : "Remote start on Laptop B: spawn failed");
+  });
+
   test("losing the selected peer on a shared repo makes the local replacement visible", () => {
     const dashboard = makeDashboard();
     dashboard.setRepos([{ name: "itsybitsy", path: "/local/project" }]);

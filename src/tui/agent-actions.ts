@@ -173,6 +173,8 @@ export function killActiveDiffProc() {
 
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
+  readonly dialog: DialogState;
+  remoteStartPending: boolean;
   peerService: PeersDialogService | null;
   remoteSelection: RemoteEntry | null;
   agentTree: {
@@ -1882,6 +1884,12 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
       }
       const target = form.machine;
       if (target.id !== null && service) {
+        if (ctx.remoteStartPending) {
+          form.error = "A remote agent start is already pending";
+          ctx.tui?.requestRender();
+          return;
+        }
+        ctx.remoteStartPending = true;
         form.inFlight = target.name;
         form.error = undefined;
         ctx.tui?.requestRender();
@@ -1889,11 +1897,14 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
           const id = await service.startRemoteAgent(target.id, {
             repo: registryName, type: agentType, name: name.trim() || undefined, prompt,
           });
-          ctx.closeDialog();
+          if (ctx.dialog === form) ctx.closeDialog();
           ctx.setNotice(`Created agent ${cleanRemoteText(id)} on ${target.name}`, "info");
         } catch (err) {
-          form.error = err instanceof Error ? err.message : String(err);
+          const detail = err instanceof Error ? err.message : String(err);
+          if (ctx.dialog === form) form.error = detail;
+          else ctx.setNotice(`Remote start on ${target.name}: ${detail}`, "error");
         } finally {
+          ctx.remoteStartPending = false;
           form.inFlight = undefined;
           ctx.tui?.requestRender();
         }

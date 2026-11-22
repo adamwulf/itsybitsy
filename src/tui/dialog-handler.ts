@@ -243,7 +243,8 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // the pending send. The submit closure clears `inFlight` on failure (re-enabling
   // the draft) or closes the dialog on success, so the success close always lands
   // on THIS dialog, never a later one.
-  if ((dialog.type === "input" || dialog.type === "textarea" || dialog.type === "new-agent-form") && dialog.inFlight) {
+  if (dialog.type === "new-agent-form" && dialog.inFlight && !matchesKey(data, Key.escape)) return true;
+  if ((dialog.type === "input" || dialog.type === "textarea") && dialog.inFlight) {
     return true;
   }
 
@@ -1161,7 +1162,7 @@ export function buildNewAgentFormContent(
   const cancelLabel = dialog.focused === "cancel" ? `${BOLD}${GREEN}[ Cancel ]${RESET}` : `[ Cancel ]`;
   lines.push(`  ${cancelLabel}   ${createLabel}`);
 
-  if (dialog.inFlight) lines.push(`Starting agent on ${dialog.inFlight}…`);
+  if (dialog.inFlight) lines.push(`Starting agent on ${dialog.inFlight}… (Esc to dismiss)`);
   if (dialog.error) lines.push(...wordWrapLines(dialog.error, innerWidth).map(line => `${RED}${line}${RESET}`));
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }

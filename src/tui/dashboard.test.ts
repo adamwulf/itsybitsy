@@ -10192,12 +10192,13 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.dialog).toBe(form);
     expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain("Type unavailable");
     expect(form.buffer.getText()).toBe(prompt);
-    start.mockResolvedValue("builder");
+    const longId = "builder-" + "w".repeat(240);
+    start.mockResolvedValue(longId);
     dashboard.handleInput("\r");
     dashboard.handleInput("\r");
     await waitFor(() => dashboard.dialog === null);
     expect(start.mock.calls).toEqual(Array(2).fill([PEER_C, { repo: "itsybitsy", type: "worker", name: "builder", prompt }]));
-    expect(dashboard.notice).toBe("Created agent builder on Laptop C");
+    expect(dashboard.notice).toBe(`Created agent ${longId.slice(0, 79)}… on Laptop C`);
   });
 
   test.each(["success", "failure"])("a detached %s is reported without replacing the next dialog", async outcome => {

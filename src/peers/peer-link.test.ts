@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setUserHome, resetUserHome } from "../home";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
+import { listSpawnableTypeNamesSync } from "../agent-types";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { makeAgent, waitFor } from "../test-utils";
@@ -381,7 +382,7 @@ describe("trusted new-agent responder", () => {
       ok, stdout: ok ? "agent-123\n" : "", stderr: ok ? "" : "Worktree is dirty", exitCode: ok ? 0 : 1,
     }));
     const notice = mock((_message: string) => {});
-    const deps = { listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent: spawn, notice };
+    const deps = { listSpawnableTypes: listSpawnableTypeNamesSync, listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent: spawn, notice };
     const side = serve({ startAgent: (req, name) => acceptRemoteAgent(req, name, deps, line => side.logs.push(line)) });
     return { side, spawn, notice, deps };
   }

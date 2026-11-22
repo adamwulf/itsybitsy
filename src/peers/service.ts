@@ -83,6 +83,7 @@ import {
 } from "./pairing";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { newAgent, resolveCallerAgentContext } from "../ib-commands";
+import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
 import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
 import { writeRemoteAgents } from "./remote-agents";
@@ -152,7 +153,7 @@ export interface PeerServiceDeps {
 export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void): PeerServiceDeps {
   return {
     resolveCaller: resolveCallerAgentContext,
-    remoteSpawn: { listRepos, newAgent, notice },
+    remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
     acquireLock: () => acquireEndpointLock(),

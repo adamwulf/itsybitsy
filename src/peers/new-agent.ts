@@ -1,4 +1,3 @@
-import { listSpawnableTypeNamesSync } from "../agent-types";
 import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { validateAgentName, type newAgent } from "../ib-commands";
 import { isValidRepoName } from "../validation";
@@ -6,6 +5,7 @@ import type { RepoEntry } from "../registry";
 import { cleanRemoteText, NEW_AGENT_MAX_REQUEST_BYTES } from "./peer-link";
 
 export interface RemoteSpawnDeps {
+  listSpawnableTypes(): string[];
   listRepos(): Promise<RepoEntry[]>;
   newAgent: typeof newAgent;
   notice(message: string): void;
@@ -22,7 +22,7 @@ export async function acceptRemoteAgent(
   const repos = await deps.listRepos();
   const registered = repos.find(r => r.name.toLowerCase() === repo.toLowerCase());
   if (!registered) throw new Error("Repo is not registered on this machine");
-  if (typeof type !== "string" || !listSpawnableTypeNamesSync().includes(type)) {
+  if (typeof type !== "string" || !deps.listSpawnableTypes().includes(type)) {
     throw new Error("Agent type is unknown or not spawnable on this machine");
   }
   if (type === REPO_COORDINATOR_TYPE || type === SYSTEM_COORDINATOR_TYPE) throw new Error(`Cannot start a ${type} remotely`);

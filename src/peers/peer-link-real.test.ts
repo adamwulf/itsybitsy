@@ -207,7 +207,7 @@ test("a trusted loopback new-agent stream starts the stubbed agent and returns i
   const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, stdout: "worker-23\n", stderr: "", exitCode: 0 }));
   const notice = mock((_line: string) => {});
   const a = await net.makeSide("a", []);
-  const b = await net.makeSide("b", [], { listRepos: async () => [{ name: "App", path: "/b/app" }], newAgent, notice });
+  const b = await net.makeSide("b", [], { listSpawnableTypes: () => ["worker"], listRepos: async () => [{ name: "App", path: "/b/app" }], newAgent, notice });
   await pairBoth(a, b);
   await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });

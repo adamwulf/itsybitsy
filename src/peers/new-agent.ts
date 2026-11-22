@@ -13,7 +13,7 @@ export interface RemoteSpawnDeps {
 /** The caller has just re-read the allowlist and obtained the paired name. */
 export async function acceptRemoteAgent(
   { repo, type, name, prompt }: Record<string, unknown>,
-  peerName: string,
+  readPeerName: () => Promise<string | null>,
   deps: RemoteSpawnDeps,
   log: (line: string) => void,
 ): Promise<string> {
@@ -32,6 +32,8 @@ export async function acceptRemoteAgent(
   if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Prompt must be non-empty text");
   if (Buffer.byteLength(prompt) > NEW_AGENT_MAX_REQUEST_BYTES) throw new Error("Prompt exceeds 256 KB");
 
+  const peerName = await readPeerName();
+  if (peerName === null) throw new Error("Machine is no longer paired");
   const result = await deps.newAgent(registered.path, prompt, { type, name });
   if (!result.ok) throw new Error(result.stderr || result.stdout || "Could not start agent");
   const id = result.stdout.trim();

@@ -4,7 +4,7 @@
  * peer-link-real.test.ts.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -383,9 +383,22 @@ describe("trusted new-agent responder", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  test("revocation during registry lookup prevents the spawn", async () => {
+    const { side, deps, spawn } = receiver();
+    const registry = Promise.withResolvers<Awaited<ReturnType<typeof deps.listRepos>>>();
+    const lookup = spyOn(deps, "listRepos").mockReturnValue(registry.promise);
+    const reply = rawRequest(side.a, encode(request));
+    await waitFor(() => lookup.mock.calls.length === 1);
+    side.peers.clear();
+    registry.resolve([{ name: "app", path: "/app" }]);
+    expect(decodeText(await reply)).toEqual({ ok: false, error: "Machine is no longer paired" });
+    expect(spawn).not.toHaveBeenCalled();
+    side.a.close(0, "done");
+  });
+
   test("validates the prompt cap in bytes", async () => {
     const { side, deps, spawn } = receiver();
-    await expect(acceptRemoteAgent({ ...request, prompt: "é".repeat(131073) }, "Alice", deps, () => {})).rejects.toThrow("256 KB");
+    await expect(acceptRemoteAgent({ ...request, prompt: "é".repeat(131073) }, async () => "Alice", deps, () => {})).rejects.toThrow("256 KB");
     expect(spawn).not.toHaveBeenCalled();
     side.a.close(0, "done");
   });

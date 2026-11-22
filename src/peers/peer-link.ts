@@ -339,7 +339,7 @@ export interface PeerResponderDeps {
   peerName(id: string): Promise<string | null>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
-  startAgent?(request: Record<string, unknown>, peerName: string): Promise<string>;
+  startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** watch.log in `ib watch`. */
   log(line: string): void;
 }
@@ -411,7 +411,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   } else if (request.op === "new-agent") {
     try {
       if (!deps.startAgent) throw new Error("Remote starts are unavailable");
-      const id = await deps.startAgent(request, peerName);
+      const id = await deps.startAgent(request, () => deps.peerName(conn.remoteId));
       reply = encodeJson({ ok: true, id });
     } catch (err) {
       const error = cleanRemoteText(errorDetail(err));

@@ -843,8 +843,8 @@ export class PeerService {
         const remoteSpawn = this.deps.remoteSpawn;
         await serveTrustedConnection(toPairConnection(conn), {
           peerName: (id) => this.peerName(id),
-          startAgent: remoteSpawn && ((request, name) =>
-            acceptRemoteAgent(request, name, remoteSpawn, this.deps.log)),
+          startAgent: remoteSpawn && ((request, readPeerName) =>
+            acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
           snapshot: this.deps.snapshot,
           log: this.deps.log,
         });

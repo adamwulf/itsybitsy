@@ -390,6 +390,8 @@ describe("trusted new-agent responder", () => {
   test.each([
     ["non-string repo", { repo: 42 }, "Invalid repo registry name"],
     ["path instead of repo name", { repo: "/local/app" }, "Invalid repo registry name"],
+    ["parent directory", { repo: ".." }, "Invalid repo registry name"],
+    ["NUL in name", { repo: "app\0" }, "Invalid repo registry name"],
     ["non-string type", { type: 42 }, "unknown or not spawnable"],
     ["unregistered repo", { repo: "missing", type: "_all" }, "Repo is not registered"],
     ["unknown type", { type: "absent", prompt: "" }, "unknown or not spawnable"],
@@ -420,6 +422,15 @@ describe("trusted new-agent responder", () => {
     await expect(stream.readToEnd(4096)).rejects.toThrow();
     expect(side.a.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.notPeer });
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  test("matches a dotted stored name and starts only at the registered path", async () => {
+    const { side, spawn, deps } = receiver();
+    spyOn(deps, "listRepos").mockResolvedValue([{ name: "milestonemade.com", path: "/local/site" }]);
+    const reply = decodeText(await rawRequest(side.a, encode({ ...request, repo: "MilestoneMade.com", path: "/other" })));
+    expect(reply).toEqual({ ok: true, id: "agent-123" });
+    expect(spawn.mock.calls).toEqual([["/local/site", request.prompt, { type: request.type, name: undefined }]]);
+    side.a.close(0, "done");
   });
 
   test("rejects a system coordinator even when the local layer is spawnable", async () => {

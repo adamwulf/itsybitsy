@@ -1,7 +1,6 @@
 import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { validateAgentName, type newAgent } from "../ib-commands";
-import { isValidRepoName } from "../validation";
-import type { RepoEntry } from "../registry";
+import { isStoredRepoName, type RepoEntry } from "../registry";
 import { cleanRemoteText, NEW_AGENT_MAX_REQUEST_BYTES } from "./peer-link";
 
 export interface RemoteSpawnDeps {
@@ -18,7 +17,7 @@ export async function acceptRemoteAgent(
   deps: RemoteSpawnDeps,
   log: (line: string) => void,
 ): Promise<string> {
-  if (typeof repo !== "string" || !isValidRepoName(repo)) throw new Error("Invalid repo registry name");
+  if (!isStoredRepoName(repo) || repo.includes("\0")) throw new Error("Invalid repo registry name");
   const repos = await deps.listRepos();
   const registered = repos.find(r => r.name.toLowerCase() === repo.toLowerCase());
   if (!registered) throw new Error("Repo is not registered on this machine");

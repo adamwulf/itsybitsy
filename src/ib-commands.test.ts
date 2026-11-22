@@ -10370,8 +10370,11 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const second = join(tempDir, "b", "project");
     await mkdir(first, { recursive: true });
     await mkdir(second, { recursive: true });
-    let root = first;
-    lifecycleSpawnCtx.set((cmd) => makeSpawnResult(cmd.includes("--show-toplevel") ? root : ".git", 0));
+    // Each fixture checkout is its own root, including the pre-registered tempDir.
+    lifecycleSpawnCtx.set((cmd) => {
+      const fields = cmd.slice(4).map(flag => flag === "--show-toplevel" ? cmd[2] : ".git");
+      return makeSpawnResult(fields.join("\n"), 0);
+    });
     const live = new Set<string>();
     const spawn = mockSpawnRunner();
     setNewAgentSpawnRunner((cmd) => {
@@ -10389,7 +10392,6 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     await Bun.write(file, "pending for first");
     expect((await removeRepo(first)).ok).toBe(true);
     expect((await addRepo(second, "shared")).ok).toBe(true);
-    root = second;
     const refused = await newAgent(second, "start", { type: "repo-coordinator", _cwd: second });
     expect(refused.ok).toBe(false);
     expect(refused.stderr).toContain(`queue directory already exists at ${queueDir}`);

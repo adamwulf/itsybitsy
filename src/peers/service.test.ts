@@ -1,5 +1,5 @@
 import { remoteStartDenialAtStartup } from "./remote-start-caller";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -659,6 +659,32 @@ describe("PeerService at boot", () => {
     await flushMicrotasks();
     expect(changes).toEqual([service.remoteStartDenial]);
     await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("timed out");
+  });
+
+  test("caches one denial when the reader succeeds at the deadline before the timer fires", async () => {
+    const clock = createFakeClock();
+    const table = Promise.withResolvers<string>();
+    const resolveCaller = mock(async () => "no-agent" as const);
+    const decision = remoteStartDenialAtStartup({
+      stdinTTY: true, stdoutTTY: true, env: {}, cwd: "/", pid: 1,
+      readProcessTable: () => table.promise,
+      resolveCaller,
+    }, clock);
+    const { service } = makeService({ remoteStartDenial: decision });
+    const changes: (string | null)[] = [];
+    service.onChange(() => changes.push(service.remoteStartDenial));
+
+    clock.jump(2_000);
+    expect(clock.pending()).toBe(1);
+    table.resolve("PID PPID STARTED                  KERNEL COMMAND\n  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd");
+    const denial = await decision;
+    expect(resolveCaller).toHaveBeenCalledTimes(1);
+    expect(denial).toContain("timed out");
+    expect(clock.pending()).toBe(0);
+    clock.advance(0);
+    await flushMicrotasks();
+    expect(service.remoteStartDenial).toBe(denial);
+    expect(changes).toEqual([denial]);
   });
 
   test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {

@@ -52,6 +52,9 @@ async function readAncestors(pid: number, readTable: NonNullable<DashboardCaller
   const ancestry = new Map<number, Ancestor>();
   while (pid > 0 && !ancestry.has(pid)) {
     const process = processes.get(pid);
+    // macOS ps may show "(launchd)" in comm when another user's argv is unreadable.
+    // We also check ucomm, the kernel p_comm that a process cannot set. Agent
+    // CLIs run as the same user, so ps can read their argv.
     if (!process || process.names.some(name => !name)) break;
     ancestry.set(pid, process);
     if (pid === 1) return ancestry;

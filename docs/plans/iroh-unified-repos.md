@@ -365,8 +365,9 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
 1. **Matching: DECIDED (Adam, 2026-11-20).** Repos match by registered repo
    name only, ignoring case. There is no path matching and nothing fancier.
    To align names, follow the steps under [Matching repos across machines](#matching-repos-across-machines).
-2. **Permission.** Any paired machine may start agents here, with a log line
-   and a notice on this machine. The alternative is a per-peer "may start
-   agents here" switch in the Peers dialog.
+2. **Permission: DECIDED (Adam, 2026-11-21).** Any paired machine may start
+   agents here, with a `watch.log` line and a notice on this machine. Later,
+   remote starts will be gated through the agent-type `.md` files; nothing is
+   built for that yet.
 3. **V filter.** It now applies to remote agent rows, because they are in the
    main tree.

@@ -561,10 +561,23 @@ describe("PeerService at boot", () => {
     ["non-TTY input", false, true, undefined, "interactive terminal"],
     ["non-TTY output", true, false, undefined, "interactive terminal"],
     ["malformed tmux", true, true, "?", "inside tmux"],
+    ["claude", true, true, undefined, "disabled under claude"],
+    ["codex", true, true, undefined, "disabled under codex"],
+    ["agy", true, true, undefined, "disabled under agy"],
+    ["ancestry error", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["missing parent", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["early PID zero", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["cycle", true, true, undefined, "Cannot verify dashboard process ancestry"],
     ["resolver error", true, true, undefined, "Cannot verify"],
   ] as const)("classifies the %s dashboard once for the service lifetime", async (kind, stdinTTY, stdoutTTY, tmux, reason) => {
     let evidence = kind as string;
-    const input = { stdinTTY, stdoutTTY, env: { TMUX: tmux }, cwd: "/app",
+    const input = { stdinTTY, stdoutTTY, env: { TMUX: tmux }, cwd: "/app", pid: 30,
+      readProcessTable: () => {
+        if (evidence === "ancestry error") throw new Error("ps failed");
+        const parent = evidence === "missing parent" ? 999 : evidence === "early PID zero" ? 0 : evidence === "cycle" ? 30 : 1;
+        const exe = ["claude", "codex", "agy"].includes(evidence) ? evidence : "Terminal";
+        return `30 20 /bin/ib\n20 10 /bin/zsh\n10 ${parent} /Applications/My Apps/${exe}\n1 0 /sbin/launchd`;
+      },
       resolveCaller: async () => {
         if (evidence === "resolver error") throw new Error("unavailable");
         return evidence === "agent" ? { meta: {}, repoPath: "/app", agentDir: "/app/agent" } : null;

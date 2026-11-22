@@ -1869,7 +1869,7 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
   const form: Extract<DialogState, { type: "new-agent-form" }> = {
     type: "new-agent-form",
     repoName: displayName,
-    remoteStartDenial: service?.remoteStartDenial ?? null,
+    get remoteStartDenial() { return service?.remoteStartDenial ?? null; },
     get otherRemoteStartPending() { return ctx.remoteStartPending && !this.inFlight; },
     machines,
     machine,

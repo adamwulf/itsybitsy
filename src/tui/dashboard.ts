@@ -106,7 +106,6 @@ import {
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 import { buildPeersDialogContent, newPeersDialog, syncPeersDialog, type PeersDialogService } from "./peers-dialog";
-import { remoteStartDenialAtStartup } from "../peers/remote-start-caller";
 import { PeerService, defaultPeerServiceDeps } from "../peers/service";
 import type { PeerLinkState } from "../peers/poller";
 import { remoteDisplayName } from "./peer-repos";
@@ -4202,7 +4201,7 @@ export async function launchDashboard(): Promise<void> {
   // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
   // and never carries a state that detection has not filled in yet.
   const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () =>
-    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? []), message => dashboard.remoteAgentStarted(message), await remoteStartDenialAtStartup()));
+    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? []), message => dashboard.remoteAgentStarted(message)));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read

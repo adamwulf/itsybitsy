@@ -61,6 +61,7 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
+import { remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
@@ -123,7 +124,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
-  remoteStartDenial: string | null;
+  remoteStartDenial: string | null | Promise<string | null>;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[]): void;
   renewLease?(): Promise<void>;
@@ -150,7 +151,7 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: string | null): PeerServiceDeps {
+export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
   return {
     remoteStartDenial,
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
@@ -316,10 +317,22 @@ export class PeerService {
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
 
-  readonly remoteStartDenial: string | null;
+  private callerDenial: string | null = "checking whether remote starts are allowed";
+
+  get remoteStartDenial(): string | null {
+    return this.callerDenial;
+  }
 
   constructor(private readonly deps: PeerServiceDeps) {
-    this.remoteStartDenial = deps.remoteStartDenial;
+    const decision = deps.remoteStartDenial;
+    if (decision === null || typeof decision === "string") {
+      this.callerDenial = decision;
+    } else {
+      void decision.catch(() => "Cannot verify the dashboard caller for remote starts").then(denial => {
+        this.callerDenial = denial;
+        this.notify();
+      });
+    }
     this.poller = new PeerPoller({
       readPeers: async () => {
         await deps.renewLease?.();

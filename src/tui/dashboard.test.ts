@@ -10271,6 +10271,27 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toBe("Created agent second-agent on Laptop B");
   });
 
+  test("an open remote form shows the startup check and enables Create when the decision allows it", async () => {
+    const { dashboard, service } = setup();
+    service.remoteStartDenial = "checking whether remote starts are allowed";
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    form.buffer.handleInput("x");
+    const rendered = () => buildNewAgentFormContent(form, 70).contentLines.map(stripAnsi).join(" ");
+    const start = spyOn(service, "startRemoteAgent").mockResolvedValue("builder");
+    expect(rendered()).toContain("checking whether remote starts are allowed");
+    await form.onSubmit("", "worker", "x");
+    expect(start).not.toHaveBeenCalled();
+    service.remoteStartDenial = null;
+    service.set({});
+    expect(rendered()).not.toContain("checking whether remote starts are allowed");
+    form.focused = "create";
+    dashboard.handleInput("\r");
+    await waitFor(() => dashboard.dialog === null);
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
   test("a denied remote-start decision is displayed and prevents form submission", () => {
     const { dashboard, service } = setup();
     service.remoteStartDenial = "Remote starts require an interactive terminal";

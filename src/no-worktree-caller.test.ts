@@ -42,8 +42,14 @@ describe("trusted no-worktree caller attribution", () => {
   async function dashboardDenial(cwd: string) {
     return remoteStartDenialAtStartup({
       stdinTTY: true, stdoutTTY: true, env: {}, cwd, pid: 500,
-      readProcessTable: () => "PID PPID KERNEL   COMMAND\n500  400 ib       ib\n400  300 sh       sh\n300    1 Terminal Terminal\n  1    0 launchd  launchd",
-      resolveCaller: (path, ancestry) => resolveDashboardCaller(path, ancestry, deps()),
+      readProcessTable: async () => [
+        "PID PPID STARTED                  KERNEL   COMMAND",
+        "500  400 1970-01-01T03:25:45.000Z ib       ib",
+        "400  300 1970-01-01T03:25:45.000Z sh       sh",
+        "300    1 1970-01-01T03:25:45.000Z Terminal Terminal",
+        "  1    0 1970-01-01T03:25:45.000Z launchd  launchd",
+      ].join("\n"),
+      resolveCaller: (path, ancestry, snapshot) => resolveDashboardCaller(path, ancestry, { ...deps(), ...snapshot }),
     });
   }
 

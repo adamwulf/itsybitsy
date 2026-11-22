@@ -583,19 +583,19 @@ describe("PeerService at boot", () => {
   ] as const)("classifies the %s dashboard once for the service lifetime", async (kind, stdinTTY, stdoutTTY, tmux, reason) => {
     let evidence = kind as string;
     const input = { stdinTTY, stdoutTTY, env: { TMUX: tmux }, cwd: "/app", pid: 30,
-      readProcessTable: (command: string[]) => {
-        expect(command).toEqual(["/bin/ps", "-axww", "-o", "pid=PID,ppid=PPID,ucomm=KERNEL,comm=COMMAND"]);
+      readProcessTable: async (command: string[]) => {
+        expect(command).toEqual(["/bin/ps", "-axww", "-o", "pid=PID,ppid=PPID,lstart=STARTED,ucomm=KERNEL,comm=COMMAND"]);
         if (evidence === "ancestry error") throw new Error("ps failed");
         const parent = evidence === "missing parent" ? 999 : evidence === "early PID zero" ? 0 : evidence === "cycle" ? 30 : 1;
         const exe = ["claude", "codex", "agy"].includes(evidence) ? evidence : "Terminal";
         const kernel = evidence === "missing kernel name" ? "" : evidence === "kernel agent" ? "codex" : "My Terminal";
         const commandName = evidence === "missing executable" ? "" : `/Applications/My Apps/${exe}`;
         return [
-          "PID PPID KERNEL           COMMAND",
-          " 30   20 ib               /bin/ib",
-          " 20   10 zsh              /bin/zsh",
-          ` 10 ${String(parent).padStart(4)} ${kernel.padEnd(16)} ${commandName}`,
-          "  1    0 launchd          /sbin/launchd",
+          "PID PPID STARTED                  KERNEL           COMMAND",
+          " 30   20 Sat Nov 21 12:01:00 2026 ib               /bin/ib",
+          " 20   10 Sat Nov 21 12:01:00 2026 zsh              /bin/zsh",
+          ` 10 ${String(parent).padStart(4)} Sat Nov 21 12:01:00 2026 ${kernel.padEnd(16)} ${commandName}`,
+          "  1    0 Sat Nov 21 12:01:00 2026 launchd          /sbin/launchd",
         ].join("\n");
       },
       resolveCaller: async (): Promise<"agent" | "no-agent" | "unverifiable"> => {
@@ -612,6 +612,53 @@ describe("PeerService at boot", () => {
     Object.assign(input, { stdinTTY: !!reason, stdoutTTY: !!reason, env: {} });
     const request = { repo: "app", type: "worker", prompt: "hello" };
     await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow(reason ?? "no longer paired");
+  });
+
+  test.each(["process table", "metadata"])("boots while the %s reader is pending and keeps a timeout denial after it finishes", async stage => {
+    const table = "PID PPID STARTED                  KERNEL COMMAND\n  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd";
+    const release = Promise.withResolvers<void>();
+    const reading = Promise.withResolvers<AbortSignal>();
+    let signal: AbortSignal;
+    const clock = createFakeClock();
+    const decision = remoteStartDenialAtStartup({
+      stdinTTY: true, stdoutTTY: true, env: {}, cwd: "/", pid: 1,
+      readProcessTable: async (_command, abort) => {
+        signal = abort;
+        if (stage === "process table") {
+          reading.resolve(abort);
+          await release.promise;
+        } else {
+          clock.advance(1_500);
+        }
+        return table;
+      },
+      resolveCaller: async () => {
+        if (stage === "metadata") {
+          reading.resolve(signal);
+          await release.promise;
+        }
+        return "no-agent";
+      },
+    }, clock);
+    const service = new PeerService(defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, decision));
+    const observed = await reading.promise;
+    await service.bootIfPaired();
+    expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
+    const request = { repo: "app", type: "worker", prompt: "hello" };
+    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("checking whether remote starts are allowed");
+    const changes: (string | null)[] = [];
+    service.onChange(() => changes.push(service.remoteStartDenial));
+    clock.advance(stage === "process table" ? 1_999 : 499);
+    await flushMicrotasks();
+    expect(observed.aborted).toBe(false);
+    expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
+    clock.advance(1);
+    expect(await decision).toContain("timed out");
+    expect(observed.aborted).toBe(true);
+    release.resolve();
+    await flushMicrotasks();
+    expect(changes).toEqual([service.remoteStartDenial]);
+    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("timed out");
   });
 
   test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {

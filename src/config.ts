@@ -1,6 +1,7 @@
 import { join } from "path";
 import { userHome } from "./home";
 import { chmod, stat } from "fs/promises";
+import { DEFAULT_ATTACHMENT_SETTINGS } from "./peers/transfer-limits";
 
 export type ConfigSource = "user" | "default";
 export type ConfigType = "number" | "boolean" | "string" | "string[]";
@@ -35,6 +36,9 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "coordinator.imessage", type: "boolean", default: false },
   { key: "coordinator.remoteControlName", type: "string", default: "" },
   { key: "channels.telegram.bot_token", type: "string", default: "" },
+  { key: "peering.attachments.maxFileMB", type: "number", default: DEFAULT_ATTACHMENT_SETTINGS.maxFileMB },
+  { key: "peering.attachments.maxMessageMB", type: "number", default: DEFAULT_ATTACHMENT_SETTINGS.maxMessageMB },
+  { key: "peering.attachments.maxFiles", type: "number", default: DEFAULT_ATTACHMENT_SETTINGS.maxFiles },
   { key: "providers.fugu.api_key", type: "string", default: "", sensitive: true },
   { key: "notifications.sayOnQuestion", type: "boolean", default: true },
   { key: "tree.groupByParent", type: "boolean", default: false },

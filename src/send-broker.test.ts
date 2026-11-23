@@ -745,6 +745,38 @@ describe("send broker", () => {
       } finally { spy.mockRestore(); }
     });
 
+    test.each(["interrupt", "deadline", "read error"])("a watchdog result lookup respects %s after claim", async kind => {
+      const { submitWatchdogRequest } = await import("./spawn-broker");
+      const control = new AbortController();
+      const path = join(spawnResultDir(agentDir), ID_A + ".json");
+      const ready = join(spawnRequestDir(agentDir), ID_A + ".json");
+      const file = Bun.file.bind(Bun);
+      let claimed = false, attempts = 0;
+      const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+      const spy = spyOn(Bun, "file").mockImplementation((location: Parameters<typeof Bun.file>[0], options?: Parameters<typeof Bun.file>[1]) => {
+        const handle: Bun.BunFile = Reflect.apply(file, Bun, [location, options]);
+        if (location === path && claimed) handle.json = async () => {
+          attempts++; entered.resolve();
+          if (kind === "read error") throw Error("fixture read error");
+          await release.promise; return {};
+        };
+        return handle;
+      });
+      try {
+        const result = submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
+          { request: "send", action: "send", alreadyStarted: "outcome unknown" }, 60, {
+            signal: control.signal, pollMs: 5,
+            sleep: async () => { if (!claimed) { await rm(ready); claimed = true; } await Bun.sleep(1); },
+          });
+        await entered.promise;
+        if (kind === "interrupt") control.abort();
+        const outcome = await result;
+        expect(outcome.stderr).toContain("outcome unknown");
+        if (kind === "read error") expect(outcome.stderr).toContain("fixture read error");
+        else expect(attempts).toBe(1);
+      } finally { release.resolve(); spy.mockRestore(); }
+    });
+
     test("Ctrl-C inside a successful claimed broker result read reports unknown", async () => {
       const { submitWatchdogRequest } = await import("./spawn-broker");
       const control = new AbortController();

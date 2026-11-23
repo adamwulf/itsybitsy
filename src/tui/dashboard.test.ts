@@ -10957,37 +10957,76 @@ describe("Unified peer repos in the Agents tree", () => {
     result.resolve("accepted");
   });
 
+  test("dashboard submission and incoming admission reserve the same temporary volume", async () => {
+    const { createCliFixture } = await import("../test-cli-runner");
+    const { createMessageReceiver } = await import("../peers/receive-message");
+    const { textHeader } = await import("../peers/peer-outbox");
+    const space = await import("../peers/attachment-space");
+    const cli = await createCliFixture();
+    setUserHome(cli.home);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const seen: number[] = [];
+    const receiver = createMessageReceiver(() => {}, () => {}, Date.now, 4096, {
+      tempDir: "/tmp", hasFreeSpace: async (_dir, bytes) => { seen.push(bytes); return false; },
+    });
+    const actual = space.hasFreeSpace;
+    const spy = spyOn(space, "hasFreeSpace").mockImplementation(async (dir, bytes) => {
+      if (!dir.startsWith("/tmp/itsybitsy-outgoing-")) return actual(dir, bytes);
+      entered.resolve(); await release.promise; return true;
+    });
+    try {
+      await Bun.write(join(cli.home, ".itsybitsy/machine-name"), "local");
+      const repo = await cli.addRepo("example");
+      await cli.addAgent(repo, "worker", { tmux_session: "ib-worker" });
+      tmuxPollerSpawnCtx.set(() => makeSpawnResult(0, "0"));
+      const source = join(cli.home, "report");
+      await Bun.write(source, "abc");
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(source);
+      dashboard.inputField.submit();
+      await entered.promise;
+      const header = textHeader({ kind: "agent", agent: "worker" }, "read", { kind: "user" });
+      header.files = [{ name: "file", size: 4, sha256: "0".repeat(64), spellings: ["file"] }];
+      await expect(receiver(header, "peer", async () => "desk", { read: async () => Buffer.alloc(0) })).rejects.toThrow("Insufficient space");
+      expect(seen).toEqual([7]);
+      release.resolve();
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      await dashboard.stopRemoteSends();
+    } finally { release.resolve(); spy.mockRestore(); resetUserHome(); await cli.cleanup(); }
+  });
+
   test("a local selection renders receipt admission, one coalesced progress burst, and removal", async () => {
     const { PeerService, defaultPeerServiceDeps } = await import("../peers/service");
     const { textHeader } = await import("../peers/peer-outbox");
     const release = Promise.withResolvers<void>();
     const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null),
       receiveMessage: async (_header, _peer, _name, _body, options) => {
-        options.admitted?.(true);
-        for (let byte = 1; byte <= 100; byte++) options.onProgress?.(byte);
+        options?.admitted?.(true);
+        for (let byte = 1; byte <= 100; byte++) options?.onProgress?.(byte);
         await release.promise;
       },
     });
     const { dashboard } = setup();
-    dashboard.setPeerService(service);
     const counter = countingTui();
     dashboard.setTui(counter.tui);
+    let beforeNotify = 0;
+    service.onChange(() => { beforeNotify = counter.renders(); });
+    dashboard.setPeerService(service);
     expect(dashboard.remoteSelection).toBeNull();
-    const notifications = mock(() => {});
+    const notifications = mock(() => { expect(counter.renders()).toBe(beforeNotify + 1); });
     service.onChange(notifications);
     const header = textHeader({ kind: "system" }, "read", { kind: "user" });
     header.files = [{ name: "f", size: 100, sha256: "0".repeat(64), spellings: ["f"] }];
-    const before = counter.renders();
     const transfer = service.receiveTracked(header, PEER_B, async () => "peer");
     try {
       expect(notifications).toHaveBeenCalledTimes(1);
-      expect(counter.renders()).toBe(before + 1);
       await waitFor(() => notifications.mock.calls.length === 2);
-      expect(counter.renders()).toBe(before + 2);
       expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("100 / 100 bytes");
     } finally { release.resolve(); await transfer; }
     expect(notifications).toHaveBeenCalledTimes(3);
-    expect(counter.renders()).toBe(before + 3);
   });
 
   test("selecting an inbound progress row and pressing Esc aborts that receipt", () => {

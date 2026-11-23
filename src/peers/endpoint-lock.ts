@@ -1,8 +1,9 @@
 /** One watcher owns the endpoint and its transfer recovery task. */
 import { randomUUID } from "node:crypto";
 import { flock, LOCK_EX, LOCK_NB } from "../file-lock";
-import { open, readFile, link, rename, rm, writeFile, unlink } from "node:fs/promises";
-import { isPidAliveSinceUncached, isPidAliveCtx, processStartEpochSecondsCtx, selfProcessStartEpochSeconds } from "../agents";
+import { open, readFile, link, rename, rm, stat, writeFile, unlink } from "node:fs/promises";
+import { stagingOwnerStart, transferOwnerState } from "./transfer-owner";
+import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
 import { peerEndpointLockFile } from "../runtime-names";
 import { ensurePeerDir } from "./peer-dir";
 
@@ -19,19 +20,10 @@ export type EndpointLockResult =
   /** A live process holds the lock. */
   | { acquired: false; ownerPid: number };
 
-/**
- * A process that loses the exclusive create can read the lock in the moment
- * between the winner's create and its write, and see it empty. Re-read
- * contents that are not an owner this many times, this far apart, before
- * taking the lock over as stale.
- */
-const UNREADABLE_RETRIES = 10;
-const UNREADABLE_DELAY_MS = 20;
-
 /** This process, as a lock owner. */
 export function currentEndpointLockOwner(): EndpointLockOwner {
-  const startEpoch = selfProcessStartEpochSeconds();
-  return startEpoch === undefined ? { pid: process.pid } : { pid: process.pid, startEpoch };
+  const startEpoch = stagingOwnerStart(process.pid);
+  return startEpoch === null ? { pid: process.pid } : { pid: process.pid, startEpoch };
 }
 
 function formatOwner(owner: EndpointLockOwner): string {
@@ -106,32 +98,29 @@ async function withLockGuard<T>(path: string, action: () => Promise<T>) {
 }
 
 export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpointLockOwner()): Promise<EndpointLockResult> {
+  if (self.startEpoch === undefined) throw Error("Cannot verify this watcher’s process start time");
   await ensurePeerDir();
   const path = peerEndpointLockFile();
   const temp = path + "." + randomUUID();
   try {
     await writeFile(temp, formatOwner(self), { mode: 0o600, flag: "wx" });
     return await withLockGuard(path, async (): Promise<EndpointLockResult> => {
-      let contents = await readLock(path);
+      const contents = await readLock(path);
       if (contents === null) { await link(temp, path); return { acquired: true }; }
-      for (let i = 0; i < UNREADABLE_RETRIES && contents !== null && !parseOwner(contents); i++) {
-        await Bun.sleep(UNREADABLE_DELAY_MS);
-        contents = await readLock(path);
-      }
-      if (contents === null) { await link(temp, path); return { acquired: true }; }
-      if (contents === formatOwner(self)) return { acquired: true };
       const owner = parseOwner(contents);
-      const live = () => owner && owner.pid !== self.pid && isPidAliveSinceUncached(owner.pid, owner.startEpoch);
-      if (owner && live()) return { acquired: false, ownerPid: owner.pid };
+      if (!owner) throw Error("Cannot verify the existing endpoint lock");
+      if (contents === formatOwner(self)) return { acquired: true };
+      const state = async (file: string) => transferOwnerState({ pid: owner.pid, start: owner.startEpoch ?? null }, (await stat(file)).birthtimeMs);
+      if (await state(path) !== "proven-dead") return { acquired: false, ownerPid: owner.pid };
       const tombstone = path + ".dead." + randomUUID();
       await rename(path, tombstone);
       try {
-        if ((await readLock(tombstone)) !== contents || live()) {
+        if ((await readLock(tombstone)) !== contents || await state(tombstone) !== "proven-dead") {
           await link(tombstone, path);
           throw Error("Endpoint lock changed during takeover");
         }
         await link(temp, path);
-        return owner ? { acquired: true, takenFromPid: owner.pid } : { acquired: true };
+        return { acquired: true, takenFromPid: owner.pid };
       } finally { await rm(tombstone, { force: true }); }
     });
   } finally { await rm(temp, { force: true }); }

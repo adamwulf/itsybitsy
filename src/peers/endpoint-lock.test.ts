@@ -63,9 +63,9 @@ describe("acquireEndpointLock", () => {
     expect(await lockContents()).toBe(`${process.pid} 1699999000\n`);
   });
 
-  test("writes the pid alone when this process cannot read its start time", async () => {
-    expect(await acquireEndpointLock({ pid: ME.pid })).toEqual({ acquired: true });
-    expect(await lockContents()).toBe(`${ME.pid}\n`);
+  test("refuses ownership when this process cannot read its start time", async () => {
+    await expect(acquireEndpointLock({ pid: ME.pid })).rejects.toThrow("process start time");
+    expect(await lockContents()).toBeNull();
   });
 
   test("fails with the owner's pid while a live process holds it, leaving the lock alone", async () => {
@@ -84,7 +84,7 @@ describe("acquireEndpointLock", () => {
   test("takes over when the owner's pid is alive but belongs to a process that started at another time", async () => {
     // An unclean exit left the lock; after a reboot an unrelated process got the pid.
     alive.add(OTHER.pid);
-    starts.set(OTHER.pid, OTHER.startEpoch + 3600);
+    starts.set(OTHER.pid, OTHER.startEpoch + 1);
     await writeLock(line(OTHER));
     expect(await acquireEndpointLock(ME)).toEqual({ acquired: true, takenFromPid: OTHER.pid });
     expect(await lockContents()).toBe(line(ME));
@@ -116,21 +116,12 @@ describe("acquireEndpointLock", () => {
     expect(await lockContents()).toBe(line(ME));
   });
 
-  test("takes over a lock whose contents stay unreadable", async () => {
+  test("an unreadable record cannot prove the owner dead", async () => {
     for (const junk of ["", "not a pid\n", "0\n", "-5\n", "12 0\n", "12 x\n"]) {
       await writeLock(junk);
-      expect(await acquireEndpointLock(ME)).toEqual({ acquired: true });
-      expect(await lockContents()).toBe(line(ME));
-      await rm(peerEndpointLockFile());
+      await expect(acquireEndpointLock(ME)).rejects.toThrow("Cannot verify");
+      expect(await lockContents()).toBe(junk);
     }
-  });
-
-  test("waits for an empty lock to get its owner instead of taking it over", async () => {
-    otherRunning();
-    await writeLock("");
-    setTimeout(() => void writeFile(peerEndpointLockFile(), line(OTHER)), 30);
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: false, ownerPid: OTHER.pid });
-    expect(await lockContents()).toBe(line(OTHER));
   });
 
   test("of many processes racing for a free lock, exactly one gets it", async () => {

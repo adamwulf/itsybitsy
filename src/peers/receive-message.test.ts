@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, unlink, utimes } from "node:fs/promises";
+import { mkdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { setUserHome, resetUserHome } from "../home";
 import { drainOutbox, resetSendSpawnRunner, setSendSpawnRunner } from "../ib-commands";
-import { resetSystemCoordinatorHasSessionFn, setSystemCoordinatorHasSessionFn } from "../index";
 import { makeAgent, makeSpawnResult, waitFor } from "../test-utils";
 import { spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
@@ -41,7 +40,6 @@ beforeEach(async () => {
   paneProbe.set(() => makeSpawnResult(0, "0"));
 });
 afterEach(async () => {
-  resetSystemCoordinatorHasSessionFn();
   resetSendSpawnRunner();
   paneProbe.reset();
   resetUserHome();
@@ -188,32 +186,24 @@ test("repo and system coordinators use their own queues", async () => {
   await waitFor(async () => !(await readOutbox(dir)).length);
 });
 
-test("system recipient drains an acknowledged append after a long delivery holds its queue lock", async () => {
-  setSystemCoordinatorHasSessionFn(async () => true);
-  const entered = Promise.withResolvers<void>();
+test("remote @system acknowledges enqueue while the local inline drainer is typing", async () => {
   const release = Promise.withResolvers<number>();
-  const typed: string[] = [];
+  const entered = Promise.withResolvers<string[]>();
   setSendSpawnRunner(cmd => {
-    const result = makeSpawnResult();
-    if (cmd.includes("-l") && cmd.includes("=ib-coordinator:")) {
-      typed.push(cmd.at(-1)!);
-      if (typed.length === 1) { entered.resolve(); return { ...result, exited: release.promise }; }
+    if (cmd.includes("-l")) {
+      entered.resolve(cmd);
+      return { ...makeSpawnResult(), exited: release.promise };
     }
-    return result;
+    return makeSpawnResult();
   });
-  const send = (message: string) => exchange(header({ target: { kind: "system" }, message }));
   try {
-    expect(await send("first")).toMatchObject({ ok: true });
-    await entered.promise;
-    // The first drainer is still typing, past the local stale-steal age.
-    const old = new Date(Date.now() - 31_000);
-    await utimes(join(cli.home, ".itsybitsy", ".outbox.lock"), old, old);
-    expect(await send("second")).toMatchObject({ ok: true });
-    await Bun.sleep(350);
-    expect(typed).toEqual(["[sent by user]: first"]);
+    expect(await exchange(header({ target: { kind: "system" } }))).toMatchObject({ ok: true });
+    const typed = await entered.promise;
+    expect(typed).toContain("=ib-coordinator:");
+    expect(typed.at(-1)).toBe("/compact");
   } finally { release.resolve(0); }
-  await waitFor(async () => typed.length === 2 && !(await readOutbox(join(cli.home, ".itsybitsy"))).length);
-}, 12_000);
+  await waitFor(async () => !(await readOutbox(join(cli.home, ".itsybitsy"))).length);
+});
 
 test("a stalled delivery probe is killed and reaped", async () => {
   const { isDeliveryPaneLive } = await import("../tmux-poller");
@@ -225,26 +215,6 @@ test("a stalled delivery probe is killed and reaped", async () => {
   }));
   await expect(isDeliveryPaneLive("ib-worker", 5)).rejects.toThrow("timed out");
   expect(reaped).toBe(true);
-});
-
-test("a repo coordinator without a watchdog retries its occupied queue", async () => {
-  const dir = join(cli.home, ".itsybitsy", "agents", "photos");
-  await unlink(join(repo, ".itsybitsy", "agents", "photos", "meta.transient.json"));
-  await mkdir(dir, { recursive: true });
-  const lock = join(dir, ".outbox.lock");
-  await Bun.write(lock, "held");
-  const typed: string[] = [];
-  setSendSpawnRunner(cmd => {
-    if (cmd.includes("-l")) typed.push(cmd.at(-1)!);
-    return makeSpawnResult();
-  });
-  try {
-    expect(await exchange(header({ target: { kind: "repo-coordinator", repo: "photos" } }))).toMatchObject({ ok: true });
-    await Bun.sleep(150);
-    expect(typed).toEqual([]);
-  } finally { await unlink(lock); }
-  await waitFor(async () => typed.length === 1 && !(await readOutbox(dir)).length);
-  expect(typed).toEqual(["/compact"]);
 });
 
 test.each(["write", "finish"] as const)("a stalled acknowledgement %s cancels its stream", async op => {

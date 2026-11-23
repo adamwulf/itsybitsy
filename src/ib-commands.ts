@@ -4526,21 +4526,16 @@ export async function sendMessage(
 
   const stdout = fromId ? "" : `Sent to ${agent.id}`;
 
+  async function drainIfNeeded(): Promise<IbCommandResult> {
+    if (await hasLiveWatchdog(agentDir)) return { ok: true, exitCode: 0, stdout, stderr: "" };
+    return drainOutbox(agent, queueDir, { steal: true });
+  }
+
   if (opts?.peerSend) {
     const { log } = opts.peerSend;
-    void (async () => {
-      if (await hasLiveWatchdog(agentDir)) return;
-      let backoffMs = 100;
-      do {
-        const result = await drainOutbox(agent, queueDir, { steal: false, timeoutMs: 0 });
-        if (!result.ok) { log(result.stderr); return; }
-        // A lock holder may already have captured its batch before this
-        // append. Keep the queue scheduled until drained or a watchdog takes over.
-        if (!(await readOutbox(queueDir)).length || await hasLiveWatchdog(agentDir)) return;
-        await Bun.sleep(backoffMs);
-        backoffMs = Math.min(2000, backoffMs * 2);
-      } while (true);
-    })().catch(err => log(`Delivery error after enqueue: ${err}`));
+    void drainIfNeeded().then(result => {
+      if (!result.ok) log(result.stderr);
+    }).catch(err => log(`Delivery error after enqueue: ${err}`));
     return { ok: true, exitCode: 0, stdout, stderr: "" };
   }
 
@@ -4554,10 +4549,7 @@ export async function sendMessage(
   // non-fatal stderr diagnostic.
   if (attachmentSend) {
     try {
-      if (await hasLiveWatchdog(agentDir)) {
-        return { ok: true, exitCode: 0, stdout, stderr: "" };
-      }
-      const result = await drainOutbox(agent, queueDir, { steal: true });
+      const result = await drainIfNeeded();
       return { ok: true, exitCode: 0, stdout, stderr: result.ok ? "" : result.stderr };
     } catch (err) {
       return {
@@ -4572,13 +4564,7 @@ export async function sendMessage(
   // Ordinary (non-staged) send — historical behavior exactly. If a live watchdog
   // will drain, just return — it owns delivery. (The system coordinator has no
   // per-agent watchdog, so a coordinator send always drains inline below.)
-  if (await hasLiveWatchdog(agentDir)) {
-    return { ok: true, exitCode: 0, stdout, stderr: "" };
-  }
-
-  // No live watchdog — the sender becomes the drainer for this batch. Steal a
-  // stale lock so a crashed holder can't wedge delivery forever.
-  const result = await drainOutbox(agent, queueDir, { steal: true });
+  const result = await drainIfNeeded();
   // Preserve the historical stdout shape (drainOutbox returns deliverMessage's
   // result, whose stdout already matches; but on empty/lock-skip it returns a
   // generic success — normalize the success stdout to the sender-aware value).

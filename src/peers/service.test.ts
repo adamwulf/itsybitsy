@@ -642,25 +642,27 @@ describe("PeerService at boot", () => {
         return "no-agent";
       },
     }, clock);
-    const service = new PeerService(defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, decision));
-    const observed = await reading.promise;
-    await service.bootIfPaired();
-    expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
-    const request = { repo: "app", type: "worker", prompt: "hello" };
-    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("checking whether remote starts are allowed");
-    const changes: (string | null)[] = [];
-    service.onChange(() => changes.push(service.remoteStartDenial));
-    clock.advance(stage === "process table" ? 1_999 : 499);
-    await flushMicrotasks();
-    expect(observed.aborted).toBe(false);
-    expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
-    clock.advance(1);
-    expect(await decision).toContain("timed out");
-    expect(observed.aborted).toBe(true);
-    release.resolve();
-    await flushMicrotasks();
-    expect(changes).toEqual([service.remoteStartDenial]);
-    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("timed out");
+    const service = new PeerService(defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, decision, home));
+    try {
+      const observed = await reading.promise;
+      await service.bootIfPaired();
+      expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
+      const request = { repo: "app", type: "worker", prompt: "hello" };
+      await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("checking whether remote starts are allowed");
+      const changes: (string | null)[] = [];
+      service.onChange(() => changes.push(service.remoteStartDenial));
+      clock.advance(stage === "process table" ? 1_999 : 499);
+      await flushMicrotasks();
+      expect(observed.aborted).toBe(false);
+      expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
+      clock.advance(1);
+      expect(await decision).toContain("timed out");
+      expect(observed.aborted).toBe(true);
+      release.resolve();
+      await flushMicrotasks();
+      expect(changes).toEqual([service.remoteStartDenial]);
+      await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("timed out");
+    } finally { release.resolve(); await service.shutdown(); }
   });
 
   test("caches one denial when the reader succeeds at the deadline before the timer fires", async () => {

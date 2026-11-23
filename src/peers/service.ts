@@ -168,13 +168,13 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
+export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = "/tmp"): PeerServiceDeps {
   const poll = createPeerOutboxPoll();
   return {
     notice,
     pollOutbox: poll,
     recoverTransfers: async () => {
-      await Promise.all([sweepOutgoingDirectories(), poll(async () => { throw new Error("Recovery cannot send"); }, log, () => false)]);
+      await Promise.all([sweepOutgoingDirectories(recoveryRoot), poll(async () => { throw new Error("Recovery cannot send"); }, log, () => false)]);
     },
     receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,

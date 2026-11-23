@@ -152,7 +152,11 @@ test("unknown, stopped, unpaired and attachment sends are refused before queuein
   expect(await exchange(header({ files }))).toEqual({ ok: false, error: "attachments are not supported yet" });
   let checks = 0;
   await expect(exchange(header(), async () => ++checks < 4 ? "desk" : null, true)).rejects.toThrow();
-  paneProbe.set(() => makeSpawnResult(0, "1\n1"));
+  paneProbe.set(cmd => {
+    if (cmd[1] === "list-panes") return makeSpawnResult(0, "1\n0"); // live auxiliary window
+    expect(cmd).toEqual(["tmux", "display-message", "-p", "-t", "=ib-worker:", "#{pane_dead}"]);
+    return makeSpawnResult(0, "1"); // dead delivery pane
+  });
   expect(await exchange(header())).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
   paneProbe.set(() => makeSpawnResult(1, "", "no such session"));
   expect(await exchange(header())).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
@@ -164,9 +168,9 @@ test("repo and system coordinators use their own queues", async () => {
   const request = header({ target: { kind: "repo-coordinator", repo: "PHOTOS" } });
   expect(await exchange(request)).toEqual({ ok: true, id: request.id });
   expect(await readOutbox(join(cli.home, ".itsybitsy", "agents", "photos"))).toMatchObject([{ fromAgent: "", raw: false, message: "/compact" }]);
-  setSystemCoordinatorHasSessionFn(async () => false);
+  paneProbe.set(() => makeSpawnResult(0, "1"));
   expect(await exchange(header({ target: { kind: "system" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
-  setSystemCoordinatorHasSessionFn(async () => true);
+  paneProbe.set(() => makeSpawnResult(0, "0"));
   // Hold the normal coordinator queue lock until after inspecting the acceptance.
   const dir = join(cli.home, ".itsybitsy");
   await Bun.write(join(dir, ".outbox.lock"), String(process.pid));
@@ -199,3 +203,15 @@ test("system recipient drains an acknowledged append after a long delivery holds
   } finally { release.resolve(0); }
   await waitFor(async () => typed.length === 2 && !(await readOutbox(join(cli.home, ".itsybitsy"))).length);
 }, 12_000);
+
+test("a stalled delivery probe is killed and reaped", async () => {
+  const { isDeliveryPaneLive } = await import("../tmux-poller");
+  const exit = Promise.withResolvers<number>();
+  let reaped = false;
+  paneProbe.set(() => ({
+    ...makeSpawnResult(), exited: exit.promise.then(code => { reaped = true; return code; }),
+    kill: () => { exit.resolve(1); },
+  }));
+  await expect(isDeliveryPaneLive("ib-worker", 5)).rejects.toThrow("timed out");
+  expect(reaped).toBe(true);
+});

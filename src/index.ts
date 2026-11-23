@@ -320,8 +320,8 @@ export async function sendToSystemCoordinator(
   opts?: { fromAgent?: string; cwd?: string; peerSend?: PeerEnqueueOptions; raw?: boolean },
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   const { IB_COORDINATOR_SESSION } = await import("./coordinator");
-  const running = await systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION);
-  if (!running) {
+  // Remote enqueue probes the delivery pane under its own bounded deadline.
+  if (!opts?.peerSend && !await systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION)) {
     return {
       ok: false,
       exitCode: 1,

@@ -4508,11 +4508,9 @@ export async function sendMessage(
     queueDir = opts?.outboxDir ?? agentOutboxDir(agent);
     const reservedKey = opts?.outboxDir === undefined ? agent.meta.queue_key : undefined;
     if (opts?.peerSend) {
-      const { probeTmuxPane } = await import("./tmux-poller");
-      const pane = await probeTmuxPane(tmuxSession);
-      if (pane.status !== "live") {
-        const reason = pane.status === "unknown" ? ": " + pane.error : "";
-        return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running${reason}` };
+      const { isDeliveryPaneLive } = await import("./tmux-poller");
+      if (!await isDeliveryPaneLive(tmuxSession)) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running` };
       }
       await opts.peerSend.beforeEnqueue();
     }

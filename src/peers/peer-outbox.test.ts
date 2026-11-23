@@ -98,8 +98,15 @@ test("a claimed cancellation with a failed signal still has an unknown outcome",
     control.abort();
     return finish.promise;
   }, () => {});
-  try { expect((await result).stderr).toBe("outcome unknown — check the recipient"); }
-  finally { finish.resolve(header.id); await watcher; }
+  const { collectSendCleanupDiagnostics, finishSendCleanup } = await import("../send-cleanup");
+  collectSendCleanupDiagnostics();
+  const output: string[] = [];
+  const printer = spyOn(console, "error").mockImplementation(line => { output.push(String(line)); });
+  try {
+    output.push((await result).stderr);
+    await finishSendCleanup();
+    expect(output).toEqual(["outcome unknown — check the recipient", expect.stringContaining("Could not signal claimed send cancellation")]);
+  } finally { printer.mockRestore(); finish.resolve(header.id); await watcher; }
 });
 
 test("Ctrl-C during a successful claimed result read still reports unknown", async () => {

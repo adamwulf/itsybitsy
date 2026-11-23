@@ -1,5 +1,5 @@
 import { stagingOwnerStart } from "./peers/transfer-owner";
-import { trackSendCleanup } from "./send-cleanup";
+import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
 import * as runtimeNames from "./runtime-names";
 /**
  * Watchdog send broker — how a SANDBOXED agent sends to an agent in another repo.
@@ -305,7 +305,7 @@ export async function sweepStagingRequests(dir: string, now: number) {
   catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
   for (const id of ids) {
     try { await sweepStagingLease(dir, id, now); }
-    catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("Staging cleanup failed:", err); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") warnSendCleanup(`Staging cleanup failed: ${err}`); }
   }
 }
 

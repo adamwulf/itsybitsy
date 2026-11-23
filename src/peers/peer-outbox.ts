@@ -1,5 +1,5 @@
 import { ownerIsDead, readTransferOwner, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
-import { trackSendCleanup } from "../send-cleanup";
+import { trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
@@ -127,7 +127,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     }
     const withdrawn = await withdrawPublishedRequest(dir, staging);
     if (!withdrawn) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
-      .catch(err => { if (!missing(err)) console.error("Could not signal claimed send cancellation:", err); });
+      .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
   } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(detail(err)); }

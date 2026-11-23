@@ -1,4 +1,4 @@
-import { trackSendCleanup } from "./send-cleanup";
+import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
 import { isCoordinatorType } from "./coordinator-type-names";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -141,7 +141,7 @@ export async function withdrawPublishedRequest(ready: string, withdrawn: string)
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;
   }
-  await rm(withdrawn, { recursive: true, force: true }).catch(err => console.error("Withdrawn request cleanup failed:", err));
+  await rm(withdrawn, { recursive: true, force: true }).catch(err => warnSendCleanup(`Withdrawn request cleanup failed: ${err}`));
   return true;
 }
 
@@ -249,7 +249,7 @@ export async function submitWatchdogRequest(
   try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
   catch (err) { deps.onUncertain?.(); return brokerFail(`Could not withdraw request: ${err}`); }
   if (!stillQueued && deps.signal?.aborted && deps.cancelClaimed) {
-    await deps.cancelClaimed().catch(err => console.error("Could not signal claimed send cancellation:", err));
+    await deps.cancelClaimed().catch(err => warnSendCleanup(`Could not signal claimed send cancellation: ${err}`));
   }
   if (!stillQueued) deps.onUncertain?.();
   if (deps.signal?.aborted) return interruptedSend(stillQueued ? "withdrawn" : "claimed");
@@ -533,7 +533,7 @@ export async function processSpawnRequests(
 
   if (deps.transferJobs) {
     const { sweepStagingRequests } = await import("./send-broker");
-    await sweepStagingRequests(agentDir, nowMs).catch(err => console.error("Staging cleanup failed:", err));
+    await sweepStagingRequests(agentDir, nowMs).catch(err => warnSendCleanup(`Staging cleanup failed: ${err}`));
   }
 
   let names: string[];

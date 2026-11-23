@@ -8,13 +8,13 @@ export function collectSendCleanupDiagnostics() {
   diagnostics = [];
 }
 
-function warn(message: string) {
+export function warnSendCleanup(message: string) {
   if (diagnostics) diagnostics.push(message);
   else console.error(message);
 }
 
 export function trackSendCleanup(operation: Promise<void>, label: string) {
-  const task = operation.catch(err => warn(`${label}: ${err}`)).finally(() => pending.delete(task));
+  const task = operation.catch(err => warnSendCleanup(`${label}: ${err}`)).finally(() => pending.delete(task));
   pending.add(task);
 }
 

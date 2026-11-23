@@ -297,6 +297,29 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); }
   });
 
+  test("a shared checkout distinguishes its dotted coordinator, a human, and unverifiable ancestry", async () => {
+    const repo = await cli.addRepo("project.com");
+    await cli.addAgent(repo, "project.com", {
+      agentType: "repo-coordinator", worktree: false, claude_pid: "200", claude_pid_epoch: 100,
+    });
+    await peer();
+    const senders: SendHeader["from"][] = [];
+    const timer = setInterval(() => { void pollPeerOutbox(async (_id, header) => {
+      senders.push(header.from);
+      return header.id;
+    }, () => {}); }, 25);
+    const send = (parents: [number, number][], identityCurrent: boolean) =>
+      cli.run(["send", "laptop-b/remote/remote-id", "hi"], { cwd: repo,
+        ancestry: { pid: 300, parents, identityCurrent } });
+    try {
+      expect((await send([[300, 200], [200, 1]], true)).exitCode).toBe(0);
+      expect((await send([[300, 1]], true)).exitCode).toBe(0);
+      expect((await send([[300, 200], [200, 1]], false)).stderr).toContain("Cannot verify");
+      expect((await send([], true)).stderr).toContain("incomplete process ancestry");
+      expect(senders).toEqual([{ kind: "agent", id: "laptop-a/project.com/project.com" }, { kind: "user" }]);
+    } finally { clearInterval(timer); }
+  });
+
   test("remote sends diagnose a missing watcher from its lock", async () => {
     const result = await cli.run(["send", "laptop-b/remote/remote-id", "hi"]);
     expect(result.exitCode).toBe(1);

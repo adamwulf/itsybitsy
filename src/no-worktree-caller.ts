@@ -2,7 +2,8 @@ import * as runtimeNames from "./runtime-names";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { readdir, realpath } from "fs/promises";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
-import { isValidAgentId } from "./validation";
+import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
+import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
 import { userInfo } from "os";
 
 export interface NoWorktreeCaller {
@@ -12,6 +13,7 @@ export interface NoWorktreeCaller {
 }
 
 interface CallerDeps {
+  remoteSender?: boolean;
   /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
   dashboardAncestry?: ReadonlySet<number>;
   registryHome?: string;
@@ -171,9 +173,9 @@ export async function resolveNoWorktreeCaller(
 ): Promise<NoWorktreeCaller | null> {
   const candidates: NoWorktreeCaller[] = [];
   // HOME is model-controlled. Resolve the operator home from the OS account.
-  const strict = deps.dashboardAncestry !== undefined;
+  const strict = deps.remoteSender === true || deps.dashboardAncestry !== undefined;
   const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir, strict);
-  if (!strict && await isRegisteredAgentWorktree(cwd, roots)) return null;
+  if (!deps.dashboardAncestry && await isRegisteredAgentWorktree(cwd, roots)) return null;
   for (const repoPath of roots) {
     const agentsDir = runtimeNames.agentsDir(repoPath);
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
@@ -181,7 +183,8 @@ export async function resolveNoWorktreeCaller(
       throw error;
     });
     for (const entry of entries) {
-      if (!entry.isDirectory() || !isValidAgentId(entry.name)) continue;
+      const dottedCoordinator = deps.remoteSender && entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
+      if (!entry.isDirectory() || (!isValidAgentId(entry.name) && !dottedCoordinator)) continue;
       const agentDir = join(agentsDir, entry.name);
       let meta: Record<string, unknown>;
       try {
@@ -194,7 +197,10 @@ export async function resolveNoWorktreeCaller(
         if (strict) throw new Error("Invalid agent metadata");
         continue;
       }
-      if (meta.worktree !== false) continue;
+      if (meta.worktree !== false || (dottedCoordinator && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
+      if (deps.remoteSender && meta.claude_pid === "" && (cwd === repoPath || cwd.startsWith(repoPath + "/"))) {
+        throw new Error("Cannot verify remote sender: shared-checkout agent has no recorded process identity");
+      }
       if (strict && meta.claude_pid !== "") {
         const pid = Number(meta.claude_pid);
         if (typeof meta.claude_pid !== "string" || !/^\d+$/.test(meta.claude_pid) || !Number.isSafeInteger(pid) || pid <= 1) {
@@ -222,6 +228,7 @@ export async function resolveNoWorktreeCaller(
   const cliPid = Number(caller.meta.claude_pid);
   const epoch = caller.meta.claude_pid_epoch;
   if (typeof epoch !== "number" || !Number.isFinite(epoch) || epoch <= 0 || !identityCurrent(cliPid, epoch)) {
+    if (deps.remoteSender) throw new Error("Cannot verify remote sender: shared-checkout agent process identity is stale");
     throw new Error("Cannot verify no-worktree caller process identity; resume the agent before spawning children");
   }
   const after = deps.dashboardAncestry ?? ancestorPids(pid, readParents());

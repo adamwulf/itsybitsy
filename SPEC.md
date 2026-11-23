@@ -607,7 +607,7 @@ After successful merge:
 
 **Paired machines.** A send to a remote agent, system coordinator or repo coordinator (§12.3.1) carries plain text. Both machines need an endpoint-owning `ib watch`. The receiver validates the target and its live tmux session, enqueues through the recipient’s normal keyed, flat or system-coordinator queue, then acknowledges. Delivery proceeds under the ordinary queue lock. A peer agent is attributed as `[sent by agent <machine>/<registry name or ~repoId>/<agent id>]`. A peer system coordinator is attributed as `[sent by <paired name>/@system]`. A human retains user formatting, including leading slash and bang passthrough.
 
-For a remote target, an explicit `--from` must equal the detected sender. A mismatch fails before the CLI submits the request.
+For a remote target, an explicit `--from` must equal the detected sender. A mismatch fails before the CLI submits the request. For agents sharing a checkout with a human shell, including repo coordinators with dotted ids, the CLI verifies the process ancestry and recorded process identity. An unverifiable lookup refuses the remote send.
 
 **Unreadable agents directory**: when a target is not found and the `.itsybitsy/agents` directory of a searched repo could not be read, the error names it: `Agent not found: <id> (could not read <dir>; a sandbox may block it)`.
 

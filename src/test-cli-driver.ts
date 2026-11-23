@@ -127,7 +127,8 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   const { setBoundNoWorktreeCallerResolver, setNoWorktreeRepoRootsLoader } = await import("./hooks/agent-context");
 
   const ancestry = (): CliAncestry => config.ancestry ?? block({ kind: "process-ancestry", detail: {} });
-  const resolver = (cwd: string) => resolveNoWorktreeCaller(cwd, {
+  const resolver = (cwd: string, options?: { remoteSender?: boolean }) => resolveNoWorktreeCaller(cwd, {
+    ...options,
     registryHome: config.home,
     pid: config.ancestry?.pid,
     readParents: () => new Map(ancestry().parents),

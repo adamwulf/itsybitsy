@@ -71,8 +71,6 @@ export class FocusManager {
   /** When true, only cycle between agent-tree and coordinator. Trumps
    *  `sidebarMode` — coordinator mode wins. */
   coordinatorMode = false;
-  /** The expanded Agents tree and Info are the only visible stops in this peer view. */
-  peerCoordinatorTreeMode = false;
   /** Which sidebar tab is visible. Determines which Tab cycling order is
    *  active when not in coordinator mode. Mirrors `DashboardComponent.sidebarMode`
    *  (§17.1 Phase 3) — the dashboard writes this whenever it switches the
@@ -108,9 +106,7 @@ export class FocusManager {
    *  `TEAMS_FOCUS_ORDER`; the agents-mode `FOCUS_ORDER` is the default (also
    *  used by `"favorites"`). */
   cycle(delta: 1 | -1): void {
-    const order: readonly FocusTarget[] = this.peerCoordinatorTreeMode
-      ? ["agent-tree", "info"]
-      : this.coordinatorMode
+    const order = this.coordinatorMode
       ? COORDINATOR_FOCUS_ORDER
       : this.sidebarMode === "teams"
       ? TEAMS_FOCUS_ORDER

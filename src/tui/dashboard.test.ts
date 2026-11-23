@@ -10012,64 +10012,82 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
-  test.each([
-    ["1", "p", "\t", "\x1b[Z"], ["1", "n", "\x1b[9u", "\x1b[9;2u"],
-    ["2", "n", "\t", "\x1b[Z"], ["2", "p", "\x1b[9u", "\x1b[9;2u"],
-  ] as const)("peer capture and TREE keep the local layout intact on sidebar %s via %s", async (tab, cycle, next, prev) => {
-    const { dashboard } = setup();
-    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+  test.each(["1", "2"])("the peer coordinator replaces TREE with a fixed capture on sidebar %s", async tab => {
+    const { dashboard, service, local } = setup();
+    const peer = { ...links()[0]!, repos: [], agents: [] };
+    service.set({ peers: [{ id: peer.id, name: peer.name, pairedAt: "now" }], links: [peer] });
+    dashboard.onUpdate([local], [{ kind: "system-coordinator", state: "running", age: "1m" },
+      makeFlatRepoHeader("local", local.repoPath), makeFlatAgent(local)], []);
     dashboard.persistLayout();
     await flushPendingSave();
     const saved = await loadLayout();
-    expect(saved).not.toBeNull();
+    const persist = spyOn(dashboard, "persistLayout");
     dashboard.teamsTree.setFlatList([
       { kind: "team-header", teamName: "east", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
     ]);
-    const persist = spyOn(dashboard, "persistLayout");
-    selectByKey(dashboard, PEER_B + "/@system");
-    dashboard.handleInput(tab);
-    dashboard.focusManager.setFocus("active-agent");
-    const tryResize = () => {
-      for (const key of ["[", "]", "{", "}"]) {
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const screen = () => dashboard.render(180);
+    const expectSidebar = (name: "Agents" | "Teams") => {
+      const title = screen().find(line => line.includes(REVERSE + BOLD + ` ${name} ` + RESET));
+      expect(title).toBeDefined();
+      expect(visibleWidth(title!.split("│")[0]!)).toBe(saved!.sidebarWidth);
+      expect(dashboard.focus).toBe(name === "Teams" ? "teams-tree" : "agent-tree");
+    };
+    try {
+      if (tab === "1") dashboard.agentTree.selectAgent(local);
+      else dashboard.agentTree.selectByRepoPath(local.repoPath);
+      dashboard.syncSelectedAgent();
+      for (let i = 0; i < PANE_MODES.length && dashboard.rightPane.mode !== "TREE"; i++) dashboard.handleInput("p");
+      dashboard.handleInput(tab);
+      expect(dashboard.rightPane.mode).toBe("TREE");
+      expect(stripAnsi(screen().join(" "))).toContain(" TREE ");
+      expect(dashboard.focus).toBe("agent-tree");
+      if (tab === "1") {
+        dashboard.handleInput("j"); // wrap to local @system, then its paired child
+        expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+        dashboard.handleInput("j");
+      } else {
+        dashboard.handleInput("k"); // the peer is immediately above the repo in the expanded Agents tree
+      }
+      expect(keyOf(dashboard)).toBe(PEER_B + "/@system");
+      await waitFor(() => stripAnsi(screen().join(" ")).includes("peer capture"));
+      expectSidebar(tab === "1" ? "Agents" : "Teams");
+      for (const key of ["p", "n", "\x1b[D", "\x1b[C", "[", "]", "{", "}"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
-        expect(dashboard.notice).toBe("resize from a local row");
-        expect(dashboard.sidebarWidth).toBe(saved!.sidebarWidth);
-        expect(dashboard.splitPane.getLeftWidth()).toBe(saved!.splitPaneLeftWidth);
-        expect(dashboard.sidebar.heightOffsets).toEqual(saved!.heightOffsets);
+        expect(dashboard.notice).toBe("[]{}".includes(key) ? "resize from a local row" : "view mode is fixed for remote coordinators");
+        expect(dashboard.rightPane.mode).toBe("AGENT LOG");
+        expect(stripAnsi(screen().join(" "))).toContain("peer capture");
       }
-    };
-    tryResize();
-    for (let i = 0; i < PANE_MODES.length && dashboard.rightPane.mode !== "TREE"; i++) {
-      dashboard.handleInput(cycle);
+      expect(stripAnsi(screen().at(-2)!)).not.toContain("p/n: pane");
+      if (tab === "2") {
+        // Carry the peer selection across sidebar switches. From Teams, j selects the team.
+        dashboard.handleInput("1");
+        dashboard.handleInput("2");
+        expect(keyOf(dashboard)).toBe(PEER_B + "/@system");
+        dashboard.handleInput("j");
+        expect(dashboard.channelPane.teamName).toBe("east");
+        expectSidebar("Teams");
+        dashboard.handleInput("1");
+        selectByKey(dashboard, PEER_B + "/@system");
+      }
+      dashboard.handleInput(tab === "1" ? "\t" : "\x1b[9u");
+      expect(dashboard.focus).toBe("info");
+      dashboard.handleInput("j");
+      expect(dashboard.agentTree.selectedRepoPath).toBe(local.repoPath);
+      expect(dashboard.rightPane.mode).toBe("REPO");
+      expectSidebar("Agents");
+      dashboard.handleInput("2");
+      dashboard.handleInput("j");
+      expect(dashboard.channelPane.teamName).toBe("east");
+      expectSidebar("Teams");
+      expect(persist).not.toHaveBeenCalled();
+      await flushPendingSave();
+      expect(await loadLayout()).toEqual(saved);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
     }
-    expect(dashboard.rightPane.mode).toBe("TREE");
-    expect(dashboard.focus).toBe("agent-tree");
-    expect(dashboard.render(180).join("")).toContain(REVERSE + BOLD + " TREE ");
-    dashboard.handleInput(next);
-    expect(dashboard.focus).toBe("info");
-    dashboard.handleInput(prev);
-    expect(dashboard.focus).toBe("agent-tree");
-    tryResize();
-    dashboard.handleInput("k");
-    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
-    expect(dashboard.sidebarWidth).toBe(saved!.sidebarWidth);
-    expect(dashboard.splitPane.getLeftWidth()).toBe(saved!.splitPaneLeftWidth);
-    const lines = dashboard.render(180);
-    expect(dashboard.focus).toBe(tab === "1" ? "agent-tree" : "teams-tree");
-    const title = lines.find(line => stripAnsi(line).includes(" System Coordinator "))!;
-    const [sidebarTitle, mainTitle] = title.split("│");
-    expect(sidebarTitle).toContain(REVERSE + BOLD + (tab === "1" ? " Agents " : " Teams ") + RESET);
-    expect(visibleWidth(sidebarTitle!)).toBe(saved!.sidebarWidth);
-    expect(stripAnsi(mainTitle!)).toContain(" TMUX ");
-    expect(visibleWidth(mainTitle!)).toBe(180 - saved!.sidebarWidth - 1);
-    const sidebar = lines.filter(line => line.includes("│")).map(line => stripAnsi(line.split("│")[0]!));
-    expect(sidebar.some(line => line.includes(tab === "1" ? "◆ coordinator" : "east"))).toBe(true);
-    expect(sidebar.some(line => line.includes(" Info "))).toBe(true);
-    expect(lines.map(stripAnsi)).toContain("─".repeat(saved!.sidebarWidth) + "┴" + "─".repeat(180 - saved!.sidebarWidth - 1));
-    expect(persist).not.toHaveBeenCalled();
-    await flushPendingSave();
-    expect(await loadLayout()).toEqual(saved);
   });
 
   test.each(["?", "/", "@", "I"])("dialog %s pauses coordinator reads and resumes once", async key => {
@@ -10125,27 +10143,6 @@ describe("Unified peer repos in the Agents tree", () => {
       running.mockRestore();
       dashboard.stopPolling();
     }
-  });
-
-  test("TREE hides the scroll hint and refuses scrolling until the peer capture is visible again", () => {
-    const { dashboard } = setup();
-    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
-    selectByKey(dashboard, PEER_B + "/@system");
-    const scroll = spyOn((dashboard as any).remotePane, "scroll");
-    const screen = () => stripAnsi(dashboard.render(180).join("\n"));
-    expect(screen()).toContain(";/l: scroll");
-    dashboard.jumpToMode("TREE");
-    expect(screen()).not.toContain(";/l: scroll");
-    for (const key of [";", "l"]) {
-      resetNotice(dashboard);
-      dashboard.handleInput(key);
-      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
-    }
-    expect(scroll).not.toHaveBeenCalled();
-    dashboard.handleInput("p");
-    expect(screen()).toContain(";/l: scroll");
-    dashboard.handleInput(";");
-    expect(scroll).toHaveBeenCalledTimes(1);
   });
 
   test("a highlighted coordinator shows the startup denial, then the remote capture when permitted", async () => {
@@ -10217,7 +10214,7 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    const permittedAscii = new Set([..."jkJK123pn@?/I;l", "\t", "\x03"]);
+    const permittedAscii = new Set([..."jkJK123@?/I;l", "\t", "\x03"]);
     const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
     for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
     const refused = new Set([
@@ -10235,7 +10232,9 @@ describe("Unified peer repos in the Agents tree", () => {
       for (const key of refused) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
-        expect(dashboard.notice).toBe(["[", "]", "{", "}"].includes(key) ? "resize from a local row" : REMOTE_READ_ONLY_NOTICE);
+        const notice = ["[", "]", "{", "}"].includes(key) ? "resize from a local row"
+          : ["p", "n"].includes(key) ? "view mode is fixed for remote coordinators" : REMOTE_READ_ONLY_NOTICE;
+        expect(dashboard.notice).toBe(notice);
         expect(dashboard.dialog).toBeNull();
       }
       for (const handler of handlers) expect(handler).not.toHaveBeenCalled();

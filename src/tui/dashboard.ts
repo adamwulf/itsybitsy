@@ -510,7 +510,6 @@ class StatusBarComponent implements Component {
    */
   remoteSelected = false;
   remoteCoordinatorVisible = false;
-  peerResizeDisabled = false;
   remoteRepoSelected = false;
   hasResolvableWarnings = false;
 
@@ -536,7 +535,7 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.remoteSelected) {
-      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll    " : ""}p/n: pane    1/2/3: tab${this.peerResizeDisabled ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll" : "p/n: pane"}    1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -1488,17 +1487,8 @@ export class DashboardComponent implements Component {
    */
   private updatePaneVisibility() {
     const peerCoordinator = this.remoteSelection?.kind === "remote-coordinator";
-    const peerTree = peerCoordinator && this.rightPane.mode === "TREE";
-    if (peerTree && (!this.focusManager.peerCoordinatorTreeMode || this.focusManager.current() === "teams-tree")) {
-      this.focusManager.setFocus("agent-tree");
-    } else if (!peerTree && this.focusManager.peerCoordinatorTreeMode
-        && this.focusManager.current() === "agent-tree" && this.sidebarMode === "teams") {
-      this.focusManager.setFocus("teams-tree");
-    }
-    this.focusManager.peerCoordinatorTreeMode = peerTree;
-    this.statusBar.peerResizeDisabled = peerCoordinator;
-    this.statusBar.remoteCoordinatorVisible = this.peerCoordinatorVisible;
-    if (this.peerCoordinatorVisible) {
+    this.statusBar.remoteCoordinatorVisible = peerCoordinator;
+    if (peerCoordinator) {
       this.focusManager.skipTargets.add("right-pane");
       const focus = this.focusManager.current();
       if (focus === "right-pane" || focus === "active-agent") this.focusManager.setFocus("active-agent");
@@ -1953,8 +1943,17 @@ export class DashboardComponent implements Component {
     return before.length !== after.length || before.some((line, i) => line !== after[i]);
   }
 
-  private get peerCoordinatorVisible(): boolean {
-    return this.remoteSelection?.kind === "remote-coordinator" && this.rightPane.mode !== "TREE";
+  private get teamChannelVisible(): boolean {
+    return this.activeSelectionSource === "teams" && (this.channelPane.teamName !== null || this.teamsTree.selection === null);
+  }
+
+  private get expandedAgentsTreeVisible(): boolean {
+    return this.rightPane.mode === "TREE" && !this.teamChannelVisible
+      && !(this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected);
+  }
+
+  private get visibleNavigationTree(): "teams-tree" | "agent-tree" {
+    return this.sidebarMode === "teams" && !this.expandedAgentsTreeVisible ? "teams-tree" : "agent-tree";
   }
 
   /** Only the Agents tree can own a remote selection. */
@@ -1974,15 +1973,19 @@ export class DashboardComponent implements Component {
       this.setNotice("resize from a local row", "info");
       return true;
     }
+    if (remote?.kind === "remote-coordinator" && (key === "p" || key === "n" || matchesKey(key, Key.left) || matchesKey(key, Key.right))) {
+      this.setNotice("view mode is fixed for remote coordinators", "info");
+      return true;
+    }
     if (remote === null || isRemoteAllowedKey(key)) return false;
-    if (this.peerCoordinatorVisible && (key === ";" || key === "l")) return false;
+    if (remote.kind === "remote-coordinator" && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
 
   private scrollOutput(up: boolean): void {
-    if (this.peerCoordinatorVisible) {
+    if (this.remoteSelection?.kind === "remote-coordinator") {
       this.remotePane.scroll(up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP);
     } else if (up) agentActions.handleScrollUp(this);
     else agentActions.handleScrollDown(this);
@@ -2113,6 +2116,7 @@ export class DashboardComponent implements Component {
   // --- Pane management (delegates to pane-manager.ts) ---
 
   jumpToMode(mode: PaneMode, forceRefresh = false) {
+    if (this.remoteSelection?.kind === "remote-coordinator") return;
     jumpToMode(this, mode, forceRefresh);
     // Entering/leaving REPO mode changes whether the per-repo coordinator pane
     // is visible — pause/resume its poller to match.
@@ -2360,6 +2364,12 @@ export class DashboardComponent implements Component {
     // path below (tmux pollers, git probe, right-pane loaders, the per-repo
     // coordinator) sees no selection. Only the info panel and render() use it.
     const remote = this.remoteSelection;
+    const peerCoordinator = remote?.kind === "remote-coordinator";
+    const leftPeerCoordinator = !peerCoordinator && this.infoPanel.remote?.kind === "remote-coordinator";
+    const enteredFromTree = peerCoordinator && this.rightPane.mode === "TREE";
+    if (peerCoordinator && this.modeIndex !== DEFAULT_MODE_INDEX) {
+      jumpToMode(this, PANE_MODES[DEFAULT_MODE_INDEX]!);
+    }
 
     this.syncRemotePane();
 
@@ -2369,11 +2379,13 @@ export class DashboardComponent implements Component {
     // When entering coordinator mode (transition, not every tick), reset view and focus
     const wasCoordinator = this.currentAgentKey === "__coordinator__";
     const visibleTree = this.sidebarMode === "teams" ? "teams-tree" : "agent-tree";
-    if (!isCoordinator && this.focusManager.current() === "coordinator") this.focusManager.setFocus(visibleTree);
+    if (leftPeerCoordinator || enteredFromTree || (!isCoordinator && this.focusManager.current() === "coordinator")) {
+      this.focusManager.setFocus(visibleTree);
+    }
     if (isCoordinator && !wasCoordinator) {
       this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
-      if (this.focusManager.peerCoordinatorTreeMode || (focus !== visibleTree && focus !== "info" && focus !== "coordinator")) {
+      if (focus !== visibleTree && focus !== "info" && focus !== "coordinator") {
         this.focusManager.setFocus(visibleTree);
       }
       // No resize on coordinator selection: the ib-coordinator tmux window is
@@ -3278,12 +3290,8 @@ export class DashboardComponent implements Component {
     if (tabMode !== null) {
       this.setSidebarMode(tabMode);
       const focus = this.focusManager.current();
-      if (tabMode === "teams") {
-        if (focus === "agent-tree" || focus === "repo-coordinator") {
-          this.focusManager.setFocus("teams-tree");
-        }
-      } else if (focus === "teams-tree") {
-        this.focusManager.setFocus("agent-tree");
+      if (focus === "agent-tree" || focus === "teams-tree" || (focus === "repo-coordinator" && tabMode === "teams")) {
+        this.focusManager.setFocus(this.visibleNavigationTree);
       }
       // syncSelectedAgent() runs the inactive-tree mirror at its top.
       this.syncSelectedAgent();
@@ -3299,7 +3307,7 @@ export class DashboardComponent implements Component {
     // QUESTIONS-mode j/k retains its agent-tree-only special case below and
     // does NOT touch activeSelectionSource (it's a right-pane question
     // selector, not a sidebar-tree navigation).
-    const navigatesTeams = this.sidebarMode === "teams" && !this.focusManager.peerCoordinatorTreeMode;
+    const navigatesTeams = this.visibleNavigationTree === "teams-tree";
     const navigatedSource: SelectionSource = navigatesTeams ? "teams" : "agents";
     if (data === "J") {
       if (navigatesTeams) {
@@ -3644,7 +3652,7 @@ export class DashboardComponent implements Component {
     // agentTree.isSystemCoordinatorSelected`).
     const isCoordinatorView =
       this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected;
-    const isTreeMode = !isCoordinatorView && this.rightPane.mode === "TREE";
+    const isTreeMode = this.expandedAgentsTreeVisible;
     // A selected remote row (SPEC §20.5) draws two placeholders in the
     // split layout, whatever the right-pane mode, except TREE: that mode draws
     // the tree itself in the main area (the sidebar hides its own), and it must
@@ -3743,12 +3751,7 @@ export class DashboardComponent implements Component {
     // selection (agent, repo header, system coord, or null in the Agents
     // tree) the main area falls through to the agent / coordinator / repo
     // branches below.
-    const teamsActiveRender = this.activeSelectionSource === "teams";
-    const showChannelPane =
-      teamsActiveRender
-      && !isCoordinatorView
-      && (this.channelPane.teamName !== null || this.teamsTree.selection === null);
-    if (showChannelPane) {
+    if (this.teamChannelVisible) {
       // §17.4 refresh cadence: the chat box + log are refreshed by
       // `channelRefreshTimer` (set up in startPolling) and by a one-shot
       // `refreshChannel()` on team-selection change. render() is PURE here — it
@@ -4014,7 +4017,7 @@ export class DashboardComponent implements Component {
     const rightPad = 3;
     const currentFocus = this.focusManager.current();
     const leftFocused = currentFocus === "active-agent";
-    const rightFocused = this.focusManager.peerCoordinatorTreeMode ? currentFocus === "agent-tree" : currentFocus === "right-pane";
+    const rightFocused = currentFocus === "right-pane";
 
     // Dash color is always DIM_GRAY — never reverse (Bug 3)
     const leftDashColor = DIM_GRAY;

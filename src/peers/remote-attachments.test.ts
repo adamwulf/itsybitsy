@@ -179,3 +179,14 @@ test("a missing suffix after a symlink and parent step uses the physical parent"
     await expect(dashboardAttachmentPaths(reference, project, project)).rejects.toThrow("file not found");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("a dangling project symlink refuses absolute, relative and nested references", async () => {
+  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+  const project = await mkdtemp("/tmp/ib-dangling-");
+  try {
+    await symlink(join(project, "missing"), join(project, "link"));
+    for (const reference of [join(project, "link"), "./link", join(project, "link/file")]) {
+      await expect(dashboardAttachmentPaths(reference, project, project)).rejects.toThrow("Unresolved attachment");
+    }
+  } finally { await rm(project, { recursive: true, force: true }); }
+});

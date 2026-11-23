@@ -1,5 +1,6 @@
 import { realpathArgument } from "./attachment-manifest";
-import { basename, dirname, resolve } from "node:path";
+import { lstat } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { references } from "../message-attachments";
 import { userHome } from "../home";
 import { canonicalizeSandboxPath } from "../sandbox";
@@ -8,7 +9,17 @@ async function resolveMissingReference(path: string) {
   const suffix: string[] = [];
   let prefix = path;
   for (;;) {
-    try { return resolve(await realpathArgument(prefix), ...suffix.reverse()); }
+    try {
+      const existing = await realpathArgument(prefix);
+      const firstMissing = suffix.at(-1);
+      if (firstMissing) {
+        const leaf = await lstat(join(existing, firstMissing)).catch(err => {
+          if (err.code !== "ENOENT") throw err;
+        });
+        if (leaf?.isSymbolicLink()) throw new Error(`Unresolved attachment: ${path}`);
+      }
+      return resolve(existing, ...suffix.reverse());
+    }
     catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT" || prefix === "/") throw err;
       suffix.push(basename(prefix));
@@ -27,6 +38,7 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
   for (const ref of references(text)) {
     let path = ref.path;
     if (!path.startsWith("/") && !path.startsWith("~/")) {
+      if (localRoot) await resolveMissingReference(localRoot + "/" + path);
       if (ref.start === 0) noPassthrough = true;
       continue;
     }
@@ -40,9 +52,9 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
         break;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-        if (!ref.quote && /^\/[\w-]+$/.test(path)) break;
         if (!ref.quote && /[.,;:!\)\]}]$/.test(path)) { path = path.slice(0, -1); continue; }
         const localPath = await resolveMissingReference(absolute);
+        if (!ref.quote && /^\/[\w-]+$/.test(path)) break;
         const peerOnly = !inside(localRoot, absolute) && inside(remoteRoot, absolute) && inside(remoteRoot, resolve(absolute));
         if (peerOnly || inside(local, localPath)) {
           if (ref.start === 0) noPassthrough = true;

@@ -10,7 +10,7 @@ import { verifiedSendCaller, type VerifiedSendCaller } from "./send-caller";
 import { buildAgentAccessTable, buildSystemHookPolicy, pathDenialReason } from "../hooks/paths-table";
 import { metaKernelSandboxed, resolvePreparedAccess, type PreparedAccessTable } from "../sandbox";
 import { readMachineName } from "../machine-name";
-import { buildAttachmentManifest, fileChunks, hashFile, type ManifestEntry } from "./attachment-manifest";
+import { buildAttachmentManifest, fileChunks, hashFile, type ManifestEntry, type AttachmentArgument } from "./attachment-manifest";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
 
 export async function copyLocalAttachments(
@@ -77,7 +77,7 @@ async function senderAttachmentAccess(sender: AttachmentSender) {
 }
 
 export async function withSenderManifest<T>(
-  paths: readonly string[], sender: AttachmentSender, signal: AbortSignal | undefined,
+  paths: readonly AttachmentArgument[], sender: AttachmentSender, signal: AbortSignal | undefined,
   use: (entries: (ManifestEntry & { sha256: string })[], machine: string) => Promise<T>,
 ) {
   const cwd = process.cwd();

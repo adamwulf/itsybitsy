@@ -74,3 +74,26 @@ test("watchdog reclaims a dead CLI's staging before publication and leaves a liv
     expect(await Bun.file(lease).exists()).toBe(false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("dashboard stages the canonical file selected through a project symlink and keeps its spelling", async () => {
+  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+  const { buildAttachmentManifest } = await import("./attachment-manifest");
+  const root = await mkdtemp("/tmp/ib-dashboard-select-");
+  try {
+    const project = join(root, "project");
+    const alias = join(project, "alias");
+    const external = join(root, "external");
+    await mkdir(project);
+    await writeFile(external, "selected");
+    await symlink(external, alias);
+    const inputs = await dashboardAttachmentPaths(alias, project, project);
+    await rm(alias);
+    await writeFile(alias, "different");
+    const entries = await buildAttachmentManifest(inputs, { home: root, cwd: project, machine: "desk" });
+    try {
+      expect(entries).toHaveLength(1);
+      expect(entries[0]!.spellings[0]).toBe(alias);
+      expect(await entries[0]!.handle.readFile("utf8")).toBe("selected");
+    } finally { await Promise.all(entries.map(entry => entry.handle.close())); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -8,7 +8,7 @@ import { CHUNK_BYTES, checkAttachmentsEnabled, checkManifestLimits, DEFAULT_TRAN
 
 // Bun normalizes ".." before its realpath call. Resolve the directory to
 // the left of each parent step first, leaving symlink traversal to the OS.
-async function realpathArgument(absolute: string): Promise<string> {
+export async function realpathArgument(absolute: string): Promise<string> {
   const parts = absolute.split(/\/\.\.(?=\/|$)/);
   let prefix = parts[0]!;
   for (const rest of parts.slice(1)) {
@@ -60,6 +60,8 @@ function protectedRoots(home: string) {
   return ["peer", "sealed"].map(name => join(home, ".itsybitsy", name));
 }
 
+export type AttachmentArgument = string | { argument: string; source: string };
+
 export interface ManifestEntry {
   argument: string;
   source: string;
@@ -83,7 +85,7 @@ interface ManifestOptions {
 }
 
 export async function buildAttachmentManifest(
-  paths: readonly string[], { cwd, home, argumentHome = home, limits = DEFAULT_TRANSFER_LIMITS, machine, checkRead, sandboxed }: ManifestOptions,
+  paths: readonly AttachmentArgument[], { cwd, home, argumentHome = home, limits = DEFAULT_TRANSFER_LIMITS, machine, checkRead, sandboxed }: ManifestOptions,
 ): Promise<ManifestEntry[]> {
   if (!paths.length) return [];
   const enabled = checkAttachmentsEnabled(limits, machine);
@@ -93,7 +95,8 @@ export async function buildAttachmentManifest(
   const protectedFiles = sandboxed ? undefined : await protectedAttachmentIdentities(home);
   const entries = new Map<string, ManifestEntry>();
   try {
-    for (const argument of paths) {
+    for (const input of paths) {
+      const argument = typeof input === "string" ? input : input.argument;
       // Let the filesystem walk symlinks before interpreting a following "..".
       const expanded = argument === "~" ? argumentHome : argument.startsWith("~/") ? argumentHome + argument.slice(1) : argument;
       const absolute = isAbsolute(expanded) ? expanded : cwd + sep + expanded;
@@ -101,7 +104,7 @@ export async function buildAttachmentManifest(
         if (absolute.endsWith("/") || absolute.endsWith("/.")) throw new Error("directory spelling is not a regular file");
         // Metadata follows symlinks and ".." without opening an unreadable
         // ancestor. Only ask for on-disk case after the read check passes.
-        const candidate = sandboxed ? metadataRealpath(absolute) : await realpathArgument(absolute);
+        const candidate = typeof input !== "string" ? input.source : sandboxed ? metadataRealpath(absolute) : await realpathArgument(absolute);
         if (!candidate) throw new Error("cannot resolve attachment path");
         if (protectedDirs.some(dir => candidate === dir || candidate.startsWith(dir + sep))) {
           throw new Error("protected attachment path");

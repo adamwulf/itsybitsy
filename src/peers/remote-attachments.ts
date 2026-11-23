@@ -2,7 +2,7 @@ import { constants as osConstants } from "node:os";
 import { constants } from "node:fs";
 import { copyFile, lstat, mkdir, open, realpath, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { fileChunks, hashFile, type ManifestEntry } from "./attachment-manifest";
+import { fileChunks, hashFile, type ManifestEntry, type AttachmentArgument } from "./attachment-manifest";
 import { hasFreeSpace } from "./attachment-space";
 import { withSenderManifest, type AttachmentSender } from "./local-attachments";
 import type { SendHeader } from "./send-frame";
@@ -69,7 +69,7 @@ export async function cloneAttachments(dir: string, entries: (ManifestEntry & { 
   }
 }
 
-export function remoteAttachmentStage(paths: readonly string[], sender: AttachmentSender, signal?: AbortSignal,
+export function remoteAttachmentStage(paths: readonly AttachmentArgument[], sender: AttachmentSender, signal?: AbortSignal,
   onStaged?: (files: SendHeader["files"]) => void): StageRemoteFiles {
   return dir => withSenderManifest(paths, sender, signal, async entries => {
     const files = await cloneAttachments(dir, entries, signal);

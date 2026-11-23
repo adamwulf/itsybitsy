@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { checkManifestLimits } from "./transfer-limits";
 import { readTransferLimits } from "../config";
 import { userHome } from "../home";
 import { resolveCallerAgentContext } from "../ib-commands";
@@ -72,8 +73,9 @@ async function senderAttachmentAccess(cwd: string, signal?: AbortSignal) {
 
 export async function stageLocalAttachments(message: string, paths: readonly string[], signal?: AbortSignal) {
   const cwd = process.cwd();
+  const machine = await readMachineName();
   const entries = await buildAttachmentManifest(paths, {
-    ...await senderAttachmentAccess(cwd, signal), cwd, home: userHome(), machine: await readMachineName(), limits: await readTransferLimits(),
+    ...await senderAttachmentAccess(cwd, signal), cwd, home: userHome(), machine, limits: await readTransferLimits(),
   });
   try {
     const verified = [];
@@ -81,7 +83,17 @@ export async function stageLocalAttachments(message: string, paths: readonly str
       signal?.throwIfAborted();
       verified.push({ ...entry, sha256: await hashFile(entry) });
     }
-    return await copyLocalAttachments(message, verified, signal);
+    const staged = await copyLocalAttachments(message, verified, signal);
+    try {
+      // A large copy can outlive a settings edit. Check the receiving
+      // machine's current limits before handing the snapshots to its queue.
+      const result = checkManifestLimits(entries, await readTransferLimits(), { machine });
+      if (!result.ok) throw new Error(result.error);
+      return staged;
+    } catch (error) {
+      await staged.cleanup();
+      throw error;
+    }
   } finally {
     await Promise.allSettled(entries.map(entry => entry.handle.close()));
   }

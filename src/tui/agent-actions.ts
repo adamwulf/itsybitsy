@@ -42,6 +42,7 @@ import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
+import { attachmentSettingKey, TRANSFER_SETTING_BOUNDS } from "../peers/transfer-limits";
 import type { ConfigResult } from "../config";
 import { PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
@@ -2605,15 +2606,17 @@ function handleConfigItemAction(
         : item.type === "string[]"
         ? (item.value as string[] ?? []).join(", ")
         : String(item.value ?? "");
+      const setting = attachmentSettingKey(item.key);
       ctx.closeDialog();
       ctx.showDialog({
         type: "input",
-        prompt: item.sensitive
+        ...(setting && { hint: `Integer ${TRANSFER_SETTING_BOUNDS[setting].join("–")}. 0 = attachments disabled` }),
+        prompt: setting ? `${setting} (${setting === "maxFiles" ? "files" : "MB"})` : item.sensitive
           ? `${item.key} (${item.type}; leave blank to keep current value):`
           : `${item.key} (${item.type}):`,
         value: currentStr,
         onSubmit: (value: string) => {
-          ctx.closeDialog();
+          if (!setting) ctx.closeDialog();
           if (item.sensitive && value === "") {
             handleSetup(ctx, tab);
             return;
@@ -2622,7 +2625,7 @@ function handleConfigItemAction(
           if (item.type === "number") {
             const num = Number(value);
             if (value.trim() === "" || isNaN(num)) {
-              ctx.setNotice("Invalid number", "error");
+              ctx.setNotice(setting ? `${setting} must be an integer` : "Invalid number", "error");
               return;
             }
             parsed = num;

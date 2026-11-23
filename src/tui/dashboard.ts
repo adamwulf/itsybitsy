@@ -648,7 +648,7 @@ class DialogOverlayComponent implements Component {
       case "input": {
         return {
           title: dialog.prompt,
-          contentLines: [truncateToWidth(`> ${dialog.value}█`, innerWidth, "")],
+          contentLines: [...(dialog.hint ? wordWrapLines(dialog.hint, innerWidth) : []), truncateToWidth(`> ${dialog.value}█`, innerWidth, "")],
         };
       }
       case "add-permission": {

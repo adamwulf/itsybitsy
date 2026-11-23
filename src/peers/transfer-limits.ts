@@ -10,6 +10,27 @@ export const TRANSFER_SETTING_BOUNDS = {
 } as const;
 
 type Setting = keyof typeof DEFAULT_ATTACHMENT_SETTINGS;
+
+export function attachmentSettingKey(key: string): Setting | undefined {
+  const prefix = "peering.attachments.";
+  const name = key.slice(prefix.length);
+  return key.startsWith(prefix) && Object.hasOwn(DEFAULT_ATTACHMENT_SETTINGS, name) ? name as Setting : undefined;
+}
+
+export function validateAttachmentSetting(key: Setting, value: unknown, raw: Partial<Record<Setting, unknown>>) {
+  const [min, max] = TRANSFER_SETTING_BOUNDS[key];
+  if (typeof value !== "number" || !Number.isInteger(value)) return `${key} must be an integer`;
+  if (value < min || value > max) return `${key} must be between ${min} and ${max}`;
+  if (key !== "maxFiles") {
+    const other = key === "maxFileMB" ? "maxMessageMB" : "maxFileMB";
+    const stored = raw[other];
+    const [lo, hi] = TRANSFER_SETTING_BOUNDS[other];
+    const limit = typeof stored === "number" && Number.isInteger(stored) && stored >= lo && stored <= hi
+      ? stored : DEFAULT_ATTACHMENT_SETTINGS[other];
+    if (key === "maxFileMB" ? value > limit : value < limit) return "maxMessageMB must be at least maxFileMB";
+  }
+}
+
 export interface TransferLimits {
   readonly maxFileBytes: number;
   readonly maxMessageBytes: number;
@@ -51,14 +72,14 @@ export function resolveTransferLimits(raw: Partial<Record<Setting, unknown>>) {
 
 type LimitResult = { ok: true } | { ok: false; error: string };
 
-function configValues(limits: TransferLimits) {
+export function attachmentSettings(limits: TransferLimits) {
   return {
     maxFileMB: limits.maxFileBytes / MIB, maxMessageMB: limits.maxMessageBytes / MIB, maxFiles: limits.maxFiles,
   };
 }
 
 export function checkAttachmentsEnabled(limits: TransferLimits, machine: string): LimitResult {
-  for (const [key, value] of Object.entries(configValues(limits))) {
+  for (const [key, value] of Object.entries(attachmentSettings(limits))) {
     if (value === 0) return { ok: false, error: `attachments are disabled on ${machine} (peering.attachments.${key} = 0)` };
   }
   return { ok: true };
@@ -71,7 +92,7 @@ export function checkManifestLimits(
   const enabled = checkAttachmentsEnabled(limits, machine);
   if (!enabled.ok) return enabled;
   function exceeded(key: Setting, detail: string): LimitResult {
-    return { ok: false, error: `${detail} exceeds the limit on ${machine} (peering.attachments.${key} = ${configValues(limits)[key]})` };
+    return { ok: false, error: `${detail} exceeds the limit on ${machine} (peering.attachments.${key} = ${attachmentSettings(limits)[key]})` };
   }
   if (files.length > limits.maxFiles) return exceeded("maxFiles", `${files.length} files`);
   let total = 0;

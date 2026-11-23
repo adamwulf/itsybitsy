@@ -1,7 +1,7 @@
 import { join } from "path";
 import { userHome } from "./home";
 import { chmod, stat } from "fs/promises";
-import { DEFAULT_ATTACHMENT_SETTINGS, resolveTransferLimits } from "./peers/transfer-limits";
+import { DEFAULT_ATTACHMENT_SETTINGS, resolveTransferLimits, attachmentSettingKey, attachmentSettings, validateAttachmentSetting } from "./peers/transfer-limits";
 
 export type ConfigSource = "user" | "default";
 export type ConfigType = "number" | "boolean" | "string" | "string[]";
@@ -107,10 +107,14 @@ export function defaultUserConfigPath(): string {
 /** Read this machine's current policy for each attachment request. */
 export async function readTransferLimits() {
   const data = await readJsonFile(defaultUserConfigPath());
-  const raw = getNestedValue(data, "peering.attachments");
-  const { limits, warnings } = resolveTransferLimits(typeof raw === "object" && raw !== null ? raw : {});
+  const { limits, warnings } = resolveTransferLimits(rawAttachmentSettings(data));
   for (const warning of warnings) console.warn(warning);
   return limits;
+}
+
+function rawAttachmentSettings(data: Record<string, unknown>) {
+  const raw = getNestedValue(data, "peering.attachments");
+  return typeof raw === "object" && raw !== null ? raw : {};
 }
 
 export interface ReadConfigOptions {
@@ -121,10 +125,17 @@ export async function readConfig(options?: ReadConfigOptions): Promise<ConfigRes
   const userPath = options?.userConfigPath ?? defaultUserConfigPath();
   const userData = await readJsonFile(userPath);
 
+  const effective = attachmentSettings(resolveTransferLimits(rawAttachmentSettings(userData)).limits);
   const result: ConfigResult = {};
 
   for (const def of CONFIG_KEYS) {
     const userVal = getNestedValue(userData, def.key);
+    const setting = attachmentSettingKey(def.key);
+    if (setting) {
+      const value = effective[setting];
+      result[def.key] = { value, source: userVal === value ? "user" : "default" };
+      continue;
+    }
     if (userVal !== undefined && validateConfigValue(userVal, def.type)) {
       result[def.key] = { value: userVal, source: "user" };
       continue;
@@ -191,6 +202,11 @@ export async function ensureConfigFilePerms(filePath: string): Promise<void> {
 
 export async function writeConfig(filePath: string, key: string, value: unknown): Promise<void> {
   const data = await readJsonFile(filePath);
+  const setting = attachmentSettingKey(key);
+  if (setting) {
+    const error = validateAttachmentSetting(setting, value, rawAttachmentSettings(data));
+    if (error) throw new Error(error);
+  }
   setNestedValue(data, key, value);
   await Bun.write(filePath, JSON.stringify(data, null, 2) + "\n");
   await ensureConfigFilePerms(filePath);

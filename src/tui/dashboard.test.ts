@@ -9372,6 +9372,46 @@ describe("setup Peers tab", () => {
     }
   });
 
+  test("Config edits live attachment limits and keeps invalid edits open", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-attachment-config-"));
+    const path = join(dir, "config.json");
+    setUserConfigPath(path);
+    const dashboard = makeDashboard();
+    try {
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      async function edit(key: string) {
+        await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+        const setup = assertDialog(dashboard.dialog, "setup");
+        setup.configSelectedIndex = setup.configItems!.findIndex(item => item.key === "peering.attachments." + key);
+        dashboard.handleInput("\r");
+        expect(text(dashboard)).toContain("0 = attachments disabled");
+        if (key.endsWith("MB")) expect(text(dashboard)).toContain("MB");
+        return assertDialog(dashboard.dialog, "input");
+      }
+      const file = await edit("maxFileMB");
+      for (const [value, reason] of [["1.5", "integer"], ["65537", "between 0 and 65536"], ["2049", "at least maxFileMB"]] as const) {
+        file.onSubmit(value);
+        await waitFor(() => dashboard.notice?.includes(reason) === true);
+        expect(dashboard.dialog).toBe(file);
+        expect(await Bun.file(path).exists()).toBe(false);
+      }
+      file.onSubmit("25");
+      const message = await edit("maxMessageMB");
+      message.onSubmit("24");
+      await waitFor(() => dashboard.notice?.includes("at least maxFileMB") === true);
+      message.onSubmit("100");
+      const count = await edit("maxFiles");
+      count.onSubmit("0");
+      await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+      expect((await Bun.file(path).json()).peering.attachments).toEqual({ maxFileMB: 25, maxMessageMB: 100, maxFiles: 0 });
+      expect(await settings.readTransferLimits()).toEqual({ maxFileBytes: 25 * 1024 ** 2, maxMessageBytes: 100 * 1024 ** 2, maxFiles: 0 });
+    } finally {
+      resetUserConfigPath();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("Kitty Tab and Shift+Tab cycle setup in both directions", () => {
     const { dashboard, service } = open();
     dashboard.handleInput("\x1b[9u");

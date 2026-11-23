@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as brokerFiles from "./remote-attachments";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, rm, stat, symlink } from "node:fs/promises";
@@ -119,4 +120,21 @@ test("a watchdog reclaims a reused PID from its saved stamp even without a lease
     await sweepStagingLease(root, id, Date.now());
     expect(await readdir(join(root, "send-attachments"))).toEqual([]);
   } finally { spy.mockRestore(); }
+});
+
+test("an interrupted watchdog stamp write leaves no visible stamp and can be retried", async () => {
+  const id = "e".repeat(32), path = join(root, "send-attachments", id);
+  await mkdir(path, { recursive: true });
+  await Bun.write(join(path, "lease"), JSON.stringify({ pid: process.pid }));
+  const open = fs.open;
+  const spy = spyOn(fs, "open").mockImplementation(async (...args) => {
+    const handle = await open(...args);
+    if (String(args[0]).includes("/.record-")) handle.writeFile = async () => { throw Error("interrupted"); };
+    return handle;
+  });
+  try {
+    expect((await inspectBrokerLease(root, id)).state).toBe("unverifiable");
+    expect(await readdir(path)).toEqual(["lease"]);
+  } finally { spy.mockRestore(); }
+  expect((await inspectBrokerLease(root, id)).state).toBe("verified-live");
 });

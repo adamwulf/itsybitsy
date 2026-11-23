@@ -1,6 +1,6 @@
 import { constants as osConstants } from "node:os";
 import { constants } from "node:fs";
-import { copyFile, lstat, mkdir, open, realpath, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
+import { copyFile, link, readdir, lstat, mkdir, open, realpath, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileChunks, hashFile, type ManifestEntry, type AttachmentArgument } from "./attachment-manifest";
 import { hasFreeSpace, type VolumeReservations } from "./attachment-space";
@@ -185,16 +185,44 @@ export function stagingDirectoryStat(agentDir: string, id: string) {
   return withBrokerDirectory(agentDir, id, dir => dir.stat());
 }
 
-export function openBrokerLease(agentDir: string, id: string, name: "lease" | "owner.json" = "lease", create = false) {
+export function openBrokerLease(agentDir: string, id: string, name: "lease" | "owner.json" = "lease") {
   return withBrokerDirectory(agentDir, id, (_dir, path, noFollow) =>
-    open(join(path, name), (create ? constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL : constants.O_RDONLY) | constants.O_NONBLOCK | noFollow, 0o600));
+    open(join(path, name), constants.O_RDONLY | constants.O_NONBLOCK | noFollow));
+}
+
+// Both names are in the same protected request directory. A reader can only
+// open the published name after the entire record has been written and closed.
+export function publishBrokerRecord(agentDir: string, id: string, name: "lease" | "owner.json", value: unknown) {
+  return withBrokerDirectory(agentDir, id, async (dir, path, noFollow) => {
+    const leaf = ".record-" + crypto.randomUUID();
+    const temp = join(path, leaf);
+    const file = await open(temp, noFollow | constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    try {
+      try { await file.writeFile(JSON.stringify(value)); } finally { await file.close(); }
+      if (process.platform !== "darwin") return await link(temp, join(path, name));
+      const { dlopen, FFIType, ptr, read } = await import("bun:ffi");
+      const libc = dlopen("/usr/lib/libSystem.B.dylib", {
+        __error: { args: [], returns: FFIType.ptr },
+        linkat: { args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+      });
+      try {
+        const from = Buffer.from(leaf + "\0"), to = Buffer.from(name + "\0");
+        if (libc.symbols.linkat(dir.fd, ptr(from), dir.fd, ptr(to), 0) === 0) return;
+        const errno = read.i32(libc.symbols.__error()!);
+        throw Object.assign(Error(`Cannot publish ${name} (errno ${errno})`), { code: errno === osConstants.errno.EEXIST ? "EEXIST" : undefined });
+      } finally { libc.close(); }
+    } finally { await removeBrokerMember(dir, leaf); }
+  });
 }
 
 // Reclaim only protocol-owned entries through pinned directory handles. A
 // forged lease cannot make the watchdog recursively delete a supplied path.
 export async function removeAbandonedStaging(agentDir: string, id: string) {
   try {
-    await withBrokerDirectory(agentDir, id, async dir => {
+    await withBrokerDirectory(agentDir, id, async (dir, path) => {
+      for (const name of await readdir(path)) {
+        if (/^\.record-[a-f0-9-]{36}$/.test(name)) await removeBrokerMember(dir, name);
+      }
       await removeBrokerMember(dir, "progress");
       await removeBrokerMember(dir, "lease");
       await removeBrokerMember(dir, "owner.json");

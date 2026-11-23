@@ -204,3 +204,12 @@ test("a suspended identity writer exposes no empty lock", async () => {
     expect(await lockContents()).toBe(line(OTHER));
   } finally { resume.resolve(); spy.mockRestore(); }
 });
+
+test("an incomplete legacy lock survives this boot and can be recovered after reboot", async () => {
+  await writeLock("");
+  const birth = (await stat(peerEndpointLockFile())).birthtimeMs;
+  await expect(acquireEndpointLock(ME, () => birth - 1)).rejects.toThrow("Cannot verify");
+  expect(await lockContents()).toBe("");
+  expect(await acquireEndpointLock(ME, () => birth + 1)).toEqual({ acquired: true });
+  expect(await lockContents()).toBe(line(ME));
+});

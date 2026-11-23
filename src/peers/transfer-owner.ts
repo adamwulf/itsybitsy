@@ -1,5 +1,5 @@
 import { transferStagingRoot } from "../runtime-names";
-import { openBrokerLease, stagingDirectoryStat } from "./remote-attachments";
+import { openBrokerLease, publishBrokerRecord, stagingDirectoryStat } from "./remote-attachments";
 import { constants, type Dir } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, opendir, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -184,8 +184,7 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
       const firstSight = transferOwnerState({ pid: seed.pid, start: null }, leaseInfo.birthtimeMs, observed);
       if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null) return { state: firstSight, created };
       try {
-        stamp = await openBrokerLease(dir, id, "owner.json", true);
-        await stamp.writeFile(JSON.stringify(candidate));
+        await publishBrokerRecord(dir, id, "owner.json", candidate);
         return { state: "verified-live", created, identity };
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
       stamp = await openBrokerLease(dir, id, "owner.json");

@@ -54,7 +54,7 @@ import { existsSync, fstatSync } from "node:fs";
 import { mkdir, open, rm, stat, rename } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
-import { brokerAttachmentStage, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
+import { brokerAttachmentStage, publishBrokerRecord, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
@@ -229,12 +229,11 @@ export async function requestSendViaWatchdog(
 }
 
 
-async function startStagingLease(stage: string) {
+async function startStagingLease(dir: string, id: string) {
+  const stage = join(dir, "send-attachments", id);
   await mkdir(stage, { mode: 0o700 });
   try {
-    const lease = await open(join(stage, "lease"), "wx", 0o600);
-    try { await lease.writeFile(JSON.stringify({ pid: process.pid })); }
-    finally { await lease.close(); }
+    await publishBrokerRecord(dir, id, "lease", { pid: process.pid });
   } catch (err) {
     await rm(stage, { recursive: true, force: true });
     throw err;
@@ -284,7 +283,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   try {
     if (stage) {
       await mkdir(parent, { recursive: true, mode: 0o700 });
-      await startStagingLease(staged);
+      await startStagingLease(dir, request.id);
       ownsStage = true;
       request.files = await stage(staged, true);
     }

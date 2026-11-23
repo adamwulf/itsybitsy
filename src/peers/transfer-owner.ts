@@ -42,10 +42,10 @@ export function transferOwnerState(owner: TransferOwner | undefined, createdMs: 
   if (!owner) return "unverifiable";
   if (!isPidAliveCtx.fn(owner.pid)) return "proven-dead";
   if (observed == null) return "unverifiable";
-  if (owner.start !== null && observed !== owner.start) return "proven-dead";
+  if (owner.start !== null) return observed === owner.start ? "verified-live" : "proven-dead";
   if (!(createdMs > 0)) return "unverifiable";
   if (observed * 1000 > createdMs) return "proven-dead";
-  return owner.start === null ? "unverifiable" : "verified-live";
+  return "unverifiable";
 }
 
 export function reclaimTransfer(state: OwnerState, createdMs: number, now: number) {
@@ -177,15 +177,15 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
     if (!seed) return { state: "unverifiable", created };
     const observed = stagingOwnerStart(seed.pid);
     const candidate = { pid: seed.pid, start: observed };
-    const firstSight = transferOwnerState(candidate, leaseInfo.birthtimeMs, observed);
-    if (firstSight !== "verified-live") return { state: firstSight, created };
+    const firstSight = transferOwnerState({ pid: seed.pid, start: null }, leaseInfo.birthtimeMs, observed);
+    if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null) return { state: firstSight, created };
     try { stamp = await openBrokerLease(dir, id, "owner.json"); }
     catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       try {
         stamp = await openBrokerLease(dir, id, "owner.json", true);
         await stamp.writeFile(JSON.stringify(candidate));
-        return { state: firstSight, created };
+        return { state: "verified-live", created };
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
       stamp = await openBrokerLease(dir, id, "owner.json");
     }

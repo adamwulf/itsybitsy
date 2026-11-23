@@ -15,17 +15,16 @@ import { finishRecovery, sweepOutgoingDirectories } from "./transfer-owner";
  *   opens the dialog never loads the addon or touches the network. Before
  *   binding it takes the endpoint lock; when another live `ib watch` holds it,
  *   it does not bind and reports "peering disabled: ib watch pid N owns the
- *   endpoint". Each later dialog open retries, so peering moves here once the
- *   owner exits.
+ *   endpoint". A disabled watcher retries the lock every 30 s and whenever
+ *   the Peers dialog opens.
  * - After a failure (a bind that fails, or the accept loop failing once its
  *   endpoint is closed), the service rebinds on its own through the same
  *   path, after 5 s, then 10, 20, 40 and 60 s, staying at 60 s; a rebind
  *   whose endpoint stays up for 60 s resets that, while one whose accept
  *   loop dies sooner is one more failure, so a flapping endpoint backs off
  *   too. It retries only while something needs the endpoint:
- *   `peers.json` lists a peer, or the Peers tab is open. It stops for good
- *   when another live `ib watch` holds the lock ("disabled"; the lock is never
- *   polled), and on shutdown. Opening the dialog while a retry is pending
+ *   `peers.json` lists a peer, or the Peers tab is open. A live lock holder switches the watcher to the 30 s
+ *   lock poll. Shutdown stops both retry paths. Opening the dialog while a retry is pending
  *   binds at once, in place of the retry. `binding` is held from the start of
  *   a bind (or of a failed endpoint's close) until its retry is armed, so two
  *   binds never run and each failure leaves at most one endpoint and one lock.

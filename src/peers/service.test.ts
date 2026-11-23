@@ -1736,7 +1736,7 @@ describe("toPairConnection maps iroh's TooLong to PairProtocolError", () => {
       });
 
       const stream = await link.a.openBi();
-      await stream.writeAll(alpn === PAIR_ALPN ? encodePairMessage({ op: "pair-hello" }) : encodePeerRequest("agents"));
+      await stream.writeAll(alpn === PAIR_ALPN ? encodePairMessage({ op: "pair-hello" }) : Buffer.alloc(NEW_AGENT_MAX_REQUEST_BYTES + 1, "a"));
       await stream.finish();
       await waitFor(() => link.a.closeInfo() !== null, { message: "the connection closed" });
       // Unmapped, the pair ALPN would close it as a "connection error", and the

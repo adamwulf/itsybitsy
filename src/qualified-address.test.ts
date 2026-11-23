@@ -40,6 +40,7 @@ describe("qualified agent addresses", () => {
     await cli.cleanup();
   });
 
+  const human = { pid: 300, parents: [[300, 1]] as [number, number][], identityCurrent: true };
   const retire = (address: string, cwd = cli.cwd) =>
     cli.run(["retire", address], { cwd, actions: { retireAgent: "record" } });
 
@@ -284,15 +285,21 @@ describe("qualified agent addresses", () => {
       if (header.message === "refuse") throw new Error("Recipient stopped");
       return header.id;
     }, line => { throw new Error(line); }); }, 25);
-    const send = (args: string[], cwd = cli.cwd) => cli.run(["send", "laptop-b/remote/remote-id", ...args], { cwd });
+    const send = (args: string[], cwd = cli.cwd) => cli.run(["send", "laptop-b/remote/remote-id", ...args], { cwd, ancestry: human });
     try {
       expect((await send(["hi"])).stdout.trim()).toBe("Sent to remote/remote-id");
       expect((await send(["refuse"])).stderr.trim()).toBe("Recipient stopped");
       expect((await send(["--from", "mgr", "hello"], worktree)).exitCode).toBe(0);
       expect((await send(["--from", "imposter", "hello"], worktree)).stderr).toContain("--from must match");
       expect((await send(["system message"], join(cli.home, ".itsybitsy"))).exitCode).toBe(0);
+      expect((await cli.run(["send", "laptop-b/remote/remote-id", "coordinator message"], {
+        cwd: cli.cwd, ancestry: { ...human, parents: [[300, 200], [200, 1]], systemPanePid: 200 },
+      })).exitCode).toBe(0);
+      const fake = join(app, ".itsybitsy", "agents", "fake", "repo");
+      await mkdir(fake, { recursive: true });
+      expect((await send(["bad"], fake)).stderr).toContain("backlink");
       expect(seen.map(h => h.from)).toEqual([{ kind: "user" }, { kind: "user" },
-        { kind: "agent", id: "laptop-a/App/mgr" }, { kind: "system" }]);
+        { kind: "agent", id: "laptop-a/App/mgr" }, { kind: "user" }, { kind: "system" }]);
       expect(seen.every(h => h.files.length === 0)).toBe(true);
     } finally { clearInterval(timer); }
   });
@@ -316,7 +323,9 @@ describe("qualified agent addresses", () => {
       expect((await send([[300, 1]], true)).exitCode).toBe(0);
       expect((await send([[300, 200], [200, 1]], false)).stderr).toContain("Cannot verify");
       expect((await send([], true)).stderr).toContain("incomplete process ancestry");
-      expect(senders).toEqual([{ kind: "agent", id: "laptop-a/project.com/project.com" }, { kind: "user" }]);
+      await cli.addAgent(repo, "moving", { worktree: true, claude_pid: "400", claude_pid_epoch: 123 });
+      expect((await send([[300, 400], [400, 1]], true)).exitCode).toBe(0);
+      expect(senders).toEqual([{ kind: "agent", id: "laptop-a/project.com/project.com" }, { kind: "user" }, { kind: "agent", id: "laptop-a/project.com/moving" }]);
     } finally { clearInterval(timer); }
   });
 
@@ -328,7 +337,7 @@ describe("qualified agent addresses", () => {
 
   test("an unclaimed CLI handoff times out and cannot be sent later", async () => {
     await peer();
-    const result = await cli.run(["send", "laptop-b/remote/remote-id", "hi"], { timeoutMs: 15_000 });
+    const result = await cli.run(["send", "laptop-b/remote/remote-id", "hi"], { timeoutMs: 15_000, ancestry: human });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("timed out before ib watch claimed");
     await pollPeerOutbox(async () => { throw new Error("unexpected send"); }, () => {});

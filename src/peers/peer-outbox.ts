@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { userHome } from "../home";
-import { resolveRemoteSharedCaller, resolveSenderId, type IbCommandResult } from "../ib-commands";
+import { resolveRemoteSharedCaller, type IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
 import { registeredQueueRepo } from "../outbox";
 import { readRepoId } from "../repo-id";
 import type { RepoEntry } from "../registry";
-import { matchWorktreeCaller, runtimeDir } from "../runtime-names";
+import { runtimeDir } from "../runtime-names";
 import { hasLivePeerWatcher } from "./endpoint-lock";
 import { SEND_UNKNOWN } from "./peer-link";
 import { targetLabel } from "./receive-message";
@@ -27,15 +27,11 @@ export async function qualifiedAgentSender(id: string, repoPath: string, repos: 
 
 export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd = process.cwd()): Promise<SendHeader["from"]> {
   const shared = await resolveRemoteSharedCaller(cwd);
-  const id = resolveSenderId("", { cwd, fromAgent: shared ? String(shared.meta.id) : undefined });
+  const id = shared ? String(shared.meta.id) : "";
   if (explicit !== undefined && explicit !== id) throw new Error("Remote --from must match the detected sender");
-  if (shared) return qualifiedAgentSender(id, shared.repoPath, repos);
-  const worktree = matchWorktreeCaller(cwd);
-  if (worktree) {
-    if (id !== worktree[2]) throw new Error("Cannot verify remote sender from this worktree");
-    return qualifiedAgentSender(id, worktree[1]!, repos);
-  }
-  return { kind: id === "@system" ? "system" : "user" };
+  if (!shared) return { kind: "user" };
+  if (id === "@system") return { kind: "system" };
+  return qualifiedAgentSender(id, shared.repoPath, repos);
 }
 
 async function writeJson(dir: string, name: string, data: unknown) {

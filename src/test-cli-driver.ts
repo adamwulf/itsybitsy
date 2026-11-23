@@ -35,6 +35,7 @@ export type CliActionName = keyof typeof cliActions;
 export type CliActionMode = "record" | "real";
 
 export interface CliAncestry {
+  systemPanePid?: number;
   /** The pid the caller check starts from. */
   pid: number;
   /** [pid, parent pid] pairs, as `ps` would report them. */
@@ -130,6 +131,7 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   const resolver = (cwd: string, options?: { remoteSender?: boolean }) => resolveNoWorktreeCaller(cwd, {
     ...options,
     registryHome: config.home,
+    systemPanePid: async () => ancestry().systemPanePid ?? null,
     pid: config.ancestry?.pid,
     readParents: () => new Map(ancestry().parents),
     identityCurrent: () => ancestry().identityCurrent,

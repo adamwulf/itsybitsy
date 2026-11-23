@@ -240,7 +240,7 @@ export async function createCliFixture(): Promise<CliFixture> {
       const agentDir = runtimeNames.agentDir(repoPath, id);
       const worktree = meta.worktree !== false;
       await mkdir(agentDir, { recursive: true });
-      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `ib-fixture-${id}`, worktree, ...meta }));
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `ib-fixture-${id}`, worktree, claude_pid: "", ...meta }));
       if (!worktree) return { id, repoPath, agentDir, sessionCwd: repoPath };
       const sessionCwd = join(agentDir, "repo");
       const gitDir = join(repoPath, ".git", "worktrees", id);

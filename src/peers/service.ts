@@ -133,6 +133,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  notice?(message: string): void;
   pollOutbox?: typeof pollPeerOutbox;
   receiveMessage?: ReturnType<typeof createMessageReceiver>;
   captureCoordinator?(): Promise<CoordinatorPane | null>;
@@ -165,6 +166,7 @@ export interface PeerServiceDeps {
  */
 export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
   return {
+    notice,
     pollOutbox: pollPeerOutbox,
     receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,
@@ -675,7 +677,9 @@ export class PeerService {
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
     const id = await requestSend(conn, header, this.deps.setTimer);
-    this.deps.log(`Sent a message to ${peer}/${targetLabel(header.target)}`);
+    const line = `Sent a message to ${peer}/${targetLabel(header.target)}`;
+    this.deps.log(line);
+    if (source === "handoff") this.deps.notice?.(line);
     return id;
   }
 

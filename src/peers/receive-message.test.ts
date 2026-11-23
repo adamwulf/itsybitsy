@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { setUserHome, resetUserHome } from "../home";
-import { resetSendSpawnRunner, setSendSpawnRunner } from "../ib-commands";
+import { drainOutbox, resetSendSpawnRunner, setSendSpawnRunner } from "../ib-commands";
 import { resetSystemCoordinatorHasSessionFn, setSystemCoordinatorHasSessionFn } from "../index";
-import { makeSpawnResult } from "../test-utils";
+import { makeAgent, makeSpawnResult } from "../test-utils";
 import { readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
 import { createMemoryLink } from "./test-pair-transport";
@@ -65,6 +65,23 @@ test("concurrent and subsequent repeats acknowledge once, with sender attributio
   const queued = await readOutbox(join(cli.home, ".itsybitsy", "agents", "worker"));
   expect(queued.map(item => item.fromAgent)).toEqual(["", "desk/tools/alice", "desk/@system"]);
   expect(lines).toEqual(Array(3).fill("desk sent a message to worker"));
+});
+
+test("the ordinary drainer applies passthrough and peer labels to the queued text", async () => {
+  const calls: string[][] = [];
+  setSendSpawnRunner(cmd => { calls.push(cmd); return makeSpawnResult(); });
+  for (const [from, message] of [
+    [{ kind: "user" }, "/compact"], [{ kind: "user" }, "!pwd"],
+    [{ kind: "agent", id: "desk/tools/alice" }, "/compact"], [{ kind: "system" }, "!pwd"],
+  ] as const) {
+    expect(await exchange(header({ from, message }))).toMatchObject({ ok: true });
+  }
+  const agent = makeAgent({ id: "worker", repoPath: repo });
+  const result = await drainOutbox(agent, join(cli.home, ".itsybitsy", "agents", agent.id));
+  expect(result.ok).toBe(true);
+  expect(calls.filter(cmd => cmd.includes("-l")).map(cmd => cmd.at(-1))).toEqual([
+    "/compact", "!pwd", "[sent by agent desk/tools/alice]: /compact", "[sent by desk/@system]: !pwd",
+  ]);
 });
 
 test("unknown, stopped, unpaired and attachment sends are refused before queueing", async () => {

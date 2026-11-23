@@ -709,6 +709,33 @@ describe("PeerService at boot", () => {
     }
   });
 
+  test("a verified CLI handoff uses the connected stream even when dashboard sends are denied", async () => {
+    const { textHeader } = await import("./peer-outbox");
+    const header = textHeader({ kind: "agent", agent: "helper" }, "hi", { kind: "user" });
+    const { service, endpoint } = makeService({ remoteStartDenial: "inside tmux" });
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const received: string[] = [];
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer, peerName: async () => "paired",
+        snapshot: () => ({ coordinator: null, repos: [], agents: [] }), log() {},
+        receiveMessage: async message => { received.push(message.id); },
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    try {
+      await expect(service.sendRemoteMessage(ID_REMOTE, header, "handoff")).rejects.toThrow("disconnected");
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      await expect(service.sendRemoteMessage(ID_REMOTE, header)).rejects.toThrow("inside tmux");
+      expect(await service.sendRemoteMessage(ID_REMOTE, header, "handoff")).toBe(header.id);
+      await writeFile(peersFile(), "[]");
+      await expect(service.sendRemoteMessage(ID_REMOTE, header, "handoff")).rejects.toThrow("no longer paired");
+      expect(received).toEqual([header.id]);
+    } finally { await service.shutdown(); }
+  });
+
   test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const { service, endpoint } = makeService();

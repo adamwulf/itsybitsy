@@ -14,9 +14,9 @@
  * Each request uses its own bi stream: the dialer writes one JSON object and
  * calls `finish`; the responder reads the bounded request, writes one
  * JSON reply and calls `finish`; the dialer reads the reply with
- * `readToEnd(1 MB)`. No framing code.
+ * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
  *
- * SPEC §20.4 defines the wire shapes for agents, coordinator-pane and new-agent.
+ * SPEC §20.4 defines the wire shapes for agents, coordinator-pane, new-agent and send.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -41,7 +41,7 @@ import { expandTabs } from "../tmux-poller";
 import { stripAnsi } from "../parse-state";
 
 export const PEER_ALPN = "itsybitsy/peer/1";
-/** All requests except new-agent. */
+/** Unframed JSON requests except new-agent. */
 export const PEER_MAX_REQUEST_BYTES = 4096;
 export const NEW_AGENT_MAX_REQUEST_BYTES = 256 * 1024;
 export const NEW_AGENT_TIMEOUT_MS = 30_000;

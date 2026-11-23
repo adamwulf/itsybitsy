@@ -10054,7 +10054,7 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.focusManager.setFocus("right-pane");
     selectByKey(dashboard, PEER_B + "/@system");
     expect(dashboard.focus).toBe("active-agent");
-    for (const sub of ["input", "send"]) {
+    for (const sub of ["input", "send"] as const) {
       dashboard.handleInput("\t");
       expect(dashboard.focusManager.subFocus).toBe(sub);
     }

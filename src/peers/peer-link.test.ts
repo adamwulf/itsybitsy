@@ -630,3 +630,19 @@ describe("coordinator-pane", () => {
     });
   }
 });
+
+
+test("a lost send acknowledgement reports uncertainty and never opens another stream", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock();
+  const header = { op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "system" }, files: [], message: "hi" } as const;
+  const sent = requestSend(a, { ...header, files: [] }, clock.setTimer);
+  const incoming = await b.acceptBi();
+  await incoming.readToEnd(4096);
+  clock.advance(30_000);
+  await expect(sent).rejects.toThrow("outcome unknown — check the agent");
+  expect(clock.pending()).toBe(0);
+  expect(a.closeInfo()).toBeNull();
+  a.close(0, "done");
+});

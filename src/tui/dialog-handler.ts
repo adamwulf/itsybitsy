@@ -198,6 +198,7 @@ export type SetupItem = {
 export type ConfigDialogItem = {
   key: string;
   issue?: string;
+  companionHint?: string;
   type: "number" | "boolean" | "string" | "string[]";
   value: unknown;
   source: "user" | "default";

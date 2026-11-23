@@ -9448,6 +9448,30 @@ describe("setup Peers tab", () => {
     }
   });
 
+  test("Config displays the malformed companion and enforces its effective budget", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-attachment-companion-"));
+    const path = join(dir, "config.json");
+    setUserConfigPath(path);
+    const original = JSON.stringify({ peering: { attachments: { maxFileMB: "typo" } } });
+    try {
+      await Bun.write(path, original);
+      const dashboard = makeDashboard();
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+      const setup = assertDialog(dashboard.dialog, "setup");
+      setup.configSelectedIndex = setup.configItems!.findIndex(item => item.key.endsWith(".maxMessageMB"));
+      dashboard.handleInput("\r");
+      expect(text(dashboard)).toContain('maxFileMB = "typo" (using 1024)');
+      assertDialog(dashboard.dialog, "input").onSubmit("512");
+      await waitFor(() => dashboard.notice?.includes("≥ maxFileMB (1024)") === true);
+      expect(await Bun.file(path).text()).toBe(original);
+    } finally {
+      resetUserConfigPath();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("Kitty Tab and Shift+Tab cycle setup in both directions", () => {
     const { dashboard, service } = open();
     dashboard.handleInput("\x1b[9u");

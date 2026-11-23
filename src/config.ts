@@ -1,7 +1,7 @@
 import { join } from "path";
 import { accountHome, userHome } from "./home";
 import { chmod, stat } from "fs/promises";
-import { DEFAULT_ATTACHMENT_SETTINGS, resolveTransferLimits, attachmentSettingKey, attachmentSettings, validateAttachmentSetting } from "./peers/transfer-limits";
+import { DEFAULT_ATTACHMENT_SETTINGS, resolveTransferLimits, attachmentCompanion, attachmentSettingKey, attachmentSettings, validateAttachmentSetting } from "./peers/transfer-limits";
 
 export type ConfigSource = "user" | "default";
 export type ConfigType = "number" | "boolean" | "string" | "string[]";
@@ -17,6 +17,7 @@ export interface ConfigKeyDef {
 export interface ConfigEntry {
   value: unknown;
   source: ConfigSource;
+  companionHint?: string;
   /** The Config editor shows the actual value to repair, alongside its constraint. */
   repair?: { value: string; source: ConfigSource; issue: string };
 }
@@ -151,6 +152,8 @@ export async function readConfig(options?: ReadConfigOptions): Promise<ConfigRes
     if (setting) {
       const value = effective[setting];
       const entry: ConfigEntry = { value, source: userVal === value ? "user" : "default" };
+      const companion = attachmentCompanion(setting, raw);
+      if (companion) entry.companionHint = companion.hint;
       const edited = userVal === undefined ? def.default : userVal;
       const issue = validateAttachmentSetting(setting, edited, raw);
       if (issue) {

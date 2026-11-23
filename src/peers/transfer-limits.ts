@@ -17,20 +17,31 @@ export function attachmentSettingKey(key: string): Setting | undefined {
   return key.startsWith(prefix) && Object.hasOwn(DEFAULT_ATTACHMENT_SETTINGS, name) ? name as Setting : undefined;
 }
 
+function validSetting(key: Setting, value: unknown): value is number {
+  const [min, max] = TRANSFER_SETTING_BOUNDS[key];
+  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+}
+
+/** The other field's independently valid budget for this edit. A valid raw
+ * budget may become usable again when the edit repairs a cross-field conflict. */
+export function attachmentCompanion(key: Setting, raw: Partial<Record<Setting, unknown>>) {
+  if (key === "maxFiles") return undefined;
+  const other = key === "maxFileMB" ? "maxMessageMB" : "maxFileMB";
+  const stored = raw[other];
+  const value = validSetting(other, stored) ? stored : DEFAULT_ATTACHMENT_SETTINGS[other];
+  const hint = stored === undefined ? `${other} = ${value} (default)`
+    : stored === value ? `${other} = ${value}` : `${other} = ${JSON.stringify(stored)} (using ${value})`;
+  return { value, hint };
+}
+
 export function validateAttachmentSetting(key: Setting, value: unknown, raw: Partial<Record<Setting, unknown>>) {
   const [min, max] = TRANSFER_SETTING_BOUNDS[key];
   if (typeof value !== "number" || !Number.isInteger(value)) return `${key} must be an integer`;
   if (value < min || value > max) return `${key} must be between ${min} and ${max}`;
-  if (value > 0 && key !== "maxFiles") {
-    const other = key === "maxFileMB" ? "maxMessageMB" : "maxFileMB";
-    const companion = raw[other] === undefined ? DEFAULT_ATTACHMENT_SETTINGS[other] : raw[other];
-    const [, maximum] = TRANSFER_SETTING_BOUNDS[other];
-    // The editor identifies a malformed companion on its own row. Either
-    // malformed field can be repaired first, without substituting a hidden budget.
-    if (typeof companion === "number" && Number.isInteger(companion) && companion > 0 && companion <= maximum) {
-      if (key === "maxFileMB" && value > companion) return `maxFileMB must be ≤ maxMessageMB (${companion})`;
-      if (key === "maxMessageMB" && value < companion) return `maxMessageMB must be ≥ maxFileMB (${companion})`;
-    }
+  const companion = attachmentCompanion(key, raw);
+  if (value > 0 && companion && companion.value > 0) {
+    if (key === "maxFileMB" && value > companion.value) return `maxFileMB must be ≤ maxMessageMB (${companion.value})`;
+    if (key === "maxMessageMB" && value < companion.value) return `maxMessageMB must be ≥ maxFileMB (${companion.value})`;
   }
 }
 
@@ -57,8 +68,7 @@ export function resolveTransferLimits(raw: Partial<Record<Setting, unknown>>) {
     const value = raw[key];
     if (value === undefined) return DEFAULT_ATTACHMENT_SETTINGS[key];
     const [min, max] = TRANSFER_SETTING_BOUNDS[key];
-    return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max
-      ? value : fallback(key, `must be an integer from ${min} to ${max}`);
+    return validSetting(key, value) ? value : fallback(key, `must be an integer from ${min} to ${max}`);
   }
   let file = setting("maxFileMB");
   let message = setting("maxMessageMB");

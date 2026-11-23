@@ -2610,7 +2610,7 @@ function handleConfigItemAction(
       ctx.closeDialog();
       ctx.showDialog({
         type: "input",
-        ...(setting && { hint: [item.issue, `Integer ${TRANSFER_SETTING_BOUNDS[setting].join("–")}. 0 = attachments disabled`].filter(Boolean).join("  ") }),
+        ...(setting && { hint: [item.issue, item.companionHint, `Integer ${TRANSFER_SETTING_BOUNDS[setting].join("–")}. 0 = attachments disabled`].filter(Boolean).join("  ") }),
         prompt: setting ? `${setting} (${setting === "maxFiles" ? "files" : "MB"})` : item.sensitive
           ? `${item.key} (${item.type}; leave blank to keep current value):`
           : `${item.key} (${item.type}):`,

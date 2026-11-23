@@ -10882,6 +10882,8 @@ describe("Unified peer repos in the Agents tree", () => {
   test.each(["Esc", "shutdown"])("remote row detects files, shows progress and cleans staging on %s", async action => {
     const home = await mkdtemp(join(tmpdir(), "ib-dashboard-transfer-"));
     setUserHome(home);
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    processStartEpochSecondsCtx.set(() => 123);
     try {
       await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
       const source = join(home, "notes.txt");
@@ -10909,7 +10911,27 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.notice === (action === "Esc" ? "Send cancelled" : "Dashboard shutting down"));
       await waitFor(async () => !await Bun.file(staged!).exists());
       expect(dashboard.inputField.getText()).toContain(source);
-    } finally { resetUserHome(); await rm(home, { recursive: true, force: true }); }
+    } finally { processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+  });
+
+  test("a dashboard snapshot whose owner cannot be verified is refused locally", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ib-dashboard-owner-"));
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    setUserHome(home);
+    processStartEpochSecondsCtx.set(() => null);
+    try {
+      const path = join(home, "file");
+      await Bun.write(path, "contents");
+      await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(path);
+      dashboard.inputField.submit();
+      await waitFor(() => dashboard.notice === "Cannot verify the outgoing attachment owner");
+      expect(service.sendRemoteMessage).not.toHaveBeenCalled();
+      await dashboard.stopRemoteSends();
+    } finally { processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
   });
 
   test("a mixed-case local registry root keeps its dashboard file live on the peer", async () => {
@@ -10964,6 +10986,8 @@ describe("Unified peer repos in the Agents tree", () => {
     const space = await import("../peers/attachment-space");
     const cli = await createCliFixture();
     setUserHome(cli.home);
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    processStartEpochSecondsCtx.set(() => 123);
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const seen: number[] = [];
@@ -10995,7 +11019,7 @@ describe("Unified peer repos in the Agents tree", () => {
       release.resolve();
       await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
       await dashboard.stopRemoteSends();
-    } finally { release.resolve(); spy.mockRestore(); resetUserHome(); await cli.cleanup(); }
+    } finally { processStartEpochSecondsCtx.reset(); release.resolve(); spy.mockRestore(); resetUserHome(); await cli.cleanup(); }
   });
 
   test("dashboard quit closes a held reset before exit and startup reclaims stranded staging", async () => {

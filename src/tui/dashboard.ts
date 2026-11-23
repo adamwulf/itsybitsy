@@ -1,4 +1,4 @@
-import { makeOutgoingDirectory } from "../peers/transfer-owner";
+import { inspectTransferDirectory, makeOutgoingDirectory } from "../peers/transfer-owner";
 import { watcherTmpReservations } from "../peers/attachment-space";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
@@ -2045,6 +2045,8 @@ export class DashboardComponent implements Component {
         filesDir = join(staging, "files");
         header.files = await remoteAttachmentStage(paths, { kind: "user" }, controller.signal, undefined, watcherTmpReservations)(filesDir);
         pending.total = header.files.reduce((sum, file) => sum + file.size, 0);
+        const { owner, state } = await inspectTransferDirectory(staging);
+        if (state !== "verified-live" || owner?.pid !== process.pid) throw new Error("Cannot verify the outgoing attachment owner");
       }
       await service.sendRemoteMessage(remote.peerId, header, "dashboard", {
         filesDir, signal: controller.signal, onProgress: bytes => {

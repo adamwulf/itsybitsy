@@ -4,10 +4,11 @@ import { mkdtemp, open, rm, writeFile, type FileHandle } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeSendHeader, encodeSendHeader, sendFileBody, streamFileBody, type SendHeader } from "./send-frame";
+import { rewriteAttachmentPaths } from "./attachment-paths";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 
 const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
-const file = { name: "雪.png", size: 4, sha256: "a".repeat(64) };
+const file = { name: "雪.png", size: 4, spellings: ["./雪.png"], sha256: "a".repeat(64) };
 const header: SendHeader = {
   op: "send", id: "97885550-0b3b-45a3-a790-ba6a71819ee9", from: { kind: "user" },
   target: { kind: "agent", agent: "worker" }, message: "🪴", files: [file],
@@ -76,6 +77,8 @@ test("rejects invalid UTF-8, JSON, truncated frames, and malformed header fields
     { target: { agent: "a" } }, { target: { kind: "unknown" } }, { target: { kind: "system", repo: "r" } },
     { target: { kind: "agent", agent: 42 } }, { target: { kind: "agent", agent: "a", repo: false } },
     { target: { kind: "repo-coordinator" } }, { target: { kind: "repo-coordinator", repo: "r", agent: "a" } },
+    { files: [{ ...file, spellings: null }] }, { files: [{ ...file, spellings: [] }] },
+    { files: [{ ...file, spellings: [2] }] }, { files: [{ ...file, spellings: [""] }] },
     { message: null }, { files: {} }, { files: [{ ...file, name: 2 }] }, { files: [{ ...file, size: -1 }] },
     { files: [{ ...file, size: 1.1 }] }, { files: [{ ...file, sha256: "z".repeat(64) }] },
   ]) {
@@ -172,4 +175,14 @@ test("sends bounded chunks in order, reports cumulative bytes and can abort a st
     await handle?.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("header spellings preserve two identical basenames and repeated references during rewriting", async () => {
+  const input = { ...header, message: "./a/image.png ./b/image.png ~/a/image.png", files: [
+    { ...file, name: "image.png", spellings: ["./a/image.png", "~/a/image.png"] },
+    { ...file, name: "image.png", spellings: ["./b/image.png"] },
+  ] };
+  const decoded = await decodeSendHeader(new MemoryStream(encodeSendHeader(input)));
+  const mapping = decoded.files.map(({ name, spellings }, index) => ({ spellings, destination: "/tmp/" + index + "/" + name }));
+  expect(rewriteAttachmentPaths(decoded.message, mapping)).toBe("/tmp/0/image.png /tmp/1/image.png /tmp/0/image.png");
 });

@@ -14,7 +14,7 @@ export interface SendHeader {
   from: { kind: "user" } | { kind: "agent"; id: string };
   target: SendTarget;
   message: string;
-  files: { name: string; size: number; sha256: string }[];
+  files: { name: string; size: number; sha256: string; spellings: string[] }[];
 }
 
 type Bytes = Uint8Array | number[];
@@ -56,7 +56,8 @@ function validTarget(value: unknown): value is SendTarget {
 function validFile(value: unknown): value is SendHeader["files"][number] {
   return object(value) && nonempty(value.name) && typeof value.size === "number" &&
     Number.isSafeInteger(value.size) && value.size >= 0 && typeof value.sha256 === "string" &&
-    /^[a-f0-9]{64}$/i.test(value.sha256) && onlyKeys(value, "name", "size", "sha256");
+    /^[a-f0-9]{64}$/i.test(value.sha256) && Array.isArray(value.spellings) &&
+    value.spellings.length > 0 && value.spellings.every(nonempty) && onlyKeys(value, "name", "size", "sha256", "spellings");
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 

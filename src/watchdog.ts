@@ -1941,13 +1941,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   const jobs = new Map<string, Promise<void>>();
   const lifetime = new AbortController();
   const stop = () => lifetime.abort(new Error("Watchdog stopped"));
-  let spawnBusy = false;
+  let brokerPoll: Promise<void> | undefined;
   const spawnNow = (): void => {
-    if (spawnBusy || lifetime.signal.aborted) return;
-    spawnBusy = true;
-    void spawnBrokerHooks.process(agentId, repoPath, jobs, lifetime.signal)
+    if (brokerPoll || lifetime.signal.aborted) return;
+    brokerPoll = spawnBrokerHooks.process(agentId, repoPath, jobs, lifetime.signal)
       .catch(() => { /* never crash the watchdog on a spawn-request error */ })
-      .finally(() => { spawnBusy = false; });
+      .finally(() => { brokerPoll = undefined; });
   };
   let spawnWatcher: FSWatcher | null = null;
   let spawnDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -2288,7 +2287,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     process.off("SIGINT", stop);
     let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([Promise.allSettled(jobs.values()), new Promise<void>(resolve => {
+      await Promise.race([Promise.allSettled([brokerPoll, ...jobs.values()]), new Promise<void>(resolve => {
         deadline = setTimeout(resolve, 1500);
       })]);
     } finally { clearTimeout(deadline); }

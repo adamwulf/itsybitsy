@@ -295,6 +295,22 @@ describe("send broker", () => {
       expect(tmuxListCalls).toEqual([]);
     });
 
+    test("shutdown suppresses a busy response already writing its temporary result", async () => {
+      const jobs = new Map([[agentDir, Promise.resolve()]]);
+      const controller = new AbortController();
+      const { deps } = server({ transferJobs: jobs, transferSignal: controller.signal });
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      const realWrite = fs.writeFile;
+      const spy = spyOn(fs, "writeFile").mockImplementation(async (path, data, options) => {
+        await realWrite(path, data, options);
+        if (String(path).startsWith(spawnResultDir(agentDir))) controller.abort(new Error("watchdog stopped"));
+      });
+      try {
+        await expect(processSpawnRequests(SENDER_ID, senderRepo, deps)).rejects.toThrow("watchdog stopped");
+        expect(await readdir(spawnResultDir(agentDir))).toEqual([]);
+      } finally { spy.mockRestore(); }
+    });
+
     test("finishing a remote job cannot recreate a retired agent directory", async () => {
       const release = Promise.withResolvers<void>();
       const jobs = new Map<string, Promise<void>>();

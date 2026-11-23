@@ -561,13 +561,13 @@ export async function processSpawnRequests(
     try {
       const size = (await stat(claimed)).size;
       if (size > SPAWN_MAX_PROMPT_BYTES * 2) {
-        await writeResult(agentDir, id, brokerFail("Error: spawn request is too large"));
+        await writeResult(agentDir, id, brokerFail("Error: spawn request is too large"), deps.transferSignal);
         handled++;
         continue;
       }
       text = await Bun.file(claimed).text();
     } catch (err) {
-      await writeResult(agentDir, id, brokerFail(`Cannot read claimed request: ${err}`));
+      await writeResult(agentDir, id, brokerFail(`Cannot read claimed request: ${err}`), deps.transferSignal);
       handled++;
       continue;
     } finally { await rm(claimed, { force: true }); }
@@ -584,7 +584,7 @@ export async function processSpawnRequests(
     const named = jobs && requestOp(text);
     if (deps.transferSignal?.aborted) break;
     if (jobs && named?.present && named.op === "remote-send") {
-      if (jobs.has(agentDir)) await writeResult(agentDir, id, brokerFail("busy, try again"));
+      if (jobs.has(agentDir)) await writeResult(agentDir, id, brokerFail("busy, try again"), deps.transferSignal);
       else jobs.set(agentDir, dispatch().finally(() => jobs.delete(agentDir)));
     } else await dispatch();
   }

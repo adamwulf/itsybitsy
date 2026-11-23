@@ -88,6 +88,10 @@ The bullets below are the original, superseded proposal. They are kept for refer
   - **(ii)** The receiver trusts the sending machine's user or agent label. It cannot verify that label. This is the same trust it already gives that machine's local classification.
   - **(iii)** Remote sends need `ib watch` running on both machines.
   - **(iv)** The CLI waits up to about 10 s for the receiver's result.
+  - **Answers (Adam, 2026-11-22):** (i) yes, (ii) yes, (iii) yes.
+  - **(iv) revised.** The receiver checks the request, adds it to the recipient's queue, and acknowledges at once. The sender returns as soon as that acknowledgement arrives. It never waits for delivery. This matches local `ib send`, which also returns once the message is queued. The message then reaches the agent through the receiver's watchdog, and the agent's response shows up in later polls.
+    - The 10 s limit is only a timeout, used when the other machine does not answer at all.
+    - A validation error comes back in the acknowledgement, the same as a local `ib send` to an unknown agent. Examples: an unknown repo or agent, or a gate refusal.
 - **B.1 Who may send.** Recommended: (a) a human in `ib watch` first.
   - (b) Also humans through `ib send <machine>/...` from the CLI. The CLI would need to hand the request to the running `ib watch`, which owns the endpoint.
   - (c) Agents too, so an agent on one machine can message an agent on the other.

@@ -9954,6 +9954,36 @@ describe("Unified peer repos in the Agents tree", () => {
       .join(" ");
   }
 
+  test.each(["?", "/", "@", "I"])("dialog %s pauses coordinator reads and resumes once", async key => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const timers = new Set<() => void>();
+    (dashboard as any).remotePane.every = (_ms: number, tick: () => void) => {
+      timers.add(tick);
+      return () => timers.delete(tick);
+    };
+    const pending = Promise.withResolvers<{ state: string; text: string }>();
+    service.fetchCoordinatorPane.mockImplementationOnce(() => pending.promise);
+    try {
+      selectByKey(dashboard, PEER_B + "/@system");
+      dashboard.handleInput(key);
+      expect(dashboard.dialog).not.toBeNull();
+      for (let tick = 0; tick < 3; tick++) for (const poll of timers) poll();
+      expect(timers.size).toBe(0);
+      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(1);
+      pending.resolve({ state: "running", text: "late reply" });
+      await Promise.resolve();
+      expect((dashboard as any).remotePane.render(60, 3).join(" ")).not.toContain("late reply");
+      dashboard.closeDialog();
+      expect(timers.size).toBe(1);
+      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(2);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
   test("a highlighted coordinator shows the startup denial, then the remote capture when permitted", async () => {
     const { dashboard, service } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);

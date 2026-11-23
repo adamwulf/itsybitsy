@@ -7,6 +7,7 @@ import { padLines, WordWrapCache, wordWrapSingleLine } from "./wrap";
  * the service settles them, so returning to a peer cannot start a second read. */
 export class RemoteCoordinatorPane {
   private selected: string | null = null;
+  private visible = true;
   private denial: string | null = null;
   private cancel: (() => void) | null = null;
   private inFlight = new Set<string>();
@@ -23,16 +24,20 @@ export class RemoteCoordinatorPane {
     },
   ) {}
 
-  select(id: string | null, denial: string | null = null): void {
-    if (id === this.selected && denial === this.denial) return;
+  select(id: string | null, denial: string | null = null, visible = true): void {
+    const samePeer = id === this.selected && denial === this.denial;
+    if (samePeer && visible === this.visible) return;
     this.cancel?.();
     this.cancel = null;
     this.selected = id;
     this.denial = denial;
-    this.text = null;
-    this.error = null;
-    this.wrap.reset();
-    if (id === null || denial !== null) return;
+    this.visible = visible;
+    if (!samePeer) {
+      this.text = null;
+      this.error = null;
+      this.wrap.reset();
+    }
+    if (!visible || id === null || denial !== null) return;
     const tick = () => this.poll(id);
     this.cancel = this.every(2_000, tick);
     void tick();

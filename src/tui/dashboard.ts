@@ -853,7 +853,7 @@ export class DashboardComponent implements Component {
   private syncRemotePane(): void {
     const row = this.remoteSelection;
     if (row?.kind === "remote-coordinator" && this.tmuxPoller.isRunning() && this.peerService) {
-      this.remotePane.select(row.peerId, this.peerService.remoteStartDenial);
+      this.remotePane.select(row.peerId, this.peerService.remoteStartDenial, this._dialog === null);
     } else {
       this.remotePane.select(null);
     }
@@ -1963,6 +1963,7 @@ export class DashboardComponent implements Component {
   private openDialog(dialog: NonNullable<DialogState>) {
     const previous = this._dialog;
     this._dialog = dialog;
+    this.syncRemotePane();
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
         : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor" || dialog.type === "multi-select") ? 70
@@ -1995,6 +1996,7 @@ export class DashboardComponent implements Component {
   closeDialog() {
     const previous = this._dialog;
     this._dialog = null;
+    this.syncRemotePane();
     this.updatePeersTabVisibility(previous);
     this.overlayHandle?.hide();
     this.overlayHandle = null;

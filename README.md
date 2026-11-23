@@ -147,7 +147,7 @@ Transient labels (`merging`, `restarting`, `op_stuck`) appear while a lifecycle 
 | `@<repo>/<agent-id>` | An agent in a specific repo |
 | `@<team>` | Every member of a team |
 
-Use `ib send reader --attach ./plot.png --attach ./data.csv "Compare ./plot.png with ./data.csv"` to share local files. The recipient gets private snapshots in `/tmp`, with a mapping from each original name to its copy. You can also supply the message body through stdin or `-f`. Paired machines currently accept text messages only.
+Use `ib send reader --attach ./plot.png --attach ./data.csv "Compare ./plot.png with ./data.csv"` to share local files. The recipient gets private snapshots in `/tmp`, with a mapping from each original name to its copy. You can also supply the message body through stdin or `-f`. To send across machines, use a paired target such as `ib send laptop/photos/reader --attach ./plot.png "Review ./plot.png"`. Run `ib watch` on both machines. Ctrl-C cancels the CLI transfer. In the dashboard, drop a file path into the remote row’s message field and press Send. The pending row shows bytes sent and Esc cancels it.
 
 Agents ask you questions with `ib ask`; `ib questions` lists what is pending and `ib acknowledge` clears one. Teams are named groups for broadcast: `ib team create/add/remove/list/delete`, `ib roster <name>`.
 
@@ -296,7 +296,7 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 | `hooks.injectStatus` / `hooks.statusVisible` | `true` | Agents-status injection in the main session |
 | `channels.telegram.bot_token` | — | Telegram bridge |
 
-In `ib watch`, press `h`, then choose **Config** to edit the limits for explicit CLI attachments (`ib send --attach`). Dashboard drag-and-drop uses its own staging rules. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender reads the settings for every attachment request and the local receiver checks them again after copying.
+In `ib watch`, press `h`, then choose **Config** to edit the limits for explicit CLI attachments (`ib send --attach`). Dashboard drag-and-drop uses its own staging rules. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender and the receiving machine each enforce their own current settings. The receiver queues the message after verifying every file.
 
 Per-agent-type permissions do **not** live here — they live in the agent-type `.md` files (old `permissions.*` config keys are deprecated and print migration hints).
 

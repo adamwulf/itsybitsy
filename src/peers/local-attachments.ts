@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { readTransferLimits } from "../config";
 import { userHome } from "../home";
+import { resolveCallerAgentContext } from "../ib-commands";
+import { matchWorktreeCaller } from "../runtime-names";
+import { isSandboxedProcess } from "../sandbox-detect";
+import { buildAgentAccessTable, pathDenialReason } from "../hooks/paths-table";
+import { resolvePreparedAccess } from "../sandbox";
+import { checkAttachmentIdentitiesViaWatchdog } from "./attachment-identity-broker";
 import { readMachineName } from "../machine-name";
 import { buildAttachmentManifest, fileChunks, hashFile, type ManifestEntry } from "./attachment-manifest";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
@@ -42,9 +48,32 @@ export async function copyLocalAttachments(
   }
 }
 
+async function senderAttachmentAccess(cwd: string, signal?: AbortSignal) {
+  const caller = await resolveCallerAgentContext(cwd);
+  if (!caller) {
+    if (matchWorktreeCaller(cwd)) throw new Error("Cannot verify attachment sender metadata");
+    return {};
+  }
+  const sandboxed = isSandboxedProcess();
+  const access = await buildAgentAccessTable({
+    meta: caller.meta, rootRepo: caller.repoPath, agentDir: caller.agentDir, agentsDir: dirname(caller.agentDir),
+    worktreePath: caller.meta.worktree === false ? caller.repoPath : join(caller.agentDir, "repo"),
+    kernelSandboxed: sandboxed,
+  });
+  return {
+    checkRead(source: string) {
+      if (resolvePreparedAccess(access, source, "read") === "deny") throw new Error(pathDenialReason(access, source, "read"));
+    },
+    checkWithWatchdog: sandboxed
+      ? (ids: string[]) => checkAttachmentIdentitiesViaWatchdog(caller, ids, signal)
+      : undefined,
+  };
+}
+
 export async function stageLocalAttachments(message: string, paths: readonly string[], signal?: AbortSignal) {
+  const cwd = process.cwd();
   const entries = await buildAttachmentManifest(paths, {
-    cwd: process.cwd(), home: userHome(), machine: await readMachineName(), limits: await readTransferLimits(),
+    ...await senderAttachmentAccess(cwd, signal), cwd, home: userHome(), machine: await readMachineName(), limits: await readTransferLimits(),
   });
   try {
     const verified = [];

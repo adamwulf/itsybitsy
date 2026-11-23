@@ -212,8 +212,9 @@ export async function buildAgentAccessTable(input: {
   agentsDir: string;
   rootRepo: string;
   home?: string;
+  kernelSandboxed?: boolean;
 }): Promise<PreparedAccessTable> {
-  const kernelSandboxed = metaKernelSandboxed(input.meta);
+  const kernelSandboxed = input.kernelSandboxed ?? metaKernelSandboxed(input.meta);
   const paths = resolvePathsConfig(input.meta.paths as PathsConfig | undefined);
   const gitDir = await resolveGitCommonDir(input.worktreePath, input.rootRepo);
   const uid = process.getuid?.() ?? 0;

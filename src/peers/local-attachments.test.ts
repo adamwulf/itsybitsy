@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, readdir, realpath, rm, stat, truncate } from "node:fs/promises";
+import { chmod, link, mkdir, readdir, realpath, rm, stat, truncate } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { writeAgentTransient } from "../agents";
-import { createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
+import { resetUserHome, setUserHome } from "../home";
+import { withFixtureWatchdog, createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
 import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
 import { copyLocalAttachments } from "./local-attachments";
 
@@ -15,11 +16,12 @@ beforeEach(async () => {
   await Bun.write(join(fixture.home, ".itsybitsy/machine-name"), "desk");
   await writeAgentTransient(recipient.agentDir, {
     updated_at_ms: Date.now(), watchdog_pid: process.pid, tmux_compacting: false,
-    tmux_rate_limited: false, tmux_api_error: false, tmux_api_safeguard: false, has_background_tasks: false,
+    tmux_rate_limited: false, tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false, has_background_tasks: false,
   });
 });
 afterEach(async () => {
   for (const root of snapshots.splice(0)) await rm(root, { recursive: true, force: true });
+  resetUserHome();
   await fixture.cleanup();
 });
 
@@ -102,4 +104,61 @@ test("a same-size mutation after validation removes the entire partial snapshot"
   } finally {
     await Promise.all(manifest.map(entry => entry.handle.close()));
   }
+});
+
+test("an unsandboxed agent's own deny rule covers a relative --attach even with --from", async () => {
+  const path = join(recipient.repoPath, ".itsybitsy/agents/sender/repo/private");
+  const sender = await fixture.addAgent(recipient.repoPath, "sender", { paths: { deny: [path] }, sandbox: { enabled: false } });
+  await Bun.write(path, "fixture");
+  const run = await fixture.run(["send", "reader", "--from", "@system", "--attach", "./private", "read"], {
+    cwd: sender.sessionCwd, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+  });
+  expect(run.exitCode).toBe(1);
+  expect(run.stderr).toContain("paths.deny");
+  expect(run.stderr).toContain(await realpath(path));
+  expect(await queue().exists()).toBe(false);
+});
+
+test.each(["ordinary", "protected link", "stopped watchdog"] as const)(
+  "sandboxed CLI with %s requires an explicit watchdog identity approval", async scenario => {
+    setUserHome(fixture.home);
+    const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
+    const file = join(sender.sessionCwd, "report");
+    if (scenario === "protected link") {
+      const secret = join(fixture.home, ".itsybitsy/sealed/example");
+      await Bun.write(secret, "fixture");
+      await link(secret, file);
+    } else await Bun.write(file, "ordinary data");
+    const run = () => fixture.run(["send", "reader", "--attach", "./report", "inspect"], {
+      sandboxed: true, cwd: sender.sessionCwd, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+    });
+    const result = scenario === "stopped watchdog" ? await run() : await withFixtureWatchdog(sender, {
+      verifySeal: async () => ({ ok: true }),
+    }, run);
+    if (scenario !== "ordinary") {
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(scenario === "protected link" ? "protected attachment identity" : "running sender watchdog");
+      expect(await queue().exists()).toBe(false);
+      return;
+    }
+    expect(result.exitCode, result.stderr).toBe(0);
+    const record = JSON.parse(await queue().text());
+    expect(record).toMatchObject({ fromAgent: "sender", noPassthrough: true });
+    const destination = record.message.split(" → ")[1];
+    snapshots.push(dirname(dirname(destination)));
+    expect(await Bun.file(destination).text()).toBe("ordinary data");
+  },
+);
+
+test.skipIf(process.getuid?.() === 0)("sandbox-routed CLI reports a kernel read refusal before contacting its watchdog", async () => {
+  const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
+  const file = join(sender.sessionCwd, "unreadable");
+  await Bun.write(file, "test fixture");
+  await chmod(file, 0);
+  const result = await fixture.run(["send", "reader", "--attach", "./unreadable", "read"], {
+    sandboxed: true, cwd: sender.sessionCwd, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+  });
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toMatch(/EACCES|permission denied/i);
+  expect(await queue().exists()).toBe(false);
 });

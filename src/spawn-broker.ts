@@ -653,6 +653,10 @@ async function handleOneRequest(
       const { handleAskRequest } = await import("./ask-broker");
       return handleAskRequest({ agentId, repoPath, agentDir, id, text }, deps);
     }
+    if (named.op === "check-attachment-identities") {
+      const { checkProtectedAttachmentRequest } = await import("./peers/attachment-identity-broker");
+      return checkProtectedAttachmentRequest(text, id);
+    }
     if (named.op === "send" || named.op === "remote-send") {
       const { handleSendRequest } = await import("./send-broker");
       return handleSendRequest({ agentId, repoPath, agentDir, id, text }, deps);

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
-import { canonicalizeSandboxPath } from "../sandbox";
+import { canonicalizeSandboxPath, metadataRealpath } from "../sandbox";
 import { sanitizeAttachmentName } from "./attachment-name";
 import { CHUNK_BYTES, checkAttachmentsEnabled, checkManifestLimits, DEFAULT_TRANSFER_LIMITS, type TransferLimits } from "./transfer-limits";
 
@@ -25,7 +25,7 @@ function fileIdentity(info: BigIntStats): string {
 
 /** Follow directory links once per identity. Only ENOENT from the initial
  * lstat of a root means an empty tree; failures below it invalidate the scan. */
-async function protectedIdentities(roots: string[]): Promise<Set<string>> {
+export async function protectedAttachmentIdentities(home: string): Promise<Set<string>> {
   const identities = new Set<string>();
   async function visit(path: string, info: BigIntStats) {
     const id = fileIdentity(info);
@@ -39,7 +39,7 @@ async function protectedIdentities(roots: string[]): Promise<Set<string>> {
     const after = await stat(path, { bigint: true });
     if (fileIdentity(after) !== id || after.ctimeNs !== info.ctimeNs) throw new Error("directory changed during enumeration");
   }
-  for (const root of roots) {
+  for (const root of protectedRoots(home)) {
     try {
       const entry = await lstat(root, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return undefined;
@@ -54,6 +54,10 @@ async function protectedIdentities(roots: string[]): Promise<Set<string>> {
     }
   }
   return identities;
+}
+
+function protectedRoots(home: string) {
+  return ["peer", "sealed"].map(name => join(home, ".itsybitsy", name));
 }
 
 export interface ManifestEntry {
@@ -71,17 +75,21 @@ interface ManifestOptions {
   home: string;
   limits?: TransferLimits;
   machine: string;
+  checkRead?: (source: string) => void;
+  /** Inside the kernel sandbox the watchdog alone enumerates the protected roots. */
+  checkWithWatchdog?: (identities: string[]) => Promise<void>;
 }
 
 export async function buildAttachmentManifest(
-  paths: readonly string[], { cwd, home, limits = DEFAULT_TRANSFER_LIMITS, machine }: ManifestOptions,
+  paths: readonly string[], { cwd, home, limits = DEFAULT_TRANSFER_LIMITS, machine, checkRead, checkWithWatchdog }: ManifestOptions,
 ): Promise<ManifestEntry[]> {
   if (!paths.length) return [];
   const enabled = checkAttachmentsEnabled(limits, machine);
   if (!enabled.ok) throw new Error(enabled.error);
-  const roots = ["peer", "sealed"].map(name => join(home, ".itsybitsy", name));
-  const protectedDirs = roots.map(root => canonicalizeSandboxPath(root));
-  const protectedFiles = await protectedIdentities(roots);
+  const protectedDirs = protectedRoots(home).map(root =>
+    checkWithWatchdog ? metadataRealpath(root) ?? root : canonicalizeSandboxPath(root));
+  const protectedFiles = checkWithWatchdog ? undefined : await protectedAttachmentIdentities(home);
+  const identities: string[] = [];
   const entries = new Map<string, ManifestEntry>();
   try {
     for (const argument of paths) {
@@ -90,8 +98,17 @@ export async function buildAttachmentManifest(
       const absolute = isAbsolute(expanded) ? expanded : cwd + sep + expanded;
       try {
         if (absolute.endsWith("/") || absolute.endsWith("/.")) throw new Error("directory spelling is not a regular file");
-        const source = await realpathArgument(absolute);
-        if (protectedDirs.some(dir => source === dir || source.startsWith(dir + sep))) {
+        // Metadata follows symlinks and ".." without opening an unreadable
+        // ancestor. Only ask for on-disk case after the read check passes.
+        const candidate = checkWithWatchdog ? metadataRealpath(absolute) : await realpathArgument(absolute);
+        if (!candidate) throw new Error("cannot resolve attachment path");
+        if (protectedDirs.some(dir => candidate === dir || candidate.startsWith(dir + sep))) {
+          throw new Error("protected attachment path");
+        }
+        checkRead?.(candidate);
+        const source = checkWithWatchdog ? await realpath(candidate) : candidate;
+        if (source !== candidate) checkRead?.(source);
+        if (source !== candidate && protectedDirs.some(dir => source === dir || source.startsWith(dir + sep))) {
           throw new Error("protected attachment path");
         }
         let entry = entries.get(source);
@@ -105,11 +122,12 @@ export async function buildAttachmentManifest(
             const opened = await handle.stat({ bigint: true });
             if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
                 await realpath(source) !== source) throw new Error("file changed while opening");
-            if (protectedFiles.has(fileIdentity(opened))) throw new Error("protected attachment identity");
+            if (protectedFiles?.has(fileIdentity(opened))) throw new Error("protected attachment identity");
             entry = { argument, source, handle, size: Number(opened.size), name: sanitizeAttachmentName(basename(absolute)), spellings: [] };
             const result = checkManifestLimits([...entries.values(), entry], limits, { machine });
             if (!result.ok) throw new Error(result.error);
             entries.set(source, entry);
+            identities.push(fileIdentity(opened));
           } catch (error) {
             await handle.close();
             throw error;
@@ -122,6 +140,7 @@ export async function buildAttachmentManifest(
         throw new Error(`Cannot attach ${JSON.stringify(argument)}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     }
+    await checkWithWatchdog?.(identities);
     return Array.from(entries.values());
   } catch (error) {
     await Promise.allSettled(Array.from(entries.values(), entry => entry.handle.close()));

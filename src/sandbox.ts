@@ -296,7 +296,7 @@ const MAX_SYMLINK_EXPANSIONS = 32;
  * realpathSync fails: a missing or non-directory component, a dangling link, a
  * loop. Unlike realpathSync it keeps the letter case as spelled.
  */
-function metadataRealpath(absolute: string): string | null {
+export function metadataRealpath(absolute: string): string | null {
   const pending = absolute.split("/").filter((part) => part.length > 0);
   let resolved = "/";
   let isDirectory = true;

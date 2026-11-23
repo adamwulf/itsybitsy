@@ -71,7 +71,6 @@ const MAX_REMOTE_TEXT = 80;
 export interface PairStream {
   write(bytes: Uint8Array): Promise<number>;
   stopReceiving(): Promise<void>;
-  stopped(): Promise<void>;
   read(limit: number): Promise<Uint8Array>;
   writeAll(bytes: Uint8Array): Promise<void>;
   /** Finish the send half: the other side's readToEnd then completes. */

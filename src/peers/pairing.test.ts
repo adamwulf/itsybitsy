@@ -501,7 +501,6 @@ describe("pair protocol: read failures close the connection", () => {
         return {
           write: bytes => stream.write(bytes),
           stopReceiving: () => stream.stopReceiving(),
-          stopped: () => stream.stopped(),
           read: limit => stream.read(limit),
           writeAll: (bytes) => stream.writeAll(bytes),
           cancel: () => stream.cancel(),

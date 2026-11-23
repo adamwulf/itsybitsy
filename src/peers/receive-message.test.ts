@@ -137,19 +137,34 @@ test("cache capacity retains accepted ids for ten minutes, independently per pee
 test.each(["header", "FIN"])("stalled %s stops the receive half and returns the idle error", async stage => {
   const { a, b } = createMemoryLink("sender", "receiver");
   const clock = createFakeClock();
+  const stream = await a.openBi();
+  const response = await b.acceptBi();
+  const finished = Promise.withResolvers<void>();
+  const finish = response.finish.bind(response);
+  response.finish = async () => { await finish(); finished.resolve(); };
+  // QUIC can acknowledge every reply byte while the client has yet to read.
+  Object.assign(response, { stopped: async () => null });
+  const accept = b.acceptBi.bind(b);
+  b.acceptBi = async () => { b.acceptBi = accept; return response; };
   const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
     log() {}, receiveMessage: receiver, setTimer: clock.setTimer });
-  const stream = await a.openBi();
   try {
     await stream.writeAll(stage === "header" ? Uint8Array.of(0) : encodeSendHeader(header()));
     await Bun.sleep(0);
     clock.advance(60_000);
-    await Bun.sleep(0); // local FIN has returned, but the client has not consumed the ACK
+    await finished.promise;
+    await Bun.sleep(0);
+    clock.advance(4999);
     expect(a.closeInfo()).toBeNull();
-    const reply = JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
-    expect(reply).toMatchObject({ ok: false, error: expect.stringContaining("No progress") });
+    if (stage === "header") {
+      const reply = JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
+      expect(reply).toMatchObject({ ok: false, error: expect.stringContaining("No progress") });
+      a.close(0, "read the error");
+    } else {
+      clock.advance(1); // This client never reads.
+      expect(await a.closed()).toMatchObject({ byPeer: true, code: 3, reason: "send read stalled" });
+    }
     await serving;
-    expect(a.closeInfo()).toMatchObject({ byPeer: true, reason: "send read stalled" });
     await expect(stream.writeAll(Uint8Array.of(1))).rejects.toThrow();
   } finally { a.close(0, "done"); await serving; }
 });

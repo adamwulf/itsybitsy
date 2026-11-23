@@ -526,8 +526,8 @@ async function startAgentWithDeadline(
   }
 }
 
-/** Give FIN time to be acknowledged, or a reset time to acquire the native stream mutex. */
-async function settledWithinGrace(operation: Promise<void>, deps: PeerResponderDeps): Promise<boolean> {
+/** Give the client time to consume its reply, or a reset time to acquire the native stream mutex. */
+async function settledWithinGrace(operation: Promise<unknown>, deps: PeerResponderDeps): Promise<boolean> {
   const deadline = Promise.withResolvers<false>();
   const cancel = deps.setTimer(5000, () => deadline.resolve(false));
   try {
@@ -574,7 +574,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       try {
         await writeWithProgress(stream, encodeJson(reply), deps.setTimer);
         await waitForIO(options, () => stream.finish());
-        if (stalledRead) await settledWithinGrace(stream.stopped(), deps);
+        if (stalledRead) await settledWithinGrace(conn.closed(), deps);
       } catch {
         if (!await settledWithinGrace(stream.cancel(), deps)) {
           closeQuietly(conn, PEER_CLOSE.error, "send reply stalled");

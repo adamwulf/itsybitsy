@@ -66,6 +66,7 @@ test("rejects invalid UTF-8, JSON, truncated frames, and malformed header fields
     await expect(decodeSendHeader(new MemoryStream(bytes))).rejects.toThrow();
   }
   for (const fields of [
+    { extra: true }, ...["a", "a/b", "a//b", "/r/a", "m/r/", "m/r/a/extra"].map(id => ({ from: { kind: "agent", id } })),
     { op: "other" }, { id: "invalid" }, { from: null }, { from: { kind: "agent", id: 1 } },
     { from: { kind: "agent" } }, { from: { kind: "user", id: "surprise" } },
     { target: { agent: "a" } }, { target: { kind: "unknown" } }, { target: { kind: "system", repo: "r" } },

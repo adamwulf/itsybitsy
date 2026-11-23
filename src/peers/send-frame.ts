@@ -41,7 +41,9 @@ function nonempty(value: unknown): value is string {
 function validFrom(value: unknown): value is SendHeader["from"] {
   if (!object(value)) return false;
   if (value.kind === "user") return onlyKeys(value, "kind");
-  return value.kind === "agent" && nonempty(value.id) && onlyKeys(value, "kind", "id");
+  if (value.kind !== "agent" || !nonempty(value.id) || !onlyKeys(value, "kind", "id")) return false;
+  const segments = value.id.split("/");
+  return segments.length === 3 && segments.every(nonempty);
 }
 function validTarget(value: unknown): value is SendTarget {
   if (!object(value)) return false;
@@ -81,7 +83,8 @@ export async function decodeSendHeader(stream: ReadStream, options: FileBodyOpti
   if (length > MAX_HEADER_BYTES) throw new Error(`Send header exceeds ${MAX_HEADER_BYTES} bytes`);
   const bytes = await readHeaderBytes(stream, length, options);
   const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  if (!object(value) || value.op !== "send" || typeof value.id !== "string" || !UUID.test(value.id) ||
+  if (!object(value) || !onlyKeys(value, "op", "id", "from", "target", "message", "files") ||
+      value.op !== "send" || typeof value.id !== "string" || !UUID.test(value.id) ||
       !validFrom(value.from) || !validTarget(value.target) || typeof value.message !== "string" ||
       !Array.isArray(value.files) || !value.files.every(validFile)) throw new Error("Malformed send header");
   return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files: value.files };

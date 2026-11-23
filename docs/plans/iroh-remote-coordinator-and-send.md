@@ -1,6 +1,6 @@
 # iroh peering: remote coordinator view and remote sends
 
-Status: Feature A built on 2026-11-22. Feature B remains proposed pending Adam’s decisions.
+Status: Feature A built on 2026-11-22.
 
 This plan follows `iroh-unified-repos.md` (Phases 6–7, on main). Adam asked for two features on 2026-11-22:
 
@@ -9,7 +9,7 @@ This plan follows `iroh-unified-repos.md` (Phases 6–7, on main). Adam asked fo
 
 Both features run on the existing trusted ALPN `itsybitsy/peer/1` and reuse its allowlist rules (§20.4): the responder checks the allowlist when it accepts a stream and checks it again before it answers. Each feature is a new op.
 
-## A. Remote coordinator view (built)
+## A. Remote coordinator view
 
 - **Tree.**
   - Under the `@system` row, add one row for each paired peer: `<peer name>`, in italic, followed by that machine's coordinator state.
@@ -25,7 +25,7 @@ Both features run on the existing trusted ALPN `itsybitsy/peer/1` and reuse its 
   - It does not run any command on behalf of the requester.
 - **Guard.**
   - The row stays read-only. It has no input box, and retire, resume and every other action are refused with a notice.
-  - Pane reads use the same dashboard startup human-caller decision as remote starts. A denial leaves the row and state visible and displays the reason in the output pane.
+  - This changes if Adam answers B.1 to include the coordinator.
 
 ## B. Remote sends
 

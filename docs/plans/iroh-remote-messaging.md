@@ -215,7 +215,20 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
    - **Per file:** 1 GB.
    - **Per message:** 2 GB total and at most 20 files. These are my values, since Adam set only the per-file limit.
    - **Header:** 256 KB.
-   - **Where they live:** all limits are named constants in one module, `src/peers/transfer-limits.ts`.
+   - **CONFIGURABLE (Adam, 2026-11-23).** All three limits are persisted settings in the user config JSON. You edit them in `ib watch` under `h`, on the Config tab:
+
+     | Key | Default | Allowed range |
+     |---|---|---|
+     | `peering.attachments.maxFileMB` | 1024 | integer, 1–65536 |
+     | `peering.attachments.maxMessageMB` | 2048 | integer, 1–131072, and at least `maxFileMB` |
+     | `peering.attachments.maxFiles` | 20 | integer, 1–100 |
+
+     - **Units.** MB means MiB.
+     - **Bad values.** The config UI refuses an invalid value with a message. A bad value already in the file falls back to its default and logs a warning that names the key.
+     - **Sender.** It checks its own limits before reading or transferring anything.
+     - **Receiver.** It enforces ITS OWN limits, read live for each request, so a peer cannot override them.
+     - **Size rejection.** A rejection names the limit that was exceeded, its value and the machine that set it. For example: "laptop refused big.iso (1.4 GB): its limit is 1 GB per file (peering.attachments.maxFileMB)".
+   - **Fixed constants.** The chunk size, header cap, idle timeout and disk margin stay as named constants in `src/peers/transfer-limits.ts`. They are implementation details, not policy.
    - **Requirements at these sizes:**
      - Streaming must keep memory bounded. Data moves in 64 KB chunks, the hash is computed as data arrives, and nothing is buffered whole.
      - The receiver checks free disk space before it accepts a message. It uses `statfs` on `/tmp` and requires the total size plus a 1 GB margin.

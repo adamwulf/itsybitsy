@@ -25,6 +25,18 @@ describe("outbox queue", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  test.each(["symlink", "FIFO", "hardlink"])("refuses a %s queue for reads and appends", async kind => {
+    const target = join(dir, "protected");
+    await writeFile(target, "original");
+    const fs = await import("node:fs/promises");
+    if (kind === "symlink") await fs.symlink(target, outboxPath(dir));
+    else if (kind === "hardlink") await fs.link(target, outboxPath(dir));
+    else expect(Bun.spawnSync(["mkfifo", outboxPath(dir)]).exitCode).toBe(0);
+    await expect(readOutbox(dir)).rejects.toThrow("single-link regular");
+    await expect(enqueueOutbox(dir, { message: "hi", fromAgent: "", raw: false })).rejects.toThrow("single-link regular");
+    expect(await readFile(target, "utf8")).toBe("original");
+  });
+
   test("enqueue then read returns the message in FIFO order", async () => {
     await enqueueOutbox(dir, { message: "first", fromAgent: "", raw: false, id: "1", enqueuedAtMs: 1 });
     await enqueueOutbox(dir, { message: "second", fromAgent: "agent-x", raw: true, id: "2", enqueuedAtMs: 2 });

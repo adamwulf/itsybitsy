@@ -27,8 +27,10 @@
  * The Telegram channel outbox lives in `src/channels/outbox.ts`.
  */
 
+import { withPinnedDirectory } from "./pinned-directory";
+import { constants } from "node:fs";
 import { join } from "path";
-import { rename, unlink, stat, readFile, appendFile, open, mkdir, rmdir } from "fs/promises";
+import { rename, unlink, stat, lstat, readFile, writeFile, open, type FileHandle, rm, rmdir } from "fs/promises";
 import type { RepoEntry } from "./registry";
 import type { AgentMeta } from "./agents";
 import { getCoordinatorHome } from "./coordinator";
@@ -135,6 +137,21 @@ export function outboxLockPath(dir: string): string {
   return join(dir, OUTBOX_LOCK_FILENAME);
 }
 
+async function openQueue(parent: string, append: boolean) {
+  const path = outboxPath(parent);
+  const before = await lstat(path).catch(err => { if (err.code !== "ENOENT") throw err; });
+  const invalid = () => new Error("Expected a single-link regular outbox queue file");
+  if (before && (!before.isFile() || before.nlink !== 1)) throw invalid();
+  const access = append ? constants.O_RDWR | constants.O_APPEND | constants.O_CREAT : constants.O_RDONLY;
+  const file = await open(path, access | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const opened = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true });
+    if (!opened.isFile() || !named.isFile() || opened.nlink !== 1n || named.nlink !== 1n ||
+        opened.dev !== named.dev || opened.ino !== named.ino) throw invalid();
+    return file;
+  } catch (err) { await file.close(); throw err; }
+}
+
 /**
  * Append one message to the outbox. A single small `appendFile` of one line is
  * atomic on POSIX (O_APPEND), and the queue directory's lock around the drain means a
@@ -164,50 +181,45 @@ export async function enqueueOutbox(
   reservedKey?: string,
   signal?: AbortSignal,
 ): Promise<OutboxMessage> {
-  // Best-effort dedupe: if an identical pending message from the same sender is
-  // already queued, return it instead of appending a second copy. Matches on
-  // everything that makes two messages "the same" — sender, text, raw flag, and
-  // team — deliberately ignoring id/enqueuedAtMs (always unique/irrelevant).
-  // readOutbox returns [] on a missing file, so this is safe before mkdir.
-  const existing = await readOutbox(dir);
-  const dup = existing.find(
-    (m) =>
-      m.fromAgent === msg.fromAgent &&
-      m.peerSender === msg.peerSender &&
-      m.message === msg.message &&
-      m.raw === msg.raw &&
-      m.team === msg.team &&
-      (m.noPassthrough === true) === (msg.noPassthrough === true),
-  );
-  if (dup) return dup;
-
-  const record: OutboxMessage = {
-    id: msg.id ?? crypto.randomUUID(),
-    message: msg.message,
-    fromAgent: msg.fromAgent,
-    peerSender: msg.peerSender,
-    raw: msg.raw,
-    enqueuedAtMs: msg.enqueuedAtMs ?? Date.now(),
-    team: msg.team,
-    // Persist only when explicitly true so an ordinary record round-trips
-    // identically to before (JSON.stringify drops the undefined key), keeping
-    // the dedupe match above stable against pre-existing queued messages.
-    noPassthrough: msg.noPassthrough === true ? true : undefined,
-  };
-  // A stored key identifies a leaf reserved at spawn. A late send to a
-  // retired recipient must not recreate that reservation.
-  if (reservedKey === undefined) await mkdir(dir, { recursive: true });
-  // Append one newline-terminated record so a torn write can be skipped.
   try {
-    signal?.throwIfAborted();
-    await appendFile(outboxPath(dir), JSON.stringify(record) + "\n");
+    return await withPinnedDirectory(dir, reservedKey === undefined, async parent => {
+      const file = await openQueue(parent, true);
+      try { return await appendRecord(file); } finally { await file.close(); }
+    });
   } catch (err) {
-    if (reservedKey !== undefined && (err as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`agent ${reservedKey} no longer exists`);
-    }
+    if (reservedKey !== undefined && (err as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`agent ${reservedKey} no longer exists`);
     throw err;
   }
-  return record;
+  async function appendRecord(file: FileHandle) {
+    const existing = parseQueue(await file.readFile("utf8"));
+    const dup = existing.find(
+      (m) =>
+        m.fromAgent === msg.fromAgent &&
+        m.peerSender === msg.peerSender &&
+        m.message === msg.message &&
+        m.raw === msg.raw &&
+        m.team === msg.team &&
+        (m.noPassthrough === true) === (msg.noPassthrough === true),
+    );
+    if (dup) return dup;
+
+    const record: OutboxMessage = {
+      id: msg.id ?? crypto.randomUUID(),
+      message: msg.message,
+      fromAgent: msg.fromAgent,
+      peerSender: msg.peerSender,
+      raw: msg.raw,
+      enqueuedAtMs: msg.enqueuedAtMs ?? Date.now(),
+      team: msg.team,
+      // Persist only when explicitly true so an ordinary record round-trips
+      // identically to before (JSON.stringify drops the undefined key), keeping
+      // the dedupe match above stable against pre-existing queued messages.
+      noPassthrough: msg.noPassthrough === true ? true : undefined,
+    };
+    signal?.throwIfAborted();
+    await file.appendFile(JSON.stringify(record) + "\n");
+    return record;
+  }
 }
 
 /**
@@ -216,12 +228,17 @@ export async function enqueueOutbox(
  * skipped rather than throwing — a malformed line must not wedge the queue.
  */
 export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
-  let content: string;
-  try {
-    content = await readFile(outboxPath(dir), "utf-8");
-  } catch {
-    return []; // missing file → empty queue
-  }
+  try { return await withPinnedDirectory(dir, false, readPinnedQueue); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return []; throw err; }
+}
+
+async function readPinnedQueue(parent: string) {
+  const file = await openQueue(parent, false);
+  try { return parseQueue(await file.readFile("utf8")); }
+  finally { await file.close(); }
+}
+
+function parseQueue(content: string) {
   const out: OutboxMessage[] = [];
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
@@ -268,20 +285,19 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
  * When the resulting set is empty the file is removed.
  */
 export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<string>): Promise<void> {
-  const current = await readOutbox(dir);
-  const remaining = current.filter((m) => !deliveredIds.has(m.id));
-  const path = outboxPath(dir);
-  if (remaining.length === 0) {
-    try {
-      await unlink(path);
-    } catch {
-      /* already gone */
-    }
-    return;
-  }
-  const tmpPath = path + ".tmp";
-  await Bun.write(tmpPath, remaining.map((m) => JSON.stringify(m)).join("\n") + "\n");
-  await rename(tmpPath, path);
+  try {
+    await withPinnedDirectory(dir, false, async parent => {
+      const current = await readPinnedQueue(parent);
+      const remaining = current.filter(m => !deliveredIds.has(m.id));
+      const path = outboxPath(parent);
+      if (!remaining.length) { await unlink(path); return; }
+      const temp = path + "." + crypto.randomUUID() + ".tmp";
+      try {
+        await writeFile(temp, remaining.map(m => JSON.stringify(m)).join("\n") + "\n", { flag: "wx", mode: 0o600 });
+        await rename(temp, path);
+      } finally { await rm(temp, { force: true }); }
+    });
+  } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
 }
 
 /** Collect unlink failures so teardown can try each remaining file. */

@@ -811,13 +811,18 @@ test("shutdown during the dedupe read prevents the queue append", async () => {
   const { PeerService, defaultPeerServiceDeps } = await import("./service");
   const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null, cli.root), receiveMessage: receiver });
   const dir = join(cli.home, ".itsybitsy", "agents", "worker");
-  const read = fs.readFile;
-  const entered = Promise.withResolvers<void>();
-  const resume = Promise.withResolvers<void>();
-  const held = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof read>) => {
-    if (args[0] === outboxPath(dir)) { entered.resolve(); await resume.promise; }
-    return read(...args);
-  }) as typeof read);
+  const open = fs.open;
+  const entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  const held = spyOn(fs, "open").mockImplementation(async (...args) => {
+    const handle = await open(...args);
+    if (String(args[0]).endsWith("/outbox.jsonl")) {
+      const read = handle.readFile.bind(handle);
+      handle.readFile = (async (...opts: Parameters<typeof read>) => {
+        entered.resolve(); await resume.promise; return read(...opts);
+      }) as typeof handle.readFile;
+    }
+    return handle;
+  });
   try {
     const receive = service.receiveTracked(header(), "peer", paired);
     await entered.promise;

@@ -285,7 +285,7 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 | `model` | `claude:opus` | Default model selector for new agents |
 | `effort` | `xhigh` | Default reasoning effort |
 | `peering.attachments.maxFileMB` | `1024` | MB per file, 0–65536 |
-| `peering.attachments.maxMessageMB` | `2048` | MB per message, 0–131072 and at least maxFileMB |
+| `peering.attachments.maxMessageMB` | `2048` | MB per message, 0–131072, at least maxFileMB when both are positive |
 | `peering.attachments.maxFiles` | `20` | Files per message, 0–100 |
 | `maxAgents` | `10` | Max concurrent agents per repo |
 | `allowAgentQuestions` | `true` | Let agents ask the user questions |
@@ -296,7 +296,7 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 | `hooks.injectStatus` / `hooks.statusVisible` | `true` | Agents-status injection in the main session |
 | `channels.telegram.bot_token` | — | Telegram bridge |
 
-In `ib watch`, press `h`, then choose **Config** to edit attachment limits. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender reads the settings for every attachment request and the local receiver checks them again after copying.
+In `ib watch`, press `h`, then choose **Config** to edit the limits for explicit CLI attachments (`ib send --attach`). Dashboard drag-and-drop uses its own staging rules. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender reads the settings for every attachment request and the local receiver checks them again after copying.
 
 Per-agent-type permissions do **not** live here — they live in the agent-type `.md` files (old `permissions.*` config keys are deprecated and print migration hints).
 

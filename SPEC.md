@@ -1124,7 +1124,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `peering.attachments.maxFileMB` | integer | `1024` | MB per file, 0–65536 |
-| `peering.attachments.maxMessageMB` | integer | `2048` | MB per message, 0–131072 and at least maxFileMB |
+| `peering.attachments.maxMessageMB` | integer | `2048` | MB per message, 0–131072, at least maxFileMB when both are positive |
 | `peering.attachments.maxFiles` | integer | `20` | Files per message, 0–100 |
 | `maxAgents` | number | `10` | Maximum number of concurrently active agents. Checked at spawn time in `newAgent()` — the count of agent directories that contain a `meta.json` must not exceed this value. |
 | `model` | string | `"opus"` | Default Claude model for new agents — the final fallback before `"opus"` for non-coordinator agents. Full resolution order at spawn time (most-specific wins): `--model` CLI flag → `<type>.md` `model` → `_non_coordinator.md` `model` (non-coordinator agents only) → `_all.md` `model` → config `model` (non-coordinator agents only) → `"opus"`. The agent-type layer files all override this config key; a blank `model:` in a layer is skipped (see §2 item 3). Coordinators deliberately skip this fallback — the coordinator agent-type file is authoritative for coordinators. |
@@ -1138,7 +1138,7 @@ All keys are read from `~/.itsybitsy/config.json`. If a key is absent or has an 
 | `hooks.statusVisible` | boolean | `true` | When `true` (and `hooks.injectStatus` is also `true`), the status injection hook also emits a `systemMessage` field so the injected summary appears visibly to the user in the Claude UI. When `false`, status is injected as silent `additionalContext` only. |
 | `hooks.injectTimestamp` | boolean | `false` | When `true`, the `inject-timestamp` PostToolUse hook (installed in regular agents only) injects the current wall-clock time into the agent's context after every tool call. When `false` (the default), the hook exits immediately without injecting. See §6.6.1. |
 
-In `ib watch`, press `h`, then choose **Config** to edit attachment limits. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender reads the settings for every attachment request and the local receiver checks them again after copying.
+In `ib watch`, press `h`, then choose **Config** to edit the limits for explicit CLI attachments (`ib send --attach`). Dashboard drag-and-drop uses its own staging rules. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender reads the settings for every attachment request and the local receiver checks them again after copying.
 
 **Deprecated keys**: All permission list keys (and the former `coordinator.model`) have been moved out of `config.json` into agent type layer files:
 

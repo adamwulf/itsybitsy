@@ -119,7 +119,7 @@ export async function stageLocalAttachments(message: string, paths: readonly str
     const verified = [];
     for (const entry of entries) {
       signal?.throwIfAborted();
-      verified.push({ ...entry, sha256: await hashFile(entry) });
+      verified.push({ ...entry, sha256: await hashFile(entry, signal) });
     }
     const staged = await copyLocalAttachments(message, verified, signal);
     try {

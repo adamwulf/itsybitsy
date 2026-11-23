@@ -216,3 +216,23 @@ test("the sandbox single-link check uses the opened handle's current link count"
     opened.mockRestore();
   }
 });
+
+test("cancelling a hash after the first chunk stops further reads", async () => {
+  const path = join(cwd, "large");
+  await writeFile(path, Buffer.alloc(3 * CHUNK_BYTES));
+  const [entry] = await manifest([path], { cwd, home, machine: "desk" });
+  const controller = new AbortController();
+  const handle: { read(buffer: Buffer, offset: number, length: number, position: number): Promise<unknown> } = entry!.handle;
+  const read = handle.read.bind(handle);
+  const reader = spyOn(handle, "read").mockImplementationOnce(async (buffer, offset, length, position) => {
+    const chunk = await read(buffer, offset, length, position);
+    controller.abort(new Error("cancelled during hash"));
+    return chunk;
+  });
+  try {
+    await expect(hashFile(entry!, controller.signal)).rejects.toThrow("cancelled during hash");
+    expect(reader).toHaveBeenCalledTimes(1);
+  } finally {
+    reader.mockRestore();
+  }
+});

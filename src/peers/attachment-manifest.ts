@@ -165,8 +165,13 @@ export async function* fileChunks(file: FileHandle, expectedSize: number): Async
   if (size < expectedSize) throw new Error("Source shorter than declared file size");
 }
 
-export async function hashFile({ handle, size }: Pick<ManifestEntry, "handle" | "size">): Promise<string> {
+export async function hashFile({ handle, size }: Pick<ManifestEntry, "handle" | "size">, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const hash = createHash("sha256");
-  for await (const chunk of fileChunks(handle, size)) hash.update(chunk);
+  for await (const chunk of fileChunks(handle, size)) {
+    signal?.throwIfAborted();
+    hash.update(chunk);
+  }
+  signal?.throwIfAborted();
   return hash.digest("hex");
 }

@@ -5,7 +5,7 @@ import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { setUserHome, resetUserHome } from "../home";
 import { drainOutbox, resetSendSpawnRunner, setSendSpawnRunner } from "../ib-commands";
 import { resetSystemCoordinatorHasSessionFn, setSystemCoordinatorHasSessionFn } from "../index";
-import { makeAgent, makeSpawnResult } from "../test-utils";
+import { makeAgent, makeSpawnResult, waitFor } from "../test-utils";
 import { spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
@@ -173,3 +173,27 @@ test("repo and system coordinators use their own queues", async () => {
   expect(await exchange(header({ target: { kind: "system" } }))).toMatchObject({ ok: true });
   expect(await readOutbox(dir)).toMatchObject([{ message: "/compact", raw: false }]);
 });
+
+test("system recipient drains an acknowledged append after a long delivery holds its queue lock", async () => {
+  setSystemCoordinatorHasSessionFn(async () => true);
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<number>();
+  const typed: string[] = [];
+  setSendSpawnRunner(cmd => {
+    const result = makeSpawnResult();
+    if (cmd.includes("-l")) {
+      typed.push(cmd.at(-1)!);
+      if (typed.length === 1) { entered.resolve(); return { ...result, exited: release.promise }; }
+    }
+    return result;
+  });
+  const send = (message: string) => exchange(header({ target: { kind: "system" }, message }));
+  try {
+    expect(await send("first")).toMatchObject({ ok: true });
+    await entered.promise;
+    expect(await send("second")).toMatchObject({ ok: true });
+    await Bun.sleep(5500);
+    expect(typed).toHaveLength(1);
+  } finally { release.resolve(0); }
+  await waitFor(async () => typed.length === 2 && !(await readOutbox(join(cli.home, ".itsybitsy"))).length);
+}, 12_000);

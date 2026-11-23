@@ -357,7 +357,7 @@ export async function hookCodexPreToolUse(
       allowList: permissions.allow,
       toolsIgnoringPaths: permissions.toolsIgnoringPaths,
       access,
-      protectedWritePaths: agentProtectedWritePaths(ctxResolved.agentDir),
+      protectedWritePaths: agentProtectedWritePaths(ctxResolved.agentDir, false, access),
     };
 
     // Relationship and internal-command authorization is asynchronous and

@@ -264,13 +264,18 @@ export function peerDirWriteDenyReason(path: string): string {
 export function agentProtectedWritePaths(
   agentDir: string,
   protectIsolatedClaudeSettings = false,
+  access?: PreparedAccessTable,
 ): ProtectedWritePath[] {
+  // This directory can be unreadable under the frozen profile. In that
+  // case keep the named anchor: structuralPath compares it by identity.
+  // Only the unsandboxed hook needs to resolve home symlinks here.
+  const handoff = runtimeNames.peerOutboxDir();
   const protectedPaths: ProtectedWritePath[] = [{
     path: canonicalizeSandboxPath(join(agentDir, "meta.json")),
     subtree: false,
     reason: META_WRITE_DENY_REASON,
   }, {
-    path: canonicalizeSandboxPath(runtimeNames.peerOutboxDir()),
+    path: access && !access.kernelSandboxed ? canonicalizeSandboxPath(handoff) : handoff,
     subtree: true,
     reason: "Only ib send and the watchdog can publish remote send requests",
   }];
@@ -2017,10 +2022,6 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     // Skipped for @system because there is no meta.json to write to.
     await writeAgentState(agentDir, "running");
 
-    // A normal agent may not rewrite its own meta.json (the hook reads its path
-    // lists and canSpawnChildren from it).
-    protectedWritePaths = agentProtectedWritePaths(agentDir, isNoWorktree);
-
     // Build the access table from meta.paths ∪ the spawn-keyed runtime roots. A
     // build failure (e.g. an invalid frozen paths block) denies, never fails open.
     try {
@@ -2032,6 +2033,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
         rootRepo,
         home: userHome(),
       });
+      protectedWritePaths = agentProtectedWritePaths(agentDir, isNoWorktree, access);
     } catch (error) {
       await emitPathDecision(agentDir, toolName, toolInput, {
         decision: "deny",

@@ -4440,3 +4440,21 @@ test("an installed broad write grant cannot publish peer requests", () => {
     expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo hi > " + path } }), ctx).decision).toBe("deny");
   } finally { resetUserHome(); }
 });
+
+test("a frozen kernel policy builds its peer-outbox guard without opening the handoff or its parents", () => {
+  const home = "/Users/test";
+  setUserHome(home);
+  const dir = "/repo/.itsybitsy/agents/example";
+  try {
+    const access = makeAccess({ allowWrite: [home] });
+    const realpath = spyOn(fs, "realpathSync");
+    try {
+      const guards = agentProtectedWritePaths(dir, false, { ...access, kernelSandboxed: true });
+      const handoff = join(home, ".itsybitsy", "peer-outbox");
+      expect(guards.some(entry => entry.subtree && entry.path === handoff)).toBe(true);
+      expect(realpath.mock.calls.some(([path]) => String(path).startsWith(home))).toBe(false);
+      agentProtectedWritePaths(dir, false, access);
+      expect(realpath.mock.calls.some(([path]) => String(path) === handoff)).toBe(true);
+    } finally { realpath.mockRestore(); }
+  } finally { resetUserHome(); }
+});

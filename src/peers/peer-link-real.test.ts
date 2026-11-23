@@ -83,7 +83,7 @@ function makeNetwork(iroh: Iroh) {
     const id = (await inHome(home, loadOrCreateIdentity)).id;
     const logs: string[] = [];
     let snapshots = 0;
-    const receive = createMessageReceiver(line => logs.push(line), () => {});
+    const receive = createMessageReceiver(line => logs.push(line), () => {}, Date.now, 4096, { tempDir: home, hasFreeSpace: async () => true });
 
     const service = new PeerService({
       remoteStartDenial: null,
@@ -288,7 +288,7 @@ test("agents send text and two files in both directions over real paired endpoin
     const [body, , heading, first, second] = queued[0]!.message.split("\n");
     const paths = [first!, second!].map(line => line.split(" → ")[1]!);
     const root = dirname(dirname(paths[0]!));
-    expect(root).toStartWith("/tmp/itsybitsy-attachments-");
+    expect(root).toStartWith(join(recipient.home, "itsybitsy-attachments-"));
     try {
       expect(body).toBe("read " + paths.join(" "));
       expect(heading).toBe("Attachments copied to this machine:");

@@ -84,6 +84,11 @@ test("shipped floor denies the peering secret key despite the ~/.itsybitsy read 
     // Kernel layer.
     const tag = newSandboxTag();
     const profile = generateProfile({ enabled: true, rawAllow: [], domains: [] }, paths, params, tag);
+    const { transferStagingPaths } = await import("./runtime-names");
+    for (const path of transferStagingPaths()) {
+      expect(resolvePathAccess(join(path, "owner.json"), "write", table)).toBe("deny");
+      expect(profile).toContain(`(deny file-write* (subpath "${path}") (with message "${tag}"))`);
+    }
     expect(profile).toContain(`(deny file-read* (subpath "${key}") (with message "${tag}"))`);
     expect(profile).toContain(`(deny file-write* (subpath "${key}") (with message "${tag}"))`);
   }

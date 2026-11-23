@@ -47,7 +47,7 @@ test("a pid born after the staging lease is reclaimed on first sight", async () 
 test("recovery ignores committed snapshots and refuses a symlink above a sweep root", async () => {
   const parent = join(root, "private", "snapshots");
   const name = "itsybitsy-attachments-" + crypto.randomUUID();
-  const partial = join(parent, name + ".partial");
+  const partial = join(parent, "incoming", crypto.randomUUID() + ".partial");
   const committed = join(parent, name);
   for (const path of [partial, committed]) {
     await mkdir(path, { recursive: true, mode: 0o700 });
@@ -57,7 +57,8 @@ test("recovery ignores committed snapshots and refuses a symlink above a sweep r
   await expect(sweepOutgoingDirectories(join(root, "redirected", "snapshots"))).rejects.toThrow("Unsafe transfer directory");
   expect((await stat(partial)).isDirectory()).toBe(true);
   await sweepOutgoingDirectories(parent);
-  expect(await readdir(parent)).toEqual([name]);
+  expect(await readdir(join(parent, "incoming"))).toEqual([]);
+  expect((await stat(committed)).isDirectory()).toBe(true);
 });
 
 test("a bounded scan continues beyond the first batch", async () => {

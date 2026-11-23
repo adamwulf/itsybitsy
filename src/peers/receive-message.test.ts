@@ -37,7 +37,7 @@ beforeEach(async () => {
     }));
   }
   lines = [];
-  receiver = createMessageReceiver(() => {}, line => lines.push(line));
+  receiver = createMessageReceiver(() => {}, line => lines.push(line), Date.now, 4096, { tempDir: cli.root, hasFreeSpace: async () => true });
   setSendSpawnRunner(() => makeSpawnResult());
   paneProbe.set(() => makeSpawnResult(0, "0"));
 });
@@ -283,7 +283,7 @@ function manifestFile(data: string, name = "../nested/a.txt", spelling = "./sour
 async function receiveFixture(space = true) {
   const dir = join(cli.root, "received");
   await mkdir(dir);
-  receiver = createMessageReceiver(() => {}, line => lines.push(line), Date.now, 4096, { tempDir: dir, hasFreeSpace: async () => space });
+  receiver = createMessageReceiver(() => {}, line => lines.push(line), Date.now, 4096, { tempDir: dir, stagingRoot: join(cli.root, "staging"), hasFreeSpace: async () => space });
   return dir;
 }
 
@@ -539,8 +539,9 @@ test("a stuck sender reset closes the connection and releases a partial receipt"
     } });
   const sending = requestSend(a, header({ files: [manifestFile("abc")] }), timer, { filesDir, signal: controller.signal });
   await waitFor(async () => {
-    const [root] = await readdir(dir);
-    return !!root && (await stat(join(dir, root, "0/a.txt")).catch(() => null))?.size === 1;
+    const partials = join(cli.root, "staging/incoming");
+    const [root] = await readdir(partials).catch(() => []);
+    return !!root && (await stat(join(partials, root, "0/a.txt")).catch(() => null))?.size === 1;
   });
   controller.abort(Error("cancelled"));
   await expect(sending).rejects.toThrow("cancelled");
@@ -588,7 +589,7 @@ test("exclusive destination creation preserves existing bytes and cleans the fai
   await Bun.write(existing, "original");
   const openFile = fs.open;
   const collision = spyOn(fs, "open").mockImplementation(async (path, ...args) => {
-    if (String(path).startsWith(dir + "/") && String(path).endsWith("/a.txt")) await fs.link(existing, path);
+    if (String(path).startsWith(join(cli.root, "staging/incoming") + "/") && String(path).endsWith("/a.txt")) await fs.link(existing, path);
     return openFile(path, ...args);
   });
   try {

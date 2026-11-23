@@ -1,3 +1,4 @@
+import { transferStagingRoot } from "../runtime-names";
 import { sweepOutgoingDirectories } from "./transfer-owner";
 /**
  * The iroh endpoint inside `ib watch` (docs/plans/iroh-peering.md, "Process
@@ -168,7 +169,7 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = "/tmp"): PeerServiceDeps {
+export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = transferStagingRoot()): PeerServiceDeps {
   const poll = createPeerOutboxPoll();
   return {
     notice,

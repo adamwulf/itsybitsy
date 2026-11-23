@@ -1,4 +1,5 @@
-import { stagingOwnerStart, writeTransferOwner } from "./transfer-owner";
+import { transferStagingRoot } from "../runtime-names";
+import { stagingArea, stagingOwnerStart, writeTransferOwner } from "./transfer-owner";
 import { constants } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -45,15 +46,17 @@ async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnque
   return sendMessage(resolved.agent, header.message, opts);
 }
 
-type ReceiveStorage = { tempDir: string; hasFreeSpace: typeof hasFreeSpace };
+type ReceiveStorage = { tempDir: string; stagingRoot?: string; hasFreeSpace: typeof hasFreeSpace };
 
 async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions, reserve: (bytes: number) => number) {
   const limits = checkIncomingFiles(header.files, await readTransferLimits(), { machine: await readMachineName() });
   if (!limits.ok) throw new Error(limits.error);
   const total = header.files.reduce((sum, file) => sum + file.size, 0);
   if (!await storage.hasFreeSpace(storage.tempDir, reserve(total))) throw new Error("Insufficient space for attachments and the 1 GiB reserve");
-  const root = join(storage.tempDir, "itsybitsy-attachments-" + crypto.randomUUID());
-  let current = root + ".partial";
+  const id = crypto.randomUUID();
+  const root = join(storage.tempDir, "itsybitsy-attachments-" + id);
+  const staging = storage.stagingRoot ?? (storage.tempDir === "/tmp" ? transferStagingRoot() : join(storage.tempDir, "staging"));
+  let current = join(await stagingArea(staging, "incoming"), id + ".partial");
   await mkdir(current, { mode: 0o700 });
   const cleanup = () => rm(current, { recursive: true, force: true });
   try {
@@ -77,9 +80,13 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
     await requireSendFin(body, options);
     return { message: rewriteAttachmentPaths(header.message, mapping, 1024 ** 2, 64 * 1024), cleanup,
       async commit() {
-        await rename(current, root);
+        await rm(join(current, "owner.json"));
+        try { await rename(current, root); }
+        catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "EXDEV") throw Error("Incoming staging and committed attachments must be on the same filesystem", { cause: err });
+          throw err;
+        }
         current = root;
-        await rm(join(root, "owner.json"));
       },
     };
   } catch (error) {

@@ -1,7 +1,8 @@
+import { transferStagingRoot } from "../runtime-names";
 import { openBrokerLease, stagingDirectoryStat } from "./remote-attachments";
 import { constants, type Dir } from "node:fs";
-import { lstat, mkdtemp, open, opendir, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { lstat, mkdir, mkdtemp, open, opendir, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
 
@@ -116,20 +117,29 @@ export async function sweepTransferDirectory(dir: string, now: number) {
   } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
 }
 
-export async function makeOutgoingDirectory(root = "/tmp") {
-  const owner = { pid: process.pid, start: stagingOwnerStart(process.pid) };
-  const dir = await mkdtemp(join(root, `itsybitsy-outgoing-${owner.pid}-${owner.start ?? 0}-`));
-  try { await writeTransferOwner(dir, owner); return dir; }
+export async function stagingArea(root: string, area: "incoming" | "outgoing") {
+  await safeTransferParent(dirname(root));
+  for (const dir of [root, join(root, area)]) {
+    await mkdir(dir, { mode: 0o700 }).catch(err => { if (err.code !== "EEXIST") throw err; });
+    const info = await lstat(await safeTransferParent(dir));
+    if (info.uid !== process.getuid!() || (info.mode & 0o777) !== 0o700) throw Error("Unsafe transfer staging permissions: " + dir);
+  }
+  return join(root, area);
+}
+
+export async function makeOutgoingDirectory(root = transferStagingRoot()) {
+  const dir = await mkdtemp(join(await stagingArea(root, "outgoing"), "snapshot-"));
+  try { await writeTransferOwner(dir, { pid: process.pid, start: stagingOwnerStart(process.pid) }); return dir; }
   catch (err) { await rm(dir, { recursive: true, force: true }); throw err; }
 }
 
-export async function sweepOutgoingDirectories(root = "/tmp", now = Date.now()) {
-  for (const name of await transferDirectoryBatch(root)) {
-    if (!/^itsybitsy-outgoing-[1-9]\d*-\d+-[a-zA-Z0-9]{6}$/.test(name) &&
-        !/^itsybitsy-attachments-[a-f0-9-]{36}\.partial$/.test(name)) continue;
-    const dir = join(root, name);
-    const info = await lstat(dir).catch(() => undefined);
-    if (info?.isDirectory() && info.uid === process.getuid?.() && !(info.mode & 0o077)) await sweepTransferDirectory(dir, now);
+export async function sweepOutgoingDirectories(root = transferStagingRoot(), now = Date.now()) {
+  for (const name of ["incoming", "outgoing"] as const) {
+    const area = await stagingArea(root, name);
+    for (const entry of await transferDirectoryBatch(area)) {
+      if (name === "incoming" ? !/^[a-f0-9-]{36}\.partial$/.test(entry) : !/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) continue;
+      await sweepTransferDirectory(join(area, entry), now);
+    }
   }
 }
 

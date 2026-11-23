@@ -55,3 +55,12 @@ export const agentDirSuffix = (id: string): string => `/.itsybitsy/agents/${id}`
 export const isExactAgentDir = (path: string): boolean => path.startsWith("/") && /\/\.itsybitsy\/agents\/[^/]+$/.test(path);
 export const containsRuntimeDir = (path: string): boolean => path.includes("/.itsybitsy/");
 export const registeredAgentsPrefix = (repo: string): string => `${repo}${repo.endsWith("/") ? "" : "/"}${RUNTIME_DIR_NAME}/agents/`;
+
+// Static policy anchors. Building a profile or hook table must never open them.
+export function transferStagingPaths(): string[] {
+  const leaf = "itsybitsy-staging-" + process.getuid!();
+  return [join("/private/tmp", leaf), join("/tmp", leaf)];
+}
+export function transferStagingRoot(): string {
+  return transferStagingPaths()[process.platform === "darwin" ? 0 : 1]!;
+}

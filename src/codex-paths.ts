@@ -1,5 +1,5 @@
 import { canonicalizeSandboxPath } from "./sandbox";
-import { peerOutboxDir } from "./runtime-names";
+import { peerOutboxDir, transferStagingPaths } from "./runtime-names";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -175,7 +175,7 @@ function isMissing(error: unknown): boolean {
 
 /** Mandatory agent policy also applies to previously installed type files. */
 export function resolveAgentCodexPathGrants(paths: PathsConfig): Promise<Record<string, Access>> {
-  return resolveCodexPathGrants({ ...paths, deny: [...paths.deny, canonicalizeSandboxPath(peerOutboxDir())] });
+  return resolveCodexPathGrants({ ...paths, deny: [...paths.deny, ...transferStagingPaths(), canonicalizeSandboxPath(peerOutboxDir())] });
 }
 
 /**

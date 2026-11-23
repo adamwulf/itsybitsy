@@ -4467,3 +4467,13 @@ test("agent file tools and shell redirects cannot write CLI attachment staging",
     makeInput({ toolName: "Bash", toolInput: { command: "echo hi > " + file } }),
   ]) expect(checkPathAccess(input, ctx)).toMatchObject({ decision: "deny", reason: expect.stringContaining("Only ib send") });
 });
+
+test("broad tmp grants cannot change trusted staging through either spelling", async () => {
+  const { transferStagingPaths } = await import("../runtime-names");
+  const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/tmp", "/private/tmp"] }) });
+  for (const root of transferStagingPaths()) {
+    for (const path of [root, join(root, "incoming/x.partial/owner.json")]) {
+      expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: path } }), ctx).decision).toBe("deny");
+    }
+  }
+});

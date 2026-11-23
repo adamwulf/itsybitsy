@@ -10883,6 +10883,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const home = await mkdtemp(join(tmpdir(), "ib-dashboard-transfer-"));
     setUserHome(home);
     const { processStartEpochSecondsCtx } = await import("../agents");
+    const stagingRoot = spyOn(await import("../runtime-names"), "transferStagingRoot").mockReturnValue(join(home, "staging"));
     processStartEpochSecondsCtx.set(() => 123);
     try {
       await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
@@ -10911,13 +10912,14 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.notice === (action === "Esc" ? "Send cancelled" : "Dashboard shutting down"));
       await waitFor(async () => !await Bun.file(staged!).exists());
       expect(dashboard.inputField.getText()).toContain(source);
-    } finally { processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
   });
 
   test("a dashboard snapshot whose owner cannot be verified is refused locally", async () => {
     const home = await mkdtemp(join(tmpdir(), "ib-dashboard-owner-"));
     const { processStartEpochSecondsCtx } = await import("../agents");
     setUserHome(home);
+    const stagingRoot = spyOn(await import("../runtime-names"), "transferStagingRoot").mockReturnValue(join(home, "staging"));
     processStartEpochSecondsCtx.set(() => null);
     try {
       const path = join(home, "file");
@@ -10931,7 +10933,7 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.notice === "Cannot verify the outgoing attachment owner");
       expect(service.sendRemoteMessage).not.toHaveBeenCalled();
       await dashboard.stopRemoteSends();
-    } finally { processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
   });
 
   test("a mixed-case local registry root keeps its dashboard file live on the peer", async () => {
@@ -10987,6 +10989,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const cli = await createCliFixture();
     setUserHome(cli.home);
     const { processStartEpochSecondsCtx } = await import("../agents");
+    const stagingRoot = spyOn(await import("../runtime-names"), "transferStagingRoot").mockReturnValue(join(cli.root, "staging"));
     processStartEpochSecondsCtx.set(() => 123);
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -10996,7 +10999,7 @@ describe("Unified peer repos in the Agents tree", () => {
     });
     const actual = space.hasFreeSpace;
     const spy = spyOn(space, "hasFreeSpace").mockImplementation(async (dir, bytes) => {
-      if (!dir.startsWith("/tmp/itsybitsy-outgoing-")) return actual(dir, bytes);
+      if (!dir.startsWith(join(cli.root, "staging/outgoing") + "/")) return actual(dir, bytes);
       entered.resolve(); await release.promise; return true;
     });
     try {
@@ -11019,7 +11022,7 @@ describe("Unified peer repos in the Agents tree", () => {
       release.resolve();
       await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
       await dashboard.stopRemoteSends();
-    } finally { processStartEpochSecondsCtx.reset(); release.resolve(); spy.mockRestore(); resetUserHome(); await cli.cleanup(); }
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); release.resolve(); spy.mockRestore(); resetUserHome(); await cli.cleanup(); }
   });
 
   test("dashboard quit closes a held reset before exit and startup reclaims stranded staging", async () => {

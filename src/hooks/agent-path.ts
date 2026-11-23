@@ -261,6 +261,10 @@ export function peerDirWriteDenyReason(path: string): string {
  * directory is a symlink — `agentDir` here is derived from cwd and is NOT
  * necessarily realpath'd.
  */
+const transferStagingGuards = () => runtimeNames.transferStagingPaths().map(path => ({
+  path, subtree: true, reason: "Only ib watch can stage peer transfers",
+}));
+
 export function agentProtectedWritePaths(
   agentDir: string,
   protectIsolatedClaudeSettings = false,
@@ -271,7 +275,7 @@ export function agentProtectedWritePaths(
   // Only the unsandboxed hook needs to resolve home symlinks here.
   const anchor = (path: string) => access && !access.kernelSandboxed ? canonicalizeSandboxPath(path) : path;
   const peer = anchor(runtimeNames.peerDir());
-  const protectedPaths: ProtectedWritePath[] = [{
+  const protectedPaths: ProtectedWritePath[] = [...transferStagingGuards(), {
     path: canonicalizeSandboxPath(join(agentDir, "meta.json")),
     subtree: false,
     reason: META_WRITE_DENY_REASON,
@@ -321,6 +325,7 @@ export function systemProtectedWritePaths(itsybitsyHome: string): ProtectedWrite
     file("layout.json"),
     dir("sealed"),
     dir("peer-outbox"),
+    ...transferStagingGuards(),
     { path: peer, subtree: true, reason: peerDirWriteDenyReason(peer) },
   ];
 }

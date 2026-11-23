@@ -1,5 +1,6 @@
+import { stagingOwnerStart, writeTransferOwner } from "./transfer-owner";
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { readTransferLimits } from "../config";
 import { readMachineName } from "../machine-name";
@@ -51,13 +52,16 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
   if (!limits.ok) throw new Error(limits.error);
   const total = header.files.reduce((sum, file) => sum + file.size, 0);
   if (!await storage.hasFreeSpace(storage.tempDir, reserve(total))) throw new Error("Insufficient space for attachments and the 1 GiB reserve");
-  const root = await mkdtemp(join(storage.tempDir, "itsybitsy-attachments-"));
-  const cleanup = () => rm(root, { recursive: true, force: true });
+  const root = join(storage.tempDir, "itsybitsy-attachments-" + crypto.randomUUID());
+  let current = root + ".partial";
+  await mkdir(current, { mode: 0o700 });
+  const cleanup = () => rm(current, { recursive: true, force: true });
   try {
+    await writeTransferOwner(current, { pid: process.pid, start: stagingOwnerStart(process.pid) });
     let received = 0;
     const mapping: AttachmentMapping[] = [];
     for (const [index, file] of header.files.entries()) {
-      const dir = join(root, String(index));
+      const dir = join(current, String(index));
       await mkdir(dir, { mode: 0o700 });
       const destination = join(dir, sanitizeAttachmentName(file.name));
       const handle = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -68,10 +72,16 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
         if (digest !== file.sha256.toLowerCase()) throw new Error("Attachment hash mismatch");
       } finally { await handle.close(); }
       received += file.size;
-      mapping.push({ destination, spellings: file.spellings });
+      mapping.push({ destination: join(root, String(index), sanitizeAttachmentName(file.name)), spellings: file.spellings });
     }
     await requireSendFin(body, options);
-    return { message: rewriteAttachmentPaths(header.message, mapping, 1024 ** 2, 64 * 1024), cleanup };
+    return { message: rewriteAttachmentPaths(header.message, mapping, 1024 ** 2, 64 * 1024), cleanup,
+      async commit() {
+        await rename(current, root);
+        current = root;
+        await rm(join(root, "owner.json"));
+      },
+    };
   } catch (error) {
     await cleanup();
     throw error;
@@ -156,6 +166,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
             if (await readPeerName() === null) throw new Error("not a peer");
             options.signal?.throwIfAborted();
             options.committing?.();
+            await staged?.commit();
           },
         });
         if (!result.ok) throw bodyError ?? new Error(result.stderr);

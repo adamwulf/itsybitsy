@@ -2351,12 +2351,13 @@ export class DashboardComponent implements Component {
 
     // When entering coordinator mode (transition, not every tick), reset view and focus
     const wasCoordinator = this.currentAgentKey === "__coordinator__";
-    if (!isCoordinator && this.focusManager.current() === "coordinator") this.focusManager.setFocus("agent-tree");
+    const visibleTree = this.sidebarMode === "teams" ? "teams-tree" : "agent-tree";
+    if (!isCoordinator && this.focusManager.current() === "coordinator") this.focusManager.setFocus(visibleTree);
     if (isCoordinator && !wasCoordinator) {
       this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
-      if (focus !== "agent-tree" && focus !== "info" && focus !== "coordinator") {
-        this.focusManager.setFocus("agent-tree");
+      if (focus !== visibleTree && focus !== "info" && focus !== "coordinator") {
+        this.focusManager.setFocus(visibleTree);
       }
       // No resize on coordinator selection: the ib-coordinator tmux window is
       // pinned to PINNED_TMUX_WIDTH and never follows mainWidth. The startup

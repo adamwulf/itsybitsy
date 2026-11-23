@@ -9973,6 +9973,27 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.coordinatorInputField.getText()).toBe("");
   });
 
+  test("on the Teams tab j from the local coordinator, Tab, k uses the visible tree", () => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.agentTree.selectSystemCoordinator();
+    dashboard.syncSelectedAgent();
+    dashboard.coordinatorPane.hasPolled = true;
+    dashboard.focusManager.setFocus("coordinator");
+    dashboard.handleInput("2");
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "east", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.handleInput("j");
+    expect(dashboard.activeSelectionSource).toBe("teams");
+    expect(dashboard.focus).toBe("teams-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("k");
+    expect(dashboard.coordinatorInputField.getText()).toBe("");
+    expect(dashboard.activeSelectionSource).toBe("teams");
+  });
+
   test("Tab visits the full-width peer capture once and resizing moves its visible divider", () => {
     const { dashboard } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);

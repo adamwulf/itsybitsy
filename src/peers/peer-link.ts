@@ -534,9 +534,16 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         if (header.files.length) throw new Error("attachments are not supported yet");
         await requireSendFin(stream, options);
         if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
-        await deps.receiveMessage(header, conn.remoteId, () => deps.peerName(conn.remoteId));
+        await deps.receiveMessage(header, conn.remoteId, async () => {
+          const name = await deps.peerName(conn.remoteId);
+          if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+          return name;
+        });
         reply = { ok: true, id: header.id };
       } catch (err) {
+        // STOP_SENDING is independent of the send half. The error ACK can
+        // finish even if the native reader is still unwinding a stalled read.
+        void stream.stopReceiving().catch(() => {});
         reply = { ok: false, error: errorDetail(err) };
       }
       await stream.writeAll(encodeJson(reply));

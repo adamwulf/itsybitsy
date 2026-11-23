@@ -9,7 +9,7 @@ import { makeAgent, makeSpawnResult } from "../test-utils";
 import { spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
-import { createMemoryLink } from "./test-pair-transport";
+import { createFakeClock, createMemoryLink } from "./test-pair-transport";
 import { serveTrustedConnection } from "./peer-link";
 import { encodeSendHeader, type SendHeader } from "./send-frame";
 
@@ -46,7 +46,7 @@ afterEach(async () => {
   await cli.cleanup();
 });
 
-async function exchange(request: SendHeader, name: () => Promise<string | null> = paired) {
+async function exchange(request: SendHeader, name: () => Promise<string | null> = paired, revoked = false) {
   const { a, b } = createMemoryLink("authenticated", "destination");
   const serving = serveTrustedConnection(b, {
     peerName: name, receiveMessage: receiver, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
@@ -57,7 +57,7 @@ async function exchange(request: SendHeader, name: () => Promise<string | null> 
     await stream.writeAll(encodeSendHeader(request));
     await stream.finish();
     return JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
-  } finally { a.close(0, "done"); await serving; }
+  } finally { if (revoked) expect(a.closeInfo()).toMatchObject({ code: 1 }); a.close(0, "done"); await serving; }
 }
 
 test("concurrent and subsequent repeats acknowledge once, with sender attribution in the real queue", async () => {
@@ -130,12 +130,28 @@ test("cache capacity retains accepted ids for ten minutes, independently per pee
   expect(lines).toHaveLength(3);
 });
 
+test.each(["header", "FIN"])("stalled %s stops the receive half and returns the idle error", async stage => {
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock();
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    log() {}, receiveMessage: receiver, setTimer: clock.setTimer });
+  const stream = await a.openBi();
+  try {
+    await stream.writeAll(stage === "header" ? Uint8Array.of(0) : encodeSendHeader(header()));
+    await Bun.sleep(0);
+    clock.advance(60_000);
+    const reply = JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
+    expect(reply).toMatchObject({ ok: false, error: expect.stringContaining("No progress") });
+    await expect(stream.writeAll(Uint8Array.of(1))).rejects.toThrow();
+  } finally { a.close(0, "done"); await serving; }
+});
+
 test("unknown, stopped, unpaired and attachment sends are refused before queueing", async () => {
   expect(await exchange(header({ target: { kind: "agent", agent: "missing" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
   const files = [{ name: "a", size: 0, sha256: "0".repeat(64), spellings: ["a"] }];
   expect(await exchange(header({ files }))).toEqual({ ok: false, error: "attachments are not supported yet" });
   let checks = 0;
-  expect(await exchange(header(), async () => ++checks < 4 ? "desk" : null)).toMatchObject({ ok: false, error: expect.stringContaining("not a peer") });
+  await expect(exchange(header(), async () => ++checks < 4 ? "desk" : null, true)).rejects.toThrow();
   paneProbe.set(() => makeSpawnResult(0, "1\n1"));
   expect(await exchange(header())).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
   paneProbe.set(() => makeSpawnResult(1, "", "no such session"));

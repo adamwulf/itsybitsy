@@ -88,6 +88,8 @@ class MemoryStream implements PairStream {
     private readonly conn: MemoryConnection,
   ) {}
 
+  async stopReceiving(): Promise<void> { this.incoming.cancel(); }
+
   async cancel(): Promise<void> {
     this.incoming.cancel();
     this.outgoing.cancel();

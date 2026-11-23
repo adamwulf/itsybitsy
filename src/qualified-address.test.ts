@@ -383,7 +383,7 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
-  test.each(["local recipient", "self", "changed bytes", "dead before append", "dead before self append", "retired during staging"])("sandboxed local --attach through the worktree watchdog: %s", async mode => {
+  test.each(["local recipient", "self", "changed bytes", "dead before append", "dead before self append", "retired during staging", "stopped system"])("sandboxed local --attach through the worktree watchdog: %s", async mode => {
     const agentDir = dirname(worktree);
     const recipient = mode.includes("self") ? "mgr" : "foo";
     const live = JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false,
@@ -392,7 +392,7 @@ describe("qualified agent addresses", () => {
     await Bun.write(join(app, ".itsybitsy", "agents", recipient, "meta.transient.json"), live);
     await Bun.write(join(worktree, "report"), "original");
     const controller = new AbortController();
-    const send = cli.run(["send", "@App/" + recipient, "--attach", "./report", "read ./report"], {
+    const send = cli.run(["send", mode === "stopped system" ? "@system" : "@App/" + recipient, "--attach", "./report", "read ./report"], {
       cwd: worktree, sandboxed: true, ancestry: human, interrupt: controller.signal,
       allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
     });
@@ -418,16 +418,20 @@ describe("qualified agent addresses", () => {
         }
         return file;
       });
-      try { await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: cli.cwd } }); }
+      try { await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: cli.cwd, sendToSystemCoordinator: async () => ({ ok: false, stdout: "", stderr: "System coordinator is not running", exitCode: 1 }) } }); }
       finally { held.mockRestore(); retire.mockRestore(); }
       const result = await send;
       const queue = Bun.file(join(cli.home, ".itsybitsy", "agents", recipient, "outbox.jsonl"));
-      if (mode === "retired during staging") {
+      if (mode === "stopped system") {
+        expect(result.stderr).toContain("System coordinator is not running");
+        expect((await readdir(cli.cwd)).filter(n => n.startsWith("itsybitsy-attachments-"))).toEqual([]);
+      } else if (mode === "retired during staging") {
         expect(result.stderr).toContain("Cannot verify the local attachment recipient directory");
         expect(await Bun.file(join(cli.home, ".itsybitsy/agents/mgr/outbox.jsonl")).exists()).toBe(false);
       } else if (death) {
         expect(result.stderr).toContain("Cannot verify the staging lease owner");
         expect(await queue.text()).toBe("");
+        expect((await readdir(cli.cwd)).filter(n => n.startsWith("itsybitsy-attachments-"))).toEqual([]);
       } else if (mode === "changed bytes") {
         expect(result.stderr).toContain("hash mismatch");
         expect(await queue.exists()).toBe(false);

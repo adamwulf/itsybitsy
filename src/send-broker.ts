@@ -57,7 +57,7 @@ import { readMachineName } from "./machine-name";
 import { mkdir, open, rm, stat, rename } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
-import { publishLocalBrokerAttachments, brokerAttachmentStage, publishBrokerRecord, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
+import { prepareLocalBrokerAttachments, brokerAttachmentStage, publishBrokerRecord, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
@@ -573,7 +573,7 @@ export async function handleSendRequest(
           // requester-writable tmux metadata for an inline delivery here.
           const { enqueueOutbox, agentOutboxDir } = await import("./outbox");
           const dir = agentOutboxDir({ id: ctx.agentId, meta: resolved.agent.meta });
-          await enqueueOutbox(dir, { message, fromAgent, noPassthrough: true, raw: false }, resolved.agent.meta.queue_key, queueGuard?.signal, queueGuard?.beforeAppend);
+          await enqueueOutbox(dir, { message, fromAgent, noPassthrough: true, raw: false }, resolved.agent.meta.queue_key, queueGuard?.signal, queueGuard);
           return { ok: true, exitCode: 0, stdout: "", stderr: "" };
         }
         return brokerFail(`Error: '${ctx.agentId}' cannot send to itself through its watchdog; send directly`);
@@ -655,9 +655,18 @@ export async function handleSendRequest(
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, signal, progress) : undefined;
         const checkLease = async () => { await requireActiveStagingLease(ctx.agentDir, ctx.id, origin, clientIdentity); };
         if (localFiles) {
-          message = await publishLocalBrokerAttachments(message, stage!, checkLease, signal, seams.attachmentTempDir);
-          signal.throwIfAborted();
-          return await dispatchLocal({ signal, beforeAppend: checkLease });
+          const snapshot = await prepareLocalBrokerAttachments(message, stage!, signal, seams.attachmentTempDir);
+          try {
+            message = snapshot.message;
+            await checkLease();
+            signal.throwIfAborted();
+            return await dispatchLocal({ signal, accepted: snapshot.accepted, beforeAppend: async () => {
+              await snapshot.publish();
+              await checkLease();
+            } });
+          } finally {
+            await snapshot.finish().catch(err => warnSendCleanup(`Local attachment cleanup failed: ${err}`));
+          }
         } else {
           const result = await handoffRemoteMessage(resolved.remote!.peer, textHeader(resolved.remote!.target, message, sender!), signal, stage, progress,
             files.length ? checkLease : undefined, origin);

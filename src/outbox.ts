@@ -170,6 +170,7 @@ async function withQueueMutation<T>(dir: string, create: boolean, signal: AbortS
 export interface LocalQueueGuard {
   signal: AbortSignal;
   beforeAppend(): Promise<void>;
+  accepted?(): void;
 }
 
 export async function enqueueOutbox(
@@ -177,7 +178,7 @@ export async function enqueueOutbox(
   msg: Omit<OutboxMessage, "id" | "enqueuedAtMs"> & { id?: string; enqueuedAtMs?: number },
   reservedKey?: string,
   signal?: AbortSignal,
-  beforeAppend?: LocalQueueGuard["beforeAppend"],
+  guard?: LocalQueueGuard,
 ): Promise<OutboxMessage> {
   try {
     return await withQueueMutation(dir, reservedKey === undefined, signal, async parent => {
@@ -216,10 +217,11 @@ export async function enqueueOutbox(
       noPassthrough: msg.noPassthrough === true ? true : undefined,
     };
     signal?.throwIfAborted();
-    if (beforeAppend) await beforeAppend();
+    if (guard) await guard.beforeAppend();
     signal?.throwIfAborted();
     const separator = content && !content.endsWith("\n") ? "\n" : "";
     await file.appendFile(separator + JSON.stringify(record) + "\n");
+    guard?.accepted?.();
     return record;
   }
 }

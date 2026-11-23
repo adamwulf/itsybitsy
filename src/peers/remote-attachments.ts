@@ -240,8 +240,8 @@ export async function removeAbandonedStaging(agentDir: string, id: string) {
 
 /** Publish only verified broker inputs. The watch recovery sweep owns abandoned
  * partials and their sidecars under the same incoming root as peer receipts. */
-export async function publishLocalBrokerAttachments(
-  message: string, stage: StageRemoteFiles, checkOwner: () => Promise<void>,
+export async function prepareLocalBrokerAttachments(
+  message: string, stage: StageRemoteFiles,
   signal: AbortSignal, tempDir = "/tmp",
 ) {
   const { stagingArea, writeTransferOwner, stagingOwnerStart } = await import("./transfer-owner");
@@ -254,6 +254,11 @@ export async function publishLocalBrokerAttachments(
   const sidecar = id + ".owner";
   const destination = join(tempDir, "itsybitsy-attachments-" + id);
   await writeTransferOwner(area, { pid: process.pid, start: stagingOwnerStart(process.pid) }, sidecar);
+  let published = false, accepted = false;
+  const cleanup = async () => {
+    await rm(partial, { recursive: true, force: true });
+    await rm(join(area, sidecar), { force: true });
+  };
   try {
     await mkdir(partial, { mode: 0o700 });
     const bodies = join(partial, "bodies");
@@ -269,15 +274,36 @@ export async function publishLocalBrokerAttachments(
     }
     await rmdir(bodies);
     const rewritten = rewriteAttachmentPaths(message, mapping, 1024 ** 2, 64 * 1024);
-    await checkOwner();
-    signal.throwIfAborted();
-    await rename(partial, destination).catch(error => {
-      if (error.code === "EXDEV") throw Error("Staging and delivered attachments must be on the same filesystem", { cause: error });
-      throw error;
-    });
-    return rewritten;
-  } finally {
-    await rm(partial, { recursive: true, force: true });
-    await rm(join(area, sidecar), { force: true });
-  }
+    const snapshot = await open(partial, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    return {
+      message: rewritten,
+      async publish() {
+        signal.throwIfAborted();
+        if (published) return;
+        try { await rename(partial, destination); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EXDEV") throw Error("Staging and delivered attachments must be on the same filesystem", { cause: error });
+          throw error;
+        }
+        published = true;
+      },
+      accepted() { accepted = true; },
+      async finish() {
+        try {
+          if (published && !accepted) {
+            // Roll back in private staging. The held fd pins the identity:
+            // never recursively remove a replacement from the public namespace.
+            const ours = await snapshot.stat({ bigint: true });
+            await rename(destination, partial);
+            const moved = await lstat(partial, { bigint: true });
+            if (moved.ino !== ours.ino || moved.dev !== ours.dev) {
+              await rename(partial, destination);
+              throw Error("Delivered attachment directory changed during rollback");
+            }
+          }
+          await cleanup();
+        } finally { await snapshot.close(); }
+      },
+    };
+  } catch (error) { await cleanup(); throw error; }
 }

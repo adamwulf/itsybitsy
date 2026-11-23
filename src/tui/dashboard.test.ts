@@ -9954,6 +9954,24 @@ describe("Unified peer repos in the Agents tree", () => {
       .join(" ");
   }
 
+  test("j from the local coordinator output, Tab, k cannot edit the hidden coordinator", () => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.agentTree.selectSystemCoordinator();
+    dashboard.syncSelectedAgent();
+    dashboard.coordinatorPane.hasPolled = true;
+    dashboard.focusManager.setFocus("coordinator");
+    dashboard.focusManager.setSubFocus("pane");
+    dashboard.handleInput("j");
+    expect(keyOf(dashboard)).toBe(PEER_B + "/@system");
+    expect(dashboard.focusManager.current()).toBe("agent-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focusManager.current()).toBe("info");
+    dashboard.handleInput("k");
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    expect(dashboard.coordinatorInputField.getText()).toBe("");
+  });
+
   test.each(["?", "/", "@", "I"])("dialog %s pauses coordinator reads and resumes once", async key => {
     const { dashboard, service } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);

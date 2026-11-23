@@ -2332,6 +2332,7 @@ export class DashboardComponent implements Component {
 
     // When entering coordinator mode (transition, not every tick), reset view and focus
     const wasCoordinator = this.currentAgentKey === "__coordinator__";
+    if (!isCoordinator && this.focusManager.current() === "coordinator") this.focusManager.setFocus("agent-tree");
     if (isCoordinator && !wasCoordinator) {
       this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
@@ -3019,11 +3020,9 @@ export class DashboardComponent implements Component {
       // Pane sub-focus and Send sub-focus: fall through to normal dashboard key handling
     }
 
-    // When coordinator panel is focused, use same three-level sub-focus as active-agent.
-    // Only requires the coordinator to have polled (session is running), not that it's
-    // selected in the agent tree — the sidebar coordinator panel should accept input
-    // regardless of which agent is selected.
-    if (this.focusManager.current() === "coordinator" && this.coordinatorPane.hasPolled) {
+    // The coordinator editor belongs only to the effective local coordinator selection.
+    if (this.focusManager.current() === "coordinator" && this.activeSelectionSource === "agents"
+        && this.agentTree.isSystemCoordinatorSelected && this.coordinatorPane.hasPolled) {
       const sf = this.focusManager.subFocus;
 
       // Tab navigation through sub-focus states

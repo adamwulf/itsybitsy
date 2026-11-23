@@ -160,7 +160,6 @@ export async function requireSendFin(stream: ReadStream, options: FileBodyOption
 export async function sendFileBody(
   { handle, size }: Pick<ManifestEntry, "handle" | "size">, stream: { writeAll(bytes: number[]): Promise<void> }, options: FileBodyOptions = {},
 ): Promise<void> {
-  if (!Number.isSafeInteger(size) || size < 0) throw new Error("Invalid file body size");
   const chunks = fileChunks(handle, size);
   let written = 0;
   for (;;) {

@@ -130,24 +130,22 @@ export async function buildAttachmentManifest(
 
 /** Positional reads let hashing and staging share the same validated handle.
  * Each iteration reuses the buffer, so consume the chunk before advancing. */
-export async function* fileChunks(file: FileHandle, expectedSize?: number): AsyncGenerator<Buffer> {
+export async function* fileChunks(file: FileHandle, expectedSize: number): AsyncGenerator<Buffer> {
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 0) throw new Error("Invalid file body size");
   const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   let position = 0;
-  while (expectedSize === undefined || position < expectedSize) {
-    const limit = expectedSize === undefined ? buffer.length : Math.min(buffer.length, expectedSize - position);
+  while (position < expectedSize) {
+    const limit = Math.min(buffer.length, expectedSize - position);
     const { bytesRead } = await file.read(buffer, 0, limit, position);
-    if (!bytesRead) {
-      if (expectedSize !== undefined) throw new Error("Early EOF before declared file size");
-      return;
-    }
+    if (!bytesRead) throw new Error("Early EOF before declared file size");
     position += bytesRead;
     yield buffer.subarray(0, bytesRead);
   }
   if ((await file.read(buffer, 0, 1, position)).bytesRead) throw new Error("Source exceeds declared file size");
 }
 
-export async function hashFile(file: FileHandle): Promise<string> {
+export async function hashFile({ handle, size }: Pick<ManifestEntry, "handle" | "size">): Promise<string> {
   const hash = createHash("sha256");
-  for await (const chunk of fileChunks(file)) hash.update(chunk);
+  for await (const chunk of fileChunks(handle, size)) hash.update(chunk);
   return hash.digest("hex");
 }

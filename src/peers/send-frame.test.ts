@@ -193,7 +193,7 @@ test("manifest to header to message preserves the spellings of two image.png fil
     const entries = await buildAttachmentManifest(["./a/image.png", "./b/image.png"], { cwd, home: cwd, machine: "desk" });
     try {
       const files = await Promise.all(entries.map(async entry => ({
-        name: entry.name, spellings: entry.spellings, size: entry.size, sha256: await hashFile(entry.handle),
+        name: entry.name, spellings: entry.spellings, size: entry.size, sha256: await hashFile(entry),
       })));
       const message = "./a/image.png ./b/image.png ./a/image.png";
       const decoded = await decodeSendHeader(new MemoryStream(encodeSendHeader({ ...header, files, message })));

@@ -87,11 +87,12 @@ test("hashes across chunk boundaries and handles an empty file", async () => {
       // Select the positional overload used by fileChunks for the spy.
       const reader: { read(buffer: Buffer, offset: number, length: number, position: number): Promise<unknown> } = handle;
       const reads = spyOn(reader, "read");
-      expect(await hashFile(handle)).toBe(createHash("sha256").update(bytes).digest("hex"));
+      expect(await hashFile({ handle, size: length })).toBe(createHash("sha256").update(bytes).digest("hex"));
       expect(reads.mock.calls.length).toBe(Math.ceil(length / CHUNK_BYTES) + 1);
       for (const [buffer, , limit] of reads.mock.calls) {
         expect(buffer).toBe(reads.mock.calls[0]![0]);
-        expect(limit).toBe(CHUNK_BYTES);
+        expect(limit).toBeGreaterThan(0);
+        expect(limit).toBeLessThanOrEqual(CHUNK_BYTES);
       }
     } finally {
       await handle.close();
@@ -106,7 +107,7 @@ test("hash and body reads stay on the validated file after its name is replaced"
   await rename(path, path + ".old");
   await writeFile(path, "different");
   const digest = createHash("sha256").update("original").digest("hex");
-  expect(await hashFile(entry!.handle)).toBe(digest);
+  expect(await hashFile(entry!)).toBe(digest);
   const chunks: Buffer[] = [];
   await sendFileBody(entry!, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } });
   expect(Buffer.concat(chunks).toString()).toBe("original");
@@ -175,4 +176,14 @@ test("a dangling protected root or descendant prevents sending an unrelated file
   await mkdir(peer);
   await symlink(join(home, "missing"), join(peer, "broken"));
   await expect(build()).rejects.toThrow(/protected/);
+});
+
+test("hashing refuses growth and truncation since validation, including an initially empty file", async () => {
+  const path = join(cwd, "change");
+  for (const [before, after] of [["a", "ab"], ["ab", "a"], ["", "b"]] as const) {
+    await writeFile(path, before);
+    const [entry] = await manifest([path], { cwd, home, machine: "desk" });
+    await writeFile(path, after);
+    await expect(hashFile(entry!)).rejects.toThrow(after.length < before.length ? /EOF/ : /exceeds/);
+  }
 });

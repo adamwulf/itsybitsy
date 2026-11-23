@@ -113,6 +113,23 @@ test("a differently cased UUID is still a replay after the recipient drained", a
   expect(await readOutbox(dir)).toEqual([]);
 });
 
+test("cache capacity retains accepted ids for ten minutes, independently per peer", async () => {
+  let now = 0;
+  const receive = createMessageReceiver(() => {}, line => lines.push(line), () => now, 2);
+  const request = header();
+  await receive(request, "peer-a", paired);
+  now++;
+  await receive(request, "peer-b", paired);
+  now = 599_999;
+  await expect(receive(header(), "peer-a", paired)).rejects.toThrow("busy, try again");
+  await receive(request, "peer-a", paired);
+  expect(lines).toHaveLength(2);
+  now++;
+  await receive(request, "peer-a", paired);
+  await receive(request, "peer-b", paired);
+  expect(lines).toHaveLength(3);
+});
+
 test("unknown, stopped, unpaired and attachment sends are refused before queueing", async () => {
   expect(await exchange(header({ target: { kind: "agent", agent: "missing" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
   const files = [{ name: "a", size: 0, sha256: "0".repeat(64), spellings: ["a"] }];

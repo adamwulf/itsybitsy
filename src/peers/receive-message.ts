@@ -34,7 +34,7 @@ async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnque
 }
 
 /** Shared across this watcher's inbound connections. Concurrent replays await the first enqueue. */
-export function createMessageReceiver(log: (line: string) => void, notice: (line: string) => void, now = Date.now) {
+export function createMessageReceiver(log: (line: string) => void, notice: (line: string) => void, now = Date.now, capacity = 4096) {
   const accepted = new Map<string, number>();
   const pending = new Map<string, Promise<void>>();
   return async (header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>) => {
@@ -45,10 +45,14 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
 
     const key = peerId + ":" + header.id.toLowerCase();
     const time = now();
-    for (const [id, expires] of accepted) if (expires <= time) accepted.delete(id);
+    for (const [id, expires] of accepted) {
+      if (expires > time) break;
+      accepted.delete(id);
+    }
     if (accepted.has(key)) return;
     const earlier = pending.get(key);
     if (earlier) return earlier;
+    if (accepted.size + pending.size >= capacity) throw new Error("busy, try again");
     const work = async () => {
       const result = await enqueue(header, name, {
         log,

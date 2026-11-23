@@ -494,7 +494,7 @@ export interface PeerResponderDeps {
   peerName(id: string): Promise<string | null>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
-  receiveMessage?(header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>): Promise<void>;
+  receiveMessage?(header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>, body?: Pick<PairStream, "read">, options?: FileBodyOptions): Promise<void>;
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
@@ -584,14 +584,16 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       let stalledRead = false;
       try {
         const header = await decodeSendHeader(reader, options);
-        if (header.files.length) throw new Error("attachments are not supported yet");
-        await requireSendFin(stream, options);
+        if (!header.files.length) await requireSendFin(stream, options);
         if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
         await deps.receiveMessage(header, conn.remoteId, async () => {
           const name = await deps.peerName(conn.remoteId);
           if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
           return name;
-        });
+        }, stream, options);
+        // A replay can acknowledge a previously queued attachment without
+        // consuming its duplicate body.
+        if (header.files.length) void stream.stopReceiving().catch(() => {});
         reply = { ok: true, id: header.id };
       } catch (err) {
         stalledRead = err instanceof TransferIdleError;

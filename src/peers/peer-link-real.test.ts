@@ -9,7 +9,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { resetUserHome, setUserHome } from "../home";
@@ -88,8 +88,8 @@ function makeNetwork(iroh: Iroh) {
     const service = new PeerService({
       remoteStartDenial: null,
       remoteSpawn,
-      receiveMessage: (header, peerId) => inHome(home, () =>
-        receive(header, peerId, async () => (await readPeers()).find(p => p.id === peerId)?.name ?? null)),
+      receiveMessage: (header, peerId, _peerName, body, options) => inHome(home, () =>
+        receive(header, peerId, async () => (await readPeers()).find(p => p.id === peerId)?.name ?? null, body, options)),
 
       captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
       acquireLock: async () => ({ acquired: true }),
@@ -252,7 +252,7 @@ test("reads the paired machine's system coordinator over a real loopback connect
   expect(b.logs.some(line => line.includes("read the system coordinator pane"))).toBe(true);
 });
 
-test("agents send text in both directions over real paired endpoints", async () => {
+test("agents send text and two files in both directions over real paired endpoints", async () => {
   const net = makeNetwork(await loadIroh());
   const a = await net.makeSide("a", [localAgent("alice")]);
   const b = await net.makeSide("b", [localAgent("bob")]);
@@ -261,6 +261,7 @@ test("agents send text in both directions over real paired endpoints", async () 
   for (const [side, agent] of [[a, "alice"], [b, "bob"]] as const) {
     const repo = join(side.home, "app");
     const dir = join(repo, ".itsybitsy", "agents", agent);
+    await Bun.write(join(side.home, ".itsybitsy/machine-name"), agent);
     await Bun.write(join(side.home, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: repo, name: "app" }] }));
     await Bun.write(join(dir, "meta.json"), JSON.stringify(localAgent(agent, { tmux_session: "ib-" + agent }).meta));
     await Bun.write(join(dir, "meta.transient.json"), JSON.stringify({
@@ -272,9 +273,29 @@ test("agents send text in both directions over real paired endpoints", async () 
   await waitFor(() => !!link(a)?.connected && !!link(b)?.connected, { message: "both connected", timeoutMs: 10_000 });
   for (const [sender, recipient, from, to] of [[a, b, "A/app/alice", "bob"], [b, a, "B/app/bob", "alice"]] as const) {
     const id = crypto.randomUUID();
+    const filesDir = join(sender.home, "staged");
+    const files = [];
+    for (const [index, name] of ["one.txt", "two.txt"].entries()) {
+      const content = from + "/" + name;
+      await Bun.write(join(filesDir, String(index)), content);
+      files.push({ name, spellings: ["./" + name], size: content.length, sha256: new Bun.CryptoHasher("sha256").update(content).digest("hex") });
+    }
     expect(await sender.service.sendRemoteMessage(recipient.id, {
-      op: "send", from: { kind: "agent", id: from }, id, target: { kind: "agent", repo: "app", agent: to }, message: "hi", files: [],
-    }, "handoff")).toBe(id);
-    expect(await readOutbox(join(recipient.home, ".itsybitsy", "agents", to))).toMatchObject([{ message: "hi", fromAgent: from }]);
+      op: "send", from: { kind: "agent", id: from }, id, target: { kind: "agent", repo: "app", agent: to }, message: "read ./one.txt ./two.txt", files,
+    }, "handoff", { filesDir })).toBe(id);
+    const queued = await readOutbox(join(recipient.home, ".itsybitsy", "agents", to));
+    expect(queued).toMatchObject([{ fromAgent: from, noPassthrough: true }]);
+    const [body, , heading, first, second] = queued[0]!.message.split("\n");
+    const paths = [first!, second!].map(line => line.split(" → ")[1]!);
+    const root = dirname(dirname(paths[0]!));
+    expect(root).toStartWith("/tmp/itsybitsy-attachments-");
+    try {
+      expect(body).toBe("read " + paths.join(" "));
+      expect(heading).toBe("Attachments copied to this machine:");
+      for (const [index, path] of paths.entries()) {
+        expect(path).toBe(join(root, String(index), files[index]!.name));
+        expect(await Bun.file(path).text()).toBe(from + "/" + files[index]!.name);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
   }
 });

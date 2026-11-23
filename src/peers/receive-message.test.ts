@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, unlink, utimes } from "node:fs/promises";
+import { mkdir, open, readdir, stat, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { setUserHome, resetUserHome } from "../home";
@@ -9,7 +9,7 @@ import { spawnCtx as paneProbe } from "../tmux-poller";
 import { acquireOutboxLock, readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
 import { createFakeClock, createMemoryLink } from "./test-pair-transport";
-import { serveTrustedConnection } from "./peer-link";
+import { requestSend, serveTrustedConnection } from "./peer-link";
 import { encodeSendHeader, type SendHeader } from "./send-frame";
 
 let cli: CliFixture;
@@ -25,6 +25,7 @@ const header = (fields: Partial<SendHeader> = {}): SendHeader => ({
 beforeEach(async () => {
   cli = await createCliFixture();
   setUserHome(cli.home);
+  await Bun.write(join(cli.home, ".itsybitsy/machine-name"), "laptop");
   repo = await cli.addRepo("photos");
   for (const id of ["worker", "photos"]) {
     const { agentDir } = await cli.addAgent(repo, id, {
@@ -46,7 +47,7 @@ afterEach(async () => {
   await cli.cleanup();
 });
 
-async function exchange(request: SendHeader, name: () => Promise<string | null> = paired, revoked = false) {
+async function exchange(request: SendHeader, name: () => Promise<string | null> = paired, revoked = false, data?: Uint8Array) {
   const { a, b } = createMemoryLink("authenticated", "destination");
   const serving = serveTrustedConnection(b, {
     peerName: name, receiveMessage: receiver, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
@@ -55,6 +56,7 @@ async function exchange(request: SendHeader, name: () => Promise<string | null> 
   try {
     const stream = await a.openBi();
     await stream.writeAll(encodeSendHeader(request));
+    if (data) await stream.writeAll(data);
     await stream.finish();
     return JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
   } finally { if (revoked) expect(a.closeInfo()).toMatchObject({ code: 1 }); a.close(0, "done"); await serving; }
@@ -172,7 +174,7 @@ test.each(["header", "FIN"])("stalled %s stops the receive half and returns the 
 test("unknown, stopped, unpaired and attachment sends are refused before queueing", async () => {
   expect(await exchange(header({ target: { kind: "agent", agent: "missing" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
   const files = [{ name: "a", size: 0, sha256: "0".repeat(64), spellings: ["a"] }];
-  expect(await exchange(header({ files }))).toEqual({ ok: false, error: "attachments are not supported yet" });
+  expect(await exchange(header({ files }))).toEqual({ ok: false, error: "Attachment hash mismatch" });
   let checks = 0;
   await expect(exchange(header(), async () => ++checks < 4 ? "desk" : null, true)).rejects.toThrow();
   paneProbe.set(cmd => {
@@ -268,5 +270,128 @@ test.each(["write", "finish"] as const)("a stalled acknowledgement %s cancels it
     await expect(ack).rejects.toThrow();
     expect(a.closeInfo()).toMatchObject({ byPeer: true, reason: "send reply stalled" });
     expect(lines).toHaveLength(1);
+  } finally { a.close(0, "done"); await serving; }
+});
+
+function manifestFile(data: string, name = "../nested/a.txt", spelling = "./source") {
+  return { name, size: Buffer.byteLength(data), sha256: new Bun.CryptoHasher("sha256").update(data).digest("hex"), spellings: [spelling] };
+}
+
+async function receiveFixture(space = true) {
+  const dir = join(cli.root, "received");
+  await mkdir(dir);
+  receiver = createMessageReceiver(() => {}, line => lines.push(line), Date.now, 4096, { tempDir: dir, hasFreeSpace: async () => space });
+  return dir;
+}
+
+test("verified files are private, sanitized, mapped once, and retained across a replay", async () => {
+  const dir = await receiveFixture();
+  const files = [manifestFile("one", "../unsafe/a.txt"), manifestFile("two", "../other/a.txt", "./another")];
+  const req = header({ message: "/compact ./source", files });
+  for (let i = 0; i < 2; i++) expect(await exchange(req, paired, false, Buffer.from("onetwo"))).toEqual({ ok: true, id: req.id });
+  const roots = await readdir(dir);
+  expect(roots).toHaveLength(1);
+  const root = join(dir, roots[0]!);
+  const paths = [join(root, "0/a.txt"), join(root, "1/a.txt")];
+  expect(await Promise.all(paths.map(p => Bun.file(p).text()))).toEqual(["one", "two"]);
+  expect((await stat(root)).mode & 0o777).toBe(0o700);
+  expect((await stat(paths[0]!)).mode & 0o777).toBe(0o600);
+  expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toMatchObject([{
+    noPassthrough: true, message: `/compact ${paths[0]}
+
+Attachments copied to this machine:
+- ./source → ${paths[0]}
+- ./another → ${paths[1]}`,
+  }]);
+  expect(lines).toEqual(["desk sent a message (2 files, 0.00 MB) to worker"]);
+});
+
+test.each(["hash", "short", "trailing", "disk", "revoked", "stall", "malformed"])("attachment %s failure retains no files or queue entry", async kind => {
+  const dir = await receiveFixture(kind !== "disk");
+  const files = [manifestFile("abc")];
+  if (kind === "malformed") files[0]!.sha256 = "wrong";
+  const req = header({ files });
+  if (kind === "stall") {
+    let reading = false;
+    const clock = createFakeClock();
+    const result = receiver(req, "peer", paired, { read: () => { reading = true; return new Promise(() => {}); } }, { setTimer: clock.setTimer });
+    await waitFor(() => reading);
+    clock.advance(60_000);
+    await expect(result).rejects.toThrow("No progress");
+  } else if (kind === "revoked") {
+    let checks = 0;
+    await expect(exchange(req, async () => ++checks < 4 ? "desk" : null, true, Buffer.from("abc"))).rejects.toThrow();
+    await waitFor(async () => !(await readdir(dir)).length);
+  } else {
+    const data = { hash: "abd", short: "ab", trailing: "abcd", disk: "", malformed: "" }[kind]!;
+    const error = { hash: "hash mismatch", short: "Early EOF", trailing: "Trailing data", disk: "1 GiB", malformed: "Malformed" }[kind]!;
+    expect(await exchange(req, paired, false, Buffer.from(data))).toMatchObject({ ok: false, error: expect.stringContaining(error) });
+  }
+  expect(await readdir(dir)).toEqual([]);
+  expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
+});
+
+test.each([
+  ["maxFileMB", 1, [1048577]], ["maxMessageMB", 1, [700000, 700000]], ["maxFiles", 1, [1, 1]],
+  ...["maxFileMB", "maxMessageMB", "maxFiles"].flatMap(key => [[key, 0, [0]], [key, 0, [1]]] as const),
+] as const)("uses this receiver's live %s = %i for sizes %j", async (key, value, sizes) => {
+  await receiveFixture();
+  const first = header({ files: [manifestFile("")] });
+  expect(await exchange(first)).toMatchObject({ ok: true });
+  await Bun.write(join(cli.home, ".itsybitsy/config.json"), JSON.stringify({ peering: { attachments: { maxFileMB: 1, [key]: value } } }));
+  const req = header({ files: sizes.map((size, i) => ({ ...manifestFile("", "a", String(i)), size })) });
+  expect(await exchange(req)).toMatchObject({ ok: false, error: expect.stringContaining(`laptop (peering.attachments.${key} = ${value})`) });
+  expect(await exchange(header())).toMatchObject({ ok: true });
+});
+
+test("one transfer per peer and two across the watcher; failed readers release their slots", async () => {
+  await receiveFixture();
+  const req = () => header({ files: [manifestFile("x")] });
+  const finish = Promise.withResolvers<Uint8Array>();
+  let reads = 0;
+  const body = { read: () => { reads++; return finish.promise; } };
+  const first = receiver(req(), "one", paired, body);
+  await waitFor(() => reads === 1);
+  await expect(receiver(req(), "one", paired, body)).rejects.toThrow("busy, try again");
+  const second = receiver(req(), "two", paired, body);
+  await waitFor(() => reads === 2);
+  await expect(receiver(req(), "three", paired, body)).rejects.toThrow("busy, try again");
+  finish.resolve(new Uint8Array());
+  expect((await Promise.allSettled([first, second])).map(r => r.status)).toEqual(["rejected", "rejected"]);
+  expect(await exchange(header({ files: [manifestFile("")] }))).toMatchObject({ ok: true });
+});
+
+test("multi-megabyte send streams through the receiver with bounded reads and cumulative progress", async () => {
+  const dir = await receiveFixture();
+  const filesDir = join(cli.root, "files");
+  await mkdir(filesDir);
+  const chunk = Buffer.alloc(64 * 1024, 17);
+  const chunks = 65;
+  const hasher = new Bun.CryptoHasher("sha256");
+  const handle = await open(join(filesDir, "0"), "wx");
+  try {
+    for (let i = 0; i < chunks; i++) { await handle.writeFile(chunk); hasher.update(chunk); }
+  } finally { await handle.close(); }
+  const size = chunks * chunk.length;
+  const files = [{ name: "large", size, sha256: hasher.digest("hex"), spellings: ["/large"] }];
+  const req = header({ files });
+  const { a, b } = createMemoryLink("one", "two");
+  let maxRead = 0;
+  let bodyReads = 0;
+  const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); };
+  const serving = serveTrustedConnection(b, {
+    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: timer,
+    receiveMessage: (header, peer, name, body, options) => receiver(header, peer, name, {
+      read: limit => { maxRead = Math.max(maxRead, limit); bodyReads++; return body!.read(limit); },
+    }, options),
+  });
+  let sent = 0;
+  try {
+    expect(await requestSend(a, req, timer, { filesDir, onProgress: n => { expect(n - sent).toBeLessThanOrEqual(chunk.length); sent = n; } })).toBe(req.id);
+    expect(sent).toBe(size);
+    expect(maxRead).toBe(chunk.length);
+    expect(bodyReads).toBeGreaterThanOrEqual(chunks + 1);
+    const [root] = await readdir(dir);
+    expect((await stat(join(dir, root!, "0/large"))).size).toBe(size);
   } finally { a.close(0, "done"); await serving; }
 });

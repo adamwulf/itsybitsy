@@ -4114,7 +4114,7 @@ async function checkSendSession(agent: Agent): Promise<IbCommandResult | null> {
 /** Inbound peer messages acknowledge enqueue, including for recipients without a watchdog. */
 export interface PeerEnqueueOptions {
   senderKind?: OutboxMessage["peerSender"];
-  beforeEnqueue(): Promise<void>;
+  beforeEnqueue(): Promise<string | void>;
   log(line: string): void;
 }
 
@@ -4513,7 +4513,7 @@ export async function sendMessage(
       if (!await isDeliveryPaneLive(tmuxSession)) {
         return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running` };
       }
-      await opts.peerSend.beforeEnqueue();
+      outgoing = await opts.peerSend.beforeEnqueue() ?? outgoing;
     }
     await enqueueOutbox(queueDir, {
       message: outgoing, fromAgent: fromId, peerSender: opts?.peerSend?.senderKind, raw, team: opts?.team, noPassthrough,

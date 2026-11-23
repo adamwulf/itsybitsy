@@ -152,7 +152,10 @@ export class IrohBiStream {
 
   /** Abort only this request, even if the send half was already finished. */
   async cancel(): Promise<void> {
-    await Promise.allSettled([this.raw.recv.stop(0n), this.raw.send.reset(0n)]);
+    const terminal = (err: unknown) => {
+      if (!/\b(?:ClosedStream|closed stream|stream (?:is |was )?(?:already )?(?:closed|finished|stopped|reset))\b/i.test(shortIrohMessage(err))) throw err;
+    };
+    await Promise.all([this.raw.recv.stop(0n).catch(terminal), this.raw.send.reset(0n).catch(terminal)]);
   }
 
   async read(limit: number): Promise<Uint8Array> {

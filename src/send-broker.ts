@@ -232,9 +232,14 @@ const UNVERIFIED_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 async function startStagingLease(stage: string) {
   await mkdir(stage, { mode: 0o700 });
-  const lease = await open(join(stage, "lease"), "wx", 0o600);
-  try { await lease.writeFile(JSON.stringify({ pid: process.pid })); }
-  finally { await lease.close(); }
+  try {
+    const lease = await open(join(stage, "lease"), "wx", 0o600);
+    try { await lease.writeFile(JSON.stringify({ pid: process.pid })); }
+    finally { await lease.close(); }
+  } catch (err) {
+    await rm(stage, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 /** Both sides read the same ps start stamp. Missing evidence cannot authorize

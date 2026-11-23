@@ -462,3 +462,18 @@ test("four retained results leave a network slot for a fifth request", async () 
     expect(await Bun.file(join(fifth.claimed, "result.json")).json()).toMatchObject({ ok: true });
   } finally { full.mockRestore(); }
 });
+
+test("a submitting client that exits during the request read cannot dispatch", async () => {
+  const { claimed, client } = await readyRequest();
+  const open = fs.open;
+  const spy = spyOn(fs, "open").mockImplementation(async (...args) => {
+    const file = await open(...args);
+    if (args[0] === join(claimed, "request.json")) isPidAliveCtx.set(pid => pid !== client.pid);
+    return file;
+  });
+  let sends = 0;
+  try { await createPeerOutboxPoll()(async () => { sends++; return ""; }, () => {}); }
+  finally { spy.mockRestore(); }
+  expect(sends).toBe(0);
+  expect(await Bun.file(join(claimed, "result.json")).json()).toMatchObject({ error: "Cannot verify the peer-outbox client" });
+});

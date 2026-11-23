@@ -733,6 +733,17 @@ describe("PeerService at boot", () => {
       await service.bootIfPaired();
       await waitFor(() => service.view().links[0]?.connected === true);
       await expect(service.sendRemoteMessage(ID_REMOTE, header)).rejects.toThrow("inside tmux");
+      let alive = true;
+      const name = service["peerName"].bind(service);
+      const pairing = spyOn(service as any, "peerName").mockImplementation(async () => {
+        const paired = await name(ID_REMOTE); alive = false; return paired;
+      });
+      try {
+        await expect(service.sendRemoteMessage(ID_REMOTE, header, "handoff", {
+          verifyClient() { if (!alive) throw Error("client exited"); },
+        })).rejects.toThrow("client exited");
+        expect(received).toEqual([]);
+      } finally { pairing.mockRestore(); }
       expect(await service.sendRemoteMessage(ID_REMOTE, header, "handoff")).toBe(header.id);
       await writeFile(peersFile(), "[]");
       await expect(service.sendRemoteMessage(ID_REMOTE, header, "handoff")).rejects.toThrow("no longer paired");

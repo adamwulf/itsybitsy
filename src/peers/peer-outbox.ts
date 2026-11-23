@@ -302,12 +302,17 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
           }
           let result: DeliveryResult;
           try {
-            if ((await inspectTransferDirectory(dir)).state !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
+            const submitter = await inspectTransferDirectory(dir);
+            if (submitter.state !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
             const { peer, header: raw, origin } = await readRequest(join(dir, "request.json"));
             const header = parseSendHeader(raw);
             if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
             if (transferOwnerState(owner, 0) !== "verified-live") throw new Error("Cannot verify the peer-outbox worker");
-            if (origin !== undefined && transferOwnerState(origin, 0) !== "verified-live") throw new Error("Cannot verify the originating CLI");
+            const verifyClient = () => {
+              if (transferOwnerState(submitter.owner, 0) !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
+              if (origin !== undefined && transferOwnerState(origin, 0) !== "verified-live") throw new Error("Cannot verify the originating CLI");
+            };
+            verifyClient();
             const controller = new AbortController();
             let bytes = 0;
             let sequence = 0;
@@ -327,7 +332,7 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
             const timer = setInterval(tick, 250);
             try {
               result = { ok: true, id: await send(peer, header, {
-                filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; sequence++; },
+                verifyClient, filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; sequence++; },
               }) };
               tick();
             } finally { clearInterval(timer); }

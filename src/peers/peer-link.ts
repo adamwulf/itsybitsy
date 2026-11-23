@@ -402,6 +402,7 @@ async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8
 }
 
 export interface OutgoingTransfer {
+  verifyClient?: () => void;
   filesDir?: string;
   signal?: AbortSignal;
   onProgress?: (bytes: number) => void;
@@ -422,7 +423,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   const io = <V>(operation: () => Promise<V>) => waitForIO({ setTimer, signal }, operation);
   let opening: Promise<PairStream> | undefined;
   let active: PairStream;
-  try { active = await io(() => opening = conn.openBi()); }
+  try { active = await io(() => { options.verifyClient?.(); return opening = conn.openBi(); }); }
   catch (err) {
     clear?.();
     if (opening && !await settledWithinGrace(opening.then(stream => stream.cancel()), { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");

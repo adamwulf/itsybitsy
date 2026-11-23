@@ -15,11 +15,11 @@ test("remote staging verifies the clone against the manifest and removes changed
     const dir = join(root, "files");
     expect(await cloneAttachments(dir, [entry])).toEqual([{ name: entry.name, size: 5, spellings: [source], sha256: entry.sha256 }]);
     expect((await stat(join(dir, "0"))).mode & 0o777).toBe(0o600);
-    await rm(source);
-    await writeFile(source, "other");
     const fallback = join(root, "fallback");
     await cloneAttachments(fallback, [entry], undefined, async () => false);
     expect(await Bun.file(join(fallback, "0")).text()).toBe("known");
+    await rm(source);
+    await writeFile(source, "other");
     const changed = join(root, "changed");
     await expect(cloneAttachments(changed, [entry])).rejects.toThrow("changed after manifest");
     expect(await Bun.file(join(changed, "0")).exists()).toBe(false);

@@ -42,7 +42,20 @@ async function copyOpened(handle: FileHandle, size: number, destination: string,
   } finally { await copy.close(); }
 }
 
-export async function cloneAttachments(dir: string, entries: (ManifestEntry & { sha256: string })[], signal?: AbortSignal, clone = cloneByPath, leasedDirectory = false) {
+async function stageSnapshot(handle: FileHandle, file: { size: number; sha256: string }, destination: string,
+  signal: AbortSignal | undefined, progress: (() => void) | undefined, mismatch: string, clone = cloneOpened) {
+  if (!await clone(handle, destination)) await copyOpened(handle, file.size, destination, signal, progress);
+  const copy = await openStagedFile(destination, file.size);
+  try {
+    const opened = await copy.stat({ bigint: true });
+    const named = await lstat(destination, { bigint: true });
+    if (!named.isFile() || opened.ino !== named.ino || opened.dev !== named.dev) throw new Error("Attachment snapshot changed while opening");
+    await copy.chmod(0o600);
+    if (await hashFile({ handle: copy, size: file.size }, signal, progress) !== file.sha256) throw new Error(mismatch);
+  } finally { await copy.close(); }
+}
+
+export async function cloneAttachments(dir: string, entries: (ManifestEntry & { sha256: string })[], signal?: AbortSignal, clone = cloneOpened, leasedDirectory = false) {
   if (!leasedDirectory) await mkdir(dir, { mode: 0o700 });
   try {
     const total = entries.reduce((sum, entry) => sum + entry.size, 0);
@@ -51,14 +64,11 @@ export async function cloneAttachments(dir: string, entries: (ManifestEntry & { 
     for (const [index, entry] of entries.entries()) {
       signal?.throwIfAborted();
       const destination = join(dir, String(index));
-      if (!await clone(entry.source, destination)) await copyOpened(entry.handle, entry.size, destination, signal);
-      const handle = await openStagedFile(destination, entry.size);
-      try {
-        await handle.chmod(0o600);
-        if (await hashFile({ handle, size: entry.size }, signal) !== entry.sha256) {
-          throw new Error(`Attachment changed after manifest: ${entry.source}`);
-        }
-      } finally { await handle.close(); }
+      const named = await lstat(entry.source, { bigint: true });
+      const opened = await entry.handle.stat({ bigint: true });
+      const mismatch = `Attachment changed after manifest: ${entry.source}`;
+      if (!named.isFile() || named.dev !== opened.dev || named.ino !== opened.ino) throw new Error(mismatch);
+      await stageSnapshot(entry.handle, entry, destination, signal, undefined, mismatch, clone);
       const { name, size, sha256, spellings } = entry;
       files.push({ name, size, sha256, spellings });
     }
@@ -72,7 +82,7 @@ export async function cloneAttachments(dir: string, entries: (ManifestEntry & { 
 export function remoteAttachmentStage(paths: readonly AttachmentArgument[], sender: AttachmentSender, signal?: AbortSignal,
   onStaged?: (files: SendHeader["files"]) => void): StageRemoteFiles {
   return (dir, leasedDirectory) => withSenderManifest(paths, sender, signal, async entries => {
-    const files = await cloneAttachments(dir, entries, signal, cloneByPath, leasedDirectory);
+    const files = await cloneAttachments(dir, entries, signal, cloneOpened, leasedDirectory);
     onStaged?.(files);
     return files;
   });
@@ -158,15 +168,7 @@ export function brokerAttachmentStage(agentDir: string, id: string, files: SendH
         const handle = await openStagedFile(join(path, String(index)), file.size, noFollow);
         try {
           const destination = join(dir, String(index));
-          if (!await cloneOpened(handle, destination)) await copyOpened(handle, file.size, destination, signal, progress);
-          const copy = await openStagedFile(destination, file.size);
-          try {
-            const opened = await copy.stat({ bigint: true });
-            const named = await lstat(destination, { bigint: true });
-            if (opened.ino !== named.ino || opened.dev !== named.dev) throw new Error("Broker clone changed while opening");
-            await copy.chmod(0o600);
-            if (await hashFile({ handle: copy, size: file.size }, signal, progress) !== file.sha256) throw new Error("Broker attachment hash mismatch");
-          } finally { await copy.close(); }
+          await stageSnapshot(handle, file, destination, signal, progress, "Broker attachment hash mismatch");
         } finally { await handle.close(); }
         await removeBrokerMember(request, String(index));
       }

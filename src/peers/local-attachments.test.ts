@@ -241,20 +241,23 @@ test("attachments refuse an unidentified caller", async () => {
   expect(await queue().exists()).toBe(false);
 });
 
-test("sandbox caller lookup opens its agent directory and no unrelated repo root", async () => {
+test("sandbox caller lookup verifies its own worktree and no unrelated repo root", async () => {
   setUserHome(fixture.home);
   const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
   const cwd = await realpath(sender.sessionCwd);
   const other = await realpath(await fixture.addRepo("unrelated"));
   const human = spyOn(remoteCliCaller, "isHuman").mockResolvedValue(false);
+  const files = spyOn(Bun, "file");
   const sync = spyOn(fs, "realpathSync");
   const asyncRead = spyOn(fsPromises, "realpath");
   try {
     expect((await resolveAttachmentSender(cwd)).kind).toBe("agent");
     const opened = [...sync.mock.calls, ...asyncRead.mock.calls].map(([path]) => String(path));
-    expect(opened).toContain(dirname(cwd));
+    expect(files.mock.calls.map(([path]) => String(path)).filter(path => path.endsWith("/meta.json"))).toEqual([join(dirname(cwd), "meta.json")]);
+    expect(opened).toContain(cwd);
     expect(opened.filter(path => path === other || path.startsWith(other + "/"))).toEqual([]);
   } finally {
+    files.mockRestore();
     asyncRead.mockRestore();
     sync.mockRestore();
     human.mockRestore();
@@ -362,26 +365,40 @@ test("a config change after copying refuses the snapshot and cleans it up", asyn
   }
 });
 
-test("a shared-checkout worker sends with its own policy even from another agent's worktree", async () => {
-  const allowed = join(recipient.repoPath, "public");
-  const denied = join(recipient.sessionCwd, "private");
-  await Bun.write(allowed, "share");
-  await Bun.write(denied, "keep");
-  await fixture.addAgent(recipient.repoPath, "worker", { worktree: false, agentType: "worker",
-    model: "claude:opus", sandbox: { enabled: false }, claude_pid: "200", claude_pid_epoch: 100,
-    paths: { deny: [denied] } });
-  const sendFile = (cwd: string, path: string) => fixture.run(["send", "reader", "--attach", path, "read"], {
-    cwd, ancestry: { ...human, terminal: "agent", parents: [[300, 200], [200, 1]] },
-    allowedProcesses: [["git", "rev-parse", "--git-common-dir"]], actions: { sendMessage: "real" },
+const unverifiedAttachmentSender = "cannot verify the sender for attachments; send from the agent's worktree or from a terminal";
+
+test("a worktree sender needs no process ancestry to attach with an unrelated shared coordinator present", async () => {
+  await fixture.addAgent(recipient.repoPath, "project", { worktree: false, agentType: "repo-coordinator", claude_pid: "200", claude_pid_epoch: 100 });
+  const sender = await fixture.addAgent(recipient.repoPath, "worker", { sandbox: { enabled: false } });
+  await Bun.write(join(sender.sessionCwd, "report"), "share");
+  // No ancestry fixture or ps permission: either probe fails the isolated CLI.
+  const run = await fixture.run(["send", "reader", "--attach", "report", "read"], {
+    cwd: sender.sessionCwd, actions: { sendMessage: "real" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
   });
-  const refusal = await sendFile(recipient.sessionCwd, denied);
-  expect(refusal.stderr).toContain("paths.deny");
-  expect(await queue().exists()).toBe(false);
-  const accepted = await sendFile(recipient.repoPath, allowed);
-  expect(accepted.exitCode, accepted.stderr).toBe(0);
+  expect(run.exitCode, run.stderr).toBe(0);
   const record = JSON.parse(await queue().text());
   snapshots.push(dirname(dirname(record.message.split(" → ")[1])));
   expect(record.fromAgent).toBe("worker");
+});
+
+test("a no-worktree worker cannot attach from a shared checkout", async () => {
+  await fixture.addAgent(recipient.repoPath, "worker", { worktree: false, model: "claude:opus", claude_pid: "200", claude_pid_epoch: 100 });
+  const result = await fixture.run(["send", "reader", "--attach", "report", "read"], {
+    cwd: recipient.repoPath, ancestry: { ...human, terminal: "agent", parents: [[300, 200], [200, 1]] },
+  });
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain(unverifiedAttachmentSender);
+  expect(await queue().exists()).toBe(false);
+});
+
+test("a worktree with a sibling's cloned Git pointer cannot supply attachment authority", async () => {
+  const sender = await fixture.addAgent(recipient.repoPath, "worker");
+  await Bun.write(join(sender.sessionCwd, ".git"), Bun.file(join(recipient.sessionCwd, ".git")));
+  await Bun.write(join(sender.sessionCwd, "report"), "data");
+  const result = await fixture.run(["send", "reader", "--attach", "report", "read"], { cwd: sender.sessionCwd });
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain(unverifiedAttachmentSender);
+  expect(await queue().exists()).toBe(false);
 });
 
 test("a case-insensitive registration matches the sender directory by identity", async () => {

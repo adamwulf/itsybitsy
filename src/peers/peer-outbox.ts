@@ -1,19 +1,17 @@
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
-import { realpath } from "node:fs/promises";
-import { findOwnRepo } from "../resolve-target";
-import { checkCoordinatorExists } from "../coordinator";
-import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
+import { verifiedSendCaller } from "./send-caller";
+export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { MAX_HEADER_BYTES } from "./transfer-limits";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { resolveSenderId, resolveRemoteSharedCaller, type IbCommandResult } from "../ib-commands";
+import type { IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
 import { registeredQueueRepo } from "../outbox";
 import { isSandboxedProcess } from "../sandbox-detect";
 import type { RepoEntry } from "../registry";
-import { agentDir, matchWorktreeCaller, peerOutboxDir } from "../runtime-names";
+import { peerOutboxDir } from "../runtime-names";
 import { hasLivePeerWatcher } from "./endpoint-lock";
 import { SEND_UNKNOWN } from "./peer-link";
 import { targetLabel } from "./receive-message";
@@ -30,36 +28,26 @@ export async function qualifiedAgentSender(id: string, repoPath: string, repos: 
   return { kind: "agent", id: `${await readMachineName()}/${repo}/${id}` };
 }
 
-export const remoteCliCaller = { isHuman: isHumanSendTerminal, isSystem: isSystemPaneCaller };
-const unverifiable = "cannot verify the sender of a remote send; run it from a terminal or from the agent's worktree";
-
 type RemoteSender =
   | { kind: "direct"; from: SendHeader["from"] }
   | { kind: "worktree"; id: string; repoPath: string; agentDir: string };
 
 export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd = process.cwd()): Promise<RemoteSender> {
+  const identity = await verifiedSendCaller(cwd, "remote", repos.map(repo => repo.path));
   let id = "";
-  let sender: RemoteSender = { kind: "direct", from: { kind: "user" } };
-  if (!await remoteCliCaller.isHuman()) {
-    const path = await realpath(cwd);
-    id = resolveSenderId("", { cwd: path });
-    const worktree = matchWorktreeCaller(path);
-    if (worktree) {
-      if (id !== worktree[2]) throw new Error(unverifiable);
-      sender = { kind: "worktree", id, repoPath: worktree[1]!, agentDir: agentDir(worktree[1]!, id) };
-    } else if (id === "@system") {
-      if (!await remoteCliCaller.isSystem()) throw new Error(unverifiable);
-      sender = { kind: "direct", from: { kind: "system" } };
+  let sender: RemoteSender;
+  if (identity.kind === "agent") {
+    const { meta, repoPath, agentDir } = identity.caller;
+    id = String(meta.id);
+    if (meta.worktree === true) {
+      sender = { kind: "worktree", id, repoPath, agentDir };
     } else {
-      const repo = findOwnRepo(path, repos);
-      const record = repo && await checkCoordinatorExists(repo.path);
-      if (!repo || !record?.exists || !record.isCoordinator) throw new Error(unverifiable);
       if (isSandboxedProcess()) throw new Error("remote sends from a sandboxed repo coordinator are not supported yet");
-      const caller = await resolveRemoteSharedCaller(path, repo.path, record.agentId).catch(() => null);
-      if (!caller) throw new Error(unverifiable);
-      id = String(caller.meta.id);
-      sender = { kind: "direct", from: await qualifiedAgentSender(id, caller.repoPath, repos) };
+      sender = { kind: "direct", from: await qualifiedAgentSender(id, repoPath, repos) };
     }
+  } else {
+    id = identity.kind === "system" ? "@system" : "";
+    sender = { kind: "direct", from: { kind: identity.kind } };
   }
   if (explicit !== undefined && explicit !== id) throw new Error("Remote --from must match the detected sender");
   return sender;

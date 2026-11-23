@@ -1,15 +1,12 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { hasFreeSpace } from "./attachment-space";
 import { checkManifestLimits } from "./transfer-limits";
 import { readTransferLimits } from "../config";
 import { accountHome, userHome } from "../home";
-import { resolveAttachmentSharedCaller, type ResolvedCallerContext } from "../ib-commands";
-import { registeredRepoRoots, locateRegisteredAgentDir } from "../hooks/agent-context";
-import { matchWorktreeCaller } from "../runtime-names";
-import { remoteCliCaller } from "./peer-outbox";
+import { verifiedSendCaller, type VerifiedSendCaller } from "./send-caller";
 import { buildAgentAccessTable, buildSystemHookPolicy, pathDenialReason } from "../hooks/paths-table";
 import { metaKernelSandboxed, resolvePreparedAccess, type PreparedAccessTable } from "../sandbox";
 import { readMachineName } from "../machine-name";
@@ -52,57 +49,10 @@ export async function copyLocalAttachments(
   }
 }
 
-export type AttachmentSender = { kind: "user" | "system" } | { kind: "agent"; caller: ResolvedCallerContext };
+export type AttachmentSender = VerifiedSendCaller;
 
-async function directoryIdentity(path: string): Promise<string | undefined> {
-  try {
-    const dir = await stat(path, { bigint: true });
-    if (dir.isDirectory()) return `${dir.dev}:${dir.ino}`;
-  } catch (error) {
-    if (!["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-  }
-}
-
-/** Match the closest registered directory by metadata, including APFS case aliases. */
-async function registeredCallerRepo(home: string, cwd: string, worktreeRepo?: string) {
-  const registered = new Set<string>();
-  for (const root of await registeredRepoRoots(home)) {
-    const id = await directoryIdentity(root);
-    if (id) registered.add(id);
-  }
-  for (let dir = worktreeRepo ?? cwd; ; dir = dirname(dir)) {
-    const id = await directoryIdentity(dir);
-    if (id && registered.has(id)) return dir;
-    if (worktreeRepo || dir === dirname(dir)) return undefined;
-  }
-}
-
-export async function resolveAttachmentSender(cwd = process.cwd()): Promise<AttachmentSender> {
-  if (await remoteCliCaller.isHuman()) return { kind: "user" };
-  const unknown = "cannot verify the sender of an attachment";
-  const home = accountHome();
-  const systemDir = join(home, ".itsybitsy");
-  if (cwd === systemDir || cwd.startsWith(systemDir + "/")) {
-    if (await remoteCliCaller.isSystem()) return { kind: "system" };
-    throw new Error(unknown);
-  }
-  const worktree = matchWorktreeCaller(cwd);
-  const repo = await registeredCallerRepo(home, cwd, worktree?.[1]);
-  if (!repo) throw new Error(unknown);
-  const shared = await resolveAttachmentSharedCaller(cwd, repo);
-  if (shared) return { kind: "agent", caller: shared };
-  if (worktree) {
-    const id = worktree[2];
-    if (!id) throw new Error(unknown);
-    const location = await locateRegisteredAgentDir(repo, id);
-    if (!location || !cwd.startsWith(join(location.agentDir, "repo") + "/") && cwd !== join(location.agentDir, "repo")) {
-      throw new Error(unknown);
-    }
-    const meta = await Bun.file(join(location.agentDir, "meta.json")).json();
-    if (meta?.id !== id || meta.worktree !== true) throw new Error(unknown);
-    return { kind: "agent", caller: { ...location, meta } };
-  }
-  throw new Error(unknown);
+export function resolveAttachmentSender(cwd = process.cwd()) {
+  return verifiedSendCaller(cwd, "attachments");
 }
 
 async function senderAttachmentAccess(sender: AttachmentSender) {

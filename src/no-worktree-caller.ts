@@ -14,8 +14,6 @@ export interface NoWorktreeCaller {
 }
 
 interface CallerDeps {
-  /** Verify shared process ancestry even when cwd belongs to a registered worktree. */
-  preferShared?: boolean;
   coordinatorId?: string;
   /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
   dashboardAncestry?: ReadonlySet<number>;
@@ -144,21 +142,21 @@ async function readGitPointer(path: string): Promise<string> {
  * path: a directory that only resembles an agent worktree is not sufficient.
  * This uses filesystem reads only; Codex's native sandbox can prohibit ps.
  */
-export async function isRegisteredAgentWorktree(cwd: string, roots: string[], allowParentGitFile = false): Promise<boolean> {
+export async function verifiedAgentWorktree(cwd: string, roots: string[], allowParentGitFile = false): Promise<NoWorktreeCaller | null> {
   try {
     const canonicalCwd = await realpath(cwd);
     const match = runtimeNames.matchWorktreeCaller(canonicalCwd);
-    if (!match || !roots.includes(match[1]!) || !isValidAgentId(match[2]!)) return false;
+    if (!match || !roots.includes(match[1]!) || !isValidAgentId(match[2]!)) return null;
     const repoPath = match[1]!;
     const agentId = match[2]!;
     const agentDir = runtimeNames.agentDir(repoPath, agentId);
     const worktreePath = join(agentDir, "repo");
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
-    if (!meta || Array.isArray(meta) || meta.id !== agentId || meta.worktree === false) return false;
+    if (!meta || Array.isArray(meta) || meta.id !== agentId || meta.worktree === false) return null;
 
     const gitFile = join(worktreePath, ".git");
     const pointer = (await readGitPointer(gitFile)).match(/^gitdir: (.+)$/);
-    if (!pointer) return false;
+    if (!pointer) return null;
     const gitDir = await realpath(resolve(worktreePath, pointer[1]!));
     // Git's worktree administration directory must belong to this registered
     // repo, and its backlink must name this exact worktree's .git file.
@@ -167,19 +165,24 @@ export async function isRegisteredAgentWorktree(cwd: string, roots: string[], al
       // A registered submodule's .git file points into the superproject's
       // administration directory. Resolve a relative pointer from the module.
       const parent = (await readGitPointer(repoGitDir)).match(/^gitdir: (.+)$/);
-      if (!parent) return false;
+      if (!parent) return null;
       repoGitDir = resolve(repoPath, parent[1]!);
     }
     const worktreesDir = await realpath(join(repoGitDir, "worktrees"));
-    if (dirname(gitDir) !== worktreesDir) return false;
+    if (dirname(gitDir) !== worktreesDir) return null;
     const backlink = await readGitPointer(join(gitDir, "gitdir"));
-    if (!backlink) return false;
-    return await realpath(resolve(gitDir, backlink)) === await realpath(gitFile);
+    if (!backlink) return null;
+    if (await realpath(resolve(gitDir, backlink)) !== await realpath(gitFile)) return null;
+    return { repoPath, agentDir, meta };
   } catch {
     // Missing or unverifiable worktree metadata must use the existing caller
     // verification, never gain an exemption from caller authorization.
-    return false;
+    return null;
   }
+}
+
+export async function isRegisteredAgentWorktree(cwd: string, roots: string[], allowParentGitFile = false): Promise<boolean> {
+  return await verifiedAgentWorktree(cwd, roots, allowParentGitFile) !== null;
 }
 
 /**
@@ -204,7 +207,7 @@ export async function resolveNoWorktreeCaller(
   // HOME is model-controlled. Resolve the operator home from the OS account.
   const strict = deps.coordinatorId !== undefined || deps.dashboardAncestry !== undefined;
   const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir, strict);
-  if (!deps.preferShared && !deps.dashboardAncestry && await isRegisteredAgentWorktree(cwd, roots)) return null;
+  if (!deps.dashboardAncestry && await isRegisteredAgentWorktree(cwd, roots)) return null;
   for (const repoPath of roots) {
     const agentsDir = runtimeNames.agentsDir(repoPath);
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
@@ -213,7 +216,7 @@ export async function resolveNoWorktreeCaller(
     });
     for (const entry of entries) {
       if (deps.coordinatorId !== undefined && entry.name !== deps.coordinatorId) continue;
-      const dottedCoordinator = (deps.coordinatorId || deps.preferShared) && entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
+      const dottedCoordinator = deps.coordinatorId && entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
       if (!entry.isDirectory() || (!isValidAgentId(entry.name) && !dottedCoordinator)) continue;
       const agentDir = join(agentsDir, entry.name);
       let meta: Record<string, unknown>;
@@ -227,7 +230,7 @@ export async function resolveNoWorktreeCaller(
         if (strict) throw new Error("Invalid agent metadata");
         continue;
       }
-      if (meta.worktree !== false || ((deps.coordinatorId !== undefined || dottedCoordinator) && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
+      if (meta.worktree !== false || (deps.coordinatorId !== undefined && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
       if (strict && meta.claude_pid !== "") {
         const pid = Number(meta.claude_pid);
         if (typeof meta.claude_pid !== "string" || !/^\d+$/.test(meta.claude_pid) || !Number.isSafeInteger(pid) || pid <= 1) {

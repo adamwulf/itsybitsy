@@ -4534,9 +4534,9 @@ export async function sendMessage(
       do {
         const result = await drainOutbox(agent, queueDir, { steal: false, timeoutMs: 0 });
         if (!result.ok) { log(result.stderr); return; }
-        // @system has no watchdog to revisit an append made while another
-        // process held the lock and delivered its previously captured batch.
-        if (!opts.outboxDir || !(await readOutbox(queueDir)).length) return;
+        // A lock holder may already have captured its batch before this
+        // append. Keep the queue scheduled until drained or a watchdog takes over.
+        if (!(await readOutbox(queueDir)).length || await hasLiveWatchdog(agentDir)) return;
         await Bun.sleep(backoffMs);
         backoffMs = Math.min(2000, backoffMs * 2);
       } while (true);

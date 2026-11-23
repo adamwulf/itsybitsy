@@ -222,3 +222,23 @@ test("a stalled delivery probe is killed and reaped", async () => {
   await expect(isDeliveryPaneLive("ib-worker", 5)).rejects.toThrow("timed out");
   expect(reaped).toBe(true);
 });
+
+test("a repo coordinator without a watchdog retries its occupied queue", async () => {
+  const dir = join(cli.home, ".itsybitsy", "agents", "photos");
+  await unlink(join(repo, ".itsybitsy", "agents", "photos", "meta.transient.json"));
+  await mkdir(dir, { recursive: true });
+  const lock = join(dir, ".outbox.lock");
+  await Bun.write(lock, "held");
+  const typed: string[] = [];
+  setSendSpawnRunner(cmd => {
+    if (cmd.includes("-l")) typed.push(cmd.at(-1)!);
+    return makeSpawnResult();
+  });
+  try {
+    expect(await exchange(header({ target: { kind: "repo-coordinator", repo: "photos" } }))).toMatchObject({ ok: true });
+    await Bun.sleep(150);
+    expect(typed).toEqual([]);
+  } finally { await unlink(lock); }
+  await waitFor(async () => typed.length === 1 && !(await readOutbox(dir)).length);
+  expect(typed).toEqual(["/compact"]);
+});

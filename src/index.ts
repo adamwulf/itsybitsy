@@ -2023,18 +2023,20 @@ export async function main() {
         controller.signal.throwIfAborted();
         const repos = input.repos;
         const readBody = messageBodyReader(inlineMessage, input.fileContent);
-        const hasAttachments = attachments.length > 0;
+        let sender: ReturnType<typeof import("./peers/local-attachments").resolveAttachmentSender> | undefined;
+        const attachmentSender = attachments.length ? () =>
+          sender ??= import("./peers/local-attachments").then(module => module.resolveAttachmentSender()) : undefined;
         const readMessage = async () => {
           if (staged) return staged.message;
           const body = await Promise.race([readBody(), interruptedInput.promise.then(() => "")]);
           controller.signal.throwIfAborted();
-          if (!hasAttachments) return body;
+          if (!attachmentSender) return body;
           const { stageLocalAttachments } = await import("./peers/local-attachments");
-          staged = await stageLocalAttachments(body, attachments, controller.signal);
+          staged = await stageLocalAttachments(body, attachments, await attachmentSender(), controller.signal);
           return staged.message;
         };
         const { routeCliSend } = await import("./send-broker");
-        const route = await routeCliSend({ target, fromAgent, readMessage, usage, repos, hasAttachments }, {
+        const route = await routeCliSend({ target, fromAgent, readMessage, usage, repos, attachmentSender }, {
           signal: controller.signal, onUncertain: () => { retain = true; },
         });
         if ("result" in route) {
@@ -2045,8 +2047,8 @@ export async function main() {
           const message = await readMessage();
           controller.signal.throwIfAborted();
           if (!message) throw new Error(usage);
-          const opts = fromAgent || hasAttachments
-            ? { ...(fromAgent && { fromAgent }), ...(hasAttachments && { noPassthrough: true }) }
+          const opts = fromAgent || attachmentSender
+            ? { ...(fromAgent && { fromAgent }), ...(attachmentSender && { noPassthrough: true }) }
             : undefined;
           if (isSystemCoordinator) result = await cliActions.sendToSystemCoordinator(message, opts);
           else if (team) result = await cliActions.teamSend(team.name, team.members, message, opts, repos);

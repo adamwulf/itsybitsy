@@ -47,6 +47,8 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
+import type { AttachmentSender } from "./peers/local-attachments";
+import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
 import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
@@ -237,7 +239,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
 
 /** What `ib send` hands the broker. */
 export interface SendCommand {
-  hasAttachments?: boolean;
+  attachmentSender?: () => Promise<AttachmentSender>;
   target: string;
   /** `--from`, when given. */
   fromAgent?: string;
@@ -273,7 +275,10 @@ export async function routeSendThroughWatchdog(
   command: SendCommand,
   deps: SpawnClientDeps = {},
 ): Promise<IbCommandResult | null> {
-  const caller = await resolveRoutedCaller(deps);
+  const sender = await command.attachmentSender?.();
+  const caller = sender
+    ? sender.kind === "agent" && sender.caller.meta.worktree === true && metaKernelSandboxed(sender.caller.meta) ? sender.caller : null
+    : await resolveRoutedCaller(deps);
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!caller) return null;
   if (command.fromAgent !== undefined && command.fromAgent !== caller.meta.id) {
@@ -285,7 +290,7 @@ export async function routeSendThroughWatchdog(
   const message = await command.readMessage();
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!message) return brokerFail(command.usage);
-  return requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller }, command.hasAttachments);
+  return requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller }, !!command.attachmentSender);
 }
 
 type CliSendRoute = { result: IbCommandResult } | { local: ResolvedSendTarget };
@@ -318,8 +323,8 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     if (machine) {
       const localName = await readMachineName().catch(() => "");
       localMachine = machine.toLowerCase() === localName.toLowerCase();
+      if (!localMachine && command.attachmentSender) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
       deferred = !localMachine && (!!worktree || isSandboxedProcess());
-      if (!localMachine && command.hasAttachments) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
       if (!localMachine) {
         message = await command.readMessage();
         if (deps.signal?.aborted) return cancelled();
@@ -332,8 +337,8 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       deferred = !!worktree && !!resolved.incompleteVisibility;
     }
     if (deps.signal?.aborted) return cancelled();
-    if (command.hasAttachments && resolved?.remote) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
-    if (command.hasAttachments && deferred) {
+    if (command.attachmentSender && resolved?.remote) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
+    if (command.attachmentSender && deferred) {
       // Only the watchdog can disambiguate a bare address across hidden repos.
       const local = await routeSendThroughWatchdog(command, deps);
       return { result: local ?? brokerFail(resolved?.error ?? "Cannot resolve local attachment target") };
@@ -365,7 +370,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     if (brokered) return { result: brokered };
     resolved ??= await resolveAddress(target, repos, cwd);
     if (deps.signal?.aborted) return cancelled();
-    if (command.hasAttachments && resolved.remote) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
+    if (command.attachmentSender && resolved.remote) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
     return resolved.error ? { result: brokerFail(resolved.error) } : { local: resolved };
   } catch (err) {
     return deps.signal?.aborted ? cancelled() : { result: brokerFail(err instanceof Error ? err.message : String(err)) };

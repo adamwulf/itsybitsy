@@ -1,13 +1,16 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { chmod, link, mkdir, readdir, realpath, rm, stat, truncate } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { writeAgentTransient } from "../agents";
+import fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
+import { remoteCliCaller } from "./peer-outbox";
 import { userInfo } from "node:os";
 import { accountHome, resetUserHome, setUserHome } from "../home";
 import { createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
 import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
 import { readTransferLimits } from "../config";
-import { copyLocalAttachments } from "./local-attachments";
+import { copyLocalAttachments, resolveAttachmentSender } from "./local-attachments";
 
 let fixture: CliFixture;
 let recipient: FixtureAgent;
@@ -248,4 +251,24 @@ test("account policy is independent of the process HOME", async () => {
   expect(accountHome()).not.toBe(process.env.HOME);
   await Bun.write(join(fixture.home, ".itsybitsy/config.json"), '{"peering":{"attachments":{"maxFiles":0}}}');
   expect((await readTransferLimits()).maxFiles).toBe(0);
+});
+
+test("sandbox caller lookup opens its agent directory and no unrelated repo root", async () => {
+  setUserHome(fixture.home);
+  const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
+  const cwd = await realpath(sender.sessionCwd);
+  const other = await realpath(await fixture.addRepo("unrelated"));
+  const human = spyOn(remoteCliCaller, "isHuman").mockResolvedValue(false);
+  const sync = spyOn(fs, "realpathSync");
+  const asyncRead = spyOn(fsPromises, "realpath");
+  try {
+    expect((await resolveAttachmentSender(cwd)).kind).toBe("agent");
+    const opened = [...sync.mock.calls, ...asyncRead.mock.calls].map(([path]) => String(path));
+    expect(opened).toContain(dirname(cwd));
+    expect(opened.filter(path => path === other || path.startsWith(other + "/"))).toEqual([]);
+  } finally {
+    asyncRead.mockRestore();
+    sync.mockRestore();
+    human.mockRestore();
+  }
 });

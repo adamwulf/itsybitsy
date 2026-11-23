@@ -5,11 +5,13 @@ import { dirname, join } from "node:path";
 import { checkManifestLimits } from "./transfer-limits";
 import { readTransferLimits } from "../config";
 import { accountHome } from "../home";
-import { resolveCallerAgentContext } from "../ib-commands";
+import { resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
+import { registeredRepoRoots, locateRegisteredAgentDir } from "../hooks/agent-context";
+import { checkCoordinatorExists } from "../coordinator";
+import { matchWorktreeCaller } from "../runtime-names";
 import { remoteCliCaller } from "./peer-outbox";
-import { isSandboxedProcess } from "../sandbox-detect";
 import { buildAgentAccessTable, buildSystemHookPolicy, pathDenialReason } from "../hooks/paths-table";
-import { resolvePreparedAccess, type PreparedAccessTable } from "../sandbox";
+import { metaKernelSandboxed, metadataRealpath, resolvePreparedAccess, type PreparedAccessTable } from "../sandbox";
 import { readMachineName } from "../machine-name";
 import { buildAttachmentManifest, fileChunks, hashFile, type ManifestEntry } from "./attachment-manifest";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
@@ -48,23 +50,54 @@ export async function copyLocalAttachments(
   }
 }
 
-async function senderAttachmentAccess(cwd: string) {
-  if (await remoteCliCaller.isHuman()) return {};
+export type AttachmentSender = { kind: "user" | "system" } | { kind: "agent"; caller: ResolvedCallerContext };
+
+export async function resolveAttachmentSender(cwd = process.cwd()): Promise<AttachmentSender> {
+  if (await remoteCliCaller.isHuman()) return { kind: "user" };
   const unknown = "cannot verify the sender of an attachment";
-  const systemDir = join(accountHome(), ".itsybitsy");
-  let access: PreparedAccessTable;
+  const home = accountHome();
+  const systemDir = join(home, ".itsybitsy");
   if (cwd === systemDir || cwd.startsWith(systemDir + "/")) {
-    if (!await remoteCliCaller.isSystem()) throw new Error(unknown);
-    access = (await buildSystemHookPolicy(accountHome())).access;
-  } else {
-    const caller = await resolveCallerAgentContext(cwd);
-    if (!caller) throw new Error(unknown);
-    if (isSandboxedProcess()) return { sandboxed: true };
+    if (await remoteCliCaller.isSystem()) return { kind: "system" };
+    throw new Error(unknown);
+  }
+  // Match registry aliases by metadata alone. Inside a kernel sandbox even
+  // realpath of an unrelated repository root can generate an access denial.
+  const roots = (await registeredRepoRoots(home)).map(metadataRealpath).filter((p): p is string => p !== null);
+  const worktree = matchWorktreeCaller(cwd);
+  if (worktree) {
+    const [, repo, id] = worktree;
+    if (!repo || !id || !roots.includes(repo)) throw new Error(unknown);
+    const location = await locateRegisteredAgentDir(repo, id);
+    if (!location || !cwd.startsWith(join(location.agentDir, "repo") + "/") && cwd !== join(location.agentDir, "repo")) {
+      throw new Error(unknown);
+    }
+    const meta = await Bun.file(join(location.agentDir, "meta.json")).json();
+    if (meta?.id !== id || meta.worktree !== true) throw new Error(unknown);
+    return { kind: "agent", caller: { ...location, meta } };
+  }
+  const repo = roots.filter(root => cwd === root || cwd.startsWith(root + "/")).sort((a, b) => b.length - a.length)[0];
+  const coord = repo && await checkCoordinatorExists(repo);
+  if (repo && coord && coord.exists) {
+    const caller = await resolveRemoteSharedCaller(cwd, repo, coord.agentId);
+    if (caller) return { kind: "agent", caller };
+  }
+  throw new Error(unknown);
+}
+
+async function senderAttachmentAccess(sender: AttachmentSender) {
+  if (sender.kind === "user") return {};
+  let access: PreparedAccessTable;
+  if (sender.kind === "agent") {
+    const { caller } = sender;
+    if (metaKernelSandboxed(caller.meta)) return { sandboxed: true };
     access = await buildAgentAccessTable({
       meta: caller.meta, rootRepo: caller.repoPath, agentDir: caller.agentDir, agentsDir: dirname(caller.agentDir),
       worktreePath: caller.meta.worktree === false ? caller.repoPath : join(caller.agentDir, "repo"),
       kernelSandboxed: false, home: accountHome(),
     });
+  } else {
+    access = (await buildSystemHookPolicy(accountHome())).access;
   }
   return {
     checkRead(source: string) {
@@ -73,11 +106,11 @@ async function senderAttachmentAccess(cwd: string) {
   };
 }
 
-export async function stageLocalAttachments(message: string, paths: readonly string[], signal?: AbortSignal) {
+export async function stageLocalAttachments(message: string, paths: readonly string[], sender: AttachmentSender, signal?: AbortSignal) {
   const cwd = process.cwd();
   const machine = await readMachineName();
   const entries = await buildAttachmentManifest(paths, {
-    ...await senderAttachmentAccess(cwd), cwd, home: accountHome(), machine, limits: await readTransferLimits(),
+    ...await senderAttachmentAccess(sender), cwd, home: accountHome(), machine, limits: await readTransferLimits(),
   });
   try {
     const verified = [];

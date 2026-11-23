@@ -78,7 +78,7 @@ function isUnreachableRepoError(error: unknown): boolean {
  * They are not realpath'd here: inside an agent's kernel sandbox a repo root is
  * not readable, and realpath opens it (see locateRegisteredAgentDir).
  */
-async function registeredRepoRoots(registryHome: string): Promise<string[]> {
+export async function registeredRepoRoots(registryHome: string): Promise<string[]> {
   const registryFile = Bun.file(join(registryHome, ".itsybitsy", "repos.json"));
   if (!(await registryFile.exists())) return [];
 
@@ -128,7 +128,7 @@ async function registeredRepoRoots(registryHome: string): Promise<string[]> {
  * `agents`, an id dir in a different letter case) falls back to
  * realpath(repoRoot), exactly as before.
  */
-async function locateRegisteredAgentDir(
+export async function locateRegisteredAgentDir(
   rawRepoRoot: string,
   agentId: string,
 ): Promise<{ agentDir: string; agentsDir: string; repoPath: string } | null> {

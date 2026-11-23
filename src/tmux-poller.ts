@@ -66,16 +66,16 @@ export async function captureDisplayPane(session: string, lines = 200): Promise<
 export const COORDINATOR_PANE_MARKER = "@ib-system-coordinator";
 
 /** Only the pane marked by the coordinator launch may leave this machine. */
-export async function captureMarkedCoordinatorPane(session: string): Promise<string | null> {
-  const listing = await spawnCtx.run(["tmux", "list-panes", "-s", "-t", tmuxSessionTarget(session),
-    "-F", `#{pane_id} #{${COORDINATOR_PANE_MARKER}}`]);
-  if (listing.exitCode !== 0) return null;
-  const matches = listing.stdout.split("\n").filter(line => /^%\d+ 1$/.test(line));
+export async function captureMarkedCoordinatorPane(session: string, timeoutMs = 5_000): Promise<string | null> {
+  const listing = await readDisplayCommand(["tmux", "list-panes", "-s", "-t", tmuxSessionTarget(session),
+    "-F", `#{pane_id} #{${COORDINATOR_PANE_MARKER}}`], timeoutMs);
+  if (listing === null) return null;
+  const matches = listing.split("\n").filter(line => /^%\d+ 1$/.test(line));
   if (matches.length !== 1) return null;
-  return captureDisplayTarget(matches[0]!.split(" ")[0]!, 200);
+  return captureDisplayTarget(matches[0]!.split(" ")[0]!, 200, timeoutMs);
 }
 
-async function captureDisplayTarget(target: string, lines: number): Promise<string | null> {
+async function captureDisplayTarget(target: string, lines: number, timeoutMs?: number): Promise<string | null> {
   // -J joins tmux's soft-wrapped continuation lines back into one logical
   // line (it preserves program-emitted \n, only rejoining lines tmux itself
   // wrapped). We reflow ourselves in the display path (wordWrapLines) so the
@@ -85,13 +85,28 @@ async function captureDisplayTarget(target: string, lines: number): Promise<stri
   // -e is the only way to read a hyperlink's target: without it a Markdown
   // link captures as just its label. keepAllowedLinks removes everything else
   // -e adds.
-  const proc = spawnCtx.runner(
-    ["tmux", "capture-pane", "-t", target, "-p", "-e", "-J", `-S`, `-${lines}`, "-E", "-"],
-    { stdout: "pipe", stderr: "pipe" }
+  return readDisplayCommand(
+    ["tmux", "capture-pane", "-t", target, "-p", "-e", "-J", "-S", `-${lines}`, "-E", "-"], timeoutMs,
   );
-  const raw = await new Response(proc.stdout).text();
-  const exitCode = await proc.exited;
-  return exitCode === 0 ? raw : null;
+}
+
+async function readDisplayCommand(cmd: string[], timeoutMs?: number): Promise<string | null> {
+  const proc = spawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe" });
+  const read = Promise.all([new Response(proc.stdout).text(), proc.exited, new Response(proc.stderr).text()])
+    .then(([text, code]) => code === 0 ? text : null);
+  if (timeoutMs === undefined) return read;
+  // Remote lookup and capture each get 5 s, under the 15 s wire deadline together.
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(() => deadline.reject(new Error("Coordinator capture timed out")), timeoutMs);
+  try {
+    return await Promise.race([read, deadline.promise]);
+  } catch (err) {
+    proc.kill?.("SIGKILL");
+    await proc.exited;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export class TmuxPoller {

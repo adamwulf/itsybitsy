@@ -23,7 +23,7 @@ export const userQuestionsFile = (repo: string): string => join(runtimeDir(repo)
 // the user home, never under a repo. Resolved through userHome() so tests
 // redirect it with setUserHome().
 export const peerOutboxDir = (home = userHome()): string => join(runtimeDir(home), "peer-outbox");
-export const peerDir = (): string => join(userHome(), RUNTIME_DIR_NAME, "peer");
+export const peerDir = (home = userHome()): string => join(runtimeDir(home), "peer");
 export const peerSecretKeyFile = (): string => join(peerDir(), "secret.key");
 export const peersFile = (): string => join(peerDir(), "peers.json");
 export const peerEndpointLockFile = (): string => join(peerDir(), "endpoint.lock");

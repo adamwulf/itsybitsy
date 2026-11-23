@@ -4431,10 +4431,10 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
   });
 });
 
-test("an installed broad write grant cannot publish peer requests", () => {
+test.each(["peer-outbox/x/request.json", "peer/coordinator-tmux.json"])("an installed broad write grant cannot write %s", relative => {
   setUserHome("/Users/test");
   try {
-    const path = "/Users/test/.itsybitsy/peer-outbox/x/request.json";
+    const path = join("/Users/test/.itsybitsy", relative);
     const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/Users/test"] }) });
     expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: path } }), ctx).decision).toBe("deny");
     expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo hi > " + path } }), ctx).decision).toBe("deny");

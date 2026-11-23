@@ -1,4 +1,4 @@
-import { peerOutboxDir } from "./runtime-names";
+import { peerDir, peerOutboxDir } from "./runtime-names";
 import { describe, expect, spyOn, test } from "bun:test";
 import * as fs from "fs";
 import { existsSync } from "fs";
@@ -256,6 +256,8 @@ describe("sandbox profile emission", () => {
       tagged('(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))'),
       tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
       tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
       tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
@@ -283,6 +285,8 @@ describe("sandbox profile emission", () => {
       '(allow file-write* (subpath (param "PARENTCLAUDE")))',
       tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
       tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
       tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);

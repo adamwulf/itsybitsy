@@ -1,7 +1,7 @@
 import { randomBytes } from "crypto";
 import { lstatSync, readdirSync, readlinkSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
-import { peerOutboxDir } from "./runtime-names";
+import { peerDir, peerOutboxDir } from "./runtime-names";
 import { userHome } from "./home";
 
 /** Fully-resolved, spawn-time sandbox configuration. */
@@ -1501,9 +1501,11 @@ export function generateProfile(
   });
 
   // Upgraded installs may still have a type file with a broad home write grant.
-  const peerOutbox = canonicalizeSandboxPath(peerOutboxDir(sandboxHome(params.HOME)));
-  const handoff = `(subpath "${escapeSbplString(peerOutbox)}")`;
-  lines.push(denyRule(`file-write* ${handoff}`, tag), denyRule(`file-link ${handoff}`, tag));
+  const home = sandboxHome(params.HOME);
+  for (const dir of [peerOutboxDir(home), peerDir(home)]) {
+    const subtree = `(subpath "${escapeSbplString(canonicalizeSandboxPath(dir))}")`;
+    lines.push(denyRule(`file-write* ${subtree}`, tag), denyRule(`file-link ${subtree}`, tag));
+  }
 
   // The ordinary /private/tmp floor lets the parent read the helper's
   // atomically-published status/output, but it must never be able to forge or

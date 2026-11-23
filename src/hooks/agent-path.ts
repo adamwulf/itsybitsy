@@ -269,16 +269,17 @@ export function agentProtectedWritePaths(
   // This directory can be unreadable under the frozen profile. In that
   // case keep the named anchor: structuralPath compares it by identity.
   // Only the unsandboxed hook needs to resolve home symlinks here.
-  const handoff = runtimeNames.peerOutboxDir();
+  const anchor = (path: string) => access && !access.kernelSandboxed ? canonicalizeSandboxPath(path) : path;
+  const peer = anchor(runtimeNames.peerDir());
   const protectedPaths: ProtectedWritePath[] = [{
     path: canonicalizeSandboxPath(join(agentDir, "meta.json")),
     subtree: false,
     reason: META_WRITE_DENY_REASON,
   }, {
-    path: access && !access.kernelSandboxed ? canonicalizeSandboxPath(handoff) : handoff,
+    path: anchor(runtimeNames.peerOutboxDir()),
     subtree: true,
     reason: "Only ib send and the watchdog can publish remote send requests",
-  }];
+  }, { path: peer, subtree: true, reason: peerDirWriteDenyReason(peer) }];
   if (protectIsolatedClaudeSettings) {
     protectedPaths.push({
       path: canonicalizeSandboxPath(join(agentDir, ".claude", "settings.local.json")),

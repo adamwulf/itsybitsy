@@ -242,3 +242,28 @@ test("a repo coordinator without a watchdog retries its occupied queue", async (
   await waitFor(async () => typed.length === 1 && !(await readOutbox(dir)).length);
   expect(typed).toEqual(["/compact"]);
 });
+
+test.each(["write", "finish"] as const)("a stalled acknowledgement %s cancels its stream", async op => {
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const client = await a.openBi();
+  const server = await b.acceptBi();
+  const entered = Promise.withResolvers<void>();
+  server[op] = () => { entered.resolve(); return new Promise<never>(() => {}); };
+  const accept = b.acceptBi.bind(b);
+  b.acceptBi = async () => { b.acceptBi = accept; return server; };
+  const clock = createFakeClock();
+  const serving = serveTrustedConnection(b, {
+    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    log() {}, receiveMessage: receiver, setTimer: clock.setTimer,
+  });
+  try {
+    await client.writeAll(encodeSendHeader(header()));
+    await client.finish();
+    await entered.promise;
+    const ack = client.readToEnd(4096);
+    clock.advance(60_000);
+    await expect(ack).rejects.toThrow();
+    expect(a.closeInfo()).toBeNull();
+    expect(lines).toHaveLength(1);
+  } finally { a.close(0, "done"); await serving; }
+});

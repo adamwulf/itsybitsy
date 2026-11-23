@@ -408,6 +408,16 @@ export async function requestNewAgent(
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
 
+async function writeWithProgress(stream: PairStream, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"]) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
+    const n = await waitForIO({ setTimer }, () => stream.write(chunk));
+    if (!Number.isInteger(n) || n <= 0 || n > chunk.length) throw new Error("Invalid send write count");
+    offset += n;
+  }
+}
+
 /** One exchange. Once FIN is attempted the peer may already have committed the message. */
 export async function requestSend(conn: PairConnection, header: SendHeader, setTimer: PeerResponderDeps["setTimer"]): Promise<string> {
   if (header.files.length) throw new Error("attachments are not supported yet");
@@ -423,13 +433,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
       return opened;
     });
     stream = active;
-    let offset = 0;
-    while (offset < bytes.length) {
-      const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
-      const n = await io(() => active.write(chunk));
-      if (!Number.isInteger(n) || n <= 0 || n > chunk.length) throw new Error("Invalid send write count");
-      offset += n;
-    }
+    await writeWithProgress(active, bytes, setTimer);
     mayBeQueued = true;
     await io(() => active.finish());
     const parts: Uint8Array[] = [];
@@ -559,8 +563,10 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         reply = { ok: false, error: errorDetail(err) };
       }
       try {
-        await stream.writeAll(encodeJson(reply));
-        await stream.finish();
+        await writeWithProgress(stream, encodeJson(reply), deps.setTimer);
+        await waitForIO(options, () => stream.finish());
+      } catch {
+        void stream.cancel().catch(() => {});
       } finally {
         // The native receive mutex is held by a pending read. Closing QUIC
         // after the error ACK releases that read even if STOP_SENDING waits.

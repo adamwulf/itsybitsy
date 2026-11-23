@@ -70,7 +70,7 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
       mapping.push({ destination, spellings: file.spellings });
     }
     await requireSendFin(body, options);
-    return { message: rewriteAttachmentPaths(header.message, mapping), cleanup };
+    return { message: rewriteAttachmentPaths(header.message, mapping, 1024 ** 2), cleanup };
   } catch (error) {
     await cleanup();
     throw error;

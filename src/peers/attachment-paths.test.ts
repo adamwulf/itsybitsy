@@ -39,3 +39,8 @@ test("rewrites only the original text and prefers a longer exact spelling at the
 test("no attachments leave even malformed text untouched", () => {
   expect(rewriteAttachmentPaths("inspect '/tmp/unfinished", [])).toBe("inspect '/tmp/unfinished");
 });
+
+test("the expanded text and the mapping share a UTF-8 byte budget", () => {
+  const mapping = [{ spellings: ["x", "x"], destination: "📸".repeat(20) }];
+  expect(() => rewriteAttachmentPaths("x ".repeat(1000), mapping, 1024)).toThrow("1024 bytes");
+});

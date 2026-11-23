@@ -103,13 +103,16 @@ export function parseSendHeader(value: unknown): SendHeader {
       !validFrom(value.from) || !validTarget(value.target) || typeof value.message !== "string" ||
       !Array.isArray(value.files) || !value.files.every(validFile)) throw new Error("Malformed send header");
   const claimed = new Set<string>();
-  for (const file of value.files) {
-    for (const spelling of new Set(file.spellings)) {
+  const files = value.files.map(file => ({ ...file, spellings: [...new Set(file.spellings)] }));
+  for (const file of files) {
+    if (file.spellings.length > 16) throw new Error("More than 16 spellings for one attachment");
+    for (const spelling of file.spellings) {
       if (claimed.has(spelling)) throw new Error("Multiple files claim the same attachment spelling");
       claimed.add(spelling);
+      if (claimed.size > 256) throw new Error("More than 256 attachment spellings");
     }
   }
-  return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files: value.files };
+  return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files };
 }
 
 export interface FileBodyOptions {

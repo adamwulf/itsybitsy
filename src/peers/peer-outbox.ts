@@ -5,7 +5,7 @@ import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
 export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
-import { constants, existsSync, renameSync, writeFileSync } from "node:fs";
+import { constants, existsSync } from "node:fs";
 import { IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -106,6 +106,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     let claimedSeen = false;
     let lastSequence = 0;
     let warnedProgress = false;
+    let progressRead: Promise<void> | undefined;
+    let polling = true;
 
     let resultDiagnostic: string | undefined;
     const readResult = async (): Promise<IbCommandResult | undefined> => {
@@ -119,17 +121,10 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
         if (!missing(err)) resultDiagnostic = detail(err);
       }
     };
-    while (!signal?.aborted) {
-      const result = await readResult();
-      if (result && !signal?.aborted) return result;
-      if (signal?.aborted) break;
-      if (!claimedSeen && existsSync(claimed)) {
-        claimedSeen = true;
-        deadline = performance.now() + IDLE_TIMEOUT_MS;
-      }
+    async function readProgress() {
       try {
         const { sequence } = JSON.parse(await readFile(join(claimed, "progress"), "utf8"));
-        if (Number.isSafeInteger(sequence) && sequence > lastSequence) {
+        if (polling && Number.isSafeInteger(sequence) && sequence > lastSequence) {
           onProgress?.();
           lastSequence = sequence;
           deadline = performance.now() + IDLE_TIMEOUT_MS;
@@ -140,9 +135,20 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
           warnedProgress = true;
         }
       }
+    }
+    while (!signal?.aborted) {
+      const result = await readResult();
+      if (result && !signal?.aborted) { polling = false; return result; }
+      if (signal?.aborted) break;
+      if (!claimedSeen && existsSync(claimed)) {
+        claimedSeen = true;
+        deadline = performance.now() + IDLE_TIMEOUT_MS;
+      }
+      progressRead ??= readProgress().finally(() => { progressRead = undefined; });
       if (performance.now() >= deadline) break;
       await Bun.sleep(50);
     }
+    polling = false;
     const withdrawn = await withdrawPublishedRequest(dir, staging);
     if (!withdrawn) {
       if (!signal?.aborted) {
@@ -278,19 +284,16 @@ export function createPeerOutboxPoll(now = Date.now) {
             let bytes = 0;
             let sequence = 0;
             let recorded = -1;
+            let writing: Promise<void> | undefined;
             let warned = false;
-            // Publish the initial claim once and then only actual wire progress.
             const tick = () => {
-              try {
-                if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
-                if (sequence === recorded) return;
-                writeFileSync(join(dir, "progress.tmp"), JSON.stringify({ bytes, sequence }), { mode: 0o600 });
-                renameSync(join(dir, "progress.tmp"), join(dir, "progress"));
-                recorded = sequence;
-              } catch (err) {
-                if (!warned) warnSendCleanup(`Remote send progress update failed: ${detail(err)}`);
+              if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
+              if (writing || sequence === recorded) return;
+              const next = sequence;
+              writing = writeJson(dir, "progress", { bytes, sequence: next }).then(() => { recorded = next; }, err => {
+                if (!warned && !missing(err)) warnSendCleanup(`Remote send progress update failed: ${detail(err)}`);
                 warned = true;
-              }
+              }).finally(() => { writing = undefined; });
             };
             tick();
             const timer = setInterval(tick, 250);

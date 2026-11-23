@@ -50,8 +50,8 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
-import { existsSync, fstatSync, writeSync } from "node:fs";
-import { mkdir, open, rm, stat } from "node:fs/promises";
+import { existsSync, fstatSync } from "node:fs";
+import { mkdir, open, rm, stat, rename } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
 import { brokerAttachmentStage, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
@@ -303,8 +303,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
         if (ownsStage) await rm(staged, { recursive: true, force: true });
         else await (await open(join(spawnResultDir(dir), request.id + ".cancel"), "wx", 0o600)).close();
       }, readProgress: async () => {
-        const marker = await stat(ownsStage ? join(staged, "progress") : join(spawnResultDir(dir), request.id + ".progress")).catch(() => null);
-        return marker?.size ?? 0;
+        return (await stat(join(spawnResultDir(dir), request.id + ".progress"))).size;
       } } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
@@ -541,7 +540,7 @@ export async function handleSendRequest(
         } else {
           deps.transferSignal?.throwIfAborted();
           await mkdir(spawnResultDir(ctx.agentDir), { mode: 0o700 }).catch(err => { if (err.code !== "EEXIST") throw err; });
-          marker = await open(textProgress, "wx", 0o600);
+
         }
       }
       catch (err) {
@@ -553,19 +552,30 @@ export async function handleSendRequest(
       const checkClient = () => {
         if (files.length ? !fstatSync(marker!.fd).nlink : existsSync(cancelPath)) controller.abort(new Error("Send cancelled"));
       };
-      let updated = -Infinity;
-      const progress = () => {
-        const now = performance.now();
-        if (marker && now - updated >= 250) {
-          updated = now;
-          // Each coalesced milestone appends one byte. A stat reads its sequence
-          // without relying on filesystem timestamps or clock ordering.
-          try { writeSync(marker.fd, Buffer.from([1])); }
-          catch (err) { warnSendCleanup(`Remote send progress update failed: ${err}`); }
-        }
+      let sequence = 0, recorded = 0, updated = -Infinity;
+      let publication: Promise<void> | undefined;
+      let warned = false;
+      const tick = () => {
+        checkClient();
+        if (publication || sequence === recorded || performance.now() - updated < 250) return;
+        const next = sequence;
+        updated = performance.now();
+        const temp = `${textProgress}.${randomBytes(8).toString("hex")}.tmp`;
+        publication = (async () => {
+          try {
+            const file = await open(temp, "wx", 0o600);
+            try { await file.truncate(next); } finally { await file.close(); }
+            await rename(temp, textProgress);
+            recorded = next;
+          } finally { await rm(temp, { force: true }); }
+        })().catch(err => {
+          if (!warned) warnSendCleanup(`Remote send progress update failed: ${err}`);
+          warned = true;
+        }).finally(() => { publication = undefined; });
       };
-      checkClient();
-      const timer = setInterval(checkClient, 250);
+      const progress = () => { sequence++; };
+      tick();
+      const timer = setInterval(tick, 250);
       try {
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, signal, progress) : undefined;
         const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), signal, stage, progress,
@@ -575,7 +585,7 @@ export async function handleSendRequest(
       } finally {
         clearInterval(timer);
         if (marker) trackSendCleanup(marker.close(), "Broker progress close failed");
-        if (!files.length) trackSendCleanup(rm(textProgress, { force: true }), "Broker progress cleanup failed");
+        trackSendCleanup(Promise.resolve(publication).then(() => rm(textProgress, { force: true })), "Broker progress cleanup failed");
       }
     }
     if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");

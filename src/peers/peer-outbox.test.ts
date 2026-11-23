@@ -293,7 +293,7 @@ test("a failed result publication is retried without sending the request again",
 
 test("a failed worker progress marker leaves the known ACK intact", async () => {
   const { ready, claimed, header } = await readyRequest();
-  await mkdir(join(ready, "progress.tmp")); // The progress write will receive EISDIR.
+  await mkdir(join(ready, "progress")); // The progress rename cannot replace a directory.
   const { collectSendCleanupDiagnostics, finishSendCleanup } = await import("../send-cleanup");
   const output: string[] = [];
   const printer = spyOn(console, "error").mockImplementation(line => { output.push(String(line)); });
@@ -367,4 +367,22 @@ test.each([false, true])("a transient result read is retried and persistent erro
     if (persistent) { expect(result.stderr).toContain("outcome unknown"); expect(result.stderr).toContain("fixture read failure"); }
     expect(failed).toBe(true);
   } finally { spy.mockRestore(); clock.mockRestore(); }
+});
+
+test("a failed progress rename retries the same sequence on the next tick", async () => {
+  const { claimed, header } = await readyRequest();
+  const path = join(claimed, "progress"), rename = fs.rename;
+  let failed = false;
+  const spy = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    if (to === path && !failed) { failed = true; throw Error("rename unavailable"); }
+    await rename(from, to);
+  });
+  try {
+    await createPeerOutboxPoll()(async () => {
+      await waitFor(() => Bun.file(path).exists());
+      expect(await Bun.file(path).json()).toEqual({ sequence: 0, bytes: 0 });
+      return header.id;
+    }, () => {});
+    expect(failed).toBe(true);
+  } finally { spy.mockRestore(); }
 });

@@ -205,6 +205,8 @@ export async function submitWatchdogRequest(
   let awaitingClaim = deps.claimTimeoutMs !== undefined;
   let deadline = now() + (deps.claimTimeoutMs ?? timeoutMs);
   let lastProgress = 0;
+  let progressRead: Promise<void> | undefined;
+  let warnedProgress = false;
   const readResult = async (): Promise<IbCommandResult | undefined> => {
     const file = Bun.file(resultFile);
     if (await file.exists()) {
@@ -238,11 +240,17 @@ export async function submitWatchdogRequest(
       deadline = now() + timeoutMs;
     }
     if (!awaitingClaim && deps.readProgress) {
-      const progress = await deps.readProgress();
-      if (progress > lastProgress) {
-        lastProgress = progress;
-        deadline = now() + timeoutMs;
-      }
+      progressRead ??= deps.readProgress().then(progress => {
+        if (progress > lastProgress) {
+          lastProgress = progress;
+          deadline = now() + timeoutMs;
+        }
+      }, err => {
+        if (!warnedProgress && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+          warnSendCleanup(`Remote send progress read failed: ${err}`);
+          warnedProgress = true;
+        }
+      }).finally(() => { progressRead = undefined; });
     }
     if (now() >= deadline) break;
     await sleep(pollMs);

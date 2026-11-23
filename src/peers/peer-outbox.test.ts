@@ -165,6 +165,9 @@ test("a successful ACK prints before a failed result cleanup warning", async () 
   const h = textHeader({ kind: "system" }, "hello", { kind: "user" });
   const dir = join(base, ".claimed", h.id);
   const output: string[] = [];
+  const { printAndExit } = await import("../index");
+  const stop = spyOn(process, "exit").mockImplementation(() => { throw Error("test exit"); });
+  const stdout = spyOn(console, "log").mockImplementation(line => { output.push(String(line)); });
   const printer = spyOn(console, "error").mockImplementation(line => { output.push(String(line)); });
   const remove = fs.rm;
   const fail = spyOn(fs, "rm").mockImplementation(async (path, opts) => {
@@ -178,10 +181,10 @@ test("a successful ACK prints before a failed result cleanup warning", async () 
     await pollPeerOutbox(async () => h.id, () => {});
     const result = await sending;
     expect(result.ok).toBe(true);
-    output.push(result.stdout);
-    await finishSendCleanup();
+    await expect(printAndExit(result)).rejects.toThrow("test exit");
+    expect(stop).toHaveBeenCalledWith(0);
     expect(output).toEqual(["Sent to @system", expect.stringContaining("cleanup unavailable")]);
-  } finally { fail.mockRestore(); printer.mockRestore(); await finishSendCleanup(); }
+  } finally { fail.mockRestore(); printer.mockRestore(); stdout.mockRestore(); stop.mockRestore(); await finishSendCleanup(); }
 });
 
 test("a live watcher stuck before wire I/O does not renew the client deadline", async () => {

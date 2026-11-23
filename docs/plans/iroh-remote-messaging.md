@@ -1,6 +1,6 @@
 # iroh peering: messages and file attachments across machines
 
-Status: APPROVED on 2026-11-23, with Adam's answers recorded under "Decisions (Adam, 2026-11-23)" below. M1 is merged. M2 text messaging is implemented on the phase branch, pending integration and full-suite verification outside the sandbox. M3 attachments and M4 acceptance remain pending. This plan supersedes feature B of [iroh-remote-coordinator-and-send.md](iroh-remote-coordinator-and-send.md); the decisions recorded there still apply. It follows [iroh-unified-repos.md](iroh-unified-repos.md).
+Status: APPROVED on 2026-11-23, with Adam's answers recorded under "Decisions (Adam, 2026-11-23)" below. M1 and M2 are merged on the phase branch. M3a is built: local CLI snapshots, sender access checks and live attachment limits in Config. M3b (remote transfer) and M4 (two-machine acceptance) remain pending. This plan supersedes feature B of [iroh-remote-coordinator-and-send.md](iroh-remote-coordinator-and-send.md); the decisions recorded there still apply. It follows [iroh-unified-repos.md](iroh-unified-repos.md).
 
 ## Goal (Adam, 2026-11-22 and 2026-11-23)
 
@@ -28,7 +28,7 @@ These came from Adam through @system.
 - **Dashboard staging (`src/message-attachments.ts`, SPEC §4.1.2).** When Send is pressed, the dashboard scans the final text for absolute and dot-relative file references, skipping backtick code. It copies each regular file into `/tmp/itsybitsy-attachments-XXXX/<n>/<name>`, rewrites the reference, and marks the message `noPassthrough`.
   - Live project references are left literal.
   - Snapshots are never deleted by `ib`.
-  - Plain CLI and agent `ib send` does NOT stage anything.
+  - CLI and agent sends stage only explicit `--attach` files.
 - **Telegram.** Inbound files are downloaded to `~/.itsybitsy/channels/telegram/inbound/<chat>/<ms>-<name>`. @system sees that local path in the message.
 - **Sandboxed agents.** Their `ib send` goes through the watchdog send broker (SPEC-SANDBOX §4C.9). A broker request cannot name a file.
 - **iroh streams.** They support `read(limit)` and `readExact(n)` on receive, and `write` / `writeAll` / `finish` on send. That makes chunked streaming possible on one bi stream.
@@ -206,7 +206,8 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
   - The dashboard input on remote agent rows, and notices.
   - The `ib send <machine>/…` CLI path.
 - **M3. Attachments.**
-  - `ib send --attach`, for local and remote targets.
+  - **M3a built.** Local `ib send --attach`, live limits in Config, canonical sender read checks and the protected-identity watchdog check.
+  - **M3b pending.** Remote `ib send --attach` and the remaining transfer work below.
   - Dashboard staging for remote targets.
   - Streaming transfer and receiving.
   - The access check for agent senders, and the `peer/` and `sealed/` refusal.

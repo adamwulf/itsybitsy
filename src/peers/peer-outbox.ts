@@ -118,7 +118,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
         if (!missing(err)) throw err;
       }
     };
-    while (!signal?.aborted && Date.now() < deadline) {
+    while (!signal?.aborted) {
       const result = await readResult();
       if (result && !signal?.aborted) return result;
       if (signal?.aborted) break;
@@ -139,6 +139,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
           warnedProgress = true;
         }
       }
+      if (Date.now() >= deadline) break;
       await Bun.sleep(50);
     }
     const withdrawn = await withdrawPublishedRequest(dir, staging);

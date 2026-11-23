@@ -16,9 +16,7 @@
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. No framing code.
  *
- *   dialer    → {"op":"agents"}
- *   responder → {"op":"agents","repos":[{registryName, displayName}, …],"agents":[{id, nickname, repoName, repoRegistryName, repoPath, state, agentType, manager}, …]}
- *             | {"op":"error","reason":"…"}   (an unknown op, a list over 1 MB, an internal error)
+ * SPEC §20.4 defines the wire shapes for agents, coordinator-pane and new-agent.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the

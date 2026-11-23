@@ -654,3 +654,28 @@ test("pending replays share their receipt without creating extra cancel targets"
   service.cancelReceipt(service.view().incoming![0]!.id);
   expect((await both).every(result => result.status === "rejected")).toBe(true);
 });
+
+test("a stalled non-framed request releases the watcher header slot", async () => {
+  const { IDLE_TIMEOUT_MS } = await import("./transfer-limits");
+  const clock = createFakeClock();
+  const { a, b } = createMemoryLink("peer", "local");
+  const readers = new Set<import("./pairing").PairStream>();
+  const reading = Promise.withResolvers<void>();
+  const accept = b.acceptBi.bind(b);
+  b.acceptBi = async () => {
+    const stream = await accept();
+    const read = stream.readToEnd.bind(stream);
+    stream.readToEnd = n => { reading.resolve(); return read(n); };
+    return stream;
+  };
+  const serving = serveTrustedConnection(b, { peerName: paired, headerReaders: readers,
+    snapshot: () => ({ agents: [], repos: [], coordinator: null }), setTimer: clock.setTimer, log() {} });
+  try {
+    await (await a.openBi()).writeAll(Buffer.from("{"));
+    await reading.promise;
+    expect(readers.size).toBe(1);
+    clock.advance(IDLE_TIMEOUT_MS);
+    await serving;
+    expect(readers.size).toBe(0);
+  } finally { a.close(0, "done"); }
+});

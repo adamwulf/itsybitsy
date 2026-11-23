@@ -154,12 +154,12 @@ test("a successful clone skips source reads and the fallback stops within one ca
     const control = new AbortController();
     read.mockImplementation(function(...args: any[]) {
       const result = Reflect.apply(realRead, handle, args);
-      control.abort(Error("copy cancelled"));
+      if (read.mock.calls.length === 2) control.abort(Error("copy cancelled"));
       return result;
     } as typeof handle.read);
     await expect(cloneAttachments(join(root, "fallback"), [entry], control.signal, async () => false)).rejects.toThrow("copy cancelled");
-    expect(read).toHaveBeenCalledTimes(1);
-    expect((read.mock.calls[0] as unknown as unknown[])[2]).toBe(CHUNK_BYTES);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(read.mock.calls.map(call => (call as unknown as unknown[])[2])).toEqual([CHUNK_BYTES, CHUNK_BYTES]);
   } finally { await handle.close(); await rm(root, { recursive: true, force: true }); }
 });
 

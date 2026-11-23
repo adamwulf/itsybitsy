@@ -3572,6 +3572,27 @@ describe("runPerAgentWatchdog", () => {
     expect(processed.every(([id, repo]) => id === "agent-test1" && repo === "/tmp/test")).toBe(true);
   });
 
+  test("removing the worktree aborts the watchdog's transfer and drains its cleanup", async () => {
+    const aborted = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    setPerAgentSpawnBroker({
+      setup: async () => null,
+      process: async (id, _repo, jobs, signal) => {
+        signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+        jobs.set(id, release.promise);
+      },
+    });
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= 1);
+    setPerAgentReadState(async () => undefined);
+    let done = false;
+    const watch = runPerAgentWatchdog("agent-test1", "/tmp/test").then(() => { done = true; });
+    await aborted.promise;
+    expect(done).toBe(false);
+    release.resolve();
+    await watch;
+  });
+
   test("a spawn-request handler that throws never crashes the watchdog", async () => {
     let calls = 0;
     setPerAgentSpawnBroker({

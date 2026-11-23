@@ -295,6 +295,20 @@ describe("send broker", () => {
       expect(tmuxListCalls).toEqual([]);
     });
 
+    test("finishing a remote job cannot recreate a retired agent directory", async () => {
+      const release = Promise.withResolvers<void>();
+      const jobs = new Map<string, Promise<void>>();
+      const { deps } = server({ transferJobs: jobs, readMeta: async () => { await release.promise; return { meta: null }; } });
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await processSpawnRequests(SENDER_ID, senderRepo, deps);
+      const job = jobs.get(agentDir);
+      expect(job).toBeDefined();
+      await rm(agentDir, { recursive: true });
+      release.resolve();
+      await job;
+      await expect(fs.stat(agentDir)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
     test.each([true, undefined])("a sealed repo coordinator with worktree=%s cannot publish through the worktree broker", async worktree => {
       await linkWorktree();
       const { deps } = server({ readMeta: async () => ({ meta: senderMeta({ agentType: "repo-coordinator", worktree }) }) });

@@ -77,7 +77,7 @@ import {
   brokerFail,
   isSameDirectory,
   resolveRoutedCaller, interruptedSend,
-  spawnRequestDir, submitWatchdogRequest,
+  submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
   type SpawnServerDeps,

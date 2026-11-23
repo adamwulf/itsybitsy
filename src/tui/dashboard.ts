@@ -47,6 +47,7 @@ import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
 import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import { RemoteCoordinatorPane } from "./remote-coordinator-pane";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
@@ -451,15 +452,15 @@ function remoteTitle(entry: RemoteEntry): string {
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
  */
-function renderRemotePlaceholders(entry: RemoteEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
+function renderRemotePanes(entry: RemoteEntry, pane: RemoteCoordinatorPane, mainWidth: number, leftPaneW: number, height: number): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
   const placeholder = (text: string, width: number) =>
     padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), height);
-  const center = placeholder(remoteCenterText(entry), lw);
+  const center = entry.kind === "remote-coordinator" ? pane.render(lw, height) : placeholder(remoteCenterText(entry), lw);
   const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw);
   const sep = `${DIM_GRAY}│${RESET}`;
-  return center.map((line, i) => padToWidth(line, lw) + sep + (right[i] ?? ""));
+  return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
 }
 
 /**
@@ -844,6 +845,19 @@ export class DashboardComponent implements Component {
   peerService: PeersDialogService | null = null;
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
+  private readonly remotePane = new RemoteCoordinatorPane(
+    id => this.peerService!.fetchCoordinatorPane(id),
+    () => this.tui?.requestRender(),
+  );
+
+  private syncRemotePane(): void {
+    const row = this.remoteSelection;
+    if (row?.kind === "remote-coordinator" && this.tmuxPoller.isRunning() && this.peerService) {
+      this.remotePane.select(row.peerId, this.peerService.remoteStartDenial);
+    } else {
+      this.remotePane.select(null);
+    }
+  }
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
   private noticeCounter = 0;
@@ -1365,6 +1379,7 @@ export class DashboardComponent implements Component {
     // tmux pane in normal mode (and the coordinator session when the system
     // coordinator is selected, via setAgent in syncSelectedAgent).
     this.tmuxPoller.start();
+    this.syncRemotePane();
     // The coordinator and repo-coordinator pollers only spawn `tmux capture-pane`
     // when their panes are actually visible. updatePollerVisibility() starts the
     // ones that should be live now and leaves the rest stopped (saves a tmux
@@ -1410,6 +1425,7 @@ export class DashboardComponent implements Component {
 
   stopPolling() {
     this.tmuxPoller.stop();
+    this.remotePane.select(null);
     this.coordinatorPoller.stop();
     this.repoCoordinatorPoller.stop();
     if (this.usageTimer) {
@@ -1871,11 +1887,12 @@ export class DashboardComponent implements Component {
     this.peerService = service;
     service.onChange(() => {
       const changed = this.refreshPeerRepos();
+      this.syncRemotePane();
       const dialog = this._dialog;
       if (dialog?.type === "setup" && dialog.peers) {
         syncPeersDialog(dialog.peers);
         this.tui?.requestRender();
-      } else if (changed || dialog?.type === "new-agent-form") {
+      } else if (changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form") {
         if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
         this.tui?.requestRender();
       }
@@ -2305,6 +2322,8 @@ export class DashboardComponent implements Component {
     // path below (tmux pollers, git probe, right-pane loaders, the per-repo
     // coordinator) sees no selection. Only the info panel and render() use it.
     const remote = this.remoteSelection;
+
+    this.syncRemotePane();
 
     // Update focus cycling for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
@@ -3772,7 +3791,7 @@ export class DashboardComponent implements Component {
     } else if (remoteView) {
       // A remote row: placeholders only. No tmux pane, right pane or input
       // field renders, so nothing local is drawn for (or loaded by) it.
-      mainLines = [mainTitleSep, ...renderRemotePlaceholders(remote, mainWidth, leftPaneW, availableHeight)];
+      mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight)];
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
       // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set

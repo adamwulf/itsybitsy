@@ -9151,6 +9151,7 @@ const PEERS_OTHER = "0a".repeat(32);
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
+  fetchCoordinatorPane = mock(async (_peerId: string) => ({ state: "running", text: "peer capture" }));
   remoteStartDenial: string | null = null;
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
   state: PeerServiceView = {
@@ -9952,6 +9953,29 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((cell) => cell !== "")
       .join(" ");
   }
+
+  test("a highlighted coordinator shows the startup denial, then the remote capture when permitted", async () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    try {
+      service.remoteStartDenial = "Dashboard is inside tmux";
+      selectByKey(dashboard, PEER_B + "/@system");
+      expect(paneText(dashboard.render(180), 2)).toContain("Dashboard is inside tmux");
+      expect(service.fetchCoordinatorPane).not.toHaveBeenCalled();
+      service.remoteStartDenial = null;
+      service.set({});
+      await waitFor(() => paneText(dashboard.render(180), 2).includes("peer capture"));
+      expect(service.fetchCoordinatorPane.mock.calls).toEqual([[PEER_B]]);
+      dashboard.handleInput("s");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      dashboard.handleInput("k");
+      expect(paneText(dashboard.render(180), 2)).not.toContain("peer capture");
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
 
   test("paired coordinators are selectable children of @system, including offline peers", () => {
     const { dashboard, service } = setup();

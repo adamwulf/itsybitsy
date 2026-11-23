@@ -26,6 +26,7 @@ export function listeningOrThrow(service: PeerService): boolean {
 /** One direction of a bi stream. */
 class Pipe {
   private chunks: Uint8Array[] = [];
+  readonly consumed = Promise.withResolvers<void>();
   private finished = false;
   private cancelled = false;
 
@@ -57,7 +58,7 @@ class Pipe {
         if (chunk.length > limit) this.chunks.unshift(chunk.subarray(limit));
         return chunk.subarray(0, limit);
       }
-      if (this.finished) return new Uint8Array();
+      if (this.finished) { this.consumed.resolve(); return new Uint8Array(); }
       await new Promise<void>(resolve => this.waiters.push(resolve));
     }
   }
@@ -77,6 +78,7 @@ class Pipe {
       out.set(chunk, offset);
       offset += chunk.length;
     }
+    this.consumed.resolve();
     return out;
   }
 }
@@ -87,6 +89,10 @@ class MemoryStream implements PairStream {
     private readonly incoming: Pipe,
     private readonly conn: MemoryConnection,
   ) {}
+
+  async stopped(): Promise<void> {
+    await Promise.race([this.outgoing.consumed.promise, this.conn.closed()]);
+  }
 
   async stopReceiving(): Promise<void> { this.incoming.cancel(); }
 

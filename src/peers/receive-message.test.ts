@@ -144,6 +144,8 @@ test.each(["header", "FIN"])("stalled %s stops the receive half and returns the 
     await stream.writeAll(stage === "header" ? Uint8Array.of(0) : encodeSendHeader(header()));
     await Bun.sleep(0);
     clock.advance(60_000);
+    await Bun.sleep(0); // local FIN has returned, but the client has not consumed the ACK
+    expect(a.closeInfo()).toBeNull();
     const reply = JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
     expect(reply).toMatchObject({ ok: false, error: expect.stringContaining("No progress") });
     await serving;
@@ -222,7 +224,9 @@ test.each(["write", "finish"] as const)("a stalled acknowledgement %s cancels it
   const client = await a.openBi();
   const server = await b.acceptBi();
   const entered = Promise.withResolvers<void>();
-  server[op] = () => { entered.resolve(); return new Promise<never>(() => {}); };
+  const cancelling = Promise.withResolvers<void>();
+  server[op] = async () => { entered.resolve(); await b.closed(); throw new Error("connection closed"); };
+  server.cancel = async () => { cancelling.resolve(); await b.closed(); };
   const accept = b.acceptBi.bind(b);
   b.acceptBi = async () => { b.acceptBi = accept; return server; };
   const clock = createFakeClock();
@@ -236,8 +240,11 @@ test.each(["write", "finish"] as const)("a stalled acknowledgement %s cancels it
     await entered.promise;
     const ack = client.readToEnd(4096);
     clock.advance(60_000);
-    await expect(ack).rejects.toThrow();
+    await cancelling.promise;
     expect(a.closeInfo()).toBeNull();
+    clock.advance(5000);
+    await expect(ack).rejects.toThrow();
+    expect(a.closeInfo()).toMatchObject({ byPeer: true, reason: "send reply stalled" });
     expect(lines).toHaveLength(1);
   } finally { a.close(0, "done"); await serving; }
 });

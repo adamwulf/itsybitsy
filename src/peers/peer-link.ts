@@ -526,6 +526,15 @@ async function startAgentWithDeadline(
   }
 }
 
+/** Give FIN time to be acknowledged, or a reset time to acquire the native stream mutex. */
+async function settledWithinGrace(operation: Promise<void>, deps: PeerResponderDeps): Promise<boolean> {
+  const deadline = Promise.withResolvers<false>();
+  const cancel = deps.setTimer(5000, () => deadline.resolve(false));
+  try {
+    return await Promise.race([operation.then(() => true, () => false), deadline.promise]);
+  } finally { cancel(); }
+}
+
 /** One request on its own stream. Every error stays here. */
 async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
@@ -565,13 +574,14 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       try {
         await writeWithProgress(stream, encodeJson(reply), deps.setTimer);
         await waitForIO(options, () => stream.finish());
+        if (stalledRead) await settledWithinGrace(stream.stopped(), deps);
       } catch {
-        void stream.cancel().catch(() => {});
-      } finally {
-        // The native receive mutex is held by a pending read. Closing QUIC
-        // after the error ACK releases that read even if STOP_SENDING waits.
-        if (stalledRead) closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
+        if (!await settledWithinGrace(stream.cancel(), deps)) {
+          closeQuietly(conn, PEER_CLOSE.error, "send reply stalled");
+          return;
+        }
       }
+      if (stalledRead) closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
       return;
     }
     const rest = await stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES - first.length);

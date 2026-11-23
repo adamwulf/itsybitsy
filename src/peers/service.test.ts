@@ -1707,6 +1707,7 @@ function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
   return {
     write: bytes => stream.write(bytes),
           stopReceiving: () => stream.stopReceiving(),
+          stopped: () => stream.stopped(),
           read: limit => stream.read(limit),
     writeAll: (bytes) => stream.writeAll(bytes),
     cancel: () => stream.cancel(),

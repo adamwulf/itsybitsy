@@ -146,6 +146,10 @@ export class IrohSecretKey {
 export class IrohBiStream {
   constructor(private readonly raw: AddonBiStream) {}
 
+  async stopped(): Promise<void> {
+    await callAsync("SendStream.stopped", () => this.raw.send.stopped());
+  }
+
   async stopReceiving(): Promise<void> {
     await this.raw.recv.stop(0n);
   }

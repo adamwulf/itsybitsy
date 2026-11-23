@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, open, rename, symlink, rm, realpath, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -41,10 +42,11 @@ test("resolves relative, home, absolute and symlink spellings into one manifest 
 
 test("refuses missing paths, directories, fifos and sockets before opening them", async () => {
   await Bun.$`mkfifo ${join(cwd, "fifo")}`.quiet();
+  await symlink(cwd, join(cwd, "dirlink"));
   const server = createServer();
   await new Promise<void>((resolve, reject) => server.once("error", reject).listen(join(cwd, "socket"), resolve));
   try {
-    for (const argument of ["~/unused", "./", "./fifo", "./socket"]) {
+    for (const argument of ["~/unused", "./", "./fifo", "./socket", "./dirlink", "/dev/null"]) {
       await expect(buildAttachmentManifest([argument], { cwd, home, machine: "desk" })).rejects.toThrow(argument);
     }
   } finally {
@@ -82,7 +84,15 @@ test("hashes across chunk boundaries and handles an empty file", async () => {
     await writeFile(path, bytes);
     const handle = await open(path, "r");
     try {
+      // Select the positional overload used by fileChunks for the spy.
+      const reader: { read(buffer: Buffer, offset: number, length: number, position: number): Promise<unknown> } = handle;
+      const reads = spyOn(reader, "read");
       expect(await hashFile(handle)).toBe(createHash("sha256").update(bytes).digest("hex"));
+      expect(reads.mock.calls.length).toBe(Math.ceil(length / CHUNK_BYTES) + 1);
+      for (const [buffer, , limit] of reads.mock.calls) {
+        expect(buffer).toBe(reads.mock.calls[0]![0]);
+        expect(limit).toBe(CHUNK_BYTES);
+      }
     } finally {
       await handle.close();
     }
@@ -118,5 +128,20 @@ test("every disable switch takes precedence over a missing path", async () => {
   for (const field of ["maxFileBytes", "maxMessageBytes", "maxFiles"] as const) {
     const limits = { ...DEFAULT_TRANSFER_LIMITS, [field]: 0 };
     await expect(manifest(["missing"], { cwd, home, limits, machine: "desk" })).rejects.toThrow("attachments are disabled on desk");
+  }
+});
+
+test("case aliases on a case-insensitive filesystem share entries and respect protected roots", async () => {
+  await writeFile(join(cwd, "Report"), "example");
+  if (!existsSync(join(cwd, "REPORT"))) return;
+  const entries = await manifest(["./REPORT", "./report"], { cwd, home, machine: "desk" });
+  expect(entries).toHaveLength(1);
+  expect(entries[0]!.spellings).toEqual(expect.arrayContaining(["./REPORT", "./report"]));
+  for (const root of ["peer", "sealed"]) {
+    const dir = join(home, ".itsybitsy", root);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "fixture"), "example");
+    await expect(manifest(["~/.ITSYBITSY/" + root.toUpperCase() + "/FIXTURE"], { cwd, home, machine: "desk" }))
+      .rejects.toThrow("protected");
   }
 });

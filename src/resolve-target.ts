@@ -97,7 +97,7 @@ export async function resolveAgentTarget(
   repos: RepoEntry[],
   cwd: string = process.cwd(),
   purpose: "send" | "agent" | "rehire" = "agent",
-  localOnly = false,
+  inboundPeer = false,
 ): Promise<TargetResult> {
   const { readAgentsOfRepos } = await import("./agents");
   const { checkCoordinatorExists } = await import("./coordinator");
@@ -111,6 +111,7 @@ export async function resolveAgentTarget(
   }
 
   function matchesInRepo(name: string, agents: Agent[]): Agent[] {
+    if (inboundPeer) return agents.filter(agent => agent.id === name);
     const first = matchAgentById(name, agents);
     if (!first) return [];
     if (purpose !== "rehire" || first.id === name) return [first];
@@ -235,7 +236,7 @@ export async function resolveAgentTarget(
     ownErrors = errors;
     searched = repos.filter((r) => r !== ownRepo);
   }
-  const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", localOnly ? [] : readConnectedPeers()]);
+  const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", inboundPeer ? [] : readConnectedPeers()]);
   if (typeof localMachine !== "string") return localMachine;
   const includesLocal = !machine || localMachine.toLowerCase() === machine;
   const peers = connected.filter((p) => !machine || p.name.toLowerCase() === machine);

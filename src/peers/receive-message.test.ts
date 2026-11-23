@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { setUserHome, resetUserHome } from "../home";
@@ -82,6 +83,22 @@ test("the ordinary drainer applies passthrough and peer labels to the queued tex
   expect(calls.filter(cmd => cmd.includes("-l")).map(cmd => cmd.at(-1))).toEqual([
     "/compact", "!pwd", "[sent by agent @desk/tools/alice]: /compact", "[sent by desk/@system]: !pwd",
   ]);
+});
+
+test("wire ids ignore recycled nicknames and select the keyed queue of the named repo", async () => {
+  await cli.addAgent(repo, "replacement", { nickname: "old-id" });
+  expect(await exchange(header({ target: { kind: "agent", repo: "photos", agent: "old-id" } }))).toMatchObject({ ok: false });
+  const other = await cli.addRepo("other");
+  for (const [path, name] of [[repo, "photos"], [other, "other"]] as const) {
+    const key = "home/" + name + "/same";
+    const { agentDir } = await cli.addAgent(path, "same", { queue_key: key });
+    await mkdir(join(cli.home, ".itsybitsy", "agents", key), { recursive: true });
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now() }));
+  }
+  expect(await exchange(header({ target: { kind: "agent", repo: "other", agent: "same" } }))).toMatchObject({ ok: true });
+  const base = join(cli.home, ".itsybitsy", "agents", "home");
+  expect(await readOutbox(join(base, "photos", "same"))).toHaveLength(0);
+  expect(await readOutbox(join(base, "other", "same"))).toHaveLength(1);
 });
 
 test("unknown, stopped, unpaired and attachment sends are refused before queueing", async () => {

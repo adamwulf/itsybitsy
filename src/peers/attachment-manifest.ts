@@ -89,6 +89,7 @@ export async function buildAttachmentManifest(
       const expanded = argument === "~" ? home : argument.startsWith("~/") ? home + argument.slice(1) : argument;
       const absolute = isAbsolute(expanded) ? expanded : cwd + sep + expanded;
       try {
+        if (absolute.endsWith("/") || absolute.endsWith("/.")) throw new Error("directory spelling is not a regular file");
         const source = await realpathArgument(absolute);
         if (protectedDirs.some(dir => source === dir || source.startsWith(dir + sep))) {
           throw new Error("protected attachment path");

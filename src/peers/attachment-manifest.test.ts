@@ -187,3 +187,10 @@ test("hashing refuses growth and truncation since validation, including an initi
     await expect(hashFile(entry!)).rejects.toThrow(after.length < before.length ? /EOF/ : /exceeds/);
   }
 });
+
+test("a trailing slash or dot requires a directory even if the underlying name is a file", async () => {
+  await writeFile(join(cwd, "report"), "ok");
+  for (const argument of ["report/", "report/.", "~/work/report/./"]) {
+    await expect(manifest([argument], { cwd, home, machine: "desk" })).rejects.toThrow(argument);
+  }
+});

@@ -285,7 +285,7 @@ describe("serveTrustedConnection", () => {
     const side = serve({ snapshot });
     try {
       const stream = await side.a.openBi();
-      const bytes = encodePeerRequest("agents");
+      const bytes = encode({ op: "agents" });
       await stream.writeAll(bytes.subarray(0, 3));
       await Bun.sleep(0);
       side.clock.advance(35_000);

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { checkManifestLimits } from "./transfer-limits";
 import { readTransferLimits } from "../config";
-import { userHome } from "../home";
+import { accountHome } from "../home";
 import { resolveCallerAgentContext } from "../ib-commands";
 import { remoteCliCaller } from "./peer-outbox";
 import { isSandboxedProcess } from "../sandbox-detect";
@@ -51,11 +51,11 @@ export async function copyLocalAttachments(
 async function senderAttachmentAccess(cwd: string) {
   if (await remoteCliCaller.isHuman()) return {};
   const unknown = "cannot verify the sender of an attachment";
-  const systemDir = join(userHome(), ".itsybitsy");
+  const systemDir = join(accountHome(), ".itsybitsy");
   let access: PreparedAccessTable;
   if (cwd === systemDir || cwd.startsWith(systemDir + "/")) {
     if (!await remoteCliCaller.isSystem()) throw new Error(unknown);
-    access = (await buildSystemHookPolicy(userHome())).access;
+    access = (await buildSystemHookPolicy(accountHome())).access;
   } else {
     const caller = await resolveCallerAgentContext(cwd);
     if (!caller) throw new Error(unknown);
@@ -63,7 +63,7 @@ async function senderAttachmentAccess(cwd: string) {
     access = await buildAgentAccessTable({
       meta: caller.meta, rootRepo: caller.repoPath, agentDir: caller.agentDir, agentsDir: dirname(caller.agentDir),
       worktreePath: caller.meta.worktree === false ? caller.repoPath : join(caller.agentDir, "repo"),
-      kernelSandboxed: false,
+      kernelSandboxed: false, home: accountHome(),
     });
   }
   return {
@@ -77,7 +77,7 @@ export async function stageLocalAttachments(message: string, paths: readonly str
   const cwd = process.cwd();
   const machine = await readMachineName();
   const entries = await buildAttachmentManifest(paths, {
-    ...await senderAttachmentAccess(cwd), cwd, home: userHome(), machine, limits: await readTransferLimits(),
+    ...await senderAttachmentAccess(cwd), cwd, home: accountHome(), machine, limits: await readTransferLimits(),
   });
   try {
     const verified = [];

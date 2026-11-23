@@ -455,9 +455,8 @@ export async function agentTypeExists(name: string): Promise<boolean> {
  * when the absence should not be an error.
  */
 async function readRawTypeFile(
-  name: string,
+  name: string, home = userHome(),
 ): Promise<{ frontmatter: Record<string, unknown>; body: string }> {
-  const home = userHome();
   const typeFile = join(home, ".itsybitsy", "agent-types", `${name}.md`);
 
   const file = Bun.file(typeFile);
@@ -490,7 +489,7 @@ function inheritsParentName(value: unknown): string | null {
  */
 async function resolveChain(
   name: string,
-  visited: string[] = [],
+  visited: string[] = [], home = userHome(),
 ): Promise<Array<{ name: string; frontmatter: Record<string, unknown>; body: string }>> {
   // Cycle check — includes self-inheritance (name === visited[-1])
   if (visited.includes(name)) {
@@ -500,7 +499,7 @@ async function resolveChain(
 
   let raw: { frontmatter: Record<string, unknown>; body: string };
   try {
-    raw = await readRawTypeFile(name);
+    raw = await readRawTypeFile(name, home);
   } catch (err) {
     if (visited.length === 0) {
       // Leaf type doesn't exist — re-throw the clean "unknown agent type" message
@@ -508,7 +507,6 @@ async function resolveChain(
     }
     // Missing parent — produce a child-aware error
     const child = visited[visited.length - 1]!;
-    const home = userHome();
     const expectedPath = join(home, ".itsybitsy", "agent-types", `${name}.md`);
     throw new Error(
       `Type '${child}' inherits from unknown type '${name}' (file not found: ${expectedPath})`,
@@ -520,7 +518,7 @@ async function resolveChain(
     return [{ name, frontmatter: raw.frontmatter, body: raw.body }];
   }
 
-  const parentChain = await resolveChain(parent, [...visited, name]);
+  const parentChain = await resolveChain(parent, [...visited, name], home);
   return [...parentChain, { name, frontmatter: raw.frontmatter, body: raw.body }];
 }
 
@@ -812,8 +810,8 @@ function buildAgentTypeFromFrontmatter(
  * Throws if the file does not exist, if the chain contains a cycle, or if
  * any parent in the chain is missing.
  */
-export async function loadAgentType(name: string): Promise<AgentType> {
-  const chain = await resolveChain(name);
+export async function loadAgentType(name: string, home = userHome()): Promise<AgentType> {
+  const chain = await resolveChain(name, [], home);
   const leaf = chain[chain.length - 1]!;
   // `spawnable` is read from the leaf file only — see PLAN-INHERITS.md
   // §"Why `spawnable` is not inherited".
@@ -849,12 +847,12 @@ export async function loadAgentType(name: string): Promise<AgentType> {
  *   4. Legacy agents without an `agentType` fall back to the `worker` boolean.
  *   5. Absent all signals, default to manager-like (can spawn).
  */
-export async function metaCanSpawnChildren(meta: Record<string, unknown>): Promise<boolean> {
+export async function metaCanSpawnChildren(meta: Record<string, unknown>, home = userHome()): Promise<boolean> {
   if (typeof meta.canSpawnChildren === "boolean") return meta.canSpawnChildren;
   if (meta.agentType === SYSTEM_COORDINATOR_TYPE) return true;
   if (typeof meta.agentType === "string" && meta.agentType.length > 0) {
     try {
-      const type = await loadAgentType(meta.agentType);
+      const type = await loadAgentType(meta.agentType, home);
       return type.canSpawnChildren;
     } catch {
       return false;

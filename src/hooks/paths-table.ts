@@ -54,9 +54,9 @@ import {
  * Lives here (rather than in agent-path.ts) so paths-table.ts has no import
  * cycle with agent-path.ts; agent-path.ts re-exports it for existing callers.
  */
-export function claudeProjectDirFor(worktreePath: string): string {
+export function claudeProjectDirFor(worktreePath: string, home = userHome()): string {
   const encoded = encodeClaudeProjectPath(worktreePath);
-  let projectDir = resolve(join(userHome(), ".claude", "projects", encoded));
+  let projectDir = resolve(join(home, ".claude", "projects", encoded));
   try {
     projectDir = realpathSync(projectDir);
   } catch {
@@ -153,7 +153,7 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
     HOME: p.home,
   };
   if (p.cli === undefined || p.cli === "claude") {
-    params.PROJECTDIR = claudeProjectDirFor(p.worktreePath);
+    params.PROJECTDIR = claudeProjectDirFor(p.worktreePath, p.home);
     params.SCRATCHPAD = claudeScratchpadDirFor(p.worktreePath, process.getuid?.() ?? 0);
   } else if (p.cli === "agy") {
     params.AGYSTATEDIR = agyStateDirFor(p.home ?? userHome());
@@ -226,7 +226,7 @@ export async function buildAgentAccessTable(input: {
     rootRepo: input.rootRepo,
     gitDir,
     tmuxSock: tmuxSocketDirPath(uid),
-    canSpawnChildren: await metaCanSpawnChildren(input.meta),
+    canSpawnChildren: await metaCanSpawnChildren(input.meta, input.home),
     cli: metadataCli(input.meta.model) ?? null,
     home: input.home ?? userHome(),
     storedPaths: kernelSandboxed,
@@ -278,8 +278,8 @@ export interface SystemHookPolicy {
 export async function buildSystemHookPolicy(home: string): Promise<SystemHookPolicy> {
   const itsyHome = join(home, ".itsybitsy");
   const [allLayer, systemLayer] = await Promise.all([
-    loadAgentType("_all").catch(() => undefined),
-    loadAgentType(SYSTEM_COORDINATOR_TYPE).catch(() => undefined),
+    loadAgentType("_all", home).catch(() => undefined),
+    loadAgentType(SYSTEM_COORDINATOR_TYPE, home).catch(() => undefined),
   ]);
   const paths = unionLayerPaths([allLayer, systemLayer]);
 

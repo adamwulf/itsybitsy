@@ -192,6 +192,8 @@ async function runDriver(): Promise<void> {
     throw new Error(`test-cli-driver blocked ${violation.kind}: ${JSON.stringify(violation.detail)}`);
   };
   installExternalGuards(config, block);
+  const { setUserHome } = await import("./home");
+  setUserHome(config.home);
 
   const { setSandboxedProcessOverride } = await import("./sandbox-detect");
   setSandboxedProcessOverride(() => config.sandboxed);

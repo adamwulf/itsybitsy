@@ -1,5 +1,5 @@
 import { join } from "path";
-import { userHome } from "./home";
+import { accountHome, userHome } from "./home";
 import { chmod, stat } from "fs/promises";
 import { DEFAULT_ATTACHMENT_SETTINGS, resolveTransferLimits, attachmentSettingKey, attachmentSettings, validateAttachmentSetting } from "./peers/transfer-limits";
 
@@ -106,7 +106,7 @@ export function defaultUserConfigPath(): string {
 
 /** Read this machine's current policy for each attachment request. */
 export async function readTransferLimits() {
-  const path = defaultUserConfigPath();
+  const path = overrideUserConfigPath ?? join(accountHome(), ".itsybitsy", "config.json");
   const data = await Bun.file(path).json().catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return {};
     throw new Error(`Cannot read attachment limits from ${path}: ${error.message}`, { cause: error });

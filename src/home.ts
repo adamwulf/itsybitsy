@@ -23,7 +23,7 @@
  * would produce relative paths like `Library/Caches` or an absolute `/.itsybitsy`.
  */
 
-import { homedir } from "os";
+import { homedir, userInfo } from "os";
 
 /** Test-only override of the resolved home directory (undefined = not set). */
 let overrideHome: string | undefined;
@@ -44,4 +44,9 @@ export function setUserHome(path: string): void {
 /** Clear the test override so {@link userHome} resolves from the environment. */
 export function resetUserHome(): void {
   overrideHome = undefined;
+}
+
+/** Account-owned policy and protected paths must follow the OS account. */
+export function accountHome(): string {
+  return overrideHome ?? userInfo().homedir;
 }

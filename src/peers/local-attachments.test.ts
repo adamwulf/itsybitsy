@@ -2,9 +2,11 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmod, link, mkdir, readdir, realpath, rm, stat, truncate } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { writeAgentTransient } from "../agents";
-import { resetUserHome, setUserHome } from "../home";
+import { userInfo } from "node:os";
+import { accountHome, resetUserHome, setUserHome } from "../home";
 import { createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
 import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
+import { readTransferLimits } from "../config";
 import { copyLocalAttachments } from "./local-attachments";
 
 let fixture: CliFixture;
@@ -231,4 +233,19 @@ test("attachments refuse an unidentified caller", async () => {
   const result = await fixture.run(["send", "reader", "--attach", "file", "read"]);
   expect(result.stderr).toContain("cannot verify the sender");
   expect(await queue().exists()).toBe(false);
+});
+
+test("account policy is independent of the process HOME", async () => {
+  const original = process.env.HOME;
+  try {
+    process.env.HOME = fixture.cwd;
+    expect(accountHome()).toBe(userInfo().homedir);
+  } finally {
+    if (original === undefined) delete process.env.HOME;
+    else process.env.HOME = original;
+  }
+  setUserHome(fixture.home);
+  expect(accountHome()).not.toBe(process.env.HOME);
+  await Bun.write(join(fixture.home, ".itsybitsy/config.json"), '{"peering":{"attachments":{"maxFiles":0}}}');
+  expect((await readTransferLimits()).maxFiles).toBe(0);
 });

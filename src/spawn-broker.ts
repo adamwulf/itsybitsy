@@ -395,6 +395,8 @@ export async function resolveRoutedCaller(
 // ── Server (runs in the unsandboxed watchdog) ────────────────────────────────
 
 export interface SpawnServerDeps {
+  /** In-flight transfer jobs owned by this watchdog, keyed by agent directory. */
+  transferJobs?: Map<string, Promise<void>>;
   newAgent?: (repoPath: string, prompt: string, opts: NewAgentOptions) => Promise<IbCommandResult>;
   verifySeal?: (
     repoPath: string,
@@ -552,15 +554,19 @@ export async function processSpawnRequests(
     } finally { await rm(claimed, { force: true }); }
     handled++;
 
-    let result: IbCommandResult;
-    try {
-      result = await handleOneRequest(agentId, repoPath, agentDir, id, text, deps);
-    } catch (err) {
-      result = brokerFail(`Error: spawn failed: ${err instanceof Error ? err.message : String(err)}`);
+    async function dispatch() {
+      let result: IbCommandResult;
+      try { result = await handleOneRequest(agentId, repoPath, agentDir, id, text, deps); }
+      catch (err) { result = brokerFail(`Error: spawn failed: ${err instanceof Error ? err.message : String(err)}`); }
+      try { await writeResult(agentDir, id, result); }
+      catch { /* The client deadline handles an unavailable result channel. */ }
     }
-    try {
-      await writeResult(agentDir, id, result);
-    } catch { /* the client will time out; nothing else to do */ }
+    const jobs = deps.transferJobs;
+    const named = jobs && requestOp(text);
+    if (jobs && named?.present && named.op === "remote-send") {
+      if (jobs.has(agentDir)) await writeResult(agentDir, id, brokerFail("busy, try again"));
+      else jobs.set(agentDir, dispatch().finally(() => jobs.delete(agentDir)));
+    } else await dispatch();
   }
   return handled;
 }

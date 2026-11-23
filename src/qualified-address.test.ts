@@ -1,5 +1,5 @@
 import { waitFor } from "./test-utils";
-import { processSpawnRequests, spawnRequestDir } from "./spawn-broker";
+import { processSpawnRequests, spawnRequestDir, spawnResultDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, open, readdir, realpath, rename, symlink, rm, utimes } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -371,7 +371,14 @@ describe("qualified agent addresses", () => {
     });
     try {
       await waitFor(async () => (await readdir(spawnRequestDir(agentDir)).catch(() => [])).some(n => n.endsWith(".json")));
-      const broker = processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }) });
+      const jobs = new Map<string, Promise<void>>();
+      const deps = { verifySeal: async () => ({ ok: true as const }), transferJobs: jobs };
+      expect(await processSpawnRequests("mgr", app, deps)).toBe(1);
+      const broker = jobs.get(agentDir)!;
+      const extra = "b".repeat(32);
+      await Bun.write(join(spawnRequestDir(agentDir), extra + ".json"), JSON.stringify({ op: "remote-send" }));
+      await processSpawnRequests("mgr", app, deps);
+      expect((await Bun.file(join(spawnResultDir(agentDir), extra + ".json")).json()).stderr).toContain("busy");
       const base = join(cli.home, ".itsybitsy/peer-outbox");
       await waitFor(async () => (await readdir(base).catch(() => [])).some(n => !n.startsWith(".")));
       const entered = Promise.withResolvers<void>();

@@ -1641,6 +1641,8 @@ export interface SpawnBrokerHooks {
   process: (agentId: string, repoPath: string) => Promise<void>;
 }
 
+const remoteTransferJobs = new Map<string, Promise<void>>();
+
 const defaultSpawnBrokerHooks: SpawnBrokerHooks = {
   setup: async (agentDir) => {
     const { ensureSpawnBrokerDirs, spawnRequestDir } = await import("./spawn-broker");
@@ -1649,7 +1651,7 @@ const defaultSpawnBrokerHooks: SpawnBrokerHooks = {
   },
   process: async (agentId, repoPath) => {
     const { processSpawnRequests } = await import("./spawn-broker");
-    await processSpawnRequests(agentId, repoPath);
+    await processSpawnRequests(agentId, repoPath, { transferJobs: remoteTransferJobs });
   },
 };
 

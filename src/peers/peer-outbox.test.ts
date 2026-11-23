@@ -308,6 +308,8 @@ test("a failed worker progress marker leaves the known ACK intact", async () => 
     expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: true, id: header.id });
     expect(output).toEqual([]);
     await finishSendCleanup();
+    // Progress publication runs in the watcher independently of the ACK.
+    await waitFor(() => output.length > 0);
     expect(output).toEqual([expect.stringContaining("progress update failed")]);
   } finally { printer.mockRestore(); }
 });

@@ -589,6 +589,26 @@ describe("send broker", () => {
       expect(await readdir(spawnRequestDir(agentDir))).toEqual([]);
     });
 
+    test.each([true, false])("remote recipient timeout races the watchdog claim (watchdog wins=%s)", async wins => {
+      const { deps } = server();
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const verify = deps.verifySeal!;
+      deps.verifySeal = async (...args) => { entered.resolve(); await release.promise; return verify(...args); };
+      let work: Promise<number> | undefined;
+      let clock = 0;
+      const out = await requestSendViaWatchdog("laptop/@system", MESSAGE, clientDeps({
+        now: () => clock,
+        sleep: async () => {
+          if (wins) { work = processSpawnRequests(SENDER_ID, senderRepo, deps); await entered.promise; }
+          clock = SPAWN_CLIENT_TIMEOUT_MS;
+        },
+      }));
+      release.resolve();
+      expect(out?.stderr).toContain(wins ? "may still be delivered" : "withdrawn");
+      expect(await (work ?? processSpawnRequests(SENDER_ID, senderRepo, deps))).toBe(wins ? 1 : 0);
+    });
+
     test("a timeout after the watchdog took the request says it may still be delivered (no direct send)", async () => {
       let clock = 0;
       const out = await requestSendViaWatchdog(TARGET_ID, MESSAGE, clientDeps({

@@ -204,8 +204,15 @@ export async function submitWatchdogRequest(
   // Timed out. Withdraw the request if the watchdog has not taken it yet; if it
   // already has, the command may still finish — say so.
   const requestFile = join(spawnRequestDir(agentDir), `${request.id}.json`);
-  const stillQueued = await Bun.file(requestFile).exists();
-  if (stillQueued) await rm(requestFile, { force: true });
+  let stillQueued = false;
+  const withdrawn = requestFile + ".withdrawn";
+  try {
+    await rename(requestFile, withdrawn);
+    stillQueued = true;
+    await rm(withdrawn, { force: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return brokerFail(`Could not withdraw request: ${err}`);
+  }
   return brokerFail(
     `Error: timed out after ${Math.round(timeoutMs / 1000)}s waiting for the watchdog of '${callerId}' to ${wording.action}. ` +
       (stillQueued
@@ -491,20 +498,25 @@ export async function processSpawnRequests(
     const id = match[1]!;
     const requestPath = join(spawnRequestDir(agentDir), name);
 
+    const claimed = requestPath + ".claimed";
+    try { await rename(requestPath, claimed); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
     let text: string;
     try {
-      const size = (await stat(requestPath)).size;
+      const size = (await stat(claimed)).size;
       if (size > SPAWN_MAX_PROMPT_BYTES * 2) {
-        await rm(requestPath, { force: true });
         await writeResult(agentDir, id, brokerFail("Error: spawn request is too large"));
         handled++;
         continue;
       }
-      text = await Bun.file(requestPath).text();
-    } catch {
-      continue; // withdrawn by the client, or not yet readable
-    }
-    await rm(requestPath, { force: true });
+      text = await Bun.file(claimed).text();
+    } catch (err) {
+      await writeResult(agentDir, id, brokerFail(`Cannot read claimed request: ${err}`));
+      handled++;
+      continue;
+    } finally { await rm(claimed, { force: true }); }
     handled++;
 
     let result: IbCommandResult;

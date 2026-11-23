@@ -3748,16 +3748,16 @@ A human initiates the request from the New Agent dialog. At dashboard startup, r
 
 | Close code | Meaning |
 |---|---|
-| 0 | a normal close: shutting down, the peer was dropped from `peers.json`, or a request timed out |
+| 0 | normal shutdown or removal of the peer from `peers.json` |
 | 1 | `not a peer` |
-| 3 | a malformed request; the reason says which |
+| 3 | a malformed request or transport teardown still pending after its grace period |
 
 **Poller.** Runs while the endpoint is bound; it polls once when the endpoint binds, then every 5 s.
 
 - Each tick re-reads `peers.json`, so a newly paired peer is polled from the next tick, and a removed one is dropped: its connection is closed (code 0, `removed`) and its state forgotten. A `peers.json` that cannot be read keeps the known peers polled and is logged once per distinct error.
 - Each peer keeps one live connection between polls and is redialed only once that connection has closed.
 - The poller has at most one dial or poll request in flight per peer. A dial can take up to 30 s to fail, so ticks that come while one is pending skip that peer; other peers are polled as usual. A failed dial or request is retried on the next tick.
-- Each `agents` request has 15 s to be answered. A peer can keep its connection alive and still never answer (its `ib watch` event loop wedged while the network side runs on), so on timeout the poller closes that connection (code 0, `request timed out`), records `request timed out`, and the next tick redials. Closing the connection is what ends the timed-out request, so it never overlaps the next one. Until the timeout, a peer that was connected still shows as connected.
+- Each `agents` request has 15 s to receive an answer. On timeout, the poller records `request timed out` and tears down the request stream. A settled teardown keeps the connection for the next poll. Teardown still pending after 750 ms closes the connection with code 3, and the next poll redials. Until the timeout, a connected peer still shows as connected.
 - The link status is green `connected` after a successful poll on a live connection. Before the first outcome it is yellow `connecting`. A failed dial or request, or a dropped connection, makes it red `offline`. It stays offline during retries until a poll succeeds.
 - The poller keeps the following state in memory: connected or not, `connectedAt` (when it last became connected; null while not), `lastOkAt`, `lastError` (one short line: the dial's error such as `timed out`, `request timed out`, `not a peer`, `closed by the other side`, `the other side reported: <reason>`, or a malformed reply), and the repo and agent lists from the most recent successful reply. Both lists survive a disconnect (§20.5). The service exposes it as `view().links`, in `peers.json` order, and notifies its listeners when something visible changes (connected, the error, the list, a name, or the set of peers); a poll that changes nothing but `lastOkAt` does not notify.
 - The endpoint-owning `ib watch` publishes each visible change to `~/.itsybitsy/peer/remote-agents.json` by renaming a temporary file in the same directory. The array has one entry per peer, `{name, id, connected, lastOkAt, agents: [{repo, id, nickname, state}]}`. Each agent’s `repo` is its registered name. Shutdown publishes the disconnected state. CLI readers count connected entries while the endpoint lock owner is alive. They check its PID and process start time. If the start time is unavailable, readers require a lock heartbeat within three poll intervals. A missing or unreadable snapshot or lock yields an empty list.

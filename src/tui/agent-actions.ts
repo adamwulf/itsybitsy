@@ -175,6 +175,7 @@ export function killActiveDiffProc() {
 export interface ActionCtx {
   readonly dialog: DialogState;
   remoteStartPending: boolean;
+  refuseOnRemoteRow(key: string): boolean;
   peerService: PeersDialogService | null;
   remoteSelection: RemoteEntry | null;
   agentTree: {
@@ -2395,6 +2396,7 @@ export function handleSetup(ctx: ActionCtx, initialTab = 0) {
   let settings: ReturnType<typeof loadSetupSettings> | undefined;
 
   const showSetupDialogForTab = (tab: number) => {
+    if (tab !== PEERS_TAB && ctx.refuseOnRemoteRow("h")) return;
     const dialog: Extract<DialogState, { type: "setup" }> = {
       type: "setup",
       tab,

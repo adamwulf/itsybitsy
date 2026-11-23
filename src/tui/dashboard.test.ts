@@ -10624,6 +10624,19 @@ describe("Unified peer repos in the Agents tree", () => {
     notRefused(d);
   });
 
+  test("a remote row can open Peers but cannot reach Hooks or Config through it", () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("I");
+    for (const key of ["\t", "\x1b[Z"]) {
+      resetNotice(dashboard);
+      dashboard.handleInput(key);
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
+      expect(service.calls).toEqual(["open"]);
+    }
+  });
+
   test("the command palette goes through the same guard", () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);

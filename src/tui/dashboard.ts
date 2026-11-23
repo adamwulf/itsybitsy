@@ -1915,7 +1915,7 @@ export class DashboardComponent implements Component {
    * allows it. Returns true when it refused. The key dispatch (handleInput)
    * and the command palette both go through it.
    */
-  private refuseOnRemoteRow(key: string): boolean {
+  refuseOnRemoteRow(key: string): boolean {
     const remote = this.remoteSelection;
     if (remote === null || isRemoteAllowedKey(key)) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;

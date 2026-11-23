@@ -158,6 +158,7 @@ function makeMockCtx(overrides?: {
   let currentDialog: DialogState = null;
   const ctx: ActionCtx = {
     remoteStartPending: false,
+    refuseOnRemoteRow: () => false,
     get dialog() { return currentDialog; },
     peerService: null,
     remoteSelection: null,

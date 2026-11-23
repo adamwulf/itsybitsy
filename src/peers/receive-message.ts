@@ -103,7 +103,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
     if (earlier) {
       if (waiters >= 8) throw new Error("busy, try again");
       waiters++;
-      try { return await earlier; } finally { waiters--; }
+      try { options.admitted?.(false); return await earlier; } finally { waiters--; }
     }
     if (accepted.size + pending.size >= capacity) throw new Error("busy, try again");
     const work = async () => {
@@ -122,6 +122,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
         receiving.add(peerId);
       }
       try {
+        options.admitted?.(files.length > 0);
         const result = await enqueue(header, name, {
           log,
           senderKind: header.from.kind === "user" ? undefined : header.from.kind,

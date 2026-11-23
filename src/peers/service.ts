@@ -691,15 +691,23 @@ export class PeerService {
     const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
     const row = { id, label: label + " → " + targetLabel(header.target), bytes: 0, total: header.files.reduce((sum, f) => sum + f.size, 0) };
     const done = Promise.withResolvers<void>();
-    this.receipts.set(id, { row, controller, done: done.promise });
-    if (options?.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
-    this.notify();
     try {
-      await receive(header, peer, name, body, { ...options, signal: controller.signal, onProgress: bytes => {
+      await receive(header, peer, name, body, { ...options, signal: controller.signal, admitted: ownsBody => {
+        if (this.shuttingDown) throw new Error("Watcher shutting down");
+        if (ownsBody) {
+          this.receipts.set(id, { row, controller, done: done.promise });
+          if (options?.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
+          this.notify();
+        }
+        options?.admitted?.(ownsBody);
+      }, onProgress: bytes => {
         row.bytes = bytes;
         this.notify();
       } });
-    } finally { this.receipts.delete(id); done.resolve(); this.notify(); }
+    } finally {
+      if (this.receipts.delete(id)) this.notify();
+      done.resolve();
+    }
   }
 
   async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {

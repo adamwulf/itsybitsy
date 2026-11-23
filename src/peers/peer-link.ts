@@ -504,7 +504,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
 // Responder
 // ---------------------------------------------------------------------------
 
-export interface ReceiptOptions extends FileBodyOptions { cancelStream?: () => void }
+export interface ReceiptOptions extends FileBodyOptions { cancelStream?: () => void; admitted?: (ownsBody: boolean) => void }
 
 export interface PeerResponderDeps {
   /** Paired name for this id, re-read on every call. A failed read returns null. */
@@ -613,13 +613,12 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       try {
         const header = await decodeSendHeader(reader, options);
         if (!header.files.length) await requireSendFin(stream, options);
-        deps.headerReaders?.delete(stream);
         if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
         await deps.receiveMessage(header, conn.remoteId, async () => {
           const name = await deps.peerName(conn.remoteId);
           if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
           return name;
-        }, stream, { ...options, cancelStream: () => {
+        }, stream, { ...options, admitted: () => deps.headerReaders?.delete(stream), cancelStream: () => {
           void settledWithinGrace(stream.cancel(), deps).then(ok => {
             if (!ok) closeQuietly(conn, PEER_CLOSE.error, "receive reset stalled");
           });

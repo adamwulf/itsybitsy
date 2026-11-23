@@ -2,12 +2,26 @@
  * operations a chance to report filesystem errors before it exits. */
 const pending = new Set<Promise<void>>();
 
+let diagnostics: string[] | undefined;
+
+export function collectSendCleanupDiagnostics() {
+  diagnostics = [];
+}
+
+function warn(message: string) {
+  if (diagnostics) diagnostics.push(message);
+  else console.error(message);
+}
+
 export function trackSendCleanup(operation: Promise<void>, label: string) {
-  const task = operation.catch(err => console.error(`${label}: ${err}`)).finally(() => pending.delete(task));
+  const task = operation.catch(err => warn(`${label}: ${err}`)).finally(() => pending.delete(task));
   pending.add(task);
 }
 
 export async function finishSendCleanup() {
+  const buffered = diagnostics;
+  diagnostics = undefined;
+  for (const line of buffered ?? []) console.error(line);
   if (!pending.size) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {

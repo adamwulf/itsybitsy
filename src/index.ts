@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { finishSendCleanup } from "./send-cleanup";
+import { collectSendCleanupDiagnostics, finishSendCleanup } from "./send-cleanup";
 import { sameRepoPath } from "./repo-identity";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -1941,6 +1941,7 @@ export async function main() {
       break;
     }
     case "send": {
+      collectSendCleanupDiagnostics();
       // Parse known flags (--attach, --from, -f/--file) at any position. Unknown short
       // flags (e.g. `-x`) and unknown long flags (e.g. `--bogus`) are rejected
       // BEFORE the target is seen so typos surface immediately. AFTER the

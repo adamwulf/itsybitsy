@@ -2996,6 +2996,7 @@ The legacy `"teams-tree"` focus target is retained in the `FocusTarget` union so
 | Local agent | `<this machine's name>/<repo registry name>/<agent id>` |
 | Repo header (local or remote-only) | `/<lowercased registry name>` |
 | System coordinator | `__system-coordinator__` (unchanged) |
+| Paired system coordinator, beneath the local coordinator | `<peer id>/@system` (selection survives a peer rename) |
 | Remote agent | `<peer name>/<remote repoRegistryName>/<remote id>` |
 
 - **machine** is this machine's name for a local row, or the peer's name (the one typed when pairing, §20.2) for a remote one. On launch, `ib watch` and `newAgent` (including brokered spawns) initialize `~/.itsybitsy/machine-name`. On first use they derive it from the macOS computer name (`scutil --get ComputerName`), falling back to `os.hostname()` without `.local`. Exclusive creation lets concurrent initializers share the first saved value. Renaming the Mac preserves the saved identity. Edit the file to rename it. It is sanitized on the way in and out: trimmed, `\p{Cc}`/`\p{Cf}` stripped, `/` turned into `-`, cut to 32 characters (`src/machine-name.ts`).
@@ -3588,7 +3589,7 @@ The design source-of-truth is **`SPEC-ANTIGRAVITY-CLI.md`** in the repo root; `A
 
 ## 20. Peering: Pairing and the Trusted Link in `ib watch`
 
-Two installs pair over [iroh](https://www.iroh.computer) so that each trusts the other's key, and then poll each other's agents over a trusted link and show them, read-only, in the Agents tree. The design is `docs/plans/iroh-peering.md`; this section is the behavior through Phase 7 of `docs/plans/iroh-unified-repos.md`. The identity, `peers.json`, the endpoint lock and `ib peer` are in §12.1.3.
+Two installs pair over [iroh](https://www.iroh.computer) so that each trusts the other's key, and then poll each other's agents over a trusted link and show them, read-only, in the Agents tree. The design is `docs/plans/iroh-peering.md`; this section also covers unified repos and the remote system coordinator view. The identity, `peers.json`, the endpoint lock and `ib peer` are in §12.1.3.
 
 Ids are ed25519 public keys written as 64 lowercase hex characters; the short id is the first 10.
 
@@ -3699,15 +3700,19 @@ ALPN `itsybitsy/peer/1` (`src/peers/peer-link.ts`), served by the accept loop an
 
 | Request | Reply |
 |---|---|
-| `{"op":"agents"}` | `{"op":"agents","repos":[{registryName, displayName}, …],"agents":[{id, nickname, repoName, repoRegistryName, repoPath, state, agentType, manager}, …]}` |
+| `{"op":"agents"}` | `{"op":"agents","repos":[{registryName, displayName}, …],"agents":[{id, nickname, repoName, repoRegistryName, repoPath, state, agentType, manager}, …],"coordinator":{"state":"<state>"}}` |
+| `{"op":"coordinator-pane"}` | `{"op":"coordinator-pane","state":"<state>","text":"<capture>"}` or `{"ok":false,"error":"<message>"}` |
 | `{"op":"new-agent","repo":"<registry name>","type":"<type>","name":"<optional>","prompt":"<text>"}` | `{"ok":true,"id":"<id>"}` or `{"ok":false,"error":"<message>"}` |
 | any other op | `{"op":"error","reason":"unknown op \"<op>\""}`; the connection stays open |
 
+- The required `coordinator` field carries the state from the local system coordinator row, or JSON null when the watcher has no row. The peer poller keeps this state alongside its latest agent list.
 - The `agents` reply includes one repo entry for every local registration, including empty repos. It carries the registry name and the display name (nickname when set). The receiver knows the machine name from its own paired-peer record. Both the local tree and peer replies use the dashboard’s in-memory registrations, so an external `ib add` appears after the dashboard reloads the registry or restarts.
 - The agent list comes from the watcher's last fully detected snapshot (`watcher.lastDetectedAgents`, injected into the service by `ib watch`): the list it last passed to `onUpdate`, which is what the local tree shows, so an answer costs no IO. Not `watcher.lastAgents`, which a refresh replaces before state detection has run, when every state is still the placeholder `unknown`. It is every agent the watcher lists (archived agents are never in it) except the system coordinator. Each entry carries exactly the eight fields above: `nickname`, `agentType` and `manager` are `null` when unset, and `state` is the agent's detected, displayed state. `repoName` is the repo's display name (its nickname, else its registry name), what the receiving tree shows; `repoRegistryName` is its registry name (`RepoEntry.name`), what the receiving tree keys the rows by (§17.1 Row keys, §20.5), so a nickname rename on the other install re-keys nothing here. Both installs run the same build, so the field is required, with no fallback for an older peer. The agent list excludes prompts, logs and tmux output.
 - A list whose JSON is over 1 MB is replied as `{"op":"error","reason":"the agent list is over 1048576 bytes"}`; a snapshot that throws is replied as `internal error`.
 - A request that exceeds its operation’s cap, is not UTF-8, not JSON, not an object or has no op closes the connection with code 3 and the reason (e.g. `request is not JSON`, `request longer than 4096 bytes`).
 - For `agents`, the dialer requires both arrays. Each repo requires strings for `registryName` and `displayName`. Each agent requires strings for `id`, `repoName`, `repoRegistryName`, `repoPath` and `state`. The optional `nickname`, `agentType` and `manager` fields accept strings, with omission or JSON null decoded as null. A missing required field or an invalid type fails the reply. The dialer drops extra fields and strips control and format characters (`\p{Cc}` and `\p{Cf}`) from received text, including error reasons.
+
+**Coordinator pane.** A paired dashboard can request the responder's own system coordinator. The request takes no arguments. The responder captures the fixed system coordinator tmux session using the dashboard's joined-line capture with link targets. Both ends filter terminal escapes to the pane's OSC 8 allowlist (`https:`, `http:` and `message:`). The responder checks the pairing again after capture, trims the oldest lines to fit the encoded reply into 1,048,576 bytes, and records the first read by each peer id in `watch.log` once per dashboard run. An unavailable coordinator returns an error.
 
 **Remote starts.** After checking the allowlist, the receiver validates and matches the requested registry name against its current registrations, ignoring case. It then checks that the type exists, is spawnable and differs from both `repo-coordinator` and `system-coordinator`. It validates the optional name with the local agent-name validator and requires nonblank prompt text within 256 KB. The size cap includes the entire encoded request. It re-reads the pairing for the authenticated peer id immediately before calling `newAgent(repo.path, prompt, { type, name })` with the local spawn defaults. A successful spawn logs one line to `watch.log`, and shows `<peer> started agent <id> in <repo>`. A validation or spawn failure returns the error and logs the refusal.
 
@@ -3739,7 +3744,11 @@ The Agents tab matches registered repo names across machines, ignoring case. Pat
 
 The V filter applies to the whole repo. Running-only hides stopped remote agents and attaches surviving descendants to their nearest visible ancestor. Selected rows keep their existing carve-out. A header with no visible agents follows the local empty-repo rule, including pins on local paths. Favorites and Teams stay local-only, apart from the selected remote row and its repo header in Favorites. The `@` jump offers local rows.
 
-Both header kinds have the same machine-independent key. Local and remote agent keys retain their machine and original registry name (§17.1). Navigating or refreshing the tree preserves selection by key, with the local path tie-breaker. J/K use the combined repo as their navigation group. A shared header is a local `repo-header`. Only a remote-only header and a `remote-agent` produce a read-only remote selection.
+Both header kinds have the same machine-independent key. Local and remote agent keys retain their machine and original registry name (§17.1). Navigating or refreshing the tree preserves selection by key, with the local path tie-breaker. J/K use the combined repo as their navigation group. A shared header is a local `repo-header`. A remote-only header, a remote agent and a paired system coordinator each produce a read-only remote selection.
+
+**Peer coordinators.** The Agents tree shows one selectable child beneath the local system coordinator for each paired machine. Each row has the machine name in italic and the last reported coordinator state. Offline rows are dimmed and show the age of the last successful poll when known. The info panel shows `Machine: <name> · <connected|connecting|offline>`. The read-only guard below also covers these rows, and their output pane has no input field.
+
+Selecting the row immediately requests its capture and refreshes it about every two seconds, with at most one pane read outstanding for that peer. Moving off the row stops polling. A failed read leaves the last capture on screen with an error line. The next success clears the error. Outbound reads use the same startup human-caller decision as remote starts. When it denies, the pane displays the reason and sends no request. The feature is available only in `ib watch`.
 
 **Remote selection.** The info panel shows a remote agent's id, full id, nickname, repo, path, state, type and manager. Its Machine line shows `Machine: <paired name> · <link status>` with the same colored word as the Peers tab (§20.4). A remote-only header shows the first peer's name, the repo name and the number of agents across reporting peers. In split layouts the center pane shows `Remote agent on <peer name> (read-only)` or `Remote repo on <peer name> (read-only)`. The right pane shows `Not available for remote agents`. TREE mode continues to show the tree. Local tmux, git and right-pane loaders receive no remote target.
 

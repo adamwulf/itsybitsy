@@ -2,7 +2,7 @@ import { waitFor } from "./test-utils";
 import { processSpawnRequests, spawnRequestDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, open, readdir, rename, symlink, rm, utimes } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setUserHome, resetUserHome } from "./home";
 import { addMember, getTeam } from "./teams";
 import { checkIbCommandAccess } from "./hooks/agent-path";
@@ -335,6 +335,35 @@ describe("qualified agent addresses", () => {
     expect((await cli.run(["send", "laptop-b/remote-id", "-f", file], { ancestry: human })).stderr)
       .toContain("Send header exceeds 262144 bytes");
     expect((await send(["hi"])).stderr).toContain("need its watchdog running");
+  });
+
+  test("a collision-suffixed coordinator sends remotely and attaches locally under its actual id", async () => {
+    await cli.addAgent(app, "App", { worktree: true });
+    const id = "App-a3f1";
+    await cli.addAgent(app, id, { agentType: "repo-coordinator", worktree: false, claude_pid: "200",
+      claude_pid_epoch: 100, sandbox: { enabled: false } });
+    await peer();
+    const ancestry = { pid: 300, parents: [[300, 200], [200, 1]] as [number, number][], identityCurrent: true };
+    const headers: SendHeader[] = [];
+    const timer = setInterval(() => { void pollPeerOutbox(async (_peer, header) => {
+      headers.push(header);
+      return header.id;
+    }, () => {}); }, 25);
+    try {
+      const remote = await cli.run(["send", "laptop-b/remote/remote-id", "hi"], { cwd: app, ancestry });
+      expect(remote.exitCode, remote.stderr).toBe(0);
+      expect(headers[0]?.from).toEqual({ kind: "agent", id: "laptop-a/App/" + id });
+      await Bun.write(join(app, "report"), "snapshot");
+      const local = await cli.run(["send", "mgr", "--attach", "report", "read"], { cwd: app, ancestry,
+        actions: { sendMessage: "record" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]] });
+      expect(local.exitCode, local.stderr).toBe(0);
+      const args = local.actions[0]!.args;
+      const destination = String(args[1]).split(" → ")[1]!;
+      try {
+        expect(args[2]).toMatchObject({ fromAgent: id, noPassthrough: true });
+        expect(await Bun.file(destination).text()).toBe("snapshot");
+      } finally { await rm(dirname(dirname(destination)), { recursive: true, force: true }); }
+    } finally { clearInterval(timer); }
   });
 
   test("a shared checkout distinguishes its dotted coordinator, a human, and unverifiable ancestry", async () => {

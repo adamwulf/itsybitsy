@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { accountHome } from "../home";
 import { registeredRepoRoots } from "../hooks/agent-context";
 import { resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
-import { getCoordinatorAgentId } from "../coordinator";
+import { checkCoordinatorExists } from "../coordinator";
 import { isCoordinatorType } from "../coordinator-type-names";
 import { verifiedAgentWorktree } from "../no-worktree-caller";
 import { matchWorktreeCaller } from "../runtime-names";
@@ -59,7 +59,9 @@ export async function verifiedSendCaller(cwd: string, purpose: "attachments" | "
     if (!caller || caller.meta.worktree !== true || isCoordinatorType(caller.meta.agentType)) throw new Error(refusal);
     return { kind: "agent", caller };
   }
-  const caller = await resolveRemoteSharedCaller(path, repo, getCoordinatorAgentId(repo)).catch(() => null);
+  const coordinator = await checkCoordinatorExists(repo);
+  if (!coordinator.exists || !coordinator.isCoordinator) throw new Error(refusal);
+  const caller = await resolveRemoteSharedCaller(path, repo, coordinator.agentId).catch(() => null);
   if (!caller) throw new Error(refusal);
   return { kind: "agent", caller };
 }

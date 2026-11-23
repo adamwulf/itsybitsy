@@ -10162,10 +10162,14 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    const refused = [
+    const permittedAscii = new Set([..."jkJK[]{}123pn@?/I;l", "\t", "\x03"]);
+    const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
+    for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
+    const refused = new Set([
+      ...ascii.filter(key => !permittedAscii.has(key)),
       "s", "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "a", "N",
       "d", "o", "O", "G", "C", "h", "E", "\x1b[200~pasted text\x1b[201~",
-    ];
+    ]);
     const handlers = [
       ...Object.keys(agentActions).filter(name => typeof (agentActions as Record<string, unknown>)[name] === "function")
         .map(name => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined)),

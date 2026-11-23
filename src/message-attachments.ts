@@ -26,59 +26,24 @@ function pathStart(text: string, offset: number): boolean {
     || text.startsWith("~/", offset);
 }
 
-/** Closing offsets for Markdown code spans and fenced blocks. Fences split the
- * text into blocks, so an unmatched inline opener cannot consume a fence. */
-function markdownCodeEnds(text: string): Map<number, number> {
-  const ends = new Map<number, number>();
-  function inline(start: number, end: number) {
-    const runs = [...text.slice(start, end).matchAll(/`+/g)];
-    const nextByWidth = new Map<number, number>();
-    for (let i = runs.length - 1; i >= 0; i--) {
-      const run = runs[i]!;
-      const pos = start + run.index;
-      const width = run[0].length;
-      // At an unmatched run, skip the entire delimiter as ordinary prose.
-      ends.set(pos, (nextByWidth.get(width) ?? pos) + width);
-      nextByWidth.set(width, pos);
-    }
-  }
-  let start = 0;
-  let fence: { pos: number; marker: string } | undefined;
-  for (const match of text.matchAll(/^ {0,3}(`{3,}|~{3,})([^\r\n]*)/gm)) {
-    const [, marker, rest] = match;
-    if (fence) {
-      if (marker![0] === fence.marker[0] && marker!.length >= fence.marker.length && /^[ \t]*$/.test(rest!)) {
-        start = match.index + match[0].length;
-        ends.set(fence.pos, start);
-        fence = undefined;
-      }
-    } else if (marker![0] !== "`" || !rest!.includes("`")) {
-      inline(start, match.index);
-      fence = { pos: match.index, marker: marker! };
-    }
-  }
-  if (fence) ends.set(fence.pos, text.length);
-  else inline(start, text.length);
-  return ends;
-}
-
-export const TRAILING_PATH_PUNCTUATION = /[.,;:!\)\]}]$/;
-
-/** A quote can be followed by prose punctuation, but not a filename suffix. */
-function endsPathToken(text: string, end: number): boolean {
-  while (end < text.length && TRAILING_PATH_PUNCTUATION.test(text[end]!)) end++;
-  return end === text.length || /[ \t\r\n<>`]/.test(text[end]!);
-}
-
 /** Read terminal drag/drop spelling as data; never invoke a shell. Offsets
  * refer to the original text so replacing a path preserves surrounding prose. */
-export function references(text: string, { tolerateMalformed = false } = {}): PathReference[] {
+export function references(text: string): PathReference[] {
   const found: PathReference[] = [];
-  const code = markdownCodeEnds(text);
   for (let i = 0; i < text.length; i++) {
-    const codeEnd = code.get(i);
-    if (codeEnd !== undefined) {
-      i = codeEnd - 1;
+    // Code spans/fences are examples, not attachment requests.
+    if (text[i] === "`") {
+      let width = 1;
+      while (text[i + width] === "`") width++;
+      const close = text.indexOf("`".repeat(width), i + width);
+      if (close < 0) {
+        // An unfinished fenced block is still code. An unmatched inline
+        // delimiter is ordinary prose and must not hide later attachments.
+        if (width >= 3) break;
+        i += width - 1;
+        continue;
+      }
+      i = close + width - 1;
       continue;
     }
     const previous = text[i - 1];
@@ -89,7 +54,6 @@ export function references(text: string, { tolerateMalformed = false } = {}): Pa
     const start = i;
     let path = "";
     let closed = !quote;
-    let malformed: string | undefined;
     for (i = pathOffset; i < text.length; i++) {
       const char = text[i]!;
       if (quote ? char === quote : /[ \t\r\n<>`]/.test(char)) {
@@ -98,10 +62,7 @@ export function references(text: string, { tolerateMalformed = false } = {}): Pa
       }
       if (char === "\\" && quote !== "'") {
         const next = text[i + 1];
-        if (next === undefined || /[\r\n]/.test(next)) {
-          malformed = "Incomplete escape in attachment path";
-          break;
-        }
+        if (next === undefined || /[\r\n]/.test(next)) throw new Error("Incomplete escape in attachment path");
         // Double quotes only unescape shell-special characters. A backslash
         // before an ordinary character remains part of the filename.
         if (!quote || /[\\"$`]/.test(next)) {
@@ -110,19 +71,10 @@ export function references(text: string, { tolerateMalformed = false } = {}): Pa
         } else path += char;
       } else path += char;
     }
-    if (!closed) malformed ??= "Unclosed quote in attachment path";
-    if (/[\x00-\x1f]/.test(path)) malformed ??= "Attachment paths cannot contain control characters";
-    if (malformed) {
-      if (!tolerateMalformed) throw new Error(malformed);
-      // Resume at the next token; a malformed reference owns no replacement.
-      i = pathOffset;
-      while (i < text.length && !/[ \t\r\n]/.test(text[i]!)) i++;
-      i--;
-      continue;
-    }
+    if (!closed) throw new Error("Unclosed quote in attachment path");
     const end = i + (quote ? 1 : 0);
     if (path === "/") continue;
-    if (quote && !endsPathToken(text, end)) continue;
+    if (/[\x00-\x1f]/.test(path)) throw new Error("Attachment paths cannot contain control characters");
     found.push({ start, end, path, quote });
     if (!quote) i--;
   }
@@ -187,7 +139,7 @@ export async function stageMessageAttachments(message: string, baseDir: string, 
         if (!reference.quote && /^\/[\w-]+$/.test(path) && (error as NodeJS.ErrnoException).code === "ENOENT") break;
         // Bare paths may end in prose/Markdown punctuation. Never trim a
         // quoted filename, and prefer the exact existing name first.
-        if (!reference.quote && (error as NodeJS.ErrnoException).code === "ENOENT" && TRAILING_PATH_PUNCTUATION.test(path)) {
+        if (!reference.quote && (error as NodeJS.ErrnoException).code === "ENOENT" && /[.,;:!\)\]}]$/.test(path)) {
           path = path.slice(0, -1);
           end--;
           continue;

@@ -67,6 +67,11 @@ describe("qualified agent addresses", () => {
     };
   }
 
+  test("send help and missing-target usage both describe remote attachments", async () => {
+    expect((await cli.run(["send", "--help"])).stdout).toContain("local or paired remote recipients");
+    expect((await cli.run(["send"])).stderr).toContain("local or paired remote recipients");
+  });
+
   test("a unique local bare name resolves with no peer cache or with a disconnected peer", async () => {
     expect((await retire("foo")).actions[0]?.args[0]).toMatchObject({ id: "foo", repoPath: app });
     await peer(false);

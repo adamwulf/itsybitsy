@@ -534,7 +534,11 @@ test("requestSend retains the machine, key and value of a long file limit error"
   const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: timer,
     receiveMessage: async () => { throw Error("File " + "x".repeat(900) + " exceeds the limit on laptop (peering.attachments.maxFileMB = 1)"); },
   });
-  try { await expect(requestSend(a, req, timer)).rejects.toThrow("laptop (peering.attachments.maxFileMB = 1)"); }
+  try {
+    const result = await requestSend(a, req, timer).catch((err: Error) => err.message);
+    expect(result).toContain("laptop (peering.attachments.maxFileMB = 1)");
+    expect(result.length).toBeLessThanOrEqual(300);
+  }
   finally { a.close(0, "done"); await serving; }
 });
 
@@ -594,4 +598,59 @@ test("a committing receipt no longer accepts dashboard cancellation", async () =
   expect(id).not.toBe("");
   expect(reset).toBe(false);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toHaveLength(1);
+});
+
+test("a leading dashboard project reference remains literal through wire decode and enqueue", async () => {
+  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+  const message = join(repo, "live.ts");
+  await Bun.write(message, "live");
+  const detection = await dashboardAttachmentPaths(message, "/remote/repo", repo);
+  expect(detection).toEqual({ paths: [], noPassthrough: true });
+  expect(await exchange(header({ message, noPassthrough: true }))).toMatchObject({ ok: true });
+  expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toMatchObject([{ message, noPassthrough: true }]);
+});
+
+test("dashboard staging reserves its unwritten bytes against incoming transfers", async () => {
+  const { VolumeReservations } = await import("./attachment-space");
+  const { cloneAttachments } = await import("./remote-attachments");
+  const reservations = new VolumeReservations();
+  const checked: number[] = [];
+  const receive = createMessageReceiver(() => {}, () => {}, Date.now, 4096, {
+    tempDir: cli.root, hasFreeSpace: async (_dir, bytes) => { checked.push(bytes); return bytes <= 3; },
+  }, reservations);
+  const source = join(cli.root, "source");
+  await Bun.write(source, "abc");
+  const handle = await open(source, "r");
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const file = manifestFile("abc");
+  const stage = cloneAttachments(join(cli.root, "stage"), [{ ...file, source, handle, argument: source }],
+    undefined, async () => { entered.resolve(); await release.promise; return false; }, false, reservations);
+  try {
+    await entered.promise;
+    const request = () => receive(header({ files: [file] }), "peer", paired, { read: async () => Buffer.alloc(0) });
+    await expect(request()).rejects.toThrow("Insufficient space");
+    release.resolve();
+    await stage;
+    await expect(request()).rejects.toThrow("Early EOF");
+    expect(checked).toEqual([6, 3]);
+  } finally { release.resolve(); await stage; await handle.close(); }
+});
+
+test("pending replays share their receipt without creating extra cancel targets", async () => {
+  await receiveFixture();
+  const { PeerService, defaultPeerServiceDeps } = await import("./service");
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null), receiveMessage: receiver });
+  const req = header({ files: [manifestFile("abc")] });
+  const first = service.receiveTracked(req, "peer", paired, { read: () => new Promise(() => {}) });
+  const admitted = Promise.withResolvers<void>();
+  await waitFor(() => !!service.view().incoming?.length);
+  const second = service.receiveTracked(req, "peer", paired, undefined, { admitted: owns => {
+    expect(owns).toBe(false); admitted.resolve();
+  } });
+  const both = Promise.allSettled([first, second]);
+  await admitted.promise;
+  expect(service.view().incoming).toHaveLength(1);
+  service.cancelReceipt(service.view().incoming![0]!.id);
+  expect((await both).every(result => result.status === "rejected")).toBe(true);
 });

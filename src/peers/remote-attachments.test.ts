@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, open, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { processStartEpochSecondsCtx } from "../agents";
@@ -131,5 +131,48 @@ test("dashboard stages the canonical file selected through a project symlink and
       expect(entries[0]!.spellings[0]).toBe(alias);
       expect(await entries[0]!.handle.readFile("utf8")).toBe("selected");
     } finally { await Promise.all(entries.map(entry => entry.handle.close())); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a successful clone skips source reads and the fallback stops within one cancelled chunk", async () => {
+  const { CHUNK_BYTES } = await import("./transfer-limits");
+  const root = await mkdtemp("/tmp/ib-copy-branches-");
+  const source = join(root, "source");
+  const size = 4 * CHUNK_BYTES;
+  await Bun.write(source, Buffer.alloc(size, 55));
+  const handle = await open(source, "r");
+  try {
+    const entry = { handle, source, argument: source, name: "source", size, spellings: [source], sha256: await hashFile({ handle, size }) };
+    const realRead = handle.read;
+    const read = spyOn(handle, "read");
+    await cloneAttachments(join(root, "cloned"), [entry], undefined, async (fd, path) => {
+      expect(fd).toBe(handle);
+      await Bun.write(path, Buffer.alloc(size, 55)); // deterministic private snapshot
+      return true;
+    });
+    expect(read).not.toHaveBeenCalled();
+    const control = new AbortController();
+    read.mockImplementation(function(...args: any[]) {
+      const result = Reflect.apply(realRead, handle, args);
+      control.abort(Error("copy cancelled"));
+      return result;
+    } as typeof handle.read);
+    await expect(cloneAttachments(join(root, "fallback"), [entry], control.signal, async () => false)).rejects.toThrow("copy cancelled");
+    expect(read).toHaveBeenCalledTimes(1);
+    expect((read.mock.calls[0] as unknown as unknown[])[2]).toBe(CHUNK_BYTES);
+  } finally { await handle.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a missing suffix after a symlink and parent step uses the physical parent", async () => {
+  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+  const root = await mkdtemp("/tmp/ib-missing-reference-");
+  try {
+    const project = join(root, "project");
+    const outside = join(root, "external/nested");
+    await mkdir(project);
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, join(project, "alias"));
+    const reference = project + "/alias/../missing";
+    await expect(dashboardAttachmentPaths(reference, project, project)).rejects.toThrow("file not found");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

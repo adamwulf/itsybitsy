@@ -10912,6 +10912,51 @@ describe("Unified peer repos in the Agents tree", () => {
     } finally { resetUserHome(); await rm(home, { recursive: true, force: true }); }
   });
 
+  test("a mixed-case local registry root keeps its dashboard file live on the peer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "ib-project-case-"));
+    try {
+      const path = join(project, "file");
+      await Bun.write(path, "live");
+      const { dashboard, service } = setup();
+      dashboard.setRepos([{ name: "ITSYBITSY", path: project }]);
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(path);
+      dashboard.inputField.submit();
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      expect(service.sendRemoteMessage.mock.calls[0]![1]).toMatchObject({ files: [], message: path, noPassthrough: true });
+    } finally { await rm(project, { recursive: true, force: true }); }
+  });
+
+  test("a local editor keeps Escape while remote requests have duplicate display labels", async () => {
+    const { dashboard, service, local } = setup();
+    const result = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementation(() => result.promise);
+    const sameLabel = links();
+    sameLabel[0]!.agents = sameLabel[0]!.agents!.map(agent => ({ ...agent, nickname: "duplicate" }));
+    service.set({ links: sameLabel });
+    for (const key of [WORKER_KEY, agentKey(PEER_B, "itsybitsy", "manager-def")]) {
+      dashboard.focusManager.setFocus("agent-tree");
+      selectByKey(dashboard, key);
+      dashboard.handleInput("s");
+      dashboard.handleInput("hello");
+      dashboard.inputField.submit();
+    }
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 2);
+    const rows = () => stripAnsi(dashboard.render(WIDTH).join("\n")).split("\n").filter(line => line.includes("sending to"));
+    expect(rows()).toHaveLength(2);
+    expect(rows().filter(line => line.includes("Esc: cancel"))).toHaveLength(1);
+    dashboard.agentTree.selectAgent(local);
+    dashboard.syncSelectedAgent();
+    dashboard.focusManager.setFocus("active-agent");
+    dashboard.focusManager.setSubFocus("input");
+    expect(rows().every(line => !line.includes("Esc: cancel"))).toBe(true);
+    dashboard.handleInput("\x1b");
+    expect(dashboard.focusManager.subFocus).toBe("pane");
+    expect(service.sendRemoteMessage.mock.calls.every(call => !call[3]?.signal?.aborted)).toBe(true);
+    result.resolve("accepted");
+  });
+
   test("selecting an inbound progress row and pressing Esc aborts that receipt", () => {
     const { dashboard, service } = setup();
     service.set({ incoming: [{ id: "first", label: "Laptop → worker", bytes: 3, total: 12 }] });

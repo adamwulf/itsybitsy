@@ -1,3 +1,5 @@
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { basename } from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +10,8 @@ import { resolveDashboardCaller } from "../no-worktree-caller";
 interface DashboardCaller {
   stdinTTY?: boolean;
   stdoutTTY?: boolean;
+  stderrTTY?: boolean;
+  hasControllingTerminal?: () => Promise<boolean>;
   env: NodeJS.ProcessEnv;
   cwd: string;
   pid: number;
@@ -64,14 +68,24 @@ async function readAncestors(pid: number, readTable: NonNullable<DashboardCaller
   return null;
 }
 
+async function hasControllingTerminal(): Promise<boolean> {
+  try {
+    const tty = await open("/dev/tty", constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
+    await tty.close();
+    return true;
+  } catch { return false; }
+}
+
 async function classifyCaller(signal: AbortSignal, input: DashboardCaller | undefined, humanSend: boolean): Promise<string | null> {
   const unverified = "Cannot verify the dashboard caller’s agent metadata for remote starts";
   try {
-    const { stdinTTY, stdoutTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable = readProcessTable } = input ?? {
-      stdinTTY: process.stdin.isTTY, stdoutTTY: process.stdout.isTTY, env: process.env,
+    const { stdinTTY, stdoutTTY, stderrTTY, hasControllingTerminal: controllingTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable = readProcessTable } = input ?? {
+      stdinTTY: process.stdin.isTTY, stdoutTTY: process.stdout.isTTY, stderrTTY: process.stderr.isTTY,
+      hasControllingTerminal, env: process.env,
       cwd: process.cwd(), pid: process.pid, readProcessTable, resolveCaller: resolveDashboardCaller,
     };
-    if (stdinTTY !== true || stdoutTTY !== true) return "Remote starts require an interactive terminal";
+    const interactive = humanSend ? stdoutTTY === true || stderrTTY === true || await controllingTTY?.() : stdinTTY === true && stdoutTTY === true;
+    if (!interactive) return "Remote starts require an interactive terminal";
     if (env.TMUX !== undefined) return "Remote starts are disabled inside tmux";
     const ancestors = await readAncestors(pid, readTable, signal);
     if (!ancestors) return "Cannot verify dashboard process ancestry for remote starts";

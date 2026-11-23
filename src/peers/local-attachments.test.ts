@@ -39,6 +39,19 @@ const human = { pid: 300, parents: [[300, 1]] as [number, number][], terminal: "
 const queue = () => Bun.file(join(fixture.home, ".itsybitsy/agents/reader/outbox.jsonl"));
 const send = (...args: string[]) => fixture.run(["send", "reader", ...args], { ancestry: human, actions: { sendMessage: "real" } });
 
+test("a human sends a local attachment with redirected stdin and a terminal on stderr", async () => {
+  await Bun.write(join(fixture.cwd, "report"), "attachment");
+  const result = await fixture.run(["send", "reader", "--attach", "./report"], {
+    stdin: "read ./report", ancestry: { ...human, sendTTY: "stderr" }, actions: { sendMessage: "real" },
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const record = JSON.parse(await queue().text());
+  expect(record.fromAgent).toBe("");
+  const path = record.message.split(" → ")[1];
+  expect(record.message.split("\n")[0]).toBe("read " + path);
+  expect(await Bun.file(path).text()).toBe("attachment");
+});
+
 test.each([1, 2])("queues %i verified private snapshots, rewriting all spellings", async count => {
   const first = join(fixture.cwd, "one");
   const bytes = Buffer.alloc(180_021, "abc");

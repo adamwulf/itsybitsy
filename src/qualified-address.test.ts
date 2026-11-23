@@ -374,6 +374,23 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); await flight; }
   });
 
+  test("a human sends piped input to a peer using the controlling terminal", async () => {
+    await peer();
+    const headers: SendHeader[] = [];
+    const poll = createPeerOutboxPoll();
+    let flight: Promise<void> | undefined;
+    const timer = setInterval(() => {
+      flight ??= poll(async (_peer, header) => { headers.push(header); return header.id; }, () => {}).finally(() => { flight = undefined; });
+    }, 20);
+    try {
+      const result = await cli.run(["send", "laptop-b/@system"], {
+        cwd: cli.cwd, stdin: "hello from stdin", ancestry: { ...human, sendTTY: "controlling" },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(headers).toMatchObject([{ message: "hello from stdin", from: { kind: "user" } }]);
+    } finally { clearInterval(timer); await flight; }
+  });
+
   test.each([false, true])("remote CLI publishes the original text, manifest and verified bytes (broker=%s)", async broker => {
     await peer();
     const cwd = broker ? worktree : cli.cwd;

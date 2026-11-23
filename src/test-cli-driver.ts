@@ -40,6 +40,7 @@ export type CliActionMode = "record" | "real";
 export interface CliAncestry {
   systemPanePid?: number;
   terminal?: "human" | "tmux" | "agent";
+  sendTTY?: "stdout" | "stderr" | "controlling";
   /** The pid the caller check starts from. */
   pid: number;
   /** [pid, parent pid] pairs, as `ps` would report them. */
@@ -149,7 +150,10 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   remoteCliCaller.isHuman = async () => {
     const terminal = config.ancestry?.terminal;
     return isHumanSendTerminal({
-      pid: 300, cwd: config.cwd, stdinTTY: terminal !== undefined, stdoutTTY: terminal !== undefined,
+      pid: 300, cwd: config.cwd, stdinTTY: process.stdin.isTTY,
+      stdoutTTY: terminal !== undefined && (config.ancestry?.sendTTY ?? "stdout") === "stdout",
+      stderrTTY: terminal !== undefined && config.ancestry?.sendTTY === "stderr",
+      hasControllingTerminal: async () => terminal !== undefined && config.ancestry?.sendTTY === "controlling",
       env: terminal === "tmux" ? { TMUX: "/tmp/test" } : {},
       readProcessTable: async () => [
         "PID PPID STARTED                  KERNEL COMMAND",

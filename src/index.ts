@@ -2027,6 +2027,11 @@ export async function main() {
       const { agent: resolvedAgent, isSystemCoordinator, team, remote } = await resolveTarget(target, repos);
 
       if (remote) {
+        const { resolveRoutedCaller } = await import("./spawn-broker");
+        if (await resolveRoutedCaller({})) {
+          console.error("Remote sends from a sandboxed agent need its watchdog running");
+          process.exit(1);
+        }
         const message = await resolveMessageBody();
         if (!message) { console.error(usage); process.exit(1); }
         const { cliRemoteSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");

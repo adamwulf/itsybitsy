@@ -337,6 +337,11 @@ export async function handleSendRequest(
     // The ordinary commands, as the watchdog's own agent. `fromAgent` is
     // always passed: these functions otherwise detect the sender from the
     // cwd, which here is the watchdog's. `stageAttachments` is never set.
+    if (resolved.remote) {
+      const { qualifiedAgentSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
+      const sender = await qualifiedAgentSender(ctx.agentId, ctx.repoPath, repos);
+      return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender));
+    }
     if (resolved.isSystemCoordinator) {
       return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { fromAgent, cwd: callerCwd });
     }

@@ -656,6 +656,34 @@ describe("send broker", () => {
       expect(reads).toBe(1);
     });
 
+    test("remote sandbox sends reach peer-outbox under the sealed requester's qualified id", async () => {
+      setSandboxedProcessOverride(() => true);
+      const { deps } = server();
+      const peerDir = join(home, ".itsybitsy", "peer");
+      await Bun.write(join(peerDir, "endpoint.lock"), String(process.pid));
+      await Bun.write(join(peerDir, "remote-agents.json"), JSON.stringify([{
+        id: "peer-b", name: "laptop", connected: true,
+        agents: [{ repo: "remote", id: "worker", nickname: null, state: "running" }],
+      }]));
+      const { pollPeerOutbox } = await import("./peers/peer-outbox");
+      const seen: unknown[] = [];
+      const timer = setInterval(() => { void pollPeerOutbox(async (peer, header) => {
+        seen.push({ peer, header });
+        return header.id;
+      }, () => {}); }, 25);
+      try {
+        const out = await routeSendThroughWatchdog(command({ target: "laptop/remote/worker" }), {
+          resolveCaller: async () => caller(), watchdogLive: async () => true,
+          sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
+        });
+        expect(out?.ok).toBe(true);
+        expect(seen).toMatchObject([{ peer: "peer-b", header: {
+          from: { kind: "agent", id: `studio/hunch/${SENDER_ID}` },
+          target: { kind: "agent", repo: "remote", agent: "worker" }, files: [], message: MESSAGE,
+        } }]);
+      } finally { clearInterval(timer); }
+    });
+
     test("--from for the caller itself is accepted", async () => {
       setSandboxedProcessOverride(() => true);
       const { deps } = server();

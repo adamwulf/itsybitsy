@@ -298,7 +298,8 @@ export class PeerPoller {
         this.watchClose(link, dialed, generation);
       }
       const snapshot = await this.requestWithTimeout(link, conn);
-      if (!this.isCurrent(link, generation)) return;
+      // A final reply can arrive alongside the close notification. Only a live link recovers.
+      if (!this.isCurrent(link, generation) || link.conn !== conn || conn.closeInfo() !== null) return;
       this.succeeded(link, snapshot);
     } catch (err) {
       if (!this.isCurrent(link, generation)) return;

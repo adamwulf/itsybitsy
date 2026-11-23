@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { waitFor } from "../test-utils";
 import { IrohError, irohAddonLoaderCtx } from "./iroh";
-import { PEER_CLOSE, serveTrustedConnection, type RemoteAgent } from "./peer-link";
+import { encodeAgentsReply, PEER_CLOSE, PEER_MAX_REQUEST_BYTES, serveTrustedConnection, type RemoteAgent } from "./peer-link";
 import type { PairConnection } from "./pairing";
 import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS, PeerPoller, peerLinkStatus } from "./poller";
 import type { Peer } from "./store";
@@ -306,6 +306,35 @@ describe("PeerPoller", () => {
     expect(rig.remote(P1).overlaps).toBe(0);
     expect(rig.state(P1)).toMatchObject({ connected: true, lastError: null, agents: list });
     expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): request timed out`);
+    rig.poller.stop();
+  });
+
+  test("a final reply on a closing connection stays offline until a live poll succeeds", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const { a, b } = createMemoryLink(SELF, P1);
+    const retry = deferredDial();
+    rig.setDial(async () => a);
+    rig.poller.start();
+    const stream = await b.acceptBi();
+    await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
+    await stream.writeAll(encodeAgentsReply({ repos: [], agents: [] }));
+    await stream.finish();
+    b.close(PEER_CLOSE.done, "shutting down");
+
+    // Let both the completed read and the close notification reach the poller.
+    await new Promise<void>(done => setImmediate(done));
+    const expectOffline = () => {
+      expect(peerLinkStatus(rig.state(P1))).toBe("offline");
+      expect(rig.state(P1)?.lastError).toBe("closed by the other side");
+    };
+    expectOffline();
+    rig.setDial(() => retry.promise);
+    rig.tick();
+    await waitFor(() => rig.dials.length === 2, { message: "retry pending" });
+    expectOffline();
+    retry.resolve(await rig.connect(P1));
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "live poll succeeded" });
+    expect(rig.state(P1)?.lastError).toBeNull();
     rig.poller.stop();
   });
 

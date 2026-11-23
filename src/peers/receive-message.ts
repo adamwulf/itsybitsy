@@ -22,7 +22,7 @@ export function targetLabel(target: SendTarget): string {
 async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnqueueOptions) {
   const fromAgent = header.from.kind === "agent" ? header.from.id :
     header.from.kind === "system" ? peerName + "/@system" : undefined;
-  const opts = { fromAgent, peerSend, noPassthrough: header.files.length > 0 };
+  const opts = { fromAgent, peerSend, noPassthrough: header.files.length > 0 || header.noPassthrough === true };
   const target = header.target;
   if (target.kind === "system") {
     const { sendToSystemCoordinator } = await import("../index");

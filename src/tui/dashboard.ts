@@ -2010,7 +2010,8 @@ export class DashboardComponent implements Component {
       this.tui?.requestRender();
       const repo = remote.kind === "remote-agent" ? remote.remote : undefined;
       const local = repo && this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo.repoRegistryName));
-      const paths = await dashboardAttachmentPaths(text, repo?.repoPath, local?.path);
+      const { paths, noPassthrough } = await dashboardAttachmentPaths(text, repo?.repoPath, local?.path);
+      if (noPassthrough) header.noPassthrough = true;
       controller.signal.throwIfAborted();
       let filesDir: string | undefined;
       if (paths.length) {

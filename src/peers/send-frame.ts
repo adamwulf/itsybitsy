@@ -17,6 +17,7 @@ export interface SendHeader {
   from: { kind: "user" | "system" } | { kind: "agent"; id: string };
   target: SendTarget;
   message: string;
+  noPassthrough?: true;
   files: { name: string; size: number; sha256: string; spellings: string[] }[];
 }
 
@@ -98,10 +99,10 @@ export async function decodeSendHeader(stream: ReadStream, options: FileBodyOpti
 }
 
 export function parseSendHeader(value: unknown): SendHeader {
-  if (!object(value) || !onlyKeys(value, "op", "id", "from", "target", "message", "files") ||
+  if (!object(value) || !onlyKeys(value, "op", "id", "from", "target", "message", "files", "noPassthrough") ||
       value.op !== "send" || typeof value.id !== "string" || !UUID.test(value.id) ||
       !validFrom(value.from) || !validTarget(value.target) || typeof value.message !== "string" ||
-      !Array.isArray(value.files) || !value.files.every(validFile)) throw new Error("Malformed send header");
+      (value.noPassthrough !== undefined && value.noPassthrough !== true) || !Array.isArray(value.files) || !value.files.every(validFile)) throw new Error("Malformed send header");
   const claimed = new Set<string>();
   const files = value.files.map(file => ({ ...file, spellings: [...new Set(file.spellings)] }));
   for (const file of files) {
@@ -112,7 +113,7 @@ export function parseSendHeader(value: unknown): SendHeader {
       if (claimed.size > 256) throw new Error("More than 256 attachment spellings");
     }
   }
-  return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files };
+  return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files, ...(value.noPassthrough === true && { noPassthrough: true }) };
 }
 
 export interface FileBodyOptions {

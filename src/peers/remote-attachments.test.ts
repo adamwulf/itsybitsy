@@ -86,9 +86,11 @@ test("dashboard stages the canonical file selected through a project symlink and
     await mkdir(project);
     await writeFile(external, "selected");
     await symlink(external, alias);
-    const inputs = await dashboardAttachmentPaths(alias, project, project);
+    const { paths: inputs } = await dashboardAttachmentPaths(alias, project, project);
     await rm(alias);
     await writeFile(alias, "different");
+    expect(await dashboardAttachmentPaths(alias, project, project)).toEqual({ paths: [], noPassthrough: true });
+    expect(await dashboardAttachmentPaths("/clear", project, project)).toEqual({ paths: [], noPassthrough: false });
     const entries = await buildAttachmentManifest(inputs, { home: root, cwd: project, machine: "desk" });
     try {
       expect(entries).toHaveLength(1);

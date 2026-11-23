@@ -338,6 +338,51 @@ describe("PeerPoller", () => {
     rig.poller.stop();
   });
 
+  test.each(["final reply", "next tick"] as const)("a close observed at the %s goes offline before redial, even when closed() is delayed", async observedAt => {
+    const rig = makeRig([peer(P1, "B")]);
+    const { a, b } = createMemoryLink(SELF, P1);
+    const closed = a.closed();
+    const notification = Promise.withResolvers<void>();
+    a.closed = async () => { await notification.promise; return closed; };
+    rig.setDial(async () => a);
+
+    async function reply(closeAfterReply: boolean) {
+      const stream = await b.acceptBi();
+      await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
+      await stream.writeAll(encodeAgentsReply({ repos: [], agents: [] }));
+      await stream.finish();
+      if (closeAfterReply) b.close(PEER_CLOSE.done, "shutting down");
+    }
+    const expectOffline = () => {
+      expect(rig.state(P1)).toMatchObject({ connected: false, lastError: "closed by the other side" });
+    };
+
+    rig.poller.start();
+    await reply(false);
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "healthy first poll" });
+    if (observedAt === "final reply") {
+      rig.tick();
+      await reply(true);
+      await new Promise<void>(done => setImmediate(done));
+      expectOffline();
+    } else {
+      b.close(PEER_CLOSE.done, "shutting down");
+    }
+
+    const retry = deferredDial();
+    rig.setDial(() => retry.promise);
+    rig.tick();
+    await waitFor(() => rig.dials.length === 2, { message: "redial pending" });
+    expectOffline();
+    notification.resolve();
+    await new Promise<void>(done => setImmediate(done));
+    expectOffline();
+    retry.resolve(await rig.connect(P1));
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "live reply restored the link" });
+    expect(rig.state(P1)?.lastError).toBeNull();
+    rig.poller.stop();
+  });
+
   test("a failed peer stays offline throughout retries until a poll succeeds", async () => {
     const rig = makeRig([peer(P1, "B")]);
     const status = () => peerLinkStatus(rig.state(P1));

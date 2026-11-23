@@ -285,8 +285,7 @@ export class PeerPoller {
     this.inFlight.add(link.id);
     let conn: PairConnection | null = link.conn;
     try {
-      if (conn === null || conn.closeInfo() !== null) {
-        link.conn = null;
+      if (conn === null || this.recordObservedClose(link, conn)) {
         conn = null;
         const dialed = await this.deps.dial(link.id);
         if (!this.isCurrent(link, generation)) {
@@ -299,7 +298,7 @@ export class PeerPoller {
       }
       const snapshot = await this.requestWithTimeout(link, conn);
       // A final reply can arrive alongside the close notification. Only a live link recovers.
-      if (!this.isCurrent(link, generation) || link.conn !== conn || conn.closeInfo() !== null) return;
+      if (!this.isCurrent(link, generation) || link.conn !== conn || this.recordObservedClose(link, conn)) return;
       this.succeeded(link, snapshot);
     } catch (err) {
       if (!this.isCurrent(link, generation)) return;
@@ -340,6 +339,15 @@ export class PeerPoller {
         },
       );
     });
+  }
+
+  /** closeInfo() on the current connection may be available before its closed() notification. */
+  private recordObservedClose(link: Link, conn: PairConnection): boolean {
+    const info = conn.closeInfo();
+    if (info === null) return false;
+    this.failed(link, describePeerClose(info));
+    link.conn = null;
+    return true;
   }
 
   /** When `conn` closes while it is still `link`'s connection: mark the peer disconnected, so the next tick redials. */

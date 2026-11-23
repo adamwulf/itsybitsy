@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { dashboardAttachmentPaths } from "../peers/dashboard-attachments";
 import { remoteAttachmentStage } from "../peers/remote-attachments";
+import { repoRowKey } from "./row-keys";
 import { remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
@@ -2008,7 +2009,7 @@ export class DashboardComponent implements Component {
       this.invalidate();
       this.tui?.requestRender();
       const repo = remote.kind === "remote-agent" ? remote.remote : undefined;
-      const local = this.repos.find(entry => entry.name === repo?.repoRegistryName);
+      const local = repo && this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo.repoRegistryName));
       const paths = await dashboardAttachmentPaths(text, repo?.repoPath, local?.path);
       controller.signal.throwIfAborted();
       let filesDir: string | undefined;

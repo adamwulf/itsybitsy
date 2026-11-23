@@ -4491,7 +4491,9 @@ test("delivered files are readable, while writes and renames are confined to oth
     const dir = root + "/itsybitsy-attachments-fixture";
     for (const path of [dir, dir + "/0/input.txt"]) {
       expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: path } }), ctx).decision).toBe("deny");
-      expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "mv " + path + " /tmp/other-file" } }), ctx).decision).toBe("deny");
+      for (const command of ["mv", "ln"]) {
+        expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: command + " " + path + " /tmp/other-file" } }), ctx).decision).toBe("deny");
+      }
     }
     expect(checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: dir + "/0/input.txt" } }), ctx).decision).toBe("allow");
     expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: root + "/other-file" } }), ctx).decision).toBe("allow");

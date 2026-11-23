@@ -141,7 +141,7 @@ export async function withdrawPublishedRequest(ready: string, withdrawn: string)
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;
   }
-  await rm(withdrawn, { recursive: true, force: true });
+  await rm(withdrawn, { recursive: true, force: true }).catch(err => console.error("Withdrawn request cleanup failed:", err));
   return true;
 }
 
@@ -229,7 +229,8 @@ export async function submitWatchdogRequest(
   };
   while (!deps.signal?.aborted) {
     const result = await readResult();
-    if (result) return result;
+    if (result && !deps.signal?.aborted) return result;
+    if (deps.signal?.aborted) break;
     if (deps.readProgress) {
       const progress = await deps.readProgress();
       if (progress > lastProgress) {

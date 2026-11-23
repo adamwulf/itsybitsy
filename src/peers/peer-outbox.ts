@@ -120,7 +120,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     };
     while (!signal?.aborted && Date.now() < deadline) {
       const result = await readResult();
-      if (result) return result;
+      if (result && !signal?.aborted) return result;
+      if (signal?.aborted) break;
       try {
         const progress = await readFile(join(claimed, "progress"), "utf8");
         if (progress !== lastProgress) {

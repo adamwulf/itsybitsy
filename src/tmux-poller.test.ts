@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import {
   TmuxPoller,
   captureTmuxOutput,
+  captureMarkedCoordinatorPane,
   captureTmuxOutputResult,
   captureTmuxWithPaneState,
   probeTmuxSession,
@@ -1349,4 +1350,24 @@ describe("TmuxPoller tab handling at the boundary", () => {
     expect(receivedRaw).toBe(`  \x1b]8;;${url}\x07${url}\x1b]8;;\x07\n`);
     expect(receivedStripped).toBe(`  ${url}\n`);
   });
+});
+
+test("coordinator capture follows its marked pane after a different pane becomes active", async () => {
+  // %8 is the active shell. The coordinator was launched in %4.
+  let listing = "%4 1\n%8 ";
+  const targets: string[] = [];
+  spawnCtx.set(cmd => {
+    const target = cmd[cmd.indexOf("-t") + 1]!;
+    if (cmd[1] === "capture-pane") targets.push(target);
+    const text = cmd[1] === "list-panes" ? listing : target === "%4" ? "coordinator" : "other shell";
+    return { stdout: streamOf(text), stderr: emptyStream(), exited: Promise.resolve(0) };
+  });
+  try {
+    expect(await captureMarkedCoordinatorPane("ib-coordinator")).toBe("coordinator");
+    listing = "%8 ";
+    expect(await captureMarkedCoordinatorPane("ib-coordinator")).toBeNull();
+    expect(targets).toEqual(["%4"]);
+  } finally {
+    spawnCtx.reset();
+  }
 });

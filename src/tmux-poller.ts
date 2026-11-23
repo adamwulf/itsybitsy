@@ -60,6 +60,22 @@ export function expandTabs(s: string): string {
 
 /** Capture logical lines with link targets for a dashboard pane. */
 export async function captureDisplayPane(session: string, lines = 200): Promise<string | null> {
+  return captureDisplayTarget(tmuxSessionTarget(session), lines);
+}
+
+export const COORDINATOR_PANE_MARKER = "@ib-system-coordinator";
+
+/** Only the pane marked by the coordinator launch may leave this machine. */
+export async function captureMarkedCoordinatorPane(session: string): Promise<string | null> {
+  const listing = await spawnCtx.run(["tmux", "list-panes", "-s", "-t", tmuxSessionTarget(session),
+    "-F", `#{pane_id} #{${COORDINATOR_PANE_MARKER}}`]);
+  if (listing.exitCode !== 0) return null;
+  const matches = listing.stdout.split("\n").filter(line => /^%\d+ 1$/.test(line));
+  if (matches.length !== 1) return null;
+  return captureDisplayTarget(matches[0]!.split(" ")[0]!, 200);
+}
+
+async function captureDisplayTarget(target: string, lines: number): Promise<string | null> {
   // -J joins tmux's soft-wrapped continuation lines back into one logical
   // line (it preserves program-emitted \n, only rejoining lines tmux itself
   // wrapped). We reflow ourselves in the display path (wordWrapLines) so the
@@ -70,7 +86,7 @@ export async function captureDisplayPane(session: string, lines = 200): Promise<
   // link captures as just its label. keepAllowedLinks removes everything else
   // -e adds.
   const proc = spawnCtx.runner(
-    ["tmux", "capture-pane", "-t", tmuxSessionTarget(session), "-p", "-e", "-J", `-S`, `-${lines}`, "-E", "-"],
+    ["tmux", "capture-pane", "-t", target, "-p", "-e", "-J", `-S`, `-${lines}`, "-E", "-"],
     { stdout: "pipe", stderr: "pipe" }
   );
   const raw = await new Response(proc.stdout).text();

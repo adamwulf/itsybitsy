@@ -87,7 +87,7 @@ import { newAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
 import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type CoordinatorPane, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
-import { captureDisplayPane } from "../tmux-poller";
+import { captureMarkedCoordinatorPane } from "../tmux-poller";
 import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator";
 import { stripAnsi } from "../parse-state";
 import { writeRemoteAgents } from "./remote-agents";
@@ -159,7 +159,7 @@ export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: ()
   return {
     remoteStartDenial,
     captureCoordinator: async () => {
-      const text = await captureDisplayPane(IB_COORDINATOR_SESSION);
+      const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION);
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },

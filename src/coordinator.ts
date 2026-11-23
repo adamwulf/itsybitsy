@@ -9,7 +9,7 @@ import { join, basename, dirname } from "path";
 import { userHome } from "./home";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
-import { captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
+import { COORDINATOR_PANE_MARKER, captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx, killPidCtx, isApiError, isApiSafeguard } from "./agents";
 import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog, getWatchLogPath } from "./watch-log";
@@ -1034,6 +1034,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
     claudeCmd, "Enter",
+    ";", "set-option", "-p", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), COORDINATOR_PANE_MARKER, "1",
   ]);
 
   // Wait for Claude's UI to be ready so the resume-failure fallback below

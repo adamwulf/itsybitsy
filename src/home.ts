@@ -27,6 +27,7 @@ import { homedir, userInfo } from "os";
 
 /** Test-only override of the resolved home directory (undefined = not set). */
 let overrideHome: string | undefined;
+let overrideAccountHome: string | undefined;
 
 /**
  * Resolve the current user's home directory. See the module header for the
@@ -37,16 +38,18 @@ export function userHome(): string {
 }
 
 /** Override the user home directory for testing. */
-export function setUserHome(path: string): void {
+export function setUserHome(path: string, account = path): void {
   overrideHome = path;
+  overrideAccountHome = account;
 }
 
 /** Clear the test override so {@link userHome} resolves from the environment. */
 export function resetUserHome(): void {
   overrideHome = undefined;
+  overrideAccountHome = undefined;
 }
 
 /** Account-owned policy and protected paths must follow the OS account. */
 export function accountHome(): string {
-  return overrideHome ?? userInfo().homedir;
+  return overrideAccountHome ?? userInfo().homedir;
 }

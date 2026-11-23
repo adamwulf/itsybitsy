@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { hasFreeSpace } from "./attachment-space";
 import { checkManifestLimits } from "./transfer-limits";
 import { readTransferLimits } from "../config";
-import { accountHome } from "../home";
+import { accountHome, userHome } from "../home";
 import { resolveAttachmentSharedCaller, type ResolvedCallerContext } from "../ib-commands";
 import { registeredRepoRoots, locateRegisteredAgentDir } from "../hooks/agent-context";
 import { matchWorktreeCaller } from "../runtime-names";
@@ -130,7 +130,7 @@ export async function stageLocalAttachments(message: string, paths: readonly str
   const cwd = process.cwd();
   const machine = await readMachineName();
   const entries = await buildAttachmentManifest(paths, {
-    ...await senderAttachmentAccess(sender), cwd, home: accountHome(), machine, limits: await readTransferLimits(),
+    ...await senderAttachmentAccess(sender), cwd, home: accountHome(), argumentHome: userHome(), machine, limits: await readTransferLimits(),
   });
   try {
     const verified = [];

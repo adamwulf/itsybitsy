@@ -72,7 +72,10 @@ export interface ManifestEntry {
 
 interface ManifestOptions {
   cwd: string;
+  /** Account home for protected roots. */
   home: string;
+  /** Sender home for tilde arguments. */
+  argumentHome?: string;
   limits?: TransferLimits;
   machine: string;
   checkRead?: (source: string) => void;
@@ -80,7 +83,7 @@ interface ManifestOptions {
 }
 
 export async function buildAttachmentManifest(
-  paths: readonly string[], { cwd, home, limits = DEFAULT_TRANSFER_LIMITS, machine, checkRead, sandboxed }: ManifestOptions,
+  paths: readonly string[], { cwd, home, argumentHome = home, limits = DEFAULT_TRANSFER_LIMITS, machine, checkRead, sandboxed }: ManifestOptions,
 ): Promise<ManifestEntry[]> {
   if (!paths.length) return [];
   const enabled = checkAttachmentsEnabled(limits, machine);
@@ -92,7 +95,7 @@ export async function buildAttachmentManifest(
   try {
     for (const argument of paths) {
       // Let the filesystem walk symlinks before interpreting a following "..".
-      const expanded = argument === "~" ? home : argument.startsWith("~/") ? home + argument.slice(1) : argument;
+      const expanded = argument === "~" ? argumentHome : argument.startsWith("~/") ? argumentHome + argument.slice(1) : argument;
       const absolute = isAbsolute(expanded) ? expanded : cwd + sep + expanded;
       try {
         if (absolute.endsWith("/") || absolute.endsWith("/.")) throw new Error("directory spelling is not a regular file");

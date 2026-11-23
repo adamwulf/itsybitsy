@@ -47,6 +47,8 @@ export interface IsolatedCliOptions {
   cwd?: string;
   /** Default: an empty directory that exists for this run only. */
   home?: string;
+  /** Optional separate fixture for OS-account policy. */
+  accountHome?: string;
   /** Piped to the child. Default: no stdin at all (/dev/null). */
   stdin?: string;
   /** Extra environment. Nothing else is inherited. */
@@ -150,6 +152,7 @@ export async function runIsolatedCli(cliArgs: string[], options: IsolatedCliOpti
     const config: CliDriverConfig = {
       cwd,
       home,
+      accountHome: options.accountHome && await assertIsolatedPath(options.accountHome, "account home"),
       logDir,
       sandboxed: options.sandboxed ?? false,
       actions: options.actions ?? {},

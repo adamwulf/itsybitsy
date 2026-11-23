@@ -49,6 +49,7 @@ export interface CliDriverConfig {
   /** The cwd and HOME this process must have been started with. */
   cwd: string;
   home: string;
+  accountHome?: string;
   /** Receives context.json, actions.jsonl and violations.jsonl. */
   logDir: string;
   /** What isSandboxedProcess() answers. */
@@ -131,7 +132,7 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   const ancestry = (): CliAncestry => config.ancestry ?? block({ kind: "process-ancestry", detail: {} });
   const resolver = (cwd: string, options?: { coordinatorId?: string; roots?: string[] }) => resolveNoWorktreeCaller(cwd, {
     ...options,
-    registryHome: config.home,
+    registryHome: config.accountHome ?? config.home,
     pid: config.ancestry?.pid,
     readParents: () => new Map(ancestry().parents),
     identityCurrent: () => ancestry().identityCurrent,
@@ -148,7 +149,7 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
         "300    1 Sat Nov 21 12:01:00 2026 " + (terminal === "agent" ? "codex  codex" : "bash   bash"),
         "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
       ].join("\n"),
-      resolveCaller: (cwd, ancestors, options) => resolveDashboardCaller(cwd, ancestors, { ...options, registryHome: config.home }),
+      resolveCaller: (cwd, ancestors, options) => resolveDashboardCaller(cwd, ancestors, { ...options, registryHome: config.accountHome ?? config.home }),
     });
   };
   remoteCliCaller.isSystem = () => isSystemPaneCaller(ancestry().pid, async () => ancestry().systemPanePid ?? null, async () => [
@@ -193,7 +194,7 @@ async function runDriver(): Promise<void> {
   };
   installExternalGuards(config, block);
   const { setUserHome } = await import("./home");
-  setUserHome(config.home);
+  setUserHome(config.home, config.accountHome);
 
   const { setSandboxedProcessOverride } = await import("./sandbox-detect");
   setSandboxedProcessOverride(() => config.sandboxed);

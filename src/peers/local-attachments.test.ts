@@ -409,3 +409,21 @@ test("a case-insensitive registration matches the sender directory by identity",
   snapshots.push(dirname(dirname(record.message.split(" → ")[1])));
   expect(record.fromAgent).toBe("sender");
 });
+
+test("tilde arguments use the sender's HOME while protected trees belong to the account", async () => {
+  const account = join(fixture.root, "account");
+  const protectedFile = join(account, ".itsybitsy/sealed/private");
+  await Bun.write(protectedFile, "private");
+  await Bun.write(join(account, "x"), "account data");
+  await Bun.write(join(fixture.home, "x"), "sender data");
+  const run = (file: string) => fixture.run(["send", "reader", "--attach", file, "read"], {
+    accountHome: account, ancestry: human, actions: { sendMessage: "real" },
+  });
+  expect((await run(protectedFile)).stderr).toContain("protected attachment path");
+  expect(await queue().exists()).toBe(false);
+  const sent = await run("~/x");
+  expect(sent.exitCode, sent.stderr).toBe(0);
+  const destination = JSON.parse(await queue().text()).message.split(" → ")[1];
+  snapshots.push(dirname(dirname(destination)));
+  expect(await Bun.file(destination).text()).toBe("sender data");
+});

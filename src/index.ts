@@ -1959,8 +1959,13 @@ export async function main() {
           continue;
         }
         if (tok === "--attach") {
-          if (!sendArgs[i + 1]) { console.error("Error: --attach requires a path"); process.exit(1); }
-          attachments.push(sendArgs[++i]!);
+          const path = sendArgs[i + 1];
+          if (!path || ["-f", "--file", "--from", "--attach"].includes(path)) {
+            console.error("Error: --attach requires a path");
+            process.exit(1);
+          }
+          attachments.push(path);
+          i++;
           continue;
         }
         if (tok === "-f" || tok === "--file") {

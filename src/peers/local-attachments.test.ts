@@ -292,3 +292,25 @@ test("insufficient staging space refuses before creating any snapshot", async ()
     await entries[0]!.handle.close();
   }
 });
+
+test.each(["-f", "--file", "--from", "--attach", ""])("--attach requires a path before %j", async option => {
+  const result = await send("--attach", ...(option ? [option] : []));
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("--attach requires a path");
+  expect(await queue().exists()).toBe(false);
+});
+
+test("--attach before the target combines with a file body and explicit attribution", async () => {
+  await Bun.write(join(fixture.cwd, "-f"), "snapshot");
+  await Bun.write(join(fixture.cwd, "body"), "Read ./-f");
+  const run = await fixture.run(["send", "--attach", "./-f", "reader", "-f", "body", "--from", "writer"], {
+    ancestry: human, actions: { sendMessage: "real" },
+  });
+  expect(run.exitCode, run.stderr).toBe(0);
+  const record = JSON.parse(await queue().text());
+  const destination = record.message.split(" → ")[1];
+  snapshots.push(dirname(dirname(destination)));
+  expect(record).toMatchObject({ fromAgent: "writer", noPassthrough: true });
+  expect(record.message.split("\n")[0]).toBe("Read " + destination);
+  expect(await Bun.file(destination).text()).toBe("snapshot");
+});

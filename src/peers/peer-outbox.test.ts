@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -99,4 +100,23 @@ test("a claimed cancellation with a failed signal still has an unknown outcome",
   }, () => {});
   try { expect((await result).stderr).toBe("outcome unknown — check the recipient"); }
   finally { finish.resolve(header.id); await watcher; }
+});
+
+test("Ctrl-C during a successful claimed result read still reports unknown", async () => {
+  await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  const controller = new AbortController();
+  const read = fs.readFile;
+  const resultPath = join(base, ".claimed", header.id, "result.json");
+  const spy = spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof read>) => {
+    const contents = await read(...args);
+    if (args[0] === resultPath) controller.abort();
+    return contents;
+  });
+  try {
+    const result = handoffRemoteMessage("peer", header, controller.signal);
+    await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
+    await pollPeerOutbox(async () => header.id, () => {});
+    expect(await result).toMatchObject({ exitCode: 130, stderr: "outcome unknown — check the recipient" });
+  } finally { spy.mockRestore(); }
 });

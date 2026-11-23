@@ -680,6 +680,32 @@ describe("send broker", () => {
       expect((await readdir(spawnRequestDir(agentDir)).catch(() => [])).filter(name => name.endsWith(".json"))).toEqual([]);
     });
 
+    test("Ctrl-C inside a successful claimed broker result read reports unknown", async () => {
+      const { submitWatchdogRequest } = await import("./spawn-broker");
+      const control = new AbortController();
+      const path = join(spawnResultDir(agentDir), ID_A + ".json");
+      const file = Bun.file.bind(Bun);
+      const spy = spyOn(Bun, "file").mockImplementation((...args: Parameters<typeof Bun.file>) => {
+        const handle = file(...args);
+        if (args[0] === path) {
+          const read = handle.json.bind(handle);
+          handle.json = async () => { const value = await read(); control.abort(); return value; };
+        }
+        return handle;
+      });
+      try {
+        const result = await submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
+          { request: "send", action: "send", alreadyStarted: "claimed" }, 5000, {
+            signal: control.signal, cancelClaimed: async () => {},
+            sleep: async () => {
+              await rm(join(spawnRequestDir(agentDir), ID_A + ".json"));
+              await Bun.write(path, JSON.stringify({ id: ID_A, ok: true, exitCode: 0 }));
+            },
+          });
+        expect(result).toMatchObject({ exitCode: 130, stderr: "outcome unknown — check the recipient" });
+      } finally { spy.mockRestore(); }
+    });
+
     test("an error signalling the claimed broker job leaves the outcome unknown", async () => {
       const { submitWatchdogRequest } = await import("./spawn-broker");
       const control = new AbortController();

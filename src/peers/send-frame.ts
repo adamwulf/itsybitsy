@@ -158,16 +158,25 @@ export async function requireSendFin(stream: ReadStream, options: FileBodyOption
 
 /** Only the caller knows when the last file has been sent and may finish the stream. */
 export async function sendFileBody(
-  { handle, size }: Pick<ManifestEntry, "handle" | "size">, stream: { writeAll(bytes: number[]): Promise<void> }, options: FileBodyOptions = {},
+  { handle, size }: Pick<ManifestEntry, "handle" | "size">, stream: { write(bytes: number[]): Promise<number> }, options: FileBodyOptions = {},
 ): Promise<void> {
   const chunks = fileChunks(handle, size);
+  let offer = CHUNK_BYTES;
   let written = 0;
   for (;;) {
     const next = await waitForIO(options, () => chunks.next());
     if (next.done) return;
     const chunk = next.value;
-    await waitForIO(options, () => stream.writeAll(Array.from(chunk)));
-    written += chunk.length;
-    options.onProgress?.(written);
+    let offset = 0;
+    while (offset < chunk.length) {
+      const bytes = Array.from(chunk.subarray(offset, offset + offer));
+      const count = await waitForIO(options, () => stream.write(bytes));
+      if (!Number.isInteger(count) || count <= 0 || count > bytes.length) throw new Error("Invalid stream write count");
+      offset += count;
+      written += count;
+      options.onProgress?.(written);
+      // Avoid repeatedly copying a full chunk when the stream accepts only a few bytes.
+      offer = Math.min(CHUNK_BYTES, count * 2);
+    }
   }
 }

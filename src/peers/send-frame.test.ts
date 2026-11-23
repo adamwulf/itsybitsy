@@ -155,7 +155,7 @@ test("sends bounded chunks in order, reports cumulative bytes and can abort a st
     handle = await open(path, "r");
     const chunks: Buffer[] = [];
     const progress: number[] = [];
-    await sendFileBody({ handle, size: data.length }, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } }, {
+    await sendFileBody({ handle, size: data.length }, { write: async bytes => { chunks.push(Buffer.from(bytes)); return bytes.length; } }, {
       onProgress: total => progress.push(total),
     });
     expect(chunks.map(chunk => chunk.length)).toEqual([CHUNK_BYTES, CHUNK_BYTES, 1]);
@@ -164,19 +164,19 @@ test("sends bounded chunks in order, reports cumulative bytes and can abort a st
 
     for (const size of [data.length + 1, data.length - 1, 0]) {
       let sent = 0;
-      await expect(sendFileBody({ handle, size }, { writeAll: async bytes => { sent += bytes.length; } }))
+      await expect(sendFileBody({ handle, size }, { write: async bytes => { sent += bytes.length; return bytes.length; } }))
         .rejects.toThrow(size > data.length ? /short|EOF/i : /long|exceed/i);
       expect(sent).toBe(Math.min(size, data.length));
     }
 
     const controller = new AbortController();
     const started = Promise.withResolvers<void>();
-    const stalled = Promise.withResolvers<void>();
-    const send = sendFileBody({ handle, size: data.length }, { writeAll: () => { started.resolve(); return stalled.promise; } }, { signal: controller.signal });
+    const stalled = Promise.withResolvers<number>();
+    const send = sendFileBody({ handle, size: data.length }, { write: () => { started.resolve(); return stalled.promise; } }, { signal: controller.signal });
     await started.promise;
     controller.abort(new Error("sender cancelled"));
     await expect(send).rejects.toThrow("sender cancelled");
-    stalled.resolve();
+    stalled.resolve(1);
   } finally {
     await handle?.close();
     await rm(dir, { recursive: true, force: true });
@@ -313,4 +313,32 @@ test("receiver waits for the sink before reading again and progresses across idl
   expect(await transfer).toBe(digest(bytes));
   expect(writes).toBe(5);
   expect(clock.now).toBeGreaterThan(3 * IDLE_TIMEOUT_MS);
+});
+
+test("positive partial writes renew the sender idle timer and preserve every byte", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ib-partial-write-"));
+  try {
+    const path = join(dir, "file");
+    const body = Buffer.from("a flow-controlled file");
+    await writeFile(path, body);
+    const handle = await open(path, "r");
+    try {
+      const clock = new IdleClock();
+      const sent: number[] = [];
+      const progress: number[] = [];
+      await sendFileBody({ handle, size: body.length }, { async write(bytes) {
+        clock.advance(IDLE_TIMEOUT_MS - 1);
+        const part = bytes.slice(0, 2);
+        sent.push(...part);
+        return part.length;
+      } }, { setTimer: clock.setTimer, onProgress: n => progress.push(n) });
+      expect(Buffer.from(sent)).toEqual(body);
+      expect(progress).toEqual(Array.from({ length: Math.ceil(body.length / 2) }, (_, i) => Math.min(body.length, (i + 1) * 2)));
+      expect(clock.now).toBeGreaterThan(2 * IDLE_TIMEOUT_MS);
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

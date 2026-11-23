@@ -285,7 +285,8 @@ test("a failed result publication is retried without sending the request again",
   finally { temporary.mockRestore(); }
   expect(await Bun.file(resultPath).exists()).toBe(false);
   expect(messages.join(" ")).toContain("retrying claim finalization");
-  await poll(send, () => {});
+  // There is no subsequent dispatch poll or recovery task after endpoint loss.
+  await waitFor(() => Bun.file(resultPath).exists());
   expect(sends).toBe(1);
   expect(await Bun.file(resultPath).json()).toEqual({ ok: true, id: header.id });
 });

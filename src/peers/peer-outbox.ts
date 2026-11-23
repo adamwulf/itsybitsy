@@ -182,32 +182,25 @@ async function readRequest(path: string) {
 export function createPeerOutboxPoll(now = Date.now) {
   const active = new Set<string>();
   type DeliveryResult = { ok: true; id: string } | { ok: false; error: string };
-  type Finalization = { result: DeliveryResult; log: (line: string) => void; flight?: Promise<void> };
-  const pending = new Map<string, Finalization>();
   let workers = 0;
 
-  function finalize(dir: string, entry: Finalization) {
-    return entry.flight ??= (async () => {
-      try {
-        if (!existsSync(join(dir, "cancel"))) {
-          await writeJson(dir, "result.json", entry.result);
-          await rm(join(dir, "files"), { recursive: true, force: true })
-            .catch(err => entry.log(`peer-outbox: could not remove sent files: ${detail(err)}`));
-        }
-        if (existsSync(join(dir, "cancel"))) await rm(dir, { recursive: true, force: true });
-      } catch (err) {
-        if (!missing(err) || existsSync(dir)) {
-          entry.log(`peer-outbox: retrying claim finalization: ${detail(err)}`);
-          return;
-        }
+  async function finalize(dir: string, result: DeliveryResult, log: (line: string) => void, delay = 250): Promise<void> {
+    try {
+      if (!existsSync(join(dir, "cancel"))) {
+        await writeJson(dir, "result.json", result);
+        await rm(join(dir, "files"), { recursive: true, force: true })
+          .catch(err => log(`peer-outbox: could not remove sent files: ${detail(err)}`));
       }
-      pending.delete(dir);
-      active.delete(dir);
-    })().finally(() => { entry.flight = undefined; });
-  }
-
-  async function retryFinalizations() {
-    await Promise.all(Array.from(pending, ([dir, entry]) => finalize(dir, entry)));
+      if (existsSync(join(dir, "cancel"))) await rm(dir, { recursive: true, force: true });
+    } catch (err) {
+      if (!missing(err) || existsSync(dir)) {
+        log(`peer-outbox: retrying claim finalization: ${detail(err)}`);
+        // This worker owns the result even after its endpoint and poller stop.
+        setTimeout(() => void finalize(dir, result, log, Math.min(30_000, delay * 2)), delay).unref();
+        return;
+      }
+    }
+    active.delete(dir);
   }
 
   async function sweep(parent: string, staging = false) {
@@ -238,7 +231,6 @@ export function createPeerOutboxPoll(now = Date.now) {
   async function recover() {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
-    await retryFinalizations();
     await finishRecovery([sweep(base), sweepEntries(claimed, id => recoverClaim(claimed, id)), sweep(join(base, ".staging"), true)]);
   }
 
@@ -246,8 +238,7 @@ export function createPeerOutboxPoll(now = Date.now) {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
     if (!ownsEndpoint()) return;
-    await retryFinalizations();
-    if (workers + pending.size >= 4) return;
+    if (workers >= 4 || active.size >= 4) return;
     const ready = (await transferDirectoryBatch(base, "dispatch")).filter(name => requestId.test(name));
     if (!ready.length) return;
     await mkdir(claimed, { recursive: true, mode: 0o700 });
@@ -257,7 +248,7 @@ export function createPeerOutboxPoll(now = Date.now) {
       workers++;
       try {
         for (const id of ids) {
-          if (!ownsEndpoint()) return;
+          if (!ownsEndpoint() || active.size >= 4) return;
           const dir = join(claimed, id);
           if (active.has(dir)) continue;
           active.add(dir);
@@ -308,14 +299,12 @@ export function createPeerOutboxPoll(now = Date.now) {
               tick();
             } finally { clearInterval(timer); }
           } catch (err) { result = { ok: false, error: detail(err) }; }
-          const entry = { result, log };
-          pending.set(dir, entry);
-          await finalize(dir, entry);
-          if (pending.has(dir)) return;
+          await finalize(dir, result, log);
+          if (active.has(dir)) return;
         }
       } finally { workers--; }
     }
-    await Promise.all(Array.from({ length: Math.max(0, Math.min(4 - workers - pending.size, ready.length)) }, worker));
+    await Promise.all(Array.from({ length: Math.max(0, Math.min(4 - workers, ready.length)) }, worker));
   }
   return Object.assign(poll, { recover });
 }

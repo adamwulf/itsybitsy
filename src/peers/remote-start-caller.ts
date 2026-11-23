@@ -142,6 +142,21 @@ export async function isSystemPaneCaller(
   } catch { return false; }
 }
 
+/** Check the named CLI and its recorded agent ancestor in one process snapshot.
+ * This verifies the named process tree, not the writer of a broker record. */
+export async function isAgentSendProcess(
+  origin: { pid: number; start: number | null }, meta: { claude_pid: string; claude_pid_epoch?: number },
+  readTable = readProcessTable,
+): Promise<boolean> {
+  const agent = Number(meta.claude_pid);
+  if (!Number.isSafeInteger(agent) || agent <= 1 || agent === origin.pid || !meta.claude_pid_epoch || origin.start === null) return false;
+  const signal = AbortSignal.timeout(2000);
+  const ancestors = await readAncestors(origin.pid, readTable, signal);
+  const cli = ancestors?.get(origin.pid), parent = ancestors?.get(agent);
+  return !signal.aborted && !!cli && !!parent && Date.parse(cli.started) / 1000 === origin.start &&
+    Math.abs(Date.parse(parent.started) / 1000 - meta.claude_pid_epoch) <= CLAUDE_PID_START_MARGIN_SECONDS;
+}
+
 /** Use the same startup decision when the dashboard sends a message. */
 export function remoteSendDenial(reason: string): string {
   return reason.replace(/remote starts/gi, match => match === "Remote starts" ? "Remote sends" : "remote sends")

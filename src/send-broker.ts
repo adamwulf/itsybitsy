@@ -1,3 +1,4 @@
+import { isAgentSendProcess } from "./peers/remote-start-caller";
 import type { LocalQueueGuard } from "./outbox";
 import { openBrokerResults, pinnedPath } from "./pinned-directory";
 import { cancellationPoll, cancellationMarkerExists } from "./send-cleanup";
@@ -472,6 +473,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
 
 /** Seams for the `ib send` request handled here. */
 export interface SendServerDeps {
+  verifySendProcess?: typeof isAgentSendProcess;
   attachmentTempDir?: string;
   setTimer?: FileBodyOptions["setTimer"];
   listRepos?: () => Promise<RepoEntry[]>;
@@ -598,8 +600,12 @@ export async function handleSendRequest(
         } else {
           deps.transferSignal?.throwIfAborted();
         }
+        if (!await (seams.verifySendProcess ?? isAgentSendProcess)(origin, requester.meta)) {
+          throw Error("Cannot verify that the send client belongs to this agent process");
+        }
       }
       catch (err) {
+        await marker?.close();
         await results.close();
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return interruptedSend("claimed");
         throw err;

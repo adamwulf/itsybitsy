@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { processStartEpochSecondsCtx } from "./agents";
 import { fixtureProcessStart } from "./test-cli-driver";
 import { waitFor } from "./test-utils";
-import { processSpawnRequests, spawnRequestDir, spawnResultDir } from "./spawn-broker";
+import { processSpawnRequests as pollFixtureWatchdog, type SpawnServerDeps, spawnRequestDir, spawnResultDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, open, readdir, realpath, rename, symlink, rm, utimes } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -15,6 +15,12 @@ import { pollPeerOutbox } from "./peers/peer-outbox";
 import type { SendHeader } from "./peers/send-frame";
 import { resolveSendTarget } from "./resolve-target";
 import { createCliFixture, type CliFixture } from "./test-cli-runner";
+
+// The isolated CLI runs under the test harness. The watchdog's ps lookup
+// has its own fixture in send-broker.test.ts.
+function processSpawnRequests(id: string, repo: string, deps: SpawnServerDeps = {}) {
+  return pollFixtureWatchdog(id, repo, { ...deps, send: { verifySendProcess: async () => true, ...deps.send } });
+}
 
 describe("qualified agent addresses", () => {
   let cli: CliFixture;

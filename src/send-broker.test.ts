@@ -193,7 +193,7 @@ describe("send broker", () => {
         return ok("Question submitted (q-1-abcdef)");
       },
       ...rest,
-      send: { listRepos: async () => repos, ...sendOver },
+      send: { verifySendProcess: async () => true, listRepos: async () => repos, ...sendOver },
     };
     return { deps, spawned, asked };
   }
@@ -310,6 +310,24 @@ describe("send broker", () => {
         await expect(processSpawnRequests(SENDER_ID, senderRepo, deps)).rejects.toThrow("watchdog stopped");
         expect(await readdir(spawnResultDir(agentDir))).toEqual([]);
       } finally { spy.mockRestore(); }
+    });
+
+    test("a live CLI outside the recorded agent process tree cannot send", async () => {
+      await linkWorktree();
+      const { isAgentSendProcess } = await import("./peers/remote-start-caller");
+      const started = "Sat Nov 21 12:01:00 2026", epoch = Date.parse(started) / 1000;
+      const table = async () => ["PID PPID STARTED                  KERNEL COMMAND",
+        "300  200 " + started + " bash   bash", "200    1 " + started + " codex  codex",
+        "100    1 " + started + " codex  codex", "  1    0 " + started + " init   /sbin/launchd"].join("\n");
+      const client = { pid: 300, start: epoch };
+      expect(await isAgentSendProcess(client, { claude_pid: "200", claude_pid_epoch: epoch }, table)).toBe(true);
+      const { deps } = server({ send: {
+        resolveTarget: async () => ({ agent: null, isSystemCoordinator: false, remote: { peer: "peer", target: { kind: "system" } } }),
+        verifySendProcess: () => isAgentSendProcess(client, { claude_pid: "100", claude_pid_epoch: epoch }, table),
+      } });
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
+      await processSpawnRequests(SENDER_ID, senderRepo, deps);
+      expect((await result(ID_A)).stderr).toContain("belongs to this agent process");
     });
 
     test("an expired bare-name lookup releases the job before the next qualified request", async () => {

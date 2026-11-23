@@ -139,7 +139,7 @@ async function sandboxedAttachmentSend(sender: FixtureAgent, args: string[]) {
   let poll: Promise<void> | undefined;
   const timer = setInterval(() => {
     poll ??= processSpawnRequests("sender", recipient.repoPath, {
-      verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: fixture.home },
+      verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: fixture.home, verifySendProcess: async () => true },
     }).then(() => {}).finally(() => { poll = undefined; });
   }, 20);
   try {

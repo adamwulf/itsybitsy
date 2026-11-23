@@ -159,7 +159,7 @@ export function handlePeersDialogInput(ctx: DialogCtx, d: PeersDialogState, data
       break;
     case "done":
     case "failed":
-      d.service.dismiss();
+      if (enter || escape) d.service.dismiss();
       break;
     default:
       // connecting, verifying, incoming, code-shown: only Esc does anything.

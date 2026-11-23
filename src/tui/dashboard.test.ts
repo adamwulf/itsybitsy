@@ -9572,8 +9572,11 @@ describe("setup Peers tab", () => {
     service.setStage({ stage: "done", name: "Laptop B", alreadyPaired: false });
     expect(text(dashboard)).toContain(`Paired with "Laptop B" (${OTHER_SHORT}).`);
     expect(text(dashboard)).toContain("Enter or Esc: return to Peers");
+    service.calls = [];
     dashboard.handleInput("x");
-    expect(service.calls.at(-1)).toBe("dismiss");
+    expect(service.calls).toEqual([]);
+    dashboard.handleInput("\r");
+    expect(service.calls).toEqual(["dismiss"]);
     expect(peersTab(dashboard)).toBeTruthy();
   });
 
@@ -9673,6 +9676,8 @@ describe("setup Peers tab", () => {
     expect(service.calls).toEqual(["name:null"]);
     service.setStage({ stage: "failed", failure: { kind: "cancelled" } });
     service.calls = [];
+    dashboard.handleInput("x");
+    expect(service.calls).toEqual([]);
     dashboard.handleInput("\x1b");
     expect(service.calls).toEqual(["dismiss"]);
 

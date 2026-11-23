@@ -9457,6 +9457,13 @@ describe("setup Peers tab", () => {
     expect(out).toContain("peers.json: not valid JSON");
   });
 
+  test("shows how to replace a legacy peer name starting with @", () => {
+    const { dashboard, service } = open();
+    service.set({ peers: [{ id: OTHER, name: "@legacy", pairedAt: "x" }] });
+    expect(text(dashboard)).toContain("@legacy");
+    expect(text(dashboard)).toContain("Remove and re-pair");
+  });
+
   test("paired peers show a colored link status and the last error under an offline peer", () => {
     const { dashboard, service } = open();
     const C = "1b".repeat(32);
@@ -9675,6 +9682,7 @@ describe("setup Peers tab", () => {
     expect(submit("laptop").error).toBe(`Another peer is already named "Laptop".`);
     expect(text(dashboard)).toContain(`Another peer is already named "Laptop".`);
     expect(submit(" STUDIO ").error).toBe(`"Studio" is this machine's name.`);
+    expect(submit("@office").error).toBe("A machine name cannot start with @.");
     expect(submit("home/office").error).toBe(`A name cannot contain "/".`);
     expect(service.calls).toEqual([]);
 

@@ -518,6 +518,32 @@ async function writeResult(agentDir: string, id: string, result: IbCommandResult
   await writeJsonAtomic(spawnResultDir(agentDir), `${id}.json`, payload, signal, false);
 }
 
+/** Completed markers carry the watchdog identity in their first 16 bytes.
+ * Unpublished temps carry it in the name, even if their write never began. */
+async function pruneBrokerProgress(agentDir: string, name: string) {
+  const { withAgentSubdirectory, removeBrokerMember } = await import("./peers/remote-attachments");
+  const { transferOwnerState } = await import("./peers/transfer-owner");
+  await withAgentSubdirectory(agentDir, [SPAWN_RESULT_DIRNAME], async (dir, path, flags) => {
+    const temp = /\.progress\.(\d+)-(\d+)-/.exec(name);
+    let pid: number, start: number;
+    if (temp) {
+      pid = Number(temp[1]); start = Number(temp[2]);
+    } else {
+      const { open } = await import("node:fs/promises");
+      const { constants } = await import("node:fs");
+      const file = await open(join(path, name), constants.O_RDONLY | constants.O_NONBLOCK | flags);
+      try {
+        if (!(await file.stat()).isFile()) return;
+        const bytes = Buffer.alloc(16);
+        if ((await file.read(bytes)).bytesRead !== bytes.length) return;
+        pid = bytes.readDoubleLE(); start = bytes.readDoubleLE(8);
+      } finally { await file.close(); }
+    }
+    if (Number.isSafeInteger(pid) && pid > 0 && Number.isSafeInteger(start) && start >= 0 &&
+        transferOwnerState({ pid, start: start || null }, 0) === "proven-dead") await removeBrokerMember(dir, name);
+  });
+}
+
 /** Remove results a client never collected. */
 async function pruneStaleResults(agentDir: string, nowMs: number): Promise<void> {
   let names: string[];
@@ -527,6 +553,12 @@ async function pruneStaleResults(agentDir: string, nowMs: number): Promise<void>
     return;
   }
   for (const name of names) {
+    if (/^[a-f0-9]{32}\.progress(?:\.([1-9]\d*)-(\d+)-[a-f0-9]{16}\.tmp)?$/.test(name)) {
+      await pruneBrokerProgress(agentDir, name).catch(err => {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") warnSendCleanup(`Cannot recover broker progress: ${err}`);
+      });
+      continue;
+    }
     if (!REQUEST_FILE.test(name) && !/^[a-f0-9]{32}\.cancel$/.test(name)) continue;
     const path = join(spawnResultDir(agentDir), name);
     try {

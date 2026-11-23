@@ -307,7 +307,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
         if (ownsStage) await rm(staged, { recursive: true, force: true });
         else await (await open(join(spawnResultDir(dir), request.id + ".cancel"), "wx", 0o600)).close();
       }, readProgress: async () => {
-        return (await stat(join(spawnResultDir(dir), request.id + ".progress"))).size;
+        return Math.max(0, (await stat(join(spawnResultDir(dir), request.id + ".progress"))).size - 16);
       } } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
@@ -560,6 +560,10 @@ export async function handleSendRequest(
       const cancelPath = join(spawnResultDir(ctx.agentDir), ctx.id + ".cancel");
       const checkClient = cancellationPoll(async () => files.length
         ? (await marker!.stat()).nlink === 0 : cancellationMarkerExists(cancelPath), controller);
+      const ownerStart = stagingOwnerStart(process.pid);
+      const ownerBytes = Buffer.alloc(16);
+      ownerBytes.writeDoubleLE(process.pid);
+      ownerBytes.writeDoubleLE(ownerStart ?? 0, 8);
       let sequence = 0, recorded = 0, updated = -Infinity;
       let publication: Promise<void> | undefined;
       let warned = false;
@@ -568,11 +572,11 @@ export async function handleSendRequest(
         if (publication || sequence === recorded || performance.now() - updated < 250) return;
         const next = sequence;
         updated = performance.now();
-        const temp = `${textProgress}.${randomBytes(8).toString("hex")}.tmp`;
+        const temp = `${textProgress}.${process.pid}-${ownerStart ?? 0}-${randomBytes(8).toString("hex")}.tmp`;
         publication = (async () => {
           try {
             const file = await open(temp, "wx", 0o600);
-            try { await file.truncate(next); } finally { await file.close(); }
+            try { await file.writeFile(ownerBytes); await file.truncate(ownerBytes.length + next); } finally { await file.close(); }
             await rename(temp, textProgress);
             recorded = next;
           } finally { await rm(temp, { force: true }); }

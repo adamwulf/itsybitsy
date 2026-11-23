@@ -99,18 +99,24 @@ async function withBrokerDirectory<T>(
   agentDir: string, id: string | undefined, use: (dir: FileHandle, path: string, noFollow: number) => Promise<T>,
 ) {
   if (id !== undefined && !/^[0-9a-f]{32}$/.test(id)) throw new Error("Invalid broker attachment request id");
+  return withAgentSubdirectory(agentDir, id ? ["send-attachments", id] : ["send-attachments"], use);
+}
+
+export async function withAgentSubdirectory<T>(
+  agentDir: string, components: string[], use: (dir: FileHandle, path: string, noFollow: number) => Promise<T>,
+) {
   const root = join(await realpath(dirname(agentDir)), basename(agentDir));
   const flags = constants.O_RDONLY | constants.O_DIRECTORY;
   if (process.platform === "darwin") {
     const O_NOFOLLOW_ANY = 0x20000000;
-    const path = join(root, "send-attachments", id ?? "");
+    const path = join(root, ...components);
     const request = await open(path, flags | O_NOFOLLOW_ANY);
     try { return await use(request, path, O_NOFOLLOW_ANY); }
     finally { await request.close(); }
   }
   let dir = await open(root, flags | constants.O_NOFOLLOW);
   try {
-    for (const name of id ? ["send-attachments", id] : ["send-attachments"]) {
+    for (const name of components) {
       const next = await open(`/proc/self/fd/${dir.fd}/${name}`, flags | constants.O_NOFOLLOW);
       await dir.close();
       dir = next;
@@ -127,7 +133,7 @@ export function createBrokerProgress(agentDir: string, id: string) {
 // Finish the cross-volume move only after the private copy is verified.
 // unlinkat scopes deletion to the pinned request even if a parent is renamed.
 // Darwin's /dev/fd does not support directory-relative path traversal.
-async function removeBrokerMember(dir: FileHandle, leaf: string, directory = false) {
+export async function removeBrokerMember(dir: FileHandle, leaf: string, directory = false) {
   if (process.platform !== "darwin") {
     const path = `/proc/self/fd/${dir.fd}/${leaf}`;
     try { return await (directory ? rmdir(path) : unlink(path)); }

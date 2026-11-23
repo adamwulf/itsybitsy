@@ -714,6 +714,7 @@ describe("send broker", () => {
           }
           const path = join(spawnResultDir(agentDir), id + ".progress");
           await mkdir(spawnResultDir(agentDir), { recursive: true });
+          if (!await Bun.file(path).exists()) await Bun.write(path, Buffer.alloc(16));
           await fs.appendFile(path, "1");
           if (now >= 120_000) await Bun.write(join(spawnResultDir(agentDir), id + ".json"), JSON.stringify({ id, ok: true, exitCode: 0 }));
         },

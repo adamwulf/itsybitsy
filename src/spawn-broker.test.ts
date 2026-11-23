@@ -289,6 +289,25 @@ describe("spawn broker", () => {
       expect(written.stdout).toContain("(truncated)");
     });
 
+    test("recovers progress and interrupted temps only for a proven dead publisher", async () => {
+      const { isPidAliveCtx, processStartEpochSecondsCtx } = await import("./agents");
+      const dir = spawnResultDir(agentDir);
+      await mkdir(dir, { recursive: true });
+      const paths = [];
+      for (const [id, pid] of [[ID_A, 10], [ID_B, 11]] as const) {
+        const marker = join(dir, id + ".progress"), temp = marker + "." + pid + "-40-aaaaaaaaaaaaaaaa.tmp";
+        const bytes = Buffer.alloc(16);
+        bytes.writeDoubleLE(pid); bytes.writeDoubleLE(40, 8);
+        await Bun.write(marker, bytes); await Bun.write(temp, "");
+        paths.push(marker, temp);
+      }
+      isPidAliveCtx.set(pid => pid === 11); processStartEpochSecondsCtx.set(() => null);
+      try {
+        await processSpawnRequests(AGENT_ID, repo, server().deps);
+        expect(await Promise.all(paths.map(path => Bun.file(path).exists()))).toEqual([false, false, true, true]);
+      } finally { isPidAliveCtx.reset(); processStartEpochSecondsCtx.reset(); }
+    });
+
     test("prunes results the client never collected, and only old ones", async () => {
       await mkdir(spawnResultDir(agentDir), { recursive: true });
       const stale = join(spawnResultDir(agentDir), `${ID_A}.json`);

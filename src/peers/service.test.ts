@@ -1838,7 +1838,7 @@ describe("endpoint owner peer-outbox polling", () => {
       requests = headers.map(header => handoffRemoteMessage(ID_REMOTE, header, abort.signal));
       await waitFor(() => send.mock.calls.length === 4);
       const id = send.mock.calls[0]![1].id;
-      const dir = join(base, ".claimed", id);
+      const dir = join(base, ".claimed", id + `@${process.pid}-${processStartEpochSecondsCtx.fn(process.pid)}`);
       expect((await stat(dir)).mode & 0o777).toBe(0o700);
       expect((await stat(join(dir, "request.json"))).mode & 0o777).toBe(0o600);
       await Bun.sleep(300);
@@ -1869,14 +1869,14 @@ describe("endpoint owner peer-outbox polling", () => {
     const base = join(home, ".itsybitsy", "peer-outbox", ".claimed");
     const crashed = textHeader({ kind: "system" }, "old", { kind: "user" });
     const done = textHeader({ kind: "system" }, "complete", { kind: "user" });
-    const abandoned = join(base, crashed.id, "request.json");
-    const unread = join(base, done.id, "result.json");
+    const abandoned = join(base, crashed.id + `@${OTHER.pid}-${OTHER.startEpoch}`, "request.json");
+    const unread = join(base, done.id + `@${OTHER.pid}-${OTHER.startEpoch}`, "result.json");
     await Bun.write(abandoned, JSON.stringify({ peer: ID_REMOTE, header: crashed }));
     await Bun.write(unread, JSON.stringify({ ok: true, id: done.id }));
     const { writeTransferOwner } = await import("./transfer-owner");
     alive.add(OTHER.pid);
     starts.set(OTHER.pid, OTHER.startEpoch);
-    for (const id of [crashed.id, done.id]) await writeTransferOwner(join(base, id), { pid: OTHER.pid, start: OTHER.startEpoch! });
+    for (const id of [crashed.id, done.id]) await writeTransferOwner(join(base, id + `@${OTHER.pid}-${OTHER.startEpoch}`), { pid: OTHER.pid, start: OTHER.startEpoch! });
     let now = Date.now();
     const tick = createPeerOutboxPoll(() => now);
     let finishedAt = -1;

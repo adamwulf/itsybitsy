@@ -7,7 +7,7 @@ export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
 import { constants, existsSync } from "node:fs";
 import { IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, opendir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
@@ -24,6 +24,22 @@ const missing = (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOEN
 const detail = (err: unknown) => err instanceof Error ? err.message : String(err);
 const fail = (stderr: string): IbCommandResult => ({ ok: false, exitCode: 1, stdout: "", stderr });
 const requestId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+
+function parseClaim(name: string) {
+  const match = /^([a-f0-9-]+)@([1-9]\d*)-([1-9]\d*)$/i.exec(name);
+  if (!match || !requestId.test(match[1]!)) return;
+  const pid = Number(match[2]), start = Number(match[3]);
+  if (Number.isSafeInteger(pid) && Number.isSafeInteger(start)) return { id: match[1]!, owner: { pid, start } };
+}
+
+async function findClaim(base: string, id: string) {
+  try {
+    const parent = join(base, ".claimed");
+    for await (const entry of await opendir(parent)) {
+      if (entry.isDirectory() && entry.name.startsWith(id + "@") && parseClaim(entry.name)) return join(parent, entry.name);
+    }
+  } catch (err) { if (!missing(err)) throw err; }
+}
 
 export async function qualifiedAgentSender(id: string, repoPath: string, repos: RepoEntry[]): Promise<SendHeader["from"]> {
   const repo = await registeredQueueRepo(repoPath, repos);
@@ -80,7 +96,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     const base = peerOutboxDir();
     const dir = join(base, header.id);
     const staging = join(base, ".staging", header.id + "." + process.pid);
-    const claimed = join(base, ".claimed", header.id);
+    let claimed: string | undefined;
     await mkdir(join(base, ".staging"), { mode: 0o700, recursive: true });
     await mkdir(staging, { mode: 0o700 });
     try {
@@ -111,6 +127,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
 
     let resultDiagnostic: string | undefined;
     const readResult = async (): Promise<IbCommandResult | undefined> => {
+      if (!claimed && !existsSync(dir)) claimed = await findClaim(base, header.id);
+      if (!claimed) return;
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
         trackSendCleanup(rm(claimed, { recursive: true, force: true }), "Peer send result cleanup failed");
@@ -122,6 +140,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       }
     };
     async function readProgress() {
+      if (!claimed) return;
       try {
         const { sequence } = JSON.parse(await readFile(join(claimed, "progress"), "utf8"));
         if (polling && Number.isSafeInteger(sequence) && sequence > lastSequence) {
@@ -140,7 +159,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       const result = await readResult();
       if (result && !signal?.aborted) { polling = false; return result; }
       if (signal?.aborted) break;
-      if (!claimedSeen && existsSync(claimed)) {
+      if (!claimedSeen && claimed) {
         claimedSeen = true;
         deadline = performance.now() + IDLE_TIMEOUT_MS;
       }
@@ -156,7 +175,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
         if (result && !signal?.aborted) return result;
         if (resultDiagnostic && !signal?.aborted) return fail(`outcome unknown — check the recipient (${resultDiagnostic})`);
       }
-      await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
+      claimed ??= await findClaim(base, header.id);
+      if (claimed) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
       const last = await readResult();
       if (last && !signal?.aborted) return last;
@@ -225,9 +245,10 @@ export function createPeerOutboxPoll(now = Date.now) {
     });
   }
 
-  async function recoverClaim(parent: string, id: string) {
-    const dir = join(parent, id);
-    if (!requestId.test(id) || active.has(dir)) return;
+  async function recoverClaim(parent: string, name: string) {
+    const claim = parseClaim(name);
+    const dir = join(parent, name);
+    if (!claim || active.has(dir)) return;
     await safeTransferParent(dir);
     const client = await inspectTransferDirectory(dir);
     if (existsSync(join(dir, "cancel")) || reclaimTransfer(client.state, client.created, now())) {
@@ -235,8 +256,7 @@ export function createPeerOutboxPoll(now = Date.now) {
       return;
     }
     if (existsSync(join(dir, "result.json"))) return;
-    const worker = await inspectTransferDirectory(dir, "worker.json");
-    if (reclaimTransfer(worker.state, worker.created, now())) {
+    if (transferOwnerState(claim.owner, 0) === "proven-dead") {
       // A claim can survive a crash on either side of FIN. Never re-dispatch it.
       await writeJson(dir, "result.json", { ok: false, error: "outcome unknown — check the recipient" });
     }
@@ -263,15 +283,15 @@ export function createPeerOutboxPoll(now = Date.now) {
       try {
         for (const id of ids) {
           if (!ownsEndpoint() || active.size >= 4) return;
-          const dir = join(claimed, id);
+          const start = stagingOwnerStart(process.pid);
+          if (start === null) { log("Cannot verify the peer-outbox worker"); continue; }
+          const owner = { pid: process.pid, start };
+          const dir = join(claimed, `${id}@${owner.pid}-${start}`);
           if (active.has(dir)) continue;
           active.add(dir);
           try {
             const readyDir = join(base, id);
             if ((await inspectTransferDirectory(readyDir)).state !== "verified-live") { active.delete(dir); continue; }
-            const start = stagingOwnerStart(process.pid);
-            if (start === null) throw new Error("Cannot verify the peer-outbox worker");
-            await writeTransferOwner(readyDir, { pid: process.pid, start }, "worker.json");
             await rename(readyDir, dir);
           } catch (err) {
             active.delete(dir);
@@ -284,8 +304,7 @@ export function createPeerOutboxPoll(now = Date.now) {
             const { peer, header: raw, origin } = await readRequest(join(dir, "request.json"));
             const header = parseSendHeader(raw);
             if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
-            const worker = await inspectTransferDirectory(dir, "worker.json");
-            if (worker.owner?.pid !== process.pid || worker.state !== "verified-live") throw new Error("Cannot verify the peer-outbox worker");
+            if (transferOwnerState(owner, 0) !== "verified-live") throw new Error("Cannot verify the peer-outbox worker");
             if (origin !== undefined && transferOwnerState(origin, 0) !== "verified-live") throw new Error("Cannot verify the originating CLI");
             const controller = new AbortController();
             let bytes = 0;

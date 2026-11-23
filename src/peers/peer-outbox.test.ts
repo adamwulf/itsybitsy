@@ -37,7 +37,7 @@ test.each(["oversize", "symlink", "FIFO"])("refuses a %s peer request without se
   if (kind === "FIFO") expect(await Bun.spawn(["mkfifo", path]).exited).toBe(0);
   let sends = 0;
   await pollPeerOutbox(async () => { sends++; return ""; }, () => {});
-  expect(await Bun.file(join(base, ".claimed", id, "result.json")).json()).toMatchObject({ ok: false });
+  expect(await Bun.file(join(base, ".claimed", id + `@${process.pid}-100`, "result.json")).json()).toMatchObject({ ok: false });
   expect(sends).toBe(0);
 });
 
@@ -83,7 +83,7 @@ test("claimed request publishes byte progress and propagates CLI interruption to
     transfer.onProgress!(192);
     return new Promise((_, reject) => transfer.signal!.addEventListener("abort", () => reject(transfer.signal!.reason), { once: true }));
   }, () => {});
-  const claimed = join(base, ".claimed", header.id);
+  const claimed = join(base, ".claimed", header.id + `@${process.pid}-100`);
   await waitFor(async () => (await Bun.file(join(claimed, "progress")).json().catch(() => null))?.bytes === 192);
   controller.abort();
   expect(await result).toMatchObject({ exitCode: 130, stderr: "outcome unknown — check the recipient" });
@@ -99,7 +99,7 @@ test("a claimed cancellation with a failed signal still has an unknown outcome",
   await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
   const finish = Promise.withResolvers<string>();
   const watcher = pollPeerOutbox(async () => {
-    await mkdir(join(base, ".claimed", header.id, "cancel")); // writeFile will receive EISDIR
+    await mkdir(join(base, ".claimed", header.id + `@${process.pid}-100`, "cancel")); // writeFile will receive EISDIR
     control.abort();
     return finish.promise;
   }, () => {});
@@ -119,7 +119,7 @@ test("Ctrl-C during a successful claimed result read still reports unknown", asy
   const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
   const controller = new AbortController();
   const read = fs.readFile;
-  const resultPath = join(base, ".claimed", header.id, "result.json");
+  const resultPath = join(base, ".claimed", header.id + `@${process.pid}-100`, "result.json");
   const spy = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof read>) => {
     const contents = await read(...args);
     if (args[0] === resultPath) controller.abort();
@@ -163,7 +163,7 @@ test("a successful ACK prints before a failed result cleanup warning", async () 
   await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
   const { collectSendCleanupDiagnostics, finishSendCleanup } = await import("../send-cleanup");
   const h = textHeader({ kind: "system" }, "hello", { kind: "user" });
-  const dir = join(base, ".claimed", h.id);
+  const dir = join(base, ".claimed", h.id + `@${process.pid}-100`);
   const output: string[] = [];
   const { printAndExit } = await import("../index");
   const stop = spyOn(process, "exit").mockImplementation(() => { throw Error("test exit"); });
@@ -210,7 +210,7 @@ test("a live watcher stuck before wire I/O does not renew the client deadline", 
 async function readyRequest() {
   const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
   const ready = join(base, header.id);
-  const claimed = join(base, ".claimed", header.id);
+  const claimed = join(base, ".claimed", header.id + `@${process.pid}-200`);
   const client = { pid: 10101, start: 100 };
   isPidAliveCtx.set(() => true);
   processStartEpochSecondsCtx.set(pid => pid === client.pid ? client.start : 200);
@@ -225,7 +225,7 @@ test.each(["waiting", "unverifiable", "cancelled", "dead"])('interrupted claim r
   const rename = fs.rename;
   const interrupted = spyOn(fs, "rename").mockImplementation(async (source, dest) => {
     if (source === ready) {
-      expect(await Bun.file(join(ready, "worker.json")).json()).toEqual({ pid: process.pid, start: 200 });
+      expect(dest).toBe(claimed);
       await rename(source, dest);
       throw Error("stopped immediately after claim");
     }
@@ -248,7 +248,7 @@ test.each(["waiting", "unverifiable", "cancelled", "dead"])('interrupted claim r
 
 test("a worker that died before the rename leaves the request ready", async () => {
   const { ready, header, claimed } = await readyRequest();
-  await writeTransferOwner(ready, { pid: process.pid, start: 99 }, "worker.json");
+
   const worker = createPeerOutboxPoll();
   await worker.recover();
   await worker(async () => header.id, () => {});
@@ -314,7 +314,7 @@ test("a failed worker progress marker leaves the known ACK intact", async () => 
 test("an ordinary timeout observes a result published during the last poll sleep", async () => {
   await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
   const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
-  const claimed = join(base, ".claimed", header.id);
+  const claimed = join(base, ".claimed", header.id + `@${process.pid}-100`);
   const sleep = Bun.sleep;
   let now = performance.now();
   const clock = spyOn(performance, "now").mockImplementation(() => now);
@@ -332,7 +332,7 @@ test("an ordinary timeout observes a result published during the last poll sleep
 test("malformed progress warns once and keeps polling for the delivery result", async () => {
   await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
   const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
-  const claimed = join(base, ".claimed", header.id);
+  const claimed = join(base, ".claimed", header.id + `@${process.pid}-100`);
   const logs: string[] = [];
   const warning = spyOn(console, "error").mockImplementation(message => { logs.push(String(message)); });
   try {
@@ -350,7 +350,7 @@ test("malformed progress warns once and keeps polling for the delivery result", 
 test.each([false, true])("a transient result read is retried and persistent errors retain the diagnostic (persistent=%s)", async persistent => {
   await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
   const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
-  const path = join(base, ".claimed", header.id, "result.json");
+  const path = join(base, ".claimed", header.id + `@${process.pid}-100`, "result.json");
   const read = fs.readFile; let failed = false, now = 0;
   const clock = spyOn(performance, "now").mockImplementation(() => now);
   const spy = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof read>) => {
@@ -420,4 +420,25 @@ test("a full staging volume frees bodies and publishes the retained ACK", async 
     expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: true, id: header.id });
     expect(sends).toBe(1);
   } finally { publication.mockRestore(); }
+});
+
+test("two watchers racing a paused claim use only the identity of the winner", async () => {
+  const { ready, header, claimed } = await readyRequest();
+  const held = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+  const rename = fs.rename;
+  const pause = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    if (from === ready && to === claimed) { entered.resolve(); await held.promise; }
+    await rename(from, to);
+  });
+  let sends = 0;
+  const send = async () => { sends++; return header.id; };
+  try {
+    const first = createPeerOutboxPoll()(send, () => {});
+    await entered.promise;
+    processStartEpochSecondsCtx.set(pid => pid === process.pid ? 201 : 100);
+    await createPeerOutboxPoll()(send, () => {});
+    held.resolve(); await first;
+    expect(await fs.readdir(join(base, ".claimed"))).toEqual([header.id + `@${process.pid}-201`]);
+    expect(sends).toBe(1);
+  } finally { held.resolve(); pause.mockRestore(); }
 });

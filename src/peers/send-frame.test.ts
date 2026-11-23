@@ -17,7 +17,6 @@ const header: SendHeader = {
 class MemoryStream {
   offset = 0;
   reads: number[] = [];
-  exactReads: number[] = [];
   constructor(readonly bytes: Uint8Array, readonly fragment = Infinity) {}
   async read(limit: number) {
     this.reads.push(limit);
@@ -25,12 +24,7 @@ class MemoryStream {
     this.offset += chunk.length;
     return Array.from(chunk);
   }
-  async readExact(n: number) {
-    this.exactReads.push(n);
-    const bytes = await this.read(n);
-    if (bytes.length !== n) throw new Error("early EOF");
-    return bytes;
-  }
+
 }
 
 function frame(bytes: Uint8Array) {
@@ -61,7 +55,7 @@ test("header cap is inclusive; an oversize prefix is refused before reading the 
   prefix.writeUInt32BE(MAX_HEADER_BYTES + 1);
   const stream = new MemoryStream(prefix);
   await expect(decodeSendHeader(stream)).rejects.toThrow(/header/i);
-  expect(stream.exactReads).toEqual([4]);
+  expect(stream.reads).toEqual([4]);
 });
 
 test("rejects invalid UTF-8, JSON, truncated frames, and malformed header fields", async () => {
@@ -221,4 +215,54 @@ test("stalled FIN can time out or be aborted", async () => {
   const cancelled = requireSendFin(stream, { signal: controller.signal });
   controller.abort(new Error("cancel FIN"));
   await expect(cancelled).rejects.toThrow("cancel FIN");
+});
+
+class IdleClock {
+  now = 0;
+  private pending = new Map<() => void, number>();
+  setTimer = (ms: number, fn: () => void) => {
+    expect(ms).toBe(IDLE_TIMEOUT_MS);
+    this.pending.set(fn, this.now + ms);
+    return () => { this.pending.delete(fn); };
+  };
+  advance(ms: number) {
+    this.now += ms;
+    for (const [fn, due] of this.pending) {
+      if (due <= this.now) {
+        this.pending.delete(fn);
+        fn();
+      }
+    }
+  }
+}
+
+test("header prefix and payload each time out or abort when their read stalls", async () => {
+  for (const partial of [Buffer.alloc(2), encodeSendHeader(header).subarray(0, 7)]) {
+    for (const abort of [false, true]) {
+      const clock = new IdleClock();
+      const controller = new AbortController();
+      const memory = new MemoryStream(partial);
+      const blocked = Promise.withResolvers<void>();
+      const transfer = decodeSendHeader({ async read(n) {
+        if (memory.offset < partial.length) return memory.read(n);
+        blocked.resolve();
+        return new Promise<number[]>(() => {});
+      } }, { setTimer: clock.setTimer, signal: controller.signal });
+      await blocked.promise;
+      if (abort) controller.abort(new Error("cancel header"));
+      else clock.advance(IDLE_TIMEOUT_MS);
+      await expect(transfer).rejects.toThrow(abort ? /cancel header/ : /progress/i);
+    }
+  }
+});
+
+test("fragmented headers succeed across many idle intervals when each read progresses", async () => {
+  const clock = new IdleClock();
+  const stream = new MemoryStream(encodeSendHeader(header), 2);
+  const decoded = await decodeSendHeader({ read(n) {
+    clock.advance(IDLE_TIMEOUT_MS - 1);
+    return stream.read(n);
+  } }, { setTimer: clock.setTimer });
+  expect(decoded).toEqual(header);
+  expect(clock.now).toBeGreaterThan(3 * IDLE_TIMEOUT_MS);
 });

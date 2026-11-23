@@ -61,14 +61,26 @@ function validFile(value: unknown): value is SendHeader["files"][number] {
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
-export async function decodeSendHeader(stream: { readExact(size: number): Promise<Bytes> }): Promise<SendHeader> {
-  const prefix = await stream.readExact(4);
-  if (prefix.length !== 4) throw new Error("Incomplete send header length");
-  const length = Buffer.from(prefix).readUInt32BE();
+async function readHeaderBytes(stream: ReadStream, size: number, options: FileBodyOptions): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(size);
+  let offset = 0;
+  while (offset < size) {
+    const limit = Math.min(CHUNK_BYTES, size - offset);
+    const chunk = await waitForIO(options, () => stream.read(limit));
+    if (!chunk.length) throw new Error("Incomplete send header");
+    if (chunk.length > limit) throw new Error("Read exceeded requested header size");
+    buffer.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return buffer;
+}
+
+export async function decodeSendHeader(stream: ReadStream, options: FileBodyOptions = {}): Promise<SendHeader> {
+  const prefix = await readHeaderBytes(stream, 4, options);
+  const length = prefix.readUInt32BE();
   if (length > MAX_HEADER_BYTES) throw new Error(`Send header exceeds ${MAX_HEADER_BYTES} bytes`);
-  const bytes = await stream.readExact(length);
-  if (bytes.length !== length) throw new Error("Incomplete send header");
-  const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes)));
+  const bytes = await readHeaderBytes(stream, length, options);
+  const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   if (!object(value) || value.op !== "send" || typeof value.id !== "string" || !UUID.test(value.id) ||
       !validFrom(value.from) || !validTarget(value.target) || typeof value.message !== "string" ||
       !Array.isArray(value.files) || !value.files.every(validFile)) throw new Error("Malformed send header");

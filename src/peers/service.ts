@@ -339,22 +339,10 @@ export class PeerService {
   /** Cancels the check that a rebind has stayed up for PEER_RETRY_STABLE_MS; null when none is armed. */
   private cancelStableTimer: (() => void) | null = null;
   private lockHeld = false;
-  private acquiringLock?: Promise<EndpointLockResult>;
   private recovery?: Promise<void>;
-  private takeServiceLock(): Promise<EndpointLockResult> {
-    if (this.lockHeld) return Promise.resolve({ acquired: true });
-    return this.acquiringLock ??= this.deps.acquireLock().then(lock => {
-      this.lockHeld = lock.acquired;
-      return lock;
-    }).finally(() => { this.acquiringLock = undefined; });
-  }
-
   private recoverTransfers(): Promise<void> {
-    if (this.shuttingDown || !this.deps.recoverTransfers) return Promise.resolve();
-    return this.recovery ??= (async () => {
-      const lock = await this.takeServiceLock();
-      if (lock.acquired && !this.shuttingDown) await this.deps.recoverTransfers!();
-    })().catch(err => this.deps.log(`transfer cleanup: ${errorDetail(err)}`))
+    if (!this.lockHeld || this.shuttingDown || !this.deps.recoverTransfers) return Promise.resolve();
+    return this.recovery ??= this.deps.recoverTransfers().catch(err => this.deps.log(`transfer cleanup: ${errorDetail(err)}`))
       .finally(() => { this.recovery = undefined; });
   }
   private shuttingDown = false;
@@ -457,9 +445,10 @@ export class PeerService {
   async bootIfPaired(): Promise<void> {
     if (this.shuttingDown) return;
     if (this.deps.recoverTransfers && !this.recoveryTimer) {
-      this.recoveryTimer = setInterval(() => { void this.recoverTransfers(); }, 30_000);
-      await this.recoverTransfers();
-      if (this.shuttingDown) return;
+      this.recoveryTimer = setInterval(() => {
+        if (this.endpoint) void this.recoverTransfers();
+        else if (!this.cancelRetryTimer) void this.bootIfPaired();
+      }, 30_000);
     }
     let peers: Peer[];
     try {
@@ -473,8 +462,9 @@ export class PeerService {
       return;
     }
     this.notify();
-    if (peers.length === 0) return;
-    this.deps.log(`peering: binding at boot for ${peers.length} paired peer${peers.length === 1 ? "" : "s"}`);
+    if (!peers.length && !this.deps.recoverTransfers) return;
+    if (this.endpoint) { await this.recoverTransfers(); return; }
+    if (peers.length) this.deps.log(`peering: binding at boot for ${peers.length} paired peer${peers.length === 1 ? "" : "s"}`);
     this.startBind();
     if (this.binding !== null) await this.binding;
   }
@@ -892,20 +882,9 @@ export class PeerService {
    */
   private async bind(): Promise<BindOutcome> {
     this.setStatus({ kind: "starting" });
-    let identity: PeerIdentity;
-    try {
-      identity = await this.deps.loadIdentity();
-      this.selfId = identity.id;
-      this.identityError = null;
-    } catch (err) {
-      this.identityError = errorDetail(err);
-      this.setStatus({ kind: "error", message: this.identityError, retryAt: null });
-      return { kind: "failed", failure: `could not load this install's identity: ${this.identityError}` };
-    }
-
     let lock: EndpointLockResult;
     try {
-      lock = await this.takeServiceLock();
+      lock = this.lockHeld ? { acquired: true } : await this.deps.acquireLock();
     } catch (err) {
       const message = `could not take the endpoint lock: ${errorDetail(err)}`;
       this.setStatus({ kind: "error", message, retryAt: null });
@@ -917,6 +896,25 @@ export class PeerService {
       return { kind: "disabled" };
     }
     this.lockHeld = true;
+    await this.recoverTransfers();
+    if (this.shuttingDown) return { kind: "shutting-down" };
+    if (!this.dialogOpen && !this.peers.length) {
+      this.setStatus({ kind: "idle" });
+      return { kind: "bound" };
+    }
+    let identity: PeerIdentity;
+    try {
+      identity = await this.deps.loadIdentity();
+      this.selfId = identity.id;
+      this.identityError = null;
+    } catch (err) {
+      this.lockHeld = false;
+      await this.deps.releaseLock().catch(() => {});
+      this.identityError = errorDetail(err);
+      this.setStatus({ kind: "error", message: this.identityError, retryAt: null });
+      return { kind: "failed", failure: `could not load this install's identity: ${this.identityError}` };
+    }
+
     this.publishRemoteAgents(); // replace any snapshot left by the previous lock owner
     if (lock.takenFromPid !== undefined) {
       this.deps.log(`peering: took over the endpoint lock from pid ${lock.takenFromPid}, which is gone`);

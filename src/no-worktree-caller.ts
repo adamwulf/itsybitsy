@@ -269,16 +269,27 @@ export async function resolveNoWorktreeCaller(
 export async function resolveDashboardCaller(
   cwd: string,
   ancestry: ReadonlySet<number>,
-  deps: Pick<CallerDeps, "registryHome" | "identityCurrent"> = {},
+  deps: Pick<CallerDeps, "registryHome" | "identityCurrent"> & { humanSend?: boolean } = {},
 ): Promise<"agent" | "no-agent" | "unverifiable"> {
   try {
     const path = await realpath(cwd);
     const worktree = runtimeNames.matchWorktreeCaller(path);
+    let roots: string[] | undefined;
     if (worktree) {
       const meta = await Bun.file(join(runtimeNames.worktreeAgentDir(path), "meta.json")).json();
-      return meta?.id === worktree[2] && meta.worktree === true ? "agent" : "unverifiable";
+      if (meta?.id !== worktree[2] || meta.worktree !== true) return "unverifiable";
+      if (!deps.humanSend) return "agent";
+      // A human terminal can open a running agent's checkout. For sends,
+      // attribute the process tree first, preserving the stricter start gate.
+      roots = await registeredRoots(deps.registryHome ?? userInfo().homedir, true);
+      if (!roots.includes(worktree[1]!)) return "unverifiable";
+      if (meta.claude_pid !== "") {
+        const pid = Number(meta.claude_pid);
+        if (!Number.isSafeInteger(pid) || pid <= 1) return "unverifiable";
+        if (ancestry.has(pid)) return "agent";
+      }
     }
-    const caller = await resolveNoWorktreeCaller(path, { ...deps, dashboardAncestry: ancestry });
+    const caller = await resolveNoWorktreeCaller(path, { ...deps, roots, dashboardAncestry: ancestry });
     return caller === null ? "no-agent" : "agent";
   } catch {
     return "unverifiable";

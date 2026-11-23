@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { setUserHome, resetUserHome } from "./home";
 import { addMember, getTeam } from "./teams";
 import { checkIbCommandAccess } from "./hooks/agent-path";
-import { pollPeerOutbox } from "./peers/peer-outbox";
+import { createPeerOutboxPoll, pollPeerOutbox } from "./peers/peer-outbox";
 import type { SendHeader } from "./peers/send-frame";
 import { resolveSendTarget } from "./resolve-target";
 import { createCliFixture, type CliFixture } from "./test-cli-runner";
@@ -57,6 +57,7 @@ describe("qualified agent addresses", () => {
   });
 
   const human = { terminal: "human" as const, pid: 300, parents: [[300, 1]] as [number, number][], identityCurrent: true };
+  const agentAncestry = { ...human, terminal: "agent" as const };
   const retire = (address: string, cwd = cli.cwd) =>
     cli.run(["retire", address], { cwd, actions: { retireAgent: "record" } });
 
@@ -346,6 +347,33 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
+  test.each([false, true])("a verified human in a running agent worktree sends directly to remote @system (attach=%s)", async attach => {
+    await peer();
+    const agentDir = dirname(worktree);
+    const metaPath = join(agentDir, "meta.json");
+    const meta = await Bun.file(metaPath).json();
+    await Bun.write(metaPath, JSON.stringify({ ...meta, claude_pid: String(process.pid), claude_pid_epoch: fixtureProcessStart(process.pid) }));
+    await Bun.write(join(worktree, "report"), "human attachment");
+    const headers: SendHeader[] = [];
+    const poll = createPeerOutboxPoll();
+    let flight: Promise<void> | undefined;
+    const timer = setInterval(() => {
+      flight ??= poll(async (_peer, header, transfer) => {
+        headers.push(header);
+        if (attach) expect(await Bun.file(join(transfer.filesDir!, "0")).text()).toBe("human attachment");
+        return header.id;
+      }, () => {}).finally(() => { flight = undefined; });
+    }, 20);
+    try {
+      const args = attach ? ["--attach", "./report", "hello"] : ["hello"];
+      const result = await cli.run(["send", "laptop-b/@system", ...args], { cwd: worktree, ancestry: human });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(headers).toMatchObject([{ from: { kind: "user" }, target: { kind: "system" }, message: "hello" }]);
+      expect(headers[0]!.files).toHaveLength(attach ? 1 : 0);
+      expect(await readdir(spawnRequestDir(agentDir)).catch(() => [])).toEqual([]);
+    } finally { clearInterval(timer); await flight; }
+  });
+
   test.each([false, true])("remote CLI publishes the original text, manifest and verified bytes (broker=%s)", async broker => {
     await peer();
     const cwd = broker ? worktree : cli.cwd;
@@ -367,7 +395,7 @@ describe("qualified agent addresses", () => {
     }, () => {}); }, 25);
     try {
       const result = await cli.run(["send", "laptop-b/remote/remote-id", "--attach", "./report", "read ./report"], {
-        cwd, ancestry: human, sandboxed: broker, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+        cwd, ancestry: broker ? agentAncestry : human, sandboxed: broker, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
       });
       expect(result.exitCode, result.stderr).toBe(0);
       expect(seen).toMatchObject([{ message: "read ./report", from: { kind: broker ? "agent" : "user" },
@@ -393,7 +421,7 @@ describe("qualified agent addresses", () => {
     await Bun.write(join(worktree, "report"), "original");
     const controller = new AbortController();
     const send = cli.run(["send", mode === "stopped system" ? "@system" : "@App/" + recipient, "--attach", "./report", "read ./report"], {
-      cwd: worktree, sandboxed: true, ancestry: human, interrupt: controller.signal,
+      cwd: worktree, sandboxed: true, ancestry: agentAncestry, interrupt: controller.signal,
       allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
     });
     try {
@@ -461,7 +489,7 @@ describe("qualified agent addresses", () => {
     const controller = new AbortController();
     await Bun.write(join(worktree, "report"), "body");
     const send = cli.run(["send", "laptop-b/remote-id", "--attach", "report", "read"], {
-      cwd: worktree, sandboxed: true, ancestry: human, interrupt: controller.signal,
+      cwd: worktree, sandboxed: true, ancestry: agentAncestry, interrupt: controller.signal,
       allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
     });
     try {
@@ -491,7 +519,7 @@ describe("qualified agent addresses", () => {
     }));
     const controller = new AbortController();
     const cliSend = cli.run(["send", "laptop-b/remote-id", "--attach", "report", "read"], {
-      cwd: worktree, sandboxed: true, ancestry: human, interrupt: controller.signal,
+      cwd: worktree, sandboxed: true, ancestry: agentAncestry, interrupt: controller.signal,
       allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
     });
     try {
@@ -567,7 +595,7 @@ describe("qualified agent addresses", () => {
   test("a worktree without a live watchdog reports validation errors before liveness", async () => {
     const file = join(worktree, "large-message");
     await Bun.write(file, "x".repeat(300 * 1024));
-    const send = (args: string[]) => cli.run(["send", "laptop-b/remote-id", ...args], { cwd: worktree, ancestry: human });
+    const send = (args: string[]) => cli.run(["send", "laptop-b/remote-id", ...args], { cwd: worktree, ancestry: agentAncestry });
     expect((await send(["-f", file])).stderr).toContain("Send header exceeds 262144 bytes");
     expect((await cli.run(["send", "laptop-b/remote-id", "-f", file], { ancestry: human })).stderr)
       .toContain("Send header exceeds 262144 bytes");
@@ -660,7 +688,7 @@ describe("qualified agent addresses", () => {
         watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
       }));
       const send = cli.run(["send", "laptop-b/remote/remote-id", "interrupt me"], {
-        cwd: broker ? worktree : cli.cwd, ancestry: human, sandboxed: broker, interrupt: interrupt.signal,
+        cwd: broker ? worktree : cli.cwd, ancestry: broker ? agentAncestry : human, sandboxed: broker, interrupt: interrupt.signal,
       });
       const queue = broker ? spawnRequestDir(agentDir) : join(cli.home, ".itsybitsy", "peer-outbox");
       let ready = "";

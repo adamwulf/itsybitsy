@@ -39,8 +39,10 @@ export const OWNER_EXPIRY_MS = 24 * 3600_000;
 export function transferOwnerState(owner: TransferOwner | undefined, createdMs: number, observed = owner && stagingOwnerStart(owner.pid)): OwnerState {
   if (!owner) return "unverifiable";
   if (!isPidAliveCtx.fn(owner.pid)) return "proven-dead";
-  if (observed == null || !(createdMs > 0)) return "unverifiable";
-  if (observed * 1000 > createdMs || (owner.start !== null && observed !== owner.start)) return "proven-dead";
+  if (observed == null) return "unverifiable";
+  if (owner.start !== null && observed !== owner.start) return "proven-dead";
+  if (!(createdMs > 0)) return "unverifiable";
+  if (observed * 1000 > createdMs) return "proven-dead";
   return owner.start === null ? "unverifiable" : "verified-live";
 }
 

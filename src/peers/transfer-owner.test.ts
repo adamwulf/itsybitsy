@@ -20,6 +20,10 @@ afterEach(async () => {
 test("live, dead, recycled and unverifiable transfer owners share one expiry rule", () => {
   const owner = { pid: process.pid, start: 10 };
   expect(transferOwnerState(owner, 10_000)).toBe("verified-live");
+  expect(transferOwnerState(owner, 0, 11)).toBe("proven-dead");
+  expect(transferOwnerState(owner, 0, 10)).toBe("unverifiable");
+  expect(transferOwnerState({ ...owner, start: null }, 9_999)).toBe("proven-dead");
+  expect(transferOwnerState({ pid: 42, start: null }, 0, null)).toBe("proven-dead");
   expect(transferOwnerState(owner, 9_999)).toBe("proven-dead");
   expect(transferOwnerState({ ...owner, start: 9 }, 10_000)).toBe("proven-dead");
   expect(transferOwnerState({ ...owner, pid: 42 }, 10_000)).toBe("proven-dead");

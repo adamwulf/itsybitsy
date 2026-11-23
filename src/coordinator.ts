@@ -1095,8 +1095,6 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const ready = await waitForCoordinatorReady();
   const readyMs = Date.now() - readyStart;
 
-  if (ready) startCoordinatorPaneRegistration(paneId);
-
   if (resumeId && !ready) {
     // Resume failed (likely a corrupt or version-mismatched transcript). Kill
     // the dead session, write the cleared marker so this transcript is
@@ -1112,7 +1110,14 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // The SessionStart hook delivers `system-coordinator.md`'s markdown body via
   // additionalContext on both fresh and resume — no special-case work here.
   lastSpawnMode = resumeId ? "resumed" : "fresh";
-  logToWatchLog(`[coordinator] ready mode=${lastSpawnMode} after ${readyMs}ms`);
+  if (ready) {
+    startCoordinatorPaneRegistration(paneId);
+    logToWatchLog(`[coordinator] ready mode=${lastSpawnMode} after ${readyMs}ms`);
+  } else {
+    paneRegistration = Promise.resolve();
+    coordinatorPaneWarning = "remote capture disabled: coordinator did not become ready";
+    logToWatchLog(`[coordinator] readiness timed out mode=fresh after ${readyMs}ms — ${coordinatorPaneWarning}`);
+  }
 
   return IB_COORDINATOR_SESSION;
 }

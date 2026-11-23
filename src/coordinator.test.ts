@@ -1570,7 +1570,13 @@ describe("ensureSystemCoordinator", () => {
       exited: Promise.resolve(0),
     }));
 
-    await ensureSystemCoordinator();
+    expect(await ensureSystemCoordinator()).toBe("ib-coordinator");
+    const warning = "remote capture disabled: coordinator did not become ready";
+    expect(takeCoordinatorPaneWarning()).toBe(warning);
+    const log = await readFile(join(tmpDir, "watch.log"), "utf8");
+    expect(log).toContain("readiness timed out mode=fresh");
+    expect(log).toContain(warning);
+    expect(log).not.toContain("ready mode=fresh");
 
     expect(getLastCoordinatorSpawnMode()).toBe("fresh");
     const cmdStrs = commands.map((c) => c.join(" "));

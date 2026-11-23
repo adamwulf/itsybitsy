@@ -158,3 +158,28 @@ test.each(["absent", "null", "unverifiable"])("a ready request with %s ownership
   expect(sent).toBe(false);
   expect(await Bun.file(join(dir, "request.json")).exists()).toBe(true);
 });
+
+test("a successful ACK prints before a failed result cleanup warning", async () => {
+  await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+  const { collectSendCleanupDiagnostics, finishSendCleanup } = await import("../send-cleanup");
+  const h = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  const dir = join(base, ".claimed", h.id);
+  const output: string[] = [];
+  const printer = spyOn(console, "error").mockImplementation(line => { output.push(String(line)); });
+  const remove = fs.rm;
+  const fail = spyOn(fs, "rm").mockImplementation(async (path, opts) => {
+    if (path === dir) throw Error("cleanup unavailable");
+    await remove(path, opts);
+  });
+  collectSendCleanupDiagnostics();
+  try {
+    const sending = handoffRemoteMessage("peer", h);
+    await waitFor(() => Bun.file(join(base, h.id, "request.json")).exists());
+    await pollPeerOutbox(async () => h.id, () => {});
+    const result = await sending;
+    expect(result.ok).toBe(true);
+    output.push(result.stdout);
+    await finishSendCleanup();
+    expect(output).toEqual(["Sent to @system", expect.stringContaining("cleanup unavailable")]);
+  } finally { fail.mockRestore(); printer.mockRestore(); await finishSendCleanup(); }
+});

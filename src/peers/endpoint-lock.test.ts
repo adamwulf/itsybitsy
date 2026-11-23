@@ -119,7 +119,7 @@ describe("acquireEndpointLock", () => {
   test("an unreadable record cannot prove the owner dead", async () => {
     for (const junk of ["", "not a pid\n", "0\n", "-5\n", "12 0\n", "12 x\n"]) {
       await writeLock(junk);
-      await expect(acquireEndpointLock(ME)).rejects.toThrow("Cannot verify");
+      await expect(acquireEndpointLock(ME)).rejects.toThrow("If no other ib watch is running, delete it and restart ib watch.");
       expect(await lockContents()).toBe(junk);
     }
   });
@@ -203,15 +203,6 @@ test("a suspended identity writer exposes no empty lock", async () => {
     resume.resolve(); expect(await first).toEqual({ acquired: false, ownerPid: OTHER.pid });
     expect(await lockContents()).toBe(line(OTHER));
   } finally { resume.resolve(); spy.mockRestore(); }
-});
-
-test("an incomplete legacy lock survives this boot and can be recovered after reboot", async () => {
-  await writeLock("");
-  const birth = (await stat(peerEndpointLockFile())).birthtimeMs;
-  await expect(acquireEndpointLock(ME, () => birth - 1)).rejects.toThrow("Cannot verify");
-  expect(await lockContents()).toBe("");
-  expect(await acquireEndpointLock(ME, () => birth + 1)).toMatchObject({ acquired: true });
-  expect(await lockContents()).toBe(line(ME));
 });
 
 test("snapshot visibility follows each acquisition generation through a clock rollback", async () => {

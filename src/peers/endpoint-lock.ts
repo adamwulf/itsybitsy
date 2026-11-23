@@ -102,14 +102,7 @@ async function withLockGuard<T>(path: string, action: () => Promise<T>) {
   } finally { await guard.close(); }
 }
 
-function bootTimeMs(): number | undefined {
-  if (process.platform !== "darwin") return;
-  const result = Bun.spawnSync(["/usr/sbin/sysctl", "-n", "kern.boottime"]);
-  const seconds = result.exitCode === 0 && /sec = (\d+),/.exec(result.stdout.toString())?.[1];
-  if (seconds) return Number(seconds) * 1000;
-}
-
-export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpointLockOwner(), boot = bootTimeMs): Promise<EndpointLockResult> {
+export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpointLockOwner()): Promise<EndpointLockResult> {
   if (self.startEpoch === undefined) throw Error("Cannot verify this watcher’s process start time");
   await ensurePeerDir();
   const path = peerEndpointLockFile();
@@ -121,6 +114,7 @@ export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpo
       const contents = await readLock(path);
       if (contents === null) { await link(temp, path); return { acquired: true, generation }; }
       const owner = parseOwner(contents);
+      if (!owner) throw Error("~/.itsybitsy/peer/endpoint.lock is empty or damaged (likely left by a crashed older ib watch). If no other ib watch is running, delete it and restart ib watch.");
 
       if (sameOwner(contents, self)) {
         if (owner?.generation) return { acquired: true, generation: owner.generation };
@@ -129,11 +123,9 @@ export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpo
       }
       const state = async (file: string) => {
         const birth = (await stat(file)).birthtimeMs;
-        if (owner) return transferOwnerState({ pid: owner.pid, start: owner.startEpoch ?? null }, birth);
-        if (birth > 0 && birth < (boot() ?? 0)) return "proven-dead";
-        throw Error("Cannot verify the existing endpoint lock");
+        return transferOwnerState({ pid: owner.pid, start: owner.startEpoch ?? null }, birth);
       };
-      if (await state(path) !== "proven-dead") return { acquired: false, ownerPid: owner!.pid };
+      if (await state(path) !== "proven-dead") return { acquired: false, ownerPid: owner.pid };
       const tombstone = path + ".dead." + randomUUID();
       await rename(path, tombstone);
       try {
@@ -142,7 +134,7 @@ export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpo
           throw Error("Endpoint lock changed during takeover");
         }
         await link(temp, path);
-        return { acquired: true, generation, ...(owner && { takenFromPid: owner.pid }) };
+        return { acquired: true, generation, takenFromPid: owner.pid };
       } finally { await rm(tombstone, { force: true }); }
     });
   } finally { await rm(temp, { force: true }); }

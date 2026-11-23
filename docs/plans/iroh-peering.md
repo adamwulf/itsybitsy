@@ -157,7 +157,7 @@ the endpoint:
    peers are paired. Opening Peers also triggers an acquisition attempt.
 3. When the PID is gone or its saved start differs, the contender renames the
    stale lock under the guard, verifies it again and links its own record.
-   An incomplete legacy lock can be recovered after reboot. The winner runs
+   An incomplete legacy lock requires manual removal after checking for a running owner. The winner runs
    recovery and binds when paired or when Peers is open. On exit it releases
    its lock under the same guard.
 

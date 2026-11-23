@@ -197,6 +197,7 @@ export type SetupItem = {
 
 export type ConfigDialogItem = {
   key: string;
+  issue?: string;
   type: "number" | "boolean" | "string" | "string[]";
   value: unknown;
   source: "user" | "default";
@@ -1286,7 +1287,7 @@ function buildConfigTabContent(
       valueStr = String(item.value);
     }
 
-    const sourceStr = item.source !== "default"
+    const sourceStr = item.issue ? "(needs repair)" : item.source !== "default"
       ? `${DIM}(${item.source})${RESET}`
       : `${DIM}(default)${RESET}`;
 

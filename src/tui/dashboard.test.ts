@@ -9390,7 +9390,7 @@ describe("setup Peers tab", () => {
         return assertDialog(dashboard.dialog, "input");
       }
       const file = await edit("maxFileMB");
-      for (const [value, reason] of [["1.5", "integer"], ["65537", "between 0 and 65536"], ["2049", "at least maxFileMB"]] as const) {
+      for (const [value, reason] of [["1.5", "integer"], ["65537", "between 0 and 65536"], ["2049", "≤ maxMessageMB (2048)"]] as const) {
         file.onSubmit(value);
         await waitFor(() => dashboard.notice?.includes(reason) === true);
         expect(dashboard.dialog).toBe(file);
@@ -9409,13 +9409,39 @@ describe("setup Peers tab", () => {
       restored.onSubmit("25");
       const message = await edit("maxMessageMB");
       message.onSubmit("24");
-      await waitFor(() => dashboard.notice?.includes("at least maxFileMB") === true);
+      await waitFor(() => dashboard.notice?.includes("≥ maxFileMB (25)") === true);
       message.onSubmit("100");
       const count = await edit("maxFiles");
       count.onSubmit("0");
       await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
       expect((await Bun.file(path).json()).peering.attachments).toEqual({ maxFileMB: 25, maxMessageMB: 100, maxFiles: 0 });
       expect(await settings.readTransferLimits()).toEqual({ maxFileBytes: 25 * 1024 ** 2, maxMessageBytes: 100 * 1024 ** 2, maxFiles: 0 });
+    } finally {
+      resetUserConfigPath();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("Config shows a stored 512 MB message limit that conflicts with the default file limit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-config-repair-"));
+    const path = join(dir, "config.json");
+    setUserConfigPath(path);
+    try {
+      await Bun.write(path, JSON.stringify({ peering: { attachments: { maxMessageMB: 512 } } }));
+      const dashboard = makeDashboard();
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+      const setup = assertDialog(dashboard.dialog, "setup");
+      setup.configSelectedIndex = setup.configItems!.findIndex(item => item.key.endsWith(".maxMessageMB"));
+      expect(text(dashboard)).toContain("512 (needs repair)");
+      dashboard.handleInput("\r");
+      expect(assertDialog(dashboard.dialog, "input").value).toBe("512");
+      expect(text(dashboard)).toContain("maxMessageMB = 512");
+      expect(text(dashboard)).toContain("maxFileMB (1024)");
+      await expect(settings.writeConfig(path, "peering.attachments.maxFileMB", 700)).rejects.toThrow("≤ maxMessageMB (512)");
+      await settings.writeConfig(path, "peering.attachments.maxFileMB", 512);
+      expect((await settings.readTransferLimits()).maxMessageBytes).toBe(512 * 1024 ** 2);
     } finally {
       resetUserConfigPath();
       await rm(dir, { recursive: true, force: true });

@@ -2426,7 +2426,7 @@ export function handleSetup(ctx: ActionCtx, initialTab = 0) {
       delete dialog.settingsMessage;
       dialog.items = items;
       if (tab === 1) {
-        dialog.configItems = CONFIG_KEYS.map(def => ({ ...def, ...config[def.key]! }));
+        dialog.configItems = CONFIG_KEYS.map(def => ({ ...def, ...config[def.key]!, ...config[def.key]?.repair }));
         dialog.configSelectedIndex = 0;
         dialog.onConfigAction = handleConfigItemAction(ctx, tab, config, () => {
           if (ctx.dialog === dialog) showSetupDialogForTab(tab);
@@ -2610,7 +2610,7 @@ function handleConfigItemAction(
       ctx.closeDialog();
       ctx.showDialog({
         type: "input",
-        ...(setting && { hint: `Integer ${TRANSFER_SETTING_BOUNDS[setting].join("–")}. 0 = attachments disabled` }),
+        ...(setting && { hint: [item.issue, `Integer ${TRANSFER_SETTING_BOUNDS[setting].join("–")}. 0 = attachments disabled`].filter(Boolean).join("  ") }),
         prompt: setting ? `${setting} (${setting === "maxFiles" ? "files" : "MB"})` : item.sensitive
           ? `${item.key} (${item.type}; leave blank to keep current value):`
           : `${item.key} (${item.type}):`,

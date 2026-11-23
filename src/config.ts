@@ -17,6 +17,8 @@ export interface ConfigKeyDef {
 export interface ConfigEntry {
   value: unknown;
   source: ConfigSource;
+  /** The Config editor shows the actual value to repair, alongside its constraint. */
+  repair?: { value: string; source: ConfigSource; issue: string };
 }
 
 export type ConfigResult = Record<string, ConfigEntry>;
@@ -139,7 +141,8 @@ export async function readConfig(options?: ReadConfigOptions): Promise<ConfigRes
   const userPath = options?.userConfigPath ?? defaultUserConfigPath();
   const userData = await readJsonFile(userPath);
 
-  const effective = attachmentSettings(resolveTransferLimits(rawAttachmentSettings(userData)).limits);
+  const raw = rawAttachmentSettings(userData);
+  const effective = attachmentSettings(resolveTransferLimits(raw).limits);
   const result: ConfigResult = {};
 
   for (const def of CONFIG_KEYS) {
@@ -147,7 +150,14 @@ export async function readConfig(options?: ReadConfigOptions): Promise<ConfigRes
     const setting = attachmentSettingKey(def.key);
     if (setting) {
       const value = effective[setting];
-      result[def.key] = { value, source: userVal === value ? "user" : "default" };
+      const entry: ConfigEntry = { value, source: userVal === value ? "user" : "default" };
+      const edited = userVal === undefined ? def.default : userVal;
+      const issue = validateAttachmentSetting(setting, edited, raw);
+      if (issue) {
+        const display = JSON.stringify(edited);
+        entry.repair = { value: display, source: userVal === undefined ? "default" : "user", issue: `${setting} = ${display}. ${issue}` };
+      }
+      result[def.key] = entry;
       continue;
     }
     if (userVal !== undefined && validateConfigValue(userVal, def.type)) {

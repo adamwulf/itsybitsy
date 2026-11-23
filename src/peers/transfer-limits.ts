@@ -23,11 +23,14 @@ export function validateAttachmentSetting(key: Setting, value: unknown, raw: Par
   if (value < min || value > max) return `${key} must be between ${min} and ${max}`;
   if (value > 0 && key !== "maxFiles") {
     const other = key === "maxFileMB" ? "maxMessageMB" : "maxFileMB";
-    const stored = raw[other];
-    const [lo, hi] = TRANSFER_SETTING_BOUNDS[other];
-    const limit = typeof stored === "number" && Number.isInteger(stored) && stored >= lo && stored <= hi
-      ? stored : DEFAULT_ATTACHMENT_SETTINGS[other];
-    if (limit > 0 && (key === "maxFileMB" ? value > limit : value < limit)) return "maxMessageMB must be at least maxFileMB";
+    const companion = raw[other] === undefined ? DEFAULT_ATTACHMENT_SETTINGS[other] : raw[other];
+    const [, maximum] = TRANSFER_SETTING_BOUNDS[other];
+    // The editor identifies a malformed companion on its own row. Either
+    // malformed field can be repaired first, without substituting a hidden budget.
+    if (typeof companion === "number" && Number.isInteger(companion) && companion > 0 && companion <= maximum) {
+      if (key === "maxFileMB" && value > companion) return `maxFileMB must be ≤ maxMessageMB (${companion})`;
+      if (key === "maxMessageMB" && value < companion) return `maxMessageMB must be ≥ maxFileMB (${companion})`;
+    }
   }
 }
 

@@ -1,4 +1,4 @@
-import { inspectTransferDirectory, safeTransferParent, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
+import { finishRecovery, inspectTransferDirectory, safeTransferParent, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
@@ -175,7 +175,7 @@ export function createPeerOutboxPoll(now = Date.now) {
 
   async function recover() {
     const base = peerOutboxDir();
-    await Promise.all([sweep(base), sweep(join(base, ".claimed")), sweep(join(base, ".staging"), true)]);
+    await finishRecovery([sweep(base), sweep(join(base, ".claimed")), sweep(join(base, ".staging"), true)]);
   }
 
   async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {

@@ -1,5 +1,5 @@
 import { transferStagingRoot } from "../runtime-names";
-import { sweepOutgoingDirectories } from "./transfer-owner";
+import { finishRecovery, sweepOutgoingDirectories } from "./transfer-owner";
 /**
  * The iroh endpoint inside `ib watch` (docs/plans/iroh-peering.md, "Process
  * model" and "Reconnection"; SPEC.md §20.3), the one pairing session it runs
@@ -175,7 +175,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     notice,
     pollOutbox: poll,
     recoverTransfers: async () => {
-      await Promise.all([sweepOutgoingDirectories(recoveryRoot), poll.recover()]);
+      await finishRecovery([sweepOutgoingDirectories(recoveryRoot), poll.recover()]);
     },
     receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,

@@ -135,14 +135,20 @@ export async function makeOutgoingDirectory(root = transferStagingRoot()) {
   catch (err) { await rm(dir, { recursive: true, force: true }); throw err; }
 }
 
+export async function finishRecovery(operations: Promise<void>[]) {
+  const outcomes = await Promise.allSettled(operations);
+  const failures = outcomes.flatMap(r => r.status === "rejected" ? [r.reason] : []);
+  if (failures.length) throw new AggregateError(failures, failures.map(String).join("\n"));
+}
+
 export async function sweepOutgoingDirectories(root = transferStagingRoot(), now = Date.now()) {
-  for (const name of ["incoming", "outgoing"] as const) {
+  await finishRecovery((["incoming", "outgoing"] as const).map(async name => {
     const area = await stagingArea(root, name);
     for (const entry of await transferDirectoryBatch(area)) {
       if (name === "incoming" ? !/^[a-f0-9-]{36}\.partial$/.test(entry) : !/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) continue;
       await sweepTransferDirectory(join(area, entry), now);
     }
-  }
+  }));
 }
 
 /** A sandbox writes its PID alone. Only the watchdog observes and records its

@@ -889,7 +889,7 @@ export class DashboardComponent implements Component {
     return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
   }
   private selectedReceipt: string | undefined;
-  private pendingRemoteSends = new Map<string, { label: string; bytes: number; total?: number; controller: AbortController; done: Promise<void> }>();
+  private pendingRemoteSends = new Map<string, { id: string; peerId: string; target: SendTarget; label: string; bytes: number; total?: number; controller: AbortController; done: Promise<void> }>();
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
   private usageTimer: ReturnType<typeof setInterval> | null = null;
@@ -1999,7 +1999,7 @@ export class DashboardComponent implements Component {
     const label = remoteTitle(remote);
     const controller = new AbortController();
     const done = Promise.withResolvers<void>();
-    const pending = { label, controller, done: done.promise, bytes: 0, total: undefined as number | undefined };
+    const pending = { id: header.id, peerId: remote.peerId, target: header.target, label, controller, done: done.promise, bytes: 0, total: undefined as number | undefined };
     let staging: string | undefined;
     try {
       if (!service) throw new Error("Remote messaging is unavailable");
@@ -3094,12 +3094,18 @@ export class DashboardComponent implements Component {
       this.selectedReceipt = undefined;
       return;
     }
-    if (this.pendingRemoteSends.size && (data === "\x1b" || matchesKey(data, Key.escape))) {
+    this.selectedReceipt = undefined;
+    if (this.pendingRemoteSends.size && matchesKey(data, Key.escape)) {
       const selected = this.remoteSelection;
-      const sends = [...this.pendingRemoteSends.values()].reverse();
-      const pending = sends.find(send => selected && send.label === remoteTitle(selected)) ?? sends[0]!;
-      pending.controller.abort(new Error("Send cancelled"));
-      return;
+      const target = remoteMessageTarget(selected);
+      if (selected && target) {
+        const request = [...this.pendingRemoteSends.values()].reverse().find(send =>
+          send.peerId === selected.peerId && JSON.stringify(send.target) === JSON.stringify(target));
+        if (request) {
+          this.pendingRemoteSends.get(request.id)?.controller.abort(new Error("Send cancelled"));
+          return;
+        }
+      }
     }
 
     // When active-agent panel is focused, use three-level sub-focus: pane → input → send.

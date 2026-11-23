@@ -344,7 +344,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
       remote ? { ...deps, cancelClaimed: async () => {
         if (ownsStage) await rm(staged, { recursive: true, force: true });
         else await (await open(join(spawnResultDir(dir), request.id + ".cancel"), "wx", 0o600)).close();
-      }, readProgress: async () => (await stat(join(staged, "progress")).catch(() => null))?.mtimeMs ?? 0 } : deps,
+      }, readProgress: async () => (await stat(ownsStage ? join(staged, "progress") : join(spawnResultDir(dir), request.id + ".progress")).catch(() => null))?.mtimeMs ?? 0 } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
@@ -570,12 +570,13 @@ export async function handleSendRequest(
       const limits = checkIncomingFiles(files, await readTransferLimits(), { machine: await readMachineName() });
       if (!limits.ok) return brokerFail(limits.error);
       const controller = new AbortController();
+      const textProgress = join(spawnResultDir(ctx.agentDir), ctx.id + ".progress");
       let marker: Awaited<ReturnType<typeof createBrokerProgress>> | undefined;
       try {
         if (files.length) {
           await requireActiveStagingLease(ctx.agentDir, ctx.id);
           marker = await createBrokerProgress(ctx.agentDir, ctx.id);
-        }
+        } else marker = await open(textProgress, "wx", 0o600);
       }
       catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return interruptedSend("claimed");
@@ -584,7 +585,7 @@ export async function handleSendRequest(
       const signal = deps.transferSignal ? AbortSignal.any([controller.signal, deps.transferSignal]) : controller.signal;
       const cancelPath = join(spawnResultDir(ctx.agentDir), ctx.id + ".cancel");
       const checkClient = () => {
-        if (marker ? !fstatSync(marker.fd).nlink : existsSync(cancelPath)) controller.abort(new Error("Send cancelled"));
+        if (files.length ? !fstatSync(marker!.fd).nlink : existsSync(cancelPath)) controller.abort(new Error("Send cancelled"));
       };
       let updated = 0;
       const progress = () => {
@@ -601,7 +602,11 @@ export async function handleSendRequest(
         const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), signal, stage, progress);
         if (signal.aborted) return interruptedSend("claimed");
         return result;
-      } finally { clearInterval(timer); await marker?.close(); }
+      } finally {
+        clearInterval(timer);
+        await marker?.close();
+        if (!files.length) trackSendCleanup(rm(textProgress, { force: true }), "Broker progress cleanup failed");
+      }
     }
     if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
     if (resolved.isSystemCoordinator) {

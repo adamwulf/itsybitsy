@@ -1,5 +1,7 @@
+import { waitFor } from "./test-utils";
+import { spawnRequestDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, symlink, rm, utimes } from "node:fs/promises";
+import { mkdir, readdir, rename, symlink, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { setUserHome, resetUserHome } from "./home";
 import { addMember, getTeam } from "./teams";
@@ -336,6 +338,36 @@ describe("qualified agent addresses", () => {
       expect(senders).toEqual([{ kind: "agent", id: "laptop-a/project.com/project.com" }, { kind: "user" }]);
     } finally { clearInterval(timer); }
   });
+
+  for (const broker of [false, true]) {
+    test.each([false, true])(`CLI SIGINT arbitrates a ${broker ? "broker" : "direct"} send (claimed=%s)`, async claimed => {
+      await peer();
+      const interrupt = new AbortController();
+      const agentDir = join(app, ".itsybitsy", "agents", "mgr");
+      await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+        watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+      }));
+      const send = cli.run(["send", "laptop-b/remote/remote-id", "interrupt me"], {
+        cwd: broker ? worktree : cli.cwd, ancestry: human, sandboxed: broker, interrupt: interrupt.signal,
+      });
+      const queue = broker ? spawnRequestDir(agentDir) : join(cli.home, ".itsybitsy", "peer-outbox");
+      let ready = "";
+      try {
+        await waitFor(async () => {
+          const name = (await readdir(queue).catch(() => [])).find(n => !n.startsWith("."));
+          if (name) ready = join(queue, name);
+          return !!name;
+        });
+        if (claimed) await rename(ready, ready + ".claimed");
+        interrupt.abort();
+        const result = await send;
+        expect(result.exitCode).toBe(130);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain(claimed ? "outcome unknown" : "withdrawn");
+        expect(await readdir(queue)).not.toContain(ready.slice(queue.length + 1));
+      } finally { interrupt.abort(); await send; }
+    });
+  }
 
   test("remote sends diagnose a missing watcher from its lock", async () => {
     const result = await cli.run(["send", "laptop-b/remote/remote-id", "hi"]);

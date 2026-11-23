@@ -60,6 +60,8 @@ export interface IsolatedCliOptions {
   ancestry?: CliAncestry;
   /** Return blocked effects instead of throwing, to assert on them. */
   expectViolations?: boolean;
+  /** Deliver SIGINT to this isolated child when the fixture requests it. */
+  interrupt?: AbortSignal;
   timeoutMs?: number;
 }
 
@@ -162,7 +164,11 @@ export async function runIsolatedCli(cliArgs: string[], options: IsolatedCliOpti
       env: { ...minimalEnv(home, tmp, options.env), [CLI_DRIVER_CONFIG_ENV]: JSON.stringify(config) },
     });
     const label = `ib ${cliArgs.join(" ")}`;
-    const run = await collect(proc, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, label);
+    const interrupt = () => proc.kill("SIGINT");
+    options.interrupt?.addEventListener("abort", interrupt, { once: true });
+    if (options.interrupt?.aborted) interrupt();
+    const run = await collect(proc, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, label)
+      .finally(() => options.interrupt?.removeEventListener("abort", interrupt));
 
     const contextFile = Bun.file(join(logDir, "context.json"));
     if (!(await contextFile.exists())) {

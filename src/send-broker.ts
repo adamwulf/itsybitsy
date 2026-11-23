@@ -66,7 +66,7 @@ import {
   SPAWN_MAX_PROMPT_BYTES,
   brokerFail,
   isSameDirectory,
-  resolveRoutedCaller, isNativeCodexWorktree,
+  resolveRoutedCaller, isNativeCodexWorktree, interruptedSend,
   submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
@@ -275,6 +275,7 @@ export async function routeSendThroughWatchdog(
   }
   if (await targetIsCaller(command.target, caller, command.repos)) return null;
   const message = await command.readMessage();
+  if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!message) return brokerFail(command.usage);
   const result = await requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller });
   if (!result && nativeCodex) return brokerFail("Remote sends from a sandboxed agent need its watchdog running");

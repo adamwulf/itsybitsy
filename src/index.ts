@@ -2021,12 +2021,14 @@ export async function main() {
       // the request (not live, or older than the broker); those send directly
       // as before. See routeSendThroughWatchdog.
       const controller = new AbortController();
-      const interrupt = () => controller.abort();
+      const interruptedInput = Promise.withResolvers<string>();
+      const interrupt = () => { controller.abort(); interruptedInput.resolve(""); };
+      const readBeforePublication = () => Promise.race([resolveMessageBody(), interruptedInput.promise]);
       process.on("SIGINT", interrupt);
       let resolved;
       try {
         const { routeSendThroughWatchdog } = await import("./send-broker");
-        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: resolveMessageBody, usage, repos }, { signal: controller.signal });
+        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: readBeforePublication, usage, repos }, { signal: controller.signal });
         if (brokered) await printAndExit(brokered);
         resolved = await resolveTarget(target, repos);
         const { interruptedSend, resolveRoutedCaller } = await import("./spawn-broker");
@@ -2036,7 +2038,8 @@ export async function main() {
             console.error("Remote sends from a sandboxed agent need its watchdog running");
             process.exit(1);
           }
-          const message = await resolveMessageBody();
+          const message = await readBeforePublication();
+          if (controller.signal.aborted) await printAndExit(interruptedSend("unpublished"));
           if (!message) { console.error(usage); process.exit(1); }
           const { cliRemoteSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
           const sender = await cliRemoteSender(repos, fromAgent).catch(err => {

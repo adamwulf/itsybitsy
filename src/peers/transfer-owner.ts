@@ -135,6 +135,15 @@ export async function makeOutgoingDirectory(root = transferStagingRoot()) {
   catch (err) { await rm(dir, { recursive: true, force: true }); throw err; }
 }
 
+export async function sweepEntries(parent: string, visit: (name: string) => Promise<void>) {
+  const failures: unknown[] = [];
+  for (const name of await transferDirectoryBatch(parent)) {
+    try { await visit(name); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") failures.push(err); }
+  }
+  if (failures.length) throw new AggregateError(failures, failures.map(String).join("\n"));
+}
+
 export async function finishRecovery(operations: Promise<void>[]) {
   const outcomes = await Promise.allSettled(operations);
   const failures = outcomes.flatMap(r => r.status === "rejected" ? [r.reason] : []);
@@ -144,10 +153,10 @@ export async function finishRecovery(operations: Promise<void>[]) {
 export async function sweepOutgoingDirectories(root = transferStagingRoot(), now = Date.now()) {
   await finishRecovery((["incoming", "outgoing"] as const).map(async name => {
     const area = await stagingArea(root, name);
-    for (const entry of await transferDirectoryBatch(area)) {
-      if (name === "incoming" ? !/^[a-f0-9-]{36}\.partial$/.test(entry) : !/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) continue;
+    await sweepEntries(area, async entry => {
+      if (name === "incoming" ? !/^[a-f0-9-]{36}\.partial$/.test(entry) : !/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) return;
       await sweepTransferDirectory(join(area, entry), now);
-    }
+    });
   }));
 }
 

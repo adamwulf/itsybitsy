@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
-import { inspectBrokerLease, reclaimTransfer, sweepOutgoingDirectories, transferDirectoryBatch, transferOwnerState, writeTransferOwner } from "./transfer-owner";
+import { inspectBrokerLease, reclaimTransfer, sweepEntries, sweepOutgoingDirectories, transferDirectoryBatch, transferOwnerState, writeTransferOwner } from "./transfer-owner";
 import { sweepStagingLease } from "../send-broker";
 
 let root: string;
@@ -71,4 +71,14 @@ test("a bounded scan continues beyond the first batch", async () => {
   const second = await transferDirectoryBatch(root, "test", 2);
   expect(first).toHaveLength(2);
   expect([...first, ...second].sort()).toEqual(["a", "b", "c"]);
+});
+
+test("a failed entry leaves the rest of its batch reachable and is retried", async () => {
+  for (const name of ["a", "b", "c"]) await mkdir(join(root, name));
+  const seen: string[] = [];
+  await expect(sweepEntries(root, async name => { seen.push(name); if (seen.length === 1) throw Error("unavailable"); })).rejects.toThrow("unavailable");
+  expect(seen.sort()).toEqual(["a", "b", "c"]);
+  const retried: string[] = [];
+  await sweepEntries(root, async name => { retried.push(name); });
+  expect(retried.sort()).toEqual(seen);
 });

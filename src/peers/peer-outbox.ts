@@ -1,4 +1,4 @@
-import { finishRecovery, inspectTransferDirectory, safeTransferParent, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
+import { finishRecovery, inspectTransferDirectory, safeTransferParent, sweepEntries, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
@@ -166,11 +166,11 @@ export function createPeerOutboxPoll(now = Date.now) {
   let workers = 0;
 
   async function sweep(parent: string, staging = false) {
-    for (const name of await transferDirectoryBatch(parent)) {
+    await sweepEntries(parent, async name => {
       const id = staging ? name.replace(/\.[1-9]\d*$/, "") : name;
       const path = join(parent, name);
       if (requestId.test(id) && !active.has(path)) await sweepTransferDirectory(path, now());
-    }
+    });
   }
 
   async function recover() {

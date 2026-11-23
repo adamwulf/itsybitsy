@@ -10012,13 +10012,19 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
-  test.each(["1", "2"])("peer capture and TREE keep the local layout intact on sidebar %s", async tab => {
+  test.each([
+    ["1", "p", "\t", "\x1b[Z"], ["1", "n", "\x1b[9u", "\x1b[9;2u"],
+    ["2", "n", "\t", "\x1b[Z"], ["2", "p", "\x1b[9u", "\x1b[9;2u"],
+  ] as const)("peer capture and TREE keep the local layout intact on sidebar %s via %s", async (tab, cycle, next, prev) => {
     const { dashboard } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
     dashboard.persistLayout();
     await flushPendingSave();
     const saved = await loadLayout();
     expect(saved).not.toBeNull();
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "east", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
     const persist = spyOn(dashboard, "persistLayout");
     selectByKey(dashboard, PEER_B + "/@system");
     dashboard.handleInput(tab);
@@ -10034,18 +10040,33 @@ describe("Unified peer repos in the Agents tree", () => {
       }
     };
     tryResize();
-    dashboard.jumpToMode("TREE");
+    for (let i = 0; i < PANE_MODES.length && dashboard.rightPane.mode !== "TREE"; i++) {
+      dashboard.handleInput(cycle);
+    }
+    expect(dashboard.rightPane.mode).toBe("TREE");
     expect(dashboard.focus).toBe("agent-tree");
     expect(dashboard.render(180).join("")).toContain(REVERSE + BOLD + " TREE ");
-    dashboard.handleInput("\t");
+    dashboard.handleInput(next);
     expect(dashboard.focus).toBe("info");
-    dashboard.handleInput("\x1b[Z");
+    dashboard.handleInput(prev);
     expect(dashboard.focus).toBe("agent-tree");
     tryResize();
     dashboard.handleInput("k");
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
     expect(dashboard.sidebarWidth).toBe(saved!.sidebarWidth);
     expect(dashboard.splitPane.getLeftWidth()).toBe(saved!.splitPaneLeftWidth);
+    const lines = dashboard.render(180);
+    expect(dashboard.focus).toBe(tab === "1" ? "agent-tree" : "teams-tree");
+    const title = lines.find(line => stripAnsi(line).includes(" System Coordinator "))!;
+    const [sidebarTitle, mainTitle] = title.split("│");
+    expect(sidebarTitle).toContain(REVERSE + BOLD + (tab === "1" ? " Agents " : " Teams ") + RESET);
+    expect(visibleWidth(sidebarTitle!)).toBe(saved!.sidebarWidth);
+    expect(stripAnsi(mainTitle!)).toContain(" TMUX ");
+    expect(visibleWidth(mainTitle!)).toBe(180 - saved!.sidebarWidth - 1);
+    const sidebar = lines.filter(line => line.includes("│")).map(line => stripAnsi(line.split("│")[0]!));
+    expect(sidebar.some(line => line.includes(tab === "1" ? "◆ coordinator" : "east"))).toBe(true);
+    expect(sidebar.some(line => line.includes(" Info "))).toBe(true);
+    expect(lines.map(stripAnsi)).toContain("─".repeat(saved!.sidebarWidth) + "┴" + "─".repeat(180 - saved!.sidebarWidth - 1));
     expect(persist).not.toHaveBeenCalled();
     await flushPendingSave();
     expect(await loadLayout()).toEqual(saved);

@@ -76,7 +76,7 @@ import {
   brokerFail,
   isSameDirectory,
   resolveRoutedCaller, interruptedSend,
-  spawnRequestDir, submitWatchdogRequest,
+  CANCELLED_BEFORE_FIN, spawnRequestDir, submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
   type SpawnServerDeps,
@@ -298,7 +298,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
           "The watchdog had already taken the message, so it may still be delivered; check with the recipient before sending it again.",
       },
       deps.timeoutMs ?? (remote ? IDLE_TIMEOUT_MS : SPAWN_CLIENT_TIMEOUT_MS),
-      remote ? { ...deps, readProgress: async () => (await stat(join(staged, "progress")).catch(() => null))?.mtimeMs ?? 0 } : deps,
+      remote ? { ...deps, cancelClaimed: () => rm(staged, { recursive: true, force: true }), readProgress: async () => (await stat(join(staged, "progress")).catch(() => null))?.mtimeMs ?? 0 } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
@@ -525,9 +525,14 @@ export async function handleSendRequest(
       const limits = checkIncomingFiles(files, await readTransferLimits(), { machine: await readMachineName() });
       if (!limits.ok) return brokerFail(limits.error);
       const controller = new AbortController();
-      const marker = parsed.request.files ? await createBrokerProgress(ctx.agentDir, ctx.id) : undefined;
+      let marker: Awaited<ReturnType<typeof createBrokerProgress>> | undefined;
+      try { marker = parsed.request.files ? await createBrokerProgress(ctx.agentDir, ctx.id) : undefined; }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return brokerFail(CANCELLED_BEFORE_FIN);
+        throw err;
+      }
       const checkClient = () => {
-        if (marker && !fstatSync(marker.fd).nlink) controller.abort();
+        if (marker && !fstatSync(marker.fd).nlink) controller.abort(new Error(CANCELLED_BEFORE_FIN));
       };
       let updated = 0;
       const progress = () => {
@@ -540,7 +545,9 @@ export async function handleSendRequest(
       const timer = setInterval(checkClient, 250);
       try {
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, controller.signal, progress) : undefined;
-        return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal, stage, progress);
+        const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal, stage, progress);
+        if (controller.signal.aborted && result.exitCode === 130 && !result.stderr.includes("outcome unknown")) return brokerFail(CANCELLED_BEFORE_FIN);
+        return result;
       } finally { clearInterval(timer); await marker?.close(); }
     }
     if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");

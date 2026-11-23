@@ -142,6 +142,22 @@ export async function withdrawPublishedRequest(ready: string, withdrawn: string)
   return true;
 }
 
+export const CANCELLED_BEFORE_FIN = "cancelled, nothing sent";
+
+export async function waitForClaimedSend(read: () => Promise<IbCommandResult | undefined>) {
+  const deadline = Date.now() + 3000;
+  do {
+    const result = await read();
+    if (result) {
+      if (result.ok) return result;
+      if (result.stderr === CANCELLED_BEFORE_FIN) return { ...result, exitCode: 130 };
+      break;
+    }
+    await Bun.sleep(50);
+  } while (Date.now() < deadline);
+  return interruptedSend("claimed");
+}
+
 export function interruptedSend(state: "unpublished" | "withdrawn" | "claimed"): IbCommandResult {
   if (state === "unpublished") return { ok: false, exitCode: 130, stdout: "", stderr: "cancelled before sending" };
   const outcome = state === "claimed" ? "outcome unknown — check the agent" :
@@ -185,7 +201,7 @@ export async function submitWatchdogRequest(
   request: { id: string },
   wording: WatchdogRequestWording,
   timeoutMs: number,
-  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain" | "readProgress"> = {},
+  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain" | "readProgress" | "cancelClaimed"> = {},
 ): Promise<IbCommandResult> {
   const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
   const now = deps.now ?? Date.now;
@@ -202,7 +218,7 @@ export async function submitWatchdogRequest(
   const resultFile = join(spawnResultDir(agentDir), `${request.id}.json`);
   let deadline = now() + timeoutMs;
   let lastProgress = 0;
-  while (!deps.signal?.aborted) {
+  const readResult = async (): Promise<IbCommandResult | undefined> => {
     const file = Bun.file(resultFile);
     if (await file.exists()) {
       try {
@@ -223,6 +239,10 @@ export async function submitWatchdogRequest(
         // parse failure as "not ready" only until the deadline.
       }
     }
+  };
+  while (!deps.signal?.aborted) {
+    const result = await readResult();
+    if (result) return result;
     if (deps.readProgress) {
       const progress = await deps.readProgress();
       if (progress > lastProgress) {
@@ -240,6 +260,10 @@ export async function submitWatchdogRequest(
   let stillQueued: boolean;
   try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
   catch (err) { deps.onUncertain?.(); return brokerFail(`Could not withdraw request: ${err}`); }
+  if (!stillQueued && deps.signal?.aborted && deps.cancelClaimed) {
+    await deps.cancelClaimed();
+    return waitForClaimedSend(readResult);
+  }
   if (!stillQueued) deps.onUncertain?.();
   if (deps.signal?.aborted) return interruptedSend(stillQueued ? "withdrawn" : "claimed");
   return brokerFail(
@@ -253,6 +277,7 @@ export async function submitWatchdogRequest(
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
 
 export interface SpawnClientDeps {
+  cancelClaimed?: () => Promise<void>;
   readProgress?: () => Promise<number>;
   /** A claimed request may have enqueued its snapshots before the reply was lost. */
   onUncertain?: () => void;

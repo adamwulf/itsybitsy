@@ -1,5 +1,5 @@
 import type { StageRemoteFiles } from "./remote-attachments";
-import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
+import { CANCELLED_BEFORE_FIN, waitForClaimedSend, interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
 export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
@@ -106,7 +106,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     let deadline = Date.now() + 10_000; // M2 claim window. Transfer progress uses the wire idle interval.
     let lastProgress = "";
 
-    while (!signal?.aborted && Date.now() < deadline) {
+    const readResult = async (): Promise<IbCommandResult | undefined> => {
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
         await rm(claimed, { recursive: true, force: true });
@@ -116,6 +116,10 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       } catch (err) {
         if (!missing(err)) throw err;
       }
+    };
+    while (!signal?.aborted && Date.now() < deadline) {
+      const result = await readResult();
+      if (result) return result;
       try {
         const progress = await readFile(join(claimed, "progress"), "utf8");
         if (progress !== lastProgress) {
@@ -129,7 +133,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     const withdrawn = await withdrawPublishedRequest(dir, staging);
     if (!withdrawn) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
       .catch(err => { if (!missing(err)) throw err; });
-    if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
+    if (signal?.aborted) return withdrawn ? interruptedSend("withdrawn") : waitForClaimedSend(readResult);
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
   } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(detail(err)); }
 }
@@ -226,7 +230,7 @@ export function createPeerOutboxPoll(now = Date.now) {
               // crashed watcher. Wire I/O enforces its own progress deadline.
               const tick = () => {
                 try {
-                  if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort();
+                  if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort(new Error(CANCELLED_BEFORE_FIN));
                   if (bytes === recorded && now() - updated < 5000) return;
                   updated = now();
                   recorded = bytes;

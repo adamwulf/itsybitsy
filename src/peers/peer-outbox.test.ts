@@ -76,12 +76,11 @@ test("claimed request publishes byte progress and propagates CLI interruption to
   await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
   const poll = pollPeerOutbox(async (_peer, _header, transfer) => {
     transfer.onProgress!(192);
-    return new Promise((_, reject) => transfer.signal!.addEventListener("abort", () => reject(Error("cancelled")), { once: true }));
+    return new Promise((_, reject) => transfer.signal!.addEventListener("abort", () => reject(transfer.signal!.reason), { once: true }));
   }, () => {});
   const claimed = join(base, ".claimed", header.id);
   await waitFor(async () => (await Bun.file(join(claimed, "progress")).json().catch(() => null))?.bytes === 192);
   controller.abort();
-  expect((await result).exitCode).toBe(130);
+  expect(await result).toMatchObject({ exitCode: 130, stderr: "cancelled, nothing sent" });
   await poll;
-  expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: false, error: "cancelled" });
 });

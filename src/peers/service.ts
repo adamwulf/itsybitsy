@@ -344,9 +344,9 @@ export class PeerService {
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
   private outboxTimer?: ReturnType<typeof setInterval>;
-  private readonly receipts = new Map<string, { row: IncomingTransfer; controller: AbortController; done: Promise<void> }>();
+  private readonly receipts = new Map<string, { row: IncomingTransfer; controller?: AbortController; done: Promise<void> }>();
   cancelReceipt(id: string) {
-    this.receipts.get(id)?.controller.abort(new Error("Receive cancelled"));
+    this.receipts.get(id)?.controller?.abort(new Error("Receive cancelled"));
   }
 
   private readonly headerReaders = new Set<import("./pairing").PairStream>();
@@ -415,7 +415,7 @@ export class PeerService {
         ? null
         : { id: active.id, role: active.session.role, peerId: active.session.peerId, stage: active.session.stage },
       links: this.poller.states(),
-      ...(this.receipts.size && { incoming: Array.from(this.receipts.values(), entry => ({ ...entry.row })) }),
+      ...(this.receipts.size && { incoming: Array.from(this.receipts.values()).filter(entry => entry.controller).map(entry => ({ ...entry.row })) }),
     };
   }
 
@@ -700,6 +700,10 @@ export class PeerService {
           this.notify();
         }
         options?.admitted?.(ownsBody);
+      }, committing: () => {
+        const receipt = this.receipts.get(id);
+        if (receipt) { receipt.controller = undefined; this.notify(); }
+        options?.committing?.();
       }, onProgress: bytes => {
         row.bytes = bytes;
         this.notify();
@@ -775,7 +779,7 @@ export class PeerService {
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     const receipts = [...this.receipts.values()];
-    for (const receipt of receipts) receipt.controller.abort(new Error("Watcher shutting down"));
+    for (const receipt of receipts) receipt.controller?.abort(new Error("Watcher shutting down"));
     this.cancelRetry();
     this.active?.session.cancel();
     this.active = null;

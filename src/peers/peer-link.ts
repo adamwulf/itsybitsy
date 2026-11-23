@@ -505,7 +505,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
 // Responder
 // ---------------------------------------------------------------------------
 
-export interface ReceiptOptions extends FileBodyOptions { cancelStream?: () => void; admitted?: (ownsBody: boolean) => void }
+export interface ReceiptOptions extends FileBodyOptions { cancelStream?: () => void; admitted?: (ownsBody: boolean) => void; committing?: () => void }
 
 export interface PeerResponderDeps {
   /** Paired name for this id, re-read on every call. A failed read returns null. */

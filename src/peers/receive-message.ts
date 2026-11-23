@@ -144,6 +144,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
           async beforeEnqueue() {
             if (await readPeerName() === null) throw new Error("not a peer");
             options.signal?.throwIfAborted();
+            options.committing?.();
           },
         });
         if (!result.ok) throw bodyError ?? new Error(result.stderr);

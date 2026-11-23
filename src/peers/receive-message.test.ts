@@ -577,3 +577,21 @@ test("a near-limit spelling header with an empty message cannot allocate an over
     .rejects.toThrow("spelling index exceeds");
   expect(await readdir(dir)).toEqual([]);
 });
+
+test("a committing receipt no longer accepts dashboard cancellation", async () => {
+  await receiveFixture();
+  const { PeerService, defaultPeerServiceDeps } = await import("./service");
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null), receiveMessage: receiver });
+  let id = "";
+  let reset = false;
+  await service.receiveTracked(header({ files: [manifestFile("")] }), "peer", paired, { read: async () => Buffer.alloc(0) }, {
+    admitted: () => { id = service.view().incoming![0]!.id; },
+    committing: () => {
+      expect(service.view().incoming ?? []).toEqual([]);
+      service.cancelReceipt(id);
+    }, cancelStream: () => { reset = true; },
+  });
+  expect(id).not.toBe("");
+  expect(reset).toBe(false);
+  expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toHaveLength(1);
+});

@@ -20,7 +20,7 @@
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
- * reason. The agent list carries exactly the eight fields above, never
+ * reason. The agent list carries only the fields of {@link RemoteAgent} (SPEC §20.4), never
  * prompts, logs or tmux output, and never the system coordinator.
  *
  * The transport is the pair protocol's seam ({@link PairConnection}):

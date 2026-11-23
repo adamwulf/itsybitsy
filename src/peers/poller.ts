@@ -8,15 +8,15 @@
  *   start, then on the timer.
  * - Each peer keeps one live connection between polls; a new dial happens
  *   only once that connection has closed.
- * - A peer never has two dials or requests in flight at once. A dial can take
+ * - Periodic agents polls for a peer never overlap, including their dials. A dial can take
  *   up to 30 s to fail, so ticks that come while one is pending skip that
  *   peer. A failure is retried on the next tick.
- * - Each request is bounded by {@link PEER_REQUEST_TIMEOUT_MS}. A peer can keep
+ * - Each agents poll is bounded by {@link PEER_REQUEST_TIMEOUT_MS}. A peer can keep
  *   its QUIC connection alive and still never answer (its `ib watch` event
  *   loop wedged while the Rust side runs on), which would otherwise leave the
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
  *   "request timed out", and the next tick redials. Closing the connection is
- *   what ends the timed-out request, so it cannot overlap the next one.
+ *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
  * - The poller tracks per-peer state: connected or not, `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
  *   keeps disconnected agents dimmed and shows the peer’s link status in their info panel.

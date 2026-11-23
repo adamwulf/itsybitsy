@@ -1038,7 +1038,7 @@ test.each(["close stall", "close error", "removal stall"])("a destination %s fai
   const incoming = join(cli.root, "staging/incoming");
   try {
     const result = receiver(header({ files: [manifestFile("x", "sink")] }), "peer", paired, { read: async () => Buffer.from(kind === "removal stall" ? "y" : "x") }, { setTimer: clock.setTimer }).catch(err => err);
-    await entered.promise; clock.advance(60_000);
+    await entered.promise; if (kind !== "close error") clock.advance(60_000);
     expect(String(await result)).toContain(kind === "close error" ? "close failed" : kind === "removal stall" ? "hash mismatch" : "No progress");
     expect(lines).toEqual([]); release.resolve();
     await waitFor(async () => !(await readdir(incoming)).length);
@@ -1061,7 +1061,7 @@ test.each(["stat", "close"] as const)("a stalled sender file %s times out withou
   try {
     const result = requestSend(a, header({ files: [manifestFile("x")] }), clock.setTimer, { filesDir: cli.root }).catch(err => err);
     await b.acceptBi(); await entered.promise; clock.advance(60_000); await Bun.sleep(0); clock.advance(750);
-    expect(String(await result)).toContain("No progress"); expect(a.closeInfo()?.code).toBe(3);
+    expect(String(await result)).toContain("No progress"); expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
   } finally { release.resolve(); spy.mockRestore(); a.close(0, "done"); }
 });
 

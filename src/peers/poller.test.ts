@@ -272,7 +272,7 @@ describe("PeerPoller", () => {
     await Bun.sleep(0); rig.clock.advance(750);
     await waitFor(() => rig.state(P1)?.lastError === "request timed out", { message: "timed out" });
     expect(rig.state(P1)?.connected).toBe(false);
-    expect(silent.b.closeInfo()?.code).toBe(3);
+    expect(silent.b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
     expect(streams).toBe(1);
     expect(rig.dials).toEqual([P1]);
     expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): request timed out`);
@@ -306,7 +306,7 @@ describe("PeerPoller", () => {
     rig.tick();
     await Bun.sleep(0); rig.clock.advance(750);
     await waitFor(() => rig.state(P1)?.lastError === "request timed out" || rig.dials.length === 2, { message: "timed out" });
-    expect(rig.remote(P1).served[0]!.closeInfo()?.code).toBe(3);
+    expect(rig.remote(P1).served[0]!.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
     rig.tick(); // 25 s
     await waitFor(() => rig.state(P1)?.connected === true, { message: "redialed" });
     expect(rig.dials).toEqual([P1, P1]);
@@ -627,6 +627,6 @@ test("a pane slot stays occupied until its pending reply exhausts grace", async 
     await expect(rig.poller.fetchCoordinatorPane(P1)).rejects.toThrow("still pending");
     rig.clock.advance(749); expect(a.closeInfo()).toBeNull(); rig.clock.advance(1);
     expect(String(await pane)).toContain("request timed out");
-    expect(rig.poller["paneReads"].has(a)).toBe(false); expect(a.closeInfo()?.code).toBe(3);
+    expect(rig.poller["paneReads"].has(a)).toBe(false); expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
   } finally { rig.poller.stop(); }
 });

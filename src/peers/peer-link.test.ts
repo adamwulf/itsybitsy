@@ -378,7 +378,7 @@ test("a new-agent stream without a reply times out at 30 s", async () => {
   expect(link.a.closeInfo()).toBeNull();
   clock.advance(1); await Bun.sleep(0); clock.advance(750);
   await expect(pending).rejects.toThrow("timed out after 30 s");
-  expect(link.b.closeInfo()?.code).toBe(3);
+  expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
   link.a.close(0, "done");
 });
 
@@ -665,7 +665,7 @@ test("a lost send acknowledgement reports uncertainty and never opens another st
   await expect(sent).rejects.toThrow("outcome unknown — check the agent");
   expect(opens).toHaveBeenCalledTimes(1);
   expect(clock.pending()).toBe(0);
-  expect(a.closeInfo()?.code).toBe(3);
+  expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
   a.close(0, "done");
 });
 
@@ -746,7 +746,7 @@ test.each([true, false])("the original read observes the whole writer grace (lat
       expect((await outcome).message).toContain("late refusal"); expect(a.closeInfo()).toBeNull();
     } else {
       clock.advance(350); expect((await outcome).message).toContain("timed out");
-      expect(a.closeInfo()?.code).toBe(3);
+      expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
     }
     expect(reading).toHaveBeenCalledTimes(1);
   } finally { pending.resolve(); a.close(0, "done"); }

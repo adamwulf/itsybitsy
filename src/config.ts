@@ -224,13 +224,15 @@ export async function ensureConfigFilePerms(filePath: string): Promise<void> {
   } catch { /* expected when file is missing or chmod is unsupported */ }
 }
 
+export function validateConfigEdit(data: Record<string, unknown>, key: string, value: unknown) {
+  const setting = attachmentSettingKey(key);
+  return setting && validateAttachmentSetting(setting, value, rawAttachmentSettings(data));
+}
+
 export async function writeConfig(filePath: string, key: string, value: unknown): Promise<void> {
   const data = await readConfigFileStrict(filePath);
-  const setting = attachmentSettingKey(key);
-  if (setting) {
-    const error = validateAttachmentSetting(setting, value, rawAttachmentSettings(data));
-    if (error) throw new Error(error);
-  }
+  const error = validateConfigEdit(data, key, value);
+  if (error) throw new Error(error);
   setNestedValue(data, key, value);
   await Bun.write(filePath, JSON.stringify(data, null, 2) + "\n");
   await ensureConfigFilePerms(filePath);

@@ -1,4 +1,4 @@
-import { readConfigFileStrict, readConfig, writeConfig, CONFIG_KEYS, validateConfigValue, defaultUserConfigPath, ensureConfigFilePerms, type ConfigKeyDef } from "./config";
+import { validateConfigEdit, readConfigFileStrict, readConfig, writeConfig, CONFIG_KEYS, validateConfigValue, defaultUserConfigPath, ensureConfigFilePerms, type ConfigKeyDef } from "./config";
 import { join, dirname } from "path";
 import { mkdir } from "fs/promises";
 import { parseModel } from "./agent-cli";
@@ -278,6 +278,8 @@ export async function runConfigCommand(args: string[]): Promise<void> {
         console.log(`Key '${key}' is not set`);
         break;
       }
+      const error = validateConfigEdit(data, key, def.default);
+      if (error) throw new Error(`Cannot unset ${key} to its default ${def.default}: ${error}. Adjust the companion limit first.`);
       await Bun.write(cfgPath, JSON.stringify(data, null, 2) + "\n");
       await ensureConfigFilePerms(cfgPath);
       console.log(`Unset ${key} (reverted to default)`);

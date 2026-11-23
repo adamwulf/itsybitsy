@@ -455,3 +455,21 @@ describe("edge cases", () => {
     expect(data.autoCompactThreshold).toBe(80);
   });
 });
+
+
+test("unset refuses the default message budget when the stored file budget is larger", async () => {
+  const { createCliFixture } = await import("./test-cli-runner");
+  const fixture = await createCliFixture();
+  try {
+    const file = join(fixture.home, ".itsybitsy/config.json");
+    const original = JSON.stringify({ peering: { attachments: { maxFileMB: 4096, maxMessageMB: 8192 } } });
+    await Bun.write(file, original);
+    const run = await fixture.run(["config", "unset", "peering.attachments.maxMessageMB"]);
+    expect(run.exitCode).toBe(1);
+    expect(run.stderr).toContain("maxFileMB (4096)");
+    expect(run.stderr).toContain("default 2048");
+    expect(await Bun.file(file).text()).toBe(original);
+  } finally {
+    await fixture.cleanup();
+  }
+});

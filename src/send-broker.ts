@@ -383,9 +383,6 @@ export async function handleSendRequest(
   // Identity comes from the agent's own sealed record, never from the request.
   const requester = await verifyBrokerRequester(ctx.agentId, ctx.repoPath, ctx.agentDir, remote ? "send remotely" : "send", deps);
   if (!requester.ok) return requester.result;
-  if (remote && requester.meta.worktree === false) {
-    return brokerFail("Remote sends through a watchdog require a worktree agent");
-  }
 
   const seams = deps.send ?? {};
   const fromAgent = ctx.agentId;

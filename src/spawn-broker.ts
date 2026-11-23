@@ -1,3 +1,4 @@
+import { isCoordinatorType } from "./coordinator-type-names";
 import * as runtimeNames from "./runtime-names";
 /**
  * Watchdog spawn broker — how a SANDBOXED agent spawns a child agent.
@@ -592,14 +593,9 @@ export async function verifyBrokerRequester(
     && meta.sandbox?.enabled === false
     && !verification.ok
     && verification.field === "(missing)";
-  if (!verification.ok && verification.field === "(missing)" && verb === "send remotely"
-      && meta.worktree === true && meta.sandbox?.enabled === false) {
-    const { isRegisteredAgentWorktree } = await import("./no-worktree-caller");
-    if (await isRegisteredAgentWorktree(join(agentDir, "repo"), [await realpath(repoPath)])) {
-      return { ok: true, meta };
-    }
-  }
-  if (!verification.ok && !unsealedDisabledSpawn) {
+  const unsealedDisabledSend = verb === "send remotely" && meta.worktree === true
+    && meta.sandbox?.enabled === false && !verification.ok && verification.field === "(missing)";
+  if (!verification.ok && !unsealedDisabledSpawn && !unsealedDisabledSend) {
     return {
       ok: false,
       result: brokerFail(
@@ -608,6 +604,16 @@ export async function verifyBrokerRequester(
           : `Error: meta.json for '${agentId}' does not match its sealed record (${verification.field}); refusing to ${verb}`,
       ),
     };
+  }
+  if (verb === "send remotely") {
+    const { isRegisteredAgentWorktree } = await import("./no-worktree-caller");
+    const root = await realpath(repoPath);
+    const expected = join(runtimeNames.agentDir(root, agentId), "repo");
+    const gitFile = join(expected, ".git");
+    if (isCoordinatorType(meta.agentType) || await realpath(gitFile).catch(() => null) !== gitFile
+        || !await isRegisteredAgentWorktree(expected, [root])) {
+      return { ok: false, result: brokerFail("Remote sends through a watchdog require a worktree agent with a verified Git backlink") };
+    }
   }
   return { ok: true, meta };
 }

@@ -292,11 +292,18 @@ describe("send broker", () => {
       expect(tmuxListCalls).toEqual([]);
     });
 
-    test("a shared-checkout agent cannot publish through the worktree remote-send broker", async () => {
-      const { deps } = server({ readMeta: async () => ({ meta: senderMeta({ worktree: false }) }) });
+    test.each([true, undefined])("a sealed repo coordinator with worktree=%s cannot publish through the worktree broker", async worktree => {
+      await linkWorktree();
+      const { deps } = server({ readMeta: async () => ({ meta: senderMeta({ agentType: "repo-coordinator", worktree }) }) });
       await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
       await processSpawnRequests(SENDER_ID, senderRepo, deps);
       expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("require a worktree agent") });
+    });
+
+    test("a sealed requester without its own physical worktree cannot send remotely", async () => {
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await processSpawnRequests(SENDER_ID, senderRepo, server().deps);
+      expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("verified Git backlink") });
     });
 
     test("the sender is the verified agent: --from cannot be smuggled in the request", async () => {

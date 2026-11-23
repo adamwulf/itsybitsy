@@ -30,7 +30,7 @@
  */
 
 import { CHUNK_BYTES } from "./transfer-limits";
-import { encodeSendHeader, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
+import { encodeSendHeader, TransferIdleError, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
 import type { Agent } from "../agents";
@@ -539,6 +539,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         return byte;
       } };
       let reply;
+      let stalledRead = false;
       try {
         const header = await decodeSendHeader(reader, options);
         if (header.files.length) throw new Error("attachments are not supported yet");
@@ -551,13 +552,20 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         });
         reply = { ok: true, id: header.id };
       } catch (err) {
+        stalledRead = err instanceof TransferIdleError;
         // STOP_SENDING is independent of the send half. The error ACK can
         // finish even if the native reader is still unwinding a stalled read.
         void stream.stopReceiving().catch(() => {});
         reply = { ok: false, error: errorDetail(err) };
       }
-      await stream.writeAll(encodeJson(reply));
-      await stream.finish();
+      try {
+        await stream.writeAll(encodeJson(reply));
+        await stream.finish();
+      } finally {
+        // The native receive mutex is held by a pending read. Closing QUIC
+        // after the error ACK releases that read even if STOP_SENDING waits.
+        if (stalledRead) closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
+      }
       return;
     }
     const rest = await stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES - first.length);
@@ -569,6 +577,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       deps.log(`peer link: ${reason}, from ${from}; closing`);
       closeQuietly(conn, PEER_CLOSE.error, reason);
     }
+    else if (err instanceof TransferIdleError) closeQuietly(conn, PEER_CLOSE.error, "request read stalled");
     else { void stream.cancel().catch(() => {}); }
     return;
   }

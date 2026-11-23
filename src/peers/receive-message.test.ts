@@ -130,6 +130,8 @@ test("cache capacity retains accepted ids for ten minutes, independently per pee
   expect(lines).toHaveLength(3);
 });
 
+// The sandbox cannot bind native iroh endpoints. The fake clock drives the
+// full idle window and the transport records the QUIC close following FIN.
 test.each(["header", "FIN"])("stalled %s stops the receive half and returns the idle error", async stage => {
   const { a, b } = createMemoryLink("sender", "receiver");
   const clock = createFakeClock();
@@ -142,6 +144,8 @@ test.each(["header", "FIN"])("stalled %s stops the receive half and returns the 
     clock.advance(60_000);
     const reply = JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
     expect(reply).toMatchObject({ ok: false, error: expect.stringContaining("No progress") });
+    await serving;
+    expect(a.closeInfo()).toMatchObject({ byPeer: true, reason: "send read stalled" });
     await expect(stream.writeAll(Uint8Array.of(1))).rejects.toThrow();
   } finally { a.close(0, "done"); await serving; }
 });

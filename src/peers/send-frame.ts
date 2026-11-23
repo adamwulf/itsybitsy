@@ -124,6 +124,8 @@ function setIdleTimer(ms: number, callback: () => void) {
   return () => clearTimeout(timer);
 }
 
+export class TransferIdleError extends Error {}
+
 /** One deadline per outstanding I/O. Its listener and timer are released at
  * each step, including on error. A stalled operation cannot start the next step. */
 export async function waitForIO<T>(options: FileBodyOptions, operation: () => T | Promise<T>): Promise<T> {
@@ -132,7 +134,7 @@ export async function waitForIO<T>(options: FileBodyOptions, operation: () => T 
   const stopped = Promise.withResolvers<never>();
   const abort = () => stopped.reject(signal!.reason);
   signal?.addEventListener("abort", abort, { once: true });
-  const cancel = setTimer(IDLE_TIMEOUT_MS, () => stopped.reject(new Error(`No progress for ${IDLE_TIMEOUT_MS} ms`)));
+  const cancel = setTimer(IDLE_TIMEOUT_MS, () => stopped.reject(new TransferIdleError(`No progress for ${IDLE_TIMEOUT_MS} ms`)));
   try {
     const result = await Promise.race([stopped.promise, operation()]);
     signal?.throwIfAborted();

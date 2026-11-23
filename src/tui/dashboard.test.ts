@@ -8493,6 +8493,49 @@ describe("pinned-width resize side-effects", () => {
     };
   }
 
+  /**
+   * Track every coordinator client-attach check the dashboard starts, so a
+   * test can wait for all of them to finish before it changes the live tmux
+   * state or asserts.
+   *
+   * Making a coordinator pane visible fires one immediate check that the
+   * dashboard does NOT await (updateCoordinatorClientCheck), and the 3s
+   * interval it starts fires more. Each check samples `list-clients` when it
+   * starts and writes the cached attach state when it finishes, so when two
+   * checks overlap after sampling different live states, the one that
+   * finishes LAST wins the cache. Starting first does not mean finishing
+   * first, even with the mocked tmux: hasAttachedClient's
+   * `await new Response(proc.stdout).text()` resolves an empty stream later
+   * than a non-empty one (measured on Bun 1.3.14: 3 microtask turns against
+   * 1), so an earlier check that read "no client" finishes after a later one
+   * that read "client-0" and overwrites it with a stale `false`. Bun 1.3.10
+   * finished the same pair in the other order, which is how these tests used
+   * to pass while silently depending on it.
+   *
+   * Shadowing the method on the instance catches every caller: the immediate
+   * check and the interval both call this.checkCoordinatorClients(), and the
+   * test's own explicit checks go through it too.
+   */
+  function trackCoordinatorChecks(dashboard: DashboardComponent) {
+    const started: Promise<void>[] = [];
+    const run = dashboard.checkCoordinatorClients.bind(dashboard);
+    dashboard.checkCoordinatorClients = () => {
+      const check = run();
+      started.push(check);
+      return check;
+    };
+    return {
+      /** Resolve once every check started so far has finished. */
+      async settle() {
+        let seen = -1;
+        while (seen !== started.length) {
+          seen = started.length;
+          await Promise.all(started);
+        }
+      },
+    };
+  }
+
   afterEach(() => {
     tmuxPollerSpawnCtx.reset();
   });
@@ -8569,18 +8612,22 @@ describe("pinned-width resize side-effects", () => {
   test("coordinator detach transition re-pins the displayed coordinator once, to 1000", async () => {
     const tmux = installTmuxRecorder();
     const dashboard = makeDashboard();
+    const checks = trackCoordinatorChecks(dashboard);
     // Make the system coordinator the displayed pane so checkCoordinatorClients
     // considers IB_COORDINATOR_SESSION (onUpdate auto-selects it).
     //
     // Selecting it also makes updateCoordinatorClientCheck start the 3s
-    // client-attach interval and fire one immediate, UNAWAITED check. That
-    // check entered hasAttachedClient before any tick below did, and every
-    // tick walks the identical await chain, so it completes first — JS
-    // microtask ordering, not timing, so load cannot reorder it. The interval
-    // it started is cancelled by the file-scope afterEach (stopPolling), which
-    // is what stops it ticking into a later test's recorder.
+    // client-attach interval and fire one immediate, UNAWAITED check, which
+    // samples "no client". Let it finish before tick 1 stages an attach. Left
+    // running, it overlaps tick 1 and can finish after it (see
+    // trackCoordinatorChecks): it then reads wasAttached=true from tick 1,
+    // records the detach re-pin itself with its stale "no client", and tick 2
+    // finds no transition left to observe. The interval it started is
+    // cancelled by the file-scope afterEach (stopPolling), which is what stops
+    // it ticking into a later test's recorder.
     dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    await checks.settle();
     // Ignore any resizes from selection wiring (there should be none — the pin
     // means nothing follows the pane) so the assertions below measure only the
     // detach transition.
@@ -8612,11 +8659,18 @@ describe("pinned-width resize side-effects", () => {
     // the window would stay stuck at the Ghostty width forever.
     const tmux = installTmuxRecorder();
     const dashboard = makeDashboard();
+    const checks = trackCoordinatorChecks(dashboard);
     const agent = makeAgent("agent-a", "/repos/test");
 
     // Visible + attached: observe the attached state (no re-pin yet).
+    // Selecting the coordinator fires an immediate UNAWAITED check that samples
+    // "no client". Let it finish before staging the attach. Left running, it
+    // can finish after the explicit check below (see trackCoordinatorChecks),
+    // overwrite attached=true with its stale false and re-pin while we are
+    // away, which also erases the attach state this test needs preserved.
     dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    await checks.settle();
     tmux.setClientsAttached(true);
     await dashboard.checkCoordinatorClients();
     tmux.clear();
@@ -8631,21 +8685,20 @@ describe("pinned-width resize side-effects", () => {
     await dashboard.checkCoordinatorClients(); // no visible coord → no-op, state kept
     expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([]);
 
-    // Navigate BACK to the coordinator, then run the check: the preserved
-    // wasAttached=true meets the now-detached live state → exactly one re-pin.
+    // Navigate BACK to the coordinator: the re-selection's immediate check
+    // meets the preserved wasAttached=true with the now-detached live state
+    // → exactly one re-pin. Settle that check instead of polling for the
+    // re-pin, so the count asserted is final, not just the first value a
+    // poll happened to see.
     dashboard.onUpdate([], [makeFlatSystemCoordinator()], []);
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    await checks.settle();
+    expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([
+      { session: IB_COORDINATOR_SESSION, width: 1000 },
+    ]);
+    // Exactly one re-pin total across the return: a further check while still
+    // detached finds the transition already consumed and does not re-pin.
     await dashboard.checkCoordinatorClients();
-    // Exactly one re-pin total across return: the re-selection fires an
-    // immediate unawaited check and the line above fires an explicit one, but
-    // whichever lands first consumes the attached→detached transition (it
-    // rewrites the cached state before the other reads it), so the pair is
-    // idempotent in either order. Wait for that one re-pin rather than assuming
-    // the unawaited check has already landed.
-    await waitFor(() => tmux.forSession(IB_COORDINATOR_SESSION).length === 1, {
-      timeoutMs: WAIT_TIMEOUT_MS,
-      message: "the return-to-coordinator detach transition to re-pin exactly once",
-    });
     expect(tmux.forSession(IB_COORDINATOR_SESSION)).toEqual([
       { session: IB_COORDINATOR_SESSION, width: 1000 },
     ]);

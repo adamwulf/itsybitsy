@@ -7298,13 +7298,25 @@ describe("readAgentMeta mtime cache", () => {
     const { stat, utimes } = await import("fs/promises");
     const path = join(tempDir, "meta.json");
     await Bun.write(path, JSON.stringify({ id: "agent-gen", created_epoch: 1_700_000_000 }));
-    const stamps = await stat(path);
+    // Pin the mtime to a whole second so the test can put back exactly the
+    // value the cache saw. A fresh write's mtimeMs can carry sub-millisecond
+    // digits (Bun 1.3.14 reports e.g. 1795459817138.1443), and restoring it
+    // through stat()'s Date objects, which hold whole milliseconds only,
+    // drops them, so the cache would see a changed mtime and re-parse.
+    const pinnedSec = Math.floor(Date.now() / 1000) - 60;
+    await utimes(path, pinnedSec, pinnedSec);
+    const originalMtimeMs = (await stat(path)).mtimeMs;
+    expect(originalMtimeMs).toBe(pinnedSec * 1000);
     expect((await readAgentMeta(tempDir)).meta?.created_epoch).toBe(1_700_000_000);
 
     // A rewrite landing inside the filesystem's timestamp granularity is
     // indistinguishable from no write at all to an mtime-keyed cache.
     await Bun.write(path, JSON.stringify({ id: "agent-gen", created_epoch: 1_700_000_500 }));
-    await utimes(path, stamps.atime, stamps.mtime);
+    await utimes(path, pinnedSec, pinnedSec);
+    // Setup precondition, not the behaviour under test: the rewrite must carry
+    // the identical mtime, or the next assertion would fail for a timestamp
+    // precision reason and look like a cache bug.
+    expect((await stat(path)).mtimeMs).toBe(originalMtimeMs);
     expect((await readAgentMeta(tempDir)).meta?.created_epoch).toBe(1_700_000_000);
 
     // The destructive path must never revalidate against that copy.

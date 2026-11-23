@@ -552,7 +552,8 @@ export async function handleSendRequest(
         const now = Date.now();
         if (marker && now - updated >= 250) {
           updated = now;
-          futimesSync(marker.fd, now / 1000, now / 1000);
+          try { futimesSync(marker.fd, now / 1000, now / 1000); }
+          catch (err) { warnSendCleanup(`Remote send progress update failed: ${err}`); }
         }
       };
       checkClient();
@@ -564,7 +565,7 @@ export async function handleSendRequest(
         return result;
       } finally {
         clearInterval(timer);
-        await marker?.close();
+        if (marker) trackSendCleanup(marker.close(), "Broker progress close failed");
         if (!files.length) trackSendCleanup(rm(textProgress, { force: true }), "Broker progress cleanup failed");
       }
     }

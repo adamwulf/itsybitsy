@@ -29,6 +29,22 @@ Both features run on the existing trusted ALPN `itsybitsy/peer/1` and reuse its 
 
 ## B. Remote sends
 
+**REVISED (Adam, 2026-11-22): mirror local `ib send` exactly.**
+
+- A remote send carries its sender: `{"from":{"kind":"user"}}` or `{"from":{"kind":"agent","id":"<machine>/<repo>/<agent>"}}`.
+- The receiving machine delivers it exactly as it would a local send from that sender:
+  - The same queue, through `agentOutboxDir` and the watchdog.
+  - The same formatting: a user send follows the user rules, including slash and bang passthrough. An agent send is shown as `[sent by agent <machine>/<repo>/<id>]`.
+  - The same `ib send` gate rules for agents.
+- **Senders:**
+  - `ib send <machine>/...` from the CLI, for both users and agents. The 6b resolver already parses these forms.
+  - The `ib watch` input box, when a remote row is selected. This counts as a user send.
+- The CLI hands the message to the local `ib watch`, which owns the endpoint, and waits up to about 10 s for the receiver's ok or error.
+- If no `ib watch` is running, the send fails with a clear error.
+- Sandboxed agents keep using the watchdog broker, as they do for cross-repo sends.
+
+The bullets below are the original, superseded proposal. They are kept for reference.
+
 - **Sender: a human in `ib watch` only (first step).**
   - With a remote agent row selected, the input box sends a `{"op":"send","repo","agent","message"}` request to that peer.
   - The request uses the recipient's registry name and id.
@@ -67,6 +83,11 @@ Both features run on the existing trusted ALPN `itsybitsy/peer/1` and reuse its 
 - **A.1 Exposure.** Any paired machine can read this machine's coordinator screen. Pairing is the trust decision, as it is for remote starts. Adam asked for the feature, so this is taken as accepted.
 - **A.2 Refresh rate: DECIDED (Adam, 2026-11-22).** About 2 s while the row is highlighted, for now.
 - **A.3 Read-only.** The coordinator row has no sends until B decides whether it gets them.
+- **B.0 DECIDED (Adam, 2026-11-22).** Remote sends mirror local `ib send` exactly, and the sender is either a user or an agent. B.1–B.3 below are superseded. What remains to confirm:
+  - **(i)** A remote user send keeps slash and bang passthrough. A human on the other machine can run `/clear` or `!cmd` in agent panes here.
+  - **(ii)** The receiver trusts the sending machine's user or agent label. It cannot verify that label. This is the same trust it already gives that machine's local classification.
+  - **(iii)** Remote sends need `ib watch` running on both machines.
+  - **(iv)** The CLI waits up to about 10 s for the receiver's result.
 - **B.1 Who may send.** Recommended: (a) a human in `ib watch` first.
   - (b) Also humans through `ib send <machine>/...` from the CLI. The CLI would need to hand the request to the running `ib watch`, which owns the endpoint.
   - (c) Agents too, so an agent on one machine can message an agent on the other.

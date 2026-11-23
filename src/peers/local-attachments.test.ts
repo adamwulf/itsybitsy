@@ -10,8 +10,9 @@ import { userInfo } from "node:os";
 import { accountHome, resetUserHome, setUserHome } from "../home";
 import { createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
 import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
+import * as config from "../config";
 import { readTransferLimits } from "../config";
-import { copyLocalAttachments, resolveAttachmentSender } from "./local-attachments";
+import { copyLocalAttachments, resolveAttachmentSender, stageLocalAttachments } from "./local-attachments";
 
 let fixture: CliFixture;
 let recipient: FixtureAgent;
@@ -210,6 +211,9 @@ test("an unreadable transfer policy refuses the send", async () => {
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toContain("Cannot read attachment limits");
   expect(await queue().exists()).toBe(false);
+  const text = await send("ordinary text");
+  expect(text.exitCode, text.stderr).toBe(0);
+  expect(JSON.parse(await queue().text()).message).toBe("ordinary text");
 });
 
 test.each(["@system", "repo coordinator"])("%s attachments follow that sender's own paths.deny", async kind => {
@@ -325,4 +329,46 @@ test("failed attachment staging never falls back to sending the original text", 
   expect(run.stderr).toContain("missing");
   expect(run.actions).toEqual([]);
   expect(await queue().exists()).toBe(false);
+});
+
+test("a bad individual limit uses its default and logs the key", async () => {
+  await Bun.write(join(fixture.home, ".itsybitsy/config.json"), '{"peering":{"attachments":{"maxFiles":"typo"}}}');
+  await Bun.write(join(fixture.cwd, "report"), "ok");
+  const result = await send("--attach", "report", "read");
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(result.stderr).toContain("peering.attachments.maxFiles");
+  expect(result.stderr).toContain("Using 20");
+  const record = JSON.parse(await queue().text());
+  snapshots.push(dirname(dirname(record.message.split(" → ")[1])));
+});
+
+test("a config change after copying refuses the snapshot and cleans it up", async () => {
+  setUserHome(fixture.home);
+  const source = join(fixture.cwd, "report");
+  await Bun.write(source, "copied");
+  let root = "";
+  const make = fsPromises.mkdtemp.bind(fsPromises);
+  const filesystem: { mkdtemp(prefix: string): Promise<string> } = fsPromises;
+  const dirs = spyOn(filesystem, "mkdtemp").mockImplementationOnce(async prefix => {
+    root = await make(prefix);
+    return root;
+  });
+  const read = config.readTransferLimits;
+  const policy = spyOn(config, "readTransferLimits").mockImplementation(async () => {
+    if (root) {
+      expect(await Bun.file(join(root, "0/report")).text()).toBe("copied");
+      await Bun.write(join(fixture.home, ".itsybitsy/config.json"), '{"peering":{"attachments":{"maxFiles":0}}}');
+    }
+    return read();
+  });
+  try {
+    await expect(stageLocalAttachments("read", [source], { kind: "user" })).rejects.toThrow("maxFiles = 0");
+    expect(policy).toHaveBeenCalledTimes(2);
+    expect(root).not.toBe("");
+    await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    dirs.mockRestore();
+    policy.mockRestore();
+    if (root) await rm(root, { force: true, recursive: true });
+  }
 });

@@ -1106,7 +1106,7 @@ test("a stalled final allowlist read releases the admission and enqueues nothing
 });
 
 test.each([false, true])("literal and escaped attachment spellings cannot name different files, reversed=%s", async reverse => {
-  const files = [manifestFile("a", "Q1 report.pdf"), manifestFile("b", "Q1\\ report.pdf")];
+  const files = [manifestFile("a", "Q1 report.pdf", "Q1 report.pdf"), manifestFile("b", "Q1\\ report.pdf", "Q1\\ report.pdf")];
   if (reverse) files.reverse();
   const result = await exchange(header({ files }));
   expect(result).toMatchObject({ op: "error", reason: expect.stringContaining("same attachment spelling") });

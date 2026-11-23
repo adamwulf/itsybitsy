@@ -1176,7 +1176,11 @@ describe("ensureSystemCoordinator", () => {
         return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
       }
       if (cmd.includes("send-keys")) {
-        if (cmd[cmd.length - 1] === "Enter" && cmd.some((a) => a.startsWith("claude --model"))) {
+        const launch = cmd.findIndex(arg => arg.startsWith("claude --model"));
+        if (launch >= 0) {
+          expect(cmd.slice(launch + 1)).toEqual([
+            "Enter", ";", "set-option", "-p", "-t", "=ib-coordinator:", "@ib-system-coordinator", "1",
+          ]);
           events.push("launch-claude");
         }
       }

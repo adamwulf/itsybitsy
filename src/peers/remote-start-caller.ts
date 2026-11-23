@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "../agents";
+import { IB_COORDINATOR_SESSION } from "../coordinator";
+import { tmuxSessionTarget } from "../validation";
 import { resolveDashboardCaller } from "../no-worktree-caller";
 
 interface DashboardCaller {
@@ -124,6 +126,22 @@ export async function remoteStartDenialAtStartup(input?: DashboardCaller, clock 
 
 export async function isHumanSendTerminal(input?: DashboardCaller): Promise<boolean> {
   return await remoteStartDenialAtStartup(input) === null;
+}
+
+/** A cwd under the coordinator home identifies @system only inside its live pane's process tree. */
+export async function isSystemPaneCaller(
+  pid = process.pid,
+  readPane = async (args: string[], signal: AbortSignal) =>
+    (await execFileAsync("tmux", args, { signal, killSignal: "SIGKILL", maxBuffer: 1024 })).stdout,
+  readTable = readProcessTable,
+): Promise<boolean> {
+  const signal = AbortSignal.timeout(2000);
+  try {
+    const pane = (await readPane(["display-message", "-p", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "#{pane_pid}"], signal)).trim();
+    if (!/^[1-9][0-9]*$/.test(pane) || Number(pane) <= 1) return false;
+    const ancestors = await readAncestors(pid, readTable, signal);
+    return !signal.aborted && ancestors?.has(Number(pane)) === true;
+  } catch { return false; }
 }
 
 /** Use the same startup decision when the dashboard sends a message. */

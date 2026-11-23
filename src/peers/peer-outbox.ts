@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import { findOwnRepo } from "../resolve-target";
 import { checkCoordinatorExists } from "../coordinator";
 import { isRegisteredAgentWorktree } from "../no-worktree-caller";
-import { isHumanSendTerminal } from "./remote-start-caller";
+import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { MAX_HEADER_BYTES } from "./transfer-limits";
@@ -31,7 +31,7 @@ export async function qualifiedAgentSender(id: string, repoPath: string, repos: 
   return { kind: "agent", id: `${await readMachineName()}/${repo}/${id}` };
 }
 
-export const remoteCliCaller = { isHuman: isHumanSendTerminal };
+export const remoteCliCaller = { isHuman: isHumanSendTerminal, isSystem: isSystemPaneCaller };
 const unverifiable = "cannot verify the sender of a remote send; run it from a terminal or from the agent's worktree";
 
 type RemoteSender =
@@ -49,6 +49,7 @@ export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd
       if (id !== worktree[2] || !await isRegisteredAgentWorktree(path, [worktree[1]!])) throw new Error(unverifiable);
       sender = { kind: "worktree", id, agentDir: agentDir(worktree[1]!, id) };
     } else if (id === "@system") {
+      if (!await remoteCliCaller.isSystem()) throw new Error(unverifiable);
       sender = { kind: "direct", from: { kind: "system" } };
     } else {
       const repo = findOwnRepo(path, repos);

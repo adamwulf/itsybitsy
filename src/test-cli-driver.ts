@@ -35,6 +35,7 @@ export type CliActionName = keyof typeof cliActions;
 export type CliActionMode = "record" | "real";
 
 export interface CliAncestry {
+  systemPanePid?: number;
   terminal?: "human" | "tmux" | "agent";
   /** The pid the caller check starts from. */
   pid: number;
@@ -136,7 +137,7 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
     identityCurrent: () => ancestry().identityCurrent,
   });
   const { remoteCliCaller } = await import("./peers/peer-outbox");
-  const { isHumanSendTerminal } = await import("./peers/remote-start-caller");
+  const { isHumanSendTerminal, isSystemPaneCaller } = await import("./peers/remote-start-caller");
   remoteCliCaller.isHuman = async () => {
     const terminal = config.ancestry?.terminal;
     return isHumanSendTerminal({
@@ -150,6 +151,14 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
       resolveCaller: (cwd, ancestors, options) => resolveDashboardCaller(cwd, ancestors, { ...options, registryHome: config.home }),
     });
   };
+  remoteCliCaller.isSystem = () => isSystemPaneCaller(ancestry().pid, async args => {
+    if (args.join(" ") !== "display-message -p -t =ib-coordinator: #{pane_pid}") throw new Error("wrong pane probe");
+    return String(ancestry().systemPanePid ?? "");
+  }, async () => [
+    "PID PPID STARTED                  KERNEL COMMAND",
+    ...ancestry().parents.map(([pid, parent]) => `${String(pid).padStart(3)} ${String(parent).padStart(4)} Sat Nov 21 12:01:00 2026 bash   bash`),
+    "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
+  ].join("\n"));
   setNewAgentNoWorktreeCallerResolver(resolver);
   setBoundNoWorktreeCallerResolver(resolver);
   setNoWorktreeRepoRootsLoader(async () => {

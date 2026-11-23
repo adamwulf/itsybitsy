@@ -304,7 +304,11 @@ describe("qualified agent addresses", () => {
       expect((await send(["--from", "imposter", "hello"], worktree)).stderr).toContain("--from must match");
       const system = join(cli.home, ".itsybitsy");
       expect((await send(["human at home"], system, "human")).exitCode).toBe(0);
-      expect((await send(["system message"], system)).exitCode).toBe(0);
+      const fromHome = (parent: number) => cli.run(["send", "laptop-b/remote/remote-id", "system message"], {
+        cwd: system, ancestry: { ...human, terminal: "agent", systemPanePid: 200, parents: [[300, parent], [parent, 1]] },
+      });
+      expect((await fromHome(250)).stderr).toContain("cannot verify the sender");
+      expect((await fromHome(200)).exitCode).toBe(0);
       expect((await send(["plain tmux"], cli.cwd, "tmux")).stderr).toContain("cannot verify the sender");
       expect((await send(["agent tmux"], worktree, "tmux")).exitCode).toBe(0);
       expect((await send(["moved"], cli.cwd, "agent")).stderr).toContain("cannot verify the sender");

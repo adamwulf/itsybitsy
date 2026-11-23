@@ -860,7 +860,10 @@ test("a stalled framed read with a pending error reply closes once at the whole-
   const client = await a.openBi();
   const server = await b.acceptBi();
   const writing = Promise.withResolvers<void>();
-  server.write = async () => { writing.resolve(); await b.closed(); throw Error("closed"); };
+  const written = Promise.withResolvers<void>();
+  const finishing = Promise.withResolvers<void>();
+  server.write = async bytes => { writing.resolve(); await written.promise; return bytes.length; };
+  server.finish = async () => { finishing.resolve(); await b.closed(); };
   server.stopReceiving = async () => { await b.closed(); };
   const accept = b.acceptBi.bind(b);
   b.acceptBi = async () => { b.acceptBi = accept; return server; };
@@ -872,7 +875,10 @@ test("a stalled framed read with a pending error reply closes once at the whole-
     await Bun.sleep(0);
     clock.advance(60_000);
     await writing.promise;
-    clock.advance(749);
+    clock.advance(500);
+    written.resolve();
+    await finishing.promise;
+    clock.advance(249);
     expect(close).not.toHaveBeenCalled();
     clock.advance(1);
     await serving;

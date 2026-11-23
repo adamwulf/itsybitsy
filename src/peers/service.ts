@@ -156,11 +156,11 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
+export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
   return {
     remoteStartDenial,
     captureCoordinator: async () => {
-      const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION);
+      const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine);
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },

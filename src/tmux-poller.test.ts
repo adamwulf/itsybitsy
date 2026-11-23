@@ -1363,12 +1363,18 @@ test("coordinator capture follows its marked pane after a different pane becomes
     return { stdout: streamOf(text), stderr: emptyStream(), exited: Promise.resolve(0) };
   });
   try {
-    expect(await captureMarkedCoordinatorPane("ib-coordinator")).toBe("coordinator");
+    expect(await captureMarkedCoordinatorPane("ib-coordinator", "Desk")).toBe("coordinator");
     listing = "%8 \n%4\n";
-    expect(await captureMarkedCoordinatorPane("ib-coordinator")).toBeNull();
+    await expect(captureMarkedCoordinatorPane("ib-coordinator", "Desk")).rejects.toThrow("Unverified coordinator pane; restart the system coordinator on Desk");
     listing = "%8 1\n%4\n"; // the shell copied the marker and the original is gone
-    expect(await captureMarkedCoordinatorPane("ib-coordinator")).toBeNull();
+    await expect(captureMarkedCoordinatorPane("ib-coordinator", "Desk")).rejects.toThrow("Unverified coordinator pane; restart the system coordinator on Desk");
+    for (const invalid of ["%8 \n", "%4 1\n%8 1\n%4\n"]) {
+      listing = invalid;
+      await expect(captureMarkedCoordinatorPane("ib-coordinator", "Desk")).rejects.toThrow("restart the system coordinator on Desk");
+    }
     expect(targets).toEqual(["%4"]);
+    spawnCtx.set(() => ({ stdout: emptyStream(), stderr: streamOf("can't find session: ib-coordinator"), exited: Promise.resolve(1) }));
+    expect(await captureMarkedCoordinatorPane("ib-coordinator", "Desk")).toBeNull();
   } finally {
     spawnCtx.reset();
   }
@@ -1385,7 +1391,7 @@ test("stalled coordinator capture is killed and reaped before returning a bounde
     : { stdout, stderr, exited: exit.promise, kill: signal => { kills.push(signal); } });
   try {
     let settled = false;
-    const read = captureMarkedCoordinatorPane("ib-coordinator", 5).catch(err => { settled = true; return err.message; });
+    const read = captureMarkedCoordinatorPane("ib-coordinator", "Desk", 5).catch(err => { settled = true; return err.message; });
     await waitFor(() => kills.length > 0);
     expect(kills).toEqual(["SIGKILL"]);
     expect(settled).toBe(false);

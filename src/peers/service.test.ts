@@ -364,7 +364,7 @@ describe("PeerService binding", () => {
   test("the real defaults are never reached: the addon loader throws in this file", async () => {
     // Guard for the tests above: they inject bindEndpoint, so the addon is never needed.
     const { defaultPeerServiceDeps } = await import("./service");
-    const deps = defaultPeerServiceDeps(() => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null);
+    const deps = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null);
     await expect(deps.bindEndpoint(new Uint8Array(32), [PAIR_ALPN])).rejects.toThrow("a service test loaded the iroh addon");
   });
 });
@@ -640,7 +640,7 @@ describe("PeerService at boot", () => {
         return "no-agent";
       },
     }, clock);
-    const service = new PeerService(defaultPeerServiceDeps(() => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, decision));
+    const service = new PeerService(defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, decision));
     const observed = await reading.promise;
     await service.bootIfPaired();
     expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
@@ -739,7 +739,7 @@ describe("PeerService at boot", () => {
 
   test("the owning watch renews the lease each poll and replaces the snapshot only on visible changes", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
-    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps(() => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null);
+    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null);
     const { service, endpoint, clock } = makeService({ writeRemoteAgents, renewLease });
     answerDials(endpoint, [{ ...REMOTE_AGENTS[0]!, repoName: "display only" }]);
     await service.bootIfPaired();
@@ -807,7 +807,7 @@ describe("PeerService at boot", () => {
       loads++;
       throw new Error("loaded");
     });
-    const realBind = defaultPeerServiceDeps(() => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null).bindEndpoint;
+    const realBind = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null).bindEndpoint;
     for (const setup of [async () => {}, async () => {
       await mkdir(peerDir(), { recursive: true });
       await writeFile(peersFile(), "[]\n");

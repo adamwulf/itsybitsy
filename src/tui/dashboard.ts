@@ -4117,10 +4117,13 @@ export async function launchDashboard(): Promise<void> {
   // agent-types dir must exist before ensureSystemCoordinator() — it reads system-coordinator.md to resolve its model.
   await ensureAgentTypesDir();
   // Kept so the Remote Control light can re-read the settings file this launch writes.
+  const dashboard = new DashboardComponent();
   const coordinatorStartup = ensureSystemCoordinator().catch((err) => {
     // Fires asynchronously — may resolve after the TUI has mounted, so
     // route through logWarning to avoid corrupting the dashboard.
-    logWarning(`System coordinator startup failed: ${err instanceof Error ? err.message : String(err)}`);
+    const message = `System coordinator startup failed: ${err instanceof Error ? err.message : String(err)}`;
+    logWarning(message);
+    dashboard.setNotice(message, "error");
   });
   logToWatchLog(`[startup] coordinator ref acquired and agent types ensured (+${Date.now() - bootStart}ms)`);
 
@@ -4185,7 +4188,6 @@ export async function launchDashboard(): Promise<void> {
    *  token: on a wake the poll loop and a retrying boot reconnect at once. */
   const telegramWake = tgToken !== "" ? new WakeDetector({ log: logToWatchLog }) : null;
 
-  const dashboard = new DashboardComponent();
   // The first segment of every local agent key (SPEC §17.1): read from
   // ~/.itsybitsy/machine-name, or set once from the computer name. Before the
   // layout, so favorites and the first selection use it.
@@ -4242,7 +4244,7 @@ export async function launchDashboard(): Promise<void> {
   // The trusted link answers peers from the watcher's last fully detected
   // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
   // and never carries a state that detection has not filled in yet.
-  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () =>
+  const peerService = new PeerService(defaultPeerServiceDeps(machine, logToWatchLog, () =>
     peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [],
       dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message)));
   dashboard.setPeerService(peerService);

@@ -1036,12 +1036,20 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // must finish revocation (or exit) before it can display another prompt.
   const revoke = `tmux set-option -pu -t "$TMUX_PANE" ${COORDINATOR_PANE_MARKER}`
     + ` && tmux set-option -u -t "$TMUX_PANE" ${COORDINATOR_PANE_ID} || exit`;
-  await coordinatorSpawnCtx.run([
+  const launch = await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", target, claudeCmd, `; ${revoke}`,
     ";", "set-option", "-F", "-t", target, COORDINATOR_PANE_ID, "#{pane_id}",
     ";", "set-option", "-p", "-t", target, COORDINATOR_PANE_MARKER, "1",
     ";", "send-keys", "-t", target, "Enter",
   ]);
+
+  if (launch.exitCode !== 0) {
+    const message = `Failed to launch and mark the system coordinator pane: ${launch.stderr || "tmux command failed"}`;
+    logToWatchLog(`[coordinator] ${message}`);
+    // The launch queue may have installed only part of the capture metadata.
+    await coordinatorSpawnCtx.run(["tmux", "set-option", "-u", "-t", target, COORDINATOR_PANE_ID]);
+    throw new Error(message);
+  }
 
   // Wait for Claude's UI to be ready so the resume-failure fallback below
   // can detect the case where `claude --resume` never reaches the marker

@@ -60,34 +60,13 @@ export function expandTabs(s: string): string {
 
 /** Capture logical lines with link targets for a dashboard pane. */
 export async function captureDisplayPane(session: string, lines = 200): Promise<string | null> {
-  return captureDisplayTarget(tmuxSessionTarget(session), lines);
-}
-
-export const COORDINATOR_PANE_ID = "@ib-system-coordinator-pane-id";
-export const COORDINATOR_PANE_MARKER = "@ib-system-coordinator";
-
-/** Only the pane marked by the coordinator launch may leave this machine. */
-export async function captureMarkedCoordinatorPane(session: string, timeoutMs = 5_000): Promise<string | null> {
   const target = tmuxSessionTarget(session);
-  const listing = await readDisplayCommand(["tmux", "list-panes", "-s", "-t", target,
-    "-F", `#{pane_id} #{${COORDINATOR_PANE_MARKER}}`,
-    ";", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID], timeoutMs);
-  if (listing === null) return null;
-  // show-options reads the session's launch record at its own scope, even
-  // when a pane carries an inherited or copied marker.
-  const lines = listing.replace(/\n$/, "").split("\n");
-  const id = lines.pop()!;
-  const marked = lines.filter(line => /^%\d+ 1$/.test(line));
-  if (!/^%\d+$/.test(id) || marked.length !== 1 || marked[0] !== `${id} 1`) return null;
-  // Check again within the tmux command queue: the CLI may have exited
-  // between listing the panes and issuing this capture.
-  const text = await readDisplayCommand(["tmux", "if-shell", "-F", "-t", id,
-    `#{==:#{${COORDINATOR_PANE_MARKER}},1}`,
-    `capture-pane -t ${id} -p -e -J -S -200 -E -`], timeoutMs);
-  return text || null;
+  const proc = spawnCtx.runner(["tmux", ...displayCaptureArgs(target, lines)], { stdout: "pipe", stderr: "pipe" });
+  const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited, new Response(proc.stderr).text()]);
+  return code === 0 ? text : null;
 }
 
-async function captureDisplayTarget(target: string, lines: number, timeoutMs?: number): Promise<string | null> {
+function displayCaptureArgs(target: string, lines: number): string[] {
   // -J joins tmux's soft-wrapped continuation lines back into one logical
   // line (it preserves program-emitted \n, only rejoining lines tmux itself
   // wrapped). We reflow ourselves in the display path (wordWrapLines) so the
@@ -97,21 +76,42 @@ async function captureDisplayTarget(target: string, lines: number, timeoutMs?: n
   // -e is the only way to read a hyperlink's target: without it a Markdown
   // link captures as just its label. keepAllowedLinks removes everything else
   // -e adds.
-  return readDisplayCommand(
-    ["tmux", "capture-pane", "-t", target, "-p", "-e", "-J", "-S", `-${lines}`, "-E", "-"], timeoutMs,
-  );
+  return ["capture-pane", "-t", target, "-p", "-e", "-J", "-S", `-${lines}`, "-E", "-"];
 }
 
-async function readDisplayCommand(cmd: string[], timeoutMs?: number): Promise<string | null> {
+export const COORDINATOR_PANE_ID = "@ib-system-coordinator-pane-id";
+export const COORDINATOR_PANE_MARKER = "@ib-system-coordinator";
+
+/** Only the pane marked by the coordinator launch may leave this machine. */
+export async function captureMarkedCoordinatorPane(session: string, machine: string, timeoutMs = 5_000): Promise<string | null> {
+  const target = tmuxSessionTarget(session);
+  const listing = await readCoordinatorCommand(["tmux", "list-panes", "-s", "-t", target,
+    "-F", `#{pane_id} #{${COORDINATOR_PANE_MARKER}}`,
+    ";", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID], timeoutMs);
+  if (listing.code !== 0 && /^(?:can't find session:|no server running on|error connecting to .*No such file or directory)/i.test(listing.error.trim())) return null;
+  const unverified = `Unverified coordinator pane; restart the system coordinator on ${machine}`;
+  if (listing.code !== 0) throw new Error(unverified);
+  // show-options reads the session's launch record at its own scope, even
+  // when a pane carries an inherited or copied marker.
+  const lines = listing.text.replace(/\n$/, "").split("\n");
+  const id = lines.pop()!;
+  const marked = lines.filter(line => /^%\d+ 1$/.test(line));
+  if (!/^%\d+$/.test(id) || marked.length !== 1 || marked[0] !== `${id} 1`) throw new Error(unverified);
+  // Check again within the tmux command queue: the CLI may have exited
+  // between listing the panes and issuing this capture.
+  const capture = await readCoordinatorCommand(["tmux", "if-shell", "-F", "-t", id,
+    `#{==:#{${COORDINATOR_PANE_MARKER}},1}`,
+    displayCaptureArgs(id, 200).join(" ")], timeoutMs);
+  if (capture.code !== 0 || !capture.text) throw new Error(unverified);
+  return capture.text;
+}
+
+async function readCoordinatorCommand(cmd: string[], timeoutMs: number) {
   const proc = spawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe" });
-  if (timeoutMs === undefined) {
-    const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited, new Response(proc.stderr).text()]);
-    return code === 0 ? text : null;
-  }
   const stdout = proc.stdout?.getReader();
   const stderr = proc.stderr?.getReader();
   const read = Promise.all([readPipe(stdout), proc.exited, readPipe(stderr)])
-    .then(([text, code]) => code === 0 ? text : null);
+    .then(([text, code, error]) => ({ text, code, error }));
   // Remote lookup and capture each get 5 s, under the 15 s wire deadline together.
   const deadline = Promise.withResolvers<never>();
   const timer = setTimeout(() => deadline.reject(new Error("Coordinator capture timed out")), timeoutMs);

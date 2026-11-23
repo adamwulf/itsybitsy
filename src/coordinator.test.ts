@@ -526,6 +526,15 @@ describe("ensureSystemCoordinator", () => {
     expect(await proc.exited).toBe(0);
   });
 
+  test("reports and logs a tmux failure while installing the coordinator pane marker", async () => {
+    const router = createCommandRouter({ "has-session": { exitCode: 1 } });
+    coordinatorSpawnCtx.set((cmd, opts) => cmd.includes("@ib-system-coordinator")
+      ? { stdout: emptyStream(), stderr: mockStream("could not mark pane"), exited: Promise.resolve(1) }
+      : router(cmd, opts));
+    await expect(ensureSystemCoordinator()).rejects.toThrow("Failed to launch and mark the system coordinator pane: could not mark pane");
+    expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain("could not mark pane");
+  });
+
   test("logs the resolved model and its source layer on spawn", async () => {
     coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 1 } }));
     await ensureSystemCoordinator();

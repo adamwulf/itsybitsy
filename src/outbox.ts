@@ -138,12 +138,10 @@ export function outboxLockPath(dir: string): string {
   return join(dir, OUTBOX_LOCK_FILENAME);
 }
 
-async function openQueue(parent: string, append: boolean) {
-  const path = outboxPath(parent);
+async function openVerifiedRecord(path: string, access: number) {
   const before = await lstat(path).catch(err => { if (err.code !== "ENOENT") throw err; });
   const invalid = () => new Error("Expected a single-link regular outbox queue file");
   if (before && (!before.isFile() || before.nlink !== 1)) throw invalid();
-  const access = append ? constants.O_RDWR | constants.O_APPEND | constants.O_CREAT : constants.O_RDONLY;
   const file = await open(path, access | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
   try {
     const opened = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true });
@@ -176,7 +174,7 @@ export async function enqueueOutbox(
 ): Promise<OutboxMessage> {
   try {
     return await withQueueMutation(dir, reservedKey === undefined, signal, async parent => {
-      const file = await openQueue(parent, true);
+      const file = await openVerifiedRecord(outboxPath(parent), constants.O_RDWR | constants.O_APPEND | constants.O_CREAT);
       try { return await appendRecord(file); } finally { await file.close(); }
     });
   } catch (err) {
@@ -228,7 +226,7 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
 }
 
 async function readPinnedQueue(parent: string) {
-  const file = await openQueue(parent, false);
+  const file = await openVerifiedRecord(outboxPath(parent), constants.O_RDONLY);
   try { return parseQueue(await file.readFile("utf8")); }
   finally { await file.close(); }
 }
@@ -398,66 +396,30 @@ export async function acquireOutboxLock(dir: string, opts?: AcquireLockOpts): Pr
   for (;;) {
     const token = crypto.randomUUID();
     try {
-      const handle = await open(path, "wx");
-      try {
-        await handle.writeFile(lockBody(token));
-      } finally {
-        await handle.close();
-      }
-      return { dir, path, token };
-    } catch (err: unknown) {
-      const code = (err as { code?: string })?.code;
-      if (code !== "EEXIST") {
-        // Unexpected error (e.g. dir missing) — treat as un-acquirable.
-        return null;
-      }
-      // Held by someone. Optionally steal if stale.
-      if (opts?.steal) {
-        try {
-          const st = await stat(path);
-          if (now() - st.mtimeMs > staleMs) {
-            // Steal: read the current token so we only remove the lock we
-            // observed as stale (don't unlink a fresh lock a third party may
-            // have just created in the race window). The subsequent O_EXCL
-            // open is the real arbiter — a racing stealer loses with EEXIST
-            // and retries.
-            let staleToken: string | null = null;
-            try {
-              staleToken = tokenFromBody(await readFile(path, "utf-8"));
-            } catch {
-              /* lock vanished — retry immediately */
-              continue;
+      const state = await withQueueMutation(dir, false, undefined, async parent => {
+        const entry = outboxLockPath(parent);
+        let file: FileHandle;
+        try { file = await open(entry, "wx", 0o600); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const held = await openVerifiedRecord(entry, constants.O_RDONLY);
+          try {
+            if (opts?.steal && now() - (await held.stat()).mtimeMs > staleMs) {
+              await unlink(entry);
+              return "retry";
             }
-            await unlinkIfToken(path, staleToken);
-            continue; // retry immediately after steal attempt
-          }
-        } catch {
-          /* lock vanished between EEXIST and stat — retry immediately */
-          continue;
+            return "held";
+          } finally { await held.close(); }
         }
-      }
-    }
+        try { await file.writeFile(lockBody(token)); }
+        finally { await file.close(); }
+        return "acquired";
+      });
+      if (state === "acquired") return { dir, path, token };
+      if (state === "retry") continue;
+    } catch { return null; }
     if (now() >= deadline) return null;
     await sleep(backoffMs);
-  }
-}
-
-/**
- * Remove the lock file ONLY if its on-disk token still matches `token`. This
- * is the ownership guard shared by release and steal: it prevents deleting a
- * lock that has since been re-created by a different holder.
- */
-async function unlinkIfToken(path: string, token: string): Promise<void> {
-  try {
-    const body = await readFile(path, "utf-8");
-    if (tokenFromBody(body) !== token) return; // not our lock anymore — leave it
-  } catch {
-    return; // already gone
-  }
-  try {
-    await unlink(path);
-  } catch {
-    /* raced with another release/steal — fine */
   }
 }
 
@@ -469,5 +431,13 @@ async function unlinkIfToken(path: string, token: string): Promise<void> {
  */
 export async function releaseOutboxLock(lock: OutboxLock | null): Promise<void> {
   if (!lock) return;
-  await unlinkIfToken(lock.path, lock.token);
+  try {
+    await withQueueMutation(lock.dir, false, undefined, async parent => {
+      const path = outboxLockPath(parent);
+      const file = await openVerifiedRecord(path, constants.O_RDONLY);
+      try {
+        if (tokenFromBody(await file.readFile("utf8")) === lock.token) await unlink(path);
+      } finally { await file.close(); }
+    });
+  } catch { /* Already gone or invalid. Leave an unverifiable entry alone. */ }
 }

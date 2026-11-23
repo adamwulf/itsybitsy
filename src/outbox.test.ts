@@ -38,6 +38,19 @@ describe("outbox queue", () => {
     expect(await readFile(target, "utf8")).toBe("original");
   });
 
+  test.each(["symlink", "FIFO"])("a %s delivery lock is never read, stolen or released", async kind => {
+    const target = join(dir, "other");
+    const path = outboxLockPath(dir);
+    await writeFile(target, "1:token");
+    if (kind === "symlink") await fs.symlink(target, path);
+    else expect(Bun.spawnSync(["mkfifo", path]).exitCode).toBe(0);
+    expect(await acquireOutboxLock(dir, { steal: true, staleMs: -1, timeoutMs: 0 })).toBeNull();
+    await releaseOutboxLock({ dir, path, token: "token" });
+    const info = await fs.lstat(path);
+    expect(kind === "symlink" ? info.isSymbolicLink() : info.isFIFO()).toBe(true);
+    expect(await readFile(target, "utf8")).toBe("1:token");
+  });
+
   test.each(["", "\n", "\n{broken"])("appending after a legacy record with tail %j preserves both complete records", async tail => {
     await writeFile(outboxPath(dir), JSON.stringify({ id: "old", message: "legacy", raw: false, fromAgent: "" }) + tail);
     await enqueueOutbox(dir, { id: "new", message: "new", fromAgent: "", raw: false });

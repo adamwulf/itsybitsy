@@ -116,7 +116,9 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
   } catch (error) { await cleanup(); throw error; }
 }
 
-/** Shared across this watcher's inbound connections. Concurrent replays await the first enqueue. */
+/** Shared across this watcher's inbound connections. Concurrent replays await the first enqueue.
+ * Dashboard and CLI submissions mint a new wire ID. No sender reopens a stream
+ * for that ID, and claim recovery reports an unknown outcome without resending. */
 export function createMessageReceiver(log: (line: string) => void, notice: (line: string) => void, now = () => performance.now(), capacity = 4096,
   storage: ReceiveStorage = { tempDir: "/tmp", hasFreeSpace },
   reservations = storage.tempDir === "/tmp" ? watcherTmpReservations : new VolumeReservations(),

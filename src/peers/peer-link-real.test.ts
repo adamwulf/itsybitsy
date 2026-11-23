@@ -21,6 +21,7 @@ import { generatePairCode } from "./pair-code";
 import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer-link";
 import type { RemoteSpawnDeps } from "./new-agent";
 import { createMessageReceiver } from "./receive-message";
+import { spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
 import { makeSpawnResult } from "../test-utils";
@@ -35,6 +36,7 @@ afterEach(async () => {
   for (const service of services.splice(0)) await service.shutdown();
   resetUserHome();
   resetSendSpawnRunner();
+  paneProbe.reset();
   for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true });
 });
 
@@ -255,6 +257,7 @@ test("agents send text in both directions over real paired endpoints", async () 
   const a = await net.makeSide("a", [localAgent("alice")]);
   const b = await net.makeSide("b", [localAgent("bob")]);
   setSendSpawnRunner(() => makeSpawnResult());
+  paneProbe.set(() => makeSpawnResult(0, "0"));
   for (const [side, agent] of [[a, "alice"], [b, "bob"]] as const) {
     const repo = join(side.home, "app");
     const dir = join(repo, ".itsybitsy", "agents", agent);

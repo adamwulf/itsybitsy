@@ -6,6 +6,7 @@ import { setUserHome, resetUserHome } from "../home";
 import { drainOutbox, resetSendSpawnRunner, setSendSpawnRunner } from "../ib-commands";
 import { resetSystemCoordinatorHasSessionFn, setSystemCoordinatorHasSessionFn } from "../index";
 import { makeAgent, makeSpawnResult } from "../test-utils";
+import { spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
 import { createMemoryLink } from "./test-pair-transport";
@@ -35,10 +36,12 @@ beforeEach(async () => {
   lines = [];
   receiver = createMessageReceiver(() => {}, line => lines.push(line));
   setSendSpawnRunner(() => makeSpawnResult());
+  paneProbe.set(() => makeSpawnResult(0, "0"));
 });
 afterEach(async () => {
   resetSystemCoordinatorHasSessionFn();
   resetSendSpawnRunner();
+  paneProbe.reset();
   resetUserHome();
   await cli.cleanup();
 });
@@ -107,7 +110,9 @@ test("unknown, stopped, unpaired and attachment sends are refused before queuein
   expect(await exchange(header({ files }))).toEqual({ ok: false, error: "attachments are not supported yet" });
   let checks = 0;
   expect(await exchange(header(), async () => ++checks < 4 ? "desk" : null)).toMatchObject({ ok: false, error: expect.stringContaining("not a peer") });
-  setSendSpawnRunner(() => makeSpawnResult(1));
+  paneProbe.set(() => makeSpawnResult(0, "1\n1"));
+  expect(await exchange(header())).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
+  paneProbe.set(() => makeSpawnResult(1, "", "no such session"));
   expect(await exchange(header())).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
   expect(lines).toEqual([]);
   expect(await readOutbox(join(cli.home, ".itsybitsy", "agents", "worker"))).toEqual([]);

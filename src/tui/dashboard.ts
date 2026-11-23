@@ -67,7 +67,7 @@ import type { Team } from "../teams";
 import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH,
-  handleDialogInput, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
+  handleDialogInput, syncNewAgentMachine, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
   buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
 import {
@@ -503,6 +503,7 @@ class StatusBarComponent implements Component {
    * would refuse.
    */
   remoteSelected = false;
+  remoteRepoSelected = false;
   hasResolvableWarnings = false;
 
   invalidate(): void {}
@@ -528,7 +529,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       row1Left = `${DIM}j/k: select    J/K: repo    p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers    (read-only remote agent)${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -838,6 +839,7 @@ export class DashboardComponent implements Component {
    * sets the real one (src/peers/service.ts); a dashboard built in a test has
    * none unless the test sets a fake, so no test can bind a real endpoint.
    */
+  remoteStartPending = false;
   peerService: PeersDialogService | null = null;
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
@@ -1858,6 +1860,11 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
+  remoteAgentStarted(message: string): void {
+    this.setNotice(message, "info");
+    void this.watcher?.refresh();
+  }
+
   /** Poll updates can affect the unified tree, a remote selection, and the Peers dialog. */
   setPeerService(service: PeersDialogService): void {
     this.peerService = service;
@@ -1867,7 +1874,8 @@ export class DashboardComponent implements Component {
       if (dialog?.type === "peers") {
         syncPeersDialog(dialog);
         this.tui?.requestRender();
-      } else if (changed) {
+      } else if (changed || dialog?.type === "new-agent-form") {
+        if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
         this.tui?.requestRender();
       }
     });
@@ -1913,9 +1921,8 @@ export class DashboardComponent implements Component {
   private refuseOnRemoteRow(key: string): boolean {
     const remote = this.remoteSelection;
     if (remote === null || isRemoteAllowedKey(key)) return false;
-    this.setNotice(remote.kind === "remote-repo-header" && key === "a"
-      ? "Starting agents on another machine comes in the next phase"
-      : REMOTE_READ_ONLY_NOTICE, "error");
+    if (remote.kind === "remote-repo-header" && key === "a") return false;
+    this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
 
@@ -2311,6 +2318,7 @@ export class DashboardComponent implements Component {
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
     this.statusBar.remoteSelected = remote !== null;
+    this.statusBar.remoteRepoSelected = remote?.kind === "remote-repo-header";
 
     // Wire info panel
     this.infoPanel.agent = selected;
@@ -4193,7 +4201,7 @@ export async function launchDashboard(): Promise<void> {
   // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
   // and never carries a state that detection has not filled in yet.
   const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () =>
-    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [])));
+    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? []), message => dashboard.remoteAgentStarted(message)));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read
@@ -4290,7 +4298,7 @@ export async function launchDashboard(): Promise<void> {
   });
 
   const typePickerKeyboard = new TypePickerKeyboard(terminal, () =>
-    dashboard.dialog?.type === "new-agent-form" && dashboard.dialog.focused === "agentType");
+    dashboard.dialog?.type === "new-agent-form" && (dashboard.dialog.focused === "agentType" || dashboard.dialog.focused === "machine"));
   const stopTerminal = installTerminalCleanup(() => {
     typePickerKeyboard.stop();
     tui.stop();

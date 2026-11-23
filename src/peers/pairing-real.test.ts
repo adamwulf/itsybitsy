@@ -52,6 +52,7 @@ test("two real loopback endpoints pair, and each peers.json ends up with the oth
     const home = await mkdtemp(join(tmpdir(), `ib-pair-real-${label}-`));
     homes.push(home);
     const service = new PeerService({
+      remoteStartDenial: null,
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
       loadIdentity: () => inHome(home, loadOrCreateIdentity),

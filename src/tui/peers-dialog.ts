@@ -14,6 +14,7 @@
 import { matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { describePairFailure } from "../peers/pairing";
 import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peers/pair-code";
+import type { RemoteNewAgentRequest } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
 import { peerNameProblem, shortPeerId } from "../peers/store";
@@ -25,7 +26,9 @@ import { wordWrapSingleLine, wrapSingleLine } from "./wrap";
 
 /** What the dialog needs from the endpoint service (src/peers/service.ts PeerService). */
 export interface PeersDialogService {
+  readonly remoteStartDenial: string | null;
   view(): PeerServiceView;
+  startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;
   openDialog(): void;
   closeDialog(): void;
   /** Start pairing with the typed id; returns the inline error, or null once started. */

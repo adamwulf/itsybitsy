@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, spyOn } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, mock, spyOn } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, readdir, realpath, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -24,7 +24,7 @@ import type { TeamFlatEntry } from "./teams-tree";
 import { PANE_MODES, FULL_WIDTH_MODES, type PaneMode } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
-import { DIALOG_WIDTH } from "./dialog-handler";
+import { DIALOG_WIDTH, buildNewAgentFormContent } from "./dialog-handler";
 import { newRepoPrompt } from "./agent-actions";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
@@ -9150,6 +9150,8 @@ const PEERS_OTHER = "0a".repeat(32);
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
+  remoteStartDenial: string | null = null;
+  startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
   state: PeerServiceView = {
     status: { kind: "listening" },
     selfId: PEERS_SELF,
@@ -10140,6 +10142,246 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test.each([0, 1, 2])("new-agent form with %i connected matching peers", count => {
+    const dashboard = makeDashboard();
+    dashboard.setRepos([{ path: "/local/project", name: "App", nickname: "Project" }]);
+    const service = new FakePeerService();
+    const linked = links().map((link, index) => ({ ...link, repos: repos("aPP"), connected: index < count }));
+    service.set({ links: [...linked, { ...linked[0]!, id: "other", connected: true, repos: repos("Project") }] });
+    dashboard.setPeerService(service);
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    const text = () => stripAnsi(buildNewAgentFormContent(form, 70).contentLines.join("\n"));
+    expect(form.machine).toEqual({ id: null, name: "This machine" });
+    expect(text().includes("Machine:")).toBe(count > 0);
+    expect(text()).not.toContain("Attachments");
+    expect(form.machines().map(m => m.id)).toEqual([null, ...linked.slice(0, count).map(l => l.id)]);
+    dashboard.handleInput("\t");
+    expect(form.focused).toBe(count ? "machine" : "agentType");
+    if (!count) return;
+    const types = [...form.availableTypes];
+    dashboard.handleInput(" ");
+    expect(form.machine?.id).toBe(PEER_B);
+    expect(text()).toContain("Attachments are not sent to Laptop B");
+    expect(form.availableTypes).toEqual(types);
+    dashboard.handleInput("\x1b[D");
+    expect(form.machine?.id).toBeNull();
+    dashboard.handleInput("\x1b[D");
+    expect(form.machine?.id).toBe(count === 1 ? PEER_B : PEER_C);
+    dashboard.handleInput("\r");
+    expect(form.machine?.id).toBeNull();
+  });
+
+  test("a on a remote-only header starts on its first connected peer, preserves the draft on failure and submits once", async () => {
+    const { dashboard, service } = setup();
+    const [b, c] = links();
+    service.set({ links: [{ ...b!, connected: false }, { ...c!, repos: repos("itsybitsy"), connected: true }] });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    expect(form.machine).toEqual({ id: PEER_C, name: "Laptop C" });
+    expect(form.machines().map(m => m.id)).toEqual([PEER_C]);
+    form.name = "builder";
+    form.agentType = "worker";
+    const prompt = `Inspect ${import.meta.path}`;
+    form.buffer.handleInput("\x1b[200~" + prompt + "\x1b[201~");
+    form.focused = "create";
+    const start = spyOn(service, "startRemoteAgent").mockRejectedValueOnce(new Error("Type unavailable"));
+    dashboard.handleInput("\r");
+    await waitFor(() => form.error === "Remote start on Laptop C: Type unavailable");
+    expect(dashboard.dialog).toBe(form);
+    expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain("Type unavailable");
+    expect(form.buffer.getText()).toBe(prompt);
+    const longId = "builder-" + "w".repeat(240);
+    start.mockResolvedValue(longId);
+    dashboard.handleInput("\r");
+    dashboard.handleInput("\r");
+    await waitFor(() => dashboard.dialog === null);
+    expect(start.mock.calls).toEqual(Array(2).fill([PEER_C, { repo: "itsybitsy", type: "worker", name: "builder", prompt }]));
+    expect(dashboard.notice).toBe(`Created agent ${longId.slice(0, 79)}… on Laptop C`);
+  });
+
+  test.each(["failure first", "peer update first"])("renders both the original peer failure and the new machine (%s)", async order => {
+    const { dashboard, service } = setup();
+    const [b, c] = links();
+    const replacement = { ...c!, repos: repos("itsybitsy"), connected: true };
+    service.set({ links: [b!, replacement] });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    const pending = Promise.withResolvers<string>();
+    spyOn(service, "startRemoteAgent").mockReturnValue(pending.promise);
+    form.onSubmit("", "worker", "hello");
+    if (order === "peer update first") service.set({ links: [replacement] });
+    pending.reject(new Error("Type unavailable"));
+    await waitFor(() => !dashboard.remoteStartPending);
+    if (order === "failure first") service.set({ links: [replacement] });
+    form.focused = "agentType";
+    dashboard.handleInput(" ");
+    const rendered = buildNewAgentFormContent(form, 80).contentLines.map(stripAnsi);
+    expect(rendered).toContain("Remote start on Laptop B: Type unavailable");
+    expect(rendered).toContain("Machine changed to Laptop C. Review before creating the agent.");
+  });
+
+  test("the pending remote start status fits the 66-column form", async () => {
+    const { dashboard, service } = setup();
+    const name = "界".repeat(16);
+    service.set({ links: [{ ...links()[0]!, name }] });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    const pending = Promise.withResolvers<string>();
+    spyOn(service, "startRemoteAgent").mockReturnValue(pending.promise);
+    const submitted = form.onSubmit("", "worker", "hello");
+    const lines = buildNewAgentFormContent(form, 66).contentLines;
+    expect(lines.map(stripAnsi).join(" ")).toContain(`Starting agent on ${name}… (Esc to dismiss)`);
+    expect(Math.max(...lines.map(visibleWidth))).toBeLessThanOrEqual(66);
+    pending.resolve("worker");
+    await submitted;
+  });
+
+  test.each(["success", "failure"])("a detached %s is reported without replacing the next dialog", async outcome => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const first = assertDialog(dashboard.dialog, "new-agent-form");
+    const pending = Promise.withResolvers<string>();
+    const start = spyOn(service, "startRemoteAgent").mockReturnValue(pending.promise);
+    first.onSubmit("builder", "worker", "hello");
+    dashboard.handleInput("\x1b");
+    expect(dashboard.dialog).toBeNull();
+    dashboard.handleInput("a");
+    const second = assertDialog(dashboard.dialog, "new-agent-form");
+    second.onSubmit("", "worker", "another draft");
+    const rendered = () => buildNewAgentFormContent(second, 70).contentLines.map(stripAnsi).join(" ");
+    expect(rendered()).toContain("already pending");
+    expect(start).toHaveBeenCalledTimes(1);
+    if (outcome === "success") pending.resolve("builder");
+    else pending.reject(new Error("spawn failed"));
+    await waitFor(() => !dashboard.remoteStartPending);
+    expect(dashboard.dialog).toBe(second);
+    expect(dashboard.notice).toBe(outcome === "success" ? "Created agent builder on Laptop B" : "Remote start on Laptop B: spawn failed");
+    expect(rendered()).not.toContain("already pending");
+    start.mockResolvedValueOnce("second-agent");
+    second.buffer.handleInput("x");
+    second.focused = "create";
+    dashboard.handleInput("\r");
+    await waitFor(() => dashboard.dialog === null);
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(dashboard.notice).toBe("Created agent second-agent on Laptop B");
+  });
+
+  test("an open remote form shows the startup check and enables Create when the decision allows it", async () => {
+    const { dashboard, service } = setup();
+    service.remoteStartDenial = "checking whether remote starts are allowed";
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    form.buffer.handleInput("x");
+    const rendered = () => buildNewAgentFormContent(form, 70).contentLines.map(stripAnsi).join(" ");
+    const start = spyOn(service, "startRemoteAgent").mockResolvedValue("builder");
+    expect(rendered()).toContain("checking whether remote starts are allowed");
+    await form.onSubmit("", "worker", "x");
+    expect(start).not.toHaveBeenCalled();
+    service.remoteStartDenial = null;
+    service.set({});
+    expect(rendered()).not.toContain("checking whether remote starts are allowed");
+    form.focused = "create";
+    dashboard.handleInput("\r");
+    await waitFor(() => dashboard.dialog === null);
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  test("a denied remote-start decision is displayed and prevents form submission", () => {
+    const { dashboard, service } = setup();
+    service.remoteStartDenial = "Remote starts require an interactive terminal";
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    form.buffer.handleInput("x");
+    expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain(service.remoteStartDenial);
+    const start = spyOn(service, "startRemoteAgent");
+    form.focused = "create";
+    dashboard.handleInput("\r");
+    form.onSubmit("", "worker", "x");
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  test("losing the selected peer on a shared repo makes the local replacement visible", () => {
+    const dashboard = makeDashboard();
+    dashboard.setRepos([{ name: "itsybitsy", path: "/local/project" }]);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    service.set({ links: links() });
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    dashboard.handleInput("\t");
+    dashboard.handleInput(" ");
+    expect(form.machine?.id).toBe(PEER_B);
+    form.focused = "create";
+    service.set({ links: [] });
+    expect(form.machine).toEqual({ id: null, name: "This machine" });
+    const text = buildNewAgentFormContent(form, 70).contentLines.join(" ");
+    expect(text).toContain("Machine changed to This machine");
+    expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("agentType");
+  });
+
+  test("an incoming successful start requests a watcher refresh without waiting for the scan", () => {
+    const dashboard = makeDashboard();
+    const scan = Promise.withResolvers<void>();
+    const refresh = mock(() => scan.promise);
+    dashboard.watcher = { refresh } as unknown as NonNullable<DashboardComponent["watcher"]>;
+    expect(dashboard.remoteAgentStarted("Laptop B started agent builder in app")).toBeUndefined();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(dashboard.notice).toBe("Laptop B started agent builder in app");
+    scan.resolve();
+  });
+
+  test("peer updates keep the open draft, reconcile by id, and disable Create when its last host vanishes", () => {
+    const { dashboard, service } = setup();
+    const [b, c] = links();
+    const second = { ...c!, connected: true, repos: repos("itsybitsy") };
+    service.set({ links: [b!, second] });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    form.buffer.handleInput("x");
+    service.set({ links: [second, { ...b!, name: "Renamed" }] });
+    expect(form.machine).toEqual({ id: PEER_B, name: "Renamed" });
+    form.focused = "create";
+    service.set({ links: [second, { ...b!, connected: false }] });
+    expect(form.machine?.id).toBe(PEER_C);
+    expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("machine");
+    expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain("Machine changed to Laptop C");
+    service.set({ links: [{ ...second, repos: [] }] });
+    expect(form.machine).toBeNull();
+    expect(form.buffer.getText()).toBe("x");
+    expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain("No connected machine");
+    const start = spyOn(service, "startRemoteAgent");
+    form.focused = "cancel";
+    dashboard.handleInput("\t");
+    expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("name"); // disabled Create is skipped
+    form.onSubmit("", "worker", "x");
+    expect(start).not.toHaveBeenCalled();
+    service.set({ links: [b!] });
+    expect(form.machine?.id).toBe(PEER_B);
+    expect(assertDialog(dashboard.dialog, "new-agent-form").focused).toBe("machine");
+    // A change unseen by the listener must still be reconciled before submission.
+    service.state.links = [second];
+    form.onSubmit("", "worker", "x");
+    expect(start).not.toHaveBeenCalled();
+    expect(form.machine?.id).toBe(PEER_C);
+    expect(form.buffer.getText()).toBe("x");
+  });
+
+  test("a on a disconnected remote-only header identifies the unavailable repo", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, repoKey("app"));
+    dashboard.handleInput("a");
+    expect(dashboard.dialog).toBeNull();
+    expect(dashboard.notice).toBe("No connected machine has app");
+  });
+
   test("all non-allowlisted keys are refused on a remote-only header before dispatch", () => {
     const key = repoKey("itsybitsy");
     const { dashboard } = setup();
@@ -10149,10 +10391,10 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => !isRemoteAllowedKey(k))) {
+      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => k !== "a" && !isRemoteAllowedKey(k))) {
         resetNotice(dashboard);
         dashboard.handleInput(k);
-        expect(dashboard.notice).toBe(k === "a" ? "Starting agents on another machine comes in the next phase" : REMOTE_READ_ONLY_NOTICE);
+        expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
         expect(dashboard.dialog).toBeNull();
       }
       for (const handler of handlers) expect(handler).not.toHaveBeenCalled();

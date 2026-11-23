@@ -155,7 +155,12 @@ function makeMockCtx(overrides?: {
     overrides?.activeSelectionSource ?? "agents";
   let leftWidth = overrides?.leftWidth ?? 60;
 
+  let currentDialog: DialogState = null;
   const ctx: ActionCtx = {
+    remoteStartPending: false,
+    get dialog() { return currentDialog; },
+    peerService: null,
+    remoteSelection: null,
     agentTree: {
       selectedAgent: overrides?.agent ?? null,
       selectedRepoHeader: overrides?.repoHeader ?? null,
@@ -238,9 +243,10 @@ function makeMockCtx(overrides?: {
     // Dashboard methods depend on their receiver; arrow stubs hide unbound callbacks.
     showDialog(d: NonNullable<DialogState>) {
       expect(this).toBe(ctx);
+      currentDialog = d;
       dialogs.push(d);
     },
-    closeDialog() { expect(this).toBe(ctx); },
+    closeDialog() { expect(this).toBe(ctx); currentDialog = null; },
     setNotice(text: string, _kind: "info" | "error") {
       expect(this).toBe(ctx);
       notices.push(text);

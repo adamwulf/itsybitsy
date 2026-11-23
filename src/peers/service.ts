@@ -61,6 +61,7 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
+import { remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
@@ -81,7 +82,11 @@ import {
   type PairStage,
   type PairStream,
 } from "./pairing";
-import { PEER_ALPN, serveTrustedConnection, type PeerSnapshot } from "./peer-link";
+import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
+import { newAgent } from "../ib-commands";
+import { listSpawnableTypeNamesSync } from "../agent-types";
+import { listRepos } from "../registry";
+import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
@@ -119,6 +124,8 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  remoteStartDenial: string | null | Promise<string | null>;
+  remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[]): void;
   renewLease?(): Promise<void>;
   acquireLock(): Promise<EndpointLockResult>;
@@ -144,8 +151,10 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot): PeerServiceDeps {
+export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
   return {
+    remoteStartDenial,
+    remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
     acquireLock: () => acquireEndpointLock(),
@@ -308,7 +317,22 @@ export class PeerService {
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
 
+  private callerDenial: string | null = "checking whether remote starts are allowed";
+
+  get remoteStartDenial(): string | null {
+    return this.callerDenial;
+  }
+
   constructor(private readonly deps: PeerServiceDeps) {
+    const decision = deps.remoteStartDenial;
+    if (decision === null || typeof decision === "string") {
+      this.callerDenial = decision;
+    } else {
+      void decision.catch(() => "Cannot verify the dashboard caller for remote starts").then(denial => {
+        this.callerDenial = denial;
+        this.notify();
+      });
+    }
     this.poller = new PeerPoller({
       readPeers: async () => {
         await deps.renewLease?.();
@@ -612,6 +636,14 @@ export class PeerService {
     return null;
   }
 
+  async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
+    if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
+    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    return requestNewAgent(conn, request, this.deps.setTimer);
+  }
+
   /** The code typed at A's prompt. */
   submitCode(code: string): void {
     const session = this.active?.session;
@@ -819,8 +851,12 @@ export class PeerService {
         return;
       }
       if (alpn === PEER_ALPN) {
+        const remoteSpawn = this.deps.remoteSpawn;
         await serveTrustedConnection(toPairConnection(conn), {
-          isPeer: (id) => this.isPeer(id),
+          setTimer: this.deps.setTimer,
+          peerName: (id) => this.peerName(id),
+          startAgent: remoteSpawn && ((request, readPeerName) =>
+            acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
           snapshot: this.deps.snapshot,
           log: this.deps.log,
         });
@@ -834,12 +870,12 @@ export class PeerService {
   }
 
   /** The trusted ALPN's allowlist: `peers.json`, re-read on every call. A failed read refuses. */
-  private async isPeer(id: string): Promise<boolean> {
+  private async peerName(id: string): Promise<string | null> {
     try {
-      return (await this.deps.readPeers()).some((peer) => peer.id === id);
+      return (await this.deps.readPeers()).find((peer) => peer.id === id)?.name ?? null;
     } catch (err) {
       this.deps.log(`peer link: could not read peers.json, so refusing: ${errorDetail(err)}`);
-      return false;
+      return null;
     }
   }
 

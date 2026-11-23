@@ -1,6 +1,6 @@
 # iroh peering, next phase: one repo list across machines
 
-Phase 6 built 2026-11-20; 6a/6b merged 2026-11-21. Phase 7 in progress (build plan below); Phase 8 is Adam's two-laptop checklist. This phase follows [iroh-peering.md](iroh-peering.md)
+Phase 6 built 2026-11-20; 6a/6b merged 2026-11-21. Phase 7 implemented 2026-11-21, pending review and full verification outside the sandbox. Phase 8 is Adam's two-laptop checklist. This phase follows [iroh-peering.md](iroh-peering.md)
 Phases 0–4, plus the self-heal and full-id work, all on `agent/iroh-peering`.
 
 It **supersedes** "remote agents shown as tree sections"
@@ -87,7 +87,7 @@ the reply change.
   - Local repo actions (remove, rename, pin, fix, and so on) work only when
     the repo exists on this machine. On a remote-only header they are refused
     with a notice.
-  - In Phase 6, `a` on a remote-only header explains that remote starts come in the next phase. Phase 7 enables the machine picker.
+  - In Phase 7, `a` on a remote-only header opens the machine picker with the first connected host selected.
 - **V filter:** it now applies to remote agent rows too, because they live in
   the main tree (open question 3).
 - **Favorites and Teams tabs** stay local-only.
@@ -108,8 +108,8 @@ the reply change.
   The form says so when a remote machine is selected.
 - **Submitting to a remote machine.** The form sends `new-agent` over the
   trusted link and waits up to 30 s.
-  - On success it closes and shows "Created agent <id> on <peer>". The row
-    appears on the next poll, within 5 s.
+  - On success it closes and shows "Created agent <id> on <peer>". The receiver refreshes its agent list immediately. The row normally appears
+    within a few seconds as polling picks up that refresh.
   - On failure it shows the error.
 
 ### Remote new-agent request
@@ -121,10 +121,9 @@ the reply change.
 - **Responder checks, in order:**
   1. The allowlist, re-checked as for every request.
   2. The repo name is registered here.
-  3. The type exists, is spawnable, and is not `repo-coordinator`. No
-     coordinators are started remotely.
+  3. The type exists, is spawnable, and is neither coordinator type.
   4. The name passes the existing agent-name validation.
-  5. The prompt is non-empty and within the cap.
+  5. The prompt is non-empty and within the cap. The responder rechecks pairing immediately before spawn.
 - **Spawning.** The responder then calls the same
   `newAgent(repo.path, prompt, { type, name })` that pressing `a` in its own
   `ib watch` calls.
@@ -255,7 +254,7 @@ exactly.
     ambiguous across repos; each qualified form; an unknown name; the gate
     agreeing with the command; and notifications reaching the right manager
     and spawner when same-id agents exist in two repos.
-7. **Remote new-agent:**
+7. **Remote new-agent (implemented):**
    - the `new-agent` op and the responder's checks and spawn, with `newAgent`
      injected;
    - the 256 KB request cap for this op;
@@ -272,7 +271,7 @@ exactly.
 
 Each phase gets the usual two-reviewer cycle before it is merged.
 
-### Phase 7 build plan (started 2026-11-21)
+### Phase 7 build plan (implemented 2026-11-21)
 
 Adam's go-ahead came on 2026-11-21, relayed by @system. One Codex worker builds Phase 7 in the order below and commits after each step. Then two Codex reviewers check it, and review rounds continue until a round finds no code issues.
 
@@ -326,15 +325,14 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
    - Set Machine to B, pick a type and type a prompt.
    - A should show "Created agent <id> on <B>".
    - B should show "<A> started agent <id> in <repo>".
-   - The new row should appear in italic on A within about 5 s.
+   - The new row should appear in italic on A within a few seconds.
 7. **Refusals.**
    - A remote start with `repo-coordinator`, or a type that B lacks, should show B's error on A.
    - So should a repo that B does not have. One way to test this: unregister the repo on B while A's form is open.
 8. **Offline.**
-   - Quit `ib watch` on B.
-   - Within a few polls, A should dim B's rows.
-   - A remote start to B should fail within 30 s with a clear error.
-   - Restart B, and A should reconnect without any action.
+   - Open the form on A, select B, enter a draft, then quit `ib watch` on B. After polling detects the disconnect, A should dim B's rows and keep the draft. The form should show the replacement machine, or disable Create if the repo has no connected host.
+   - Restart B and wait for A to reconnect. Submit a remote start to B, then quit B while the request is pending. A should show an error within 30 s.
+   - Restart B again and verify that A reconnects automatically.
 9. **Names.**
    - Create an agent with the same name on both laptops.
    - On A, `ib send <name>` should go to A's own agent, because the same repo comes first.
@@ -365,9 +363,8 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
 1. **Matching: DECIDED (Adam, 2026-11-20).** Repos match by registered repo
    name only, ignoring case. There is no path matching and nothing fancier.
    To align names, follow the steps under [Matching repos across machines](#matching-repos-across-machines).
-2. **Permission: DECIDED (Adam, 2026-11-21).** Any paired machine may start
-   agents here, with a `watch.log` line and a notice on this machine. Later,
-   remote starts will be gated through the agent-type `.md` files; nothing is
-   built for that yet.
+2. **Permission: DECIDED (Adam, 2026-11-21), implemented in Phase 7.** Any paired machine may start
+   agents here, with a `watch.log` line and a notice on this machine. A future
+   change will gate remote starts through the agent-type `.md` files.
 3. **V filter.** It now applies to remote agent rows, because they are in the
    main tree.

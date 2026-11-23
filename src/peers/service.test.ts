@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { remoteStartDenialAtStartup } from "./remote-start-caller";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +15,7 @@ import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, PairProtocolError, decod
 import {
   PEER_ALPN,
   PEER_CLOSE,
-  PEER_MAX_REQUEST_BYTES,
+  NEW_AGENT_MAX_REQUEST_BYTES,
   encodePeerRequest,
   requestAgents,
   serveTrustedConnection,
@@ -176,6 +177,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
   const calls = { loadIdentity: 0, readPeers: 0 };
   const clock = createFakeClock();
   const service = new PeerService({
+      remoteStartDenial: null,
     acquireLock: () => acquireEndpointLock(),
     releaseLock: () => releaseEndpointLock(),
     loadIdentity: () => {
@@ -362,7 +364,7 @@ describe("PeerService binding", () => {
   test("the real defaults are never reached: the addon loader throws in this file", async () => {
     // Guard for the tests above: they inject bindEndpoint, so the addon is never needed.
     const { defaultPeerServiceDeps } = await import("./service");
-    const deps = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }));
+    const deps = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null);
     await expect(deps.bindEndpoint(new Uint8Array(32), [PAIR_ALPN])).rejects.toThrow("a service test loaded the iroh addon");
   });
 });
@@ -532,7 +534,7 @@ function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: stri
   endpoint.connectImpl = async (id) => {
     const link = createMemoryLink("00".repeat(32), id);
     served.push(link.b);
-    void serveTrustedConnection(link.b, { isPeer: async () => true, snapshot: () => ({ repos: [], agents }), log: () => {} });
+    void serveTrustedConnection(link.b, { setTimer: createFakeClock().setTimer, peerName: async () => "paired", snapshot: () => ({ repos: [], agents }), log: () => {} });
     const conn = serviceConnection(link.a, PEER_ALPN);
     return {
       ...conn,
@@ -550,9 +552,172 @@ const REMOTE_AGENTS: RemoteAgent[] = [
 ];
 
 describe("PeerService at boot", () => {
+  test.skipIf(process.env.IB_LIVE_CALLER !== "1")("reads launchd from the production macOS ps columns", async () => {
+    expect(await remoteStartDenialAtStartup({
+      stdinTTY: true, stdoutTTY: true, env: {}, cwd: "/", pid: 1,
+      resolveCaller: async () => "no-agent",
+    })).toBeNull();
+  });
+
+  test.each([
+    ["human", true, true, undefined, null],
+    ["agent", true, true, undefined, "Only a human"],
+    ["system coordinator", true, true, "/tmp/tmux-501/default,13,0", "inside tmux"],
+    ["custom tmux directory", true, true, "/other/tmp/server,12,0", "inside tmux"],
+    ["empty tmux variable", true, true, "", "inside tmux"],
+    ["non-TTY input", false, true, undefined, "interactive terminal"],
+    ["non-TTY output", true, false, undefined, "interactive terminal"],
+    ["malformed tmux", true, true, "?", "inside tmux"],
+    ["claude", true, true, undefined, "disabled under claude"],
+    ["codex", true, true, undefined, "disabled under codex"],
+    ["agy", true, true, undefined, "disabled under agy"],
+    ["ancestry error", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["missing parent", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["kernel agent", true, true, undefined, "disabled under codex"],
+    ["missing kernel name", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["missing executable", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["early PID zero", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["cycle", true, true, undefined, "Cannot verify dashboard process ancestry"],
+    ["damaged metadata", true, true, undefined, "Cannot verify"],
+    ["resolver error", true, true, undefined, "Cannot verify"],
+  ] as const)("classifies the %s dashboard once for the service lifetime", async (kind, stdinTTY, stdoutTTY, tmux, reason) => {
+    let evidence = kind as string;
+    const input = { stdinTTY, stdoutTTY, env: { TMUX: tmux }, cwd: "/app", pid: 30,
+      readProcessTable: async (command: string[]) => {
+        expect(command).toEqual(["/bin/ps", "-axww", "-o", "pid=PID,ppid=PPID,lstart=STARTED,ucomm=KERNEL,comm=COMMAND"]);
+        if (evidence === "ancestry error") throw new Error("ps failed");
+        const parent = evidence === "missing parent" ? 999 : evidence === "early PID zero" ? 0 : evidence === "cycle" ? 30 : 1;
+        const exe = ["claude", "codex", "agy"].includes(evidence) ? evidence : "Terminal";
+        const kernel = evidence === "missing kernel name" ? "" : evidence === "kernel agent" ? "codex" : "My Terminal";
+        const commandName = evidence === "missing executable" ? "" : `/Applications/My Apps/${exe}`;
+        return [
+          "PID PPID STARTED                  KERNEL           COMMAND",
+          " 30   20 Sat Nov 21 12:01:00 2026 ib               /bin/ib",
+          " 20   10 Sat Nov 21 12:01:00 2026 zsh              /bin/zsh",
+          ` 10 ${String(parent).padStart(4)} Sat Nov 21 12:01:00 2026 ${kernel.padEnd(16)} ${commandName}`,
+          "  1    0 Sat Nov 21 12:01:00 2026 launchd          /sbin/launchd",
+        ].join("\n");
+      },
+      resolveCaller: async (): Promise<"agent" | "no-agent" | "unverifiable"> => {
+        if (evidence === "resolver error") throw new Error("unavailable");
+        if (evidence === "damaged metadata") return "unverifiable";
+        return evidence === "agent" ? "agent" : "no-agent";
+      },
+    };
+    const decision = await remoteStartDenialAtStartup(input);
+    const { service } = makeService({ remoteStartDenial: decision });
+    if (reason === null) expect(decision).toBeNull();
+    else expect(decision).toContain(reason);
+    evidence = reason ? "human" : "agent";
+    Object.assign(input, { stdinTTY: !!reason, stdoutTTY: !!reason, env: {} });
+    const request = { repo: "app", type: "worker", prompt: "hello" };
+    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow(reason ?? "no longer paired");
+  });
+
+  test.each(["process table", "metadata"])("boots while the %s reader is pending and keeps a timeout denial after it finishes", async stage => {
+    const table = "PID PPID STARTED                  KERNEL COMMAND\n  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd";
+    const release = Promise.withResolvers<void>();
+    const reading = Promise.withResolvers<AbortSignal>();
+    let signal: AbortSignal;
+    const clock = createFakeClock();
+    const decision = remoteStartDenialAtStartup({
+      stdinTTY: true, stdoutTTY: true, env: {}, cwd: "/", pid: 1,
+      readProcessTable: async (_command, abort) => {
+        signal = abort;
+        if (stage === "process table") {
+          reading.resolve(abort);
+          await release.promise;
+        } else {
+          clock.advance(1_500);
+        }
+        return table;
+      },
+      resolveCaller: async () => {
+        if (stage === "metadata") {
+          reading.resolve(signal);
+          await release.promise;
+        }
+        return "no-agent";
+      },
+    }, clock);
+    const service = new PeerService(defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, decision));
+    const observed = await reading.promise;
+    await service.bootIfPaired();
+    expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
+    const request = { repo: "app", type: "worker", prompt: "hello" };
+    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("checking whether remote starts are allowed");
+    const changes: (string | null)[] = [];
+    service.onChange(() => changes.push(service.remoteStartDenial));
+    clock.advance(stage === "process table" ? 1_999 : 499);
+    await flushMicrotasks();
+    expect(observed.aborted).toBe(false);
+    expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
+    clock.advance(1);
+    expect(await decision).toContain("timed out");
+    expect(observed.aborted).toBe(true);
+    release.resolve();
+    await flushMicrotasks();
+    expect(changes).toEqual([service.remoteStartDenial]);
+    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("timed out");
+  });
+
+  test("caches one denial when the reader succeeds at the deadline before the timer fires", async () => {
+    const clock = createFakeClock();
+    const table = Promise.withResolvers<string>();
+    const resolveCaller = mock(async () => "no-agent" as const);
+    const decision = remoteStartDenialAtStartup({
+      stdinTTY: true, stdoutTTY: true, env: {}, cwd: "/", pid: 1,
+      readProcessTable: () => table.promise,
+      resolveCaller,
+    }, clock);
+    const { service } = makeService({ remoteStartDenial: decision });
+    const changes: (string | null)[] = [];
+    service.onChange(() => changes.push(service.remoteStartDenial));
+
+    clock.jump(2_000);
+    expect(clock.pending()).toBe(1);
+    table.resolve("PID PPID STARTED                  KERNEL COMMAND\n  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd");
+    const denial = await decision;
+    expect(resolveCaller).toHaveBeenCalledTimes(1);
+    expect(denial).toContain("timed out");
+    expect(clock.pending()).toBe(0);
+    clock.advance(0);
+    await flushMicrotasks();
+    expect(service.remoteStartDenial).toBe(denial);
+    expect(changes).toEqual([denial]);
+  });
+
+  test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint } = makeService();
+    const starts: unknown[] = [];
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer,
+        peerName: async () => "paired", snapshot: () => ({ repos: [], agents: [] }), log: () => {},
+        startAgent: async request => { starts.push(request); return "my-agent"; },
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    const request = { repo: "app", type: "worker", prompt: "hello" };
+    try {
+      await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("disconnected");
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      expect(await service.startRemoteAgent(ID_REMOTE, request)).toBe("my-agent");
+      await writeFile(peersFile(), "[]");
+      await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("no longer paired");
+      expect(starts).toEqual([{ op: "new-agent", ...request }]);
+      expect(endpoint.connects).toEqual([ID_REMOTE]);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   test("the owning watch renews the lease each poll and replaces the snapshot only on visible changes", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
-    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }));
+    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null);
     const { service, endpoint, clock } = makeService({ writeRemoteAgents, renewLease });
     answerDials(endpoint, [{ ...REMOTE_AGENTS[0]!, repoName: "display only" }]);
     await service.bootIfPaired();
@@ -620,7 +785,7 @@ describe("PeerService at boot", () => {
       loads++;
       throw new Error("loaded");
     });
-    const realBind = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] })).bindEndpoint;
+    const realBind = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null).bindEndpoint;
     for (const setup of [async () => {}, async () => {
       await mkdir(peerDir(), { recursive: true });
       await writeFile(peersFile(), "[]\n");
@@ -1500,7 +1665,7 @@ function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
 describe("toPairConnection maps iroh's TooLong to PairProtocolError", () => {
   for (const [alpn, reason] of [
     [PAIR_ALPN, `message longer than ${PAIR_MAX_MESSAGE_BYTES} bytes`],
-    [PEER_ALPN, `request longer than ${PEER_MAX_REQUEST_BYTES} bytes`],
+    [PEER_ALPN, `request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`],
   ] as const) {
     test(`on the ${alpn} ALPN: an over-long message closes the connection with code 3 and says why`, async () => {
       // A listed peer, so the trusted ALPN reads its request at all.

@@ -4,7 +4,13 @@
  * peer-link-real.test.ts.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setUserHome, resetUserHome } from "../home";
+import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
+import { listSpawnableTypeNamesSync } from "../agent-types";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { makeAgent, waitFor } from "../test-utils";
@@ -12,6 +18,8 @@ import { irohAddonLoaderCtx } from "./iroh";
 import {
   PEER_CLOSE,
   PEER_MAX_REPLY_BYTES,
+  NEW_AGENT_MAX_REQUEST_BYTES,
+  requestNewAgent,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
   PeerProtocolError,
@@ -22,9 +30,10 @@ import {
   toRemoteAgents,
   peerSnapshot,
   type PeerSnapshot,
+  type PeerResponderDeps,
   type RemoteAgent,
 } from "./peer-link";
-import { createMemoryLink, type MemoryConnection } from "./test-pair-transport";
+import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test-pair-transport";
 
 const ID_A = "a1".repeat(32);
 const ID_B = "b2".repeat(32);
@@ -57,16 +66,19 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot } = {}) {
+function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
   const link = createMemoryLink(ID_A, ID_B);
   const peers = options.peers ?? new Set([ID_A]);
   const logs: string[] = [];
   let snapshots = 0;
   let checks = 0;
+  const clock = createFakeClock();
   const done = serveTrustedConnection(link.b, {
-    isPeer: async (id) => {
+    setTimer: clock.setTimer,
+    startAgent: options.startAgent,
+    peerName: async (id) => {
       checks++;
-      return peers.has(id);
+      return peers.has(id) ? "Alice" : null;
     },
     snapshot: () => {
       snapshots++;
@@ -75,6 +87,7 @@ function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot } =
     log: (line) => logs.push(line),
   });
   return {
+    clock,
     a: link.a,
     b: link.b,
     peers,
@@ -263,7 +276,35 @@ describe("serveTrustedConnection", () => {
     await side.done;
   });
 
+  test.each([262144, 262145])("reads at most 262144 bytes for a %i-byte encoded new-agent request", async size => {
+    const startAgent = mock(async () => "agent-id");
+    const side = serve({ startAgent });
+    const accept = side.b.acceptBi.bind(side.b);
+    const limits: number[] = [];
+    spyOn(side.b, "acceptBi").mockImplementationOnce(async () => {
+      const stream = await accept();
+      const read = stream.readToEnd.bind(stream);
+      spyOn(stream, "readToEnd").mockImplementation(limit => { limits.push(limit); return read(limit); });
+      return stream;
+    });
+    const request = { op: "new-agent", repo: "app", type: "worker", prompt: "é" };
+    request.prompt += "x".repeat(size - encode(request).length);
+    const reply = await rawRequest(side.a, encode(request));
+    expect(limits).toEqual([262144]);
+    if (size === 262144) {
+      expect(decodeText(reply)).toEqual({ ok: true, id: "agent-id" });
+      expect(startAgent).toHaveBeenCalledTimes(1);
+    } else {
+      expect(reply).toBeInstanceOf(Error);
+      expect(startAgent).not.toHaveBeenCalled();
+      expect(side.a.closeInfo()).toMatchObject({ code: PEER_CLOSE.error });
+    }
+    side.a.close(0, "done");
+  });
+
   for (const [label, bytes, reason] of [
+    ["new-agent over 256 KB", encode({ op: "new-agent", prompt: "a".repeat(NEW_AGENT_MAX_REQUEST_BYTES) }), `request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`],
+    ["unknown op over 4096 bytes", encode({ op: "unknown", pad: "a".repeat(4096) }), "request longer than 4096 bytes"],
     ["not JSON", encode("{"), "request is not JSON"],
     ["not an object", encode([1, 2]), "request is not a JSON object"],
     ["no op", encode({ agents: true }), "request has no op"],
@@ -300,5 +341,173 @@ describe("serveTrustedConnection", () => {
     await side.done;
     await waitFor(() => side.b.closeInfo() !== null, { message: "B sees the close" });
     expect(side.logs.filter((line) => line.includes("closing"))).toEqual([]);
+  });
+});
+
+
+test("a new-agent stream without a reply times out at 30 s", async () => {
+  const link = createMemoryLink(ID_A, ID_B);
+  const clock = createFakeClock();
+  const pending = requestNewAgent(link.a, { repo: "app", type: "worker", prompt: "hello" }, clock.setTimer);
+  const stream = await link.b.acceptBi();
+  expect(decodeText(await stream.readToEnd(4096))).toEqual({ op: "new-agent", repo: "app", type: "worker", prompt: "hello" });
+  clock.advance(29_999);
+  expect(link.a.closeInfo()).toBeNull();
+  clock.advance(1);
+  await expect(pending).rejects.toThrow("timed out after 30 s");
+  expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.done });
+});
+
+test.each(["", "bad/id", "agent\u001b[32m", "white space"])("rejects a malformed success id %j as a protocol error", async id => {
+  const side = serve({ startAgent: async () => id });
+  await expect(requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "hi" }, side.clock.setTimer))
+    .rejects.toBeInstanceOf(PeerProtocolError);
+  side.a.close(0, "done");
+});
+
+describe("trusted new-agent responder", () => {
+  const request = { op: "new-agent", repo: "ApP", type: "worker", prompt: "build it" };
+  let home: string;
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "ib-peer-request-"));
+    setUserHome(home);
+  });
+  afterEach(async () => {
+    resetUserHome();
+    await rm(home, { recursive: true, force: true });
+  });
+
+  function receiver(ok = true) {
+    const spawn = mock<RemoteSpawnDeps["newAgent"]>(async () => ({
+      ok, stdout: ok ? "agent-123\n" : "", stderr: ok ? "" : "Worktree is dirty", exitCode: ok ? 0 : 1,
+    }));
+    const notice = mock((_message: string) => {});
+    const deps = { listSpawnableTypes: listSpawnableTypeNamesSync, listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent: spawn, notice };
+    const side = serve({ startAgent: (req, name) => acceptRemoteAgent(req, name, deps, line => side.logs.push(line)) });
+    return { side, spawn, notice, deps };
+  }
+
+  test.each([
+    ["non-string repo", { repo: 42 }, "Invalid repo registry name"],
+    ["path instead of repo name", { repo: "/local/app" }, "Invalid repo registry name"],
+    ["parent directory", { repo: ".." }, "Invalid repo registry name"],
+    ["NUL in name", { repo: "app\0" }, "Invalid repo registry name"],
+    ["non-string type", { type: 42 }, "unknown or not spawnable"],
+    ["unregistered repo", { repo: "missing", type: "_all" }, "Repo is not registered"],
+    ["unknown type", { type: "absent", prompt: "" }, "unknown or not spawnable"],
+    ["layer-only type", { type: "_all" }, "unknown or not spawnable"],
+    ["repo coordinator", { type: "repo-coordinator", name: "!" }, "repo-coordinator"],
+    ["non-string name", { name: 42 }, "name must be a string"],
+    ["invalid name", { name: "../x", prompt: "" }, "agent name may only contain"],
+    ["reserved name", { name: "system" }, "reserved name"],
+    ["repo name collision", { name: "app" }, "collides with registered repo"],
+    ["empty prompt", { prompt: "  " }, "non-empty text"],
+    ["non-text prompt", { prompt: 17 }, "non-empty text"],
+  ] as const)("refuses %s before spawning", async (_, overrides, reason) => {
+    const { side, spawn, notice } = receiver();
+    const reply = decodeText(await rawRequest(side.a, encode({ ...request, ...overrides })));
+    expect(reply).toEqual({ ok: false, error: expect.stringContaining(reason) });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(notice).not.toHaveBeenCalled();
+    side.a.close(0, "done");
+  });
+
+  test("refuses a peer removed after its new-agent stream was accepted", async () => {
+    const { side, spawn } = receiver();
+    const stream = await side.a.openBi();
+    await waitFor(() => side.checks() === 2);
+    side.peers.clear();
+    await stream.writeAll(encode(request));
+    await stream.finish();
+    await expect(stream.readToEnd(4096)).rejects.toThrow();
+    expect(side.a.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.notPeer });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  test("matches a dotted stored name and starts only at the registered path", async () => {
+    const { side, spawn, deps } = receiver();
+    spyOn(deps, "listRepos").mockResolvedValue([{ name: "milestonemade.com", path: "/local/site" }]);
+    const reply = decodeText(await rawRequest(side.a, encode({ ...request, repo: "MilestoneMade.com", path: "/other" })));
+    expect(reply).toEqual({ ok: true, id: "agent-123" });
+    expect(spawn.mock.calls).toEqual([["/local/site", request.prompt, { type: request.type, name: undefined }]]);
+    side.a.close(0, "done");
+  });
+
+  test("rejects a system coordinator even when the local layer is spawnable", async () => {
+    await Bun.write(join(home, ".itsybitsy", "agent-types", "system-coordinator.md"), "---\nspawnable: true\n---\n");
+    const { side, spawn } = receiver();
+    const reply = decodeText(await rawRequest(side.a, encode({ ...request, type: SYSTEM_COORDINATOR_TYPE })));
+    expect(reply).toEqual({ ok: false, error: "Cannot start a system-coordinator remotely" });
+    expect(spawn).not.toHaveBeenCalled();
+    side.a.close(0, "done");
+  });
+
+  test("revocation during registry lookup prevents the spawn", async () => {
+    const { side, deps, spawn } = receiver();
+    const registry = Promise.withResolvers<Awaited<ReturnType<typeof deps.listRepos>>>();
+    const lookup = spyOn(deps, "listRepos").mockReturnValue(registry.promise);
+    const reply = rawRequest(side.a, encode(request));
+    await waitFor(() => lookup.mock.calls.length === 1);
+    side.peers.clear();
+    registry.resolve([{ name: "app", path: "/app" }]);
+    expect(decodeText(await reply)).toEqual({ ok: false, error: "Machine is no longer paired" });
+    expect(spawn).not.toHaveBeenCalled();
+    side.a.close(0, "done");
+  });
+
+  test("validates the prompt cap in bytes", async () => {
+    const { side, deps, spawn } = receiver();
+    await expect(acceptRemoteAgent({ ...request, prompt: "é".repeat(131073) }, async () => "Alice", deps, () => {})).rejects.toThrow("256 KB");
+    expect(spawn).not.toHaveBeenCalled();
+    side.a.close(0, "done");
+  });
+
+  test("polls while spawn is pending and returns an uncertain outcome at the responder deadline", async () => {
+    const { side, spawn } = receiver();
+    spawn.mockImplementation(() => new Promise(() => {}));
+    const pending = rawRequest(side.a, encode(request));
+    await waitFor(() => spawn.mock.calls.length === 1);
+    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    side.clock.advance(25_000);
+    expect(decodeText(await pending)).toEqual({ ok: false, error: expect.stringContaining("outcome unknown") });
+    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    side.a.close(0, "done");
+  });
+
+  test("a throwing spawn gets an error reply and leaves the connection usable", async () => {
+    const { side, spawn } = receiver();
+    spawn.mockRejectedValue(new Error("spawn failed"));
+    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "spawn failed" });
+    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    side.a.close(0, "done");
+  });
+
+  test("a long valid id is returned intact and bounded in the receiving notice", async () => {
+    const { side, spawn, notice } = receiver();
+    const id = "w".repeat(256);
+    spawn.mockResolvedValue({ ok: true, exitCode: 0, stdout: id, stderr: "" });
+    expect(await requestNewAgent(side.a, request, side.clock.setTimer)).toBe(id);
+    expect(notice.mock.calls[0]?.[0]).toBe(`Alice started agent ${"w".repeat(79)}… in app`);
+    side.a.close(0, "done");
+  });
+
+  test("returns spawn failures with one log entry and no success notice", async () => {
+    const { side, notice } = receiver(false);
+    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "Worktree is dirty" });
+    expect(side.logs.filter(line => line.includes("Worktree is dirty"))).toHaveLength(1);
+    expect(notice).not.toHaveBeenCalled();
+    side.a.close(0, "done");
+  });
+
+  test("matches a mixed-case registry name, passes only type and name, and announces the id", async () => {
+    const { side, spawn, notice } = receiver();
+    const prompt = "a".repeat(5000);
+    const reply = decodeText(await rawRequest(side.a, encode({ ...request, name: "builder", prompt, model: "other", permissions: ["all"] })));
+    expect(reply).toEqual({ ok: true, id: "agent-123" });
+    expect(spawn.mock.calls).toEqual([["/local/app", prompt, { type: "worker", name: "builder" }]]);
+    const message = "Alice started agent agent-123 in app";
+    expect(notice.mock.calls).toEqual([[message]]);
+    expect(side.logs.filter(line => line === message)).toHaveLength(1);
+    side.a.close(0, "done");
   });
 });

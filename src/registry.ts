@@ -120,6 +120,12 @@ function registryPath(): string {
   return join(itsybitsyDir(), "repos.json");
 }
 
+/** Registry entries can contain names derived from folder names, including dots. */
+export function isStoredRepoName(value: unknown): value is string {
+  return typeof value === "string" && !!value.trim() && !value.includes("/") &&
+    value !== "." && value !== ".." && !value.startsWith("~");
+}
+
 /** Queue identity requires a complete registry. Only a fresh install (ENOENT) has no entries. */
 export async function readRegistryStrict(): Promise<RegistryData> {
   const path = registryPath();
@@ -128,8 +134,7 @@ export async function readRegistryStrict(): Promise<RegistryData> {
     if (!Array.isArray(data?.repos)) throw new Error("expected a repos array");
     for (const [index, repo] of data.repos.entries()) {
       if (typeof repo?.path !== "string" || !isAbsolute(repo.path) ||
-          typeof repo.name !== "string" || !repo.name.trim() || repo.name.includes("/") ||
-          repo.name === "." || repo.name === ".." || repo.name.startsWith("~") ||
+          !isStoredRepoName(repo.name) ||
           [repo.nickname, repo.defaultAgentType, repo.notes].some((v) => v !== undefined && typeof v !== "string")) {
         throw new Error(`invalid repository entry at index ${index}`);
       }

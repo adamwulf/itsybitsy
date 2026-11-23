@@ -156,6 +156,12 @@ export class PeerPoller {
     }));
   }
 
+  /** The already authenticated link for a human-initiated request. */
+  connectedConnection(peerId: string): PairConnection | null {
+    const link = this.links.get(peerId);
+    return link?.connected && link.conn?.closeInfo() === null ? link.conn : null;
+  }
+
   /** Poll now, then every {@link PEER_POLL_INTERVAL_MS}. */
   start(): void {
     if (this.running) return;

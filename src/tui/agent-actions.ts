@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { stat, readdir } from "node:fs/promises";
 import { dirname, join, basename } from "node:path";
 import { agentWorktreePath } from "../agents";
-import type { Agent, FlatEntry, PendingQuestion } from "../agents";
+import type { Agent, FlatEntry, PendingQuestion, RemoteEntry } from "../agents";
 import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
 import { canonicalizeSandboxPath } from "../sandbox";
@@ -35,13 +35,15 @@ import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
+import { cleanRemoteText } from "../peers/peer-link";
+import type { PeersDialogService } from "./peers-dialog";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import type { ConfigResult } from "../config";
-import { fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
+import { syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { fullyQualifiedAgentId } from "./row-keys";
 import type { PaneMode, TailLogMode } from "./pane-manager";
@@ -171,6 +173,10 @@ export function killActiveDiffProc() {
 
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
+  readonly dialog: DialogState;
+  remoteStartPending: boolean;
+  peerService: PeersDialogService | null;
+  remoteSelection: RemoteEntry | null;
   agentTree: {
     selectedAgent: Agent | null;
     selectedRepoHeader: string | null;
@@ -1807,19 +1813,17 @@ export function handleAddPermission(ctx: ActionCtx) {
 
 /** 'a' — infer repo from current selection, fallback to first repo */
 export function handleNewAgent(ctx: ActionCtx) {
-  if (ctx.repos.length === 0) { ctx.setNotice("No repos registered", "error"); return; }
-  if (ctx.repos.length === 1) { showNewAgentFormDialog(ctx, ctx.repos[0]!); return; }
-  const selectedAgent = ctx.agentTree.selectedAgent;
-  const selectedRepoHeader = ctx.agentTree.selectedRepoHeader;
-  if (selectedAgent) {
-    const repo = ctx.repos.find((r) => r.path === selectedAgent.repoPath);
-    if (repo) { showNewAgentFormDialog(ctx, repo); return; }
-  } else if (selectedRepoHeader) {
-    const repo = ctx.repos.find((r) => repoDisplayName(r) === selectedRepoHeader);
-    if (repo) { showNewAgentFormDialog(ctx, repo); return; }
+  const remote = ctx.remoteSelection;
+  if (remote?.kind === "remote-repo-header") {
+    showNewAgentFormDialog(ctx, null, remote.repoRegistryName, remote.repoName);
+    return;
   }
-  // Fallback to first repo
-  showNewAgentFormDialog(ctx, ctx.repos[0]!);
+  const path = ctx.agentTree.selectedAgent?.repoPath ?? ctx.agentTree.selectedRepoPath;
+  const repo = ctx.repos.find(r => r.path === path)
+    ?? ctx.repos.find(r => repoDisplayName(r) === ctx.agentTree.selectedRepoHeader)
+    ?? ctx.repos[0];
+  if (!repo) { ctx.setNotice("No repos registered", "error"); return; }
+  showNewAgentFormDialog(ctx, repo, repo.name, repoDisplayName(repo));
 }
 
 /**
@@ -1836,27 +1840,77 @@ export function newAgentFormTypeOrder(typeNames: string[]): string[] {
   return others.length === typeNames.length ? others : [...others, REPO_COORDINATOR_TYPE];
 }
 
-function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
+function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registryName: string, displayName: string) {
+  const service = ctx.peerService;
+  const machines = () => {
+    const peers = (service?.view().links ?? []).filter(link => link.connected &&
+      link.repos?.some(r => r.registryName.toLowerCase() === registryName.toLowerCase()));
+    return [
+      ...(repo ? [{ id: null, name: "This machine" }] : []),
+      ...peers.map(({ id, name }) => ({ id, name })),
+    ];
+  };
+  const machine = machines()[0];
+  if (!machine) {
+    ctx.setNotice(`No connected machine has ${displayName}`, "error");
+    return;
+  }
   // Read the names of available spawnable agent types synchronously so the
   // dialog can open immediately. Layer-only types (e.g. `_all`, `_non_coordinator`)
   // are filtered out — they act only as permission/prompt layers. Falls back to
   // embedded defaults when the on-disk types directory is missing.
   const availableTypes = newAgentFormTypeOrder(listSpawnableTypeNamesSync());
-  const defaultType = resolveDefaultAgentType(repo.defaultAgentType, availableTypes);
+  const defaultType = resolveDefaultAgentType(repo?.defaultAgentType, availableTypes);
   // An agent made from the Favorites tab becomes a favorite, so it stays in
   // that view (SPEC §17.1). Read when the form opens: the tab the user was
   // looking at when they pressed `a`.
   const favoriteOnCreate = ctx.sidebarMode === "favorites";
 
-  ctx.showDialog({
+  const form: Extract<DialogState, { type: "new-agent-form" }> = {
     type: "new-agent-form",
-    repoName: repoDisplayName(repo),
+    repoName: displayName,
+    get remoteStartDenial() { return service?.remoteStartDenial ?? null; },
+    get otherRemoteStartPending() { return ctx.remoteStartPending && !this.inFlight; },
+    machines,
+    machine,
     name: "",
     agentType: defaultType,
     availableTypes,
     buffer: new TextBuffer(),
     focused: "name",
-    onSubmit: (name: string, agentType: string, prompt: string) => {
+    onSubmit: async (name, agentType, prompt) => {
+      if (form.inFlight) return;
+      if (syncNewAgentMachine(form) || !form.machine) {
+        ctx.tui?.requestRender();
+        return;
+      }
+      const target = form.machine;
+      if (target.id !== null && service) {
+        if (form.remoteStartDenial !== null) return;
+        if (ctx.remoteStartPending) return;
+        ctx.remoteStartPending = true;
+        form.inFlight = target.name;
+        form.error = undefined;
+        ctx.tui?.requestRender();
+        try {
+          const id = await service.startRemoteAgent(target.id, {
+            repo: registryName, type: agentType, name: name.trim() || undefined, prompt,
+          });
+          if (ctx.dialog === form) ctx.closeDialog();
+          ctx.setNotice(`Created agent ${cleanRemoteText(id)} on ${target.name}`, "info");
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          const message = `Remote start on ${target.name}: ${detail}`;
+          if (ctx.dialog === form) form.error = message;
+          else ctx.setNotice(message, "error");
+        } finally {
+          ctx.remoteStartPending = false;
+          form.inFlight = undefined;
+          ctx.tui?.requestRender();
+        }
+        return;
+      }
+      if (!repo) return;
       const opts: NewAgentOptions = {};
       if (name.trim()) opts.name = name.trim();
       if (agentType) opts.type = agentType;
@@ -1889,7 +1943,8 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
         });
       });
     },
-  });
+  };
+  ctx.showDialog(form);
 }
 
 /**

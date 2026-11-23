@@ -304,7 +304,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
         else await (await open(join(spawnResultDir(dir), request.id + ".cancel"), "wx", 0o600)).close();
       }, readProgress: async () => {
         const marker = await stat(ownsStage ? join(staged, "progress") : join(spawnResultDir(dir), request.id + ".progress")).catch(() => null);
-        return marker?.size ? marker.mtimeMs : 0;
+        return marker?.size ?? 0;
       } } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
@@ -558,7 +558,9 @@ export async function handleSendRequest(
         const now = Date.now();
         if (marker && now - updated >= 250) {
           updated = now;
-          try { writeSync(marker.fd, Buffer.from([1]), 0, 1, 0); }
+          // Each coalesced milestone appends one byte. A stat reads its sequence
+          // without relying on filesystem timestamps or clock ordering.
+          try { writeSync(marker.fd, Buffer.from([1])); }
           catch (err) { warnSendCleanup(`Remote send progress update failed: ${err}`); }
         }
       };

@@ -81,28 +81,22 @@ function displayCaptureArgs(target: string, lines: number): string[] {
 }
 
 export const COORDINATOR_PANE_ID = "@ib-system-coordinator-pane-id";
-export const COORDINATOR_PANE_MARKER = "@ib-system-coordinator";
+export const COORDINATOR_PANE_COMMAND = "@ib-system-coordinator-command";
 
-/** Only the pane marked by the coordinator launch may leave this machine. */
+/** Capture the launch pane only while its recorded CLI is still in the foreground. */
 export async function captureMarkedCoordinatorPane(session: string, machine: string, timeoutMs = 5_000): Promise<string | null> {
   const target = tmuxSessionTarget(session);
-  const listing = await readCoordinatorCommand(["tmux", "list-panes", "-s", "-t", target,
-    "-F", `#{pane_id} #{${COORDINATOR_PANE_MARKER}}`,
-    ";", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID], timeoutMs);
-  if (listing.code !== 0 && /^(?:can't find session:|no server running on|error connecting to .*No such file or directory)/i.test(listing.error.trim())) return null;
+  const record = await readCoordinatorCommand(["tmux", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID], timeoutMs);
+  if (record.code !== 0 && /^(?:can't find session:|no server running on|error connecting to .*No such file or directory)/i.test(record.error.trim())) return null;
   const unverified = `Unverified coordinator pane; restart the system coordinator on ${machine}`;
-  if (listing.code !== 0) throw new Error(unverified);
-  // show-options reads the session's launch record at its own scope, even
-  // when a pane carries an inherited or copied marker.
-  const lines = listing.text.replace(/\n$/, "").split("\n");
-  const id = lines.pop()!;
-  const marked = lines.filter(line => /^%\d+ 1$/.test(line));
-  if (!/^%\d+$/.test(id) || marked.length !== 1 || marked[0] !== `${id} 1`) throw new Error(unverified);
-  // Check again within the tmux command queue: the CLI may have exited
-  // between listing the panes and issuing this capture.
+  const id = record.text.trim();
+  if (record.code !== 0 || !/^%\d+$/.test(id)) throw new Error(unverified);
+  // Evaluate all three conditions in tmux's capture queue, even if the
+  // pane died or its foreground changed after we looked up the launch id.
+  const recordedCommand = `#{${COORDINATOR_PANE_COMMAND}}`;
+  const matches = `#{==:#{pane_id}:#{pane_dead}:#{pane_current_command},#{${COORDINATOR_PANE_ID}}:0:${recordedCommand}}`;
   const capture = await readCoordinatorCommand(["tmux", "if-shell", "-F", "-t", id,
-    `#{==:#{${COORDINATOR_PANE_MARKER}},1}`,
-    displayCaptureArgs(id, 200).join(" ")], timeoutMs);
+    `#{&&:#{!=:${recordedCommand},},${matches}}`, displayCaptureArgs(id, 200).join(" ")], timeoutMs);
   if (capture.code !== 0 || !capture.text) throw new Error(unverified);
   return capture.text;
 }

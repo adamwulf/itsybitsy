@@ -504,35 +504,26 @@ describe("ensureSystemCoordinator", () => {
     expect(newSession![newSession!.length - 1]).toBe("bash");
   });
 
-  test("a failed coordinator exits to a live shell only after revoking pane capture", async () => {
-    const router = createCommandRouter({ "has-session": { exitCode: 1 } });
-    let line = "";
+  test("the visible launch line contains only Claude and preserves its exit status", async () => {
+    const router = createCommandRouter({ "has-session": { exitCode: 1 }, "new-session": { stdout: "%4" } });
+    let keys: string[] = [];
     coordinatorSpawnCtx.set((cmd, opts) => {
-      const launch = cmd.findIndex(arg => arg.startsWith("claude "));
-      if (launch >= 0) line = cmd.slice(launch, cmd.indexOf(";", launch)).join("");
+      if (cmd[1] === "send-keys") keys = cmd.slice(2);
       return router(cmd, opts);
     });
     await ensureSystemCoordinator();
-    expect(line).toContain("claude --model");
-    // Run the actual launch line in bash. The failed CLI returns to its parent
-    // shell, which must see the marker cleared before it can run another command.
-    const script = [
-      "marker=1", "record=%4", "TMUX_PANE=%4", "claude() { return 42; }",
-      'tmux() { if [[ "$*" == "set-option -pu -t %4 @ib-system-coordinator" ]]; then marker=0; elif [[ "$*" == "set-option -u -t %4 @ib-system-coordinator-pane-id" ]]; then record=; else return 1; fi; }',
-      line, 'echo "shell alive, marker=$marker record=$record"',
-    ].join("\n");
-    const proc = Bun.spawn(["bash", "-c", script], { stdout: "pipe", stderr: "pipe" });
-    expect(await new Response(proc.stdout).text()).toBe("shell alive, marker=0 record=\n");
-    expect(await proc.exited).toBe(0);
+    expect(keys).toEqual(["-t", "%4", "claude --model opus", "Enter"]);
+    const proc = Bun.spawn(["bash", "-c", `claude() { return 42; }\n${keys[2]}`]);
+    expect(await proc.exited).toBe(42);
   });
 
-  test("reports and logs a tmux failure while installing the coordinator pane marker", async () => {
-    const router = createCommandRouter({ "has-session": { exitCode: 1 } });
-    coordinatorSpawnCtx.set((cmd, opts) => cmd.includes("@ib-system-coordinator")
-      ? { stdout: emptyStream(), stderr: mockStream("could not mark pane"), exited: Promise.resolve(1) }
-      : router(cmd, opts));
-    await expect(ensureSystemCoordinator()).rejects.toThrow("Failed to launch and mark the system coordinator pane: could not mark pane");
-    expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain("could not mark pane");
+  test("reports and logs a tmux failure while recording the coordinator pane", async () => {
+    coordinatorSpawnCtx.set(createCommandRouter({
+      "has-session": { exitCode: 1 }, "new-session": { stdout: "%4" },
+      "display-message": { stdout: "claude" }, "@ib-system-coordinator-command": { exitCode: 1 },
+    }));
+    await expect(ensureSystemCoordinator()).rejects.toThrow("Failed to record the system coordinator pane");
+    expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain("Failed to record");
   });
 
   test("logs the resolved model and its source layer on spawn", async () => {
@@ -1206,14 +1197,21 @@ describe("ensureSystemCoordinator", () => {
       if (cmdStr.includes("has-session")) {
         return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
       }
+      if (cmd[1] === "new-session") return { stdout: mockStream("%4"), stderr: emptyStream(), exited: Promise.resolve(0) };
+      if (cmd[1] === "display-message") {
+        expect(cmd.slice(2)).toEqual(["-p", "-t", "%4", "#{pane_current_command}"]);
+        events.push("read foreground");
+        return { stdout: mockStream("claude"), stderr: emptyStream(), exited: Promise.resolve(0) };
+      }
+      if (cmd.includes("@ib-system-coordinator-command")) {
+        expect(cmd.slice(2)).toEqual(["-t", "%4", "@ib-system-coordinator-command", "claude",
+          ";", "set-option", "-t", "%4", "@ib-system-coordinator-pane-id", "%4"]);
+        events.push("record");
+      }
       if (cmd.includes("send-keys")) {
         const launch = cmd.findIndex(arg => arg.startsWith("claude --model"));
         if (launch >= 0) {
-          expect(cmd.slice(cmd.indexOf("set-option"), -5)).toEqual([
-            "set-option", "-F", "-t", "=ib-coordinator:", "@ib-system-coordinator-pane-id", "#{pane_id}",
-            ";", "set-option", "-p", "-t", "=ib-coordinator:", "@ib-system-coordinator", "1",
-          ]);
-          expect(cmd.slice(-5)).toEqual([";", "send-keys", "-t", "=ib-coordinator:", "Enter"]);
+          expect(cmd.slice(launch + 1)).toEqual(["Enter"]);
           events.push("launch-claude");
         }
       }
@@ -1242,6 +1240,7 @@ describe("ensureSystemCoordinator", () => {
     expect(events.indexOf("poll-1")).toBeGreaterThan(launchIdx);
     // Loop stops once the marker appears (4th poll).
     expect(capturePolls).toBe(4);
+    expect(events.slice(-3)).toEqual(["poll-4", "read foreground", "record"]);
   });
 
   test("waitForCoordinatorReady recognises [USER TASK] marker", async () => {

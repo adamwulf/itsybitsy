@@ -9,7 +9,7 @@ import { join, basename, dirname } from "path";
 import { userHome } from "./home";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
-import { COORDINATOR_PANE_ID, COORDINATOR_PANE_MARKER, captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
+import { COORDINATOR_PANE_ID, COORDINATOR_PANE_COMMAND, captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx, killPidCtx, isApiError, isApiSafeguard } from "./agents";
 import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog, getWatchLogPath } from "./watch-log";
@@ -917,8 +917,8 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // Per-repo coordinators force bash via the `#!/bin/bash` shebang in their start.sh; this
   // brings the system coordinator to true parity.
   const coordTmuxWidth = await getTmuxWidthForAgent(true);
-  const { exitCode } = await coordinatorSpawnCtx.run([
-    "tmux", "new-session", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
+  const { exitCode, stdout: createdPane } = await coordinatorSpawnCtx.run([
+    "tmux", "new-session", "-P", "-F", "#{pane_id}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
   ]);
 
   if (exitCode !== 0) {
@@ -1031,25 +1031,11 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   logToWatchLog(
     `[coordinator] launch cmd (${resumeId ? "resume" : "fresh"}): ${claudeCmd}`,
   );
-  const target = tmuxSessionTarget(IB_COORDINATOR_SESSION);
-  // Install the marker before Enter so even a failed exec revokes it. Bash
-  // must finish revocation (or exit) before it can display another prompt.
-  const revoke = `tmux set-option -pu -t "$TMUX_PANE" ${COORDINATOR_PANE_MARKER}`
-    + ` && tmux set-option -u -t "$TMUX_PANE" ${COORDINATOR_PANE_ID} || exit`;
+  const paneId = /^%\d+$/.test(createdPane) ? createdPane : null;
   const launch = await coordinatorSpawnCtx.run([
-    "tmux", "send-keys", "-t", target, claudeCmd, `; ${revoke}`,
-    ";", "set-option", "-F", "-t", target, COORDINATOR_PANE_ID, "#{pane_id}",
-    ";", "set-option", "-p", "-t", target, COORDINATOR_PANE_MARKER, "1",
-    ";", "send-keys", "-t", target, "Enter",
+    "tmux", "send-keys", "-t", paneId ?? tmuxSessionTarget(IB_COORDINATOR_SESSION), claudeCmd, "Enter",
   ]);
-
-  if (launch.exitCode !== 0) {
-    const message = `Failed to launch and mark the system coordinator pane: ${launch.stderr || "tmux command failed"}`;
-    logToWatchLog(`[coordinator] ${message}`);
-    // The launch queue may have installed only part of the capture metadata.
-    await coordinatorSpawnCtx.run(["tmux", "set-option", "-u", "-t", target, COORDINATOR_PANE_ID]);
-    throw new Error(message);
-  }
+  if (launch.exitCode !== 0) throw new Error(`Failed to launch system coordinator: ${launch.stderr}`);
 
   // Wait for Claude's UI to be ready so the resume-failure fallback below
   // can detect the case where `claude --resume` never reaches the marker
@@ -1059,6 +1045,22 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const readyStart = Date.now();
   const ready = await waitForCoordinatorReady();
   const readyMs = Date.now() - readyStart;
+
+  if (ready && paneId) {
+    const foreground = await coordinatorSpawnCtx.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
+    // Readiness text can outlive Claude. Never record the launcher's bash as the CLI.
+    if (foreground.exitCode === 0 && foreground.stdout && foreground.stdout !== "bash") {
+      const record = await coordinatorSpawnCtx.run([
+        "tmux", "set-option", "-t", paneId, COORDINATOR_PANE_COMMAND, foreground.stdout,
+        ";", "set-option", "-t", paneId, COORDINATOR_PANE_ID, paneId,
+      ]);
+      if (record.exitCode !== 0) {
+        const message = `Failed to record the system coordinator pane: ${record.stderr}`;
+        logToWatchLog(`[coordinator] ${message}`);
+        throw new Error(message);
+      }
+    }
+  }
 
   if (resumeId && !ready) {
     // Resume failed (likely a corrupt or version-mismatched transcript). Kill

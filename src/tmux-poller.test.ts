@@ -12,6 +12,8 @@ import {
   spawnCtx,
   expandTabs,
 } from "./tmux-poller";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { waitFor } from "./test-utils";
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -1352,31 +1354,45 @@ describe("TmuxPoller tab handling at the boundary", () => {
   });
 });
 
-test("coordinator capture follows its marked pane after a different pane becomes active", async () => {
-  // %8 is the active shell. The coordinator was launched in %4.
-  let listing = "%4 1\n%8 \n%4\n";
-  const targets: string[] = [];
-  spawnCtx.set(cmd => {
-    const target = cmd[cmd.indexOf("-t") + 1]!;
-    if (cmd[1] === "if-shell") targets.push(target);
-    const text = cmd[1] === "list-panes" ? listing : target === "%4" ? "coordinator" : "other shell";
-    return { stdout: streamOf(text), stderr: emptyStream(), exited: Promise.resolve(0) };
-  });
+test.skipIf(!Bun.which("tmux"))("coordinator capture checks the recorded identity against the live foreground in private tmux", async () => {
+  const dir = await mkdtemp("/tmp/ib-pane-");
+  const session = "ib-coordinator";
+  spawnCtx.set((cmd, opts) => Bun.spawn(["tmux", "-f", "/dev/null", "-S", join(dir, "sock"), ...cmd.slice(1)], opts));
+  const tmux = async (...args: string[]) => {
+    const result = await spawnCtx.run(["tmux", ...args]);
+    if (result.exitCode !== 0) throw new Error(result.stderr);
+    return result.stdout;
+  };
+  const capture = () => captureMarkedCoordinatorPane(session, "Desk");
+  const refused = "Unverified coordinator pane; restart the system coordinator on Desk";
   try {
-    expect(await captureMarkedCoordinatorPane("ib-coordinator", "Desk")).toBe("coordinator");
-    listing = "%8 \n%4\n";
-    await expect(captureMarkedCoordinatorPane("ib-coordinator", "Desk")).rejects.toThrow("Unverified coordinator pane; restart the system coordinator on Desk");
-    listing = "%8 1\n%4\n"; // the shell copied the marker and the original is gone
-    await expect(captureMarkedCoordinatorPane("ib-coordinator", "Desk")).rejects.toThrow("Unverified coordinator pane; restart the system coordinator on Desk");
-    for (const invalid of ["%8 \n", "%4 1\n%8 1\n%4\n"]) {
-      listing = invalid;
-      await expect(captureMarkedCoordinatorPane("ib-coordinator", "Desk")).rejects.toThrow("restart the system coordinator on Desk");
-    }
-    expect(targets).toEqual(["%4"]);
-    spawnCtx.set(() => ({ stdout: emptyStream(), stderr: streamOf("can't find session: ib-coordinator"), exited: Promise.resolve(1) }));
-    expect(await captureMarkedCoordinatorPane("ib-coordinator", "Desk")).toBeNull();
+    const pane = await tmux("new-session", "-dP", "-F", "#{pane_id}", "-s", session, "bash --noprofile --norc");
+    const foreground = () => tmux("display-message", "-p", "-t", pane, "#{pane_current_command}");
+    await tmux("send-keys", "-t", pane, "echo coordinator-output; sleep 120", "Enter");
+    await waitFor(async () => await foreground() === "sleep");
+    await tmux("split-window", "-t", pane, "bash --noprofile --norc"); // another shell is active
+    await tmux("set-option", "-t", pane, "@ib-system-coordinator-pane-id", pane);
+    await expect(capture()).rejects.toThrow(refused); // missing command
+    await tmux("set-option", "-t", pane, "@ib-system-coordinator-command", await foreground());
+    expect(await capture()).toContain("coordinator-output");
+    await tmux("set-option", "-u", "-t", pane, "@ib-system-coordinator-pane-id");
+    await expect(capture()).rejects.toThrow(refused); // missing id
+    await tmux("set-option", "-t", pane, "@ib-system-coordinator-pane-id", pane);
+    await tmux("send-keys", "-t", pane, "C-c");
+    await waitFor(async () => await foreground() === "bash");
+    await expect(capture()).rejects.toThrow(refused); // original shell still alive
+    await tmux("respawn-pane", "-k", "-t", pane, "bash --noprofile --norc");
+    expect(await tmux("display-message", "-p", "-t", pane, "#{pane_id}")).toBe(pane);
+    await expect(capture()).rejects.toThrow(refused);
+    await tmux("set-option", "-p", "-t", pane, "remain-on-exit", "on");
+    await tmux("send-keys", "-t", pane, "exit", "Enter");
+    await waitFor(async () => await tmux("display-message", "-p", "-t", pane, "#{pane_dead}") === "1");
+    await tmux("set-option", "-t", pane, "@ib-system-coordinator-command", await foreground());
+    await expect(capture()).rejects.toThrow(refused); // even with matching metadata
   } finally {
+    await spawnCtx.run(["tmux", "kill-server"]);
     spawnCtx.reset();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -1386,8 +1402,8 @@ test("stalled coordinator capture is killed and reaped before returning a bounde
   const cancelled: string[] = [];
   const stdout = new ReadableStream<Uint8Array>({ cancel() { cancelled.push("stdout"); } });
   const stderr = new ReadableStream<Uint8Array>({ cancel() { cancelled.push("stderr"); } });
-  spawnCtx.set(cmd => cmd[1] === "list-panes"
-    ? { stdout: streamOf("%4 1\n%4\n"), stderr: emptyStream(), exited: Promise.resolve(0) }
+  spawnCtx.set(cmd => cmd[1] === "show-options"
+    ? { stdout: streamOf("%4\n"), stderr: emptyStream(), exited: Promise.resolve(0) }
     : { stdout, stderr, exited: exit.promise, kill: signal => { kills.push(signal); } });
   try {
     let settled = false;

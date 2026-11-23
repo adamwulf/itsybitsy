@@ -1,3 +1,4 @@
+import { isCoordinatorType } from "./coordinator-type-names";
 import { isAgentSendProcess } from "./peers/remote-start-caller";
 import type { LocalQueueGuard } from "./outbox";
 import { openBrokerResults, pinnedPath } from "./pinned-directory";
@@ -284,7 +285,7 @@ export async function sweepStagingRequests(dir: string, now: number) {
   }
 }
 
-async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false, stage?: StageRemoteFiles) {
+async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false, stage?: StageRemoteFiles, missingBroker?: string) {
   const transfer = op !== SEND_OP;
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!isBrokerableTarget(target)) return transfer ? brokerFail("send request has an invalid target") : null;
@@ -293,7 +294,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   try { live = await (deps.watchdogLive ?? hasLiveWatchdog)(dir); }
   catch (err) { return deps.signal?.aborted ? interruptedSend("unpublished") : brokerFail(String(err)); }
   if (deps.signal?.aborted) return interruptedSend("unpublished");
-  if (!live) return transfer ? brokerFail(op === "remote-send" ? "Remote sends from a worktree agent need its watchdog running" : "Local attachment sends need the worktree watchdog running") : null;
+  if (!live) return transfer ? brokerFail(op === "remote-send" ? "Remote sends from a worktree agent need its watchdog running" : missingBroker ?? "Local attachment sends need the worktree watchdog running") : null;
   const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(transfer && { clientPid: process.pid }), ...(noPassthrough && { noPassthrough: true }) };
   const parent = join(dir, "send-attachments");
   const staged = join(parent, request.id);
@@ -371,8 +372,11 @@ export async function routeSendThroughWatchdog(
   deps: SpawnClientDeps = {},
 ): Promise<IbCommandResult | null> {
   const sender = await command.attachmentSender?.();
+  const agent = sender?.kind === "agent" ? sender.caller : undefined;
+  const sharedCoordinator = !!agent && agent.meta.worktree === false && isCoordinatorType(agent.meta.agentType) &&
+    isSandboxedProcess() && metaKernelSandboxed(agent.meta);
   const caller = sender
-    ? sender.kind === "agent" && sender.caller.meta.worktree === true && metaKernelSandboxed(sender.caller.meta) ? sender.caller : null
+    ? agent && (sharedCoordinator || (agent.meta.worktree === true && metaKernelSandboxed(agent.meta))) ? agent : null
     : await resolveRoutedCaller(deps);
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!caller) return null;
@@ -384,7 +388,8 @@ export async function routeSendThroughWatchdog(
   if (sender && command.attachments?.length && isSandboxedProcess()) {
     const body = await (command.readRawMessage ?? command.readMessage)();
     return submitSendRequest("local-attachment-send", caller.agentDir, String(caller.meta.id), command.target, body, deps,
-      false, remoteAttachmentStage(command.attachments, sender, deps.signal));
+      false, remoteAttachmentStage(command.attachments, sender, deps.signal),
+      sharedCoordinator ? "sandboxed repo coordinators cannot attach files locally yet without a running watchdog broker" : undefined);
   }
   if (await targetIsCaller(command.target, caller, command.repos)) return null;
   const message = await command.readMessage();
@@ -538,7 +543,7 @@ export async function handleSendRequest(
   // Where the requester "is": its own worktree, the cwd of a direct `ib send`
   // there. It decides `@coordinator` and the same-repo-first search of a bare
   // id; the watchdog's own cwd says nothing about the requester.
-  const callerCwd = join(ctx.agentDir, "repo");
+  const callerCwd = localFiles && requester.meta.worktree === false ? ctx.repoPath : join(ctx.agentDir, "repo");
   try {
     const lookup = <T>(read: () => Promise<T>) => remote || localFiles
       ? waitForIO({ signal: deps.transferSignal, setTimer: seams.setTimer }, read) : read();

@@ -602,6 +602,36 @@ describe("qualified agent addresses", () => {
     expect((await send(["hi"])).stderr).toContain("need its watchdog running");
   });
 
+  test.each([false, true])("a kernel-sandboxed shared coordinator attaches locally only through its watchdog (live=%s)", async live => {
+    const coordinator = await cli.addAgent(app, "App", { agentType: "repo-coordinator", worktree: false,
+      claude_pid: "200", claude_pid_epoch: 100, sandbox: { enabled: true } });
+    const transient = JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false,
+      tmux_rate_limited: false, has_background_tasks: false });
+    await Bun.write(join(app, "report"), "snapshot");
+    await Bun.write(join(dirname(worktree), "meta.transient.json"), transient);
+    if (live) await Bun.write(join(coordinator.agentDir, "meta.transient.json"), transient);
+    const ancestry = { ...agentAncestry, parents: [[300, 200], [200, 1]] as [number, number][] };
+    let flight: Promise<void> | undefined;
+    const timer = setInterval(() => {
+      if (live) flight ??= processSpawnRequests(coordinator.id, app, { verifySeal: async () => ({ ok: true }),
+        send: { attachmentTempDir: cli.cwd } }).then(() => {}).finally(() => { flight = undefined; });
+    }, 25);
+    try {
+      const sent = await cli.run(["send", "@App/mgr", "--attach", "./report", "read ./report"], { cwd: app, ancestry,
+        sandboxed: true, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]] });
+      const queue = Bun.file(join(cli.home, ".itsybitsy/agents/mgr/outbox.jsonl"));
+      if (!live) {
+        expect(sent.stderr).toContain("sandboxed repo coordinators cannot attach files locally yet");
+        expect(await queue.exists()).toBe(false);
+      } else {
+        expect(sent.exitCode, sent.stderr).toBe(0);
+        const record = JSON.parse(await queue.text());
+        expect(record).toMatchObject({ fromAgent: coordinator.id, noPassthrough: true });
+        expect(await Bun.file(record.message.split(" → ")[1]).text()).toBe("snapshot");
+      }
+    } finally { clearInterval(timer); await flight; }
+  });
+
   test("a collision-suffixed coordinator sends remotely and attaches locally under its actual id", async () => {
     await cli.addAgent(app, "App", { worktree: true });
     const id = "App-a3f1";

@@ -532,7 +532,11 @@ export async function handleSendRequest(
         if (files.length) {
           await requireActiveStagingLease(ctx.agentDir, ctx.id);
           marker = await createBrokerProgress(ctx.agentDir, ctx.id);
-        } else marker = await open(textProgress, "wx", 0o600);
+        } else {
+          deps.transferSignal?.throwIfAborted();
+          await mkdir(spawnResultDir(ctx.agentDir), { mode: 0o700 }).catch(err => { if (err.code !== "EEXIST") throw err; });
+          marker = await open(textProgress, "wx", 0o600);
+        }
       }
       catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return interruptedSend("claimed");

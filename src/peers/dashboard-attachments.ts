@@ -37,17 +37,17 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
   const inside = (root: string | undefined, path: string) => !!root && (path === root || path.startsWith(root + "/"));
   for (const ref of references(text)) {
     let path = ref.path;
-    if (!path.startsWith("/") && !path.startsWith("~/")) {
-      if (localRoot) await resolveMissingReference(localRoot + "/" + path);
+    const relative = !path.startsWith("/") && !path.startsWith("~/");
+    if (relative && !localRoot) {
       if (ref.start === 0) noPassthrough = true;
       continue;
     }
     for (;;) {
-      const absolute = path.startsWith("~/") ? userHome() + path.slice(1) : path;
+      const absolute = path.startsWith("~/") ? userHome() + path.slice(1) : relative ? localRoot + "/" + path : path;
       try {
         const source = await realpathArgument(absolute);
         if (ref.start === 0) noPassthrough = true;
-        if (inside(local, source)) break;
+        if (relative || inside(local, source)) break;
         paths.set(path, { argument: path, source });
         break;
       } catch (err) {
@@ -55,6 +55,7 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
         if (!ref.quote && /[.,;:!\)\]}]$/.test(path)) { path = path.slice(0, -1); continue; }
         const localPath = await resolveMissingReference(absolute);
         if (!ref.quote && /^\/[\w-]+$/.test(path)) break;
+        if (relative) { if (ref.start === 0) noPassthrough = true; break; }
         const peerOnly = !inside(localRoot, absolute) && inside(remoteRoot, absolute) && inside(remoteRoot, resolve(absolute));
         if (peerOnly || inside(local, localPath)) {
           if (ref.start === 0) noPassthrough = true;

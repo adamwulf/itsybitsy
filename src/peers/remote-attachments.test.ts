@@ -190,7 +190,7 @@ test("a dangling project symlink refuses absolute, relative and nested reference
   const project = await mkdtemp("/tmp/ib-dangling-");
   try {
     await symlink(join(project, "missing"), join(project, "link"));
-    for (const reference of [join(project, "link"), "./link", join(project, "link/file")]) {
+    for (const reference of [join(project, "link"), "./link", "see ./link.", join(project, "link/file")]) {
       await expect(dashboardAttachmentPaths(reference, project, project)).rejects.toThrow("Unresolved attachment");
     }
   } finally { await rm(project, { recursive: true, force: true }); }

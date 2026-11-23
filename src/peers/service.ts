@@ -1,3 +1,4 @@
+import { sweepOutgoingDirectories } from "./transfer-owner";
 /**
  * The iroh endpoint inside `ib watch` (docs/plans/iroh-peering.md, "Process
  * model" and "Reconnection"; SPEC.md §20.3), the one pairing session it runs
@@ -137,6 +138,7 @@ export interface ServiceEndpoint {
 export interface PeerServiceDeps {
   notice?(message: string): void;
   pollOutbox?: typeof pollPeerOutbox;
+  recoverTransfers?(): Promise<void>;
   receiveMessage?: ReturnType<typeof createMessageReceiver>;
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   remoteStartDenial: string | null | Promise<string | null>;
@@ -167,9 +169,13 @@ export interface PeerServiceDeps {
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
 export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
+  const poll = createPeerOutboxPoll();
   return {
     notice,
-    pollOutbox: createPeerOutboxPoll(),
+    pollOutbox: poll,
+    recoverTransfers: async () => {
+      await Promise.all([sweepOutgoingDirectories(), poll(async () => { throw new Error("Recovery cannot send"); }, log, () => false)]);
+    },
     receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,
     captureCoordinator: async () => {
@@ -344,6 +350,7 @@ export class PeerService {
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
   private readonly outboxPolls = new Set<Promise<void>>();
+  private recoveryTimer?: ReturnType<typeof setInterval>;
   private outboxOwner?: AbortController;
   private outboxTimer?: ReturnType<typeof setInterval>;
   private readonly receipts = new Map<string, { row: IncomingTransfer; controller?: AbortController; done: Promise<void> }>();
@@ -429,6 +436,12 @@ export class PeerService {
    */
   async bootIfPaired(): Promise<void> {
     if (this.shuttingDown) return;
+    if (this.deps.recoverTransfers && !this.recoveryTimer) {
+      const recover = () => this.deps.recoverTransfers!().catch(err => this.deps.log(`transfer cleanup: ${errorDetail(err)}`));
+      this.recoveryTimer = setInterval(() => { void recover(); }, 30_000);
+      await recover();
+      if (this.shuttingDown) return;
+    }
     let peers: Peer[];
     try {
       peers = await this.deps.readPeers();
@@ -785,6 +798,7 @@ export class PeerService {
    */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    clearInterval(this.recoveryTimer);
     const receipts = [...this.receipts.values()];
     for (const receipt of receipts) receipt.controller?.abort(new Error("Watcher shutting down"));
     this.cancelRetry();
@@ -797,7 +811,7 @@ export class PeerService {
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([drain(), new Promise<void>(resolve => { timer = setTimeout(resolve, 2000); })]);
+      await Promise.race([drain(), new Promise<void>(resolve => { timer = setTimeout(resolve, 1500); })]);
     } finally { clearTimeout(timer); }
   }
 

@@ -1,3 +1,4 @@
+import { stagingOwnerStart } from "./peers/transfer-owner";
 import { trackSendCleanup } from "./send-cleanup";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -60,7 +61,7 @@ import { isSandboxedProcess } from "./sandbox-detect";
 import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
 import { join } from "path";
-import { isPidAliveCtx, processStartEpochSecondsCtx, type Agent } from "./agents";
+import { isPidAliveCtx, type Agent } from "./agents";
 import {
   hasLiveWatchdog,
   resolveCallerAgentContext,
@@ -228,11 +229,6 @@ export async function requestSendViaWatchdog(
 }
 
 const UNVERIFIED_RETENTION_MS = 24 * 60 * 60 * 1000;
-
-function stagingOwnerStart(pid: number): number | null {
-  const start = processStartEpochSecondsCtx.fn(pid);
-  return start !== null && Number.isSafeInteger(start) && start > 0 ? start : null;
-}
 
 async function startStagingLease(stage: string) {
   await mkdir(stage, { mode: 0o700 });

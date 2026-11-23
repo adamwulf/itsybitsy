@@ -1809,7 +1809,7 @@ describe("endpoint owner peer-outbox polling", () => {
     }
   });
 
-  test("an owner never replays a crashed claim, and sweeps abandoned claims and unread results after ten minutes", async () => {
+  test("an owner keeps live claims across sweeps and reclaims dead claims without replay", async () => {
     const base = join(home, ".itsybitsy", "peer-outbox", ".claimed");
     const crashed = textHeader({ kind: "system" }, "old", { kind: "user" });
     const done = textHeader({ kind: "system" }, "complete", { kind: "user" });
@@ -1817,6 +1817,10 @@ describe("endpoint owner peer-outbox polling", () => {
     const unread = join(base, done.id, "result.json");
     await Bun.write(abandoned, JSON.stringify({ peer: ID_REMOTE, header: crashed }));
     await Bun.write(unread, JSON.stringify({ ok: true, id: done.id }));
+    const { writeTransferOwner } = await import("./transfer-owner");
+    alive.add(OTHER.pid);
+    starts.set(OTHER.pid, OTHER.startEpoch);
+    for (const id of [crashed.id, done.id]) await writeTransferOwner(join(base, id), { pid: OTHER.pid, start: OTHER.startEpoch! });
     let now = Date.now();
     const tick = createPeerOutboxPoll(() => now);
     let finishedAt = -1;
@@ -1836,6 +1840,7 @@ describe("endpoint owner peer-outbox polling", () => {
       await waitFor(() => finishedAt === now);
       expect(await Bun.file(abandoned).exists()).toBe(true);
       expect(await Bun.file(unread).exists()).toBe(true);
+      alive.delete(OTHER.pid);
       now++;
       await waitFor(() => finishedAt === now);
       expect(await Bun.file(abandoned).exists()).toBe(false);

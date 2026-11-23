@@ -1,3 +1,4 @@
+import { ownerIsDead, readTransferOwner, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
 import { trackSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
@@ -81,18 +82,10 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     await mkdir(join(base, ".staging"), { mode: 0o700, recursive: true });
     await mkdir(staging, { mode: 0o700 });
     try {
+      // The watcher captures process birth stamps. The submitter can run with ps denied.
+      await writeTransferOwner(staging, { pid: process.pid, start: null });
       if (stage) {
-        // The orphan sweep also visits .staging. Keep an active clone/hash
-        // alive on slow volumes for as long as the submitting process lives.
-        const lease = await open(staging, constants.O_RDONLY | constants.O_DIRECTORY);
-        let leaseError: unknown;
-        const heartbeat = setInterval(() => {
-          const now = Date.now() / 1000;
-          try { futimesSync(lease.fd, now, now); } catch (err) { leaseError = err; }
-        }, 30_000);
-        try { header = { ...header, files: await stage(join(staging, "files")) }; }
-        finally { clearInterval(heartbeat); await lease.close(); }
-        if (leaseError) throw leaseError;
+        header = { ...header, files: await stage(join(staging, "files")) };
         encodeSendHeader(parseSendHeader(header));
       }
       await writeJson(staging, "request.json", { peer, header });
@@ -177,7 +170,8 @@ export function createPeerOutboxPoll(now = Date.now) {
       const path = join(parent, entry.name);
       if (!entry.isDirectory() || !requestId.test(entry.name) || active.has(path)) continue;
       try {
-        if (now() - (await stat(path)).mtimeMs >= retentionMs && !active.has(path)) {
+        const owner = await readTransferOwner(path);
+        if (owner && ownerIsDead(owner) && !active.has(path)) {
           await rm(path, { recursive: true, force: true });
         }
       } catch (err) { if (!missing(err)) throw err; }
@@ -214,10 +208,14 @@ export function createPeerOutboxPoll(now = Date.now) {
           }
           active.add(dir);
           try {
-            if (now() - (await stat(dir)).mtimeMs >= retentionMs) {
+            const submittedBy = await readTransferOwner(dir);
+            if (submittedBy && ownerIsDead(submittedBy)) {
               await rm(dir, { recursive: true, force: true });
               continue;
             }
+            const submitter = submittedBy;
+            const clientOwner = submitter && { pid: submitter.pid, start: submitter.start ?? stagingOwnerStart(submitter.pid) };
+            await writeTransferOwner(dir, { pid: process.pid, start: stagingOwnerStart(process.pid) });
             let result;
             try {
               const { peer, header: raw } = await readRequest(join(dir, "request.json"));
@@ -249,6 +247,7 @@ export function createPeerOutboxPoll(now = Date.now) {
                 tick();
               } finally { clearInterval(timer); }
             } catch (err) { result = { ok: false, error: detail(err) }; }
+            if (clientOwner) await writeTransferOwner(dir, clientOwner);
             await writeJson(dir, "result.json", result);
             await rm(join(dir, "files"), { recursive: true, force: true })
               .catch(err => log(`peer-outbox: could not remove sent files: ${detail(err)}`));

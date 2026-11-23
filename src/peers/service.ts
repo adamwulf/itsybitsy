@@ -338,6 +338,24 @@ export class PeerService {
   /** Cancels the check that a rebind has stayed up for PEER_RETRY_STABLE_MS; null when none is armed. */
   private cancelStableTimer: (() => void) | null = null;
   private lockHeld = false;
+  private acquiringLock?: Promise<EndpointLockResult>;
+  private recovery?: Promise<void>;
+  private takeServiceLock(): Promise<EndpointLockResult> {
+    if (this.lockHeld) return Promise.resolve({ acquired: true });
+    return this.acquiringLock ??= this.deps.acquireLock().then(lock => {
+      this.lockHeld = lock.acquired;
+      return lock;
+    }).finally(() => { this.acquiringLock = undefined; });
+  }
+
+  private recoverTransfers(): Promise<void> {
+    if (this.shuttingDown || !this.deps.recoverTransfers) return Promise.resolve();
+    return this.recovery ??= (async () => {
+      const lock = await this.takeServiceLock();
+      if (lock.acquired && !this.shuttingDown) await this.deps.recoverTransfers!();
+    })().catch(err => this.deps.log(`transfer cleanup: ${errorDetail(err)}`))
+      .finally(() => { this.recovery = undefined; });
+  }
   private shuttingDown = false;
   private dialogOpen = false;
   private selfId: string | null = null;
@@ -438,9 +456,8 @@ export class PeerService {
   async bootIfPaired(): Promise<void> {
     if (this.shuttingDown) return;
     if (this.deps.recoverTransfers && !this.recoveryTimer) {
-      const recover = () => this.deps.recoverTransfers!().catch(err => this.deps.log(`transfer cleanup: ${errorDetail(err)}`));
-      this.recoveryTimer = setInterval(() => { void recover(); }, 30_000);
-      await recover();
+      this.recoveryTimer = setInterval(() => { void this.recoverTransfers(); }, 30_000);
+      await this.recoverTransfers();
       if (this.shuttingDown) return;
     }
     let peers: Peer[];
@@ -835,6 +852,7 @@ export class PeerService {
     } catch (err) {
       this.deps.log(`peering: closing the endpoint failed: ${errorDetail(err)}`);
     } finally {
+      await this.recovery;
       if (this.lockHeld) {
         this.lockHeld = false;
         try {
@@ -886,7 +904,7 @@ export class PeerService {
 
     let lock: EndpointLockResult;
     try {
-      lock = await this.deps.acquireLock();
+      lock = await this.takeServiceLock();
     } catch (err) {
       const message = `could not take the endpoint lock: ${errorDetail(err)}`;
       this.setStatus({ kind: "error", message, retryAt: null });
@@ -908,6 +926,7 @@ export class PeerService {
       ep = await this.deps.bindEndpoint(identity.secretKey, [PAIR_ALPN, PEER_ALPN]);
     } catch (err) {
       const message = errorDetail(err);
+      await this.recovery;
       this.lockHeld = false;
       await this.deps.releaseLock().catch(() => {});
       this.setStatus({ kind: "error", message, retryAt: null });

@@ -313,10 +313,14 @@ describe("spawn broker", () => {
       const protectedDir = join(repo, "protected");
       await mkdir(protectedDir);
       await mkdir(agentDir, { recursive: true });
+      const stale = join(protectedDir, ID_B + ".json");
+      await Bun.write(stale, "keep");
+      await (await import("node:fs/promises")).utimes(stale, 1, 1);
       await symlink(protectedDir, spawnResultDir(agentDir));
       await queue(ID_A, validRequest(ID_A));
       await processSpawnRequests(AGENT_ID, repo, server().deps);
-      expect(await readdir(protectedDir)).toEqual([]);
+      expect(await readdir(protectedDir)).toEqual([ID_B + ".json"]);
+      expect(await Bun.file(stale).text()).toBe("keep");
     });
 
     test("abandoned JSON temps and withdrawals are recovered without dispatch", async () => {

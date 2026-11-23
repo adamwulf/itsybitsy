@@ -63,19 +63,15 @@ Attachments copied to this machine:
 
 There is no new ALPN. A new op `send` runs on the trusted ALPN `itsybitsy/peer/1`, one bi stream per message.
 
-**Request framing:**
+**Request framing.** The four-byte big-endian prefix `00 00 01 57` gives the length of this 343-byte UTF-8 JSON header, excluding the displayed line break.
 
+```json
+{"op":"send","id":"6ed350b1-b70e-4b50-bfb5-56a4a93752b8","from":{"kind":"user"},"target":{"kind":"agent","repo":"photos","agent":"worker-1"},"message":"Read ./greeting.txt","files":[{"name":"greeting.txt","size":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","spellings":["./greeting.txt","/src/greeting.txt"]}]}
 ```
-u32 big-endian header length
-UTF-8 JSON header:
-  {"op":"send","id":"<uuid>","from":{"kind":"user"}|{"kind":"agent","id":"<machine>/<repo>/<agent>"},
-   "target":{"kind":"agent","agent":"<id or nickname>","repo":"<optional registryName>"}
-          | {"kind":"system"}
-          | {"kind":"repo-coordinator","repo":"<registryName>"},
-   "message":"<text>",
-   "files":[{"name":"<basename>","size":<bytes>,"sha256":"<hex>","spellings":["./dir/image.png","/src/dir/image.png"]}]}
-then, for each file in order, exactly `size` raw bytes, then finish()
-```
+
+The next five bytes are `68 65 6c 6c 6f` (ASCII `hello`). The sender then issues a single FIN. For multiple files, their raw bodies follow in manifest order and the FIN follows the last body. For zero files, the FIN immediately follows the header.
+
+An agent sender uses `{"kind":"agent","id":"desk/photos/worker-1"}` in `from`. An agent target can omit `repo` to use the receiver’s normal resolver. The other target forms are `{"kind":"system"}` for the system coordinator and `{"kind":"repo-coordinator","repo":"photos"}` for a repo coordinator.
 
 **Reply:** `{"ok":true,"id":"<uuid>"}` or `{"ok":false,"error":"<message>"}`.
 

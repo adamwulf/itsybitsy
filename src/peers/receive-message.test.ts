@@ -7,7 +7,7 @@ import { setUserHome, resetUserHome } from "../home";
 import { drainOutbox, resetSendSpawnRunner, setSendSpawnRunner } from "../ib-commands";
 import { makeAgent, makeSpawnResult, waitFor } from "../test-utils";
 import { spawnCtx as paneProbe } from "../tmux-poller";
-import { acquireOutboxLock, readOutbox } from "../outbox";
+import { acquireOutboxLock, outboxPath, readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
 import { createFakeClock, createMemoryLink } from "./test-pair-transport";
 import { requestSend, serveTrustedConnection } from "./peer-link";
@@ -790,4 +790,26 @@ test("a pending replay expires independently while the body is still being recei
     held.resolve(new Uint8Array());
     await next;
   } finally { held.resolve(new Uint8Array()); await original; }
+});
+
+test("shutdown during the dedupe read prevents the queue append", async () => {
+  const { PeerService, defaultPeerServiceDeps } = await import("./service");
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null, cli.root), receiveMessage: receiver });
+  const dir = join(cli.home, ".itsybitsy", "agents", "worker");
+  const read = fs.readFile;
+  const entered = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const held = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof read>) => {
+    if (args[0] === outboxPath(dir)) { entered.resolve(); await resume.promise; }
+    return read(...args);
+  }) as typeof read);
+  try {
+    const receive = service.receiveTracked(header(), "peer", paired);
+    await entered.promise;
+    const stopped = service.shutdown();
+    resume.resolve();
+    await expect(receive).rejects.toThrow("shutting down");
+    await stopped;
+    expect(await readOutbox(dir)).toEqual([]);
+  } finally { resume.resolve(); held.mockRestore(); await service.shutdown(); }
 });

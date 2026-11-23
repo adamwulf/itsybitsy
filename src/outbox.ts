@@ -103,6 +103,8 @@ export interface OutboxMessage {
   message: string;
   /** Resolved sender: real agent id, `@`-sentinel, or "" for the human user. */
   fromAgent: string;
+  /** Qualified peer labels can start with @, too. Retain their wire kind for the drainer. */
+  peerSender?: "agent" | "system";
   /** Mirrors the historical `opts.raw` — suppresses the `[sent by ...]` prefix. */
   raw: boolean;
   /** Wall-clock ms at enqueue time (debugging / ordering aid). */
@@ -170,6 +172,7 @@ export async function enqueueOutbox(
   const dup = existing.find(
     (m) =>
       m.fromAgent === msg.fromAgent &&
+      m.peerSender === msg.peerSender &&
       m.message === msg.message &&
       m.raw === msg.raw &&
       m.team === msg.team &&
@@ -181,6 +184,7 @@ export async function enqueueOutbox(
     id: msg.id ?? crypto.randomUUID(),
     message: msg.message,
     fromAgent: msg.fromAgent,
+    peerSender: msg.peerSender,
     raw: msg.raw,
     enqueuedAtMs: msg.enqueuedAtMs ?? Date.now(),
     team: msg.team,
@@ -234,6 +238,7 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
           id: obj.id,
           message: obj.message,
           fromAgent: obj.fromAgent,
+          peerSender: obj.peerSender === "system" || obj.peerSender === "agent" ? obj.peerSender : undefined,
           raw: obj.raw,
           enqueuedAtMs: typeof obj.enqueuedAtMs === "number" ? obj.enqueuedAtMs : 0,
           team: typeof obj.team === "string" ? obj.team : undefined,

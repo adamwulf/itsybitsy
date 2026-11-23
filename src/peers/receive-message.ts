@@ -52,6 +52,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
     const work = async () => {
       const result = await enqueue(header, name, {
         log,
+        senderKind: header.from.kind === "user" ? undefined : header.from.kind,
         async beforeEnqueue() {
           if (await readPeerName() === null) throw new Error("not a peer");
         },

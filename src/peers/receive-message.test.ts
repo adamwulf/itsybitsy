@@ -72,7 +72,7 @@ test("the ordinary drainer applies passthrough and peer labels to the queued tex
   setSendSpawnRunner(cmd => { calls.push(cmd); return makeSpawnResult(); });
   for (const [from, message] of [
     [{ kind: "user" }, "/compact"], [{ kind: "user" }, "!pwd"],
-    [{ kind: "agent", id: "desk/tools/alice" }, "/compact"], [{ kind: "system" }, "!pwd"],
+    [{ kind: "agent", id: "@desk/tools/alice" }, "/compact"], [{ kind: "system" }, "!pwd"],
   ] as const) {
     expect(await exchange(header({ from, message }))).toMatchObject({ ok: true });
   }
@@ -80,7 +80,7 @@ test("the ordinary drainer applies passthrough and peer labels to the queued tex
   const result = await drainOutbox(agent, join(cli.home, ".itsybitsy", "agents", agent.id));
   expect(result.ok).toBe(true);
   expect(calls.filter(cmd => cmd.includes("-l")).map(cmd => cmd.at(-1))).toEqual([
-    "/compact", "!pwd", "[sent by agent desk/tools/alice]: /compact", "[sent by desk/@system]: !pwd",
+    "/compact", "!pwd", "[sent by agent @desk/tools/alice]: /compact", "[sent by desk/@system]: !pwd",
   ]);
 });
 

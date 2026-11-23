@@ -4113,6 +4113,7 @@ async function checkSendSession(agent: Agent): Promise<IbCommandResult | null> {
 
 /** Inbound peer messages acknowledge enqueue, including for recipients without a watchdog. */
 export interface PeerEnqueueOptions {
+  senderKind?: OutboxMessage["peerSender"];
   beforeEnqueue(): Promise<void>;
   log(line: string): void;
 }
@@ -4202,13 +4203,15 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   if (!raw && !userPassthrough) {
     if (fromId) {
       let label: string;
-      if (fromId.startsWith("@")) {
+      if (queued.peerSender) {
+        label = queued.peerSender === "agent" ? `agent ${fromId}` : fromId;
+      } else if (fromId.startsWith("@")) {
         label = BARE_RENDERED_SENTINELS.has(fromId) ? fromId.slice(1) : fromId;
       } else {
         // In a team context the ` in @<team>` clause already establishes that
         // the sender is an agent in a room, so the literal "agent " word is
         // dropped (§16.4 delivery-prefix divergence). Outside a team it stays.
-        label = teamClause || fromId.endsWith("/@system") ? fromId : `agent ${fromId}`;
+        label = teamClause ? fromId : `agent ${fromId}`;
       }
       fullMessage = `[sent by ${label}${teamClause}]: ${message}`;
     } else {
@@ -4275,7 +4278,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   }
 
   // Log to sender's agent.log if applicable
-  if (fromId && !fromId.includes("/")) {
+  if (fromId && !queued.peerSender) {
     const senderDir = runtimeNames.agentDir(agent.repoPath, fromId);
     const verb = raw ? "Sent raw message" : "Sent message";
     await logAgent(senderDir, `${verb} to ${agent.id}: ${message}`);
@@ -4509,7 +4512,9 @@ export async function sendMessage(
       if (unavailable) return unavailable;
       await opts.peerSend.beforeEnqueue();
     }
-    await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough }, reservedKey);
+    await enqueueOutbox(queueDir, {
+      message: outgoing, fromAgent: fromId, peerSender: opts?.peerSend?.senderKind, raw, team: opts?.team, noPassthrough,
+    }, reservedKey);
   } catch (err) {
     // Enqueue failed — nothing is queued. Undo any staged copies so an
     // abandoned attempt leaves no unused attachment behind (no partial copy).

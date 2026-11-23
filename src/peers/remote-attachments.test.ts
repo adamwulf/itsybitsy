@@ -36,6 +36,7 @@ test("watchdog takes only numbered, single-link files within its request and ver
     const files = [{ name: "../../other", spellings: ["/elsewhere"], size: 3, sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex") }];
     const stage = brokerAttachmentStage(root, id, files);
     await stage(join(root, "valid"));
+    expect(await Bun.file(source).exists()).toBe(false);
     expect(await Bun.file(join(root, "valid/0")).text()).toBe("abc");
     await writeFile(source, "xyz");
     await expect(stage(join(root, "changed"))).rejects.toThrow("hash mismatch");

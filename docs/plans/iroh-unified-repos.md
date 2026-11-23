@@ -131,7 +131,7 @@ the reply change.
     override.
   - Hooks, sandbox, agent-type permissions and every spawn gate therefore
     apply exactly as for a local human spawn.
-- **Reply:** `{"ok":true,"id":"<id>"}` or `{"ok":false,"error":"<message>"}`.
+- **Reply:** `{"ok":true,"id":"<id>"}` or `{"op":"error","reason":"<message>"}`.
 - **Visibility.** The receiving machine logs each request to `watch.log` and
   shows a notice: "<peer> started agent <id> in <repo>".
 - **Permission model:**

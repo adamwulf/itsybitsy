@@ -1935,7 +1935,6 @@ export async function main() {
       break;
     }
     case "send": {
-      const repos = await listRepos();
       // Parse known flags (--from, -f/--file) at any position. Unknown short
       // flags (e.g. `-x`) and unknown long flags (e.g. `--bogus`) are rejected
       // BEFORE the target is seen so typos surface immediately. AFTER the
@@ -1993,40 +1992,41 @@ export async function main() {
         process.exit(1);
       }
 
-      // Read file upfront so file errors are reported before agent lookup.
-      let fileContent: string | undefined;
-      if (filePath) {
-        try {
-          const f = Bun.file(filePath);
-          if (!(await f.exists())) {
-            console.error(`Error: file not found: ${filePath}`);
-            process.exit(1);
-          }
-          fileContent = (await f.text()).trim();
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(`Error: could not read file ${filePath}: ${msg}`);
-          process.exit(1);
-        }
-      }
-
-      // Resolve message content per precedence: inline > file > stdin, at most
-      // once: the broker below may read it before the direct path does.
-      const resolveMessageBody = messageBodyReader(inlineMessage, fileContent);
-
-      // Install cancellation before caller classification, target resolution
-      // and either handoff. The selected route owns the result and exit status.
       const controller = new AbortController();
-      const interruptedInput = Promise.withResolvers<string>();
-      const interrupt = () => { controller.abort(); interruptedInput.resolve(""); };
-      const readBeforePublication = () => Promise.race([resolveMessageBody(), interruptedInput.promise]);
+      const interruptedInput = Promise.withResolvers<void>();
+      const interrupt = () => { controller.abort(); interruptedInput.resolve(); };
       process.on("SIGINT", interrupt);
+      let repos: RepoEntry[];
       let resolved;
+      let resolveMessageBody: ReturnType<typeof messageBodyReader>;
       try {
+        const prepare = async () => {
+          const repos = await listRepos();
+          let fileContent: string | undefined;
+          if (filePath) {
+            const file = Bun.file(filePath);
+            if (!await file.exists()) throw new Error(`Error: file not found: ${filePath}`);
+            try { fileContent = (await file.text()).trim(); }
+            catch (err) { throw new Error(`Error: could not read file ${filePath}: ${err instanceof Error ? err.message : String(err)}`); }
+          }
+          return { repos, fileContent };
+        };
+        const input = await Promise.race([prepare(), interruptedInput.promise.then((): never => { throw controller.signal.reason; })]);
+        controller.signal.throwIfAborted();
+        repos = input.repos;
+        resolveMessageBody = messageBodyReader(inlineMessage, input.fileContent);
+        const readBeforePublication = () => Promise.race([resolveMessageBody(), interruptedInput.promise.then(() => "")]);
         const { routeCliSend } = await import("./send-broker");
         const route = await routeCliSend({ target, fromAgent, readMessage: readBeforePublication, usage, repos }, { signal: controller.signal });
         if ("result" in route) { await printAndExit(route.result); break; }
         resolved = route.local;
+      } catch (err) {
+        if (controller.signal.aborted) {
+          const { interruptedSend } = await import("./spawn-broker");
+          await printAndExit(interruptedSend("unpublished"));
+        }
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
       } finally { process.off("SIGINT", interrupt); }
       const { agent: resolvedAgent, isSystemCoordinator, team } = resolved;
 

@@ -1,7 +1,7 @@
 import { waitFor } from "./test-utils";
 import { processSpawnRequests, SPAWN_MAX_PROMPT_BYTES, spawnRequestDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, readdir, rename, symlink, rm, utimes } from "node:fs/promises";
+import { mkdir, open, readdir, rename, symlink, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { setUserHome, resetUserHome } from "./home";
 import { addMember, getTeam } from "./teams";
@@ -367,6 +367,20 @@ describe("qualified agent addresses", () => {
       expect((await send([[300, 400], [400, 1]], true)).stderr).toContain("cannot verify the sender");
       expect(senders).toEqual([{ kind: "agent", id: "laptop-a/project.com/project.com" }, { kind: "user" }]);
     } finally { clearInterval(timer); }
+  });
+
+  test("SIGINT while -f is waiting for text cancels before either handoff", async () => {
+    const fifo = join(cli.cwd, "slow-message");
+    expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+    const interrupt = new AbortController();
+    const send = cli.run(["send", "laptop-b/remote/remote-id", "-f", fifo], { cwd: worktree, interrupt: interrupt.signal });
+    const writer = await open(fifo, "w"); // The CLI has opened the read side and cannot receive EOF yet.
+    try {
+      interrupt.abort();
+      expect(await send).toMatchObject({ exitCode: 130, stdout: "", stderr: "cancelled before sending\n" });
+    } finally { await writer.close(); }
+    expect(await readdir(spawnRequestDir(join(app, ".itsybitsy", "agents", "mgr"))).catch(() => [])).toEqual([]);
+    expect(await readdir(join(cli.home, ".itsybitsy", "peer-outbox")).catch(() => [])).toEqual([]);
   });
 
   for (const broker of [false, true]) {

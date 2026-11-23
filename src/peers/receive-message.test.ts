@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import { mkdir, open, readdir, stat, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
@@ -525,4 +526,36 @@ test("requestSend retains the machine, key and value of a long file limit error"
   });
   try { await expect(requestSend(a, req, timer)).rejects.toThrow("laptop (peering.attachments.maxFileMB = 1)"); }
   finally { a.close(0, "done"); await serving; }
+});
+
+test("exclusive destination creation preserves existing bytes and cleans the failed receipt", async () => {
+  const dir = await receiveFixture();
+  const existing = join(cli.root, "existing");
+  await Bun.write(existing, "original");
+  const openFile = fs.open;
+  const collision = spyOn(fs, "open").mockImplementation(async (path, ...args) => {
+    if (String(path).startsWith(dir + "/") && String(path).endsWith("/a.txt")) await fs.link(existing, path);
+    return openFile(path, ...args);
+  });
+  try {
+    expect(await exchange(header({ files: [manifestFile("replacement")] }), paired, false, Buffer.from("replacement"))).toMatchObject({ ok: false });
+    expect(await Bun.file(existing).text()).toBe("original");
+    expect(await readdir(dir)).toEqual([]);
+    expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
+  } finally { collision.mockRestore(); }
+});
+
+test.each(["second hash", "target stopped"])("%s after writing the first file rolls back the entire receipt", async kind => {
+  const dir = await receiveFixture();
+  const files = [manifestFile("one"), manifestFile("two", "b", "./other")];
+  if (kind === "target stopped") {
+    let probes = 0;
+    paneProbe.set(() => makeSpawnResult(0, probes++ ? "1" : "0"));
+  }
+  const bytes = Buffer.from(kind === "second hash" ? "onebad" : "onetwo");
+  expect(await exchange(header({ files }), paired, false, bytes)).toMatchObject({
+    ok: false, error: expect.stringContaining(kind === "second hash" ? "hash mismatch" : "not running"),
+  });
+  expect(await readdir(dir)).toEqual([]);
+  expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });

@@ -1357,7 +1357,10 @@ describe("TmuxPoller tab handling at the boundary", () => {
 test.skipIf(!Bun.which("tmux"))("coordinator capture checks the recorded identity against the live foreground in private tmux", async () => {
   const dir = await mkdtemp("/tmp/ib-pane-");
   const session = "ib-coordinator";
-  spawnCtx.set((cmd, opts) => Bun.spawn(["tmux", "-f", "/dev/null", "-S", join(dir, "sock"), ...cmd.slice(1)], opts));
+  spawnCtx.set((cmd, opts) => {
+    const proc = Bun.spawn(["tmux", "-f", "/dev/null", "-S", join(dir, "sock"), ...cmd.slice(1)], opts);
+    return { stdout: proc.stdout, stderr: proc.stderr, exited: proc.exited, kill: () => proc.kill("SIGKILL") };
+  });
   const tmux = async (...args: string[]) => {
     const result = await spawnCtx.run(["tmux", ...args]);
     if (result.exitCode !== 0) throw new Error(result.stderr);

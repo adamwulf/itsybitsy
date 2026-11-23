@@ -1,6 +1,6 @@
 import { requestLookup } from "../request-lookup";
 import { transferOwnerState, type TransferOwner, finishRecovery, inspectTransferDirectory, reclaimTransfer, safeTransferParent, sweepEntries, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
-import { trackSendCleanup, warnSendCleanup } from "../send-cleanup";
+import { cancellationPoll, cancellationMarkerExists, trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
@@ -334,8 +334,11 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
             let recorded = -1;
             let writing: Promise<void> | undefined;
             let warned = false;
+            const checkCancel = cancellationPoll(async () => await cancellationMarkerExists(join(dir, "cancel"))
+              || await cancellationMarkerExists(join(dir, "timeout")), controller);
             const tick = () => {
-              if (existsSync(join(dir, "cancel")) || existsSync(join(dir, "timeout")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
+              if (!ownsEndpoint()) controller.abort(new Error("Send cancelled"));
+              checkCancel();
               if (writing || sequence === recorded) return;
               const next = sequence;
               writing = writeJson(dir, "progress", { bytes, sequence: next }).then(() => { recorded = next; }, err => {

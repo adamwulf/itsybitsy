@@ -1,3 +1,4 @@
+import { cancellationPoll, cancellationMarkerExists } from "./send-cleanup";
 import { inspectBrokerLease, stagingOwnerStart, transferOwnerState, type TransferOwner, reclaimTransfer, transferDirectoryBatch } from "./peers/transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
 import * as runtimeNames from "./runtime-names";
@@ -50,7 +51,6 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
-import { existsSync, fstatSync } from "node:fs";
 import { mkdir, open, rm, stat, rename } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
@@ -558,9 +558,8 @@ export async function handleSendRequest(
       }
       const signal = deps.transferSignal ? AbortSignal.any([controller.signal, deps.transferSignal]) : controller.signal;
       const cancelPath = join(spawnResultDir(ctx.agentDir), ctx.id + ".cancel");
-      const checkClient = () => {
-        if (files.length ? !fstatSync(marker!.fd).nlink : existsSync(cancelPath)) controller.abort(new Error("Send cancelled"));
-      };
+      const checkClient = cancellationPoll(async () => files.length
+        ? (await marker!.stat()).nlink === 0 : cancellationMarkerExists(cancelPath), controller);
       let sequence = 0, recorded = 0, updated = -Infinity;
       let publication: Promise<void> | undefined;
       let warned = false;

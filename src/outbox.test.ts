@@ -1,4 +1,5 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import * as fs from "node:fs/promises";
+import { spyOn, test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, readFile, writeFile, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -35,6 +36,30 @@ describe("outbox queue", () => {
     await expect(readOutbox(dir)).rejects.toThrow("single-link regular");
     await expect(enqueueOutbox(dir, { message: "hi", fromAgent: "", raw: false })).rejects.toThrow("single-link regular");
     expect(await readFile(target, "utf8")).toBe("original");
+  });
+
+  test.each(["", "\n", "\n{broken"])("appending after a legacy record with tail %j preserves both complete records", async tail => {
+    await writeFile(outboxPath(dir), JSON.stringify({ id: "old", message: "legacy", raw: false, fromAgent: "" }) + tail);
+    await enqueueOutbox(dir, { id: "new", message: "new", fromAgent: "", raw: false });
+    expect((await readOutbox(dir)).map(m => m.id)).toEqual(["old", "new"]);
+  });
+
+  test("a concurrent append survives a drain paused immediately before replacement", async () => {
+    for (const id of ["one", "two"]) await enqueueOutbox(dir, { id, message: id, fromAgent: "", raw: false });
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const rename = fs.rename;
+    const spy = spyOn(fs, "rename").mockImplementation(async (...args) => {
+      entered.resolve(); await release.promise; return rename(...args);
+    });
+    try {
+      const drain = rewriteOutboxRemoving(dir, new Set(["one"]));
+      await entered.promise;
+      const append = enqueueOutbox(dir, { id: "three", message: "three", fromAgent: "", raw: false });
+      await Bun.sleep(25);
+      expect((await readOutbox(dir)).map(m => m.id)).toEqual(["one", "two"]);
+      release.resolve(); await Promise.all([append, drain]);
+      expect((await readOutbox(dir)).map(m => m.id)).toEqual(["two", "three"]);
+    } finally { release.resolve(); spy.mockRestore(); }
   });
 
   test("enqueue then read returns the message in FIFO order", async () => {

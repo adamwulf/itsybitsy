@@ -1,3 +1,4 @@
+import { flock, LOCK_EX, LOCK_NB } from "./file-lock";
 /**
  * Per-agent (and per-coordinator) tmux message-delivery queue.
  *
@@ -153,29 +154,21 @@ async function openQueue(parent: string, append: boolean) {
   } catch (err) { await file.close(); throw err; }
 }
 
-/**
- * Append one message to the outbox. A single small `appendFile` of one line is
- * atomic on POSIX (O_APPEND), and the queue directory's lock around the drain means a
- * concurrent drainer never truncates a half-written line: the drainer reads the
- * whole file, parses complete lines, and rewrites only the not-yet-delivered
- * remainder. An append that lands mid-drain is simply picked up next drain.
- *
- * Dedupe: before appending, we scan the current pending queue and skip the
- * append if an identical message from the same sender is ALREADY queued (not
- * yet drained) — matching on `(fromAgent, message, raw, team)`. This caps the
- * queue at one pending copy per that tuple, so a stuck sender that re-fires the
- * SAME notification every tick (e.g. a watchdog whose inline drain into a dead
- * tmux keeps failing) can't grow the queue unbounded. On a skip we return the
- * pre-existing matching record instead of creating a new one. This is
- * best-effort: the read+append is intentionally NOT lock-guarded (the drain
- * lock guards delivery, not enqueue), so a rare concurrent double from two
- * separate processes is acceptable and harmless — the goal is bounding runaway
- * growth from a single re-firing sender, not exactly-once delivery. Dedupe only
- * suppresses while a copy is still PENDING: once the queued copy is drained, an
- * identical message enqueues fresh (nothing is permanently blacklisted).
- *
- * `id` and `enqueuedAtMs` are injectable for deterministic tests.
- */
+/** Writers lock the directory inode, which survives replacement of the JSONL
+ * file. The independent delivery lock serializes tmux, outside this section. */
+async function withQueueMutation<T>(dir: string, create: boolean, signal: AbortSignal | undefined, work: (parent: string) => Promise<T>) {
+  return withPinnedDirectory(dir, create, async (parent, directory) => {
+    const deadline = performance.now() + 60_000;
+    while (flock(directory.fd, LOCK_EX | LOCK_NB) !== 0) {
+      signal?.throwIfAborted();
+      if (performance.now() >= deadline) throw Error("Timed out waiting for queue mutation lock");
+      await Bun.sleep(10);
+    }
+    signal?.throwIfAborted();
+    return work(parent);
+  });
+}
+
 export class PendingQueueAppend extends Error {
   constructor(readonly completion: Promise<void>, cause: unknown) {
     super("Queue append outcome unknown — check the recipient", { cause });
@@ -193,7 +186,7 @@ export async function enqueueOutbox(
   const active = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
   let append: Promise<void> | undefined;
   try {
-    return await waitForIO({ ...timing, signal }, () => withPinnedDirectory(dir, reservedKey === undefined, async parent => {
+    return await waitForIO({ ...timing, signal }, () => withQueueMutation(dir, reservedKey === undefined, active, async parent => {
       const file = await openQueue(parent, true);
       try { return await appendRecord(file); } finally { await file.close(); }
     }));
@@ -204,7 +197,8 @@ export async function enqueueOutbox(
     throw err;
   }
   async function appendRecord(file: FileHandle) {
-    const existing = parseQueue(await file.readFile("utf8"));
+    const content = await file.readFile("utf8");
+    const existing = parseQueue(content);
     const dup = existing.find(
       (m) =>
         m.fromAgent === msg.fromAgent &&
@@ -230,7 +224,8 @@ export async function enqueueOutbox(
       noPassthrough: msg.noPassthrough === true ? true : undefined,
     };
     active.throwIfAborted();
-    append = file.appendFile(JSON.stringify(record) + "\n");
+    const separator = content && !content.endsWith("\n") ? "\n" : "";
+    append = file.appendFile(separator + JSON.stringify(record) + "\n");
     await append;
     return record;
   }
@@ -300,7 +295,7 @@ function parseQueue(content: string) {
  */
 export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<string>): Promise<void> {
   try {
-    await withPinnedDirectory(dir, false, async parent => {
+    await withQueueMutation(dir, false, undefined, async parent => {
       const current = await readPinnedQueue(parent);
       const remaining = current.filter(m => !deliveredIds.has(m.id));
       const path = outboxPath(parent);

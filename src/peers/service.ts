@@ -145,7 +145,7 @@ export interface PeerServiceDeps {
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   remoteStartDenial: string | null | Promise<string | null>;
   remoteSpawn?: RemoteSpawnDeps;
-  writeRemoteAgents?(states: PeerLinkState[]): void;
+  writeRemoteAgents?(states: PeerLinkState[], generation: string): void;
   renewLease?(): Promise<void>;
   acquireLock(): Promise<EndpointLockResult>;
   releaseLock(): Promise<unknown>;
@@ -341,6 +341,7 @@ export class PeerService {
   /** Cancels the check that a rebind has stayed up for PEER_RETRY_STABLE_MS; null when none is armed. */
   private cancelStableTimer: (() => void) | null = null;
   private lockHeld = false;
+  private lockGeneration?: string;
   private recovery?: Promise<void>;
   private recoverTransfers(): Promise<void> {
     if (!this.lockHeld || this.shuttingDown || !this.deps.recoverTransfers) return Promise.resolve();
@@ -408,7 +409,7 @@ export class PeerService {
 
   private publishRemoteAgents(): void {
     try {
-      this.deps.writeRemoteAgents?.(this.poller.states());
+      if (this.lockHeld && this.lockGeneration) this.deps.writeRemoteAgents?.(this.poller.states(), this.lockGeneration);
     } catch (err) {
       this.deps.log(`peering: could not write remote-agents.json: ${errorDetail(err)}`);
     }
@@ -883,7 +884,7 @@ export class PeerService {
     this.setStatus({ kind: "starting" });
     let lock: EndpointLockResult;
     try {
-      lock = this.lockHeld ? { acquired: true } : await this.deps.acquireLock();
+      lock = this.lockHeld ? { acquired: true, generation: this.lockGeneration } : await this.deps.acquireLock();
     } catch (err) {
       const message = `could not take the endpoint lock: ${errorDetail(err)}`;
       this.setStatus({ kind: "error", message, retryAt: null });
@@ -900,6 +901,7 @@ export class PeerService {
       return { kind: "disabled" };
     }
     this.lockHeld = true;
+    this.lockGeneration = lock.generation;
     await this.recoverTransfers();
     if (this.shuttingDown) return { kind: "shutting-down" };
     const readable = !readPeersAtBoot || await this.readPeersAtBoot();

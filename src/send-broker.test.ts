@@ -917,11 +917,12 @@ describe("send broker", () => {
         await Bun.write(join(cwd, ".git"), "gitdir: " + join(superGit, "worktrees", SENDER_ID));
       }
       const peerDir = join(home, ".itsybitsy", "peer");
-      await Bun.write(join(peerDir, "endpoint.lock"), String(process.pid));
-      await Bun.write(join(peerDir, "remote-agents.json"), JSON.stringify([{
+      const generation = crypto.randomUUID();
+    await Bun.write(join(peerDir, "endpoint.lock"), process.pid + "\n" + generation);
+      await Bun.write(join(peerDir, "remote-agents.json"), JSON.stringify({ generation, peers: [{
         id: "peer-b", name: "laptop", connected: true,
         agents: [{ repo: "remote", id: "worker", nickname: null, state: "running" }],
-      }]));
+      }] }));
       const { pollPeerOutbox } = await import("./peers/peer-outbox");
       const seen: unknown[] = [];
       const timer = setInterval(() => { void pollPeerOutbox(async (peer, header) => {

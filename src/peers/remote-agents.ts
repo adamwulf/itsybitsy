@@ -25,7 +25,7 @@ export interface CachedPeer {
 const cachePath = () => join(peerDir(), "remote-agents.json");
 
 /** Called by the endpoint lock owner. Synchronous replacement preserves poll order through shutdown. */
-export function writeRemoteAgents(states: PeerLinkState[]): void {
+export function writeRemoteAgents(states: PeerLinkState[], generation: string): void {
   const peers: CachedPeer[] = states.map(({ name, id, connected, lastOkAt, agents }) => ({
     name, id, connected, lastOkAt,
     agents: (agents ?? []).map(({ repoRegistryName: repo, id, nickname, state }) => ({ repo, id, nickname, state })),
@@ -33,7 +33,7 @@ export function writeRemoteAgents(states: PeerLinkState[]): void {
   const path = cachePath();
   const tmp = path + "." + randomUUID() + ".tmp";
   try {
-    writeFileSync(tmp, JSON.stringify(peers), { flag: "wx", mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify({ generation, peers }), { flag: "wx", mode: 0o600 });
     renameSync(tmp, path);
   } finally {
     try { unlinkSync(tmp); } catch { /* renamed, or creation failed */ }
@@ -45,8 +45,9 @@ export async function readConnectedPeers(requireVisibility = false): Promise<Cac
     const file = await open(cachePath(), "r");
     let peers;
     try {
-      if (!await hasLiveEndpointOwner((await file.stat()).mtimeMs, 3 * PEER_POLL_INTERVAL_MS)) return [];
-      peers = JSON.parse(await file.readFile("utf8"));
+      const snapshot = JSON.parse(await file.readFile("utf8"));
+      if (typeof snapshot?.generation !== "string" || !await hasLiveEndpointOwner(snapshot.generation, 3 * PEER_POLL_INTERVAL_MS)) return [];
+      peers = snapshot.peers;
     } finally { await file.close(); }
     if (!Array.isArray(peers)) return [];
     return peers.filter((p) => p?.connected === true && typeof p.name === "string" &&

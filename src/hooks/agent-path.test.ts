@@ -1883,11 +1883,12 @@ describe("checkIbCommandAccess", () => {
     test("defers a bare name that also exists on a connected peer", async () => {
       setSandboxedProcessOverride(() => true);
       await hideArchive();
-      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
-      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify([{
+      const generation = crypto.randomUUID();
+    await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "endpoint.lock"), process.pid + "\n" + generation);
+      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify({ generation, peers: [{
         name: "other", id: "peer", connected: true, lastOkAt: 1,
         agents: [{ repo: "app", id: "agent-target1", nickname: null, state: "waiting" }],
-      }]));
+      }] }));
       expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
     });
 

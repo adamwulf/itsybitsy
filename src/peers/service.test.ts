@@ -207,7 +207,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
   return { service, endpoint, logs, binds, clock, calls };
 }
 
-const lockContents = () => readFile(peerEndpointLockFile(), "utf-8").catch(() => null);
+const lockContents = () => readFile(peerEndpointLockFile(), "utf-8").then(text => text.replace(/\n[a-f0-9-]{36}\n$/, "\n")).catch(() => null);
 
 /** When the pending automatic rebind runs, or null when the status is not an error with one pending. */
 function retryAt(service: PeerService): number | null {
@@ -777,7 +777,7 @@ describe("PeerService at boot", () => {
     const file = join(peerDir(), "remote-agents.json");
     try {
       await waitFor(() => service.view().links[0]?.connected === true, { message: "first snapshot" });
-      const first = JSON.parse(await readFile(file, "utf8"));
+      const first = JSON.parse(await readFile(file, "utf8")).peers;
       expect(first).toEqual([{ id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: clock.now(),
         agents: [{ repo: "app", id: "agent-r1", nickname: null, state: "running" }] }]);
       const original = await open(file);
@@ -796,11 +796,11 @@ describe("PeerService at boot", () => {
         starts.delete(process.pid);
         expect(await readConnectedPeers()).toEqual(first);
         starts.set(process.pid, ME_START);
-        expect(JSON.parse(await readFile(file, "utf8"))).toEqual(first);
+        expect(JSON.parse(await readFile(file, "utf8")).peers).toEqual(first);
         await service.shutdown();
         expect((await stat(file)).ino).not.toBe(inode);
-        expect(JSON.parse(await original.readFile("utf8"))).toEqual(first);
-        expect(JSON.parse(await readFile(file, "utf8"))[0].connected).toBe(false);
+        expect(JSON.parse(await original.readFile("utf8")).peers).toEqual(first);
+        expect(JSON.parse(await readFile(file, "utf8")).peers[0].connected).toBe(false);
       } finally {
         await original.close();
       }

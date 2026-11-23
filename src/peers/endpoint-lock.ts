@@ -16,7 +16,7 @@ export interface EndpointLockOwner {
 
 export type EndpointLockResult =
   /** We hold the lock. `takenFromPid` is the dead owner whose lock we took over, if any. */
-  | { acquired: true; takenFromPid?: number }
+  | { acquired: true; takenFromPid?: number; generation?: string }
   /** A live process holds the lock. */
   | { acquired: false; ownerPid: number };
 
@@ -30,13 +30,18 @@ function formatOwner(owner: EndpointLockOwner): string {
   return owner.startEpoch === undefined ? `${owner.pid}\n` : `${owner.pid} ${owner.startEpoch}\n`;
 }
 
-function parseOwner(text: string): EndpointLockOwner | null {
-  const match = /^([1-9][0-9]*)(?: ([1-9][0-9]*))?$/.exec(text.trim());
+function parseOwner(text: string): (EndpointLockOwner & { generation?: string }) | null {
+  const match = /^([1-9][0-9]*)(?: ([1-9][0-9]*))?(?:\n([a-f0-9-]{36}))?$/.exec(text.trim());
   if (!match) return null;
   const pid = Number(match[1]);
   const startEpoch = match[2] === undefined ? undefined : Number(match[2]);
   if (!Number.isSafeInteger(pid) || (startEpoch !== undefined && !Number.isSafeInteger(startEpoch))) return null;
-  return startEpoch === undefined ? { pid } : { pid, startEpoch };
+  return { pid, startEpoch, generation: match[3] };
+}
+
+function sameOwner(text: string | null, self: EndpointLockOwner) {
+  const owner = text === null ? null : parseOwner(text);
+  return owner?.pid === self.pid && owner.startEpoch === self.startEpoch;
 }
 
 /** The lock's contents, or null when it does not exist. */
@@ -53,7 +58,7 @@ async function readLock(path: string): Promise<string | null> {
 export async function renewEndpointLease(): Promise<void> {
   const lock = await open(peerEndpointLockFile(), "r+");
   try {
-    if (await lock.readFile("utf8") === formatOwner(currentEndpointLockOwner())) {
+    if (sameOwner(await lock.readFile("utf8"), currentEndpointLockOwner())) {
       const now = new Date();
       await lock.utimes(now, now);
     }
@@ -61,13 +66,13 @@ export async function renewEndpointLease(): Promise<void> {
 }
 
 /** If a sandbox hides process birth times, a fresh owner heartbeat bounds stale visibility. */
-export async function hasLiveEndpointOwner(snapshotMtime: number, maxLeaseAge: number): Promise<boolean> {
+export async function hasLiveEndpointOwner(generation: string | undefined, maxLeaseAge: number): Promise<boolean> {
   const lock = await open(peerEndpointLockFile(), "r");
   try {
     const owner = parseOwner(await lock.readFile("utf8"));
     if (!owner || !isPidAliveCtx.fn(owner.pid)) return false;
     const stat = await lock.stat();
-    if (stat.birthtimeMs > snapshotMtime) return false;
+    if (generation !== undefined && owner.generation !== generation) return false;
     const start = owner.startEpoch === undefined ? null : processStartEpochSecondsCtx.fn(owner.pid);
     if (start !== null) return start === owner.startEpoch;
     const age = Date.now() - stat.mtimeMs;
@@ -77,7 +82,7 @@ export async function hasLiveEndpointOwner(snapshotMtime: number, maxLeaseAge: n
 
 export async function hasLivePeerWatcher(): Promise<boolean> {
   try {
-    return await hasLiveEndpointOwner(Infinity, 15_000);
+    return await hasLiveEndpointOwner(undefined, 15_000);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;
@@ -108,15 +113,20 @@ export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpo
   if (self.startEpoch === undefined) throw Error("Cannot verify this watcher’s process start time");
   await ensurePeerDir();
   const path = peerEndpointLockFile();
-  const temp = path + "." + randomUUID();
+  const generation = randomUUID();
+  const temp = path + "." + generation;
   try {
-    await writeFile(temp, formatOwner(self), { mode: 0o600, flag: "wx" });
+    await writeFile(temp, formatOwner(self) + generation + "\n", { mode: 0o600, flag: "wx" });
     return await withLockGuard(path, async (): Promise<EndpointLockResult> => {
       const contents = await readLock(path);
-      if (contents === null) { await link(temp, path); return { acquired: true }; }
+      if (contents === null) { await link(temp, path); return { acquired: true, generation }; }
       const owner = parseOwner(contents);
 
-      if (contents === formatOwner(self)) return { acquired: true };
+      if (sameOwner(contents, self)) {
+        if (owner?.generation) return { acquired: true, generation: owner.generation };
+        await rename(temp, path);
+        return { acquired: true, generation };
+      }
       const state = async (file: string) => {
         const birth = (await stat(file)).birthtimeMs;
         if (owner) return transferOwnerState({ pid: owner.pid, start: owner.startEpoch ?? null }, birth);
@@ -132,7 +142,7 @@ export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpo
           throw Error("Endpoint lock changed during takeover");
         }
         await link(temp, path);
-        return { acquired: true, ...(owner && { takenFromPid: owner.pid }) };
+        return { acquired: true, generation, ...(owner && { takenFromPid: owner.pid }) };
       } finally { await rm(tombstone, { force: true }); }
     });
   } finally { await rm(temp, { force: true }); }
@@ -142,7 +152,7 @@ export async function releaseEndpointLock(self: EndpointLockOwner = currentEndpo
   const path = peerEndpointLockFile();
   try {
     return await withLockGuard(path, async () => {
-      if (await readLock(path) !== formatOwner(self)) return false;
+      if (!sameOwner(await readLock(path), self)) return false;
       await unlink(path);
       return true;
     });

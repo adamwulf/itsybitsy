@@ -21,11 +21,12 @@ describe("qualified agent addresses", () => {
   let worktree: string;
 
   async function peer(connected = true, ownerPid = process.pid) {
-    await Bun.write(join(cli.home, ".itsybitsy", "peer", "endpoint.lock"), String(ownerPid));
-    await Bun.write(join(cli.home, ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify([{
+    const generation = crypto.randomUUID();
+    await Bun.write(join(cli.home, ".itsybitsy", "peer", "endpoint.lock"), ownerPid + "\n" + generation);
+    await Bun.write(join(cli.home, ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify({ generation, peers: [{
       name: "laptop-b", id: "peer-id", connected, lastOkAt: 15,
       agents: [{ repo: "remote", id: "remote-id", nickname: "foo", state: "waiting" }],
-    }]));
+    }] }));
   }
 
   beforeEach(async () => {
@@ -626,7 +627,7 @@ describe("qualified agent addresses", () => {
     await peer();
     const path = join(cli.home, ".itsybitsy", "peer", "remote-agents.json");
     const cache = await Bun.file(path).json();
-    cache[0].name = "@App";
+    cache.peers[0].name = "@App";
     await Bun.write(path, JSON.stringify(cache));
     expect((await resolveSendTarget("@App/foo", [{ path: app, name: "App" }], cli.cwd)).agent?.id).toBe("foo");
     expect((await resolveSendTarget("remote-id", [], cli.cwd)).remote).toBeUndefined();

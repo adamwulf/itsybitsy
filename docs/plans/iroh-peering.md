@@ -131,8 +131,9 @@ turns on n0's public relays and discovery:
   the wait only once it has stayed up for 60 s; an accept loop that dies
   sooner is one more failure, so a flapping endpoint backs off too. It
   retries only while `peers.json` lists a peer or the Peers tab is open.
-  It stops when another live `ib watch` holds the lock (peering shows as
-  disabled, and the lock is not polled) and on exit. Opening the tab
+  When another live `ib watch` holds the lock, peering shows as disabled.
+  Every 30 s the standby retries the lock and runs recovery if it wins.
+  Exiting stops retries. Opening the tab
   while a retry is pending binds at once instead. Each failure is one
   `watch.log` line with its wait; once the wait reaches 60 s, a repeat of
   the same failure is not logged again. When that failure is the accept

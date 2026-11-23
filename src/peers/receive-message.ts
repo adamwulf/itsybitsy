@@ -12,7 +12,7 @@ import type { PairStream } from "./pairing";
 import { sendMessage, type PeerEnqueueOptions } from "../ib-commands";
 import { listRepos } from "../registry";
 import { resolveAgentTarget } from "../resolve-target";
-import { streamFileBody, requireSendFin, type FileBodyOptions, type SendHeader, type SendTarget } from "./send-frame";
+import { waitForIO, TransferIdleError, streamFileBody, requireSendFin, type FileBodyOptions, type SendHeader, type SendTarget } from "./send-frame";
 
 export function targetLabel(target: SendTarget): string {
   if (target.kind === "system") return "@system";
@@ -105,19 +105,18 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
     if (earlier) {
       if (waiters >= 8) throw new Error("busy, try again");
       waiters++;
-      const signal = options.signal;
       const result = Promise.withResolvers<void>();
       const finish: Replay = failure => failure ? result.reject(failure.error) : result.resolve();
-      const closed = () => result.reject(signal!.reason);
       try {
         options.admitted?.(false);
-        signal?.throwIfAborted();
         earlier.add(finish);
-        signal?.addEventListener("abort", closed, { once: true });
-        return await result.promise;
+        try { return await waitForIO(options, () => result.promise); }
+        catch (err) {
+          if (err instanceof TransferIdleError) throw new Error("still being received — outcome unknown");
+          throw err;
+        }
       } finally {
         earlier.delete(finish);
-        signal?.removeEventListener("abort", closed);
         waiters--;
       }
     }

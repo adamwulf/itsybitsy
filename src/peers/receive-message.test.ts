@@ -771,3 +771,23 @@ test("closing a replay connection frees its waiter while the original body is pe
     await result;
   } finally { owner.abort(); for (const w of waiters) w.link.a.close(0, "done"); await first; await Promise.all(waiters.map(w => w.serving)); }
 });
+
+test("a pending replay expires independently while the body is still being received", async () => {
+  await receiveFixture();
+  const held = Promise.withResolvers<Uint8Array>();
+  const entered = Promise.withResolvers<void>();
+  const req = header({ files: [manifestFile("")] });
+  const original = receiver(req, "peer", paired, { read() { entered.resolve(); return held.promise; } });
+  await entered.promise;
+  try {
+    const clock = createFakeClock();
+    const admitted = Promise.withResolvers<void>();
+    const replay = receiver(req, "peer", paired, undefined, { setTimer: clock.setTimer, admitted: () => admitted.resolve() });
+    await admitted.promise;
+    clock.advance(60_000);
+    await expect(replay).rejects.toThrow("still being received — outcome unknown");
+    const next = receiver(req, "peer", paired);
+    held.resolve(new Uint8Array());
+    await next;
+  } finally { held.resolve(new Uint8Array()); await original; }
+});

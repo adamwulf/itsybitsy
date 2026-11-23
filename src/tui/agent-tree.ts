@@ -563,13 +563,21 @@ export class AgentTreeComponent implements Component {
     return this.favoriteAgentIds.has(this.agentKey(agent));
   }
 
-  setPeerLinks(links: readonly PeerLinkState[]): void {
-    this.peerCoordinators = links.map(link => ({
-      kind: "remote-coordinator", peerId: link.id, peerName: link.name, state: link.coordinator?.state ?? null,
-      linkStatus: peerLinkStatus(link), lastOkAt: link.connected ? null : link.lastOkAt,
-    }));
+  setPeerLinks(links: readonly PeerLinkState[], peers: readonly { id: string; name: string }[] = links): void {
+    const selected = this.selectedRemote;
+    const byId = new Map(links.map(link => [link.id, link]));
+    this.peerCoordinators = peers.map(peer => {
+      const link = byId.get(peer.id);
+      return {
+        kind: "remote-coordinator", peerId: peer.id, peerName: peer.name, state: link?.coordinator?.state ?? null,
+        linkStatus: peerLinkStatus(link), lastOkAt: link?.connected ? null : link?.lastOkAt ?? null,
+      };
+    });
     this.peerRepos = collectPeerRepos(links);
     this.visibleCache = null;
+    if (selected?.kind === "remote-coordinator" && !peers.some(peer => peer.id === selected.peerId)) {
+      this.selectSystemCoordinator();
+    }
     this.resyncAfterFilterChange();
   }
 

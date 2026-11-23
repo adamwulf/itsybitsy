@@ -107,7 +107,7 @@ import {
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
-import { PeerService, defaultPeerServiceDeps } from "../peers/service";
+import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { remoteDisplayName } from "./peer-repos";
 
@@ -846,6 +846,7 @@ export class DashboardComponent implements Component {
   peerService: PeersDialogService | null = null;
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
+  private pairedPeers: PeerServiceView["peers"] = [];
   private readonly remotePane = new RemoteCoordinatorPane(
     id => this.peerService!.fetchCoordinatorPane(id),
     () => this.tui?.requestRender(),
@@ -1903,26 +1904,24 @@ export class DashboardComponent implements Component {
 
   private refreshPeerRepos(): boolean {
     const view = this.peerService?.view();
-    const links = [...(view?.links ?? [])];
-    // A pairing can be visible before the endpoint binds or its first poll starts.
-    const polled = new Set(links.map(link => link.id));
-    for (const peer of view?.peers ?? []) {
-      if (!polled.has(peer.id)) links.push({ id: peer.id, name: peer.name, connected: false, lastOkAt: null,
-        lastError: null, repos: null, agents: null, coordinator: null });
-    }
+    const links = view?.links ?? [];
+    const peers = view?.peers ?? [];
+    const samePeers = this.pairedPeers.length === peers.length && peers.every((peer, i) =>
+      this.pairedPeers[i]!.id === peer.id && this.pairedPeers[i]!.name === peer.name);
     // Stable snapshot references from the poller make dialog-only changes cheap.
-    if (links.length === this.peerLinks.length && links.every((link, i) => {
+    if (samePeers && links.length === this.peerLinks.length && links.every((link, i) => {
       const old = this.peerLinks[i]!;
       return link.id === old.id && link.name === old.name && link.repos === old.repos && link.agents === old.agents
         && peerLinkStatus(link) === peerLinkStatus(old) && link.coordinator?.state === old.coordinator?.state
         && (link.connected || link.lastOkAt === old.lastOkAt);
     })) return false;
     this.peerLinks = links;
+    this.pairedPeers = peers;
     const treeVisible = this.sidebarMode !== "teams" || this.rightPane.mode === "TREE";
     const width = this.rightPane.mode === "TREE" ? this.getMainWidth() : this.sidebarWidth;
     const before = treeVisible ? this.agentTree.render(width) : [];
     const previous = this.remoteSelection;
-    this.agentTree.setPeerLinks(links);
+    this.agentTree.setPeerLinks(links, peers);
     const selected = this.remoteSelection;
     // The connector can change when another root appears. Only the tree displays it.
     const details = (entry: RemoteEntry | null) => entry?.kind === "remote-agent"

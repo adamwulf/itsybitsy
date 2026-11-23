@@ -9914,7 +9914,8 @@ describe("Unified peer repos in the Agents tree", () => {
     const local = makeAgent("agent-1", "/repos/local");
     dashboard.onUpdate([local], [makeFlatAgent(local)], []);
     const service = new FakePeerService();
-    service.state = { ...service.state, links: links() };
+    const current = links();
+    service.state = { ...service.state, links: current, peers: current.map(link => ({ id: link.id, name: link.name, pairedAt: "x" })) };
     dashboard.setPeerService(service);
     return { dashboard, service, local };
   }
@@ -10050,12 +10051,36 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("unpairing the selected coordinator returns to @system while the stale link still exists", () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const cancel = mock(() => {});
+    (dashboard as any).remotePane.every = () => cancel;
+    try {
+      selectByKey(dashboard, PEER_B + "/@system");
+      const remaining = [{ id: PEER_C, name: "Renamed machine", pairedAt: "now" }];
+      service.set({ peers: remaining });
+      expect(service.state.links.some(link => link.id === PEER_B)).toBe(true);
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+      expect(dashboard.agentTree.visibleList.filter(row => row.kind === "remote-coordinator").map(row => row.peerName))
+        .toEqual(["Renamed machine"]);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(1);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
   test("paired coordinators are selectable children of @system, including offline peers", () => {
     const { dashboard, service } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
     const [b, c] = links();
     for (const count of [0, 1, 2]) {
-      service.set({ links: [b!, c!].slice(0, count).map(link => ({ ...link, coordinator: { state: "compacting" } })) });
+      const current = [b!, c!].slice(0, count);
+      service.set({ peers: current.map(link => ({ ...link, pairedAt: "x" })),
+        links: current.map(link => ({ ...link, coordinator: { state: "compacting" } })) });
       expect(dashboard.agentTree.visibleList.filter(row => row.kind === "remote-coordinator")).toHaveLength(count);
       expect(dashboard.agentTree.visibleList.slice(0, 1 + count).map(row => row.kind)).toEqual([
         "system-coordinator", ...Array(count).fill("remote-coordinator"),
@@ -10069,7 +10094,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(rows[2]).toContain(DIM);
     expect(stripAnsi(rows[2]!)).toContain("2m ago");
     selectByKey(dashboard, PEER_C + "/@system");
-    service.set({ links: [c!, b!] });
+    service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
     for (let i = 0; i < 128; i++) {
@@ -10082,7 +10107,7 @@ describe("Unified peer repos in the Agents tree", () => {
     }
     expect(dashboard.agentTree.selectedAgent).toBeNull();
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
-    service.set({ links: [{ ...b!, connected: false, lastError: null, lastOkAt: null }] });
+    service.set({ peers: [{ ...b!, pairedAt: "x" }], links: [{ ...b!, connected: false, lastError: null, lastOkAt: null }] });
     expect(treeRows(dashboard)[1]).toContain(YELLOW + "connecting" + RESET);
   });
 

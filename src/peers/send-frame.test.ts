@@ -342,3 +342,12 @@ test("positive partial writes renew the sender idle timer and preserve every byt
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("abort from the final receive progress callback rejects the body", async () => {
+  const controller = new AbortController();
+  const receive = streamFileBody(new MemoryStream(Buffer.from("x")), 1, () => {}, {
+    signal: controller.signal,
+    onProgress: () => controller.abort(new Error("cancel after last byte")),
+  });
+  await expect(receive).rejects.toThrow("cancel after last byte");
+});

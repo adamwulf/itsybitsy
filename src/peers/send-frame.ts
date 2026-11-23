@@ -147,6 +147,7 @@ export async function streamFileBody(
     written += chunk.length;
     options.onProgress?.(written);
   }
+  options.signal?.throwIfAborted();
   return hash.digest("hex");
 }
 

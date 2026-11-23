@@ -715,6 +715,8 @@ test("a stalled non-framed request releases the watcher header slot", async () =
     await reading.promise;
     expect(readers.size).toBe(1);
     clock.advance(IDLE_TIMEOUT_MS);
+    await Bun.sleep(0);
+    clock.advance(5000);
     await serving;
     expect(readers.size).toBe(0);
   } finally { a.close(0, "done"); }

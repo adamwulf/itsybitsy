@@ -378,7 +378,8 @@ test("a new-agent stream without a reply times out at 30 s", async () => {
   expect(link.a.closeInfo()).toBeNull();
   clock.advance(1);
   await expect(pending).rejects.toThrow("timed out after 30 s");
-  expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.done });
+  expect(link.b.closeInfo()).toBeNull();
+  link.a.close(0, "done");
 });
 
 test.each(["", "bad/id", "agent\u001b[32m", "white space"])("rejects a malformed success id %j as a protocol error", async id => {

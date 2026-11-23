@@ -15,6 +15,7 @@ export interface PeerRepo {
 }
 
 export function peerEntryKey(entry: RemoteEntry): string {
+  if (entry.kind === "remote-coordinator") return `${entry.peerId}/@system`;
   return entry.kind === "remote-agent"
     ? fullyQualifiedAgentId(entry.peerName, entry.remote.repoRegistryName, entry.remote.id)
     : repoRowKey(entry.repoRegistryName);

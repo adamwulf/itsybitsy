@@ -424,6 +424,8 @@ export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 /** The center pane's text for a selected remote row (SPEC §20.5). */
 export function remoteCenterText(entry: RemoteEntry): string {
   switch (entry.kind) {
+    case "remote-coordinator":
+      return `System coordinator on ${entry.peerName} (read-only)`;
     case "remote-agent":
       return `Remote agent on ${entry.peerName} (read-only)`;
     case "remote-repo-header":
@@ -434,6 +436,8 @@ export function remoteCenterText(entry: RemoteEntry): string {
 /** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
 function remoteTitle(entry: RemoteEntry): string {
   switch (entry.kind) {
+    case "remote-coordinator":
+      return `${entry.peerName}/@system`;
     case "remote-agent":
       return `${entry.peerName}/${remoteDisplayName(entry.remote)}`;
     case "remote-repo-header":
@@ -1880,12 +1884,20 @@ export class DashboardComponent implements Component {
   }
 
   private refreshPeerRepos(): boolean {
-    const links = this.peerService?.view().links ?? [];
+    const view = this.peerService?.view();
+    const links = [...(view?.links ?? [])];
+    // A pairing can be visible before the endpoint binds or its first poll starts.
+    const polled = new Set(links.map(link => link.id));
+    for (const peer of view?.peers ?? []) {
+      if (!polled.has(peer.id)) links.push({ id: peer.id, name: peer.name, connected: false, lastOkAt: null,
+        lastError: null, repos: null, agents: null, coordinator: null });
+    }
     // Stable snapshot references from the poller make dialog-only changes cheap.
     if (links.length === this.peerLinks.length && links.every((link, i) => {
       const old = this.peerLinks[i]!;
       return link.id === old.id && link.name === old.name && link.repos === old.repos && link.agents === old.agents
-        && peerLinkStatus(link) === peerLinkStatus(old);
+        && peerLinkStatus(link) === peerLinkStatus(old) && link.coordinator?.state === old.coordinator?.state
+        && (link.connected || link.lastOkAt === old.lastOkAt);
     })) return false;
     this.peerLinks = links;
     const treeVisible = this.sidebarMode !== "teams" || this.rightPane.mode === "TREE";

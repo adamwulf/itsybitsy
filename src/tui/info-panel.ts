@@ -257,6 +257,13 @@ export class InfoPanelComponent implements Component {
     const field = (label: string, value: string) => lines.push(truncateToWidth(`${DIM}${label}:${RESET} ${value}`, width, ""));
     const notConnected = `${DIM}(peer not connected)${RESET}`;
     switch (entry.kind) {
+      case "remote-coordinator": {
+        const connection = peerLinkStateText(entry.linkStatus);
+        title("System coordinator");
+        field("Machine", `${truncatePeerField(entry.peerName, width - visibleWidth(`Machine:  · ${entry.linkStatus}`))} · ${connection}`);
+        if (entry.state !== null) field("State", entry.state);
+        break;
+      }
       case "remote-agent": {
         const agent = entry.remote;
         const state = displayState(agent.state);

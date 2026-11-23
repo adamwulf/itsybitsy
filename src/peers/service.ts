@@ -345,7 +345,8 @@ export class PeerService {
     this.poller = new PeerPoller({
       readPeers: async () => {
         await deps.renewLease?.();
-        return deps.readPeers();
+        this.peers = await deps.readPeers();
+        return this.peers;
       },
       dial: (id) => this.dialPeer(id),
       now: deps.now,

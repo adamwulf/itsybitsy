@@ -9953,6 +9953,42 @@ describe("Unified peer repos in the Agents tree", () => {
       .join(" ");
   }
 
+  test("paired coordinators are selectable children of @system, including offline peers", () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const [b, c] = links();
+    for (const count of [0, 1, 2]) {
+      service.set({ links: [b!, c!].slice(0, count).map(link => ({ ...link, coordinator: { state: "compacting" } })) });
+      expect(dashboard.agentTree.visibleList.filter(row => row.kind === "remote-coordinator")).toHaveLength(count);
+      expect(dashboard.agentTree.visibleList.slice(0, 1 + count).map(row => row.kind)).toEqual([
+        "system-coordinator", ...Array(count).fill("remote-coordinator"),
+      ]);
+    }
+    const rows = treeRows(dashboard);
+    expect(rows[1]).toContain(ITALIC + "Laptop B");
+    expect(rows[1]).toContain(GREEN + "connected" + RESET);
+    expect(rows[2]).toContain(RED + "offline" + RESET);
+    expect(stripAnsi(rows[1]!)).toContain("compacting");
+    expect(rows[2]).toContain(DIM);
+    expect(stripAnsi(rows[2]!)).toContain("2m ago");
+    selectByKey(dashboard, PEER_C + "/@system");
+    service.set({ links: [c!, b!] });
+    expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
+    expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
+    for (let i = 0; i < 128; i++) {
+      const key = String.fromCharCode(i);
+      if (isRemoteAllowedKey(key)) continue;
+      resetNotice(dashboard);
+      dashboard.handleInput(key);
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(dashboard.dialog).toBeNull();
+    }
+    expect(dashboard.agentTree.selectedAgent).toBeNull();
+    expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
+    service.set({ links: [{ ...b!, connected: false, lastError: null, lastOkAt: null }] });
+    expect(treeRows(dashboard)[1]).toContain(YELLOW + "connecting" + RESET);
+  });
+
   test("remote-only repos follow local rows in display order, with italic agents and dim stale rows", () => {
     const { dashboard } = setup();
     const raw = treeRows(dashboard);

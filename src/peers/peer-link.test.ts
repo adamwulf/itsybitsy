@@ -689,3 +689,17 @@ test("acknowledgement progress keeps a send alive beyond sixty seconds", async (
     expect(clock.pending()).toBe(0);
   } finally { a.close(0, "done"); }
 });
+
+test.each(["writeAll", "finish"] as const)("new-agent reads a busy reply after %s rejects", async op => {
+  const { a, b } = createMemoryLink("client", "server");
+  const client = await a.openBi();
+  a.openBi = async () => client;
+  const server = await b.acceptBi();
+  client[op] = async () => { throw Error("request half stopped"); };
+  try {
+    await server.writeAll(encode({ op: "error", reason: "busy, try again" }));
+    await server.finish();
+    await expect(requestNewAgent(a, { repo: "app", prompt: "x", type: "worker" }, createFakeClock().setTimer)).rejects.toThrow("busy, try again");
+    expect(a.closeInfo()).toBeNull();
+  } finally { a.close(0, "done"); }
+});

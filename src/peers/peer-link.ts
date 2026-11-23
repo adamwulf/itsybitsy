@@ -358,68 +358,33 @@ function errorDetail(err: unknown): string {
  * failure: the transport's error, a {@link PeerErrorReply}, or a
  * {@link PeerProtocolError} for a malformed or oversized reply.
  */
-export async function requestAgents(conn: PairConnection): Promise<PeerSnapshot> {
-  return decodeAgentsReply(await requestRead(conn, "agents"));
+type Timer = PeerResponderDeps["setTimer"];
+const realTimer: Timer = (ms, fn) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); };
+
+export function requestAgents(conn: PairConnection, setTimer = realTimer, timeoutError = new Error("request timed out")): Promise<PeerSnapshot> {
+  return clientExchange(conn, encodePeerRequest("agents"), decodeAgentsReply, { setTimer, timeout: [15_000, timeoutError] });
 }
 
-async function requestRead(conn: PairConnection, op: string, signal?: AbortSignal): Promise<Uint8Array> {
-  const stream = await conn.openBi();
-  const cancel = () => { void stream.cancel().catch(() => {}); };
-  if (signal?.aborted) {
-    cancel();
-    throw signal.reason;
-  }
-  signal?.addEventListener("abort", cancel, { once: true });
-  try {
-    try { await stream.writeAll(encodePeerRequest(op)); await stream.finish(); }
-    catch (err) { if (signal?.aborted) throw err; } // A refused request can still have a reply.
-    return await stream.readToEnd(PEER_MAX_REPLY_BYTES);
-  } catch (err) {
-    if (err instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
-    throw err;
-  } finally {
-    signal?.removeEventListener("abort", cancel);
-  }
+export function requestCoordinatorPane(conn: PairConnection, signal?: AbortSignal, setTimer = realTimer): Promise<CoordinatorPane> {
+  return clientExchange(conn, encodePeerRequest("coordinator-pane"), bytes => {
+    const reply = decodeObject(bytes, "reply");
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
+    if (reply.op !== "coordinator-pane" || typeof reply.state !== "string" || typeof reply.text !== "string") {
+      throw new PeerProtocolError("malformed coordinator-pane reply");
+    }
+    return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
+  }, { signal, setTimer, timeout: [15_000, new Error("Coordinator pane request timed out")] });
 }
 
-export async function requestCoordinatorPane(conn: PairConnection, signal?: AbortSignal): Promise<CoordinatorPane> {
-  const reply = decodeObject(await requestRead(conn, "coordinator-pane", signal), "reply");
-  if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
-  if (reply.op !== "coordinator-pane" || typeof reply.state !== "string" || typeof reply.text !== "string") {
-    throw new PeerProtocolError("malformed coordinator-pane reply");
-  }
-  return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
-}
-
-/** Use a separate stream on the live trusted connection. Never retry a spawn. */
-export async function requestNewAgent(
-  conn: PairConnection,
-  { repo, type, name, prompt }: RemoteNewAgentRequest,
-  setTimer: (ms: number, fn: () => void) => () => void,
-): Promise<string> {
+export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt }: RemoteNewAgentRequest, setTimer: Timer): Promise<string> {
   const bytes = encodeJson({ op: "new-agent", repo, type, name, prompt });
   if (bytes.length > NEW_AGENT_MAX_REQUEST_BYTES) throw new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
-  const exchange = async () => {
-    const stream = await conn.openBi();
-    await stream.writeAll(bytes);
-    await stream.finish();
-    const reply = decodeObject(await stream.readToEnd(PEER_MAX_REPLY_BYTES), "reply");
+  return clientExchange(conn, bytes, payload => {
+    const reply = decodeObject(payload, "reply");
     if (reply.ok === true && typeof reply.id === "string" && isValidAgentId(reply.id)) return reply.id;
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
     throw new PeerProtocolError("malformed new-agent reply");
-  };
-  let cancel: (() => void) | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    cancel = setTimer(NEW_AGENT_TIMEOUT_MS, () => {
-      reject(new Error("Remote agent request timed out after 30 s. Check the peer for the agent."));
-      closeQuietly(conn, PEER_CLOSE.done, "request timed out");
-    });
-  });
-  try {
-    return await Promise.race([exchange(), timeout]);
-  } finally {
-    cancel?.();
-  }
+  }, { setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")] });
 }
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
@@ -440,75 +405,93 @@ export interface OutgoingTransfer {
   onProgress?: (bytes: number) => void;
 }
 
-/** One exchange. Once FIN is attempted the peer may already have committed the message. */
-export async function requestSend(conn: PairConnection, header: SendHeader, setTimer: PeerResponderDeps["setTimer"], transfer: OutgoingTransfer = {}): Promise<string> {
-  if (header.files.length && !transfer.filesDir) throw new Error("Missing staged attachments");
-  const bytes = encodeSendHeader(header);
+interface ClientOptions extends OutgoingTransfer {
+  setTimer: Timer;
+  timeout?: [number, Error];
+  files?: SendHeader["files"];
+}
+
+/** One owner for the request deadline, both halves of the stream, and teardown. */
+async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode: (bytes: Uint8Array) => T, options: ClientOptions): Promise<T> {
+  const { setTimer, timeout, files } = options;
+  const deadline = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
+  const clear = timeout && setTimer(timeout[0], () => deadline.abort(timeout[1]));
+  const io = <V>(operation: () => Promise<V>) => waitForIO({ setTimer, signal }, operation);
   let stream: PairStream | undefined;
   let opening: Promise<PairStream> | undefined;
-  let sentFin = false;
-  let receivedFin = false;
-  let finished = false;
-  let mayBeQueued = false;
-  const io = <T>(operation: () => Promise<T>) => waitForIO({ setTimer, signal: transfer.signal }, operation);
+  let sendDone = false;
+  let recvDone = false;
+  let attemptedFin = false;
+  let writeError: unknown;
   try {
-    const active = await io(async () => {
-      opening = conn.openBi();
-      const opened = await opening;
-      if (finished) { await opened.cancel(); throw new Error("Remote send timed out"); }
-      stream = opened;
-      return opened;
-    });
+    const active = await io(() => opening = conn.openBi());
+    stream = active;
     let sent = 0;
-    // A receiver can reject the header and stop its read half before we
-    // finish writing. Read its error ACK on the independent return half.
-    let writeError: unknown;
     try {
-      try { await writeWithProgress(active, bytes, setTimer, transfer.signal); }
-      catch (err) { writeError = err; throw err; }
-      for (const [index, file] of header.files.entries()) {
-        const handle = await openStagedFile(join(transfer.filesDir!, String(index)), file.size);
+      try {
+        if (files) await writeWithProgress(active, bytes, setTimer, signal);
+        else await io(() => active.writeAll(bytes));
+      } catch (err) { writeError = err; throw err; }
+      for (const [index, file] of (files ?? []).entries()) {
+        const handle = await openStagedFile(join(options.filesDir!, String(index)), file.size);
         try {
           await sendFileBody({ handle, size: file.size }, { async write(chunk) {
             try { return await active.write(chunk); }
             catch (err) { writeError = err; throw err; }
-          } }, { setTimer, signal: transfer.signal, onProgress: bytes => transfer.onProgress?.(sent + bytes) });
+          } }, { setTimer, signal, onProgress: n => options.onProgress?.(sent + n) });
         } finally { await handle.close(); }
         sent += file.size;
       }
-      transfer.signal?.throwIfAborted();
-      mayBeQueued = true;
+      signal.throwIfAborted();
+      attemptedFin = true;
       await io(() => active.finish());
-      sentFin = true;
+      sendDone = true;
     } catch (err) {
-      if ((!writeError && !mayBeQueued) || err instanceof TransferIdleError || transfer.signal?.aborted) throw err;
+      if ((!writeError && !attemptedFin) || err instanceof TransferIdleError || signal.aborted) throw err;
+      sendDone = true;
       writeError = err;
     }
-    const parts: Uint8Array[] = [];
-    let length = 0;
-    while (true) {
-      const chunk = await io(() => active.read(Math.min(CHUNK_BYTES, PEER_MAX_REPLY_BYTES + 1 - length)));
-      if (!chunk.length) { receivedFin = true; break; }
-      length += chunk.length;
-      if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
-      parts.push(chunk);
+    try {
+      let payload: Uint8Array;
+      if (files) {
+        const parts: Uint8Array[] = [];
+        let length = 0;
+        while (true) {
+          const chunk = await io(() => active.read(Math.min(CHUNK_BYTES, PEER_MAX_REPLY_BYTES + 1 - length)));
+          if (!chunk.length) break;
+          length += chunk.length;
+          if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
+          parts.push(chunk);
+        }
+        payload = Buffer.concat(parts, length);
+      } else payload = await io(() => active.readToEnd(PEER_MAX_REPLY_BYTES));
+      recvDone = true;
+      return decode(payload);
+    } catch (err) {
+      if (err instanceof PeerErrorReply) throw err;
+      if (writeError) throw writeError;
+      if (err instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
+      throw err;
     }
-    if (!length && writeError) throw writeError;
-    const reply = decodeObject(Buffer.concat(parts, length), "reply");
+  } catch (err) {
+    if (!(sendDone && recvDone)) {
+      const teardown = stream ? (sendDone ? stream.stopReceiving() : stream.cancel()) : opening?.then(s => s.cancel());
+      if (teardown && !await settledWithinGrace(teardown, { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+    }
+    if (files && attemptedFin && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN, { cause: err });
+    throw err;
+  } finally { clear?.(); }
+}
+
+export async function requestSend(conn: PairConnection, header: SendHeader, setTimer: Timer, transfer: OutgoingTransfer = {}): Promise<string> {
+  if (header.files.length && !transfer.filesDir) throw new Error("Missing staged attachments");
+  return clientExchange(conn, encodeSendHeader(header), bytes => {
+    const reply = decodeObject(bytes, "reply");
     if (reply.ok === true && reply.id === header.id) return header.id;
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(sendDiagnostic(reply.reason));
     throw new PeerProtocolError("Malformed send acknowledgement");
-  } catch (err) {
-    finished = true;
-    if (stream && !(sentFin && receivedFin)) {
-      const teardown = sentFin ? stream.stopReceiving() : stream.cancel();
-      if (!await settledWithinGrace(teardown, { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
-    } else if (!stream && opening && !await settledWithinGrace(opening, { setTimer })) {
-      closeQuietly(conn, PEER_CLOSE.error, "send open stalled");
-    }
-    if (mayBeQueued && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN, { cause: err });
-    throw err;
-  } finally { finished = true; }
+  }, { ...transfer, setTimer, files: header.files });
 }
 
 // ---------------------------------------------------------------------------

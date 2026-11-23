@@ -29,7 +29,7 @@
  * throws {@link PairProtocolError} when the stream is over its limit.
  */
 
-import { decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
+import { encodeSendHeader, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
 import type { Agent } from "../agents";
@@ -402,6 +402,43 @@ export async function requestNewAgent(
     return await Promise.race([exchange(), timeout]);
   } finally {
     cancel?.();
+  }
+}
+
+export const SEND_UNKNOWN = "outcome unknown — check the agent";
+
+/** One exchange. Once FIN is attempted the peer may already have committed the message. */
+export async function requestSend(conn: PairConnection, header: SendHeader, setTimer: PeerResponderDeps["setTimer"]): Promise<string> {
+  if (header.files.length) throw new Error("attachments are not supported yet");
+  const bytes = encodeSendHeader(header);
+  let stream: PairStream | undefined;
+  let expired = false;
+  let mayBeQueued = false;
+  const timeout = Promise.withResolvers<never>();
+  const cancelTimer = setTimer(30_000, () => {
+    expired = true;
+    timeout.reject(new Error(mayBeQueued ? SEND_UNKNOWN : "Remote send timed out"));
+    void stream?.cancel().catch(() => {});
+  });
+  const exchange = async () => {
+    stream = await conn.openBi();
+    if (expired) { await stream.cancel(); throw new Error("Remote send timed out"); }
+    await stream.writeAll(bytes);
+    if (expired) throw new Error("Remote send timed out");
+    mayBeQueued = true;
+    await stream.finish();
+    const reply = decodeObject(await stream.readToEnd(PEER_MAX_REPLY_BYTES), "reply");
+    if (reply.ok === true && reply.id === header.id) return header.id;
+    if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
+    throw new PeerProtocolError("Malformed send acknowledgement");
+  };
+  try {
+    return await Promise.race([exchange(), timeout.promise]);
+  } catch (err) {
+    if (mayBeQueued && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN);
+    throw err;
+  } finally {
+    cancelTimer();
   }
 }
 

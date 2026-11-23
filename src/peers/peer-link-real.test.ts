@@ -19,6 +19,10 @@ import { loadIroh, type Iroh } from "./iroh";
 import { generatePairCode } from "./pair-code";
 import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer-link";
 import type { RemoteSpawnDeps } from "./new-agent";
+import { createMessageReceiver } from "./receive-message";
+import { readOutbox } from "../outbox";
+import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
+import { makeSpawnResult } from "../test-utils";
 import { PeerService } from "./service";
 import { addPeer, readPeers, removePeer, shortPeerId } from "./store";
 
@@ -29,6 +33,7 @@ const services: PeerService[] = [];
 afterEach(async () => {
   for (const service of services.splice(0)) await service.shutdown();
   resetUserHome();
+  resetSendSpawnRunner();
   for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true });
 });
 
@@ -75,9 +80,14 @@ function makeNetwork(iroh: Iroh) {
     const id = (await inHome(home, loadOrCreateIdentity)).id;
     const logs: string[] = [];
     let snapshots = 0;
+    const receive = createMessageReceiver(line => logs.push(line), () => {});
+
     const service = new PeerService({
       remoteStartDenial: null,
       remoteSpawn,
+      receiveMessage: (header, peerId) => inHome(home, () =>
+        receive(header, peerId, async () => (await readPeers()).find(p => p.id === peerId)?.name ?? null)),
+
       captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
@@ -231,4 +241,28 @@ test("reads the paired machine's system coordinator over a real loopback connect
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
   expect(await a.service.fetchCoordinatorPane(b.id)).toEqual({ state: "running", text: "b coordinator" });
   expect(b.logs.some(line => line.includes("read the system coordinator pane"))).toBe(true);
+});
+
+test("agents send text in both directions over real paired endpoints", async () => {
+  const net = makeNetwork(await loadIroh());
+  const a = await net.makeSide("a", [localAgent("alice")]);
+  const b = await net.makeSide("b", [localAgent("bob")]);
+  setSendSpawnRunner(() => makeSpawnResult());
+  for (const [side, agent] of [[a, "alice"], [b, "bob"]] as const) {
+    const repo = join(side.home, "app");
+    const dir = join(repo, ".itsybitsy", "agents", agent);
+    await Bun.write(join(side.home, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: repo, name: "app" }] }));
+    await Bun.write(join(dir, "meta.json"), JSON.stringify(localAgent(agent, { tmux_session: "ib-" + agent }).meta));
+    await Bun.write(join(dir, "meta.transient.json"), JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now() }));
+  }
+  await pairBoth(a, b);
+  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await waitFor(() => !!link(a)?.connected && !!link(b)?.connected, { message: "both connected", timeoutMs: 10_000 });
+  for (const [sender, recipient, from, to] of [[a, b, "A/app/alice", "bob"], [b, a, "B/app/bob", "alice"]] as const) {
+    const id = crypto.randomUUID();
+    expect(await sender.service.sendRemoteMessage(recipient.id, {
+      op: "send", from: { kind: "agent", id: from }, id, target: { kind: "agent", repo: "app", agent: to }, message: "hi", files: [],
+    }, "handoff")).toBe(id);
+    expect(await readOutbox(join(recipient.home, ".itsybitsy", "agents", to))).toMatchObject([{ message: "hi", fromAgent: from }]);
+  }
 });

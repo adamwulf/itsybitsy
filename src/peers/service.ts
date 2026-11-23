@@ -61,7 +61,9 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
-import { createMessageReceiver } from "./receive-message";
+import type { SendHeader } from "./send-frame";
+import { requestSend } from "./peer-link";
+import { createMessageReceiver, targetLabel } from "./receive-message";
 import { remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
@@ -657,6 +659,20 @@ export class PeerService {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
     if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
     return this.poller.fetchCoordinatorPane(peerId);
+  }
+
+  async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard"): Promise<string> {
+    if (source === "dashboard") {
+      if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
+      if (header.from.kind !== "user") throw new Error("Dashboard sends require a user sender");
+    }
+    const peer = await this.peerName(peerId);
+    if (peer === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    const id = await requestSend(conn, header, this.deps.setTimer);
+    this.deps.log(`Sent a message to ${peer}/${targetLabel(header.target)}`);
+    return id;
   }
 
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {

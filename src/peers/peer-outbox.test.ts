@@ -346,3 +346,25 @@ test("malformed progress warns once and keeps polling for the delivery result", 
     expect(logs).toEqual([expect.stringContaining("progress read failed")]);
   } finally { warning.mockRestore(); }
 });
+
+test.each([false, true])("a transient result read is retried and persistent errors retain the diagnostic (persistent=%s)", async persistent => {
+  await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
+  const path = join(base, ".claimed", header.id, "result.json");
+  const read = fs.readFile; let failed = false, now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  const spy = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof read>) => {
+    const bytes = await read(...args);
+    if (args[0] === path && (persistent || !failed)) { failed = true; now += 61_000; throw Error("fixture read failure"); }
+    return bytes;
+  }) as typeof read);
+  try {
+    const waiting = handoffRemoteMessage("peer", header);
+    await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
+    await createPeerOutboxPoll()(async () => header.id, () => {});
+    const result = await waiting;
+    expect(result.ok).toBe(!persistent);
+    if (persistent) { expect(result.stderr).toContain("outcome unknown"); expect(result.stderr).toContain("fixture read failure"); }
+    expect(failed).toBe(true);
+  } finally { spy.mockRestore(); clock.mockRestore(); }
+});

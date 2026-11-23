@@ -107,6 +107,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     let lastSequence = 0;
     let warnedProgress = false;
 
+    let resultDiagnostic: string | undefined;
     const readResult = async (): Promise<IbCommandResult | undefined> => {
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
@@ -115,7 +116,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
           ? { ok: true, exitCode: 0, stdout: `Sent to ${targetLabel(header.target)}`, stderr: "" }
           : fail(result.error ?? SEND_UNKNOWN);
       } catch (err) {
-        if (!missing(err)) throw err;
+        if (!missing(err)) resultDiagnostic = detail(err);
       }
     };
     while (!signal?.aborted) {
@@ -147,6 +148,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       if (!signal?.aborted) {
         const result = await readResult();
         if (result && !signal?.aborted) return result;
+        if (resultDiagnostic && !signal?.aborted) return fail(`outcome unknown — check the recipient (${resultDiagnostic})`);
       }
       await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });

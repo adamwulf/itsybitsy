@@ -20,3 +20,8 @@ test("cuts at a UTF-8 code point boundary and keeps the extension", () => {
   expect(sanitizeAttachmentName("🌻".repeat(60) + ".写真")).toBe("🌻".repeat(48) + ".写真");
   expect(sanitizeAttachmentName("x." + "雪".repeat(100))).toBe("x." + "雪".repeat(66));
 });
+
+test("dots and spaces alone fall back; meaningful dotfiles and spaces survive", () => {
+  for (const name of ["...", "   ", " . . "]) expect(sanitizeAttachmentName(name)).toBe("attachment");
+  for (const name of [".notes", "my notes.txt"]) expect(sanitizeAttachmentName(name)).toBe(name);
+});

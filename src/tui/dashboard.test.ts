@@ -10329,9 +10329,9 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.handleInput("hi");
       dashboard.inputField.submit();
       await waitFor(() => dashboard.inputField.getText() === "");
-      expect(service.sendRemoteMessage.mock.calls).toMatchObject([[PEER_B, {
+      expect(service.sendRemoteMessage.mock.calls[0]?.slice(0, 2)).toMatchObject([PEER_B, {
         from: { kind: "user" }, target: { kind: "system" }, message: "hi", files: [],
-      }]]);
+      }]);
       dashboard.focusManager.setFocus("agent-tree");
       dashboard.handleInput("k");
       expect(stripAnsi(dashboard.render(180).join("\n"))).not.toContain("peer capture");
@@ -10860,7 +10860,7 @@ describe("Unified peer repos in the Agents tree", () => {
     service.remoteStartDenial = null;
     service.sendRemoteMessage.mockRejectedValueOnce(new Error("Machine is disconnected"));
     dashboard.inputField.submit();
-    await Bun.sleep(0);
+    await waitFor(() => dashboard.notice !== "Only a human can send to another machine");
     expect(dashboard.notice).toBe("Machine is disconnected");
     expect(dashboard.inputField.getText()).toBe("/compact");
 
@@ -10876,6 +10876,38 @@ describe("Unified peer repos in the Agents tree", () => {
     pending.resolve(header.id);
     await waitFor(() => dashboard.inputField.getText() === "");
     expect(dashboard.notice).toContain("Sent to Laptop B/");
+  });
+
+  test("remote row detects submitted files, shows byte progress and cancels its own send on Esc", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ib-dashboard-transfer-"));
+    setUserHome(home);
+    try {
+      await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
+      const source = join(home, "notes.txt");
+      await Bun.write(source, "contents");
+      const { dashboard, service } = setup();
+      const entered = Promise.withResolvers<void>();
+      let staged: string | undefined;
+      service.sendRemoteMessage.mockImplementationOnce(async (_peer, header, _source, transfer) => {
+        expect(header.files).toHaveLength(1);
+        expect(header.files[0]?.spellings).toContain(source);
+        staged = join(transfer!.filesDir!, "0");
+        expect(await Bun.file(staged).text()).toBe("contents");
+        transfer!.onProgress!(3);
+        entered.resolve();
+        return new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason)));
+      });
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(`Read ${source} and ./live.ts`);
+      dashboard.inputField.submit();
+      await entered.promise;
+      expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 8 bytes");
+      dashboard.handleInput("\x1b");
+      await waitFor(() => dashboard.notice === "Send cancelled");
+      await waitFor(async () => !await Bun.file(staged!).exists());
+      expect(dashboard.inputField.getText()).toContain(source);
+    } finally { resetUserHome(); await rm(home, { recursive: true, force: true }); }
   });
 
   test("incoming notices and overlapping completions leave each pending send visible", async () => {

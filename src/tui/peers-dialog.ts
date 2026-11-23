@@ -29,7 +29,7 @@ import { wordWrapSingleLine, wrapSingleLine } from "./wrap";
 export interface PeersDialogService {
   readonly remoteStartDenial: string | null;
   view(): PeerServiceView;
-  sendRemoteMessage(peerId: string, header: import("../peers/send-frame").SendHeader): Promise<string>;
+  sendRemoteMessage: import("../peers/service").PeerService["sendRemoteMessage"];
   fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane>;
   startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;
   openDialog(): void;

@@ -1,3 +1,7 @@
+import { join } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { dashboardAttachmentPaths } from "../peers/dashboard-attachments";
+import { remoteAttachmentStage } from "../peers/remote-attachments";
 import { remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
@@ -884,7 +888,7 @@ export class DashboardComponent implements Component {
     const repoPath = this.agentTree.selectedRepoPath ?? (this.agentTree.selectedAgent?.repoPath ?? null);
     return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
   }
-  private pendingRemoteSends = new Map<string, string>();
+  private pendingRemoteSends = new Map<string, { label: string; bytes: number; total?: number; controller: AbortController }>();
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
   private usageTimer: ReturnType<typeof setInterval> | null = null;
@@ -1163,7 +1167,7 @@ export class DashboardComponent implements Component {
       const remote = this.remoteSelection;
       const target = remoteMessageTarget(remote);
       if (remote && remote.kind !== "remote-repo-header" && target && trimmed) {
-        return this.submitRemoteMessage(remote.peerId, remoteTitle(remote), target, trimmed);
+        return this.submitRemoteMessage(remote, target, trimmed);
       }
       if (!agent || !trimmed) return;
       return promptAndStageAttachmentsIfNeeded({
@@ -1982,22 +1986,44 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
-  private async submitRemoteMessage(peer: string, label: string, target: SendTarget, text: string): Promise<boolean> {
+  private async submitRemoteMessage(remote: Exclude<RemoteEntry, { kind: "remote-repo-header" }>, target: SendTarget, text: string): Promise<boolean> {
     const service = this.peerService;
     const header = textHeader(target, text, { kind: "user" });
+    const label = remoteTitle(remote);
+    const controller = new AbortController();
+    const pending = { label, controller, bytes: 0, total: undefined as number | undefined };
+    let staging: string | undefined;
     try {
       if (!service) throw new Error("Remote messaging is unavailable");
       if (service.remoteStartDenial !== null) throw new Error(remoteSendDenial(service.remoteStartDenial));
-      this.pendingRemoteSends.set(header.id, label);
+      this.pendingRemoteSends.set(header.id, pending);
       this.invalidate();
       this.tui?.requestRender();
-      await service.sendRemoteMessage(peer, header);
+      const repo = remote.kind === "remote-agent" ? remote.remote : undefined;
+      const local = this.repos.find(entry => entry.name === repo?.repoRegistryName);
+      const paths = await dashboardAttachmentPaths(text, repo?.repoPath, local?.path);
+      controller.signal.throwIfAborted();
+      let filesDir: string | undefined;
+      if (paths.length) {
+        staging = await mkdtemp("/tmp/itsybitsy-outgoing-");
+        filesDir = join(staging, "files");
+        header.files = await remoteAttachmentStage(paths, { kind: "user" }, controller.signal)(filesDir);
+        pending.total = header.files.reduce((sum, file) => sum + file.size, 0);
+      }
+      await service.sendRemoteMessage(remote.peerId, header, "dashboard", {
+        filesDir, signal: controller.signal, onProgress: bytes => {
+          pending.bytes = bytes;
+          this.invalidate();
+          this.tui?.requestRender();
+        },
+      });
       this.setNotice(`Sent to ${label}`, "info");
       return true;
     } catch (err) {
       this.setNotice(err instanceof Error ? err.message : String(err), "error");
       return false;
     } finally {
+      if (staging) await rm(staging, { recursive: true, force: true });
       this.pendingRemoteSends.delete(header.id);
       this.invalidate();
       this.tui?.requestRender();
@@ -3047,6 +3073,14 @@ export class DashboardComponent implements Component {
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;
 
+    if (this.pendingRemoteSends.size && (data === "\x1b" || matchesKey(data, Key.escape))) {
+      const selected = this.remoteSelection;
+      const sends = [...this.pendingRemoteSends.values()].reverse();
+      const pending = sends.find(send => selected && send.label === remoteTitle(selected)) ?? sends[0]!;
+      pending.controller.abort(new Error("Send cancelled"));
+      return;
+    }
+
     // When active-agent panel is focused, use three-level sub-focus: pane → input → send.
     // In 'pane' sub-focus, dashboard shortcuts work normally. In 'input', the input field
     // captures all input. In 'send', Enter submits and other keys fall through. (SPEC §13.4)
@@ -3749,8 +3783,9 @@ export class DashboardComponent implements Component {
     // Compute available height for the main content area.
     // Chrome lines: header(1) + main title separator(1) +
     //               bottom separator(1) + status bar(2) = 5.
-    for (const label of this.pendingRemoteSends.values()) {
-      lines.push(truncateToWidth(`sending to ${label}…`, width, "…"));
+    for (const send of this.pendingRemoteSends.values()) {
+      const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
+      lines.push(truncateToWidth(`sending to ${send.label}…${progress}  Esc: cancel`, width, "…"));
     }
     const chromeLines = 5 + this.pendingRemoteSends.size;
     const availableHeight = Math.max(5, terminalRows - chromeLines);

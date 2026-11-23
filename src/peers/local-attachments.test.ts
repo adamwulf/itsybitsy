@@ -2,7 +2,9 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { chmod, link, mkdir, readdir, realpath, rm, stat, truncate } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { encodeClaudeProjectPath } from "../auto-compact";
-import { writeAgentTransient } from "../agents";
+import { fixtureProcessStart } from "../test-cli-driver";
+import { processSpawnRequests } from "../spawn-broker";
+import { writeAgentTransient, processStartEpochSecondsCtx } from "../agents";
 import fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as space from "./attachment-space";
@@ -127,6 +129,27 @@ test.each([false, true])("an unwrapped caller respects its worktree deny rule wi
   expect(await queue().exists()).toBe(false);
 });
 
+async function sandboxedAttachmentSend(sender: FixtureAgent, args: string[]) {
+  setUserHome(fixture.home);
+  processStartEpochSecondsCtx.set(fixtureProcessStart);
+  await writeAgentTransient(sender.agentDir, {
+    updated_at_ms: Date.now(), watchdog_pid: process.pid, tmux_compacting: false,
+    tmux_rate_limited: false, tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false, has_background_tasks: false,
+  });
+  let poll: Promise<void> | undefined;
+  const timer = setInterval(() => {
+    poll ??= processSpawnRequests("sender", recipient.repoPath, {
+      verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: fixture.home },
+    }).then(() => {}).finally(() => { poll = undefined; });
+  }, 20);
+  try {
+    return await fixture.run(["send", "reader", ...args], {
+      cwd: sender.sessionCwd, sandboxed: true, actions: { sendMessage: "record" },
+      allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+    });
+  } finally { clearInterval(timer); await poll; processStartEpochSecondsCtx.reset(); }
+}
+
 test.each(["ordinary", "protected link"] as const)(
   "sandboxed CLI with %s checks the opened source locally", async scenario => {
     setUserHome(fixture.home);
@@ -137,10 +160,7 @@ test.each(["ordinary", "protected link"] as const)(
       await Bun.write(secret, "fixture");
       await link(secret, file);
     } else await Bun.write(file, "ordinary data");
-    const run = () => fixture.run(["send", "reader", "--attach", "./report", "inspect"], {
-      sandboxed: true, cwd: sender.sessionCwd, actions: { sendMessage: "real" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
-    });
-    const result = await run();
+    const result = await sandboxedAttachmentSend(sender, ["--attach", "./report", "inspect"]);
     if (scenario !== "ordinary") {
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("has multiple hard links; copy it to a new file first");
@@ -161,9 +181,7 @@ test.skipIf(process.getuid?.() === 0)("sandbox-routed CLI reports a kernel read 
   const file = join(sender.sessionCwd, "unreadable");
   await Bun.write(file, "test fixture");
   await chmod(file, 0);
-  const result = await fixture.run(["send", "reader", "--attach", "./unreadable", "read"], {
-    sandboxed: true, cwd: sender.sessionCwd, actions: { sendMessage: "real" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
-  });
+  const result = await sandboxedAttachmentSend(sender, ["--attach", "./unreadable", "read"]);
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toMatch(/EACCES|permission denied/i);
   expect(await queue().exists()).toBe(false);
@@ -348,9 +366,7 @@ test("--attach before the target combines with a file body and explicit attribut
 test("failed attachment staging never falls back to sending the original text", async () => {
   const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
   await Bun.write(join(sender.sessionCwd, "first"), "ok");
-  const run = await fixture.run(["send", "reader", "--attach", "first", "--attach", "missing", "!read first missing"], {
-    cwd: sender.sessionCwd, sandboxed: true, actions: { sendMessage: "record" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
-  });
+  const run = await sandboxedAttachmentSend(sender, ["--attach", "first", "--attach", "missing", "!read first missing"]);
   expect(run.exitCode).toBe(1);
   expect(run.stderr).toContain("missing");
   expect(run.actions).toEqual([]);

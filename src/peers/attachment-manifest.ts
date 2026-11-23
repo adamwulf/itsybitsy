@@ -1,10 +1,23 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, realpath, stat, type FileHandle } from "node:fs/promises";
-import { basename, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { sanitizeAttachmentName } from "./attachment-name";
 import { CHUNK_BYTES, checkManifestLimits, DEFAULT_TRANSFER_LIMITS, type TransferLimits } from "./transfer-limits";
+
+// Bun normalizes ".." before its realpath call. Resolve the directory to
+// the left of each parent step first, leaving symlink traversal to the OS.
+async function realpathArgument(absolute: string): Promise<string> {
+  const parts = absolute.split(/\/\.\.(?=\/|$)/);
+  let prefix = parts[0]!;
+  for (const rest of parts.slice(1)) {
+    const directory = await realpath(prefix || sep);
+    if (!(await stat(directory)).isDirectory()) throw new Error("parent component requires a directory");
+    prefix = dirname(directory) + rest;
+  }
+  return realpath(prefix);
+}
 
 export interface ManifestEntry {
   argument: string;
@@ -31,10 +44,11 @@ export async function buildAttachmentManifest(
   const entries = new Map<string, ManifestEntry>();
   try {
     for (const argument of paths) {
-      const expanded = argument === "~" ? home : argument.startsWith("~/") ? join(home, argument.slice(2)) : argument;
-      const absolute = resolve(cwd, expanded);
+      // Let the filesystem walk symlinks before interpreting a following "..".
+      const expanded = argument === "~" ? home : argument.startsWith("~/") ? home + argument.slice(1) : argument;
+      const absolute = isAbsolute(expanded) ? expanded : cwd + sep + expanded;
       try {
-        const source = await realpath(absolute);
+        const source = await realpathArgument(absolute);
         if (protectedDirs.some(dir => source === dir || source.startsWith(dir + sep))) {
           throw new Error("protected attachment path");
         }
@@ -58,7 +72,8 @@ export async function buildAttachmentManifest(
             throw error;
           }
         }
-        for (const spelling of [argument, absolute, source]) {
+        const spellingPath = absolute.split(sep).includes("..") ? absolute : normalize(absolute);
+        for (const spelling of [argument, spellingPath, source]) {
           if (!entry.spellings.includes(spelling)) entry.spellings.push(spelling);
         }
       } catch (error) {

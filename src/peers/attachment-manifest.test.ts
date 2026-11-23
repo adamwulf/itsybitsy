@@ -101,3 +101,15 @@ test("hash and body reads stay on the validated file after its name is replaced"
   await sendFileBody(entry!.handle, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } });
   expect(Buffer.concat(chunks).toString()).toBe("original");
 });
+
+test("resolves symlinks before parent components for both cwd and home arguments", async () => {
+  await mkdir(join(home, "remote", "sub"), { recursive: true });
+  await symlink(join(home, "remote", "sub"), join(cwd, "dirlink"));
+  await writeFile(join(home, "remote", "x"), "intended");
+  await writeFile(join(cwd, "x"), "lexical");
+  const args = ["dirlink/../x", "~/work/dirlink/../x"];
+  const [entry] = await manifest(args, { cwd, home });
+  expect(entry!.source).toBe(await realpath(join(home, "remote", "x")));
+  expect(entry!.spellings).toEqual(expect.arrayContaining(args));
+  expect(entry!.spellings).not.toContain(join(cwd, "x"));
+});

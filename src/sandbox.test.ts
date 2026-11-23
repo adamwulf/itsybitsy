@@ -254,6 +254,8 @@ describe("sandbox profile emission", () => {
       tagged('(deny file-read* (subpath (param "TMUXSOCK")))'),
       tagged('(deny file-write* (subpath (param "TMUXSOCK")))'),
       tagged('(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))'),
+      ...["/private/tmp", "/tmp"].flatMap(prefix => ["file-write*", "file-link"].map(op =>
+        tagged(`(deny ${op} (subpath "${prefix}/itsybitsy-staging-${process.getuid!()}"))`))),
       tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
@@ -283,6 +285,8 @@ describe("sandbox profile emission", () => {
       // deny for a spawner.
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
       '(allow file-write* (subpath (param "PARENTCLAUDE")))',
+      ...["/private/tmp", "/tmp"].flatMap(prefix => ["file-write*", "file-link"].map(op =>
+        tagged(`(deny ${op} (subpath "${prefix}/itsybitsy-staging-${process.getuid!()}"))`))),
       tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
@@ -435,8 +439,8 @@ describe("sandbox profile emission", () => {
     );
     const denies = profile.trimEnd().split("\n").filter((line) => line.startsWith("(deny"));
     // default, 2 read-only write denies (/tmp/read-only, REPOID), 2 raw, 2 per
-    // config deny, 4 peer and handoff denies, 2 seal-helper denies.
-    expect(denies.length).toBe(15);
+    // config deny, 4 staging denies, 4 peer and handoff denies, 2 seal-helper denies.
+    expect(denies.length).toBe(19);
     for (const line of denies) expect(line.endsWith(` (with message "${TAG}"))`)).toBe(true);
     // A string that merely contains "(deny" is not a second rule.
     expect(profile).toContain(tagged('(deny file-read* (literal "/x (deny y)"))'));

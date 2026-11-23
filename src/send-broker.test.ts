@@ -753,7 +753,7 @@ describe("send broker", () => {
       const file = Bun.file.bind(Bun);
       let claimed = false, attempts = 0;
       const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-      const spy = spyOn(Bun, "file").mockImplementation((location: Parameters<typeof Bun.file>[0], options?: Parameters<typeof Bun.file>[1]) => {
+      const spy = spyOn(Bun, "file").mockImplementation((location: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number, options?: Parameters<typeof Bun.file>[1]) => {
         const handle: Bun.BunFile = Reflect.apply(file, Bun, [location, options]);
         if (location === path && claimed) handle.json = async () => {
           attempts++; entered.resolve();

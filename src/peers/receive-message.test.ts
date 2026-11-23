@@ -31,7 +31,9 @@ beforeEach(async () => {
     const { agentDir } = await cli.addAgent(repo, id, {
       tmux_session: "ib-" + id, ...(id === "photos" && { agentType: "repo-coordinator" }),
     });
-    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now() }));
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
   }
   lines = [];
   receiver = createMessageReceiver(() => {}, line => lines.push(line));
@@ -96,7 +98,9 @@ test("wire ids ignore recycled nicknames and select the keyed queue of the named
     const key = "home/" + name + "/same";
     const { agentDir } = await cli.addAgent(path, "same", { queue_key: key });
     await mkdir(join(cli.home, ".itsybitsy", "agents", key), { recursive: true });
-    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now() }));
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
   }
   expect(await exchange(header({ target: { kind: "agent", repo: "other", agent: "same" } }))).toMatchObject({ ok: true });
   const base = join(cli.home, ".itsybitsy", "agents", "home");

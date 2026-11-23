@@ -431,8 +431,8 @@ describe("sandbox profile emission", () => {
     );
     const denies = profile.trimEnd().split("\n").filter((line) => line.startsWith("(deny"));
     // default, 2 read-only write denies (/tmp/read-only, REPOID), 2 raw, 2 per
-    // config deny, 2 seal-helper denies.
-    expect(denies.length).toBe(11);
+    // config deny, 2 peer handoff denies, 2 seal-helper denies.
+    expect(denies.length).toBe(13);
     for (const line of denies) expect(line.endsWith(` (with message "${TAG}"))`)).toBe(true);
     // A string that merely contains "(deny" is not a second rule.
     expect(profile).toContain(tagged('(deny file-read* (literal "/x (deny y)"))'));

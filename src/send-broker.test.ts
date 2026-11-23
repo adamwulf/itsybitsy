@@ -626,9 +626,9 @@ describe("send broker", () => {
         return renameFile(from, to);
       });
       const file = Bun.file.bind(Bun);
-      const readSpy = spyOn(Bun, "file").mockImplementation((...args: Parameters<typeof Bun.file>) => {
-        const handle = file(...args);
-        if (wins && String(args[0]).startsWith(spawnRequestDir(agentDir) + "/")) {
+      const readSpy = spyOn(Bun, "file").mockImplementation((path: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number, options?: Parameters<typeof Bun.file>[1]) => {
+        const handle: Bun.BunFile = Reflect.apply(file, Bun, [path, options]);
+        if (wins && String(path).startsWith(spawnRequestDir(agentDir) + "/")) {
           const read = handle.text.bind(handle);
           handle.text = async () => { const text = await read(); entered.resolve(); await release.promise; return text; };
         }

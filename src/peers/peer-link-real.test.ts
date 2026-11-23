@@ -263,7 +263,9 @@ test("agents send text in both directions over real paired endpoints", async () 
     const dir = join(repo, ".itsybitsy", "agents", agent);
     await Bun.write(join(side.home, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: repo, name: "app" }] }));
     await Bun.write(join(dir, "meta.json"), JSON.stringify(localAgent(agent, { tmux_session: "ib-" + agent }).meta));
-    await Bun.write(join(dir, "meta.transient.json"), JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now() }));
+    await Bun.write(join(dir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
   }
   await pairBoth(a, b);
   await bootPair(a, b);

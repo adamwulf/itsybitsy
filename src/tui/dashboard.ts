@@ -2373,7 +2373,7 @@ export class DashboardComponent implements Component {
     if (isCoordinator && !wasCoordinator) {
       this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
-      if (focus !== visibleTree && focus !== "info" && focus !== "coordinator") {
+      if (this.focusManager.peerCoordinatorTreeMode || (focus !== visibleTree && focus !== "info" && focus !== "coordinator")) {
         this.focusManager.setFocus(visibleTree);
       }
       // No resize on coordinator selection: the ib-coordinator tmux window is
@@ -3644,7 +3644,7 @@ export class DashboardComponent implements Component {
     // agentTree.isSystemCoordinatorSelected`).
     const isCoordinatorView =
       this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected;
-    const isTreeMode = this.rightPane.mode === "TREE";
+    const isTreeMode = !isCoordinatorView && this.rightPane.mode === "TREE";
     // A selected remote row (SPEC §20.5) draws two placeholders in the
     // split layout, whatever the right-pane mode, except TREE: that mode draws
     // the tree itself in the main area (the sidebar hides its own), and it must

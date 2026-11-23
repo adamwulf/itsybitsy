@@ -454,6 +454,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     }
   }
   async function writeRequest() {
+    options.verifyClient?.();
     if (files) await writeWithProgress(active, bytes, setTimer, signal, () => options.onProgress?.(0));
     else await io(() => active.writeAll(bytes));
     for (const [index, file] of (files ?? []).entries()) {
@@ -473,6 +474,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
       sent += file.size;
     }
     signal.throwIfAborted();
+    options.verifyClient?.();
     attemptedFin = true;
     await io(() => active.finish());
     sendDone = true;

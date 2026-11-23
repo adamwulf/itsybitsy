@@ -774,3 +774,28 @@ test("each partial header write reports a milestone with zero body bytes", async
   expect(await sent).toBe(header.id);
   a.close(0, "done");
 });
+
+test("a client that exits while openBi is pending writes nothing and resets", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock(), opened = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const open = a.openBi.bind(a);
+  let alive = true, writes = 0, resets = 0;
+  spyOn(a, "openBi").mockImplementation(async () => {
+    const stream = await open(), reset = stream.resetSending.bind(stream);
+    stream.write = async bytes => { writes++; return bytes.length; };
+    stream.resetSending = async () => { resets++; return reset(); };
+    opened.resolve(); await release.promise; return stream;
+  });
+  const send = requestSend(a, { op: "send", id: crypto.randomUUID(), target: { kind: "system" },
+    from: { kind: "user" }, message: "hi", files: [] }, clock.setTimer, {
+      verifyClient() { if (!alive) throw Error("sender exited"); },
+    }).catch(err => err);
+  const remote = await b.acceptBi();
+  await opened.promise; alive = false; release.resolve();
+  await waitFor(() => resets === 1);
+  await remote.finish();
+  expect(String(await send)).toContain("sender exited");
+  expect(writes).toBe(0);
+  a.close(0, "done");
+});

@@ -595,18 +595,21 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
   if (stalledRead) {
     // The native read is still pending. Bound the entire ACK attempt before
     // closing, with a delivery grace only if the reply actually settled.
-    if (await settledWithinGrace(writeReply(), deps) && await settledWithinGrace(conn.closed(), deps, 5000)) return;
+    if (await settledWithinGrace(writeReply(), deps) && await settledWithinGrace(conn.closed(), deps, 5000)) return false;
     closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
-    return;
+    return false;
   }
+  let delivered = true;
   try { await writeReply(); }
   catch {
+    delivered = false;
     if (!await settledWithinGrace(stream.cancel(), deps)) {
       closeQuietly(conn, PEER_CLOSE.error, "send reply stalled");
-      return;
+      return false;
     }
   }
   if (stopped && !await settledWithinGrace(stopped, deps)) closeQuietly(conn, PEER_CLOSE.error, "receive stop stalled");
+  return delivered;
 }
 
 /** One request on its own stream. Every error stays here. */
@@ -687,8 +690,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       deps.log(`peer link: ${reason}, from ${from}; closing`);
       closeQuietly(conn, PEER_CLOSE.error, reason);
     }
-    else if (err instanceof TransferIdleError) closeQuietly(conn, PEER_CLOSE.error, "request read stalled");
-    else { void stream.cancel().catch(() => {}); }
+    else await sendReply(conn, stream, deps, encodeErrorReply(sendDiagnostic(errorDetail(err))), stream.stopReceiving(), reading);
     return;
   } finally { deps.headerReaders?.delete(stream); }
 
@@ -738,14 +740,9 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   } else {
     reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);
   }
-  try {
-    await stream.writeAll(reply);
-    await stream.finish();
-    if (capturedPane && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
-      deps.paneReaders.add(conn.remoteId);
-      deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
-    }
-  } catch {
-    // The dialer went away; its poller reports that on its side.
+  const delivered = await sendReply(conn, stream, deps, reply);
+  if (delivered && capturedPane && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
+    deps.paneReaders.add(conn.remoteId);
+    deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
   }
 }

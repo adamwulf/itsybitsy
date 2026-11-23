@@ -16,7 +16,7 @@ Pairing works like this:
 After pairing, each install trusts the other and can find it by key. The
 `ib watch` sidebar shows one unified repo list, with remote agents in italic.
 Select a remote agent to see its machine and connection status on the info
-panel's Machine line. Open the Peers dialog to see the status of all paired
+panel's Machine line. Open the Peers tab to see the status of all paired
 machines.
 
 ## Research findings
@@ -120,7 +120,7 @@ turns on n0's public relays and discovery:
 - The endpoint lives in `ib watch`, so peering only works while `ib watch` is
   running.
 - `ib watch` binds the endpoint at boot if `peers.json` lists at least one
-  peer, or when you open the Peers dialog. An install that never pairs never
+  peer, or when you open the Peers tab. An install that never pairs never
   touches the network.
 - Once bound, the endpoint stays up until `ib watch` exits, or until its
   accept loop fails.
@@ -130,16 +130,16 @@ turns on n0's public relays and discovery:
   It waits 5 s, then doubles the wait each time up to 60 s. A rebind resets
   the wait only once it has stayed up for 60 s; an accept loop that dies
   sooner is one more failure, so a flapping endpoint backs off too. It
-  retries only while `peers.json` lists a peer or the Peers dialog is open.
+  retries only while `peers.json` lists a peer or the Peers tab is open.
   It stops when another live `ib watch` holds the lock (peering shows as
-  disabled, and the lock is not polled) and on exit. Opening the dialog
+  disabled, and the lock is not polled) and on exit. Opening the tab
   while a retry is pending binds at once instead. Each failure is one
   `watch.log` line with its wait; once the wait reaches 60 s, a repeat of
   the same failure is not logged again. When that failure is the accept
   loop dying, the binds of the repeating cycle and their close lines are
   not logged either, including the bind that ends up staying up; a bind
   after a failure to bind (identity, lock, socket) is logged. Recovery is
-  logged once a rebind has stayed up for 60 s, and the dialog shows
+  logged once a rebind has stayed up for 60 s, and the tab shows
   "retrying in N s" with the last error.
 
 **One endpoint per machine.** Two endpoints with the same key would fight: the
@@ -153,14 +153,14 @@ the endpoint:
 2. If the lock exists and its process is alive (the same pid with the same
    start time), this `ib watch` skips peering.
    It logs "peering disabled: ib watch pid N owns the endpoint" to
-   `watch.log`, and its Peers dialog says the same.
+   `watch.log`, and its Peers tab says the same.
 3. If that process is gone, this `ib watch` takes the lock over. "Gone" means
    the pid is dead, or it now belongs to a process with a different start
    time. A different start time can happen after a reboot. The owner deletes
    the lock when it exits.
 
 A second `ib watch` tries for the lock only when it binds: at boot, when the
-Peers dialog opens, or in an automatic rebind after its own failure. It never
+Peers tab opens, or in an automatic rebind after its own failure. It never
 polls the lock: when a bind finds the lock held, retrying stops there. So once
 the owner exits, opening Peers or restarting moves peering to the second one.
 This works like Telegram, where the first poller wins.
@@ -186,7 +186,7 @@ This works like Telegram, where the first poller wins.
 
 ### Pairing
 
-`ib watch` gets a new **Peers dialog**, opened with `I` (currently unused). It
+In `ib watch`, **Peers** is the third tab of `h` setup. The `I` shortcut opens that tab directly. It
 shows this install's id, the paired peers with their connection state, and a
 "Pair with id" input.
 
@@ -199,11 +199,11 @@ request and reply has its own bi stream:
 
 This needs no framing code. B ties the pending code to the connection.
 
-1. On B, open the Peers dialog to read B's id (64 hex characters), and leave
-   it open. B accepts pairing only while that dialog is open.
+1. On B, open the Peers tab to read B's id (64 hex characters), and leave
+   it open. B accepts pairing only while that tab is visible.
 2. On A, paste B's id. A trims and lowercases it, checks it with
    `EndpointId.fromString`, dials B, and sends `pair-hello`.
-3. B accepts the request only if its Peers dialog is open and no other
+3. B accepts the request only if its Peers tab is open and no other
    pairing is pending (incoming or outgoing). If either check fails, B replies
    `pair-refused {reason}` and closes, and A shows the reason. If A's id (from
    `conn.remoteId()`) is already in B's `peers.json`, B replies `pair-ok`
@@ -244,7 +244,7 @@ attack.
   authenticated B.
 - B trusts the key from `conn.remoteId()` only after the code shows that
   whoever drives that connection can see B's screen.
-- Requiring B's dialog to be open, the busy rule, and the short ids shown on
+- Requiring B's Peers tab to be visible, the busy rule, and the short ids shown on
   both screens keep a stranger who dials at the same moment from slipping in.
 
 **Lost final reply.** If A never receives `pair-ok`, B trusts A but A does not
@@ -267,7 +267,7 @@ trust B. Pairing again fixes it. B already trusts A's id, so step 3 replies
 - A peer never has two dials in flight at once. A dial can take up to 30 s to
   fail, so ticks that come in while a dial is pending are skipped.
 - Each peer's state is kept in memory: connected, or last seen N ago plus the
-  last error. The Peers dialog shows the connection state and last error. Selecting a
+  last error. The Peers tab shows the connection state and last error. Selecting a
   remote agent shows the connection state on the info panel’s Machine line. Nothing is written to disk.
 - You only need to pair again if one side loses `secret.key` (which gives it a
   new id) or runs `ib peer remove`.
@@ -351,13 +351,13 @@ Pairing happens only in the watch window. There is no `ib peer add`.
 2. **Pairing:**
    - code helpers: generate, normalize, constant-time compare, expiry;
    - the pair protocol over a transport seam;
-   - the Peers dialog on `I`, including name entry;
-   - binding the endpoint in `ib watch` when the dialog opens. This takes the
+   - the Peers tab on `I`, including name entry;
+   - binding the endpoint in `ib watch` when the tab opens. This takes the
      endpoint lock and calls `ep.close()` on exit. Phase 2 is the first phase
      to bind the endpoint. Binding at boot when peers exist comes in Phase 3,
      together with the trusted ALPN.
 
-   Tests drive the protocol through the seam and the dialog through the
+   Tests drive the protocol through the seam and the tab through the
    existing dashboard test helpers. Real-endpoint tests use `presetMinimal`,
    `RelayMode.disabled()` and `bindAddr("127.0.0.1:0")`, and dial
    `ep.addr().directAddresses()`. They need no network, and a round trip
@@ -378,7 +378,7 @@ Pairing happens only in the watch window. There is no `ib peer add`.
   sessions.
 - **Watchdog:** not affected. Remote agents are never watched locally.
 - **`ib watch`:** the most affected area:
-  - the Peers dialog on `I`, plus its help entry;
+  - the Peers tab on `I`, plus its help entry;
   - a background endpoint next to Telegram, logging to `watch.log`;
   - the new `FlatEntry` kinds and peer sections in the tree;
   - the read-only guard in the key dispatch;
@@ -406,7 +406,7 @@ machine. See [unified-multi-machine-repos.md](unified-multi-machine-repos.md).
 
 ## Decisions (Adam, 2026-11-15)
 
-1. B accepts pairing only while its Peers dialog is open.
+1. B accepts pairing only while its Peers tab is open.
 2. A code expires after 2 minutes and gets one attempt.
 3. You type a name for each peer while pairing.
 4. The first feature is the other install's repos and agents in a new tree

@@ -5,7 +5,7 @@
  *
  * - The endpoint binds at boot when `peers.json` lists at least one peer
  *   (`bootIfPaired`, which `ib watch` starts in the background once the
- *   watcher's first scan is done), or when the Peers dialog opens
+ *   watcher's first scan is done), or when the Peers tab opens
  *   (`openDialog`) with nothing bound yet, and again through the automatic
  *   rebind after a failure (below); one bind runs at a time, and a bound
  *   endpoint is never bound again. An install with no peers that never
@@ -20,7 +20,7 @@
  *   whose endpoint stays up for 60 s resets that, while one whose accept
  *   loop dies sooner is one more failure, so a flapping endpoint backs off
  *   too. It retries only while something needs the endpoint:
- *   `peers.json` lists a peer, or the Peers dialog is open. It stops for good
+ *   `peers.json` lists a peer, or the Peers tab is open. It stops for good
  *   when another live `ib watch` holds the lock ("disabled"; the lock is never
  *   polled), and on shutdown. Opening the dialog while a retry is pending
  *   binds at once, in place of the retry. `binding` is held from the start of
@@ -86,7 +86,10 @@ import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { newAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
-import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
+import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type CoordinatorPane, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
+import { captureMarkedCoordinatorPane } from "../tmux-poller";
+import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator";
+import { stripAnsi } from "../parse-state";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
@@ -101,6 +104,7 @@ export interface ServiceStream {
   writeAll(bytes: Uint8Array): Promise<void>;
   finish(): Promise<void>;
   readToEnd(limit: number): Promise<Uint8Array>;
+  cancel(): Promise<void>;
 }
 
 export interface ServiceConnection {
@@ -124,6 +128,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  captureCoordinator?(): Promise<CoordinatorPane | null>;
   remoteStartDenial: string | null | Promise<string | null>;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[]): void;
@@ -151,9 +156,13 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
+export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
   return {
     remoteStartDenial,
+    captureCoordinator: async () => {
+      const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log });
+      return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
+    },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
@@ -178,7 +187,7 @@ export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: ()
 export const PEER_RETRY_INITIAL_MS = 5_000;
 /** The longest wait between automatic rebinds. */
 export const PEER_RETRY_MAX_MS = 60_000;
-/** While the open Peers dialog shows a pending retry, the service notifies this often, so its countdown moves. */
+/** While the open Peers tab shows a pending retry, the service notifies this often, so its countdown moves. */
 export const PEER_RETRY_COUNTDOWN_MS = 1_000;
 /**
  * A rebind counts as recovered, and the backoff resets, only once its
@@ -258,6 +267,7 @@ export function toPairConnection(conn: ServiceConnection): PairConnection {
   const stream = (s: ServiceStream): PairStream => ({
     writeAll: (bytes) => s.writeAll(bytes),
     finish: () => s.finish(),
+    cancel: () => s.cancel(),
     readToEnd: async (limit) => {
       try {
         return await s.readToEnd(limit);
@@ -314,6 +324,7 @@ export class PeerService {
   private readonly listeners = new Set<() => void>();
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
+  private readonly paneReaders = new Set<string>();
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
 
@@ -336,7 +347,8 @@ export class PeerService {
     this.poller = new PeerPoller({
       readPeers: async () => {
         await deps.renewLease?.();
-        return deps.readPeers();
+        this.peers = await deps.readPeers();
+        return this.peers;
       },
       dial: (id) => this.dialPeer(id),
       now: deps.now,
@@ -407,7 +419,7 @@ export class PeerService {
   }
 
   /**
-   * The Peers dialog opened: accept pairing requests, and bind if not bound
+   * The Peers tab opened: accept pairing requests, and bind if not bound
    * yet. A pending retry is replaced by this bind, which starts at once.
    */
   openDialog(): void {
@@ -475,7 +487,7 @@ export class PeerService {
     this.notify();
     if (this.dialogOpen) return null;
     if (readError !== null) return `could not read peers.json: ${readError}`;
-    return this.peers.length === 0 ? "no paired peers and the Peers dialog is closed" : null;
+    return this.peers.length === 0 ? "no paired peers and the Peers tab is hidden" : null;
   }
 
   /**
@@ -492,7 +504,7 @@ export class PeerService {
     }
     this.failures++;
     if (!this.dialogOpen && this.peers.length === 0) {
-      this.deps.log(`peering: ${failure}; not retrying: no paired peers and the Peers dialog is closed`);
+      this.deps.log(`peering: ${failure}; not retrying: no paired peers and the Peers tab is hidden`);
       this.resetRetries();
       return;
     }
@@ -602,7 +614,7 @@ export class PeerService {
   }
 
   /**
-   * The Peers dialog closed: stop accepting, and cancel a pairing still in
+   * The Peers tab closed: stop accepting, and cancel a pairing still in
    * progress. A pending retry stays; when it fires it binds only if
    * `peers.json` lists a peer.
    */
@@ -634,6 +646,12 @@ export class PeerService {
     this.install(session);
     void session.start();
     return null;
+  }
+
+  async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
+    if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
+    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    return this.poller.fetchCoordinatorPane(peerId);
   }
 
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
@@ -858,6 +876,8 @@ export class PeerService {
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
           snapshot: this.deps.snapshot,
+          captureCoordinator: this.deps.captureCoordinator,
+          paneReaders: this.paneReaders,
           log: this.deps.log,
         });
         return;

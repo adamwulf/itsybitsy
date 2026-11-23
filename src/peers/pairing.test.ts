@@ -500,6 +500,7 @@ describe("pair protocol: read failures close the connection", () => {
         if (++accepted !== failOn) return stream;
         return {
           writeAll: (bytes) => stream.writeAll(bytes),
+          cancel: () => stream.cancel(),
           finish: () => stream.finish(),
           readToEnd: async () => {
             throw new Error("RecvStream.readToEnd: stream reset by peer");
@@ -654,7 +655,7 @@ describe("parsePairTarget (the Pair with id input)", () => {
 describe("describePairFailure", () => {
   test("names the other install where it matters", () => {
     expect(describePairFailure({ kind: "refused", reason: "busy" }, "b2b2b2b2b2")).toContain("b2b2b2b2b2 is busy");
-    expect(describePairFailure({ kind: "refused", reason: "not-accepting" }, "b2b2b2b2b2")).toContain("Peers dialog open");
+    expect(describePairFailure({ kind: "refused", reason: "not-accepting" }, "b2b2b2b2b2")).toContain("Peers tab open");
     expect(describePairFailure({ kind: "cancelled" }, "x")).toBe("Pairing cancelled.");
     expect(describePairFailure({ kind: "expired" }, "x")).toBe("The code expired. Pairing failed.");
   });

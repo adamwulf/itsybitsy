@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import {
   TmuxPoller,
   captureTmuxOutput,
+  captureMarkedCoordinatorPane,
   captureTmuxOutputResult,
   captureTmuxWithPaneState,
   probeTmuxSession,
@@ -11,6 +12,8 @@ import {
   spawnCtx,
   expandTabs,
 } from "./tmux-poller";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { waitFor } from "./test-utils";
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -1349,4 +1352,99 @@ describe("TmuxPoller tab handling at the boundary", () => {
     expect(receivedRaw).toBe(`  \x1b]8;;${url}\x07${url}\x1b]8;;\x07\n`);
     expect(receivedStripped).toBe(`  ${url}\n`);
   });
+});
+
+test.skipIf(!Bun.which("tmux"))("coordinator capture checks the recorded identity against the live foreground in private tmux", async () => {
+  const dir = await mkdtemp("/tmp/ib-pane-");
+  const session = "ib-coordinator";
+  spawnCtx.set((cmd, opts) => {
+    const proc = Bun.spawn(["tmux", "-f", "/dev/null", "-S", join(dir, "sock"), ...cmd.slice(1)], opts);
+    return { stdout: proc.stdout, stderr: proc.stderr, exited: proc.exited, kill: () => proc.kill("SIGKILL") };
+  });
+  const tmux = async (...args: string[]) => {
+    const result = await spawnCtx.run(["tmux", ...args]);
+    if (result.exitCode !== 0) throw new Error(result.stderr);
+    return result.stdout;
+  };
+  const capture = () => captureMarkedCoordinatorPane(session, "Desk");
+  const refused = "Unverified coordinator pane; restart the system coordinator on Desk";
+  try {
+    const pane = await tmux("new-session", "-dP", "-F", "#{pane_id}", "-s", session, "bash --noprofile --norc");
+    const foreground = () => tmux("display-message", "-p", "-t", pane, "#{pane_current_command}");
+    await tmux("send-keys", "-t", pane, "echo coordinator-output; sleep 120", "Enter");
+    await waitFor(async () => await foreground() === "sleep");
+    await tmux("split-window", "-t", pane, "bash --noprofile --norc"); // another shell is active
+    await tmux("set-option", "-t", pane, "@ib-system-coordinator-pane-id", pane);
+    await expect(capture()).rejects.toThrow(refused); // missing command
+    await tmux("set-option", "-t", pane, "@ib-system-coordinator-command", await foreground());
+    expect(await capture()).toContain("coordinator-output");
+    await tmux("set-option", "-u", "-t", pane, "@ib-system-coordinator-pane-id");
+    await expect(capture()).rejects.toThrow(refused); // missing id
+    await tmux("set-option", "-t", pane, "@ib-system-coordinator-pane-id", pane);
+    await tmux("send-keys", "-t", pane, "C-c");
+    await waitFor(async () => await foreground() === "bash");
+    await expect(capture()).rejects.toThrow(refused); // original shell still alive
+    await tmux("respawn-pane", "-k", "-t", pane, "bash --noprofile --norc");
+    expect(await tmux("display-message", "-p", "-t", pane, "#{pane_id}")).toBe(pane);
+    await expect(capture()).rejects.toThrow(refused);
+    await tmux("set-option", "-p", "-t", pane, "remain-on-exit", "on");
+    await tmux("send-keys", "-t", pane, "exit", "Enter");
+    await waitFor(async () => await tmux("display-message", "-p", "-t", pane, "#{pane_dead}") === "1");
+    await tmux("set-option", "-t", pane, "@ib-system-coordinator-command", await foreground());
+    await expect(capture()).rejects.toThrow(refused); // even with matching metadata
+  } finally {
+    await spawnCtx.run(["tmux", "kill-server"]);
+    spawnCtx.reset();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("capture distinguishes operational errors, missing sessions and stale launch records", async () => {
+  const logs: string[] = [];
+  const capture = () => captureMarkedCoordinatorPane("ib-coordinator", "Desk", { log: line => logs.push(line) });
+  try {
+    for (const stage of ["show-options", "if-shell"]) {
+      spawnCtx.set(cmd => cmd[1] === stage
+        ? { stdout: emptyStream(), stderr: streamOf("socket /private/path: Permission denied"), exited: Promise.resolve(1) }
+        : { stdout: streamOf("%4"), stderr: emptyStream(), exited: Promise.resolve(0) });
+      await expect(capture()).rejects.toThrow(/^Coordinator capture failed$/);
+      expect(logs.pop()).toContain("socket /private/path: Permission denied");
+    }
+    mockSpawn("", 1, 0, "can't find session: ib-coordinator");
+    expect(await capture()).toBeNull();
+    spawnCtx.set(cmd => cmd[1] === "show-options"
+      ? { stdout: streamOf("%4"), stderr: emptyStream(), exited: Promise.resolve(0) }
+      : { stdout: emptyStream(), stderr: streamOf("can't find pane: %4"), exited: Promise.resolve(1) });
+    await expect(capture()).rejects.toThrow("restart the system coordinator on Desk");
+    expect(logs).toEqual([]);
+  } finally {
+    spawnCtx.reset();
+  }
+});
+
+test("stalled coordinator capture is killed and reaped before returning a bounded error", async () => {
+  const exit = Promise.withResolvers<number>();
+  const kills: (number | string | undefined)[] = [];
+  const cancelled: string[] = [];
+  const stdout = new ReadableStream<Uint8Array>({ cancel() { cancelled.push("stdout"); } });
+  const stderr = new ReadableStream<Uint8Array>({ cancel() { cancelled.push("stderr"); } });
+  spawnCtx.set(cmd => cmd[1] === "show-options"
+    ? { stdout: streamOf("%4\n"), stderr: emptyStream(), exited: Promise.resolve(0) }
+    : { stdout, stderr, exited: exit.promise, kill: signal => { kills.push(signal); } });
+  try {
+    let settled = false;
+    const logs: string[] = [];
+    const read = captureMarkedCoordinatorPane("ib-coordinator", "Desk", { timeoutMs: 5, log: line => logs.push(line) }).catch(err => { settled = true; return err.message; });
+    await waitFor(() => kills.length > 0);
+    expect(kills).toEqual(["SIGKILL"]);
+    expect(settled).toBe(false);
+    exit.resolve(137);
+    expect(await read).toBe("Coordinator capture failed");
+    expect(logs[0]).toContain("Coordinator capture timed out");
+    expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
+    expect(stdout.locked).toBe(false);
+    expect(stderr.locked).toBe(false);
+  } finally {
+    spawnCtx.reset();
+  }
 });

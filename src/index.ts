@@ -2318,13 +2318,19 @@ export async function main() {
       // @system: route to the system coordinator restart path directly.
       // The system coordinator has no Agent object (no meta.json on disk),
       // so it can't go through the regular respawnAgent flow.
-      if (idArg === "@system") {
-        const { discardSystemCoordinator, ensureSystemCoordinator } = await import("./coordinator");
+      const restartSystem = async () => {
+        const { discardSystemCoordinator, ensureSystemCoordinator, waitForCoordinatorPaneRegistration,
+          takeCoordinatorPaneWarning } = await import("./coordinator");
         await discardSystemCoordinator();
         await ensureSystemCoordinator();
         console.log("System coordinator restart scheduled (fresh session)");
-        process.exit(0);
-      }
+        // The local result is available now. Keep this invoking CLI alive to
+        // report its bounded registration outcome before exit.
+        await waitForCoordinatorPaneRegistration();
+        const warning = takeCoordinatorPaneWarning();
+        if (warning) console.error(warning);
+      };
+      if (idArg === "@system") return restartSystem();
 
       // Resolve target. If no ID, infer from cwd via the same mechanism
       // hooks use. This lets the slash command body call `ib respawn` with
@@ -2335,13 +2341,7 @@ export async function main() {
       } else {
         const { resolveAgentFromCwd, SYSTEM_AGENT_ID } = await import("./hooks/shared");
         const resolved = resolveAgentFromCwd(process.cwd());
-        if (resolved?.agentId === SYSTEM_AGENT_ID) {
-          const { discardSystemCoordinator, ensureSystemCoordinator } = await import("./coordinator");
-          await discardSystemCoordinator();
-          await ensureSystemCoordinator();
-          console.log("System coordinator restart scheduled (fresh session)");
-          process.exit(0);
-        }
+        if (resolved?.agentId === SYSTEM_AGENT_ID) return restartSystem();
         if (!resolved) {
           console.error("Could not detect current agent from cwd. Pass an agent ID: ib respawn <id>");
           process.exit(1);

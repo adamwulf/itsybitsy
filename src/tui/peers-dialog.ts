@@ -1,5 +1,5 @@
 /**
- * The Peers dialog (`I` in `ib watch`; SPEC.md §20.1): this install's id, the
+ * The Peers tab of setup (`h`, or `I` to open it directly; SPEC.md §20.1): this install's id, the
  * paired peers with each one's connection state, a "Pair with id" input, and
  * the pairing stages on either side. The protocol, the endpoint and the
  * poller live in src/peers/ (pairing.ts, service.ts, poller.ts); this module
@@ -11,16 +11,17 @@
  * a result, and closes the dialog from the idle view.
  */
 
-import { matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { matchesKey, Key, visibleWidth } from "@mariozechner/pi-tui";
 import { describePairFailure } from "../peers/pairing";
 import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peers/pair-code";
-import type { RemoteNewAgentRequest } from "../peers/peer-link";
-import type { PeerLinkState } from "../peers/poller";
+import type { CoordinatorPane, RemoteNewAgentRequest } from "../peers/peer-link";
+import { peerLinkStatus, type PeerLinkStatus } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
-import { peerNameProblem, shortPeerId } from "../peers/store";
-import { cancelPaste, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
+import { peerNameProblem, shortPeerId, SHORT_ID_LENGTH } from "../peers/store";
+import { cancelPaste, isPasteInProgress, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
 import { BOLD, DIM, GREEN, RED, RESET, YELLOW } from "./colors";
 import type { DialogCtx } from "./dialog-handler";
+import { truncatePeerField } from "./peer-repos";
 import { deleteWord } from "./text-buffer";
 import { wordWrapSingleLine, wrapSingleLine } from "./wrap";
 
@@ -28,6 +29,7 @@ import { wordWrapSingleLine, wrapSingleLine } from "./wrap";
 export interface PeersDialogService {
   readonly remoteStartDenial: string | null;
   view(): PeerServiceView;
+  fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane>;
   startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;
   openDialog(): void;
   closeDialog(): void;
@@ -41,7 +43,6 @@ export interface PeersDialogService {
 }
 
 export type PeersDialogState = {
-  type: "peers";
   service: PeersDialogService;
   /** The "Pair with id" input. */
   idValue: string;
@@ -56,14 +57,13 @@ export type PeersDialogState = {
   error: string | null;
   /** This machine's name (src/machine-name.ts): the name prompt refuses it. */
   machineName: string;
-  width?: number;
 };
 
 /** Most peers listed; the rest are counted. */
 const MAX_LISTED_PEERS = 10;
 
 export function newPeersDialog(service: PeersDialogService, machineName: string): PeersDialogState {
-  return { type: "peers", service, idValue: "", sessionValue: "", inputKey: null, error: null, machineName };
+  return { service, idValue: "", sessionValue: "", inputKey: null, error: null, machineName };
 }
 
 /** Start each session stage's input empty. Called on every service change and before every key. */
@@ -97,14 +97,14 @@ function editLine(ctx: DialogCtx, d: PeersDialogState, field: "idValue" | "sessi
     d[field] += sanitizePasteForSingleLine(pasted);
     return true;
   }
-  if (data.length === 1 && data >= " ") {
+  if (!isPasteInProgress() && data.length === 1 && data >= " ") {
     d[field] += data;
     return true;
   }
   return false;
 }
 
-/** Keys while the Peers dialog is open. Consumes every key. */
+/** Handle a key in the Peers tab after setup navigation. */
 export function handlePeersDialogInput(ctx: DialogCtx, d: PeersDialogState, data: string): boolean {
   syncPeersDialog(d);
   const session = d.service.view().session;
@@ -160,7 +160,7 @@ export function handlePeersDialogInput(ctx: DialogCtx, d: PeersDialogState, data
       break;
     case "done":
     case "failed":
-      d.service.dismiss();
+      if (enter || escape) d.service.dismiss();
       break;
     default:
       // connecting, verifying, incoming, code-shown: only Esc does anything.
@@ -177,7 +177,7 @@ function statusLines(status: EndpointStatus, now: number): Array<{ text: string;
     case "starting":
       return [{ text: `${YELLOW}●${RESET} starting…` }];
     case "listening":
-      return [{ text: `${GREEN}●${RESET} accepting pairing requests while this dialog is open` }];
+      return [{ text: `${GREEN}●${RESET} accepting pairing requests while this tab is visible` }];
     case "disabled":
       return [{ text: `${YELLOW}●${RESET} peering disabled: ib watch pid ${status.ownerPid} owns the endpoint` }];
     case "error":
@@ -194,29 +194,11 @@ function retrySeconds(retryAt: number, now: number): number {
   return Math.max(1, Math.ceil((retryAt - now) / 1000));
 }
 
-/** A duration as its largest whole unit: `42s`, `5m`, `3h`, `2d`. */
-export function formatSince(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
+const linkColors: Record<PeerLinkStatus, string> = { connected: GREEN, connecting: YELLOW, offline: RED };
 
-/**
- * A peer's connection state as plain text: `connected`, `last seen N ago`, or
- * `not connected yet`. The dialog and the remote agent info panel both show it.
- */
-export function peerLinkStateText(link: Pick<PeerLinkState, "connected" | "lastOkAt">, now: number): string {
-  if (link.connected) return "connected";
-  if (link.lastOkAt !== null) return `last seen ${formatSince(now - link.lastOkAt)} ago`;
-  return "not connected yet";
-}
-
-/** A peer's connection state, after its name and short id. */
-function linkStateText(link: PeerLinkState, now: number): string {
-  const text = peerLinkStateText(link, now);
-  return link.connected ? `${GREEN}● ${text}${RESET}` : `${YELLOW}●${RESET} ${text}`;
+/** The same colored word appears in the Peers tab and the remote agent's Machine line. */
+export function peerLinkStateText(status: PeerLinkStatus): string {
+  return `${linkColors[status]}${status}${RESET}`;
 }
 
 /** The input line: the end of the value stays visible. */
@@ -228,53 +210,84 @@ function inputLine(value: string, innerWidth: number): string {
   return `…${tail.join("")}`;
 }
 
-export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number): { title: string; contentLines: string[] } {
-  const view = d.service.view();
-  const lines: string[] = [];
-  const prose = (text: string, color = "") => {
-    for (const line of wordWrapSingleLine(text, innerWidth)) lines.push(color ? `${color}${line}${RESET}` : line);
+function proseLines(text: string, width: number, color = ""): string[] {
+  return wordWrapSingleLine(text, width).map(line => color ? `${color}${line}${RESET}` : line);
+}
+
+function peerListLines(view: PeerServiceView, innerWidth: number, available: number, maxLines: number): string[] {
+  if (view.peersError !== null) return proseLines(view.peersError, innerWidth, RED).slice(0, available);
+  if (view.peers.length === 0) return [`${DIM}  none yet${RESET}`].slice(0, available);
+  const listed = view.peers.slice(0, MAX_LISTED_PEERS);
+  // Reserve the indent, both gaps, the short id and the longest status word.
+  const availableNameWidth = innerWidth - 6 - SHORT_ID_LENGTH - "connecting".length;
+  const nameWidth = Math.min(availableNameWidth, Math.max(...listed.map(p => visibleWidth(p.name))));
+  const links = new Map(view.links.map((link) => [link.id, link]));
+  const groups = listed.map(peer => {
+    const lines: string[] = [];
+    const link = links.get(peer.id);
+    const state = peerLinkStateText(peerLinkStatus(link));
+    const id = `${DIM}${shortPeerId(peer.id)}${RESET}`;
+    if (nameWidth > 0) {
+      const name = truncatePeerField(peer.name, nameWidth);
+      const pad = " ".repeat(nameWidth - visibleWidth(name));
+      lines.push(`  ${name}${pad}  ${id}  ${state}`);
+    } else {
+      lines.push(truncatePeerField(peer.name, innerWidth), ...wordWrapSingleLine(`${id}  ${state}`, innerWidth));
+    }
+    const error = link && !link.connected && link.lastError !== null
+      ? wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4)).map(line => `    ${RED}${line}${RESET}`)
+      : [];
+    return { lines, error };
+  });
+
+  // Reclaim header space if needed for the first peer, its first error line and the count.
+  const first = groups[0]!;
+  const firstMinimum = first.lines.length + Math.min(1, first.error.length);
+  const budget = Math.min(maxLines, Math.max(available, firstMinimum + (view.peers.length > 1 ? 1 : 0)));
+  const overflow = (hidden: number) => {
+    if (hidden === 0) return [];
+    const count = `…and ${hidden} more`;
+    const full = proseLines(`  ${count} (ib peer list shows all)`, innerWidth, DIM);
+    return first.lines.length + first.error.length + full.length <= budget ? full : [`${DIM}  ${count}${RESET}`];
   };
+  const result: string[] = [];
+  let shown = 0;
+  for (const group of groups) {
+    const room = budget - result.length - overflow(view.peers.length - shown - 1).length;
+    if (group.lines.length + Math.min(1, group.error.length) > room) break;
+    result.push(...group.lines, ...group.error.slice(0, room - group.lines.length));
+    shown++;
+  }
+  return [...result, ...overflow(view.peers.length - shown)].slice(0, budget);
+}
+
+export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number, maxLines: number): string[] {
+  const view = d.service.view();
+  const header = [`${BOLD}This install's id${RESET}`];
+  if (view.selfId !== null) {
+    header.push(...wrapSingleLine(view.selfId, innerWidth));
+  } else if (view.identityError !== null) {
+    header.push(...proseLines(`unavailable: ${view.identityError}`, innerWidth, RED));
+  } else {
+    header.push(`${DIM}loading…${RESET}`);
+  }
+  for (const line of statusLines(view.status, Date.now())) header.push(...proseLines(line.text, innerWidth, line.color));
+  header.push("");
+
+  const pairing = buildPairingContent(d, view, innerWidth);
+  // Leave the active input, error and key hint together at the bottom of the overlay.
+  const room = Math.max(0, maxLines - pairing.length - 2); // Paired peers heading and separator
+  const peers = peerListLines(view, innerWidth, Math.max(1, room - header.length), room);
+  const top = header.slice(0, Math.max(0, room - peers.length));
+  return [...top, `${BOLD}Paired peers${RESET}`, ...peers, "", ...pairing];
+}
+
+function buildPairingContent(d: PeersDialogState, view: PeerServiceView, innerWidth: number): string[] {
+  const lines: string[] = [];
+  const prose = (text: string, color = "") => lines.push(...proseLines(text, innerWidth, color));
   const error = () => {
     if (d.error !== null) prose(d.error, RED);
   };
-
-  lines.push(`${BOLD}This install's id${RESET}`);
-  if (view.selfId !== null) {
-    for (const part of wrapSingleLine(view.selfId, innerWidth)) lines.push(part);
-  } else if (view.identityError !== null) {
-    prose(`unavailable: ${view.identityError}`, RED);
-  } else {
-    lines.push(`${DIM}loading…${RESET}`);
-  }
-  for (const line of statusLines(view.status, Date.now())) prose(line.text, line.color);
-  lines.push("");
-
-  lines.push(`${BOLD}Paired peers${RESET}`);
-  if (view.peersError !== null) {
-    prose(view.peersError, RED);
-  } else if (view.peers.length === 0) {
-    lines.push(`${DIM}  none yet${RESET}`);
-  } else {
-    const listed = view.peers.slice(0, MAX_LISTED_PEERS);
-    const nameWidth = Math.max(...listed.map((p) => visibleWidth(p.name)));
-    // The poller's state, once the endpoint has bound; until then, none.
-    const links = new Map(view.links.map((link) => [link.id, link]));
-    const now = Date.now();
-    for (const peer of listed) {
-      const pad = " ".repeat(Math.max(0, nameWidth - visibleWidth(peer.name)));
-      const link = links.get(peer.id);
-      const state = link === undefined ? "" : `  ${linkStateText(link, now)}`;
-      lines.push(truncateToWidth(`  ${peer.name}${pad}  ${DIM}${shortPeerId(peer.id)}${RESET}${state}`, innerWidth, ""));
-      if (link !== undefined && !link.connected && link.lastError !== null) {
-        for (const line of wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4))) lines.push(`    ${RED}${line}${RESET}`);
-      }
-    }
-    if (view.peers.length > listed.length) {
-      lines.push(`${DIM}  …and ${view.peers.length - listed.length} more (ib peer list shows all)${RESET}`);
-    }
-  }
-  lines.push("");
-
   let hint: string;
   const session = view.session;
   if (session === null) {
@@ -325,15 +338,15 @@ export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number)
             : `Paired with ${JSON.stringify(stage.name)} (${peer}).`,
           GREEN,
         );
-        hint = "Press any key to continue";
+        hint = "Enter or Esc: return to Peers";
         break;
       case "failed":
         prose(describePairFailure(stage.failure, peer), RED);
-        hint = "Press any key to continue";
+        hint = "Enter or Esc: return to Peers";
         break;
     }
   }
   lines.push("");
   prose(hint, DIM);
-  return { title: "Peers", contentLines: lines };
+  return lines;
 }

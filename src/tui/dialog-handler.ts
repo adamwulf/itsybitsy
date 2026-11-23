@@ -8,10 +8,10 @@ import { wrapSingleLine, wordWrapLines } from "./wrap";
 import { buildFolderItems } from "./folder-browser";
 import type { FolderItem } from "./folder-browser";
 import { RESET, BOLD, DIM, REVERSE, GREEN, RED, DIM_GRAY } from "./colors";
-import { resolvePasteText, cancelPaste, sanitizePasteForSingleLine } from "./clipboard";
+import { resolvePasteText, isPasteInProgress, cancelPaste, sanitizePasteForSingleLine } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { sanitizeAgentNameInput } from "../validation";
-import { handlePeersDialogInput, type PeersDialogState } from "./peers-dialog";
+import { buildPeersDialogContent, handlePeersDialogInput, type PeersDialogState } from "./peers-dialog";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
@@ -140,7 +140,10 @@ export type DialogState =
     } & DialogCommon)
   | ({
       type: "setup";
-      tab: number; // 0=Hooks, 1=Config
+      tab: number; // 0=Hooks, 1=Config, 2=Peers
+      /** Present only on the visible Peers tab. */
+      peers?: PeersDialogState;
+      settingsMessage?: string;
       items: SetupItem[];
       selectedIndex: number;
       configItems?: ConfigDialogItem[];
@@ -161,8 +164,6 @@ export type DialogState =
       scrollOffset: number;
       onSave: (allowList: string[], denyList: string[]) => void;
     } & DialogCommon)
-  /** The Peers dialog (`I`): src/tui/peers-dialog.ts. */
-  | (PeersDialogState & DialogCommon)
   | null;
 
 /** Folder-browser focus targets, in visual (Tab) order. */
@@ -265,10 +266,9 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
     return true;
   }
 
-  // The Peers dialog gives Esc its own meaning at each stage (cancel, keep the
-  // name, close), so it runs before the generic Escape below.
-  if (dialog.type === "peers") {
-    return handlePeersDialogInput(ctx, dialog, data);
+  // Pairing owns Escape (cancel, keep the name, or dismiss the result).
+  if (matchesKey(data, Key.escape) && dialog.type === "setup" && dialog.peers) {
+    return handlePeersDialogInput(ctx, dialog.peers, data);
   }
 
   // Escape: permissions-editor in input mode exits input mode first.
@@ -747,12 +747,19 @@ function handleSetupDialog(
   d: Extract<NonNullable<DialogState>, { type: "setup" }>,
   data: string
 ): boolean {
-  // Tab switching: 1/2 number keys, Tab/Shift+Tab
-  const TAB_COUNT = 2;
-  if (data === "1" && d.tab !== 0) { d.onTabChange(0); return true; }
-  if (data === "2" && d.tab !== 1) { d.onTabChange(1); return true; }
-  if (data === "\t") { d.onTabChange((d.tab + 1) % TAB_COUNT); return true; }
-  if (data === "\x1b[Z") { d.onTabChange((d.tab - 1 + TAB_COUNT) % TAB_COUNT); return true; }
+  if (d.peers && isPasteInProgress()) return handlePeersDialogInput(ctx, d.peers, data);
+
+  const count = SETUP_TAB_NAMES.length;
+  if (matchesKey(data, Key.tab)) { d.onTabChange((d.tab + 1) % count); return true; }
+  if (matchesKey(data, Key.shift("tab"))) { d.onTabChange((d.tab + count - 1) % count); return true; }
+
+  const stage = d.peers?.service.view().session?.stage.stage;
+  const editing = d.peers && (!stage || stage === "code-entry" || stage === "naming");
+  if (!editing && /^[1-3]$/.test(data) && Number(data) - 1 !== d.tab) {
+    d.onTabChange(Number(data) - 1);
+    return true;
+  }
+  if (d.tab === PEERS_TAB) return d.peers ? handlePeersDialogInput(ctx, d.peers, data) : true;
 
   // Tab 0: existing setup behavior
   if (d.tab === 0) {
@@ -1183,7 +1190,8 @@ export function buildNewAgentFormContent(
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }
 
-const SETUP_TAB_NAMES = ["Hooks", "Config"];
+const SETUP_TAB_NAMES = ["Hooks", "Config", "Peers"];
+export const PEERS_TAB = 2;
 
 /** Build the tab bar for the setup dialog */
 function buildTabBar(activeTab: number, innerWidth: number): string {
@@ -1206,11 +1214,16 @@ export function buildSetupContent(
 ): DialogContent {
   const lines: string[] = [];
   lines.push(buildTabBar(dialog.tab, innerWidth));
-  lines.push(`${DIM}(1/2/Tab: tabs, j/k: navigate, Enter: toggle/edit, Esc: close)${RESET}`);
+  const hint = dialog.tab === PEERS_TAB ? "Tab/Shift+Tab: switch tabs" : "1/2/3/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close";
+  lines.push(...wordWrapLines(`(${hint})`, innerWidth).map(line => `${DIM}${line}${RESET}`));
   lines.push("");
 
-  if (dialog.tab === 0) {
+  if (dialog.settingsMessage) {
+    lines.push(...wordWrapLines(dialog.settingsMessage, innerWidth));
+  } else if (dialog.tab === 0) {
     buildSetupTab0Content(dialog, lines, innerWidth);
+  } else if (dialog.tab === PEERS_TAB) {
+    lines.push(...(dialog.peers ? buildPeersDialogContent(dialog.peers, innerWidth, (process.stdout.rows || 24) - 2 - lines.length) : ["Peering is not available here"]));
   } else {
     buildConfigTabContent(dialog, lines, innerWidth);
   }

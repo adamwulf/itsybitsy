@@ -14,6 +14,8 @@ import {
   sanitizeTmuxInput,
   ensureSystemCoordinator,
   acquireSystemCoordinator,
+  takeCoordinatorPaneWarning,
+  waitForCoordinatorPaneRegistration,
   releaseSystemCoordinator,
   restartSystemCoordinator,
   detectSystemCoordinatorState,
@@ -502,6 +504,185 @@ describe("ensureSystemCoordinator", () => {
     const newSession = commands.find((c) => c[0] === "tmux" && c[1] === "new-session");
     expect(newSession).toBeDefined();
     expect(newSession![newSession!.length - 1]).toBe("bash");
+  });
+
+  test("the visible launch line contains only Claude and preserves its exit status", async () => {
+    const router = createCommandRouter({ "has-session": { exitCode: 1 }, "new-session": { stdout: "%4" } });
+    let keys: string[] = [];
+    coordinatorSpawnCtx.set((cmd, opts) => {
+      if (cmd[1] === "send-keys") keys = cmd.slice(2);
+      return router(cmd, opts);
+    });
+    await ensureSystemCoordinator();
+    expect(keys).toEqual(["-t", "%4", "claude --model opus", "Enter"]);
+    const proc = Bun.spawn(["bash", "-c", `claude() { return 42; }\n${keys[2]}`]);
+    expect(await proc.exited).toBe(42);
+  });
+
+  test.each(["new-session id", "foreground read", "record write"])("a failed %s leaves the local coordinator running", async failure => {
+    let created = false;
+    let launches = 0;
+    coordinatorSpawnCtx.set((cmd) => {
+      let stdout = "";
+      let code = 0;
+      if (cmd[1] === "has-session") code = created ? 0 : 1;
+      if (cmd[1] === "new-session") {
+        created = true;
+        stdout = failure === "new-session id" ? "" : "%4";
+      }
+      if (cmd[1] === "send-keys" && cmd.includes("claude --model opus")) {
+        expect(cmd.at(-1)).toBe("Enter");
+        launches++;
+      }
+      if (cmd[1] === "display-message") {
+        expect(launches).toBe(1);
+        stdout = "claude";
+        if (failure === "foreground read") code = 1;
+      }
+      if (cmd.includes("@ib-system-coordinator-command") && failure === "record write") code = 1;
+      return { stdout: mockStream(stdout), stderr: mockStream(code ? failure : ""), exited: Promise.resolve(code) };
+    });
+
+    expect(await ensureSystemCoordinator()).toBe("ib-coordinator");
+    expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+    await waitForCoordinatorPaneRegistration();
+    const warning = takeCoordinatorPaneWarning();
+    expect(warning).toContain("Remote coordinator capture disabled");
+    expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain(warning!);
+    expect(takeCoordinatorPaneWarning()).toBeNull();
+    expect(await ensureSystemCoordinator()).toBe("ib-coordinator");
+    expect(getLastCoordinatorSpawnMode()).toBe("existing");
+    expect(launches).toBe(1);
+  });
+
+  test("local launch and the bounce notice complete while registration is stalled, then its child is killed and reaped", async () => {
+    const router = createCommandRouter({ "has-session": { exitCode: 1 }, "new-session": { stdout: "%4" } });
+    const exit = Promise.withResolvers<number>();
+    const started = Promise.withResolvers<void>();
+    const killed = Promise.withResolvers<void>();
+    const cancellations: string[] = [];
+    coordinatorSpawnCtx.set((cmd, opts) => {
+      if (cmd[1] !== "display-message") return router(cmd, opts);
+      started.resolve();
+      return {
+        stdout: new ReadableStream({ cancel() { cancellations.push("out"); } }),
+        stderr: new ReadableStream({ cancel() { cancellations.push("err"); } }),
+        exited: exit.promise,
+        kill(signal) { expect(signal).toBe("SIGKILL"); killed.resolve(); },
+      };
+    });
+    await Bun.write(join(tmpDir, "coordinator-bounce.json"), "{}");
+    let notice = "";
+    bounceNoticeCtx.set(async message => { notice = message; return { ok: true, stderr: "" }; });
+    try {
+      const launch = ensureSystemCoordinator();
+      await started.promise;
+      expect(await Promise.race([launch, killed.promise])).toBe("ib-coordinator");
+      expect(notice).toBe(BOUNCE_RESTART_NOTICE);
+      expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+      let registered = false;
+      const registration = waitForCoordinatorPaneRegistration().then(() => { registered = true; });
+      await killed.promise;
+      expect(registered).toBe(false);
+      exit.resolve(137);
+      await registration;
+      expect(cancellations.sort()).toEqual(["err", "out"]);
+      expect(takeCoordinatorPaneWarning()).toContain("registration timed out");
+    } finally {
+      exit.resolve(137);
+      bounceNoticeCtx.reset();
+    }
+  });
+
+  test.each(["Claude Code v1.0.0", "old pane closed"])("only the replacement publishes readiness when the older poll returns %s", async oldOutput => {
+    // Leave an earlier launch failure pending for the dashboard.
+    coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 1 } }));
+    await ensureSystemCoordinator();
+    await waitForCoordinatorPaneRegistration();
+    expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain("tmux did not report the launched pane id");
+
+    const projectDir = join(typesHome, ".claude", "projects", encodeClaudeProjectPath(tmpDir));
+    await mkdir(projectDir, { recursive: true });
+    const transcript = join(projectDir, "44444444-4444-4444-4444-444444444444.jsonl");
+    await Bun.write(transcript, "{}\n");
+    const olderPoll = Promise.withResolvers<number>();
+    const started = Promise.withResolvers<void>();
+    const records: string[] = [];
+    let panes = 0;
+    let kills = 0;
+    coordinatorSpawnCtx.set(cmd => {
+      let text = "";
+      if (cmd[1] === "new-session") text = `%${++panes}`;
+      if (cmd[1] === "kill-session") kills++;
+      if (cmd[1] === "display-message") text = "claude";
+      if (cmd.includes("@ib-system-coordinator-command")) records.push(cmd[3]!);
+      return { stdout: mockStream(text), stderr: emptyStream(), exited: Promise.resolve(cmd[1] === "has-session" ? 1 : 0) };
+    });
+    tmuxSpawnCtx.set(() => {
+      if (panes === 1) {
+        started.resolve();
+        return { stdout: mockStream(oldOutput), stderr: emptyStream(), exited: olderPoll.promise };
+      }
+      return { stdout: mockStream("Claude Code v1.0.0"), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+    const older = restartSystemCoordinator();
+    try {
+      await started.promise;
+      expect(takeCoordinatorPaneWarning()).toBeNull(); // cleared as soon as this pane was created
+      await rm(transcript); // the replacement launches fresh, the older launch attempted resume
+      await restartSystemCoordinator();
+      await waitForCoordinatorPaneRegistration();
+      const replacementRegistration = waitForCoordinatorPaneRegistration();
+      olderPoll.resolve(0);
+      await older;
+      expect(waitForCoordinatorPaneRegistration()).toBe(replacementRegistration);
+      expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+      expect(records).toEqual(["%2"]);
+      expect(kills).toBe(2); // no stale resume-failure kill/retry
+      expect(takeCoordinatorPaneWarning()).toBeNull();
+      const log = await readFile(join(tmpDir, "watch.log"), "utf8");
+      expect(log).not.toContain("ready mode=resumed");
+      expect(log).not.toContain("ready-poll exhausted");
+    } finally {
+      olderPoll.resolve(0);
+      await older;
+    }
+  });
+
+  test("an older registration failure cannot publish while the replacement is waiting for readiness", async () => {
+    const oldWrite = Promise.withResolvers<number>();
+    const writing = Promise.withResolvers<void>();
+    const newPoll = Promise.withResolvers<number>();
+    const polling = Promise.withResolvers<void>();
+    let panes = 0;
+    coordinatorSpawnCtx.set(cmd => {
+      if (cmd.includes("@ib-system-coordinator-command") && panes === 1) {
+        writing.resolve();
+        return { stdout: emptyStream(), stderr: mockStream("stale write"), exited: oldWrite.promise };
+      }
+      const text = cmd[1] === "new-session" ? `%${++panes}` : cmd[1] === "display-message" ? "claude" : "";
+      return { stdout: mockStream(text), stderr: emptyStream(), exited: Promise.resolve(cmd[1] === "has-session" ? 1 : 0) };
+    });
+    tmuxSpawnCtx.set(() => {
+      if (panes === 2) polling.resolve();
+      return { stdout: mockStream("Claude Code v1.0.0"), stderr: emptyStream(), exited: panes === 2 ? newPoll.promise : Promise.resolve(0) };
+    });
+    await restartSystemCoordinator();
+    await writing.promise;
+    const olderRegistration = waitForCoordinatorPaneRegistration();
+    const replacement = restartSystemCoordinator();
+    try {
+      await polling.promise;
+      oldWrite.resolve(1);
+      await olderRegistration;
+      expect(takeCoordinatorPaneWarning()).toBeNull();
+      expect(await readFile(join(tmpDir, "watch.log"), "utf8")).not.toContain("stale write");
+    } finally {
+      oldWrite.resolve(1);
+      newPoll.resolve(0);
+      await replacement;
+      await waitForCoordinatorPaneRegistration();
+    }
   });
 
   test("logs the resolved model and its source layer on spawn", async () => {
@@ -1175,8 +1356,21 @@ describe("ensureSystemCoordinator", () => {
       if (cmdStr.includes("has-session")) {
         return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
       }
+      if (cmd[1] === "new-session") return { stdout: mockStream("%4"), stderr: emptyStream(), exited: Promise.resolve(0) };
+      if (cmd[1] === "display-message") {
+        expect(cmd.slice(2)).toEqual(["-p", "-t", "%4", "#{pane_current_command}"]);
+        events.push("read foreground");
+        return { stdout: mockStream("claude"), stderr: emptyStream(), exited: Promise.resolve(0) };
+      }
+      if (cmd.includes("@ib-system-coordinator-command")) {
+        expect(cmd.slice(2)).toEqual(["-t", "%4", "@ib-system-coordinator-command", "claude",
+          ";", "set-option", "-t", "%4", "@ib-system-coordinator-pane-id", "%4"]);
+        events.push("record");
+      }
       if (cmd.includes("send-keys")) {
-        if (cmd[cmd.length - 1] === "Enter" && cmd.some((a) => a.startsWith("claude --model"))) {
+        const launch = cmd.findIndex(arg => arg.startsWith("claude --model"));
+        if (launch >= 0) {
+          expect(cmd.slice(launch + 1)).toEqual(["Enter"]);
           events.push("launch-claude");
         }
       }
@@ -1205,6 +1399,8 @@ describe("ensureSystemCoordinator", () => {
     expect(events.indexOf("poll-1")).toBeGreaterThan(launchIdx);
     // Loop stops once the marker appears (4th poll).
     expect(capturePolls).toBe(4);
+    await waitForCoordinatorPaneRegistration();
+    expect(events.slice(-3)).toEqual(["poll-4", "read foreground", "record"]);
   });
 
   test("waitForCoordinatorReady recognises [USER TASK] marker", async () => {
@@ -1465,7 +1661,13 @@ describe("ensureSystemCoordinator", () => {
       exited: Promise.resolve(0),
     }));
 
-    await ensureSystemCoordinator();
+    expect(await ensureSystemCoordinator()).toBe("ib-coordinator");
+    const warning = "remote capture disabled: coordinator did not become ready";
+    expect(takeCoordinatorPaneWarning()).toBe(warning);
+    const log = await readFile(join(tmpDir, "watch.log"), "utf8");
+    expect(log).toContain("readiness timed out mode=fresh");
+    expect(log).toContain(warning);
+    expect(log).not.toContain("ready mode=fresh");
 
     expect(getLastCoordinatorSpawnMode()).toBe("fresh");
     const cmdStrs = commands.map((c) => c.join(" "));

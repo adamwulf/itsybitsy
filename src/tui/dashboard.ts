@@ -34,6 +34,7 @@ import {
   BOUNCE_SIGNAL,
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
+  takeCoordinatorPaneWarning,
   ensureSystemCoordinator,
   releaseSystemCoordinator,
   sanitizeTmuxInput,
@@ -47,6 +48,7 @@ import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
 import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import { RemoteCoordinatorPane } from "./remote-coordinator-pane";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
@@ -68,7 +70,7 @@ import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH,
   handleDialogInput, syncNewAgentMachine, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
-  buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
+  PEERS_TAB, buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
 import {
   RightPaneComponent, colorizeDiff, colorizeLog,
@@ -105,9 +107,9 @@ import {
   type RemoteControlFiles, type RemoteControlFilesOptions, type RemoteControlStatus,
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
-import { buildPeersDialogContent, newPeersDialog, syncPeersDialog, type PeersDialogService } from "./peers-dialog";
-import { PeerService, defaultPeerServiceDeps } from "../peers/service";
-import type { PeerLinkState } from "../peers/poller";
+import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
+import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
+import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { remoteDisplayName } from "./peer-repos";
 
 // Re-export for test compatibility
@@ -424,6 +426,8 @@ export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 /** The center pane's text for a selected remote row (SPEC §20.5). */
 export function remoteCenterText(entry: RemoteEntry): string {
   switch (entry.kind) {
+    case "remote-coordinator":
+      return `System coordinator on ${entry.peerName} (read-only)`;
     case "remote-agent":
       return `Remote agent on ${entry.peerName} (read-only)`;
     case "remote-repo-header":
@@ -434,6 +438,8 @@ export function remoteCenterText(entry: RemoteEntry): string {
 /** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
 function remoteTitle(entry: RemoteEntry): string {
   switch (entry.kind) {
+    case "remote-coordinator":
+      return `${entry.peerName}/@system`;
     case "remote-agent":
       return `${entry.peerName}/${remoteDisplayName(entry.remote)}`;
     case "remote-repo-header":
@@ -447,7 +453,7 @@ function remoteTitle(entry: RemoteEntry): string {
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
  */
-function renderRemotePlaceholders(entry: RemoteEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
+function renderRemotePanes(entry: RemoteEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
   const placeholder = (text: string, width: number) =>
@@ -455,7 +461,7 @@ function renderRemotePlaceholders(entry: RemoteEntry, mainWidth: number, leftPan
   const center = placeholder(remoteCenterText(entry), lw);
   const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw);
   const sep = `${DIM_GRAY}│${RESET}`;
-  return center.map((line, i) => padToWidth(line, lw) + sep + (right[i] ?? ""));
+  return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
 }
 
 /**
@@ -503,6 +509,7 @@ class StatusBarComponent implements Component {
    * would refuse.
    */
   remoteSelected = false;
+  remoteCoordinatorVisible = false;
   remoteRepoSelected = false;
   hasResolvableWarnings = false;
 
@@ -528,8 +535,8 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.remoteSelected) {
-      row1Left = `${DIM}j/k: select    J/K: repo    p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll" : "p/n: pane"}    1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -733,9 +740,6 @@ class DialogOverlayComponent implements Component {
       case "permissions-editor": {
         return buildPermissionsEditorContent(dialog, innerWidth);
       }
-      case "peers": {
-        return buildPeersDialogContent(dialog, innerWidth);
-      }
     }
   }
 }
@@ -835,7 +839,7 @@ export class DashboardComponent implements Component {
   private overlayHandle: OverlayHandle | null = null;
   private dialogOverlay: DialogOverlayComponent;
   /**
-   * The iroh endpoint service behind the Peers dialog (`I`). launchDashboard
+   * The iroh endpoint service behind the Peers tab (`I`). launchDashboard
    * sets the real one (src/peers/service.ts); a dashboard built in a test has
    * none unless the test sets a fake, so no test can bind a real endpoint.
    */
@@ -843,6 +847,20 @@ export class DashboardComponent implements Component {
   peerService: PeersDialogService | null = null;
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
+  private pairedPeers: PeerServiceView["peers"] = [];
+  private readonly remotePane = new RemoteCoordinatorPane(
+    id => this.peerService!.fetchCoordinatorPane(id),
+    () => this.tui?.requestRender(),
+  );
+
+  private syncRemotePane(): void {
+    const row = this.remoteSelection;
+    if (row?.kind === "remote-coordinator" && this.tmuxPoller.isRunning() && this.peerService) {
+      this.remotePane.select(row.peerId, this.peerService.remoteStartDenial, this._dialog === null);
+    } else {
+      this.remotePane.select(null);
+    }
+  }
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
   private noticeCounter = 0;
@@ -1364,11 +1382,12 @@ export class DashboardComponent implements Component {
     // tmux pane in normal mode (and the coordinator session when the system
     // coordinator is selected, via setAgent in syncSelectedAgent).
     this.tmuxPoller.start();
+    this.syncRemotePane();
     // The coordinator and repo-coordinator pollers only spawn `tmux capture-pane`
-    // when their panes are actually visible. updatePollerVisibility() starts the
+    // when their panes are actually visible. updatePaneVisibility() starts the
     // ones that should be live now and leaves the rest stopped (saves a tmux
     // spawn/sec per hidden pane).
-    this.updatePollerVisibility();
+    this.updatePaneVisibility();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
     // Live Codex usage (SPEC.md §6.6.3): the session logs go stale when a
@@ -1409,6 +1428,7 @@ export class DashboardComponent implements Component {
 
   stopPolling() {
     this.tmuxPoller.stop();
+    this.remotePane.select(null);
     this.coordinatorPoller.stop();
     this.repoCoordinatorPoller.stop();
     if (this.usageTimer) {
@@ -1465,7 +1485,16 @@ export class DashboardComponent implements Component {
    * resume() fires an immediate poll, so a pane that just became visible is not
    * stale for up to 1s. The always-on selected-agent `tmuxPoller` is untouched.
    */
-  private updatePollerVisibility() {
+  private updatePaneVisibility() {
+    const peerCoordinator = this.remoteSelection?.kind === "remote-coordinator";
+    this.statusBar.remoteCoordinatorVisible = peerCoordinator;
+    if (peerCoordinator) {
+      this.focusManager.skipTargets.add("right-pane");
+      const focus = this.focusManager.current();
+      if (focus === "right-pane" || focus === "active-agent") this.focusManager.setFocus("active-agent");
+    } else {
+      this.focusManager.skipTargets.delete("right-pane");
+    }
     // §17.1 Phase 2: gate the system coordinator poller on the active source
     // matching the render path. A stale coord pointer in the (inactive)
     // Agents tree must not keep the coordinator tmux poller running while
@@ -1865,16 +1894,17 @@ export class DashboardComponent implements Component {
     void this.watcher?.refresh();
   }
 
-  /** Poll updates can affect the unified tree, a remote selection, and the Peers dialog. */
+  /** Poll updates can affect the unified tree, a remote selection, and the Peers tab. */
   setPeerService(service: PeersDialogService): void {
     this.peerService = service;
     service.onChange(() => {
       const changed = this.refreshPeerRepos();
+      this.syncRemotePane();
       const dialog = this._dialog;
-      if (dialog?.type === "peers") {
-        syncPeersDialog(dialog);
+      if (dialog?.type === "setup" && dialog.peers) {
+        syncPeersDialog(dialog.peers);
         this.tui?.requestRender();
-      } else if (changed || dialog?.type === "new-agent-form") {
+      } else if (changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form") {
         if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
         this.tui?.requestRender();
       }
@@ -1883,28 +1913,47 @@ export class DashboardComponent implements Component {
   }
 
   private refreshPeerRepos(): boolean {
-    const links = this.peerService?.view().links ?? [];
+    const view = this.peerService?.view();
+    const links = view?.links ?? [];
+    const peers = view?.peers ?? [];
+    const samePeers = this.pairedPeers.length === peers.length && peers.every((peer, i) =>
+      this.pairedPeers[i]!.id === peer.id && this.pairedPeers[i]!.name === peer.name);
     // Stable snapshot references from the poller make dialog-only changes cheap.
-    if (links.length === this.peerLinks.length && links.every((link, i) => {
+    if (samePeers && links.length === this.peerLinks.length && links.every((link, i) => {
       const old = this.peerLinks[i]!;
       return link.id === old.id && link.name === old.name && link.repos === old.repos && link.agents === old.agents
-        && link.connected === old.connected && (link.connected || link.lastOkAt === old.lastOkAt);
+        && peerLinkStatus(link) === peerLinkStatus(old) && link.coordinator?.state === old.coordinator?.state
+        && (link.connected || link.lastOkAt === old.lastOkAt);
     })) return false;
     this.peerLinks = links;
+    this.pairedPeers = peers;
     const treeVisible = this.sidebarMode !== "teams" || this.rightPane.mode === "TREE";
     const width = this.rightPane.mode === "TREE" ? this.getMainWidth() : this.sidebarWidth;
     const before = treeVisible ? this.agentTree.render(width) : [];
     const previous = this.remoteSelection;
-    this.agentTree.setPeerLinks(links);
+    this.agentTree.setPeerLinks(links, peers);
     const selected = this.remoteSelection;
     // The connector can change when another root appears. Only the tree displays it.
     const details = (entry: RemoteEntry | null) => entry?.kind === "remote-agent"
-      ? [entry.peerName, entry.remote, entry.stale, entry.lastOkAt] : entry;
+      ? [entry.peerName, entry.remote, entry.linkStatus] : entry;
     const selectionChanged = JSON.stringify(details(previous)) !== JSON.stringify(details(selected));
     if (selectionChanged) this.syncSelectedAgent();
     if (selectionChanged || !treeVisible) return selectionChanged;
     const after = this.agentTree.render(width);
     return before.length !== after.length || before.some((line, i) => line !== after[i]);
+  }
+
+  private get teamChannelVisible(): boolean {
+    return this.activeSelectionSource === "teams" && (this.channelPane.teamName !== null || this.teamsTree.selection === null);
+  }
+
+  private get expandedAgentsTreeVisible(): boolean {
+    return this.rightPane.mode === "TREE" && !this.teamChannelVisible
+      && !(this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected);
+  }
+
+  private get visibleNavigationTree(): "teams-tree" | "agent-tree" {
+    return this.sidebarMode === "teams" && !this.expandedAgentsTreeVisible ? "teams-tree" : "agent-tree";
   }
 
   /** Only the Agents tree can own a remote selection. */
@@ -1918,23 +1967,28 @@ export class DashboardComponent implements Component {
    * allows it. Returns true when it refused. The key dispatch (handleInput)
    * and the command palette both go through it.
    */
-  private refuseOnRemoteRow(key: string): boolean {
+  refuseOnRemoteRow(key: string): boolean {
     const remote = this.remoteSelection;
+    if (remote?.kind === "remote-coordinator" && ["[", "]", "{", "}"].includes(key)) {
+      this.setNotice("resize from a local row", "info");
+      return true;
+    }
+    if (remote?.kind === "remote-coordinator" && (key === "p" || key === "n" || matchesKey(key, Key.left) || matchesKey(key, Key.right))) {
+      this.setNotice("view mode is fixed for remote coordinators", "info");
+      return true;
+    }
     if (remote === null || isRemoteAllowedKey(key)) return false;
+    if (remote.kind === "remote-coordinator" && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
 
-  /** `I`: open the Peers dialog. Opening it binds the endpoint if boot has not already. */
-  openPeersDialog(): void {
-    const service = this.peerService;
-    if (!service) {
-      this.setNotice("Peering is not available here", "error");
-      return;
-    }
-    this.showDialog(newPeersDialog(service, this.agentTree.machineName));
-    service.openDialog();
+  private scrollOutput(up: boolean): void {
+    if (this.remoteSelection?.kind === "remote-coordinator") {
+      this.remotePane.scroll(up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP);
+    } else if (up) agentActions.handleScrollUp(this);
+    else agentActions.handleScrollDown(this);
   }
 
   showDialog(dialog: NonNullable<DialogState>) {
@@ -1946,9 +2000,9 @@ export class DashboardComponent implements Component {
   }
 
   private openDialog(dialog: NonNullable<DialogState>) {
-    // Replacing the Peers dialog closes it: pairing is accepted only while it is open.
-    if (this._dialog?.type === "peers" && dialog !== this._dialog) this._dialog.service.closeDialog();
+    const previous = this._dialog;
     this._dialog = dialog;
+    this.syncRemotePane();
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
         : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor" || dialog.type === "multi-select") ? 70
@@ -1964,11 +2018,25 @@ export class DashboardComponent implements Component {
       });
     }
     this.tui?.requestRender();
+    this.updatePeersTabVisibility(previous);
+  }
+
+  private updatePeersTabVisibility(previous: DialogState): void {
+    const before = previous?.type === "setup" ? previous.peers?.service : undefined;
+    const after = this._dialog?.type === "setup" ? this._dialog.peers?.service : undefined;
+    if (before === after) return;
+    if (before) {
+      cancelPaste();
+      before.closeDialog();
+    }
+    after?.openDialog();
   }
 
   closeDialog() {
-    if (this._dialog?.type === "peers") this._dialog.service.closeDialog();
+    const previous = this._dialog;
     this._dialog = null;
+    this.syncRemotePane();
+    this.updatePeersTabVisibility(previous);
     this.overlayHandle?.hide();
     this.overlayHandle = null;
     this.tui?.requestRender();
@@ -2048,10 +2116,11 @@ export class DashboardComponent implements Component {
   // --- Pane management (delegates to pane-manager.ts) ---
 
   jumpToMode(mode: PaneMode, forceRefresh = false) {
+    if (this.remoteSelection?.kind === "remote-coordinator") return;
     jumpToMode(this, mode, forceRefresh);
     // Entering/leaving REPO mode changes whether the per-repo coordinator pane
     // is visible — pause/resume its poller to match.
-    this.updatePollerVisibility();
+    this.updatePaneVisibility();
   }
 
   /** Reload a tail-log mode's window (or skip via cache) — called from scroll/resize handlers. */
@@ -2066,7 +2135,7 @@ export class DashboardComponent implements Component {
     // cyclePaneMode skips REPO (only entered via repo-header selection), but
     // keep the visibility sync here for symmetry with jumpToMode in case the
     // active mode changed.
-    this.updatePollerVisibility();
+    this.updatePaneVisibility();
   }
 
   // --- Command palette ---
@@ -2105,10 +2174,10 @@ export class DashboardComponent implements Component {
       { label: "add repo — A", key: "A", action: () => agentActions.handleAddRepo(this) },
       { label: "remove repo — D", key: "D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
       { label: "help — ?", key: "?", action: () => agentActions.handleHelp(this) },
-      { label: "setup — h", key: "h", action: () => agentActions.handleSetup(this) },
-      { label: "peers — I", key: "I", action: () => this.openPeersDialog() },
-      { label: "scroll up — ;", key: ";", action: () => agentActions.handleScrollUp(this) },
-      { label: "scroll down — l", key: "l", action: () => agentActions.handleScrollDown(this) },
+      { label: "setup (Hooks, Config, Peers) — h", key: "h", action: () => agentActions.handleSetup(this) },
+      { label: "setup: Peers tab — I", key: "I", action: () => agentActions.handleSetup(this, PEERS_TAB) },
+      { label: "scroll up — ;", key: ";", action: () => this.scrollOutput(true) },
+      { label: "scroll down — l", key: "l", action: () => this.scrollOutput(false) },
     ];
 
     const allItems = commands.map((c) => c.label);
@@ -2295,17 +2364,29 @@ export class DashboardComponent implements Component {
     // path below (tmux pollers, git probe, right-pane loaders, the per-repo
     // coordinator) sees no selection. Only the info panel and render() use it.
     const remote = this.remoteSelection;
+    const peerCoordinator = remote?.kind === "remote-coordinator";
+    const leftPeerCoordinator = !peerCoordinator && this.infoPanel.remote?.kind === "remote-coordinator";
+    const enteredFromTree = peerCoordinator && this.rightPane.mode === "TREE";
+    if (peerCoordinator && this.modeIndex !== DEFAULT_MODE_INDEX) {
+      jumpToMode(this, PANE_MODES[DEFAULT_MODE_INDEX]!);
+    }
+
+    this.syncRemotePane();
 
     // Update focus cycling for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
 
     // When entering coordinator mode (transition, not every tick), reset view and focus
     const wasCoordinator = this.currentAgentKey === "__coordinator__";
+    const visibleTree = this.sidebarMode === "teams" ? "teams-tree" : "agent-tree";
+    if (leftPeerCoordinator || enteredFromTree || (!isCoordinator && this.focusManager.current() === "coordinator")) {
+      this.focusManager.setFocus(visibleTree);
+    }
     if (isCoordinator && !wasCoordinator) {
       this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
-      if (focus !== "agent-tree" && focus !== "info" && focus !== "coordinator") {
-        this.focusManager.setFocus("agent-tree");
+      if (focus !== visibleTree && focus !== "info" && focus !== "coordinator") {
+        this.focusManager.setFocus(visibleTree);
       }
       // No resize on coordinator selection: the ib-coordinator tmux window is
       // pinned to PINNED_TMUX_WIDTH and never follows mainWidth. The startup
@@ -2530,7 +2611,7 @@ export class DashboardComponent implements Component {
     // Selection (and the REPO-mode auto-switch above) may have changed which
     // coordinator pane is visible — pause/resume those pollers accordingly so
     // we don't spawn `tmux capture-pane` for off-screen panes.
-    this.updatePollerVisibility();
+    this.updatePaneVisibility();
   }
 
   /**
@@ -2988,11 +3069,9 @@ export class DashboardComponent implements Component {
       // Pane sub-focus and Send sub-focus: fall through to normal dashboard key handling
     }
 
-    // When coordinator panel is focused, use same three-level sub-focus as active-agent.
-    // Only requires the coordinator to have polled (session is running), not that it's
-    // selected in the agent tree — the sidebar coordinator panel should accept input
-    // regardless of which agent is selected.
-    if (this.focusManager.current() === "coordinator" && this.coordinatorPane.hasPolled) {
+    // The coordinator editor belongs only to the effective local coordinator selection.
+    if (this.focusManager.current() === "coordinator" && this.activeSelectionSource === "agents"
+        && this.agentTree.isSystemCoordinatorSelected && this.coordinatorPane.hasPolled) {
       const sf = this.focusManager.subFocus;
 
       // Tab navigation through sub-focus states
@@ -3211,12 +3290,8 @@ export class DashboardComponent implements Component {
     if (tabMode !== null) {
       this.setSidebarMode(tabMode);
       const focus = this.focusManager.current();
-      if (tabMode === "teams") {
-        if (focus === "agent-tree" || focus === "repo-coordinator") {
-          this.focusManager.setFocus("teams-tree");
-        }
-      } else if (focus === "teams-tree") {
-        this.focusManager.setFocus("agent-tree");
+      if (focus === "agent-tree" || focus === "teams-tree" || (focus === "repo-coordinator" && tabMode === "teams")) {
+        this.focusManager.setFocus(this.visibleNavigationTree);
       }
       // syncSelectedAgent() runs the inactive-tree mirror at its top.
       this.syncSelectedAgent();
@@ -3232,7 +3307,7 @@ export class DashboardComponent implements Component {
     // QUESTIONS-mode j/k retains its agent-tree-only special case below and
     // does NOT touch activeSelectionSource (it's a right-pane question
     // selector, not a sidebar-tree navigation).
-    const navigatesTeams = this.sidebarMode === "teams";
+    const navigatesTeams = this.visibleNavigationTree === "teams-tree";
     const navigatedSource: SelectionSource = navigatesTeams ? "teams" : "agents";
     if (data === "J") {
       if (navigatesTeams) {
@@ -3299,7 +3374,7 @@ export class DashboardComponent implements Component {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
         // Switching to DASHBOARD hides the coordinator tmux output; switching
         // back to TMUX shows it again. Pause/resume the poller to match.
-        this.updatePollerVisibility();
+        this.updatePaneVisibility();
       } else {
         this.cyclePaneMode(1);
       }
@@ -3309,7 +3384,7 @@ export class DashboardComponent implements Component {
         // no-op in teams view (see "p" branch above)
       } else if (this.agentTree.isSystemCoordinatorSelected) {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
-        this.updatePollerVisibility();
+        this.updatePaneVisibility();
       } else {
         this.cyclePaneMode(-1);
       }
@@ -3355,8 +3430,8 @@ export class DashboardComponent implements Component {
       }
     }
     // Scroll
-    else if (data === ";") { agentActions.handleScrollUp(this); }
-    else if (data === "l") { agentActions.handleScrollDown(this); }
+    else if (data === ";") { this.scrollOutput(true); }
+    else if (data === "l") { this.scrollOutput(false); }
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
       // §17.3 manage-team: when a team ANCHOR is the GLOBAL selection
@@ -3437,8 +3512,8 @@ export class DashboardComponent implements Component {
     else if (data === "O") { agentActions.handleOpenDiffToolVsManager(this); }
     // Help dialog
     else if (data === "?") { agentActions.handleHelp(this); }
-    // Peers dialog: this install's id, paired peers, pairing
-    else if (data === "I") { this.openPeersDialog(); }
+    // Peers tab: this install's id, paired peers, pairing
+    else if (data === "I") { agentActions.handleSetup(this, PEERS_TAB); }
     // Setup dialog
     else if (data === "h") { agentActions.handleSetup(this); }
     // Re-check repo health
@@ -3504,6 +3579,7 @@ export class DashboardComponent implements Component {
         // panes reflow to the new mainWidth at display time via WordWrapCache, so
         // resizing the sidebar never repaints a coordinator TUI at a new width.
         this.tui?.requestRender();
+
       } else if (focus === "right-pane") {
         // Right pane focused: ] grows right (shrinks middle) = negative delta to handleResizeLeft
         agentActions.handleResizeLeft(this, -delta);
@@ -3576,14 +3652,15 @@ export class DashboardComponent implements Component {
     // agentTree.isSystemCoordinatorSelected`).
     const isCoordinatorView =
       this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected;
-    const isTreeMode = this.rightPane.mode === "TREE";
+    const isTreeMode = this.expandedAgentsTreeVisible;
     // A selected remote row (SPEC §20.5) draws two placeholders in the
     // split layout, whatever the right-pane mode, except TREE: that mode draws
     // the tree itself in the main area (the sidebar hides its own), and it must
     // stay on screen while j/k move through the tree.
     const remote = this.remoteSelection;
     const remoteView = remote !== null && !isTreeMode;
-    const isFullWidth = !remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode));
+    const remoteCoordinator = remoteView && remote.kind === "remote-coordinator" ? remote : null;
+    const isFullWidth = remoteCoordinator !== null || (!remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode)));
 
     // Header
     const noticeColor = this.lastSentNoticeKind === "error" ? RED : YELLOW;
@@ -3644,8 +3721,8 @@ export class DashboardComponent implements Component {
     const teamsActiveForTitle = this.activeSelectionSource === "teams";
     const teamSelectedForTitle =
       teamsActiveForTitle && !isCoordinatorView && this.channelPane.teamName !== null;
-    const mainTitleSep = isCoordinatorView
-      ? this.buildCoordinatorTitleSeparator(mainWidth)
+    const mainTitleSep = isCoordinatorView || remoteCoordinator
+      ? this.buildCoordinatorTitleSeparator(mainWidth, remoteCoordinator?.peerName)
       : teamSelectedForTitle
         ? this.buildTeamTitleSeparator(mainWidth, leftPaneW, this.channelPane.teamName!)
         : remoteView
@@ -3674,12 +3751,7 @@ export class DashboardComponent implements Component {
     // selection (agent, repo header, system coord, or null in the Agents
     // tree) the main area falls through to the agent / coordinator / repo
     // branches below.
-    const teamsActiveRender = this.activeSelectionSource === "teams";
-    const showChannelPane =
-      teamsActiveRender
-      && !isCoordinatorView
-      && (this.channelPane.teamName !== null || this.teamsTree.selection === null);
-    if (showChannelPane) {
+    if (this.teamChannelVisible) {
       // §17.4 refresh cadence: the chat box + log are refreshed by
       // `channelRefreshTimer` (set up in startPolling) and by a one-shot
       // `refreshChannel()` on team-selection change. render() is PURE here — it
@@ -3759,10 +3831,12 @@ export class DashboardComponent implements Component {
       this.coordinatorInputField.active = false;
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
+    } else if (remoteCoordinator) {
+      mainLines = [mainTitleSep, ...this.remotePane.render(mainWidth, availableHeight)];
     } else if (remoteView) {
       // A remote row: placeholders only. No tmux pane, right pane or input
       // field renders, so nothing local is drawn for (or loaded by) it.
-      mainLines = [mainTitleSep, ...renderRemotePlaceholders(remote, mainWidth, leftPaneW, availableHeight)];
+      mainLines = [mainTitleSep, ...renderRemotePanes(remote, mainWidth, leftPaneW, availableHeight)];
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
       // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set
@@ -4013,15 +4087,15 @@ export class DashboardComponent implements Component {
   }
 
   /** Build title separator for system coordinator full-width view */
-  private buildCoordinatorTitleSeparator(mainWidth: number): string {
-    const leftTitle = " System Coordinator ";
-    const rightTitle = this.coordinatorViewMode === "TMUX" ? " TMUX " : " DASHBOARD ";
+  private buildCoordinatorTitleSeparator(mainWidth: number, peer?: string): string {
+    const leftTitle = peer === undefined ? " System Coordinator " : ` ${peer}/@system `;
+    const rightTitle = peer !== undefined || this.coordinatorViewMode === "TMUX" ? " TMUX " : " DASHBOARD ";
     const leftPad = 3;
     const rightPad = 3;
     const currentFocus = this.focusManager.current();
-    const coordFocused = currentFocus === "coordinator";
+    const coordFocused = currentFocus === (peer === undefined ? "coordinator" : "active-agent");
     const leftTitleStyle = coordFocused ? `${REVERSE}${BOLD}` : BOLD;
-    const fillCount = Math.max(1, mainWidth - leftPad - leftTitle.length - rightTitle.length - rightPad);
+    const fillCount = Math.max(1, mainWidth - leftPad - visibleWidth(leftTitle) - visibleWidth(rightTitle) - rightPad);
     return truncateToWidth(
       `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}` +
       `${BOLD}${rightTitle}${RESET}` +
@@ -4075,10 +4149,13 @@ export async function launchDashboard(): Promise<void> {
   // agent-types dir must exist before ensureSystemCoordinator() — it reads system-coordinator.md to resolve its model.
   await ensureAgentTypesDir();
   // Kept so the Remote Control light can re-read the settings file this launch writes.
+  const dashboard = new DashboardComponent();
   const coordinatorStartup = ensureSystemCoordinator().catch((err) => {
     // Fires asynchronously — may resolve after the TUI has mounted, so
     // route through logWarning to avoid corrupting the dashboard.
-    logWarning(`System coordinator startup failed: ${err instanceof Error ? err.message : String(err)}`);
+    const message = `System coordinator startup failed: ${err instanceof Error ? err.message : String(err)}`;
+    logWarning(message);
+    dashboard.setNotice(message, "error");
   });
   logToWatchLog(`[startup] coordinator ref acquired and agent types ensured (+${Date.now() - bootStart}ms)`);
 
@@ -4143,7 +4220,6 @@ export async function launchDashboard(): Promise<void> {
    *  token: on a wake the poll loop and a retrying boot reconnect at once. */
   const telegramWake = tgToken !== "" ? new WakeDetector({ log: logToWatchLog }) : null;
 
-  const dashboard = new DashboardComponent();
   // The first segment of every local agent key (SPEC §17.1): read from
   // ~/.itsybitsy/machine-name, or set once from the computer name. Before the
   // layout, so favorites and the first selection use it.
@@ -4192,7 +4268,7 @@ export async function launchDashboard(): Promise<void> {
   // Peering (src/peers/service.ts): nothing is loaded or bound here. The
   // endpoint binds at boot when peers.json lists a peer (bootIfPaired, started
   // at the end of this function once the watcher's first scan is done), or
-  // else the first time the Peers dialog (`I`) opens, and stays up until
+  // else the first time the Peers tab (`I`) opens, and stays up until
   // quitDashboard shuts it down; after a failed bind or accept loop the
   // service rebinds on its own with backoff (SPEC §20.3). Logs go to watch.log. That first bind stalls
   // the UI once, for about a third of a second: the dynamic import in
@@ -4200,8 +4276,9 @@ export async function launchDashboard(): Promise<void> {
   // The trusted link answers peers from the watcher's last fully detected
   // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
   // and never carries a state that detection has not filled in yet.
-  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () =>
-    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? []), message => dashboard.remoteAgentStarted(message)));
+  const peerService = new PeerService(defaultPeerServiceDeps(machine, logToWatchLog, () =>
+    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [],
+      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message)));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read
@@ -4218,6 +4295,8 @@ export async function launchDashboard(): Promise<void> {
   void dashboard.refreshRemoteControlStatus();
   void dashboard.refreshRemoteControlAfterLaunch(coordinatorStartup);
   dashboard.statusLightTimer = setInterval(() => {
+    const warning = takeCoordinatorPaneWarning();
+    if (warning) dashboard.setNotice(warning, "error");
     if (SANDBOX_DENIAL_COLLECTOR_ENABLED) {
       dashboard.setCollectorStatus(sandboxCollectorHealth({ previous: dashboard.collectorStatus }));
     }

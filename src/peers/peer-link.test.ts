@@ -20,6 +20,7 @@ import {
   PEER_MAX_REPLY_BYTES,
   NEW_AGENT_MAX_REQUEST_BYTES,
   requestNewAgent,
+  requestCoordinatorPane,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
   PeerProtocolError,
@@ -66,9 +67,10 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
-  const link = createMemoryLink(ID_A, ID_B);
-  const peers = options.peers ?? new Set([ID_A]);
+function serve(options: { readerId?: string; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+  const readerId = options.readerId ?? ID_A;
+  const link = createMemoryLink(readerId, ID_B);
+  const peers = options.peers ?? new Set([readerId]);
   const logs: string[] = [];
   let snapshots = 0;
   let checks = 0;
@@ -76,13 +78,15 @@ function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot; st
   const done = serveTrustedConnection(link.b, {
     setTimer: clock.setTimer,
     startAgent: options.startAgent,
+    captureCoordinator: options.captureCoordinator,
+    paneReaders: options.paneReaders ?? new Set(),
     peerName: async (id) => {
       checks++;
       return peers.has(id) ? "Alice" : null;
     },
     snapshot: () => {
       snapshots++;
-      return options.snapshot ? options.snapshot() : { repos: [], agents: [] };
+      return options.snapshot ? options.snapshot() : { coordinator: null, repos: [], agents: [] };
     },
     log: (line) => logs.push(line),
   });
@@ -133,7 +137,7 @@ describe("decodeAgentsReply", () => {
   test("rebuilds each entry from the allowed fields only, and strips control characters", () => {
     const { repos, agents } = decodeAgentsReply(
       encode({
-        op: "agents",
+        op: "agents", coordinator: { state: "running" },
         repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
         agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoRegistryName: "app\x1b[31m", repoPath: "/r", state: "running", prompt: "leak", extra: { x: 1 } }],
       }),
@@ -149,7 +153,7 @@ describe("decodeAgentsReply", () => {
     const cf = "‮⁦​‍﻿­";
     const { agents: [agent] } = decodeAgentsReply(
       encode({
-        op: "agents",
+        op: "agents", coordinator: { state: "running" },
         repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
         agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoRegistryName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}` }],
       }),
@@ -186,7 +190,7 @@ describe("decodeAgentsReply", () => {
 
   test("a list over 1 MB is sent as an error reply", () => {
     const big: RemoteAgent[] = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
-    expect(() => decodeAgentsReply(encodeAgentsReply({ repos: [], agents: big }))).toThrow(
+    expect(() => decodeAgentsReply(encodeAgentsReply({ coordinator: null, repos: [], agents: big }))).toThrow(
       new PeerErrorReply(`the other side reported: the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`),
     );
   });
@@ -213,12 +217,13 @@ describe("serveTrustedConnection", () => {
   const snapshot = () => peerSnapshot([
     { name: "app", path: "/repos/app" },
     { name: "empty", nickname: "No agents", path: "/repos/empty" },
-  ], [fullAgent("agent-1")]);
+  ], [fullAgent("agent-1")], "waiting");
 
   test("answers a peer's agents requests, each on its own stream, over one connection", async () => {
     const side = serve({ snapshot });
     expect(await requestAgents(side.a)).toEqual(snapshot());
     expect(await requestAgents(side.a)).toEqual(snapshot());
+    expect(snapshot().coordinator).toEqual({ state: "waiting" });
     expect(snapshot().repos).toEqual([{ registryName: "app", displayName: "app" }, { registryName: "empty", displayName: "No agents" }]);
     expect(side.snapshots()).toBe(2);
     // One check at the connection's accept, then two per request: when its
@@ -467,10 +472,10 @@ describe("trusted new-agent responder", () => {
     spawn.mockImplementation(() => new Promise(() => {}));
     const pending = rawRequest(side.a, encode(request));
     await waitFor(() => spawn.mock.calls.length === 1);
-    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.clock.advance(25_000);
     expect(decodeText(await pending)).toEqual({ ok: false, error: expect.stringContaining("outcome unknown") });
-    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.a.close(0, "done");
   });
 
@@ -478,7 +483,7 @@ describe("trusted new-agent responder", () => {
     const { side, spawn } = receiver();
     spawn.mockRejectedValue(new Error("spawn failed"));
     expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "spawn failed" });
-    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.a.close(0, "done");
   });
 
@@ -510,4 +515,118 @@ describe("trusted new-agent responder", () => {
     expect(side.logs.filter(line => line === message)).toHaveLength(1);
     side.a.close(0, "done");
   });
+});
+
+describe("coordinator-pane", () => {
+  const text = "\x1b[31mred\x1b[0m\t\x1b]8;;file:/private\x07label\x1b]8;;\x07\x07\u009b\r\n\x1b]8;;https://example.com\x07site\x1b]8;;\x07";
+  const pane = { state: "running", text };
+  test("serves only its own sanitized capture and logs the first read across connections", async () => {
+    const captureCoordinator = mock(async () => pane);
+    const paneReaders = new Set<string>();
+    const sides = [serve({ captureCoordinator, paneReaders }), serve({ captureCoordinator, paneReaders })];
+    for (const side of sides) {
+      const reply = decodeText(await rawRequest(side.a, encode({ op: "coordinator-pane", session: "other" })));
+      expect(reply).toEqual({ op: "coordinator-pane", state: "running", text: "red   label\n\x1b]8;;https://example.com\x07site\x1b]8;;\x07" });
+      side.a.close(0, "done");
+    }
+    expect(sides.flatMap(side => side.logs).filter(line => line.includes("read the system coordinator pane"))).toHaveLength(1);
+    expect(captureCoordinator.mock.calls).toEqual([[], []]);
+  });
+
+  test("audits each peer once after a successful finish, including a failed first delivery", async () => {
+    const paneReaders = new Set<string>();
+    const options = { paneReaders, captureCoordinator: async () => pane };
+    const failed = serve(options);
+    const accept = failed.b.acceptBi.bind(failed.b);
+    const finishing = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    spyOn(failed.b, "acceptBi").mockImplementationOnce(async () => {
+      const stream = await accept();
+      stream.finish = async () => {
+        finishing.resolve();
+        await release.promise;
+        failed.b.close(0, "delivery failed");
+        throw new Error("finish failed");
+      };
+      return stream;
+    });
+    const read = requestCoordinatorPane(failed.a);
+    await finishing.promise;
+    expect(paneReaders.size).toBe(0);
+    release.resolve();
+    await expect(read).rejects.toThrow();
+    expect(failed.logs.filter(line => line.includes("read the system coordinator pane"))).toBeEmpty();
+    const deliveries = [];
+    for (const readerId of [ID_A, "cd".repeat(32), ID_A, "cd".repeat(32)]) {
+      const side = serve({ ...options, readerId });
+      await requestCoordinatorPane(side.a);
+      side.a.close(0, "done");
+      await side.done;
+      deliveries.push(...side.logs.filter(line => line.includes("read the system coordinator pane")));
+    }
+    expect(deliveries).toEqual([ID_A, "cd".repeat(32)].map(id =>
+      `peer link: Alice (${id.slice(0, 10)}) read the system coordinator pane`));
+  });
+
+  test("returns an error when there is no coordinator", async () => {
+    const side = serve({ captureCoordinator: async () => null });
+    await expect(requestCoordinatorPane(side.a)).rejects.toThrow("No system coordinator");
+    expect(side.logs.join(" ")).not.toContain("read the system coordinator pane");
+    side.a.close(0, "done");
+  });
+
+  test.each(["resolve", "reject"])("refuses a removed reader when its pending capture will %s", async outcome => {
+    const pending = Promise.withResolvers<typeof pane>();
+    const captureCoordinator = mock(() => pending.promise);
+    const refused = serve({ peers: new Set(), captureCoordinator });
+    await expect(requestCoordinatorPane(refused.a)).rejects.toThrow();
+    expect(captureCoordinator).not.toHaveBeenCalled();
+    const side = serve({ captureCoordinator });
+    const read = requestCoordinatorPane(side.a);
+    await waitFor(() => captureCoordinator.mock.calls.length === 1);
+    side.peers.clear();
+    if (outcome === "resolve") pending.resolve(pane);
+    else pending.reject(new Error("capture failed"));
+    await expect(read).rejects.toThrow();
+    expect(side.a.closeInfo()).toMatchObject({ code: PEER_CLOSE.notPeer });
+    expect(side.logs.join(" ")).not.toContain("read the system coordinator pane");
+  });
+
+  test("dialer filters an untrusted raw reply before rendering", async () => {
+    const { a, b } = createMemoryLink(ID_A, ID_B);
+    const read = requestCoordinatorPane(a);
+    const stream = await b.acceptBi();
+    await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
+    const link = "\x1b]8;;https://example.org\x07site\x1b]8;;\x07";
+    const unsafe = "\x1b]0;window title\x07\x1b[12;9Hhello\x1b]8;;file:///private\x07 label\x1b]8;;\x07 " + link;
+    await stream.writeAll(encode({ op: "coordinator-pane", state: "running", text: unsafe }));
+    await stream.finish();
+    expect(await read).toEqual({ state: "running", text: "hello label " + link });
+    a.close(0, "done");
+  });
+
+  test("drops the entire four-byte code point when only two of its bytes fit", async () => {
+    const envelope = { op: "coordinator-pane", state: "running", text: "" };
+    const suffix = "a".repeat(PEER_MAX_REPLY_BYTES - encode(envelope).length - 2);
+    const side = serve({ captureCoordinator: async () => ({ state: "running", text: "🔥" + suffix }) });
+    const bytes = await rawRequest(side.a, encode({ op: envelope.op }));
+    const reply = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes as Uint8Array));
+    expect(reply.text).toBe(suffix);
+    side.a.close(0, "done");
+  });
+
+  for (const separator of ["\n", ""]) {
+    test(`caps JSON bytes and keeps the newest text with separator ${JSON.stringify(separator)}`, async () => {
+      const text = "oldest" + ('🔥"\\' + separator).repeat(150_000) + "newest\n\n";
+      const side = serve({ captureCoordinator: async () => ({ state: "running", text }) });
+      const bytes = await rawRequest(side.a, encode({ op: "coordinator-pane" }));
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect((bytes as Uint8Array).length).toBeLessThanOrEqual(PEER_MAX_REPLY_BYTES);
+      const reply = decodeText(bytes);
+      expect(reply.text.endsWith("newest\n\n")).toBe(true);
+      expect(reply.text).not.toContain("oldest");
+      expect(text.endsWith(reply.text)).toBe(true);
+      side.a.close(0, "done");
+    });
+  }
 });

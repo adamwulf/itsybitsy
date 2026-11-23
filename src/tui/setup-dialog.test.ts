@@ -55,6 +55,18 @@ describe("setup dialog tab bar", () => {
     const stripped = result.contentLines.map((l) => stripAnsi(l));
     expect(stripped[0]).toContain("[Hooks]");
     expect(stripped[0]).toContain("[Config]");
+    expect(stripped[0]).toContain("[Peers]");
+  });
+
+  test.each([66, 67])("the toggle/edit hint fits one row at %i columns", width => {
+    for (const tab of [0, 1]) {
+      const content = buildSetupContent({
+        type: "setup", tab, items: makeSetupItems(), selectedIndex: 0,
+        onAction: () => {}, onTabChange: () => {},
+      }, width - 4);
+      expect(stripAnsi(content.contentLines[1]!)).toBe("(1/2/3/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close)");
+      expect(content.contentLines[2]).toBe("");
+    }
   });
 
   test("title changes based on active tab", () => {
@@ -131,7 +143,7 @@ describe("setup dialog tab switching", () => {
     expect(switchedTo).toBe(1);
   });
 
-  test("Tab key wraps from last tab to first", () => {
+  test("Tab key moves from Config to Peers", () => {
     let switchedTo = -1;
     const ctx = makeCtx();
     const dialog: Extract<NonNullable<DialogState>, { type: "setup" }> = {
@@ -148,7 +160,7 @@ describe("setup dialog tab switching", () => {
     ctx._dialog = dialog;
     const handled = handleDialogInput(ctx, "\t");
     expect(handled).toBe(true);
-    expect(switchedTo).toBe(0);
+    expect(switchedTo).toBe(2);
   });
 
   test("Shift+Tab cycles to previous tab", () => {
@@ -186,7 +198,7 @@ describe("setup dialog tab switching", () => {
     ctx._dialog = dialog;
     const handled = handleDialogInput(ctx, "\x1b[Z");
     expect(handled).toBe(true);
-    expect(switchedTo).toBe(1);
+    expect(switchedTo).toBe(2);
   });
 
   test("pressing same tab number does nothing", () => {

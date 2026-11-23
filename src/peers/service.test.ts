@@ -1,5 +1,5 @@
 import { remoteStartDenialAtStartup } from "./remote-start-caller";
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { spyOn, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -200,7 +200,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
     now: clock.now,
     setTimer: clock.setTimer,
     log: (line) => logs.push(line),
-    snapshot: () => ({ repos: [], agents: [] }),
+    snapshot: () => ({ coordinator: null, repos: [], agents: [] }),
     ...overrides,
   });
   return { service, endpoint, logs, binds, clock, calls };
@@ -364,7 +364,7 @@ describe("PeerService binding", () => {
   test("the real defaults are never reached: the addon loader throws in this file", async () => {
     // Guard for the tests above: they inject bindEndpoint, so the addon is never needed.
     const { defaultPeerServiceDeps } = await import("./service");
-    const deps = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null);
+    const deps = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null);
     await expect(deps.bindEndpoint(new Uint8Array(32), [PAIR_ALPN])).rejects.toThrow("a service test loaded the iroh addon");
   });
 });
@@ -534,7 +534,7 @@ function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: stri
   endpoint.connectImpl = async (id) => {
     const link = createMemoryLink("00".repeat(32), id);
     served.push(link.b);
-    void serveTrustedConnection(link.b, { setTimer: createFakeClock().setTimer, peerName: async () => "paired", snapshot: () => ({ repos: [], agents }), log: () => {} });
+    void serveTrustedConnection(link.b, { setTimer: createFakeClock().setTimer, peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents }), log: () => {} });
     const conn = serviceConnection(link.a, PEER_ALPN);
     return {
       ...conn,
@@ -640,7 +640,7 @@ describe("PeerService at boot", () => {
         return "no-agent";
       },
     }, clock);
-    const service = new PeerService(defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, decision));
+    const service = new PeerService(defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, decision));
     const observed = await reading.promise;
     await service.bootIfPaired();
     expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
@@ -687,6 +687,28 @@ describe("PeerService at boot", () => {
     expect(changes).toEqual([denial]);
   });
 
+  test.each(["caller denied", "local removal"])("coordinator pane opens no stream while pending or after %s", async scenario => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const decision = gate<string | null>();
+    const { service, endpoint } = makeService({ remoteStartDenial: decision.promise });
+    const connections = answerDials(endpoint, []);
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      const open = spyOn(connections[0]!.peer, "openBi");
+      await expect(service.fetchCoordinatorPane(ID_REMOTE)).rejects.toThrow("checking whether remote starts are allowed");
+      decision.resolve(scenario === "caller denied" ? "Dashboard inside tmux" : null);
+      await flushMicrotasks();
+      if (scenario === "local removal") await writeFile(peersFile(), "[]");
+      await expect(service.fetchCoordinatorPane(ID_REMOTE)).rejects.toThrow(
+        scenario === "caller denied" ? "Dashboard inside tmux" : "Machine is no longer paired",
+      );
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const { service, endpoint } = makeService();
@@ -695,7 +717,7 @@ describe("PeerService at boot", () => {
       const link = createMemoryLink("00".repeat(32), id);
       void serveTrustedConnection(link.b, {
         setTimer: createFakeClock().setTimer,
-        peerName: async () => "paired", snapshot: () => ({ repos: [], agents: [] }), log: () => {},
+        peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents: [] }), log: () => {},
         startAgent: async request => { starts.push(request); return "my-agent"; },
       });
       return serviceConnection(link.a, PEER_ALPN);
@@ -717,7 +739,7 @@ describe("PeerService at boot", () => {
 
   test("the owning watch renews the lease each poll and replaces the snapshot only on visible changes", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
-    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null);
+    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null);
     const { service, endpoint, clock } = makeService({ writeRemoteAgents, renewLease });
     answerDials(endpoint, [{ ...REMOTE_AGENTS[0]!, repoName: "display only" }]);
     await service.bootIfPaired();
@@ -769,7 +791,7 @@ describe("PeerService at boot", () => {
 
     await waitFor(() => service.view().links[0]?.connected === true, { message: "peer polled" });
     expect(service.view().links).toEqual([
-      { id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: expect.any(Number), lastError: null, repos: [], agents: REMOTE_AGENTS },
+      { id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: expect.any(Number), lastError: null, coordinator: null, repos: [], agents: REMOTE_AGENTS },
     ]);
     expect(endpoint.connects).toEqual([ID_REMOTE]);
 
@@ -785,7 +807,7 @@ describe("PeerService at boot", () => {
       loads++;
       throw new Error("loaded");
     });
-    const realBind = defaultPeerServiceDeps(() => {}, () => ({ repos: [], agents: [] }), () => {}, null).bindEndpoint;
+    const realBind = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null).bindEndpoint;
     for (const setup of [async () => {}, async () => {
       await mkdir(peerDir(), { recursive: true });
       await writeFile(peersFile(), "[]\n");
@@ -901,7 +923,7 @@ function recordTimers(clock: FakeClock) {
 
 describe("PeerService self-heal", () => {
   const SOCKET_GONE = "Endpoint.acceptNext: socket gone";
-  const NOT_NEEDED = "peering: not retrying the bind: no paired peers and the Peers dialog is closed";
+  const NOT_NEEDED = "peering: not retrying the bind: no paired peers and the Peers tab is hidden";
   const OWN_LOCK = `${process.pid} ${ME_START}\n`;
   const AT_CAP = "retrying every 60 s, not logging this error again until it changes";
   /** watch.log lines about retrying; each failure has exactly one, so there is no separate "retrying" line. */
@@ -1286,7 +1308,7 @@ describe("PeerService self-heal", () => {
     service.closeDialog(); // the endpoint stays bound, but nothing needs it any more
 
     first.failAccept(new Error(SOCKET_GONE));
-    const gaveUp = `peering: accept loop stopped: ${SOCKET_GONE}; not retrying: no paired peers and the Peers dialog is closed`;
+    const gaveUp = `peering: accept loop stopped: ${SOCKET_GONE}; not retrying: no paired peers and the Peers tab is hidden`;
     await waitFor(() => logs.includes(gaveUp), { message: "not retrying" });
     expect(service.view().status).toEqual({ kind: "error", message: `accept loop stopped: ${SOCKET_GONE}`, retryAt: null });
     expect(await lockContents()).toBeNull();
@@ -1624,7 +1646,7 @@ describe("PeerService trusted ALPN", () => {
     const { service, endpoint } = makeService({
       snapshot: () => {
         snapshots++;
-        return { repos: [], agents: toRemoteAgents([local]) };
+        return { coordinator: null, repos: [], agents: toRemoteAgents([local]) };
       },
     });
     endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
@@ -1633,7 +1655,7 @@ describe("PeerService trusted ALPN", () => {
 
     const listed = incomingFrom(endpoint, selfId, PEER_ALPN);
     const reply = await requestAgents(listed);
-    expect(reply).toEqual({ repos: [], agents: toRemoteAgents([local]) });
+    expect(reply).toEqual({ coordinator: null, repos: [], agents: toRemoteAgents([local]) });
     expect(JSON.stringify(reply)).not.toContain("SECRET");
     expect(snapshots).toBe(1);
 
@@ -1655,6 +1677,7 @@ const irohTooLong = () => new IrohError("RecvStream.readToEnd", "TooLong");
 function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
   return {
     writeAll: (bytes) => stream.writeAll(bytes),
+    cancel: () => stream.cancel(),
     finish: () => stream.finish(),
     readToEnd: async () => {
       throw fail();

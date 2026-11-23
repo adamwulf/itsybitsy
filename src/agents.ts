@@ -22,6 +22,7 @@ import { InjectionContext } from "./types";
 import { logToWatchLog, logWarning } from "./watch-log";
 import { resolveSandboxEnabled, type PathsConfig, type SandboxConfig } from "./sandbox";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
+import type { PeerLinkStatus } from "./peers/poller";
 import type { RemoteAgent } from "./peers/peer-link";
 
 /** States that can be written to meta.json */
@@ -2122,8 +2123,10 @@ export type FlatEntry =
 
 /** Read-only dashboard rows. A local repo always keeps its local header. */
 export type RemoteEntry =
+  | { kind: "remote-coordinator"; peerId: string; peerName: string; state: string | null;
+      linkStatus: import("./peers/poller").PeerLinkStatus; lastOkAt: number | null }
   | { kind: "remote-repo-header"; peerName: string; repoName: string; repoRegistryName: string; agentCount: number }
-  | { kind: "remote-agent"; peerId: string; peerName: string; remote: RemoteAgent; connector: string; stale: boolean; lastOkAt: number | null };
+  | { kind: "remote-agent"; peerId: string; peerName: string; remote: RemoteAgent; connector: string; linkStatus: PeerLinkStatus };
 
 /**
  * Whether an agent's render state should count as "actively working" for the

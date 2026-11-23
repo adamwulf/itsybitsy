@@ -78,6 +78,7 @@ function makeNetwork(iroh: Iroh) {
     const service = new PeerService({
       remoteStartDenial: null,
       remoteSpawn,
+      captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
       loadIdentity: () => inHome(home, loadOrCreateIdentity),
@@ -106,7 +107,7 @@ function makeNetwork(iroh: Iroh) {
       log: (line) => logs.push(line),
       snapshot: () => {
         snapshots++;
-        return { repos: [{ registryName: "app", displayName: "app" }], agents: toRemoteAgents(agents) };
+        return { coordinator: null, repos: [{ registryName: "app", displayName: "app" }], agents: toRemoteAgents(agents) };
       },
     });
     services.push(service);
@@ -219,4 +220,15 @@ test("a trusted loopback new-agent stream starts the stubbed agent and returns i
   expect(newAgent.mock.calls).toEqual([["/b/app", prompt, { type, name: undefined }]]);
   expect(b.logs).toContain("A started agent worker-23 in App");
   expect(notice.mock.calls).toEqual([["A started agent worker-23 in App"]]);
+});
+
+test("reads the paired machine's system coordinator over a real loopback connection", async () => {
+  const net = makeNetwork(await loadIroh());
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", []);
+  await pairBoth(a, b);
+  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
+  expect(await a.service.fetchCoordinatorPane(b.id)).toEqual({ state: "running", text: "b coordinator" });
+  expect(b.logs.some(line => line.includes("read the system coordinator pane"))).toBe(true);
 });

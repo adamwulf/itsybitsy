@@ -11,8 +11,10 @@ import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM, ITALIC, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
 import { collectPeerRepos, peerEntryKey, remoteDisplayName, truncatePeerField, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
 import { repoDisplayName, type RepoEntry } from "../registry";
-import type { PeerLinkState } from "../peers/poller";
+import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { localAgentKey, repoRowKey } from "./row-keys";
+import { peerLinkStateText } from "./peers-dialog";
+import { formatAgo } from "../channels/connection-view";
 import { FALLBACK_MACHINE_NAME } from "../machine-name";
 
 export const MAX_TREE_HEIGHT = 7;
@@ -197,6 +199,7 @@ function entryKey(f: FlatEntry, machine: string): string | null {
       return null;
     case "agent":
       return localAgentKey(machine, f.agent);
+    case "remote-coordinator":
     case "remote-repo-header":
     case "remote-agent":
       return peerEntryKey(f);
@@ -254,7 +257,7 @@ export function formatRemoteAgentRow(
   const fullState = displayState(entry.remote.state);
   const state = truncatePeerField(fullState, stateColWidth);
   const statePad = " ".repeat(Math.max(0, stateColWidth - visibleWidth(state)));
-  const line = entry.stale
+  const line = entry.linkStatus !== "connected"
     ? `${ITALIC}${DIM}${prefix}${name}${namePad}  ${state}${statePad}${RESET}`
     : `${ITALIC}${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${statePad}${RESET}`;
   return highlightRow(truncateToWidth(line, width, ""), selected, width);
@@ -393,6 +396,7 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
   private visibleCache: { inputs: unknown[]; rows: FlatEntry[] } | null = null;
+  private peerCoordinators: Extract<RemoteEntry, { kind: "remote-coordinator" }>[] = [];
   private peerRepos = new Map<string, PeerRepo>();
   /** Local single-repo trees normally omit their header. Peering needs its registration, even when empty. */
   registeredRepos: readonly RepoEntry[] = [];
@@ -559,9 +563,21 @@ export class AgentTreeComponent implements Component {
     return this.favoriteAgentIds.has(this.agentKey(agent));
   }
 
-  setPeerLinks(links: readonly PeerLinkState[]): void {
+  setPeerLinks(links: readonly PeerLinkState[], peers: readonly { id: string; name: string }[] = links): void {
+    const selected = this.selectedRemote;
+    const byId = new Map(links.map(link => [link.id, link]));
+    this.peerCoordinators = peers.map(peer => {
+      const link = byId.get(peer.id);
+      return {
+        kind: "remote-coordinator", peerId: peer.id, peerName: peer.name, state: link?.coordinator?.state ?? null,
+        linkStatus: peerLinkStatus(link), lastOkAt: link?.connected ? null : link?.lastOkAt ?? null,
+      };
+    });
     this.peerRepos = collectPeerRepos(links);
     this.visibleCache = null;
+    if (selected?.kind === "remote-coordinator" && !peers.some(peer => peer.id === selected.peerId)) {
+      this.selectSystemCoordinator();
+    }
     this.resyncAfterFilterChange();
   }
 
@@ -583,7 +599,7 @@ export class AgentTreeComponent implements Component {
 
   /** Insert each peer forest after its local agents. Unmatched repos follow in display order. */
   private unifiedRows(local: FlatEntry[]): FlatEntry[] {
-    if (this.peerRepos.size === 0) return local;
+    if (!this.peerRepos.size && !this.peerCoordinators.length) return local;
     const remaining = new Map(this.peerRepos);
     const rows: FlatEntry[] = [];
     const agentsFor = (repo: PeerRepo) => visibleRemoteAgents(repo, (row) => this.isSelectedRow(row)
@@ -593,6 +609,11 @@ export class AgentTreeComponent implements Component {
       const repo = header.kind === "repo-header" ? remaining.get(repoRowKey(header.repoRegistryName)) : undefined;
       if (header.kind !== "repo-header" || !repo) {
         rows.push(header);
+        if (header.kind === "system-coordinator") {
+          for (const row of this.peerCoordinators) {
+            if (!this.favoritesOnly || this.isSelectedRow(row)) rows.push(row);
+          }
+        }
         continue;
       }
       remaining.delete(repoRowKey(header.repoRegistryName));
@@ -923,7 +944,7 @@ export class AgentTreeComponent implements Component {
       if (item.kind === "parent-header") return null;
       // A remote row is its own selection kind, never `agent`: nothing
       // that reads a local agent from the selection can be handed a remote one.
-      if (item.kind === "remote-repo-header" || item.kind === "remote-agent") {
+      if (item.kind === "remote-repo-header" || item.kind === "remote-agent" || item.kind === "remote-coordinator") {
         return { kind: "remote", entry: item };
       }
       return { kind: "agent", agent: item.agent };
@@ -1435,6 +1456,17 @@ export class AgentTreeComponent implements Component {
       const item = visible[i]!;
       if (item.kind === "remote-repo-header") {
         lines.push(formatRemoteRepoRow(item, selectionActive && i === this.selectedIndex, width));
+      } else if (item.kind === "remote-coordinator") {
+        const link = peerLinkStateText(item.linkStatus);
+        const seen = item.lastOkAt === null ? "" : `  ${formatAgo(Date.now() - item.lastOkAt)}`;
+        const available = width - 6 - visibleWidth(link) - visibleWidth(seen);
+        const state = item.state ?? (item.linkStatus === "connected" ? "unavailable" : "");
+        const label = state ? "  " + truncatePeerField(state, Math.min(MAX_REMOTE_STATE_COL_WIDTH, Math.max(1, available - 5))) : "";
+        const name = truncatePeerField(item.peerName, Math.max(1, available - visibleWidth(label)));
+        const branch = visible[i + 1]?.kind === "remote-coordinator" ? "├── " : "└── ";
+        const dim = item.linkStatus === "offline" ? DIM : "";
+        const row = `${dim}${branch}${ITALIC}${name}${RESET}${dim}${label}  ${link}${dim}${seen}${RESET}`;
+        lines.push(highlightRow(truncateToWidth(row, width, ""), selectionActive && i === this.selectedIndex, width));
       } else if (item.kind === "remote-agent") {
         lines.push(formatRemoteAgentRow(
           { ...item, connector: (remoteOnlyStart < 0 || i < remoteOnlyStart ? repoIndent : "") + item.connector }, selectionActive && i === this.selectedIndex, width,

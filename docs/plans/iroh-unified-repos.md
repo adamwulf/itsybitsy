@@ -75,7 +75,7 @@ the reply change.
     received (as today).
 - **Remote-only repos** still get a header. All agents under it are italic.
 - The unified tree removes `peer-header`. A `remote-repo-header` now identifies a repo registered only on peers. Peer
-  connection state stays visible in two places: the Peers dialog (`I`), and
+  connection state stays visible in two places: the Peers tab of setup (`I`), and
   the info panel of a selected remote agent ("Machine: <name> · connected" or
   "last seen N ago").
 - **Keys:**
@@ -309,11 +309,11 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
 
 1. **Install.** On each laptop, rebuild and install `ib`, then restart `ib watch`.
 2. **Pair.**
-   - In `ib watch` on laptop A, press `I`.
-   - Paste B's id, which B shows under `I`.
-   - Type the 8-character code that B shows into A.
+   - In `ib watch` on both laptops, press `h` and go to the Peers tab, or press `I` to open it directly.
+   - Leave Peers visible on B. Copy B’s id and paste it into **Pair with id** on A, then press Enter.
+   - Type the 8-character code that B shows into A, then press Enter.
    - Name each side.
-   - Both Peers dialogs should then show the other laptop as connected.
+   - Both Peers tabs should then show the other laptop as connected.
 3. **Merged repos.**
    - Register one repo under the SAME name on both laptops.
    - It should appear once in the tree.

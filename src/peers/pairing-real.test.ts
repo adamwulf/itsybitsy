@@ -74,7 +74,7 @@ test("two real loopback endpoints pair, and each peers.json ends up with the oth
         return () => clearTimeout(timer);
       },
       log: (line) => logs.push(`${label}: ${line}`),
-      snapshot: () => ({ repos: [], agents: [] }),
+      snapshot: () => ({ coordinator: null, repos: [], agents: [] }),
     });
     return { service, home };
   }

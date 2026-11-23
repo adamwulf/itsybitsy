@@ -8,18 +8,19 @@
  *   start, then on the timer.
  * - Each peer keeps one live connection between polls; a new dial happens
  *   only once that connection has closed.
- * - A peer never has two dials or requests in flight at once. A dial can take
+ * - Periodic agents polls for a peer never overlap, including their dials. A dial can take
  *   up to 30 s to fail, so ticks that come while one is pending skip that
  *   peer. A failure is retried on the next tick.
- * - Each request is bounded by {@link PEER_REQUEST_TIMEOUT_MS}. A peer can keep
+ * - Once connected, the agents request has a {@link PEER_REQUEST_TIMEOUT_MS} deadline.
+ *   Dialing has its own deadline. A peer can keep
  *   its QUIC connection alive and still never answer (its `ib watch` event
  *   loop wedged while the Rust side runs on), which would otherwise leave the
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
  *   "request timed out", and the next tick redials. Closing the connection is
- *   what ends the timed-out request, so it cannot overlap the next one.
+ *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
  * - The poller tracks per-peer state: connected or not, `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
- *   keeps disconnected agents dimmed and shows last contact in their info panel.
+ *   keeps disconnected agents dimmed and shows the peer’s link status in their info panel.
  * - {@link PeerPoller.onChange} fires when what a reader can see changes:
  *   connected, the error, the agent list, the name, or the set of peers. A
  *   successful poll that changes nothing but `lastOkAt` does not fire it.
@@ -40,6 +41,8 @@ import {
   cleanRemoteText,
   describePeerClose,
   requestAgents,
+  requestCoordinatorPane,
+  type CoordinatorPane,
   type RemoteAgent,
   type RemoteRepo,
   type PeerSnapshot,
@@ -72,8 +75,18 @@ export interface PeerLinkState {
   /** Why the last dial or request failed, or the connection closed; null once a request succeeds. */
   lastError: string | null;
   /** The last agent list received, kept after the peer drops; null until one arrives. */
+  coordinator: PeerSnapshot["coordinator"];
   repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
+}
+
+export type PeerLinkStatus = "connected" | "connecting" | "offline";
+
+/** A new peer is connecting until its first outcome. Retrying keeps the previous outcome. */
+export function peerLinkStatus(link: PeerLinkState | undefined): PeerLinkStatus {
+  if (!link) return "connecting";
+  if (link.connected) return "connected";
+  return link.lastError === null && link.lastOkAt === null ? "connecting" : "offline";
 }
 
 export interface PeerPollerDeps {
@@ -96,6 +109,7 @@ interface Link {
   connected: boolean;
   lastOkAt: number | null;
   lastError: string | null;
+  coordinator: PeerSnapshot["coordinator"];
   repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
   /** The complete snapshot as JSON, to tell a changed list from the same one. */
@@ -121,6 +135,8 @@ export class PeerPoller {
    * still never gets a second one.
    */
   private readonly inFlight = new Set<string>();
+  /** Each peer has one live link. Its native pane read can outlast the wire deadline. */
+  private readonly paneReads = new WeakMap<PairConnection, AbortSignal>();
   /** Bumped by every stop(): work started before a stop is ignored when it settles, even after a restart. */
   private generation = 0;
   private running = false;
@@ -151,6 +167,7 @@ export class PeerPoller {
       connected: link.connected,
       lastOkAt: link.lastOkAt,
       lastError: link.lastError,
+      coordinator: link.coordinator,
       repos: link.repos,
       agents: link.agents,
     }));
@@ -160,6 +177,29 @@ export class PeerPoller {
   connectedConnection(peerId: string): PairConnection | null {
     const link = this.links.get(peerId);
     return link?.connected && link.conn?.closeInfo() === null ? link.conn : null;
+  }
+
+  async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
+    const conn = this.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    const pending = this.paneReads.get(conn);
+    if (pending) throw pending.reason ?? new Error("Previous coordinator pane read is still pending");
+    const abort = new AbortController();
+    this.paneReads.set(conn, abort.signal);
+    const deadline = Promise.withResolvers<never>();
+    const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
+      const error = new Error("Coordinator pane request timed out. Previous read is still pending.");
+      abort.abort(error);
+      deadline.reject(error);
+    });
+    // iroh 1.2.0's readToEnd holds the receive mutex needed by stop(). Release
+    // the slot when the underlying exchange settles, even if the caller timed out.
+    const read = requestCoordinatorPane(conn, abort.signal).finally(() => this.paneReads.delete(conn));
+    try {
+      return await Promise.race([read, deadline.promise]);
+    } finally {
+      cancel();
+    }
   }
 
   /** Poll now, then every {@link PEER_POLL_INTERVAL_MS}. */
@@ -236,6 +276,7 @@ export class PeerPoller {
           connected: false,
           lastOkAt: null,
           lastError: null,
+          coordinator: null,
           repos: null,
           agents: null,
           snapshotKey: null,
@@ -254,7 +295,10 @@ export class PeerPoller {
       changed = true;
       const conn = link.conn;
       link.conn = null;
-      if (conn !== null) closeQuietly(conn, PEER_CLOSE.done, "removed");
+      if (conn !== null) {
+        this.paneReads.delete(conn);
+        closeQuietly(conn, PEER_CLOSE.done, "removed");
+      }
       this.deps.log(`peer link: stopped polling ${link.name} (${shortPeerId(link.id)}): no longer in peers.json`);
     }
     const reordered = [...next.keys()].join() !== [...this.links.keys()].join();
@@ -276,8 +320,7 @@ export class PeerPoller {
     this.inFlight.add(link.id);
     let conn: PairConnection | null = link.conn;
     try {
-      if (conn === null || conn.closeInfo() !== null) {
-        link.conn = null;
+      if (conn === null || this.recordObservedClose(link, conn)) {
         conn = null;
         const dialed = await this.deps.dial(link.id);
         if (!this.isCurrent(link, generation)) {
@@ -289,7 +332,8 @@ export class PeerPoller {
         this.watchClose(link, dialed, generation);
       }
       const snapshot = await this.requestWithTimeout(link, conn);
-      if (!this.isCurrent(link, generation)) return;
+      // A final reply can arrive alongside the close notification. Only a live link recovers.
+      if (!this.isCurrent(link, generation) || link.conn !== conn || this.recordObservedClose(link, conn)) return;
       this.succeeded(link, snapshot);
     } catch (err) {
       if (!this.isCurrent(link, generation)) return;
@@ -332,9 +376,19 @@ export class PeerPoller {
     });
   }
 
+  /** closeInfo() on the current connection may be available before its closed() notification. */
+  private recordObservedClose(link: Link, conn: PairConnection): boolean {
+    const info = conn.closeInfo();
+    if (info === null) return false;
+    this.failed(link, describePeerClose(info));
+    link.conn = null;
+    return true;
+  }
+
   /** When `conn` closes while it is still `link`'s connection: mark the peer disconnected, so the next tick redials. */
   private watchClose(link: Link, conn: PairConnection, generation: number): void {
     const closed = (message: string) => {
+      this.paneReads.delete(conn);
       if (link.conn !== conn) return; // replaced, or closed on purpose by this side
       link.conn = null;
       if (this.isCurrent(link, generation)) this.failed(link, message);
@@ -353,6 +407,7 @@ export class PeerPoller {
     link.connected = true;
     link.lastError = null;
     if (key !== link.snapshotKey) {
+      link.coordinator = snapshot.coordinator;
       link.repos = snapshot.repos;
       link.agents = snapshot.agents;
       link.snapshotKey = key;

@@ -94,7 +94,7 @@ export function resetPasteState(): void {
   pasteInProgress = null;
 }
 
-/** Test-only: returns true if a chunked bracketed paste is currently being assembled. */
+/** Whether input chunks still belong to a bracketed paste. */
 export function isPasteInProgress(): boolean {
   return pasteInProgress !== null;
 }

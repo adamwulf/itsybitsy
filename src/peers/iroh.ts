@@ -146,6 +146,11 @@ export class IrohSecretKey {
 export class IrohBiStream {
   constructor(private readonly raw: AddonBiStream) {}
 
+  /** Abort only this request, even if the send half was already finished. */
+  async cancel(): Promise<void> {
+    await Promise.allSettled([this.raw.recv.stop(0n), this.raw.send.reset(0n)]);
+  }
+
   /** Write all of `bytes`. */
   writeAll(bytes: Uint8Array): Promise<void> {
     return callAsync("SendStream.writeAll", () => this.raw.send.writeAll(toArray(bytes)));

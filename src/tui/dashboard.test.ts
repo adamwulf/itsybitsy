@@ -29,7 +29,7 @@ import { newRepoPrompt } from "./agent-actions";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
-import { formatSince, type PeersDialogService } from "./peers-dialog";
+import type { PeersDialogService } from "./peers-dialog";
 import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent } from "../peers/peer-link";
@@ -37,8 +37,9 @@ import type { PeerLinkState } from "../peers/poller";
 import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
-import { DIM, ITALIC, RED } from "./colors";
+import { BOLD, DIM, GREEN, ITALIC, RED, RESET, REVERSE, YELLOW } from "./colors";
 import { getStateColors } from "./color-scheme";
+import * as settings from "../config";
 import * as agentActions from "./agent-actions";
 import * as ghostty from "../ghostty";
 import * as paneManager from "./pane-manager";
@@ -8984,6 +8985,27 @@ describe("idle render checks", () => {
   });
 });
 
+/**
+ * A real pi-tui TUI over an inert terminal. It is stopped, so the render
+ * that showOverlay() schedules never reaches doRender() (which writes a
+ * crash log under the real home on an over-width row); the test runs
+ * compositeOverlays() itself — the exact step doRender takes between
+ * render() and its width check. compositeOverlays is private in the typings.
+ */
+function overlayTui(width: number, height: number): { tui: TUI; composite: (lines: string[]) => string[] } {
+  const terminal = {
+    start() {}, stop() {}, async drainInput() {}, write() {},
+    get columns() { return width; }, get rows() { return height; },
+    get kittyProtocolActive() { return false; },
+    moveBy() {}, hideCursor() {}, showCursor() {},
+    clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {},
+  };
+  const tui = new TUI(terminal);
+  tui.stop();
+  const internals = tui as unknown as { compositeOverlays(lines: string[], width: number, height: number): string[] };
+  return { tui, composite: (lines) => internals.compositeOverlays(lines, width, height) };
+}
+
 describe("tabs on screen under an overlay", () => {
   // pi-tui's visibleWidth() counts \t as 3 columns, but the slicing it uses to
   // composite an overlay onto a row counts it as 0. A tab on a row under an
@@ -9001,27 +9023,6 @@ describe("tabs on screen under an overlay", () => {
   // Full-width views start their text at column 62: the tab is 60 columns in.
   const wideLines = (): string[] => Array.from({ length: 40 }, (_, i) => `${"x".repeat(60)}\tfrom x.rb:${i}`);
 
-  /**
-   * A real pi-tui TUI over an inert terminal. It is stopped, so the render
-   * that showOverlay() schedules never reaches doRender() (which writes a
-   * crash log under the real home on an over-width row); the test runs
-   * compositeOverlays() itself — the exact step doRender takes between
-   * render() and its width check. compositeOverlays is private in the typings.
-   */
-  function overlayTui(): { tui: TUI; composite: (lines: string[]) => string[] } {
-    const terminal = {
-      start() {}, stop() {}, async drainInput() {}, write() {},
-      get columns() { return WIDTH; }, get rows() { return ROWS; },
-      get kittyProtocolActive() { return false; },
-      moveBy() {}, hideCursor() {}, showCursor() {},
-      clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {},
-    };
-    const tui = new TUI(terminal);
-    tui.stop();
-    const internals = tui as unknown as { compositeOverlays(lines: string[], width: number, height: number): string[] };
-    return { tui, composite: (lines) => internals.compositeOverlays(lines, WIDTH, ROWS) };
-  }
-
   let origRows: number;
   beforeEach(() => {
     origRows = process.stdout.rows;
@@ -9034,7 +9035,7 @@ describe("tabs on screen under an overlay", () => {
   /** A dashboard on the overlay TUI, with `agents` in the tree (the first selected). */
   function dashboardWith(agents: Agent[]): { dashboard: DashboardComponent; composite: (lines: string[]) => string[] } {
     const dashboard = makeDashboard();
-    const { tui, composite } = overlayTui();
+    const { tui, composite } = overlayTui(WIDTH, ROWS);
     dashboard.setTui(tui);
     dashboard.onUpdate(agents, agents.map((agent) => makeFlatAgent(agent)), []);
     return { dashboard, composite };
@@ -9054,7 +9055,7 @@ describe("tabs on screen under an overlay", () => {
   test("witness: pi-tui overflows a row whose tab is beside an overlay", () => {
     // No expansion anywhere: this proves the harness reproduces pi-tui's bug,
     // and fails loudly if an upgrade changes how pi-tui slices a tab.
-    const { tui, composite } = overlayTui();
+    const { tui, composite } = overlayTui(WIDTH, ROWS);
     tui.showOverlay({ render: (width: number) => ["#".repeat(width)], invalidate() {} }, { width: 80, anchor: "center" });
     const base = Array.from({ length: ROWS }, () => `${"a".repeat(130)}\t${"b".repeat(27)}`);
     expect(visibleWidth(base[0]!)).toBe(WIDTH);
@@ -9146,10 +9147,11 @@ const PEERS_OTHER = "0a".repeat(32);
 
 /**
  * A scripted stand-in for the peer service (src/peers/service.ts), for the
- * Peers dialog and the tree's remote rows. `set` changes its view and
+ * Peers tab and the tree's remote rows. `set` changes its view and
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
+  fetchCoordinatorPane = mock(async (_peerId: string) => ({ state: "running", text: "peer capture" }));
   remoteStartDenial: string | null = null;
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
   state: PeerServiceView = {
@@ -9212,10 +9214,10 @@ class FakePeerService implements PeersDialogService {
   }
 }
 
-// The Peers dialog (`I`, src/tui/peers-dialog.ts). The dashboard gets a
+// The Peers tab (`I`, src/tui/peers-dialog.ts). The dashboard gets a
 // scripted fake service, never the real one, so no test here binds an endpoint
 // or loads the iroh addon.
-describe("Peers dialog", () => {
+describe("setup Peers tab", () => {
   const SELF = PEERS_SELF;
   const OTHER = PEERS_OTHER;
   const OTHER_SHORT = OTHER.slice(0, 10);
@@ -9228,25 +9230,119 @@ describe("Peers dialog", () => {
     return { dashboard, service };
   }
 
+  function peersTab(dashboard: DashboardComponent) {
+    const dialog = assertDialog(dashboard.dialog, "setup");
+    expect(dialog.tab).toBe(2);
+    expect(dialog.peers).toBeDefined();
+    return dialog.peers!;
+  }
+
   function rendered(dashboard: DashboardComponent): string[] {
     return (dashboard as any).dialogOverlay.render(DIALOG_WIDTH) as string[];
   }
 
   const text = (dashboard: DashboardComponent) => stripAnsi(rendered(dashboard).join("\n"));
 
-  test("I opens the dialog and asks the service to start (bind once)", () => {
+  test("I opens setup on Peers and asks the service to start once", () => {
     const { dashboard, service } = open();
-    expect(assertDialog(dashboard.dialog, "peers").idValue).toBe("");
+    expect(peersTab(dashboard).idValue).toBe("");
     expect(service.calls).toEqual(["open"]);
     const out = text(dashboard);
     expect(out).toContain("┌─ Peers ─");
+    expect(out).toContain("[Hooks]  [Config]  [Peers]");
     expect(out).toContain("This install's id");
     expect(out).toContain(SELF);
-    expect(out).toContain("accepting pairing requests while this dialog is open");
+    expect(out).toContain("accepting pairing requests while this tab is visible");
     expect(out).toContain("Paired peers");
     expect(out).toContain("none yet");
     expect(out).toContain("Pair with id");
     expect(out).toContain("Enter: pair    Esc: close");
+  });
+
+  test("only the visible Peers tab opens the service, including after re-entry", () => {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    dashboard.handleInput("h");
+    const tab = () => assertDialog(dashboard.dialog, "setup").tab;
+    expect(tab()).toBe(0);
+    dashboard.handleInput("\t");
+    expect(tab()).toBe(1);
+    expect(service.calls).toEqual([]);
+    dashboard.handleInput("3");
+    expect(tab()).toBe(2);
+    expect(service.calls).toEqual(["open"]);
+    dashboard.handleInput("\x1b[Z");
+    expect(tab()).toBe(1);
+    expect(service.calls).toEqual(["open", "close"]);
+    dashboard.handleInput("\t");
+    expect(tab()).toBe(2);
+    dashboard.handleInput("\t");
+    expect(tab()).toBe(0);
+    dashboard.handleInput("\x1b[Z");
+    expect(tab()).toBe(2);
+    dashboard.handleInput("\x1b");
+    expect(dashboard.dialog).toBeNull();
+    expect(service.calls).toEqual(["open", "close", "open", "close", "open", "close"]);
+  });
+
+  test.each(["Config", "Peers"])("settings finish loading with %s visible", async visible => {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    const { promise, resolve } = Promise.withResolvers<settings.ConfigResult>();
+    const read = spyOn(settings, "readConfig").mockReturnValue(promise);
+    try {
+      dashboard.handleInput("h");
+      expect(text(dashboard)).toContain("Loading settings…");
+      dashboard.handleInput("2");
+      expect(text(dashboard)).toContain("Loading settings…");
+      expect(text(dashboard)).not.toContain("No configuration keys found");
+      await waitFor(() => read.mock.calls.length === 1, { message: "pending settings read" });
+      if (visible === "Peers") dashboard.handleInput("3");
+      resolve(Object.fromEntries(settings.CONFIG_KEYS.map(def => [def.key, { value: def.default, source: "default" }])));
+      await new Promise<void>(done => setImmediate(done));
+      if (visible === "Peers") {
+        expect(peersTab(dashboard)).toBeDefined();
+        expect(service.calls).toEqual(["open"]);
+        dashboard.handleInput("\x1b[Z");
+      }
+      expect(text(dashboard)).toContain(settings.CONFIG_KEYS[0]!.key);
+      dashboard.handleInput("1");
+      expect(text(dashboard)).toContain("Safety hooks");
+      dashboard.handleInput("2");
+      expect(text(dashboard)).toContain(settings.CONFIG_KEYS[0]!.key);
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  test("Kitty Tab and Shift+Tab cycle setup in both directions", () => {
+    const { dashboard, service } = open();
+    dashboard.handleInput("\x1b[9u");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+    dashboard.handleInput("\x1b[9;2u");
+    expect(peersTab(dashboard)).toBeDefined();
+    expect(service.calls).toEqual(["open", "close", "open"]);
+  });
+
+  test("the numbered tab shortcuts type into every pairing field", () => {
+    const { dashboard, service } = open();
+    const typeDigits = () => { for (const digit of "123") dashboard.handleInput(digit); };
+    typeDigits();
+    expect(peersTab(dashboard).idValue).toBe("123");
+    service.setSession("initiator", { stage: "code-entry" });
+    typeDigits();
+    expect(peersTab(dashboard).sessionValue).toBe("123");
+    service.setStage({ stage: "naming", savedName: OTHER_SHORT });
+    typeDigits();
+    expect(peersTab(dashboard).sessionValue).toBe("123");
+    expect(service.calls).toEqual(["open"]);
+    service.setStage({ stage: "verifying" });
+    dashboard.handleInput("1");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+    expect(service.calls).toEqual(["open", "close"]);
   });
 
   test("without a peer service, I shows a notice and opens nothing", () => {
@@ -9259,10 +9355,10 @@ describe("Peers dialog", () => {
     const dashboard = makeDashboard();
     dashboard.handleInput("?");
     const lines = assertDialog(dashboard.dialog, "help").lines.map(stripAnsi);
-    expect(lines).toContain(`  ${"I".padEnd(18)}peers: this install's id, pairing`);
+    expect(lines).toContain(`  ${"I".padEnd(18)}setup: Peers tab (id and pairing)`);
     // The help dialog is 72 wide (68 inside), so the row is drawn uncut.
     const drawn = stripAnsi(((dashboard as any).dialogOverlay.render(72) as string[]).join("\n"));
-    expect(drawn).toMatch(/│ {4}I {17}peers: this install's id, pairing +│/);
+    expect(drawn).toMatch(/│ {4}I {17}setup: Peers tab \(id and pairing\) +│/);
   });
 
   test("the / command palette has a peers entry that opens the dialog", () => {
@@ -9271,10 +9367,10 @@ describe("Peers dialog", () => {
     dashboard.setPeerService(service);
     dashboard.handleInput("/");
     const palette = assertDialog(dashboard.dialog, "fuzzy");
-    const index = palette.allItems.indexOf("peers — I");
+    const index = palette.allItems.indexOf("setup: Peers tab — I");
     expect(index).toBeGreaterThanOrEqual(0);
     palette.onSelect(index);
-    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    expect(peersTab(dashboard)).toBeTruthy();
     expect(service.calls).toEqual(["open"]);
   });
 
@@ -9307,7 +9403,7 @@ describe("Peers dialog", () => {
     expect(out).toContain("peers.json: not valid JSON");
   });
 
-  test("each paired peer shows its connection state: connected, last seen N ago with the error, or not connected yet", () => {
+  test("paired peers show a colored link status and the last error under an offline peer", () => {
     const { dashboard, service } = open();
     const C = "1b".repeat(32);
     const D = "2c".repeat(32);
@@ -9319,33 +9415,38 @@ describe("Peers dialog", () => {
         { id: D, name: "D", pairedAt: "x" },
         { id: E, name: "E", pairedAt: "x" },
       ],
-      // E has no link state yet: the poller has not reached it.
       links: [
-        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] },
-        { id: C, name: "C", connected: false, lastOkAt: Date.now() - 125_000, lastError: "closed by the other side", repos: [], agents: [] },
-        { id: D, name: "D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
+        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] },
+        { id: C, name: "C", connected: false, lastOkAt: Date.now(), coordinator: null, lastError: "closed by the other side", repos: [], agents: [] },
+        { id: D, name: "D", connected: false, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
       ],
     });
-    const rows = rendered(dashboard).map(stripAnsi);
-    const row = (prefix: string) => rows.find((r) => r.includes(prefix)) ?? "";
-    expect(row(`Laptop B  ${OTHER_SHORT}`)).toContain(`Laptop B  ${OTHER_SHORT}  ● connected`);
-    expect(row(`C         ${"1b".repeat(5)}`)).toContain(`C         ${"1b".repeat(5)}  ● last seen 2m ago`);
-    expect(row(`D         ${"2c".repeat(5)}`)).toContain(`D         ${"2c".repeat(5)}  ● not connected yet`);
-    expect(row(`E         ${"3d".repeat(5)}`)).not.toContain("●");
-    // The last error sits on the line under its peer.
-    expect(rows[rows.findIndex((r) => r.includes("last seen 2m ago")) + 1]).toContain("    closed by the other side");
-    expect(rows[rows.findIndex((r) => r.includes("not connected yet")) + 1]).toContain("    timed out");
-    // A connected peer shows no error line.
-    expect(rows[rows.findIndex((r) => r.includes("● connected")) + 1]).toContain(`C         ${"1b".repeat(5)}`);
-
-    // A change from the service redraws the state.
-    service.set({ links: [{ id: OTHER, name: "Laptop B", connected: false, lastOkAt: Date.now() - 3_000, lastError: "not a peer", repos: [], agents: [] }] });
-    const out = text(dashboard);
-    expect(out).toContain(`Laptop B  ${OTHER_SHORT}  ● last seen 3s ago`);
-    expect(out).toContain("not a peer");
+    function expectRow(id: string, word: string, color: string, error?: string) {
+      const rows = rendered(dashboard);
+      const short = id.slice(0, 10);
+      const index = rows.findIndex(row => row.includes(short));
+      expect(stripAnsi(rows[index]!)).toContain(`${short}  ${word}`);
+      expect(rows[index]).toContain(`${color}${word}${RESET}`);
+      if (error) expect(stripAnsi(rows[index + 1]!)).toContain(`    ${error}`);
+    }
+    expectRow(OTHER, "connected", GREEN);
+    expectRow(C, "offline", RED, "closed by the other side");
+    expectRow(D, "offline", RED, "timed out");
+    expectRow(E, "connecting", YELLOW); // newly paired, before the poller lists it
+    service.set({ links: [{ id: E, name: "E", connected: false, lastOkAt: null, coordinator: null, lastError: null, repos: null, agents: null }] });
+    expectRow(E, "connecting", YELLOW); // first dial in progress
   });
 
-  test("with no peer section on screen, a service change renders only while the Peers dialog is open", () => {
+  test("a long peer name leaves the short id and status visible at 40 columns", () => {
+    const { dashboard, service } = open();
+    service.set({ peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }] });
+    const rows = (dashboard as any).dialogOverlay.render(40) as string[];
+    const peer = rows.map(stripAnsi).find(row => row.includes(OTHER_SHORT))!;
+    expect(peer).toMatch(new RegExp(`N+…  ${OTHER_SHORT}  connecting`));
+    expect(visibleWidth(peer)).toBe(40);
+  });
+
+  test("with no peer section on screen, a service change renders only while the Peers tab is open", () => {
     const dashboard = makeDashboard();
     // Counts renders, and stands in for the overlay the dialog opens.
     let renders = 0;
@@ -9358,13 +9459,13 @@ describe("Peers dialog", () => {
     } as unknown as TUI);
     const service = new FakePeerService();
     dashboard.setPeerService(service);
-    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] };
+    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] };
     // The Teams tab draws only its local tree.
     dashboard.setSidebarMode("teams");
 
     // Closed: the poller's background changes draw nothing.
     service.set({ links: [link] });
-    service.set({ links: [{ ...link, connected: false, lastError: "timed out" }] });
+    service.set({ links: [{ ...link, connected: false, coordinator: null, lastError: "timed out" }] });
     expect(counter.renders()).toBe(0);
 
     dashboard.handleInput("I");
@@ -9375,20 +9476,18 @@ describe("Peers dialog", () => {
     service.set({ status: { kind: "starting" } });
     expect(counter.renders()).toBe(opened + 2);
 
-    dashboard.handleInput("\x1b"); // close it
+    dashboard.handleInput("\x1b[Z"); // Config is visible.
+    const hidden = counter.renders();
+    service.set({ status: { kind: "listening" } });
+    expect(counter.renders()).toBe(hidden);
+    dashboard.handleInput("3");
+    const reopened = counter.renders();
+    service.set({ status: { kind: "starting" } });
+    expect(counter.renders()).toBe(reopened + 1);
+    dashboard.handleInput("\x1b");
     const closed = counter.renders();
     service.set({ links: [{ ...link, connected: false }] });
     expect(counter.renders()).toBe(closed);
-  });
-
-  test("formatSince picks the largest whole unit", () => {
-    expect(formatSince(0)).toBe("0s");
-    expect(formatSince(59_999)).toBe("59s");
-    expect(formatSince(60_000)).toBe("1m");
-    expect(formatSince(3_599_000)).toBe("59m");
-    expect(formatSince(7_200_000)).toBe("2h");
-    expect(formatSince(3 * 86_400_000)).toBe("3d");
-    expect(formatSince(-5)).toBe("0s");
   });
 
   test("a narrow dialog wraps the full id instead of cutting it", () => {
@@ -9405,7 +9504,7 @@ describe("Peers dialog", () => {
     test(`a pasted 64-character id (${label}) fills the input, and Enter pairs with it`, () => {
       const { dashboard, service } = open();
       for (const chunk of paste(`  ${OTHER.toUpperCase()}`)) dashboard.handleInput(chunk);
-      const dialog = assertDialog(dashboard.dialog, "peers");
+      const dialog = peersTab(dashboard);
       const typed = dialog.idValue;
       expect(typed.trim()).toBe(OTHER.toUpperCase());
       expect(text(dashboard)).toContain(OTHER.toUpperCase());
@@ -9417,6 +9516,13 @@ describe("Peers dialog", () => {
     });
   }
 
+  test("tab switches and digits inside a chunked paste stay in the input", () => {
+    const { dashboard, service } = open();
+    for (const chunk of ["\x1b[200~id", "\t", "3", "\x1b[201~"]) dashboard.handleInput(chunk);
+    expect(peersTab(dashboard).idValue).toBe("id 3");
+    expect(service.calls).toEqual(["open"]);
+  });
+
   test("an invalid id shows the error inline; typing clears it", () => {
     const { dashboard } = open();
     for (const ch of "abc123") dashboard.handleInput(ch);
@@ -9424,9 +9530,9 @@ describe("Peers dialog", () => {
     expect(text(dashboard)).toContain("Not an id: an id is 64 hex characters.");
     dashboard.handleInput("\x7f");
     expect(text(dashboard)).not.toContain("Not an id");
-    expect(assertDialog(dashboard.dialog, "peers").idValue).toBe("abc12");
+    expect(peersTab(dashboard).idValue).toBe("abc12");
     // This install's own id is refused too.
-    assertDialog(dashboard.dialog, "peers").idValue = SELF;
+    peersTab(dashboard).idValue = SELF;
     dashboard.handleInput("\r");
     expect(text(dashboard)).toContain("That is this install's own id.");
   });
@@ -9466,10 +9572,13 @@ describe("Peers dialog", () => {
 
     service.setStage({ stage: "done", name: "Laptop B", alreadyPaired: false });
     expect(text(dashboard)).toContain(`Paired with "Laptop B" (${OTHER_SHORT}).`);
-    expect(text(dashboard)).toContain("Press any key to continue");
+    expect(text(dashboard)).toContain("Enter or Esc: return to Peers");
+    service.calls = [];
     dashboard.handleInput("x");
-    expect(service.calls.at(-1)).toBe("dismiss");
-    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    expect(service.calls).toEqual([]);
+    dashboard.handleInput("\r");
+    expect(service.calls).toEqual(["dismiss"]);
+    expect(peersTab(dashboard)).toBeTruthy();
   });
 
   test("responder: the request with its code, exactly as specified, then naming", () => {
@@ -9502,7 +9611,7 @@ describe("Peers dialog", () => {
     service.setSession("initiator", { stage: "naming", savedName: OTHER_SHORT });
     service.calls = [];
     const submit = (name: string) => {
-      const dialog = assertDialog(dashboard.dialog, "peers");
+      const dialog = peersTab(dashboard);
       dialog.sessionValue = "";
       for (const ch of name) dashboard.handleInput(ch);
       dashboard.handleInput("\r");
@@ -9517,7 +9626,7 @@ describe("Peers dialog", () => {
 
     // Typing clears the error; the peer's own saved name and a new name are fine.
     dashboard.handleInput("x");
-    expect(assertDialog(dashboard.dialog, "peers").error).toBeNull();
+    expect(peersTab(dashboard).error).toBeNull();
     submit(OTHER_SHORT.toUpperCase());
     expect(service.calls).toEqual([`name:${OTHER_SHORT.toUpperCase()}`]);
     submit("Desk");
@@ -9532,7 +9641,7 @@ describe("Peers dialog", () => {
   test("every failure renders its message", () => {
     const { dashboard, service } = open();
     const cases: Array<[PairStage, string]> = [
-      [{ stage: "failed", failure: { kind: "refused", reason: "not-accepting" } }, `Pairing refused: ${OTHER_SHORT} does not have its Peers dialog open.`],
+      [{ stage: "failed", failure: { kind: "refused", reason: "not-accepting" } }, `Pairing refused: ${OTHER_SHORT} does not have its Peers tab open.`],
       [{ stage: "failed", failure: { kind: "refused", reason: "busy" } }, `Pairing refused: ${OTHER_SHORT} is busy with another pairing.`],
       [{ stage: "failed", failure: { kind: "wrong-code" } }, "Wrong code."],
       [{ stage: "failed", failure: { kind: "expired" } }, "The code expired."],
@@ -9543,7 +9652,7 @@ describe("Peers dialog", () => {
     for (const [stage, message] of cases) {
       service.setSession("initiator", stage);
       expect(text(dashboard)).toContain(message);
-      expect(text(dashboard)).toContain("Press any key to continue");
+      expect(text(dashboard)).toContain("Enter or Esc: return to Peers");
     }
   });
 
@@ -9560,7 +9669,7 @@ describe("Peers dialog", () => {
       service.calls = [];
       dashboard.handleInput("\x1b");
       expect(service.calls).toEqual(["cancel"]);
-      expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+      expect(peersTab(dashboard)).toBeTruthy();
     }
     service.setSession("responder", { stage: "naming", savedName: OTHER_SHORT });
     service.calls = [];
@@ -9568,6 +9677,8 @@ describe("Peers dialog", () => {
     expect(service.calls).toEqual(["name:null"]);
     service.setStage({ stage: "failed", failure: { kind: "cancelled" } });
     service.calls = [];
+    dashboard.handleInput("x");
+    expect(service.calls).toEqual([]);
     dashboard.handleInput("\x1b");
     expect(service.calls).toEqual(["dismiss"]);
 
@@ -9584,7 +9695,7 @@ describe("Peers dialog", () => {
     service.calls = [];
     for (const key of ["x", "?", "a", "\r", "j"]) dashboard.handleInput(key);
     expect(service.calls).toEqual([]);
-    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    expect(peersTab(dashboard)).toBeTruthy();
   });
 
   test("a new session starts with an empty input and no stale error", () => {
@@ -9592,7 +9703,7 @@ describe("Peers dialog", () => {
     service.setSession("initiator", { stage: "code-entry" });
     for (const ch of "zz") dashboard.handleInput(ch);
     dashboard.handleInput("\r");
-    const dialog = assertDialog(dashboard.dialog, "peers");
+    const dialog = peersTab(dashboard);
     expect(dialog.sessionValue).toBe("zz");
     expect(dialog.error).not.toBeNull();
     service.setSession("responder", { stage: "naming", savedName: OTHER_SHORT });
@@ -9606,11 +9717,115 @@ describe("Peers dialog", () => {
     expect(service.calls).toEqual(["open", "close"]);
   });
 
+  test("a 24-row terminal keeps code entry, its validation error and the hint on screen", () => {
+    const originalRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 24, writable: true, configurable: true });
+    try {
+      const dashboard = makeDashboard();
+      const { tui, composite } = overlayTui(140, 24);
+      dashboard.setTui(tui);
+      const service = new FakePeerService();
+      const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+        coordinator: null, lastError: "connection refused", repos: null, agents: null })) });
+      dashboard.setPeerService(service);
+      dashboard.handleInput("I");
+      service.setSession("initiator", { stage: "code-entry" });
+      dashboard.handleInput("12");
+      dashboard.handleInput("\r");
+      const visible = stripAnsi(composite(dashboard.render(140)).slice(-24).join("\n"));
+      expect(visible).toContain("Code  (your id:");
+      expect(visible).toContain("> 12█");
+      expect(visible).toContain("A code is 8 characters");
+      expect(visible).toContain("Enter: send code    Esc: cancel");
+      expect(visible).toContain("connection refused");
+      expect(visible).toMatch(/…and \d+ more/);
+      expect(visible).toContain("└" + "─".repeat(68) + "┘");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
+    }
+  });
+
+  test.each(["code-entry", "naming"] as const)("40x24 keeps the first peer visible alongside a %s error", stage => {
+    const originalRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 24, writable: true, configurable: true });
+    try {
+      const dashboard = makeDashboard();
+      const { tui, composite } = overlayTui(40, 24);
+      dashboard.setTui(tui);
+      const service = new FakePeerService();
+      const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+        coordinator: null, lastError: "connection refused while trying to reach the other endpoint during the most recent polling attempt", repos: null, agents: null })) });
+      dashboard.setPeerService(service);
+      dashboard.handleInput("I");
+      service.setSession("initiator", stage === "code-entry" ? { stage } : { stage, savedName: OTHER_SHORT });
+      const value = stage === "code-entry" ? "12" : "peer-0";
+      dashboard.handleInput(value);
+      dashboard.handleInput("\r");
+      const screen = composite(dashboard.render(40)).slice(-24).map(stripAnsi);
+      const lines = screen.map(line => line.slice(1, -1).trim());
+      const content = lines.join(" ");
+      expect(content).toContain("0000000000  offline");
+      expect(content).toContain("connection refused");
+      expect(lines).toContain("…and 10 more");
+      expect(content).toContain(`> ${value}█`);
+      if (stage === "code-entry") {
+        expect(content).toContain("Code  (your id:");
+        expect(content).toContain("A code is 8 characters, like ABCD-1234.");
+        expect(content).toContain("Enter: send code    Esc: cancel");
+      } else {
+        expect(content).toContain(`Name for ${OTHER_SHORT}:`);
+        expect(content).toContain('Another peer is already named "peer-0".');
+        expect(content).toContain(`Enter: save    Esc: keep "${OTHER_SHORT}"`);
+      }
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
+    }
+  });
+
+  test.each([70, 40])("the %i-column Peers overlay shows status, count, field, hint and borders", width => {
+    const height = 24;
+    const originalRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: height, writable: true, configurable: true });
+    try {
+      const dashboard = makeDashboard();
+      const { tui, composite } = overlayTui(width, height);
+      dashboard.setTui(tui);
+      const service = new FakePeerService();
+      const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: "N".repeat(32), pairedAt: "x" }));
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+        coordinator: null, lastError: "connection refused", repos: null, agents: null })) });
+      dashboard.setPeerService(service);
+      dashboard.handleInput("I");
+      dashboard.handleInput("abc");
+      const screen = composite(dashboard.render(width)).slice(-height).map(stripAnsi);
+      const start = screen.findIndex(line => line.startsWith("┌─ Peers "));
+      const end = screen.indexOf("└" + "─".repeat(width - 2) + "┘");
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(end).toBeGreaterThan(start);
+      const body = screen.slice(start + 1, end);
+      for (const line of body) {
+        expect(line).toStartWith("│");
+        expect(line).toEndWith("│");
+        expect(visibleWidth(line)).toBe(width);
+      }
+      const shown = body.filter(line => /\d{10}  offline/.test(line)).length;
+      expect(shown).toBeGreaterThan(0);
+      const content = body.map(line => line.slice(1, -1).trim()).join(" ");
+      expect(content).toContain(`…and ${11 - shown} more (ib peer list shows all)`);
+      expect(content).toContain("Pair with id > abc█");
+      expect(content).toContain("Enter: pair    Esc: close");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
+    }
+  });
+
   test("every row fits the dialog in every stage", () => {
     const { dashboard, service } = open();
     service.set({
       peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }],
-      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, lastError: "e".repeat(160), repos: null, agents: null }],
+      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, coordinator: null, lastError: "e".repeat(160), repos: null, agents: null }],
     });
     const stages: PairStage[] = [
       { stage: "connecting" },
@@ -9619,8 +9834,8 @@ describe("Peers dialog", () => {
       { stage: "naming", savedName: "N".repeat(32) },
       { stage: "failed", failure: { kind: "error", detail: "x".repeat(120) } },
     ];
-    assertDialog(dashboard.dialog, "peers").idValue = "y".repeat(200);
-    for (const width of [DIALOG_WIDTH, 40]) {
+    peersTab(dashboard).idValue = "y".repeat(200);
+    for (const width of [70, 40]) {
       service.set({ session: null });
       const idle = (dashboard as any).dialogOverlay.render(width) as string[];
       expect(idle.filter((row) => visibleWidth(row) !== width)).toEqual([]);
@@ -9675,12 +9890,12 @@ describe("Unified peer repos in the Agents tree", () => {
     return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
   }
 
-  /** Laptop B connected; Laptop C unreachable, last seen 2m ago; Laptop D never answered. */
+  /** Laptop B connected; Laptop C unreachable, offline; Laptop D never answered. */
   function links(): PeerLinkState[] {
     const now = Date.now();
     return [
       {
-        id: PEER_B, name: "Laptop B", connected: true, lastOkAt: now, lastError: null,
+        id: PEER_B, name: "Laptop B", connected: true, lastOkAt: now, coordinator: null, lastError: null,
         repos: repos("itsybitsy", "other-repo"),
         agents: [
           remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
@@ -9688,8 +9903,8 @@ describe("Unified peer repos in the Agents tree", () => {
           remote("agent-1", "other-repo", { state: "complete" }),
         ],
       },
-      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
-      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
+      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, coordinator: null, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
+      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
     ];
   }
 
@@ -9699,7 +9914,8 @@ describe("Unified peer repos in the Agents tree", () => {
     const local = makeAgent("agent-1", "/repos/local");
     dashboard.onUpdate([local], [makeFlatAgent(local)], []);
     const service = new FakePeerService();
-    service.state = { ...service.state, links: links() };
+    const current = links();
+    service.state = { ...service.state, links: current, peers: current.map(link => ({ id: link.id, name: link.name, pairedAt: "x" })) };
     dashboard.setPeerService(service);
     return { dashboard, service, local };
   }
@@ -9738,6 +9954,298 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((cell) => cell !== "")
       .join(" ");
   }
+
+  test("j from the local coordinator output, Tab, k cannot edit the hidden coordinator", () => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.agentTree.selectSystemCoordinator();
+    dashboard.syncSelectedAgent();
+    dashboard.coordinatorPane.hasPolled = true;
+    dashboard.focusManager.setFocus("coordinator");
+    dashboard.focusManager.setSubFocus("pane");
+    dashboard.handleInput("j");
+    expect(keyOf(dashboard)).toBe(PEER_B + "/@system");
+    expect(dashboard.focusManager.current()).toBe("agent-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focusManager.current()).toBe("info");
+    dashboard.handleInput("k");
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    expect(dashboard.coordinatorInputField.getText()).toBe("");
+  });
+
+  test("on the Teams tab j from the local coordinator, Tab, k uses the visible tree", () => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.agentTree.selectSystemCoordinator();
+    dashboard.syncSelectedAgent();
+    dashboard.coordinatorPane.hasPolled = true;
+    dashboard.focusManager.setFocus("coordinator");
+    dashboard.handleInput("2");
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "east", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    dashboard.handleInput("j");
+    expect(dashboard.activeSelectionSource).toBe("teams");
+    expect(dashboard.focus).toBe("teams-tree");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("k");
+    expect(dashboard.coordinatorInputField.getText()).toBe("");
+    expect(dashboard.activeSelectionSource).toBe("teams");
+  });
+
+  test("Tab visits the full-width peer capture once", () => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.focusManager.setFocus("right-pane");
+    selectByKey(dashboard, PEER_B + "/@system");
+    expect(dashboard.focus).toBe("active-agent");
+    for (const stop of ["agent-tree", "info", "active-agent"] as const) {
+      dashboard.handleInput("\t");
+      expect(dashboard.focus).toBe(stop);
+      expect(dashboard.focusManager.subFocus).toBe("pane");
+    }
+    expect(dashboard.render(180).join("")).toContain(REVERSE + BOLD + " Laptop B/@system ");
+    for (const stop of ["info", "agent-tree", "active-agent"] as const) {
+      dashboard.handleInput("\x1b[Z");
+      expect(dashboard.focus).toBe(stop);
+    }
+  });
+
+  test.each(["1", "2"])("the peer coordinator replaces TREE with a fixed capture on sidebar %s", async tab => {
+    const { dashboard, service, local } = setup();
+    const peer = { ...links()[0]!, repos: [], agents: [] };
+    service.set({ peers: [{ id: peer.id, name: peer.name, pairedAt: "now" }], links: [peer] });
+    dashboard.onUpdate([local], [{ kind: "system-coordinator", state: "running", age: "1m" },
+      makeFlatRepoHeader("local", local.repoPath), makeFlatAgent(local)], []);
+    dashboard.persistLayout();
+    await flushPendingSave();
+    const saved = await loadLayout();
+    const persist = spyOn(dashboard, "persistLayout");
+    dashboard.teamsTree.setFlatList([
+      { kind: "team-header", teamName: "east", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
+    ]);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const screen = () => dashboard.render(180);
+    const expectSidebar = (name: "Agents" | "Teams") => {
+      const title = screen().find(line => line.includes(REVERSE + BOLD + ` ${name} ` + RESET));
+      expect(title).toBeDefined();
+      expect(visibleWidth(title!.split("│")[0]!)).toBe(saved!.sidebarWidth);
+      expect(dashboard.focus).toBe(name === "Teams" ? "teams-tree" : "agent-tree");
+    };
+    try {
+      if (tab === "1") dashboard.agentTree.selectAgent(local);
+      else dashboard.agentTree.selectByRepoPath(local.repoPath);
+      dashboard.syncSelectedAgent();
+      for (let i = 0; i < PANE_MODES.length && dashboard.rightPane.mode !== "TREE"; i++) dashboard.handleInput("p");
+      dashboard.handleInput(tab);
+      expect(dashboard.rightPane.mode).toBe("TREE");
+      expect(stripAnsi(screen().join(" "))).toContain(" TREE ");
+      expect(dashboard.focus).toBe("agent-tree");
+      if (tab === "1") {
+        dashboard.handleInput("j"); // wrap to local @system, then its paired child
+        expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+        dashboard.handleInput("j");
+      } else {
+        dashboard.handleInput("k"); // the peer is immediately above the repo in the expanded Agents tree
+      }
+      expect(keyOf(dashboard)).toBe(PEER_B + "/@system");
+      await waitFor(() => stripAnsi(screen().join(" ")).includes("peer capture"));
+      expectSidebar(tab === "1" ? "Agents" : "Teams");
+      for (const key of ["p", "n", "\x1b[D", "\x1b[C", "[", "]", "{", "}"]) {
+        resetNotice(dashboard);
+        dashboard.handleInput(key);
+        expect(dashboard.notice).toBe("[]{}".includes(key) ? "resize from a local row" : "view mode is fixed for remote coordinators");
+        expect(dashboard.rightPane.mode).toBe("AGENT LOG");
+        expect(stripAnsi(screen().join(" "))).toContain("peer capture");
+      }
+      expect(stripAnsi(screen().at(-2)!)).not.toContain("p/n: pane");
+      if (tab === "2") {
+        // Carry the peer selection across sidebar switches. From Teams, j selects the team.
+        dashboard.handleInput("1");
+        dashboard.handleInput("2");
+        expect(keyOf(dashboard)).toBe(PEER_B + "/@system");
+        dashboard.handleInput("j");
+        expect(dashboard.channelPane.teamName).toBe("east");
+        expectSidebar("Teams");
+        dashboard.handleInput("1");
+        selectByKey(dashboard, PEER_B + "/@system");
+      }
+      dashboard.handleInput(tab === "1" ? "\t" : "\x1b[9u");
+      expect(dashboard.focus).toBe("info");
+      dashboard.handleInput("j");
+      expect(dashboard.agentTree.selectedRepoPath).toBe(local.repoPath);
+      expect(dashboard.rightPane.mode).toBe("REPO");
+      expectSidebar("Agents");
+      dashboard.handleInput("2");
+      dashboard.handleInput("j");
+      expect(dashboard.channelPane.teamName).toBe("east");
+      expectSidebar("Teams");
+      expect(persist).not.toHaveBeenCalled();
+      await flushPendingSave();
+      expect(await loadLayout()).toEqual(saved);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
+  test.each(["?", "/", "@", "I"])("dialog %s pauses coordinator reads and resumes once", async key => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const timers = new Set<() => void>();
+    (dashboard as any).remotePane.every = (_ms: number, tick: () => void) => {
+      timers.add(tick);
+      return () => timers.delete(tick);
+    };
+    const pending = Promise.withResolvers<{ state: string; text: string }>();
+    service.fetchCoordinatorPane.mockImplementationOnce(() => pending.promise);
+    try {
+      selectByKey(dashboard, PEER_B + "/@system");
+      dashboard.handleInput(key);
+      expect(dashboard.dialog).not.toBeNull();
+      for (let tick = 0; tick < 3; tick++) for (const poll of timers) poll();
+      expect(timers.size).toBe(0);
+      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(1);
+      pending.resolve({ state: "running", text: "late reply" });
+      await Promise.resolve();
+      expect((dashboard as any).remotePane.render(60, 3).join(" ")).not.toContain("late reply");
+      dashboard.closeDialog();
+      expect(timers.size).toBe(1);
+      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(2);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
+  test("the peer coordinator uses main width and its scroll keys affect only its capture", async () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const last = "peer-output-".repeat(8);
+    service.fetchCoordinatorPane.mockResolvedValue({ state: "running", text: [
+      ...Array.from({ length: (process.stdout.rows || 24) + 20 }, (_, i) => "line " + i), last,
+    ].join("\n") });
+    try {
+      selectByKey(dashboard, PEER_B + "/@system");
+      await Promise.resolve();
+      const screen = () => stripAnsi(dashboard.render(180).join("\n"));
+      expect(screen()).toContain(last);
+      dashboard.handleInput(";");
+      expect(screen()).not.toContain(last);
+      expect(dashboard.coordinatorPane.scrollBack).toBe(0);
+      expect(dashboard.rightPane.scrollOffset).toBe(0);
+      dashboard.handleInput("l");
+      expect(screen()).toContain(last);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
+  test("a highlighted coordinator shows the startup denial, then the remote capture when permitted", async () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    try {
+      service.remoteStartDenial = "Dashboard is inside tmux";
+      selectByKey(dashboard, PEER_B + "/@system");
+      expect(stripAnsi(dashboard.render(180).join("\n"))).toContain("Dashboard is inside tmux");
+      expect(service.fetchCoordinatorPane).not.toHaveBeenCalled();
+      service.remoteStartDenial = null;
+      service.set({});
+      await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("peer capture"));
+      expect(service.fetchCoordinatorPane.mock.calls).toEqual([[PEER_B]]);
+      dashboard.handleInput("s");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      dashboard.handleInput("k");
+      expect(stripAnsi(dashboard.render(180).join("\n"))).not.toContain("peer capture");
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
+  test("unpairing the selected coordinator returns to @system while the stale link still exists", () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const cancel = mock(() => {});
+    (dashboard as any).remotePane.every = () => cancel;
+    try {
+      selectByKey(dashboard, PEER_B + "/@system");
+      const remaining = [{ id: PEER_C, name: "Renamed machine", pairedAt: "now" }];
+      service.set({ peers: remaining });
+      expect(service.state.links.some(link => link.id === PEER_B)).toBe(true);
+      expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+      expect(dashboard.agentTree.visibleList.filter(row => row.kind === "remote-coordinator").map(row => row.peerName))
+        .toEqual(["Renamed machine"]);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(1);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
+  test("paired coordinators are selectable children of @system, including offline peers", () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const [b, c] = links();
+    for (const count of [0, 1, 2]) {
+      const current = [b!, c!].slice(0, count);
+      service.set({ peers: current.map(link => ({ ...link, pairedAt: "x" })),
+        links: current.map(link => ({ ...link, coordinator: { state: "compacting" } })) });
+      expect(dashboard.agentTree.visibleList.filter(row => row.kind === "remote-coordinator")).toHaveLength(count);
+      expect(dashboard.agentTree.visibleList.slice(0, 1 + count).map(row => row.kind)).toEqual([
+        "system-coordinator", ...Array(count).fill("remote-coordinator"),
+      ]);
+    }
+    const rows = treeRows(dashboard);
+    expect(rows[1]).toContain(ITALIC + "Laptop B");
+    expect(rows[1]).toContain(GREEN + "connected" + RESET);
+    expect(rows[2]).toContain(RED + "offline" + RESET);
+    expect(stripAnsi(rows[1]!)).toContain("compacting");
+    expect(rows[2]).toContain(DIM);
+    expect(stripAnsi(rows[2]!)).toContain("2m ago");
+    selectByKey(dashboard, PEER_C + "/@system");
+    service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
+    expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
+    expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
+    const permittedAscii = new Set([..."jkJK123@?/I;l", "\t", "\x03"]);
+    const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
+    for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
+    const refused = new Set([
+      ...ascii.filter(key => !permittedAscii.has(key)),
+      "s", "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "a", "N",
+      "d", "o", "O", "G", "C", "h", "E", "\x1b[200~pasted text\x1b[201~",
+    ]);
+    const handlers = [
+      ...Object.keys(agentActions).filter(name => typeof (agentActions as Record<string, unknown>)[name] === "function")
+        .map(name => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined)),
+      spyOn(dashboard, "jumpToMode"), spyOn(dashboard.infoPanel.notesEditor, "handleInput"),
+      spyOn(dashboard.inputField, "handleInput"), spyOn(dashboard.coordinatorInputField, "handleInput"),
+    ];
+    try {
+      for (const key of refused) {
+        resetNotice(dashboard);
+        dashboard.handleInput(key);
+        const notice = ["[", "]", "{", "}"].includes(key) ? "resize from a local row"
+          : ["p", "n"].includes(key) ? "view mode is fixed for remote coordinators" : REMOTE_READ_ONLY_NOTICE;
+        expect(dashboard.notice).toBe(notice);
+        expect(dashboard.dialog).toBeNull();
+      }
+      for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
+    } finally {
+      for (const handler of handlers) handler.mockRestore();
+    }
+    expect(dashboard.agentTree.selectedAgent).toBeNull();
+    expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
+    service.set({ peers: [{ ...b!, pairedAt: "x" }], links: [{ ...b!, connected: false, lastError: null, lastOkAt: null }] });
+    expect(treeRows(dashboard)[1]).toContain(YELLOW + "connecting" + RESET);
+  });
 
   test("remote-only repos follow local rows in display order, with italic agents and dim stale rows", () => {
     const { dashboard } = setup();
@@ -9945,16 +10453,18 @@ describe("Unified peer repos in the Agents tree", () => {
       selectByKey(dashboard, `${name}/app/worker`);
       assertStyle(false, true);
       dashboard.infoPanel.displayHeight = 20;
-      const machine = () => dashboard.infoPanel.render(width).map(stripAnsi).find((row) => row.startsWith("Machine:"))!.trimEnd();
+      const machine = () => dashboard.infoPanel.render(width).find(row => stripAnsi(row).startsWith("Machine:"))!;
       const expectedLine = (connection: string) => {
         const available = width - visibleWidth(`Machine:  · ${connection}`);
         const label = available >= name.length ? name : name.slice(0, available - 1) + "…";
         return `Machine: ${label} · ${connection}`;
       };
-      expect(machine()).toBe(expectedLine("connected"));
+      expect(stripAnsi(machine()).trimEnd()).toBe(expectedLine("connected"));
+      expect(machine()).toContain(`${GREEN}connected${RESET}`);
       service.set({ links: [{ ...peer, connected: false, lastOkAt: Date.now() - 125_000 }] });
       assertStyle(true, true);
-      expect(machine()).toBe(expectedLine("last seen 2m ago"));
+      expect(stripAnsi(machine()).trimEnd()).toBe(expectedLine("offline"));
+      expect(machine()).toContain(`${RED}offline${RESET}`);
       dashboard.handleInput("k");
       assertStyle(true, false);
     });
@@ -9963,7 +10473,7 @@ describe("Unified peer repos in the Agents tree", () => {
       const { dashboard, service } = setup();
       const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
       const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
-      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
+      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
       const rows = treeRows(dashboard, width);
       expect(rows.filter((r) => visibleWidth(r) > width)).toEqual([]);
       const text = rows.map(stripAnsi);
@@ -9983,7 +10493,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const name = local.repoRegistryName;
     dashboard.setRepos([{ name, path: local.repoPath }]);
     const peer = (base: PeerLinkState, state: string): PeerLinkState => ({
-      ...base, connected: true, lastError: null, repos: repos(name), agents: [remote(local.id, name, { state })],
+      ...base, connected: true, coordinator: null, lastError: null, repos: repos(name), agents: [remote(local.id, name, { state })],
     });
     const [first, second] = links();
     const b = peer(first!, "waiting");
@@ -10014,7 +10524,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(index()).toBe(originalIndex);
     checkSelection("connected");
     service.set({ links: [b, { ...c, connected: false, lastOkAt: Date.now() - 125_000 }] });
-    checkSelection("last seen 2m ago");
+    checkSelection("offline");
   });
 
   test("the @ jump lists only local rows", () => {
@@ -10067,7 +10577,7 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.infoPanel.displayHeight = 20;
     expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Agents: 2");
     selectByKey(dashboard, agentKey(PEER_C, "app", "agent-1"));
-    expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Machine: Laptop C · last seen 2m ago");
+    expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Machine: Laptop C · offline");
   });
 
   test("on a remote row no local path runs: no tmux setAgent, no git probe, no right-pane loader", async () => {
@@ -10460,7 +10970,7 @@ describe("Unified peer repos in the Agents tree", () => {
 
     selectByKey(dashboard, WORKER_KEY);
     const text = footer();
-    const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers"];
+    const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
     for (const hint of ["s: send", "m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
@@ -10559,13 +11069,26 @@ describe("Unified peer repos in the Agents tree", () => {
     // ? / / / I open their dialogs; Ctrl+C (handled before the dashboard) is never refused.
     d = onRemote();
     d.setPeerService(new FakePeerService());
-    for (const [key, type] of [["?", "help"], ["/", "fuzzy"], ["I", "peers"]] as const) {
+    for (const [key, type] of [["?", "help"], ["/", "fuzzy"], ["I", "setup"]] as const) {
       d.handleInput(key);
       expect(d.dialog?.type).toBe(type);
       d.closeDialog();
     }
     d.handleInput("\x03");
     notRefused(d);
+  });
+
+  test("a remote row can open Peers but cannot reach Hooks or Config through it", () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("I");
+    for (const key of ["\t", "\x1b[Z"]) {
+      resetNotice(dashboard);
+      dashboard.handleInput(key);
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
+      expect(service.calls).toEqual(["open"]);
+    }
   });
 
   test("the command palette goes through the same guard", () => {
@@ -10586,8 +11109,8 @@ describe("Unified peer repos in the Agents tree", () => {
       pick("DIFF — run ib diff");
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
       expect(dashboard.currentMode).not.toBe("DIFF");
-      pick("peers — I");
-      expect(dashboard.dialog?.type).toBe("peers");
+      pick("setup: Peers tab — I");
+      expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
       expect(service.calls).toContain("open");
     } finally {
       retire.mockRestore();
@@ -10635,14 +11158,14 @@ describe("Unified peer repos in the Agents tree", () => {
     const b = service.state.links[0]!;
     const c = service.state.links[1]!;
     service.set({ links: [{ ...b, agents: b.agents!.map((agent) => ({ ...agent, repoPath: "/elsewhere" })) },
-      { ...c, lastError: "still unreachable" }, ...service.state.links.slice(2)] });
+      { ...c, coordinator: null, lastError: "still unreachable" }, ...service.state.links.slice(2)] });
     expect(counter.renders()).toBe(renders);
 
     // The Teams tab draws no section: rebuilt, but no render.
     dashboard.setSidebarMode("teams");
     service.set({ links: [{ ...service.state.links[0]!, connected: false }, ...service.state.links.slice(1)] });
     expect(counter.renders()).toBe(renders);
-    expect(dashboard.agentTree.visibleList.find((r) => r.kind === "remote-agent" && r.peerId === PEER_B)).toMatchObject({ stale: true });
+    expect(dashboard.agentTree.visibleList.find((r) => r.kind === "remote-agent" && r.peerId === PEER_B)).toMatchObject({ linkStatus: "offline" });
     // TREE mode draws the Agents tree in the main area, whatever the tab.
     dashboard.jumpToMode("TREE");
     renders = counter.renders();

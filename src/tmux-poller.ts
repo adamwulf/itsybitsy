@@ -4,9 +4,11 @@
  * for display, while watcher handles structural agent changes.
  */
 
+import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { keepAllowedLinks, linkifyMessageUrls } from "./hyperlinks";
 import { stripAnsi } from "./parse-state";
 import { SpawnContext } from "./types";
+import { logToWatchLog } from "./watch-log";
 import { tmuxSessionTarget } from "./validation";
 
 /** Spawn context for tmux poller operations */
@@ -56,6 +58,97 @@ export type TmuxCaptureWithPaneResult =
 // callback site.
 export function expandTabs(s: string): string {
   return s.includes("\t") ? s.replace(/\t/g, "   ") : s;
+}
+
+/** Capture logical lines with link targets for a dashboard pane. */
+export async function captureDisplayPane(session: string, lines = 200): Promise<string | null> {
+  const target = tmuxSessionTarget(session);
+  const proc = spawnCtx.runner(["tmux", ...displayCaptureArgs(target, lines)], { stdout: "pipe", stderr: "pipe" });
+  const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited, new Response(proc.stderr).text()]);
+  return code === 0 ? text : null;
+}
+
+function displayCaptureArgs(target: string, lines: number): string[] {
+  // -J joins tmux's soft-wrapped continuation lines back into one logical
+  // line (it preserves program-emitted \n, only rejoining lines tmux itself
+  // wrapped). We reflow ourselves in the display path (wordWrapLines) so the
+  // whole scrollback renders at ONE width — capture-pane -p alone returns
+  // older lines hard-wrapped at the width the session had when they scrolled
+  // in, which mixes wrap widths within a single buffer after resizeTmuxWindow.
+  // -e is the only way to read a hyperlink's target: without it a Markdown
+  // link captures as just its label. keepAllowedLinks removes everything else
+  // -e adds.
+  return ["capture-pane", "-t", target, "-p", "-e", "-J", "-S", `-${lines}`, "-E", "-"];
+}
+
+export const COORDINATOR_PANE_ID = "@ib-system-coordinator-pane-id";
+export const COORDINATOR_PANE_COMMAND = "@ib-system-coordinator-command";
+
+/** Capture the launch pane only while its recorded CLI is still in the foreground. */
+export async function captureMarkedCoordinatorPane(
+  session: string, machine: string, { timeoutMs = 5_000, log = logToWatchLog } = {},
+): Promise<string | null> {
+  const failed = (detail: unknown) => {
+    log(`[coordinator] Peer pane capture failed: ${detail instanceof Error ? detail.message : detail}`);
+    return new Error("Coordinator capture failed");
+  };
+  const run = (cmd: string[]) => runCoordinatorCommand(cmd, timeoutMs).catch(err => { throw failed(err); });
+  const target = tmuxSessionTarget(session);
+  const record = await run(["tmux", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID]);
+  if (record.code !== 0) {
+    if (/^can't find session:/i.test(record.error.trim())) return null;
+    throw failed(record.error.trim() || `show-options exited ${record.code}`);
+  }
+  const unverified = `Unverified coordinator pane; restart the system coordinator on ${machine}`;
+  const id = record.text.trim();
+  if (!/^%\d+$/.test(id)) throw new Error(unverified);
+  // Evaluate all three conditions in tmux's capture queue, even if the
+  // pane died or its foreground changed after we looked up the launch id.
+  const recordedCommand = `#{${COORDINATOR_PANE_COMMAND}}`;
+  const matches = `#{==:#{pane_id}:#{pane_dead}:#{pane_current_command},#{${COORDINATOR_PANE_ID}}:0:${recordedCommand}}`;
+  const capture = await run(["tmux", "if-shell", "-F", "-t", id,
+    `#{&&:#{!=:${recordedCommand},},${matches}}`, displayCaptureArgs(id, 200).join(" ")]);
+  if (capture.code !== 0 && !/^can't find pane:/i.test(capture.error.trim())) {
+    throw failed(capture.error.trim() || `capture-pane exited ${capture.code}`);
+  }
+  if (capture.code !== 0 || !capture.text) throw new Error(unverified);
+  return capture.text;
+}
+
+export async function runCoordinatorCommand(
+  cmd: string[], timeoutMs: number, spawn = spawnCtx.runner, timeoutMessage = "Coordinator capture timed out",
+) {
+  const proc = spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+  const stdout = proc.stdout?.getReader();
+  const stderr = proc.stderr?.getReader();
+  const read = Promise.all([readPipe(stdout), proc.exited, readPipe(stderr)])
+    .then(([text, code, error]) => ({ text, code, error }));
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(() => deadline.reject(new Error(timeoutMessage)), timeoutMs);
+  try {
+    return await Promise.race([read, deadline.promise]);
+  } catch (err) {
+    proc.kill?.("SIGKILL");
+    await Promise.allSettled([stdout?.cancel(), stderr?.cancel(), proc.exited]);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readPipe(reader?: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return text + decoder.decode();
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 export class TmuxPoller {
@@ -173,26 +266,12 @@ export class TmuxPoller {
     if (!targetSession) return;
 
     try {
-      // -J joins tmux's soft-wrapped continuation lines back into one logical
-      // line (it preserves program-emitted \n, only rejoining lines tmux itself
-      // wrapped). We reflow ourselves in the display path (wordWrapLines) so the
-      // whole scrollback renders at ONE width — capture-pane -p alone returns
-      // older lines hard-wrapped at the width the session had when they scrolled
-      // in, which mixes wrap widths within a single buffer after resizeTmuxWindow.
-      // -e is the only way to read a hyperlink's target: without it a Markdown
-      // link captures as just its label. keepAllowedLinks removes everything else
-      // -e adds.
-      const proc = spawnCtx.runner(
-        ["tmux", "capture-pane", "-t", tmuxSessionTarget(targetSession), "-p", "-e", "-J", `-S`, `-${this.lines}`, "-E", "-"],
-        { stdout: "pipe", stderr: "pipe" }
-      );
-      const raw = await new Response(proc.stdout).text();
-      const exitCode = await proc.exited;
+      const raw = await captureDisplayPane(targetSession, this.lines);
 
       // Discard result if the agent changed while we were awaiting
       if (this.tmuxSession !== targetSession) return;
 
-      if (exitCode !== 0) {
+      if (raw === null) {
         // tmux session doesn't exist. Delivered once, like any unchanged output.
         if (this.lastDelivered === "") return;
         this.lastDelivered = "";

@@ -4,7 +4,7 @@ import { RESET } from "./colors";
 import type { RemoteEntry } from "../agents";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import type { RemoteAgent } from "../peers/peer-link";
-import type { PeerLinkState } from "../peers/poller";
+import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { fullyQualifiedAgentId, repoRowKey } from "./row-keys";
 
 export const MAX_REMOTE_DEPTH = 8;
@@ -15,6 +15,7 @@ export interface PeerRepo {
 }
 
 export function peerEntryKey(entry: RemoteEntry): string {
+  if (entry.kind === "remote-coordinator") return `${entry.peerId}/@system`;
   return entry.kind === "remote-agent"
     ? fullyQualifiedAgentId(entry.peerName, entry.remote.repoRegistryName, entry.remote.id)
     : repoRowKey(entry.repoRegistryName);
@@ -134,7 +135,7 @@ function appendMachineTree(repo: PeerRepo, agents: RemoteAgent[], link: PeerLink
     repo.nodes.push({
       parent,
       row: { kind: "remote-agent", peerId: link.id, peerName: link.name, remote: agent,
-        connector: "", stale: !link.connected, lastOkAt: link.connected ? null : link.lastOkAt },
+        connector: "", linkStatus: peerLinkStatus(link) },
     });
     const kids = children.get(agent) ?? [];
     for (let i = kids.length - 1; i >= 0; i--) stack.push({ agent: kids[i]!, parent: index });

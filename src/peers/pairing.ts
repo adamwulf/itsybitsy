@@ -74,6 +74,7 @@ export interface PairStream {
   finish(): Promise<void>;
   /** Read until the other side finishes. Throws {@link PairProtocolError} past `limit` bytes. */
   readToEnd(limit: number): Promise<Uint8Array>;
+  cancel(): Promise<void>;
 }
 
 /** Why a connection closed. */
@@ -205,7 +206,7 @@ export function describePairFailure(failure: PairFailure, peer: string): string 
     case "refused":
       return failure.reason === "busy"
         ? `Pairing refused: ${peer} is busy with another pairing.`
-        : `Pairing refused: ${peer} does not have its Peers dialog open.`;
+        : `Pairing refused: ${peer} does not have its Peers tab open.`;
     case "wrong-code":
       return "Wrong code. Pairing failed; start again from the install that dials.";
     case "expired":

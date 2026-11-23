@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { hasFreeSpace } from "./attachment-space";
 import { checkManifestLimits } from "./transfer-limits";
 import { readTransferLimits } from "../config";
 import { accountHome } from "../home";
@@ -20,6 +21,8 @@ export async function copyLocalAttachments(
   message: string, entries: readonly (ManifestEntry & { sha256: string })[], signal?: AbortSignal,
   tempDir = "/tmp",
 ) {
+  const bytes = entries.reduce((total, entry) => total + entry.size, 0);
+  if (!await hasFreeSpace(tempDir, bytes)) throw new Error(`Insufficient space in ${tempDir} for ${bytes} attachment bytes plus the 1 GiB reserve`);
   const root = await mkdtemp(join(tempDir, "itsybitsy-attachments-"));
   const cleanup = () => rm(root, { force: true, recursive: true });
   try {

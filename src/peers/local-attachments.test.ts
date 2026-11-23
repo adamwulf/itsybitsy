@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { writeAgentTransient } from "../agents";
 import fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
+import * as space from "./attachment-space";
 import { remoteCliCaller } from "./peer-outbox";
 import { userInfo } from "node:os";
 import { accountHome, resetUserHome, setUserHome } from "../home";
@@ -270,5 +271,24 @@ test("sandbox caller lookup opens its agent directory and no unrelated repo root
     asyncRead.mockRestore();
     sync.mockRestore();
     human.mockRestore();
+  }
+});
+
+test("insufficient staging space refuses before creating any snapshot", async () => {
+  const dest = join(fixture.root, "copies");
+  await mkdir(dest);
+  const path = join(fixture.cwd, "file");
+  await Bun.write(path, "data");
+  const entries = await buildAttachmentManifest([path], { cwd: fixture.cwd, home: fixture.home, machine: "desk" });
+  const available = spyOn(space, "hasFreeSpace").mockResolvedValue(false);
+  try {
+    const verified = [{ ...entries[0]!, sha256: await hashFile(entries[0]!) }];
+    await expect(copyLocalAttachments("read", verified, undefined, dest)).rejects.toThrow("1 GiB reserve");
+    expect(available).toHaveBeenCalledWith(dest, 4);
+    expect(await readdir(dest)).toEqual([]);
+    expect(await queue().exists()).toBe(false);
+  } finally {
+    available.mockRestore();
+    await entries[0]!.handle.close();
   }
 });

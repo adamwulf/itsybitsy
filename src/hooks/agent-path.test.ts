@@ -2851,6 +2851,14 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
     });
   }
 
+  test("@system file writes and Bash redirects cannot publish peer requests", () => {
+    const path = join(ITSY, "peer-outbox", "x", "request.json");
+    for (const input of [
+      makeInput({ toolName: "Write", toolInput: { file_path: path } }),
+      makeInput({ toolName: "Bash", toolInput: { command: `echo hello > ${path}` }, cwd: ITSY }),
+    ]) expect(checkPathAccess(input, systemCtx()).decision).toBe("deny");
+  });
+
   test("@system Bash redirects into peer/ → DENIED", () => {
     setUserHome("/Users/test");
     try {

@@ -306,6 +306,7 @@ export function systemProtectedWritePaths(itsybitsyHome: string): ProtectedWrite
     file("repos.json"),
     file("layout.json"),
     dir("sealed"),
+    dir("peer-outbox"),
     { path: peer, subtree: true, reason: peerDirWriteDenyReason(peer) },
   ];
 }

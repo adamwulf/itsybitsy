@@ -1467,6 +1467,9 @@ the compiled `ib` inside a real agent profile.
 
 ### 4C.9 Sandboxed `ib send`: the same broker (2026-10-24)
 
+For a local worktree send with explicit attachments, the sandboxed CLI copies verified files into its protected per-request lease. Its watchdog opens the numbered files, verifies the private snapshots, then renames the directory from protected staging to the read-only delivered attachment path before local enqueue. The watchdog enqueues self-addressed attachments directly in its own queue for the normal drain. Local text-only self-sends remain direct.
+
+
 **Problem.** `ib send <agent>` from a sandboxed worktree agent could not reach
 an agent in another repo: both `ib send cli-email-client ...` and
 `ib send @iris/cli-email-client ...` printed `Agent not found`, although the

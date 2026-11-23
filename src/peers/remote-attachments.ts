@@ -1,6 +1,6 @@
 import { constants as osConstants } from "node:os";
 import { constants } from "node:fs";
-import { copyFile, link, readdir, lstat, mkdir, open, realpath, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
+import { copyFile, link, readdir, lstat, mkdir, open, realpath, rename, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileChunks, hashFile, type ManifestEntry, type AttachmentArgument } from "./attachment-manifest";
 import { hasFreeSpace, type VolumeReservations } from "./attachment-space";
@@ -236,4 +236,48 @@ export async function removeAbandonedStaging(agentDir: string, id: string) {
     });
     await withBrokerDirectory(agentDir, undefined, parent => removeBrokerMember(parent, id, true));
   } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
+}
+
+/** Publish only verified broker inputs. The watch recovery sweep owns abandoned
+ * partials and their sidecars under the same incoming root as peer receipts. */
+export async function publishLocalBrokerAttachments(
+  message: string, stage: StageRemoteFiles, checkOwner: () => Promise<void>,
+  signal: AbortSignal, tempDir = "/tmp",
+) {
+  const { stagingArea, writeTransferOwner, stagingOwnerStart } = await import("./transfer-owner");
+  const { transferStagingRoot } = await import("../runtime-names");
+  const { rewriteAttachmentPaths } = await import("./attachment-paths");
+  const { sanitizeAttachmentName } = await import("./attachment-name");
+  const area = await stagingArea(tempDir === "/tmp" ? transferStagingRoot() : join(tempDir, "staging"), "incoming");
+  const id = crypto.randomUUID();
+  const partial = join(area, id + ".partial");
+  const sidecar = id + ".owner";
+  const destination = join(tempDir, "itsybitsy-attachments-" + id);
+  await writeTransferOwner(area, { pid: process.pid, start: stagingOwnerStart(process.pid) }, sidecar);
+  try {
+    await mkdir(partial, { mode: 0o700 });
+    const bodies = join(partial, "bodies");
+    const files = await stage(bodies);
+    const mapping = [];
+    for (const [index, file] of files.entries()) {
+      signal.throwIfAborted();
+      const number = String(index);
+      const name = sanitizeAttachmentName(file.name);
+      await mkdir(join(partial, number), { mode: 0o700 });
+      await rename(join(bodies, number), join(partial, number, name));
+      mapping.push({ spellings: file.spellings, destination: join(destination, number, name) });
+    }
+    await rmdir(bodies);
+    const rewritten = rewriteAttachmentPaths(message, mapping, 1024 ** 2, 64 * 1024);
+    await checkOwner();
+    signal.throwIfAborted();
+    await rename(partial, destination).catch(error => {
+      if (error.code === "EXDEV") throw Error("Staging and delivered attachments must be on the same filesystem", { cause: error });
+      throw error;
+    });
+    return rewritten;
+  } finally {
+    await rm(partial, { recursive: true, force: true });
+    await rm(join(area, sidecar), { force: true });
+  }
 }

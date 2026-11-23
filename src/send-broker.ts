@@ -39,11 +39,11 @@ import * as runtimeNames from "./runtime-names";
  * spellings. The watchdog reads only numbered, private request files. It sends as its OWN agent (verified against the sealed
  * record, as for a spawn) and passes that id as `fromAgent`, so a request
  * cannot send in another agent's name; `--from` for another agent is refused
- * on the client. The watchdog never delivers to the requester itself: a
+ * on the client. The watchdog never types into the requester’s tmux session: a
  * recipient's `tmux_session` and heartbeat are files that agent can write, so
  * a send to itself would let it choose where the unsandboxed watchdog types
- * its text. A send to itself therefore stays on the direct path (isAgentAt,
- * targetIsCaller). For local sends, the client reads `-f <path>` and stdin
+ * its text. Text-only self-sends use the direct path. A brokered attachment
+ * self-send only appends to the requester’s queue for the regular drain. For local sends, the client reads `-f <path>` and stdin
  * inside the sandbox, and the watchdog never reads a path for the agent. It
  * also never sets `stageAttachments` (send-time attachment staging copies the
  * files a message names; outside the sandbox that would let an agent copy out
@@ -55,7 +55,7 @@ import { readMachineName } from "./machine-name";
 import { mkdir, open, rm, stat, rename } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
-import { brokerAttachmentStage, publishBrokerRecord, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
+import { publishLocalBrokerAttachments, brokerAttachmentStage, publishBrokerRecord, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
@@ -111,7 +111,7 @@ const OLD_WATCHDOG_ANSWERS = new Set([
 export interface SendRequest {
   v: 1;
   id: string;
-  op: typeof SEND_OP | "remote-send";
+  op: typeof SEND_OP | "remote-send" | "local-attachment-send";
   target: string;
   message: string;
   noPassthrough?: true;
@@ -171,9 +171,9 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
   }
   if (obj.v !== 1) return { ok: false, error: "unsupported send request version" };
   if (obj.id !== expectedId) return { ok: false, error: "send request id does not match its file name" };
-  if (obj.op !== SEND_OP && obj.op !== "remote-send") return { ok: false, error: "send request has an unsupported op" };
+  if (obj.op !== SEND_OP && obj.op !== "remote-send" && obj.op !== "local-attachment-send") return { ok: false, error: "send request has an unsupported op" };
   const pid = obj.clientPid;
-  if (obj.op === "remote-send" ? typeof pid !== "number" || !Number.isSafeInteger(pid) || pid < 1 : pid !== undefined) {
+  if (obj.op !== SEND_OP ? typeof pid !== "number" || !Number.isSafeInteger(pid) || pid < 1 : pid !== undefined) {
     return { ok: false, error: "invalid remote send client PID" };
   }
   if (obj.noPassthrough !== undefined && (obj.noPassthrough !== true || obj.op !== SEND_OP)) {
@@ -183,7 +183,7 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
     return { ok: false, error: "send request has an invalid target" };
   }
   // Empty only, as on the direct path (`ib send` refuses "" and nothing else).
-  if (typeof obj.message !== "string" || (obj.message === "" && !(obj.op === "remote-send" && Array.isArray(obj.files) && obj.files.length))) {
+  if (typeof obj.message !== "string" || (obj.message === "" && !(obj.op !== SEND_OP && Array.isArray(obj.files) && obj.files.length))) {
     return { ok: false, error: "send request needs a non-empty message" };
   }
   if (Buffer.byteLength(obj.message, "utf8") > SPAWN_MAX_PROMPT_BYTES) {
@@ -191,13 +191,14 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
   }
   let files: SendHeader["files"] | undefined;
   if (obj.files !== undefined) {
-    if (obj.op !== "remote-send") return { ok: false, error: "Only remote requests may carry files" };
+    if (obj.op === SEND_OP) return { ok: false, error: "Only remote requests may carry files" };
     try {
       const header = parseSendHeader({ op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "system" }, message: obj.message, files: obj.files });
       encodeSendHeader(header);
       files = header.files;
     } catch (err) { return { ok: false, error: String(err) }; }
   }
+  if (obj.op === "local-attachment-send" && !files?.length) return { ok: false, error: "Local attachment send needs files" };
   return { ok: true, request: { v: 1, id: expectedId, op: obj.op, target: obj.target, message: obj.message, ...(typeof pid === "number" && { clientPid: pid }), ...(files && { files }), ...(obj.noPassthrough === true && { noPassthrough: true }) } };
 }
 
@@ -273,16 +274,16 @@ export async function sweepStagingRequests(dir: string, now: number) {
 }
 
 async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false, stage?: StageRemoteFiles) {
-  const remote = op === "remote-send";
+  const transfer = op !== SEND_OP;
   if (deps.signal?.aborted) return interruptedSend("unpublished");
-  if (!isBrokerableTarget(target)) return remote ? brokerFail("send request has an invalid target") : null;
-  if (Buffer.byteLength(message, "utf8") > SPAWN_MAX_PROMPT_BYTES) return remote ? brokerFail("send request message is too large") : null;
+  if (!isBrokerableTarget(target)) return transfer ? brokerFail("send request has an invalid target") : null;
+  if (Buffer.byteLength(message, "utf8") > SPAWN_MAX_PROMPT_BYTES) return transfer ? brokerFail("send request message is too large") : null;
   let live;
   try { live = await (deps.watchdogLive ?? hasLiveWatchdog)(dir); }
   catch (err) { return deps.signal?.aborted ? interruptedSend("unpublished") : brokerFail(String(err)); }
   if (deps.signal?.aborted) return interruptedSend("unpublished");
-  if (!live) return remote ? brokerFail("Remote sends from a worktree agent need its watchdog running") : null;
-  const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(remote && { clientPid: process.pid }), ...(noPassthrough && { noPassthrough: true }) };
+  if (!live) return transfer ? brokerFail(op === "remote-send" ? "Remote sends from a worktree agent need its watchdog running" : "Local attachment sends need the worktree watchdog running") : null;
+  const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(transfer && { clientPid: process.pid }), ...(noPassthrough && { noPassthrough: true }) };
   const parent = join(dir, "send-attachments");
   const staged = join(parent, request.id);
   let ownsStage = false;
@@ -303,15 +304,15 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
         alreadyStarted:
           "The watchdog had already taken the message, so it may still be delivered; check with the recipient before sending it again.",
       },
-      deps.timeoutMs ?? (remote ? IDLE_TIMEOUT_MS : SPAWN_CLIENT_TIMEOUT_MS),
-      remote ? { ...deps, claimTimeoutMs: Math.min(10_000, deps.timeoutMs ?? Infinity), cancelClaimed: async () => {
+      deps.timeoutMs ?? (transfer ? IDLE_TIMEOUT_MS : SPAWN_CLIENT_TIMEOUT_MS),
+      transfer ? { ...deps, claimTimeoutMs: Math.min(10_000, deps.timeoutMs ?? Infinity), cancelClaimed: async () => {
         if (ownsStage) await rm(staged, { recursive: true, force: true });
         else await (await open(join(spawnResultDir(dir), request.id + ".cancel"), "wx", 0o600)).close();
       }, readProgress: async () => {
         return Math.max(0, (await stat(join(spawnResultDir(dir), request.id + ".progress"))).size - 16);
       } } : deps,
     );
-    if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
+    if (!transfer && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
   } finally {
     if (ownsStage) trackSendCleanup(rm(staged, { recursive: true, force: true }), "Remote staging cleanup failed");
@@ -368,6 +369,11 @@ export async function routeSendThroughWatchdog(
     return brokerFail(
       "Error: --from for another agent is not supported inside the sandbox: a sandboxed agent sends only as itself, through its watchdog.",
     );
+  }
+  if (sender && command.attachments?.length && isSandboxedProcess()) {
+    const body = await (command.readRawMessage ?? command.readMessage)();
+    return submitSendRequest("local-attachment-send", caller.agentDir, String(caller.meta.id), command.target, body, deps,
+      false, remoteAttachmentStage(command.attachments, sender, deps.signal));
   }
   if (await targetIsCaller(command.target, caller, command.repos)) return null;
   const message = await command.readMessage();
@@ -465,6 +471,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
 
 /** Seams for the `ib send` request handled here. */
 export interface SendServerDeps {
+  attachmentTempDir?: string;
   setTimer?: FileBodyOptions["setTimer"];
   listRepos?: () => Promise<RepoEntry[]>;
   resolveTarget?: (
@@ -502,7 +509,9 @@ export async function handleSendRequest(
 ): Promise<IbCommandResult> {
   const parsed = parseSendRequest(ctx.text, ctx.id);
   if (!parsed.ok) return brokerFail(`Error: ${parsed.error}`);
-  const { target, message, op } = parsed.request;
+  const { target, op } = parsed.request;
+  let message = parsed.request.message;
+  const localFiles = op === "local-attachment-send";
   const remote = op === "remote-send";
 
   // Identity comes from the agent's own sealed record, never from the request.
@@ -511,14 +520,14 @@ export async function handleSendRequest(
 
   const seams = deps.send ?? {};
   const fromAgent = ctx.agentId;
-  const opts = { fromAgent, ...(parsed.request.noPassthrough && { noPassthrough: true as const }) };
+  const opts = { fromAgent, ...((localFiles || parsed.request.noPassthrough) && { noPassthrough: true as const }) };
   const self: AgentLocation = { id: ctx.agentId, repoPath: ctx.repoPath, agentDir: ctx.agentDir };
   // Where the requester "is": its own worktree, the cwd of a direct `ib send`
   // there. It decides `@coordinator` and the same-repo-first search of a bare
   // id; the watchdog's own cwd says nothing about the requester.
   const callerCwd = join(ctx.agentDir, "repo");
   try {
-    const lookup = <T>(read: () => Promise<T>) => remote
+    const lookup = <T>(read: () => Promise<T>) => remote || localFiles
       ? waitForIO({ signal: deps.transferSignal, setTimer: seams.setTimer }, read) : read();
     const repos = await lookup(seams.listRepos ?? listRepos);
     const sender = remote ? await lookup(async () => (await import("./peers/peer-outbox")).qualifiedAgentSender(ctx.agentId, ctx.repoPath, repos)) : null;
@@ -527,8 +536,9 @@ export async function handleSendRequest(
     // The ordinary commands, as the watchdog's own agent. `fromAgent` is
     // always passed: these functions otherwise detect the sender from the
     // cwd, which here is the watchdog's. `stageAttachments` is never set.
-    if (sender) {
-      if (!resolved.remote) {
+    if (remote || localFiles) {
+      if (localFiles && resolved.remote) return brokerFail("Local attachment sends require a local target");
+      if (remote && !resolved.remote) {
         const result = brokerFail(LOCAL_REMOTE_TARGET);
         if (parsed.request.files?.length) result.exitCode = LOCAL_TARGET_EXIT;
         return result;
@@ -595,10 +605,16 @@ export async function handleSendRequest(
       const timer = setInterval(tick, 250);
       try {
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, signal, progress) : undefined;
-        const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), signal, stage, progress,
-          files.length ? async () => { await requireActiveStagingLease(ctx.agentDir, ctx.id, origin, clientIdentity); } : undefined, origin);
-        if (signal.aborted) return interruptedSend("claimed");
-        return result;
+        const checkLease = async () => { await requireActiveStagingLease(ctx.agentDir, ctx.id, origin, clientIdentity); };
+        if (localFiles) {
+          message = await publishLocalBrokerAttachments(message, stage!, checkLease, signal, seams.attachmentTempDir);
+          signal.throwIfAborted();
+        } else {
+          const result = await handoffRemoteMessage(resolved.remote!.peer, textHeader(resolved.remote!.target, message, sender!), signal, stage, progress,
+            files.length ? checkLease : undefined, origin);
+          if (signal.aborted) return interruptedSend("claimed");
+          return result;
+        }
       } finally {
         clearInterval(timer);
         if (marker) trackSendCleanup(marker.close(), "Broker progress close failed");
@@ -623,6 +639,14 @@ export async function handleSendRequest(
     }
     if (!resolved.agent) return brokerFail(`Agent not found: ${target}`);
     if (await excludeRecipient(resolved.agent)) {
+      if (localFiles) {
+        // The requester's own watchdog drains its queue normally. Never use
+        // requester-writable tmux metadata for an inline delivery here.
+        const { enqueueOutbox, agentOutboxDir } = await import("./outbox");
+        const dir = agentOutboxDir({ id: ctx.agentId, meta: resolved.agent.meta });
+        await enqueueOutbox(dir, { message, fromAgent, noPassthrough: true, raw: false }, resolved.agent.meta.queue_key, deps.transferSignal);
+        return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+      }
       return brokerFail(`Error: '${ctx.agentId}' cannot send to itself through its watchdog; send directly`);
     }
     return await (seams.sendMessage ?? sendMessage)(resolved.agent, message, opts);

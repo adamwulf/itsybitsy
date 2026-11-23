@@ -375,6 +375,46 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
+  test.each(["local recipient", "self", "changed bytes"])("sandboxed local --attach through the worktree watchdog: %s", async mode => {
+    const agentDir = dirname(worktree);
+    const recipient = mode === "self" ? "mgr" : "foo";
+    const live = JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false,
+      tmux_rate_limited: false, has_background_tasks: false });
+    await Bun.write(join(agentDir, "meta.transient.json"), live);
+    await Bun.write(join(app, ".itsybitsy", "agents", recipient, "meta.transient.json"), live);
+    await Bun.write(join(worktree, "report"), "original");
+    const controller = new AbortController();
+    const send = cli.run(["send", "@App/" + recipient, "--attach", "./report", "read ./report"], {
+      cwd: worktree, sandboxed: true, ancestry: human, interrupt: controller.signal,
+      allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+    });
+    try {
+      await Promise.race([waitFor(async () => (await readdir(spawnRequestDir(agentDir)).catch(() => [])).some(n => n.endsWith(".json"))),
+        send.then(result => { throw Error("CLI exited before handoff: " + result.stderr); })]);
+      const [id] = await readdir(join(agentDir, "send-attachments"));
+      if (mode === "changed bytes") await Bun.write(join(agentDir, "send-attachments", id!, "0"), "modified");
+      await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: cli.cwd } });
+      const result = await send;
+      const queue = Bun.file(join(cli.home, ".itsybitsy", "agents", recipient, "outbox.jsonl"));
+      if (mode === "changed bytes") {
+        expect(result.stderr).toContain("hash mismatch");
+        expect(await queue.exists()).toBe(false);
+        expect((await readdir(cli.cwd)).filter(n => n.startsWith("itsybitsy-attachments-"))).toEqual([]);
+      } else {
+        expect(result.exitCode, result.stderr).toBe(0);
+        const queued = JSON.parse((await queue.text()).trim());
+        expect(queued).toMatchObject({ fromAgent: "mgr", noPassthrough: true });
+        const [dir] = (await readdir(cli.cwd)).filter(n => n.startsWith("itsybitsy-attachments-"));
+        const path = join(cli.cwd, dir!, "0", "report");
+        expect(queued.message).toContain("read " + path);
+        expect(queued.message).toContain("./report");
+        expect(await Bun.file(path).text()).toBe("original");
+        expect(await readdir(join(cli.cwd, dir!))).toEqual(["0"]);
+      }
+      expect(await readdir(join(cli.cwd, "staging", "incoming"))).toEqual([]);
+    } finally { controller.abort(); await send; }
+  });
+
   test.each(["unavailable", "mismatched", "changed during copy"])("watchdog refuses a remote send with %s owner evidence", async evidence => {
     await peer();
     const agentDir = dirname(worktree);

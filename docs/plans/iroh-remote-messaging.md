@@ -261,6 +261,9 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
 
 ## Behaviour changes beyond M3b
 
+A worktree CLI under the kernel sandbox sends local `--attach` requests through its own watchdog. The CLI verifies its sources and creates a protected lease. The watchdog verifies a private copy of the numbered bodies, publishes it by rename from protected staging, and enqueues the rewritten message as the originating agent with `noPassthrough`. A self-send goes into the requester's own queue for its regular watchdog drain. Local text sends, unsandboxed and human sends, dashboard sends, and Telegram keep their existing routes.
+
+
 Delivered attachment directories under `/tmp/itsybitsy-attachments-*` and the corresponding `/private/tmp` paths are read-only to agents. This includes local `--attach`, dashboard snapshots and published receiver snapshots. Agents can read the original and edit a copy elsewhere in their scratch space or project.
 
 An audit of ib source, the agent-type instructions, SPEC and README found no instruction telling agents to write, append or edit files inside a delivered directory. The production creators are local CLI staging in `src/peers/local-attachments.ts`, local dashboard sends in `src/message-attachments.ts`, dashboard attachment prompts in `src/tui/attachment-prompt.ts`, and remote publication in `src/peers/receive-message.ts`. SPEC §4.1 and §20 describe the path and staging behavior. README describes editing attachment limits and the message draft. These are configuration and composition actions.

@@ -665,7 +665,7 @@ export async function processSpawnRequests(
     const jobs = deps.transferJobs;
     const named = jobs && requestOp(text);
     if (deps.transferSignal?.aborted) break;
-    if (jobs && named?.present && named.op === "remote-send") {
+    if (jobs && named?.present && (named.op === "remote-send" || named.op === "local-attachment-send")) {
       if (jobs.has(agentDir)) await writeResult(agentDir, id, brokerFail("busy, try again"), deps.transferSignal);
       else jobs.set(agentDir, dispatch().finally(() => jobs.delete(agentDir)));
     } else await dispatch();
@@ -771,7 +771,7 @@ async function handleOneRequest(
       const { handleAskRequest } = await import("./ask-broker");
       return handleAskRequest({ agentId, repoPath, agentDir, id, text }, deps);
     }
-    if (named.op === "send" || named.op === "remote-send") {
+    if (named.op === "send" || named.op === "remote-send" || named.op === "local-attachment-send") {
       const { handleSendRequest } = await import("./send-broker");
       return handleSendRequest({ agentId, repoPath, agentDir, id, text, createdMs }, deps);
     }

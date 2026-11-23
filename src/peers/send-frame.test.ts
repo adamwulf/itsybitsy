@@ -72,6 +72,7 @@ test("rejects invalid UTF-8, JSON, truncated frames, and malformed header fields
     { extra: true }, ...["a", "a/b", "a//b", "/r/a", "m/r/", "m/r/a/extra"].map(id => ({ from: { kind: "agent", id } })),
     { op: "other" }, { id: "invalid" }, { from: null }, { from: { kind: "agent", id: 1 } },
     { from: { kind: "agent" } }, { from: { kind: "user", id: "surprise" } }, { from: { kind: "system", id: "surprise" } },
+    { target: { kind: "agent", agent: "a\n" } }, { target: { kind: "repo-coordinator", repo: "b\u202e" } },
     { target: { agent: "a" } }, { target: { kind: "unknown" } }, { target: { kind: "system", repo: "r" } },
     { target: { kind: "agent", agent: 42 } }, { target: { kind: "agent", agent: "a", repo: false } },
     { target: { kind: "repo-coordinator" } }, { target: { kind: "repo-coordinator", repo: "r", agent: "a" } },

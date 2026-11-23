@@ -63,7 +63,7 @@
 
 import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
 import type { SendHeader } from "./send-frame";
-import { requestSend } from "./peer-link";
+import { cleanRemoteText, requestSend } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
 import { remoteSendDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
@@ -689,7 +689,7 @@ export class PeerService {
     const id = crypto.randomUUID();
     const controller = new AbortController();
     const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
-    const row = { id, label: label + " → " + targetLabel(header.target), bytes: 0, total: header.files.reduce((sum, f) => sum + f.size, 0) };
+    const row = { id, label: cleanRemoteText(label + " → " + targetLabel(header.target)), bytes: 0, total: header.files.reduce((sum, f) => sum + f.size, 0) };
     const done = Promise.withResolvers<void>();
     try {
       await receive(header, peer, name, body, { ...options, signal: controller.signal, admitted: ownsBody => {

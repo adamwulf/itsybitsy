@@ -6,6 +6,7 @@ import { readMachineName } from "../machine-name";
 import { sanitizeAttachmentName } from "./attachment-name";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
 import { hasFreeSpace } from "./attachment-space";
+import { cleanRemoteText } from "./peer-link";
 import { checkIncomingFiles } from "./transfer-limits";
 import type { PairStream } from "./pairing";
 import { sendMessage, type PeerEnqueueOptions } from "../ib-commands";
@@ -154,7 +155,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
       } finally { reserve(0); if (files.length) receiving.delete(peerId); }
       accepted.set(key, now() + 600_000);
       const summary = files.length ? ` (${files.length} files, ${(total / 1024 ** 2).toFixed(2)} MB)` : "";
-      const line = `${name} sent a message${summary} to ${targetLabel(header.target)}`;
+      const line = `${cleanRemoteText(name)} sent a message${summary} to ${cleanRemoteText(targetLabel(header.target))}`;
       log(line);
       notice(line);
     };

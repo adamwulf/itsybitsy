@@ -57,13 +57,16 @@ function validFrom(value: unknown): value is SendHeader["from"] {
   // A coordinator takes its checkout basename. Allow dots alongside the usual agent-id characters.
   return isValidPeerSenderIdSegment(agent);
 }
+function targetPart(value: unknown): value is string {
+  return nonempty(value) && !UNSAFE_LINE_CHARACTERS.test(value) && !value.includes("/");
+}
 function validTarget(value: unknown): value is SendTarget {
   if (!object(value)) return false;
   switch (value.kind) {
     case "system": return onlyKeys(value, "kind");
-    case "repo-coordinator": return nonempty(value.repo) && onlyKeys(value, "kind", "repo");
-    case "agent": return nonempty(value.agent) && !value.agent.startsWith("@") &&
-      (value.repo === undefined || nonempty(value.repo)) && onlyKeys(value, "kind", "repo", "agent");
+    case "repo-coordinator": return targetPart(value.repo) && onlyKeys(value, "kind", "repo");
+    case "agent": return targetPart(value.agent) && !value.agent.startsWith("@") &&
+      (value.repo === undefined || targetPart(value.repo)) && onlyKeys(value, "kind", "repo", "agent");
     default: return false;
   }
 }

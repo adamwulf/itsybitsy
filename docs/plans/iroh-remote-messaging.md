@@ -73,7 +73,7 @@ The next five bytes are `68 65 6c 6c 6f` (ASCII `hello`). The sender then issues
 
 The sending system coordinator uses `{"kind":"system"}` with no id. The receiver derives its `<peer>/@system` attribution from the authenticated pairing. An agent sender uses `{"kind":"agent","id":"desk/photos/worker-1"}` in `from`. An agent target can omit `repo` to use the receiver’s normal resolver. The other target forms are `{"kind":"system"}` for the system coordinator and `{"kind":"repo-coordinator","repo":"photos"}` for a repo coordinator.
 
-**Reply:** `{"ok":true,"id":"<uuid>"}` or `{"ok":false,"error":"<message>"}`.
+**Reply:** `{"ok":true,"id":"<uuid>"}` or `{"op":"error","reason":"<message>"}`.
 
 **Limits:**
 

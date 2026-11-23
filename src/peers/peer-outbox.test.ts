@@ -309,3 +309,21 @@ test("a failed worker progress marker leaves the known ACK intact", async () => 
     expect(output).toEqual([expect.stringContaining("progress update failed")]);
   } finally { printer.mockRestore(); }
 });
+
+test("an ordinary timeout observes a result published during the last poll sleep", async () => {
+  await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
+  const claimed = join(base, ".claimed", header.id);
+  const sleep = Bun.sleep;
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const poll = spyOn(Bun, "sleep").mockImplementation(async delay => {
+    if (delay !== 50) return sleep(delay);
+    await mkdir(join(base, ".claimed"), { recursive: true });
+    await fs.rename(join(base, header.id), claimed);
+    await Bun.write(join(claimed, "result.json"), JSON.stringify({ ok: true, id: header.id }));
+    now += 60_000;
+  });
+  try { expect(await handoffRemoteMessage("peer", header)).toMatchObject({ ok: true }); }
+  finally { clock.mockRestore(); poll.mockRestore(); }
+});

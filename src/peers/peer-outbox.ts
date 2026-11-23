@@ -136,6 +136,10 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     }
     const withdrawn = await withdrawPublishedRequest(dir, staging);
     if (!withdrawn) {
+      if (!signal?.aborted) {
+        const result = await readResult();
+        if (result && !signal?.aborted) return result;
+      }
       await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
       if (existsSync(join(claimed, "result.json"))) {

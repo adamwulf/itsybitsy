@@ -1522,7 +1522,7 @@ broker's. `src/send-broker.ts` adds:
   sandbox that would let an agent copy any file the watchdog can read (a
   `.env`, say) to where it can read it. A path in a brokered message is sent
   as text.
-- **Remote text targets.** For a remote match the watchdog submits the message to the local endpoint owner via `peer-outbox` (SPEC §20.4). It qualifies the verified requester with this machine’s name and the repo’s registry name or `~<repoId>`. The broker returns the watcher’s queue acknowledgement or error. The sandboxed client still supplies only the target and text. It needs its watchdog to submit a remote request. A Codex worktree using its native sandbox with the itsybitsy sandbox disabled also uses this route. Its watchdog verifies the worktree backlink and requester id and checks that the seal is genuinely absent. This exception applies only to remote sends.
+- **Remote text targets.** Every worktree agent submits the target address and message to its own watchdog with `op: "remote-send"`. The watchdog verifies the requester, requires a registered repo, resolves the address and publishes only a remote match to peer-outbox (§20.4). A worktree with sandboxing explicitly disabled must pass the missing-seal and Git backlink checks. The sender label uses the machine, registered repo and verified agent id. The watcher’s queue acknowledgement or error returns through the broker.
 
 - **Never to the requester itself.** `sendMessage` takes the recipient's tmux
   session from its `meta.json` and decides an inline drain from its
@@ -1549,7 +1549,7 @@ broker's. `src/send-broker.ts` adds:
   is deliberate — it is the reach an unsandboxed agent already has. A sender is
   always set, so the text is never sent raw and a leading `/` or `!` never runs
   as a command there (SPEC.md §4.1, step 4).
-- **Fallback** — `ib send` must not work less well than before, and a
+- **Local fallback** — `ib send` must not work less well than before, and a
   same-repo send works inside the sandbox. So the client sends directly, as
   before, when the watchdog has no fresh heartbeat, when the watchdog predates
   this broker, and when the target or message cannot travel in a request (too
@@ -1583,9 +1583,7 @@ the requester check, the by-directory cases reached the inline tmux drain
 agent profile.
 
 **Known limitations.**
-1. EVERY `ib send`, from every caller, now runs `isSandboxedProcess()` first:
-   the routing check (`resolveRoutedCaller`) comes before anything else in the
-   `send` case, and its first step is the kernel `sandbox_check` through
+1. Local send broker routing checks `isSandboxedProcess()` via the kernel `sandbox_check` through
    `bun:ffi`. Outside the sandbox that costs about 1.2 ms wall time and 1.1 ms
    CPU per send, about 3% (measured in review: 40 runs, compiled binaries).
    Inside the sandbox, loading `bun:ffi` also opens the macOS SDK directory,
@@ -1600,7 +1598,7 @@ agent profile.
    still queued. The watchdog renames the ready request to a claimed name before
    reading it. On timeout or Ctrl-C the client renames the same ready request
    to a withdrawn name. Only one rename can succeed. A send cancelled before
-   publication or successfully withdrawn is safe to retry. If the watchdog
+   publication is safe to retry. After withdrawal, a retry is safe with a same-build watchdog that claims by rename. If the watchdog version is unknown, check the recipient before retrying. If the watchdog
    won the claim, the message may already be queued. Check the recipient before
    retrying. A completed acknowledgement reports the selected result and status.
 3. When the target has no live watchdog, `sendMessage` delivers inline, in the

@@ -95,6 +95,7 @@ export interface RemoteRepo {
 }
 
 export interface PeerSnapshot {
+  coordinator: { state: string } | null;
   repos: RemoteRepo[];
   agents: RemoteAgent[];
 }
@@ -142,8 +143,9 @@ function encodeCoordinatorPane(pane: CoordinatorPane): Uint8Array {
   return encode(chars.slice(start).join("") + (first < lines.length ? "\n" : "") + tail);
 }
 
-export function peerSnapshot(repos: readonly RepoEntry[], agents: readonly Agent[]): PeerSnapshot {
+export function peerSnapshot(repos: readonly RepoEntry[], agents: readonly Agent[], coordinatorState: string | undefined): PeerSnapshot {
   return {
+    coordinator: coordinatorState === undefined ? null : { state: coordinatorState },
     repos: repos.map((repo) => ({ registryName: repo.name, displayName: repoDisplayName(repo) })),
     agents: toRemoteAgents(agents),
   };
@@ -208,8 +210,8 @@ function encodeErrorReply(reason: string): Uint8Array {
 }
 
 /** The `agents` reply, or an error reply when the list is over {@link PEER_MAX_REPLY_BYTES}. */
-export function encodeAgentsReply({ repos, agents }: PeerSnapshot): Uint8Array {
-  const bytes = encodeJson({ op: "agents", repos, agents });
+export function encodeAgentsReply({ repos, agents, coordinator }: PeerSnapshot): Uint8Array {
+  const bytes = encodeJson({ op: "agents", repos, agents, coordinator });
   if (bytes.length > PEER_MAX_REPLY_BYTES) return encodeErrorReply(`the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`);
   return bytes;
 }
@@ -297,7 +299,13 @@ export function decodeAgentsReply(bytes: Uint8Array): PeerSnapshot {
     }
     return { registryName: cleanField(entry.registryName), displayName: cleanField(entry.displayName) };
   });
-  return { repos, agents: message.agents.map(parseRemoteAgent) };
+  const agents = message.agents.map(parseRemoteAgent);
+  const coordinator = message.coordinator;
+  if (coordinator === null) return { repos, agents, coordinator };
+  if (!coordinator || typeof coordinator !== "object" || !("state" in coordinator) || typeof coordinator.state !== "string") {
+    throw new PeerProtocolError("reply has malformed coordinator state");
+  }
+  return { repos, agents, coordinator: { state: cleanRemoteText(coordinator.state) } };
 }
 
 /** What a close of the trusted connection means, as the poller shows it. */

@@ -645,6 +645,12 @@ export class PeerService {
     return null;
   }
 
+  async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
+    if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
+    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    return this.poller.fetchCoordinatorPane(peerId);
+  }
+
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
     if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");

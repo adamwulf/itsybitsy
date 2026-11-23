@@ -9415,9 +9415,9 @@ describe("setup Peers tab", () => {
         { id: E, name: "E", pairedAt: "x" },
       ],
       links: [
-        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] },
-        { id: C, name: "C", connected: false, lastOkAt: Date.now(), lastError: "closed by the other side", repos: [], agents: [] },
-        { id: D, name: "D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
+        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] },
+        { id: C, name: "C", connected: false, lastOkAt: Date.now(), coordinator: null, lastError: "closed by the other side", repos: [], agents: [] },
+        { id: D, name: "D", connected: false, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
       ],
     });
     function expectRow(id: string, word: string, color: string, error?: string) {
@@ -9432,7 +9432,7 @@ describe("setup Peers tab", () => {
     expectRow(C, "offline", RED, "closed by the other side");
     expectRow(D, "offline", RED, "timed out");
     expectRow(E, "connecting", YELLOW); // newly paired, before the poller lists it
-    service.set({ links: [{ id: E, name: "E", connected: false, lastOkAt: null, lastError: null, repos: null, agents: null }] });
+    service.set({ links: [{ id: E, name: "E", connected: false, lastOkAt: null, coordinator: null, lastError: null, repos: null, agents: null }] });
     expectRow(E, "connecting", YELLOW); // first dial in progress
   });
 
@@ -9458,13 +9458,13 @@ describe("setup Peers tab", () => {
     } as unknown as TUI);
     const service = new FakePeerService();
     dashboard.setPeerService(service);
-    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] };
+    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] };
     // The Teams tab draws only its local tree.
     dashboard.setSidebarMode("teams");
 
     // Closed: the poller's background changes draw nothing.
     service.set({ links: [link] });
-    service.set({ links: [{ ...link, connected: false, lastError: "timed out" }] });
+    service.set({ links: [{ ...link, connected: false, coordinator: null, lastError: "timed out" }] });
     expect(counter.renders()).toBe(0);
 
     dashboard.handleInput("I");
@@ -9824,7 +9824,7 @@ describe("setup Peers tab", () => {
     const { dashboard, service } = open();
     service.set({
       peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }],
-      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, lastError: "e".repeat(160), repos: null, agents: null }],
+      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, coordinator: null, lastError: "e".repeat(160), repos: null, agents: null }],
     });
     const stages: PairStage[] = [
       { stage: "connecting" },
@@ -9894,7 +9894,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const now = Date.now();
     return [
       {
-        id: PEER_B, name: "Laptop B", connected: true, lastOkAt: now, lastError: null,
+        id: PEER_B, name: "Laptop B", connected: true, lastOkAt: now, coordinator: null, lastError: null,
         repos: repos("itsybitsy", "other-repo"),
         agents: [
           remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
@@ -9902,8 +9902,8 @@ describe("Unified peer repos in the Agents tree", () => {
           remote("agent-1", "other-repo", { state: "complete" }),
         ],
       },
-      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
-      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
+      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, coordinator: null, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
+      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
     ];
   }
 
@@ -10179,7 +10179,7 @@ describe("Unified peer repos in the Agents tree", () => {
       const { dashboard, service } = setup();
       const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
       const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
-      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
+      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
       const rows = treeRows(dashboard, width);
       expect(rows.filter((r) => visibleWidth(r) > width)).toEqual([]);
       const text = rows.map(stripAnsi);
@@ -10199,7 +10199,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const name = local.repoRegistryName;
     dashboard.setRepos([{ name, path: local.repoPath }]);
     const peer = (base: PeerLinkState, state: string): PeerLinkState => ({
-      ...base, connected: true, lastError: null, repos: repos(name), agents: [remote(local.id, name, { state })],
+      ...base, connected: true, coordinator: null, lastError: null, repos: repos(name), agents: [remote(local.id, name, { state })],
     });
     const [first, second] = links();
     const b = peer(first!, "waiting");
@@ -10864,7 +10864,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const b = service.state.links[0]!;
     const c = service.state.links[1]!;
     service.set({ links: [{ ...b, agents: b.agents!.map((agent) => ({ ...agent, repoPath: "/elsewhere" })) },
-      { ...c, lastError: "still unreachable" }, ...service.state.links.slice(2)] });
+      { ...c, coordinator: null, lastError: "still unreachable" }, ...service.state.links.slice(2)] });
     expect(counter.renders()).toBe(renders);
 
     // The Teams tab draws no section: rebuilt, but no render.

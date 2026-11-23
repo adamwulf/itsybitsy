@@ -40,6 +40,8 @@ import {
   cleanRemoteText,
   describePeerClose,
   requestAgents,
+  requestCoordinatorPane,
+  type CoordinatorPane,
   type RemoteAgent,
   type RemoteRepo,
   type PeerSnapshot,
@@ -72,6 +74,7 @@ export interface PeerLinkState {
   /** Why the last dial or request failed, or the connection closed; null once a request succeeds. */
   lastError: string | null;
   /** The last agent list received, kept after the peer drops; null until one arrives. */
+  coordinator: PeerSnapshot["coordinator"];
   repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
 }
@@ -105,6 +108,7 @@ interface Link {
   connected: boolean;
   lastOkAt: number | null;
   lastError: string | null;
+  coordinator: PeerSnapshot["coordinator"];
   repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
   /** The complete snapshot as JSON, to tell a changed list from the same one. */
@@ -160,6 +164,7 @@ export class PeerPoller {
       connected: link.connected,
       lastOkAt: link.lastOkAt,
       lastError: link.lastError,
+      coordinator: link.coordinator,
       repos: link.repos,
       agents: link.agents,
     }));
@@ -169,6 +174,12 @@ export class PeerPoller {
   connectedConnection(peerId: string): PairConnection | null {
     const link = this.links.get(peerId);
     return link?.connected && link.conn?.closeInfo() === null ? link.conn : null;
+  }
+
+  async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
+    const conn = this.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    return this.requestWithTimeout(conn, requestCoordinatorPane);
   }
 
   /** Poll now, then every {@link PEER_POLL_INTERVAL_MS}. */
@@ -245,6 +256,7 @@ export class PeerPoller {
           connected: false,
           lastOkAt: null,
           lastError: null,
+          coordinator: null,
           repos: null,
           agents: null,
           snapshotKey: null,
@@ -296,7 +308,7 @@ export class PeerPoller {
         link.conn = dialed;
         this.watchClose(link, dialed, generation);
       }
-      const snapshot = await this.requestWithTimeout(link, conn);
+      const snapshot = await this.requestWithTimeout(conn, requestAgents);
       // A final reply can arrive alongside the close notification. Only a live link recovers.
       if (!this.isCurrent(link, generation) || link.conn !== conn || this.recordObservedClose(link, conn)) return;
       this.succeeded(link, snapshot);
@@ -308,23 +320,17 @@ export class PeerPoller {
     }
   }
 
-  /**
-   * {@link requestAgents} bounded by {@link PEER_REQUEST_TIMEOUT_MS}. On
-   * timeout it detaches `conn` from `link` (so the close is not reported as the
-   * other side's), closes it, which fails the pending request, and rejects
-   * with {@link PeerRequestTimeout}.
-   */
-  private requestWithTimeout(link: Link, conn: PairConnection): Promise<PeerSnapshot> {
+  /** Bound each read on the live link. Closing it on timeout ends outstanding streams. */
+  private requestWithTimeout<T>(conn: PairConnection, request: (conn: PairConnection) => Promise<T>): Promise<T> {
     return new Promise((resolve, reject) => {
       let settled = false;
       const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
         if (settled) return;
         settled = true;
-        if (link.conn === conn) link.conn = null;
         closeQuietly(conn, PEER_CLOSE.done, "request timed out");
         reject(new PeerRequestTimeout());
       });
-      requestAgents(conn).then(
+      request(conn).then(
         (snapshot) => {
           if (settled) return;
           settled = true;
@@ -371,6 +377,7 @@ export class PeerPoller {
     link.connected = true;
     link.lastError = null;
     if (key !== link.snapshotKey) {
+      link.coordinator = snapshot.coordinator;
       link.repos = snapshot.repos;
       link.agents = snapshot.agents;
       link.snapshotKey = key;

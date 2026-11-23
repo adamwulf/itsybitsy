@@ -85,7 +85,7 @@ function serve(options: { captureCoordinator?: PeerResponderDeps["captureCoordin
     },
     snapshot: () => {
       snapshots++;
-      return options.snapshot ? options.snapshot() : { repos: [], agents: [] };
+      return options.snapshot ? options.snapshot() : { coordinator: null, repos: [], agents: [] };
     },
     log: (line) => logs.push(line),
   });
@@ -136,7 +136,7 @@ describe("decodeAgentsReply", () => {
   test("rebuilds each entry from the allowed fields only, and strips control characters", () => {
     const { repos, agents } = decodeAgentsReply(
       encode({
-        op: "agents",
+        op: "agents", coordinator: { state: "running" },
         repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
         agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoRegistryName: "app\x1b[31m", repoPath: "/r", state: "running", prompt: "leak", extra: { x: 1 } }],
       }),
@@ -152,7 +152,7 @@ describe("decodeAgentsReply", () => {
     const cf = "‮⁦​‍﻿­";
     const { agents: [agent] } = decodeAgentsReply(
       encode({
-        op: "agents",
+        op: "agents", coordinator: { state: "running" },
         repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
         agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoRegistryName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}` }],
       }),
@@ -189,7 +189,7 @@ describe("decodeAgentsReply", () => {
 
   test("a list over 1 MB is sent as an error reply", () => {
     const big: RemoteAgent[] = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
-    expect(() => decodeAgentsReply(encodeAgentsReply({ repos: [], agents: big }))).toThrow(
+    expect(() => decodeAgentsReply(encodeAgentsReply({ coordinator: null, repos: [], agents: big }))).toThrow(
       new PeerErrorReply(`the other side reported: the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`),
     );
   });
@@ -216,12 +216,13 @@ describe("serveTrustedConnection", () => {
   const snapshot = () => peerSnapshot([
     { name: "app", path: "/repos/app" },
     { name: "empty", nickname: "No agents", path: "/repos/empty" },
-  ], [fullAgent("agent-1")]);
+  ], [fullAgent("agent-1")], "waiting");
 
   test("answers a peer's agents requests, each on its own stream, over one connection", async () => {
     const side = serve({ snapshot });
     expect(await requestAgents(side.a)).toEqual(snapshot());
     expect(await requestAgents(side.a)).toEqual(snapshot());
+    expect(snapshot().coordinator).toEqual({ state: "waiting" });
     expect(snapshot().repos).toEqual([{ registryName: "app", displayName: "app" }, { registryName: "empty", displayName: "No agents" }]);
     expect(side.snapshots()).toBe(2);
     // One check at the connection's accept, then two per request: when its
@@ -470,10 +471,10 @@ describe("trusted new-agent responder", () => {
     spawn.mockImplementation(() => new Promise(() => {}));
     const pending = rawRequest(side.a, encode(request));
     await waitFor(() => spawn.mock.calls.length === 1);
-    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.clock.advance(25_000);
     expect(decodeText(await pending)).toEqual({ ok: false, error: expect.stringContaining("outcome unknown") });
-    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.a.close(0, "done");
   });
 
@@ -481,7 +482,7 @@ describe("trusted new-agent responder", () => {
     const { side, spawn } = receiver();
     spawn.mockRejectedValue(new Error("spawn failed"));
     expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "spawn failed" });
-    expect(await requestAgents(side.a)).toEqual({ repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.a.close(0, "done");
   });
 

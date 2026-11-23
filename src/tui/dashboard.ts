@@ -4199,7 +4199,8 @@ export async function launchDashboard(): Promise<void> {
   // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
   // and never carries a state that detection has not filled in yet.
   const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () =>
-    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? []), message => dashboard.remoteAgentStarted(message)));
+    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [],
+      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message)));
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read

@@ -75,7 +75,7 @@ function makeRig(initialPeers: Peer[]) {
       },
       snapshot: () => {
         r.requests++;
-        return { repos: r.repos, agents: r.agents };
+        return { coordinator: null, repos: r.repos, agents: r.agents };
       },
       log: () => {},
     });
@@ -146,6 +146,7 @@ describe("PeerPoller", () => {
       connected: true,
       lastOkAt: rig.clock.now(),
       lastError: null,
+      coordinator: null,
       repos: rig.remote(P1).repos,
       agents: rig.remote(P1).agents,
     });
@@ -417,7 +418,7 @@ describe("PeerPoller", () => {
     });
     rig.poller.start();
     await waitFor(() => rig.state(P1)?.lastError !== null, { message: "first dial failed" });
-    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null });
+    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, lastOkAt: null, lastError: "timed out", coordinator: null, repos: null, agents: null });
 
     rig.setDial(rig.connect);
     rig.tick();
@@ -430,7 +431,7 @@ describe("PeerPoller", () => {
     rig.clock.jump(1_000);
     rig.remote(P1).served[0]!.close(PEER_CLOSE.done, "shutting down");
     await waitFor(() => rig.state(P1)?.connected === false, { message: "dropped" });
-    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, lastOkAt: okAt, lastError: "closed by the other side", repos: rig.remote(P1).repos, agents: firstList });
+    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, lastOkAt: okAt, lastError: "closed by the other side", coordinator: null, repos: rig.remote(P1).repos, agents: firstList });
 
     // Its list changes while it is away; the redial brings the new one.
     rig.remote(P1).agents = [remoteAgent("agent-new", "waiting")];

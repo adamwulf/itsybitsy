@@ -80,6 +80,17 @@ export function validateConfigValue(value: unknown, type: ConfigType): boolean {
   }
 }
 
+export async function readConfigFileStrict(filePath: string): Promise<Record<string, unknown>> {
+  try {
+    const data = await Bun.file(filePath).json();
+    if (data === null || typeof data !== "object" || Array.isArray(data)) throw new Error("Expected a JSON object");
+    return data;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+}
+
 async function readJsonFile(filePath: string): Promise<Record<string, unknown>> {
   try {
     const file = Bun.file(filePath);
@@ -107,8 +118,7 @@ export function defaultUserConfigPath(): string {
 /** Read this machine's current policy for each attachment request. */
 export async function readTransferLimits() {
   const path = overrideUserConfigPath ?? join(accountHome(), ".itsybitsy", "config.json");
-  const data = await Bun.file(path).json().catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return {};
+  const data = await readConfigFileStrict(path).catch((error: Error) => {
     throw new Error(`Cannot read attachment limits from ${path}: ${error.message}`, { cause: error });
   });
   const { limits, warnings } = resolveTransferLimits(rawAttachmentSettings(data));
@@ -205,7 +215,7 @@ export async function ensureConfigFilePerms(filePath: string): Promise<void> {
 }
 
 export async function writeConfig(filePath: string, key: string, value: unknown): Promise<void> {
-  const data = await readJsonFile(filePath);
+  const data = await readConfigFileStrict(filePath);
   const setting = attachmentSettingKey(key);
   if (setting) {
     const error = validateAttachmentSetting(setting, value, rawAttachmentSettings(data));

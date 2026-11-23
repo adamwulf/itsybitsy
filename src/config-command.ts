@@ -1,4 +1,4 @@
-import { readConfig, writeConfig, CONFIG_KEYS, validateConfigValue, defaultUserConfigPath, ensureConfigFilePerms, type ConfigKeyDef } from "./config";
+import { readConfigFileStrict, readConfig, writeConfig, CONFIG_KEYS, validateConfigValue, defaultUserConfigPath, ensureConfigFilePerms, type ConfigKeyDef } from "./config";
 import { join, dirname } from "path";
 import { mkdir } from "fs/promises";
 import { parseModel } from "./agent-cli";
@@ -17,16 +17,6 @@ function printAvailableKeys(): void {
 
 function printArrayKeys(): void {
   console.error("Array keys: " + ARRAY_KEYS.join(", "));
-}
-
-async function readJsonFile(filePath: string): Promise<Record<string, unknown>> {
-  try {
-    const file = Bun.file(filePath);
-    if (!(await file.exists())) return {};
-    return (await file.json()) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
 }
 
 function getNestedValue(obj: Record<string, unknown>, dotKey: string): unknown {
@@ -218,7 +208,7 @@ export async function runConfigCommand(args: string[]): Promise<void> {
       }
       const cfgPath = defaultUserConfigPath();
       await ensureConfigDir(cfgPath);
-      const data = await readJsonFile(cfgPath);
+      const data = await readConfigFileStrict(cfgPath);
       const existing = getNestedValue(data, key);
       const arr = Array.isArray(existing) ? existing as string[] : [];
       if (arr.includes(value)) {
@@ -250,7 +240,7 @@ export async function runConfigCommand(args: string[]): Promise<void> {
         console.error(`Config file not found: ~/.itsybitsy/config.json`);
         process.exit(1);
       }
-      const data = await readJsonFile(cfgPath);
+      const data = await readConfigFileStrict(cfgPath);
       const existing = getNestedValue(data, key);
       const arr = Array.isArray(existing) ? existing as string[] : [];
       const idx = arr.indexOf(value);
@@ -282,7 +272,7 @@ export async function runConfigCommand(args: string[]): Promise<void> {
         console.error(`Config file not found: ~/.itsybitsy/config.json`);
         process.exit(1);
       }
-      const data = await readJsonFile(cfgPath);
+      const data = await readConfigFileStrict(cfgPath);
       const existed = deleteNestedValue(data, key);
       if (!existed) {
         console.log(`Key '${key}' is not set`);

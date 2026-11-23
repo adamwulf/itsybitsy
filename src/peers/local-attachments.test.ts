@@ -248,7 +248,7 @@ test.each(["claude", "agy"])("sandboxed %s sender builds its table without openi
   const repo = await realpath(recipient.repoPath);
   const cwd = join(repo, ".itsybitsy/agents/sender/repo");
   const encoded = encodeClaudeProjectPath(cwd);
-  const roots = [join(repo, ".git"), join(home, ".claude/projects", encoded),
+  const roots = [join(home, ".claude/projects", encoded),
     join("/private/tmp", `claude-${process.getuid?.() ?? 0}`, encoded), join(home, ".gemini")];
   await fixture.addAgent(repo, "sender", { model: cli + ":test", paths: { deny: roots }, sandbox: { enabled: true } });
   const path = join(cwd, "report");
@@ -267,7 +267,7 @@ test.each(["claude", "agy"])("sandboxed %s sender builds its table without openi
     expect(files.mock.calls.map(([path]) => String(path)).filter(path => path.endsWith("/meta.json"))).toEqual([join(dirname(cwd), "meta.json")]);
     expect(opened).toContain(cwd);
     expect(opened.filter(path => path === other || path.startsWith(other + "/"))).toEqual([]);
-    expect(opened.filter(path => roots.includes(path))).toEqual([]);
+    expect(opened.filter(path => roots.some(root => root === path || path.startsWith(root + "/")))).toEqual([]);
   } finally {
     files.mockRestore();
     asyncRead.mockRestore();

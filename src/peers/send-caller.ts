@@ -5,7 +5,8 @@ import { registeredRepoRoots } from "../hooks/agent-context";
 import { resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
 import { checkCoordinatorExists } from "../coordinator";
 import { isCoordinatorType } from "../coordinator-type-names";
-import { verifiedAgentWorktree } from "../no-worktree-caller";
+import { hasGitWorktreeBacklink, registeredWorktreeRecord } from "../no-worktree-caller";
+import { metadataRealpath, orderedEntryMatches, prepareAccessTable, resolvePathsConfig, type PathsConfig } from "../sandbox";
 import { matchWorktreeCaller } from "../runtime-names";
 import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
 
@@ -55,8 +56,19 @@ export async function verifiedSendCaller(cwd: string, purpose: "attachments" | "
     throw new Error(refusal);
   }
   if (worktree) {
-    const caller = await verifiedAgentWorktree(path, [repo], true);
+    const caller = await registeredWorktreeRecord(path, [repo]);
     if (!caller || caller.meta.worktree !== true || isCoordinatorType(caller.meta.agentType)) throw new Error(refusal);
+    // A remote worktree is only a broker destination here. Its watchdog
+    // checks the seal, registration and backlink before publishing anything.
+    if (purpose === "attachments") {
+      const { deny } = prepareAccessTable({ ...resolvePathsConfig(caller.meta.paths as PathsConfig | undefined), runtimeRoots: [], runtimeDenyRoots: [] });
+      const verified = await hasGitWorktreeBacklink(caller, true, file => {
+        const canonical = metadataRealpath(file);
+        if (!canonical || deny.some(entry => orderedEntryMatches(entry, canonical))) throw new Error(refusal);
+        return file;
+      });
+      if (!verified) throw new Error(refusal);
+    }
     return { kind: "agent", caller };
   }
   const coordinator = await checkCoordinatorExists(repo);

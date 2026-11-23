@@ -1,7 +1,7 @@
 import { waitFor } from "./test-utils";
 import { processSpawnRequests, spawnRequestDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, open, readdir, rename, symlink, rm, utimes } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, realpath, rename, symlink, rm, utimes } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setUserHome, resetUserHome } from "./home";
 import { addMember, getTeam } from "./teams";
@@ -325,6 +325,39 @@ describe("qualified agent addresses", () => {
       expect(seen.at(-1)?.from).toEqual({ kind: "user" });
       expect(seen.every(h => h.files.length === 0)).toBe(true);
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
+  });
+
+  test("only the watchdog verifies a remote sender whose common Git directory is denied", async () => {
+    await peer();
+    const git = join(await realpath(app), ".git");
+    const agent = await cli.addAgent(app, "private-git", { sandbox: { enabled: true }, paths: { deny: [git, git + "/**"] } });
+    const run = (args: string[]) => cli.run(["send", ...args], { cwd: agent.sessionCwd, sandboxed: true });
+    await Bun.write(join(agent.sessionCwd, "report"), "fixture");
+    const local = await run(["mgr", "--attach", "report", "read"]);
+    expect(local.stderr).toContain("cannot verify the sender for attachments");
+    expect(local.actions).toEqual([]);
+
+    await Bun.write(join(agent.agentDir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
+    const messages: SendHeader[] = [];
+    const timer = setInterval(() => { void pollPeerOutbox(async (_id, header) => {
+      messages.push(header);
+      return header.id;
+    }, () => {}); }, 25);
+    const mode = (await Bun.file(git).stat()).mode & 0o777;
+    try {
+      // Model the client kernel boundary. Restore the watchdog's access only
+      // once the CLI has actually submitted its request.
+      await chmod(git, 0);
+      const remote = run(["laptop-b/remote/remote-id", "hello"]);
+      await waitFor(async () => (await readdir(spawnRequestDir(agent.agentDir)).catch(() => [])).some(name => name.endsWith(".json")));
+      await chmod(git, mode);
+      await processSpawnRequests(agent.id, app, { verifySeal: async () => ({ ok: true }) });
+      const result = await remote;
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(messages).toMatchObject([{ message: "hello", from: { id: "laptop-a/App/private-git" } }]);
+    } finally { await chmod(git, mode); clearInterval(timer); }
   });
 
   test("a worktree without a live watchdog reports validation errors before liveness", async () => {

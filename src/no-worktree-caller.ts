@@ -136,53 +136,51 @@ async function readGitPointer(path: string): Promise<string> {
   } finally { await file.close(); }
 }
 
-/**
- * An existing agent worktree already identifies its caller. Verify both the
- * registered repository and Git's worktree backlink before taking this fast
- * path: a directory that only resembles an agent worktree is not sufficient.
- * This uses filesystem reads only; Codex's native sandbox can prohibit ps.
- */
-export async function verifiedAgentWorktree(cwd: string, roots: string[], allowParentGitFile = false): Promise<NoWorktreeCaller | null> {
+/** Locate the candidate's own record without opening any Git admin files. */
+export async function registeredWorktreeRecord(canonicalCwd: string, roots: string[]): Promise<NoWorktreeCaller | null> {
+  const match = runtimeNames.matchWorktreeCaller(canonicalCwd);
+  if (!match || !roots.includes(match[1]!) || !isValidAgentId(match[2]!)) return null;
+  const repoPath = match[1]!;
+  const agentId = match[2]!;
+  const agentDir = runtimeNames.agentDir(repoPath, agentId);
   try {
-    const canonicalCwd = await realpath(cwd);
-    const match = runtimeNames.matchWorktreeCaller(canonicalCwd);
-    if (!match || !roots.includes(match[1]!) || !isValidAgentId(match[2]!)) return null;
-    const repoPath = match[1]!;
-    const agentId = match[2]!;
-    const agentDir = runtimeNames.agentDir(repoPath, agentId);
-    const worktreePath = join(agentDir, "repo");
     const meta = await Bun.file(join(agentDir, "meta.json")).json();
     if (!meta || Array.isArray(meta) || meta.id !== agentId || meta.worktree === false) return null;
+    return { repoPath, agentDir, meta };
+  } catch { return null; }
+}
 
+/** Verify Git's backlink before granting worktree authority. A CLI with a
+ * frozen read policy checks each path before opening it; a watchdog verifies
+ * under its own access. Neither needs process ancestry. */
+export async function hasGitWorktreeBacklink(
+  caller: NoWorktreeCaller, allowParentGitFile: boolean, checkRead: (path: string) => string = path => path,
+): Promise<boolean> {
+  try {
+    const { repoPath, agentDir } = caller;
+    const worktreePath = join(agentDir, "repo");
     const gitFile = join(worktreePath, ".git");
-    const pointer = (await readGitPointer(gitFile)).match(/^gitdir: (.+)$/);
-    if (!pointer) return null;
-    const gitDir = await realpath(resolve(worktreePath, pointer[1]!));
-    // Git's worktree administration directory must belong to this registered
-    // repo, and its backlink must name this exact worktree's .git file.
+    const pointer = (await readGitPointer(checkRead(gitFile))).match(/^gitdir: (.+)$/);
+    if (!pointer) return false;
+    const gitDir = await realpath(checkRead(resolve(worktreePath, pointer[1]!)));
     let repoGitDir = join(repoPath, ".git");
     if (allowParentGitFile && (await stat(repoGitDir)).isFile()) {
-      // A registered submodule's .git file points into the superproject's
-      // administration directory. Resolve a relative pointer from the module.
-      const parent = (await readGitPointer(repoGitDir)).match(/^gitdir: (.+)$/);
-      if (!parent) return null;
+      const parent = (await readGitPointer(checkRead(repoGitDir))).match(/^gitdir: (.+)$/);
+      if (!parent) return false;
       repoGitDir = resolve(repoPath, parent[1]!);
     }
-    const worktreesDir = await realpath(join(repoGitDir, "worktrees"));
-    if (dirname(gitDir) !== worktreesDir) return null;
-    const backlink = await readGitPointer(join(gitDir, "gitdir"));
-    if (!backlink) return null;
-    if (await realpath(resolve(gitDir, backlink)) !== await realpath(gitFile)) return null;
-    return { repoPath, agentDir, meta };
-  } catch {
-    // Missing or unverifiable worktree metadata must use the existing caller
-    // verification, never gain an exemption from caller authorization.
-    return null;
-  }
+    const worktreesDir = await realpath(checkRead(join(repoGitDir, "worktrees")));
+    if (dirname(gitDir) !== worktreesDir) return false;
+    const backlink = await readGitPointer(checkRead(join(gitDir, "gitdir")));
+    if (!backlink) return false;
+    return await realpath(checkRead(resolve(gitDir, backlink))) === await realpath(checkRead(gitFile));
+  } catch { return false; }
 }
 
 export async function isRegisteredAgentWorktree(cwd: string, roots: string[], allowParentGitFile = false): Promise<boolean> {
-  return await verifiedAgentWorktree(cwd, roots, allowParentGitFile) !== null;
+  const path = await realpath(cwd).catch(() => null);
+  const caller = path && await registeredWorktreeRecord(path, roots);
+  return caller ? hasGitWorktreeBacklink(caller, allowParentGitFile) : false;
 }
 
 /**

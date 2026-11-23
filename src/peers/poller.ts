@@ -139,7 +139,7 @@ export class PeerPoller {
    */
   private readonly inFlight = new Set<string>();
   /** Each peer has one live link. Its native pane read can outlast the wire deadline. */
-  private readonly paneReads = new WeakMap<PairConnection, AbortSignal>();
+  private readonly paneReads = new WeakSet<PairConnection>();
   /** Bumped by every stop(): work started before a stop is ignored when it settles, even after a restart. */
   private generation = 0;
   private running = false;
@@ -186,24 +186,10 @@ export class PeerPoller {
   async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
     const conn = this.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
-    const pending = this.paneReads.get(conn);
-    if (pending) throw pending.reason ?? new Error("Previous coordinator pane read is still pending");
-    const abort = new AbortController();
-    this.paneReads.set(conn, abort.signal);
-    const deadline = Promise.withResolvers<never>();
-    const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
-      const error = new Error("Coordinator pane request timed out. Previous read is still pending.");
-      abort.abort(error);
-      deadline.reject(error);
-    });
-    // iroh 1.2.0's readToEnd holds the receive mutex needed by stop(). Release
-    // the slot when the underlying exchange settles, even if the caller timed out.
-    const read = requestCoordinatorPane(conn, abort.signal).finally(() => this.paneReads.delete(conn));
-    try {
-      return await Promise.race([read, deadline.promise]);
-    } finally {
-      cancel();
-    }
+    if (this.paneReads.has(conn)) throw new Error("Previous coordinator pane read is still pending");
+    this.paneReads.add(conn);
+    try { return await requestCoordinatorPane(conn, undefined, this.deps.setTimer); }
+    finally { this.paneReads.delete(conn); }
   }
 
   /** Poll now, then every {@link PEER_POLL_INTERVAL_MS}. */
@@ -337,7 +323,7 @@ export class PeerPoller {
         link.conn = dialed;
         this.watchClose(link, dialed, generation);
       }
-      const snapshot = await this.requestWithTimeout(link, conn);
+      const snapshot = await requestAgents(conn, this.deps.setTimer, new PeerRequestTimeout());
       // A final reply can arrive alongside the close notification. Only a live link recovers.
       if (!this.isCurrent(link, generation) || link.conn !== conn || this.recordObservedClose(link, conn)) return;
       this.succeeded(link, snapshot);
@@ -350,39 +336,6 @@ export class PeerPoller {
     } finally {
       this.inFlight.delete(link.id);
     }
-  }
-
-  /**
-   * {@link requestAgents} bounded by {@link PEER_REQUEST_TIMEOUT_MS}. On
-   * timeout it detaches `conn` from `link` (so the close is not reported as the
-   * other side's), closes it, which fails the pending request, and rejects
-   * with {@link PeerRequestTimeout}.
-   */
-  private requestWithTimeout(link: Link, conn: PairConnection): Promise<PeerSnapshot> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
-        if (settled) return;
-        settled = true;
-        if (link.conn === conn) link.conn = null;
-        closeQuietly(conn, PEER_CLOSE.done, "request timed out");
-        reject(new PeerRequestTimeout());
-      });
-      requestAgents(conn).then(
-        (snapshot) => {
-          if (settled) return;
-          settled = true;
-          cancel();
-          resolve(snapshot);
-        },
-        (err: unknown) => {
-          if (settled) return;
-          settled = true;
-          cancel();
-          reject(err);
-        },
-      );
-    });
   }
 
   /** closeInfo() on the current connection may be available before its closed() notification. */

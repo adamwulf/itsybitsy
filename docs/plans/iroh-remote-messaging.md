@@ -244,7 +244,7 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
      - The receiver checks free disk space before it accepts a message. It uses `statfs` on `/tmp` and requires the total size plus a 1 GB margin.
      - Progress shows on both sides, and cancel works on both sides.
    - **Timeouts.** They are generous: there is no overall deadline, and a transfer fails only after 60 s with no progress in either direction. That allows for a 1 GB file over a slow relay.
-   - **Sender handoff.** It copies with `COPYFILE_FICLONE`. On APFS that makes a clone, which is nearly instant and uses no extra space, so a 1 GB `--attach` does not double disk use. On other filesystems it falls back to a normal copy.
+   - **Sender handoff.** The CLI checks the named regular file against the verified open handle and forces a descriptor-based copy-on-write clone. APFS shares storage with the source. Filesystems without clone support use a cancellable copy from the same handle in 64 KiB chunks. The CLI verifies the identity, exact length and SHA-256 of the private snapshot. The watchdog applies the same snapshot checks to each securely opened broker input.
 2. **`--attach`.** Yes: `ib send <target> --attach <file>`, repeatable. It also works for local sends, with the same copy and rewrite.
 3. **The other machine's coordinators.** Yes. Remote sends may reach the other machine's `@system` and its repo coordinators:
    - the CLI forms `<machine>/@system` and `<machine>/@<repo>`;

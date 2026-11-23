@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
-import { inspectBrokerLease, reclaimTransfer, sweepEntries, sweepOutgoingDirectories, transferDirectoryBatch, transferOwnerState, writeTransferOwner } from "./transfer-owner";
+import { finishRecovery, inspectBrokerLease, reclaimTransfer, sweepEntries, sweepOutgoingDirectories, transferDirectoryBatch, transferOwnerState, writeTransferOwner } from "./transfer-owner";
 import { sweepStagingLease } from "../send-broker";
 
 let root: string;
@@ -81,4 +81,18 @@ test("a failed entry leaves the rest of its batch reachable and is retried", asy
   const retried: string[] = [];
   await sweepEntries(root, async name => { retried.push(name); });
   expect(retried.sort()).toEqual(seen);
+});
+
+test("recovery reports errors only after every root finishes", async () => {
+  const held = Promise.withResolvers<void>();
+  let reported = false;
+  const outcome = finishRecovery([Promise.reject(Error("outbox unavailable")), held.promise]).catch(err => {
+    reported = true;
+    return err;
+  });
+  await Bun.sleep(0);
+  expect(reported).toBe(false);
+  held.resolve();
+  expect(await outcome).toBeInstanceOf(AggregateError);
+  expect(reported).toBe(true);
 });

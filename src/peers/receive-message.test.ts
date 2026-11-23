@@ -781,14 +781,21 @@ test("a pending replay expires independently while the body is still being recei
   await entered.promise;
   try {
     const clock = createFakeClock();
-    const admitted = Promise.withResolvers<void>();
-    const replay = receiver(req, "peer", paired, undefined, { setTimer: clock.setTimer, admitted: () => admitted.resolve() });
-    await admitted.promise;
+    const clocks = [clock, ...Array.from({ length: 7 }, () => createFakeClock())];
+    const admission = clocks.map(() => Promise.withResolvers<void>());
+    const waiters = clocks.map((c, i) => receiver(req, "peer", paired, undefined, {
+      setTimer: c.setTimer, admitted: () => admission[i]!.resolve(),
+    }));
+    await Promise.all(admission.map(a => a.promise));
+    await expect(receiver(req, "peer", paired)).rejects.toThrow("busy");
     clock.advance(60_000);
-    await expect(replay).rejects.toThrow("still being received — outcome unknown");
-    const next = receiver(req, "peer", paired);
+    await expect(waiters[0]!).rejects.toThrow("still being received — outcome unknown");
+    const admitted = Promise.withResolvers<void>();
+    const replacement = receiver(req, "peer", paired, undefined, { admitted: () => admitted.resolve() });
+    await admitted.promise;
+    await expect(receiver(req, "peer", paired)).rejects.toThrow("busy");
     held.resolve(new Uint8Array());
-    await next;
+    await Promise.all([replacement, ...waiters.slice(1)]);
   } finally { held.resolve(new Uint8Array()); await original; }
 });
 
@@ -843,4 +850,30 @@ test("a replay of another stream's idle failure keeps its connection for the nex
     clock.advance(5000);
     expect(await requestAgents(a)).toMatchObject({ agents: [] });
   } finally { a.close(0, "done"); await serving; }
+});
+
+test("a stalled framed read with a pending error reply closes once at the whole-ACK grace", async () => {
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock();
+  const client = await a.openBi();
+  const server = await b.acceptBi();
+  const writing = Promise.withResolvers<void>();
+  server.write = async () => { writing.resolve(); await b.closed(); throw Error("closed"); };
+  server.stopReceiving = async () => { await b.closed(); };
+  const accept = b.acceptBi.bind(b);
+  b.acceptBi = async () => { b.acceptBi = accept; return server; };
+  const close = spyOn(b, "close");
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    log() {}, receiveMessage: receiver, setTimer: clock.setTimer });
+  try {
+    await client.writeAll(Uint8Array.of(0));
+    await Bun.sleep(0);
+    clock.advance(60_000);
+    await writing.promise;
+    clock.advance(749);
+    expect(close).not.toHaveBeenCalled();
+    clock.advance(1);
+    await serving;
+    expect(close).toHaveBeenCalledTimes(1);
+  } finally { a.close(0, "done"); }
 });

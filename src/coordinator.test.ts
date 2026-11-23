@@ -556,7 +556,7 @@ describe("ensureSystemCoordinator", () => {
       const pinned = cmd[0] === record.executable && cmd[1] === "-S" && cmd[2] === record.socket;
       const env = opts?.env ?? process.env;
       const selected = !pinned || !!(env.PATH || env.TMUX || env.TMUX_TMPDIR);
-      return { stdout: mockStream(selected ? "200" : "250"), stderr: emptyStream(), exited: Promise.resolve(0) };
+      return { stdout: mockStream("ib-coordinator\t%22\t0\t%22\t" + (selected ? "200" : "250")), stderr: emptyStream(), exited: Promise.resolve(0) };
     });
     try {
       const ancestors = async () => [
@@ -572,6 +572,41 @@ describe("ensureSystemCoordinator", () => {
         if (original[i] === undefined) delete process.env[key]; else process.env[key] = original[i];
       });
     }
+  });
+
+  test("system sender ancestry follows the registered pane when another pane has focus", async () => {
+    const { isSystemPaneCaller } = await import("./peers/remote-start-caller");
+    const path = join(tmpDir, "peer", "coordinator-tmux.json");
+    const record = { executable: "/launcher/bin/tmux", socket: "/launcher/socket", paneId: "%22" };
+    const from = (parent: number) => isSystemPaneCaller(300, coordinatorSenderPanePid, async () => [
+      "PID PPID STARTED                  KERNEL COMMAND",
+      `300  ${parent} Sat Nov 21 12:01:00 2026 bash   bash`,
+      `${parent}    1 Sat Nov 21 12:01:00 2026 bash   bash`,
+      "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
+    ].join("\n"));
+    let calls = 0;
+    let session = "ib-coordinator", dead = "0", registered = "%22";
+    coordinatorSpawnCtx.set(cmd => {
+      calls++;
+      const target = cmd[cmd.indexOf("-t") + 1];
+      const focused = target === "=ib-coordinator:";
+      const id = focused ? "%23" : target;
+      const pid = id === "%22" ? 200 : 250;
+      return { stdout: mockStream([session, id, dead, registered, pid].join("\t")), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+    expect(await from(200)).toBe(false); // missing record
+    expect(calls).toBe(0);
+    await Bun.write(path, JSON.stringify(record));
+    expect(await from(200)).toBe(true);
+    expect(await from(250)).toBe(false);
+    dead = "1";
+    expect(await from(200)).toBe(false);
+    dead = "0";
+    session = "another-session";
+    expect(await from(200)).toBe(false);
+    session = "ib-coordinator";
+    registered = "%24"; // socket and pane id reused after the recorded launch
+    expect(await from(200)).toBe(false);
   });
 
   test("the visible launch line contains only Claude and preserves its exit status", async () => {

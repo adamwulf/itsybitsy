@@ -870,10 +870,12 @@ export async function coordinatorSenderPanePid(): Promise<number | null> {
   if (!isAbsolute(binding.executable) || !isAbsolute(binding.socket) || !/^%\d+$/.test(binding.paneId)) return null;
   const result = await runCoordinatorCommand([
     binding.executable, "-S", binding.socket, "display-message", "-p", "-t",
-    tmuxSessionTarget(IB_COORDINATOR_SESSION), "#{pane_pid}",
+    binding.paneId, `#{session_name}\t#{pane_id}\t#{pane_dead}\t#{${COORDINATOR_PANE_ID}}\t#{pane_pid}`,
   ], 2000, cmd => coordinatorSpawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe", env: { LC_ALL: "C" } }));
-  const pid = result.text.trim();
-  return result.code === 0 && /^[1-9]\d*$/.test(pid) && Number(pid) > 1 ? Number(pid) : null;
+  const [session, pane, dead, markedPane, pid] = result.text.trimEnd().split("\t");
+  if (result.code !== 0 || session !== IB_COORDINATOR_SESSION || pane !== binding.paneId ||
+      dead !== "0" || markedPane !== pane || !pid || !/^[1-9]\d*$/.test(pid)) return null;
+  return Number(pid) > 1 ? Number(pid) : null;
 }
 
 function startCoordinatorPaneRegistration(paneId: string | null, generation: number, provider: CoordinatorTmux | null): void {

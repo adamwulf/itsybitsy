@@ -1469,7 +1469,6 @@ the compiled `ib` inside a real agent profile.
 
 For a local worktree send with explicit attachments, the sandboxed CLI copies verified files into its protected per-request lease. Its watchdog opens the numbered files, verifies the private snapshots, then renames the directory from protected staging to the read-only delivered attachment path before local enqueue. The watchdog enqueues self-addressed attachments directly in its own queue for the normal drain. Local text-only self-sends remain direct.
 
-
 **Problem.** `ib send <agent>` from a sandboxed worktree agent could not reach
 an agent in another repo: both `ib send cli-email-client ...` and
 `ib send @iris/cli-email-client ...` printed `Agent not found`, although the
@@ -1488,7 +1487,7 @@ request to the caller's own unsandboxed watchdog and waits. Queue, file names,
 atomic writes, at-most-once handling, result clipping and pruning are the spawn
 broker's. `src/send-broker.ts` adds:
 
-- **Request** — `{v:1, id, op:"send", target, message}`. The target is any
+- **Local text request** — `{v:1, id, op:"send", target, message}`. The target is any
   text the CLI could resolve, at most 256 characters, with no control
   characters; the message is the TEXT, at most 1 MiB
   (`SPAWN_MAX_PROMPT_BYTES`), and only the empty string is refused (as on the
@@ -1525,16 +1524,17 @@ broker's. `src/send-broker.ts` adds:
   sandbox that would let an agent copy any file the watchdog can read (a
   `.env`, say) to where it can read it. A path in a brokered message is sent
   as text.
+- **Local attachment request.** The `local-attachment-send` operation includes the target, message, client PID and manifest. It uses the same lease, numbered staging inputs, copy verification and cancellation protocol as a remote transfer.
 - **Remote targets.** Every worktree agent submits the target address and message to its own watchdog with `op: "remote-send"`. The watchdog verifies the requester, requires a registered repo, resolves the address and publishes only a remote match to peer-outbox (§20.4). A worktree with sandboxing explicitly disabled must pass the missing-seal and Git backlink checks. The sender label uses the machine, registered repo and verified agent id. The watcher’s queue acknowledgement or error returns through the broker. For explicit attachments, the CLI verifies sources under the agent’s policy and stages copies in `<agentDir>/send-attachments/<request-id>/<index>`. Agent tool writes into this subtree are denied. The request carries the wire manifest. The watchdog derives every input path from the verified requester directory, the queue request ID and a numeric index. It opens without following symlinks, requires single-link regular files of the declared size, and requests a copy-on-write clone from the verified descriptor into the private peer-outbox request. If the filesystem cannot clone, the watchdog copies from that descriptor in cancellable 64 KiB chunks. It compares the open private snapshot’s device and inode with its directory entry and verifies its exact size and manifest SHA-256. After each hash matches, it removes that numeric source relative to the open request directory. The receiver uses spellings solely for message rewriting. Withdrawing or cancelling removes the client staging directory.
-- **Staging ownership.** Text-only sends use the broker without a staging directory or lease. For attachments the CLI writes its PID into the protected request directory before staging bodies. On first observing the lease, the watchdog checks that the process started no later than the lease was created and records its start time there. A process start later than the lease prevents dispatch and leaves the directory eligible for the 24-hour expiry. It dispatches only when its current observation matches the recorded identity. A dead owner or a changed start time permits immediate reclamation. The watchdog scans the protected staging parent directly. It keeps a matching live owner regardless of age. A missing stamp permits the 24-hour retention only while there is no proof of death. A missing process or a known start mismatch proves death. The watchdog uses the lease birth time only when recording the first stamp. It checks the original lease identity again after verifying the private snapshot and immediately before publication. Ctrl-C before claim withdraws the request. After claim it signals the transfer and reports an unknown outcome. A watchdog runs at most one remote transfer for its agent. At shutdown it aborts the transfer and waits up to 1.5 seconds for broker polling and transfer jobs to finish.
+- **Staging ownership.** Text-only sends use the broker without a staging directory or lease. For attachments the CLI writes its PID into the protected request directory before staging bodies. On first observing the lease, the watchdog checks that the process started no later than the lease was created and records its start time there. A process start later than the lease prevents dispatch and leaves the directory eligible for the 24-hour expiry. It dispatches only when its current observation matches the recorded identity. A dead owner or a changed start time permits immediate reclamation. The watchdog scans the protected staging parent directly. It keeps a matching live owner regardless of age. A missing stamp permits the 24-hour retention only while there is no proof of death. A missing process or a known start mismatch proves death. The watchdog uses the lease birth time only when recording the first stamp. It checks the original lease identity again after verifying the private snapshot and immediately before publication. Ctrl-C before claim withdraws the request. After claim it signals the transfer and reports an unknown outcome. Each watchdog runs at most one remote send or local attachment job at a time. At shutdown it aborts the transfer and waits up to 1.5 seconds for broker polling and transfer jobs to finish.
 
-- **Never to the requester itself.** `sendMessage` takes the recipient's tmux
+- **Preventing inline delivery to the requester.** `sendMessage` takes the recipient's tmux
   session from its `meta.json` and decides an inline drain from its
   `meta.transient.json`; the seal covers neither, and every agent can write
   both of its own. A brokered send to the requester would let a sandboxed
   agent choose the text AND the tmux session its unsandboxed watchdog types it
   into — the reason a non-spawner's profile denies the tmux socket. So the
-  server refuses a resolved agent that is the requester (`isAgentAt`: same id
+  server refuses a text request addressed to the requester and uses queue-only delivery for its explicit attachments (`isAgentAt`: same id
   in the same repo, or the same resolved directory, as §4C.7 does — `meta.id`
   is agent-writable and a case variant opens the same directory), and a team
   send drops it like the sender (`teamSend`'s internal `excludeRecipient`; its
@@ -1553,7 +1553,7 @@ broker's. `src/send-broker.ts` adds:
   is deliberate — it is the reach an unsandboxed agent already has. A sender is
   always set, so the text is never sent raw and a leading `/` or `!` never runs
   as a command there (SPEC.md §4.1, step 4).
-- **Local fallback** — `ib send` must not work less well than before, and a
+- **Local text fallback** — `ib send` must not work less well than before, and a
   same-repo send works inside the sandbox. So the client sends directly, as
   before, when the watchdog has no fresh heartbeat, when the watchdog predates
   this broker, and when the target or message cannot travel in a request (too

@@ -67,13 +67,18 @@ export async function transferDirectoryBatch(parent: string, purpose = "sweep", 
   const key = parent + ":" + purpose;
   if (listing.has(key)) return [];
   listing.add(key);
-  try { return await readBatch(parent, key, limit); } finally { listing.delete(key); }
+  try { return await readBatch(parent, key, limit); }
+  catch (err) {
+    const scan = scans.get(key);
+    scans.delete(key);
+    await scan?.handle.close().catch(() => {});
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  } finally { listing.delete(key); }
 }
 async function readBatch(parent: string, key: string, limit: number) {
   const entries = [];
-  let path: string;
-  try { path = await safeTransferParent(parent); }
-  catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return []; throw err; }
+  const path = await safeTransferParent(parent);
   const info = await lstat(path);
   let scan = scans.get(key);
   if (scan && (scan.ino !== info.ino || scan.dev !== info.dev)) {

@@ -397,6 +397,44 @@ test("multi-megabyte send streams through the receiver with bounded reads and cu
   } finally { a.close(0, "done"); await serving; }
 });
 
+test("a read half that rejects stop after FIN still delivers the attachment acknowledgement", async () => {
+  await receiveFixture();
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const accept = b.acceptBi.bind(b);
+  let stopsAfterFin = 0;
+  let earlyStops = 0;
+  b.acceptBi = async () => {
+    const stream = await accept();
+    const read = stream.read.bind(stream);
+    const stop = stream.stopReceiving.bind(stream);
+    let finished = false;
+    stream.read = async limit => {
+      const chunk = await read(limit);
+      if (chunk.length === 0) finished = true;
+      return chunk;
+    };
+    stream.stopReceiving = async () => {
+      if (finished) { stopsAfterFin++; throw new Error("receive half already consumed"); }
+      earlyStops++;
+      await stop();
+    };
+    return stream;
+  };
+  const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); };
+  const serving = serveTrustedConnection(b, { peerName: paired, receiveMessage: receiver,
+    snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: timer });
+  const filesDir = join(cli.root, "staged");
+  await Bun.write(join(filesDir, "0"), "hello");
+  const request = header({ files: [manifestFile("hello")] });
+  try {
+    expect(await requestSend(a, request, timer, { filesDir })).toBe(request.id);
+    expect(await requestSend(a, request, timer, { filesDir })).toBe(request.id);
+    expect(stopsAfterFin).toBe(0);
+    expect(earlyStops).toBe(1); // the replay has an unread body
+    expect(lines).toHaveLength(1);
+  } finally { a.close(0, "done"); await serving; }
+});
+
 test.each(["body", "ack"])("cancelling while the %s is pending resets the exchange", async stage => {
   const filesDir = join(cli.root, "outgoing");
   await mkdir(filesDir);

@@ -609,36 +609,41 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     const first = await waitForIO(options, () => stream.read(1));
     if (first[0] === 0) {
       let prefix: Uint8Array | undefined = first;
+      let receivedFin = false;
       const reader = { read: async (limit: number) => {
-        if (!prefix) return stream.read(limit);
-        const byte = prefix;
+        const chunk = prefix ?? await stream.read(limit);
         prefix = undefined;
-        return byte;
+        if (!chunk.length) receivedFin = true;
+        return chunk;
       } };
+      // Native QUIC can reject STOP_SENDING once the receive half reached FIN.
+      const stopUnreadBody = () => {
+        if (!receivedFin) void stopReceivingOrClose(conn, stream, deps);
+      };
       let reply;
       let stalledRead = false;
       try {
         const header = await decodeSendHeader(reader, options);
-        if (!header.files.length) await requireSendFin(stream, options);
+        if (!header.files.length) await requireSendFin(reader, options);
         if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
         await deps.receiveMessage(header, conn.remoteId, async () => {
           const name = await deps.peerName(conn.remoteId);
           if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
           return name;
-        }, stream, { ...options, signal, admitted: () => deps.headerReaders?.delete(stream), cancelStream: () => {
+        }, reader, { ...options, signal, admitted: () => deps.headerReaders?.delete(stream), cancelStream: () => {
           void settledWithinGrace(stream.cancel(), deps).then(ok => {
             if (!ok) closeQuietly(conn, PEER_CLOSE.error, "receive reset stalled");
           });
         } });
         // A replay can acknowledge a previously queued attachment without
         // consuming its duplicate body.
-        if (header.files.length) void stopReceivingOrClose(conn, stream, deps);
+        if (header.files.length) stopUnreadBody();
         reply = { ok: true, id: header.id };
       } catch (err) {
         stalledRead = err instanceof TransferIdleError;
         // STOP_SENDING is independent of the send half. The error ACK can
         // finish even if the native reader is still unwinding a stalled read.
-        void stopReceivingOrClose(conn, stream, deps);
+        stopUnreadBody();
         reply = { ok: false, error: sendDiagnostic(errorDetail(err)) };
       }
       try {

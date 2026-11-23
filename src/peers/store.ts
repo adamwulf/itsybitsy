@@ -148,7 +148,11 @@ export async function addPeer(peer: { id: string; name: string; pairedAt?: strin
     name: sanitizePeerName(peer.name, id),
     pairedAt: peer.pairedAt ?? new Date().toISOString(),
   };
-  const peers = (await readPeers()).filter((p) => p.id !== id);
+  const previous = await readPeers();
+  if (stored.name.startsWith("@") && !previous.some(p => p.id === id && p.name === stored.name)) {
+    throw new Error("A machine name cannot start with @.");
+  }
+  const peers = previous.filter((p) => p.id !== id);
   peers.push(stored);
   await writePeers(peers);
   return stored;

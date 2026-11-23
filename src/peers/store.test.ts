@@ -88,6 +88,17 @@ describe("readPeers", () => {
 });
 
 describe("addPeer", () => {
+  test("refuses new and changed @ names while retaining readable legacy entries", async () => {
+    await expect(addPeer({ id: ID_A, name: " @new" })).rejects.toThrow("cannot start with @");
+    await addPeer({ id: ID_A, name: "new" });
+    await expect(addPeer({ id: ID_A, name: "@changed" })).rejects.toThrow("cannot start with @");
+    const legacy = { id: ID_A, name: "@legacy", pairedAt: "old" };
+    await writeFile(peersFile(), JSON.stringify([legacy]));
+    expect(await readPeers()).toEqual([legacy]);
+    expect(await addPeer(legacy)).toEqual(legacy);
+    expect((await addPeer({ ...legacy, name: "fixed" })).name).toBe("fixed");
+  });
+
   test("writes a JSON array of {id, name, pairedAt} in a 0700 directory", async () => {
     const stored = await addPeer({ id: ID_A, name: "Laptop B", pairedAt: "2026-11-15T01:02:03.000Z" });
     expect(stored).toEqual({ id: ID_A, name: "Laptop B", pairedAt: "2026-11-15T01:02:03.000Z" });

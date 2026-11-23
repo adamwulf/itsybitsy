@@ -3661,7 +3661,7 @@ A saves B when it reads `pair-ok`, keeping a name it already gave B, then closes
 - it equals this machine's name (§17.1, `~/.itsybitsy/machine-name`), ignoring case: `"<machine>" is this machine's name.`;
 - it equals another peer's name in `peers.json`, ignoring case: `Another peer is already named "<name>".` The peer being named may keep, or re-type, its own saved name.
 
-Esc, or a blank name, still keeps the saved name (a new peer's short id, which is unique enough). Only the prompt checks: peers already in `peers.json` keep the names they have, and `addPeer` itself does not refuse.
+Esc, or a blank name, still keeps the saved name (a new peer's short id, which is unique enough). The store also refuses new or changed names beginning with `@`. Existing entries retain their names.
 
 **Closing.** B always sends the last message, then waits for A to close (A closes as soon as it has read it), so a close cannot race the reply; B closes after 5 s at the latest. Other closes carry a code the other side maps to what it shows:
 

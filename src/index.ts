@@ -2052,6 +2052,8 @@ export async function main() {
           const message = await readMessage();
           controller.signal.throwIfAborted();
           if (!message) throw new Error(usage);
+          const detected = await sender;
+          if (!fromAgent && detected?.kind === "agent") fromAgent = String(detected.caller.meta.id);
           const opts = fromAgent || attachmentSender
             ? { ...(fromAgent && { fromAgent }), ...(attachmentSender && { noPassthrough: true }) }
             : undefined;

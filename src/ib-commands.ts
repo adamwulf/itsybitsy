@@ -5267,7 +5267,7 @@ export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
 
 /** Type for readCallerMetaFromCwd override in tests */
 export type CallerMetaReaderFn = (cwd: string) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
-export type NoWorktreeCallerResolverFn = (cwd: string, options?: { coordinatorId?: string; roots?: string[] }) => Promise<NoWorktreeCaller | null>;
+export type NoWorktreeCallerResolverFn = (cwd: string, options?: { coordinatorId?: string; roots?: string[]; preferShared?: boolean }) => Promise<NoWorktreeCaller | null>;
 
 let callerMetaReaderOverride: CallerMetaReaderFn | null = null;
 let noWorktreeCallerResolverOverride: NoWorktreeCallerResolverFn | null = null;
@@ -6211,6 +6211,10 @@ export interface ResolvedCallerContext {
  * Throws on an unverifiable or ambiguous caller; a destructive-command gate must
  * treat a throw as "deny" (fail-closed), matching newAgent()'s posture.
  */
+export function resolveAttachmentSharedCaller(cwd: string, repoPath: string): Promise<NoWorktreeCaller | null> {
+  return (noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller)(cwd, { roots: [repoPath], preferShared: true });
+}
+
 export function resolveRemoteSharedCaller(cwd: string, repoPath: string, coordinatorId: string): Promise<NoWorktreeCaller | null> {
   return (noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller)(cwd, { roots: [repoPath], coordinatorId });
 }

@@ -14,6 +14,8 @@ export interface NoWorktreeCaller {
 }
 
 interface CallerDeps {
+  /** Verify shared process ancestry even when cwd belongs to a registered worktree. */
+  preferShared?: boolean;
   coordinatorId?: string;
   /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
   dashboardAncestry?: ReadonlySet<number>;
@@ -202,7 +204,7 @@ export async function resolveNoWorktreeCaller(
   // HOME is model-controlled. Resolve the operator home from the OS account.
   const strict = deps.coordinatorId !== undefined || deps.dashboardAncestry !== undefined;
   const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir, strict);
-  if (!deps.dashboardAncestry && await isRegisteredAgentWorktree(cwd, roots)) return null;
+  if (!deps.preferShared && !deps.dashboardAncestry && await isRegisteredAgentWorktree(cwd, roots)) return null;
   for (const repoPath of roots) {
     const agentsDir = runtimeNames.agentsDir(repoPath);
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
@@ -211,7 +213,7 @@ export async function resolveNoWorktreeCaller(
     });
     for (const entry of entries) {
       if (deps.coordinatorId !== undefined && entry.name !== deps.coordinatorId) continue;
-      const dottedCoordinator = deps.coordinatorId && entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
+      const dottedCoordinator = (deps.coordinatorId || deps.preferShared) && entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
       if (!entry.isDirectory() || (!isValidAgentId(entry.name) && !dottedCoordinator)) continue;
       const agentDir = join(agentsDir, entry.name);
       let meta: Record<string, unknown>;
@@ -225,7 +227,7 @@ export async function resolveNoWorktreeCaller(
         if (strict) throw new Error("Invalid agent metadata");
         continue;
       }
-      if (meta.worktree !== false || (deps.coordinatorId !== undefined && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
+      if (meta.worktree !== false || ((deps.coordinatorId !== undefined || dottedCoordinator) && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
       if (strict && meta.claude_pid !== "") {
         const pid = Number(meta.claude_pid);
         if (typeof meta.claude_pid !== "string" || !/^\d+$/.test(meta.claude_pid) || !Number.isSafeInteger(pid) || pid <= 1) {

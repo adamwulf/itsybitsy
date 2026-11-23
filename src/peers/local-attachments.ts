@@ -6,9 +6,8 @@ import { hasFreeSpace } from "./attachment-space";
 import { checkManifestLimits } from "./transfer-limits";
 import { readTransferLimits } from "../config";
 import { accountHome } from "../home";
-import { resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
+import { resolveAttachmentSharedCaller, type ResolvedCallerContext } from "../ib-commands";
 import { registeredRepoRoots, locateRegisteredAgentDir } from "../hooks/agent-context";
-import { checkCoordinatorExists } from "../coordinator";
 import { matchWorktreeCaller } from "../runtime-names";
 import { remoteCliCaller } from "./peer-outbox";
 import { buildAgentAccessTable, buildSystemHookPolicy, pathDenialReason } from "../hooks/paths-table";
@@ -68,9 +67,14 @@ export async function resolveAttachmentSender(cwd = process.cwd()): Promise<Atta
   // realpath of an unrelated repository root can generate an access denial.
   const roots = (await registeredRepoRoots(home)).map(metadataRealpath).filter((p): p is string => p !== null);
   const worktree = matchWorktreeCaller(cwd);
+  const repo = worktree ? roots.find(root => root === worktree[1])
+    : roots.filter(root => cwd === root || cwd.startsWith(root + "/")).sort((a, b) => b.length - a.length)[0];
+  if (!repo) throw new Error(unknown);
+  const shared = await resolveAttachmentSharedCaller(cwd, repo);
+  if (shared) return { kind: "agent", caller: shared };
   if (worktree) {
-    const [, repo, id] = worktree;
-    if (!repo || !id || !roots.includes(repo)) throw new Error(unknown);
+    const id = worktree[2];
+    if (!id) throw new Error(unknown);
     const location = await locateRegisteredAgentDir(repo, id);
     if (!location || !cwd.startsWith(join(location.agentDir, "repo") + "/") && cwd !== join(location.agentDir, "repo")) {
       throw new Error(unknown);
@@ -78,12 +82,6 @@ export async function resolveAttachmentSender(cwd = process.cwd()): Promise<Atta
     const meta = await Bun.file(join(location.agentDir, "meta.json")).json();
     if (meta?.id !== id || meta.worktree !== true) throw new Error(unknown);
     return { kind: "agent", caller: { ...location, meta } };
-  }
-  const repo = roots.filter(root => cwd === root || cwd.startsWith(root + "/")).sort((a, b) => b.length - a.length)[0];
-  const coord = repo && await checkCoordinatorExists(repo);
-  if (repo && coord && coord.exists) {
-    const caller = await resolveRemoteSharedCaller(cwd, repo, coord.agentId);
-    if (caller) return { kind: "agent", caller };
   }
   throw new Error(unknown);
 }

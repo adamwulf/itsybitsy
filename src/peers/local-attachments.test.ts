@@ -372,3 +372,25 @@ test("a config change after copying refuses the snapshot and cleans it up", asyn
     if (root) await rm(root, { force: true, recursive: true });
   }
 });
+
+test("a shared-checkout worker sends with its own policy even from another agent's worktree", async () => {
+  const allowed = join(recipient.repoPath, "public");
+  const denied = join(recipient.sessionCwd, "private");
+  await Bun.write(allowed, "share");
+  await Bun.write(denied, "keep");
+  await fixture.addAgent(recipient.repoPath, "worker", { worktree: false, agentType: "worker",
+    model: "claude:opus", sandbox: { enabled: false }, claude_pid: "200", claude_pid_epoch: 100,
+    paths: { deny: [denied] } });
+  const sendFile = (cwd: string, path: string) => fixture.run(["send", "reader", "--attach", path, "read"], {
+    cwd, ancestry: { ...human, terminal: "agent", parents: [[300, 200], [200, 1]] },
+    allowedProcesses: [["git", "rev-parse", "--git-common-dir"]], actions: { sendMessage: "real" },
+  });
+  const refusal = await sendFile(recipient.sessionCwd, denied);
+  expect(refusal.stderr).toContain("paths.deny");
+  expect(await queue().exists()).toBe(false);
+  const accepted = await sendFile(recipient.repoPath, allowed);
+  expect(accepted.exitCode, accepted.stderr).toBe(0);
+  const record = JSON.parse(await queue().text());
+  snapshots.push(dirname(dirname(record.message.split(" → ")[1])));
+  expect(record.fromAgent).toBe("worker");
+});

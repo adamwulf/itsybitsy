@@ -1,4 +1,4 @@
-import { openBrokerResults, pinnedPath } from "./pinned-directory";
+import { openBrokerResults, pinnedPath, withPinnedDirectory } from "./pinned-directory";
 import { requestLookup } from "./request-lookup";
 import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
 import { isCoordinatorType } from "./coordinator-type-names";
@@ -123,7 +123,8 @@ export async function ensureSpawnBrokerDirs(agentDir: string): Promise<void> {
 async function writeJsonAtomic(dir: string, name: string, value: unknown, signal?: AbortSignal, createParent = true): Promise<void> {
   signal?.throwIfAborted();
   if (createParent) await mkdir(dir, { recursive: true });
-  const tmp = join(dir, `.${name}.${randomBytes(4).toString("hex")}.tmp`);
+  const start = createParent ? 0 : (await import("./peers/transfer-owner")).stagingOwnerStart(process.pid) ?? 0;
+  const tmp = join(dir, `.${name}.${process.pid}-${start}-${randomBytes(4).toString("hex")}.tmp`);
   try {
     await writeFile(tmp, JSON.stringify(value), { flag: "wx", mode: 0o600 });
     signal?.throwIfAborted();
@@ -258,7 +259,7 @@ export async function submitWatchdogRequest(
   // Timed out. Withdraw the request if the watchdog has not taken it yet; if it
   // already has, the command may still finish — say so.
   let stillQueued: boolean;
-  try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
+  try { stillQueued = await withdrawPublishedRequest(requestFile, join(spawnRequestDir(agentDir), `${request.id}@${process.pid}-0.json.withdrawn`)); }
   catch (err) { deps.onUncertain?.(); return brokerFail(`outcome unknown — check the recipient (could not withdraw request: ${err})`); }
   if (!stillQueued && !deps.signal?.aborted) {
     const result = await readResult(150, deps.signal);
@@ -544,6 +545,29 @@ async function pruneBrokerProgress(path: string, name: string) {
         transferOwnerState({ pid, start: start || null }, 0) === "proven-dead") await rm(join(path, name), { force: true });
 }
 
+const JSON_TEMP = /^\.[a-f0-9]{32}\.json\.([1-9]\d*)-(\d+)-[a-f0-9]{8}\.tmp$/;
+const WITHDRAWN = /^[a-f0-9]{32}@([1-9]\d*)-(\d+)\.json\.withdrawn$/;
+const LEGACY_TEMP = /^\.[a-f0-9]{32}\.json\.[a-f0-9]{8}\.tmp$/;
+const LEGACY_WITHDRAWN = /^[a-f0-9]{32}\.json\.withdrawn$/;
+
+async function recoverBrokerArtifact(parent: string, name: string, requests: boolean) {
+  const match = JSON_TEMP.exec(name) ?? (requests && WITHDRAWN.exec(name));
+  if (!match && !LEGACY_TEMP.test(name) && !(requests && LEGACY_WITHDRAWN.test(name))) return false;
+  const { transferOwnerState, reclaimTransfer } = await import("./peers/transfer-owner");
+  const path = join(parent, name);
+  const info = await lstat(path);
+  if (!info.isFile()) return true;
+  const owner = match ? { pid: Number(match[1]), start: Number(match[2]) || null } : undefined;
+  if (owner && (!Number.isSafeInteger(owner.pid) || owner.start !== null && !Number.isSafeInteger(owner.start))) return true;
+  // The sandboxed CLI records only a PID. Keep a running PID even if it
+  // outlives the retention window; its eventual exit permits recovery.
+  const state = transferOwnerState(owner, 0);
+  if (state === "proven-dead" || (!owner && reclaimTransfer(state, `${info.dev}:${info.ino}:${info.birthtimeMs}`, performance.now()))) {
+    await rm(path, { force: true });
+  }
+  return true;
+}
+
 /** Remove results a client never collected. */
 async function pruneStaleResults(agentDir: string, nowMs: number): Promise<void> {
   const dir = await openBrokerResults(agentDir, false).catch(() => undefined);
@@ -552,6 +576,7 @@ async function pruneStaleResults(agentDir: string, nowMs: number): Promise<void>
     const parent = await pinnedPath(dir);
     const names = await readdir(parent);
   for (const name of names) {
+    if (await recoverBrokerArtifact(parent, name, false).catch(() => true)) continue;
     if (/^[a-f0-9]{32}\.progress(?:\.([1-9]\d*)-(\d+)-[a-f0-9]{16}\.tmp)?$/.test(name)) {
       await pruneBrokerProgress(parent, name).catch(err => {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") warnSendCleanup(`Cannot recover broker progress: ${err}`);
@@ -598,7 +623,12 @@ export async function processSpawnRequests(
     // File names are agent-controlled: only a plain 32-hex id is ever used as a path.
     if (deps.transferSignal?.aborted) break;
     const match = REQUEST_FILE.exec(name);
-    if (!match) continue;
+    if (!match) {
+      if (JSON_TEMP.test(name) || WITHDRAWN.test(name) || LEGACY_TEMP.test(name) || LEGACY_WITHDRAWN.test(name)) {
+        await withPinnedDirectory(spawnRequestDir(agentDir), false, dir => recoverBrokerArtifact(dir, name, true)).catch(() => {});
+      }
+      continue;
+    }
     const id = match[1]!;
     const requestPath = join(spawnRequestDir(agentDir), name);
 

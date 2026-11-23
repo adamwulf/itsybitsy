@@ -319,6 +319,22 @@ describe("spawn broker", () => {
       expect(await readdir(protectedDir)).toEqual([]);
     });
 
+    test("abandoned JSON temps and withdrawals are recovered without dispatch", async () => {
+      const { isPidAliveCtx } = await import("./agents");
+      const requests = spawnRequestDir(agentDir), results = spawnResultDir(agentDir);
+      for (const dir of [requests, results]) await mkdir(dir, { recursive: true });
+      const dead = [join(requests, "." + ID_A + ".json.42-0-aaaabbbb.tmp"), join(results, "." + ID_B + ".json.42-123-aaaabbbb.tmp"),
+        join(requests, ID_A + "@42-0.json.withdrawn")];
+      const live = join(requests, ID_A + "@43-0.json.withdrawn");
+      for (const file of [...dead, live]) await Bun.write(file, "{}");
+      isPidAliveCtx.set(pid => pid !== 42);
+      try {
+        expect(await processSpawnRequests(AGENT_ID, repo, server().deps)).toBe(0);
+        expect(await Promise.all(dead.map(path => Bun.file(path).exists()))).toEqual([false, false, false]);
+        expect(await Bun.file(live).exists()).toBe(true);
+      } finally { isPidAliveCtx.reset(); }
+    });
+
     test("prunes results the client never collected, and only old ones", async () => {
       await mkdir(spawnResultDir(agentDir), { recursive: true });
       const stale = join(spawnResultDir(agentDir), `${ID_A}.json`);

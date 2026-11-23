@@ -267,3 +267,29 @@ test("fragmented headers succeed across many idle intervals when each read progr
   expect(decoded).toEqual(header);
   expect(clock.now).toBeGreaterThan(3 * IDLE_TIMEOUT_MS);
 });
+
+test("receiver waits for the sink before reading again and progresses across idle intervals", async () => {
+  const clock = new IdleClock();
+  const bytes = Buffer.alloc(5 * CHUNK_BYTES, "123");
+  const stream = new MemoryStream(bytes);
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let writes = 0;
+  const transfer = streamFileBody({ read(n) {
+    clock.advance(IDLE_TIMEOUT_MS / 3);
+    return stream.read(n);
+  } }, bytes.length, async () => {
+    if (++writes === 1) {
+      started.resolve();
+      await release.promise;
+    }
+    clock.advance(IDLE_TIMEOUT_MS / 3);
+  }, { setTimer: clock.setTimer });
+  await started.promise;
+  expect(stream.reads).toEqual([CHUNK_BYTES]);
+  expect(stream.offset).toBe(CHUNK_BYTES);
+  release.resolve();
+  expect(await transfer).toBe(digest(bytes));
+  expect(writes).toBe(5);
+  expect(clock.now).toBeGreaterThan(3 * IDLE_TIMEOUT_MS);
+});

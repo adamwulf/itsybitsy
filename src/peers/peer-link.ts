@@ -30,7 +30,9 @@
  */
 
 import { CHUNK_BYTES } from "./transfer-limits";
-import { encodeSendHeader, TransferIdleError, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
+import { join } from "node:path";
+import { openStagedFile } from "./remote-attachments";
+import { sendFileBody, type FileBodyOptions, encodeSendHeader, TransferIdleError, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
 import type { Agent } from "../agents";
@@ -408,24 +410,30 @@ export async function requestNewAgent(
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
 
-async function writeWithProgress(stream: PairStream, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"]) {
+async function writeWithProgress(stream: PairStream, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal) {
   let offset = 0;
   while (offset < bytes.length) {
     const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
-    const n = await waitForIO({ setTimer }, () => stream.write(chunk));
+    const n = await waitForIO({ setTimer, signal }, () => stream.write(chunk));
     if (!Number.isInteger(n) || n <= 0 || n > chunk.length) throw new Error("Invalid send write count");
     offset += n;
   }
 }
 
+export interface OutgoingTransfer {
+  filesDir?: string;
+  signal?: AbortSignal;
+  onProgress?: (bytes: number) => void;
+}
+
 /** One exchange. Once FIN is attempted the peer may already have committed the message. */
-export async function requestSend(conn: PairConnection, header: SendHeader, setTimer: PeerResponderDeps["setTimer"]): Promise<string> {
-  if (header.files.length) throw new Error("attachments are not supported yet");
+export async function requestSend(conn: PairConnection, header: SendHeader, setTimer: PeerResponderDeps["setTimer"], transfer: OutgoingTransfer = {}): Promise<string> {
+  if (header.files.length && !transfer.filesDir) throw new Error("Missing staged attachments");
   const bytes = encodeSendHeader(header);
   let stream: PairStream | undefined;
   let finished = false;
   let mayBeQueued = false;
-  const io = <T>(operation: () => Promise<T>) => waitForIO({ setTimer }, operation);
+  const io = <T>(operation: () => Promise<T>) => waitForIO({ setTimer, signal: transfer.signal }, operation);
   try {
     const active = await io(async () => {
       const opened = await conn.openBi();
@@ -433,9 +441,29 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
       return opened;
     });
     stream = active;
-    await writeWithProgress(active, bytes, setTimer);
-    mayBeQueued = true;
-    await io(() => active.finish());
+    await writeWithProgress(active, bytes, setTimer, transfer.signal);
+    let sent = 0;
+    // A receiver can reject the header and stop its read half before we
+    // finish writing. Read its error ACK on the independent return half.
+    let writeError: unknown;
+    try {
+      for (const [index, file] of header.files.entries()) {
+        const handle = await openStagedFile(join(transfer.filesDir!, String(index)), file.size);
+        try {
+          await sendFileBody({ handle, size: file.size }, { async write(chunk) {
+            try { return await active.write(chunk); }
+            catch (err) { writeError = err; throw err; }
+          } }, { setTimer, signal: transfer.signal, onProgress: bytes => transfer.onProgress?.(sent + bytes) });
+        } finally { await handle.close(); }
+        sent += file.size;
+      }
+      transfer.signal?.throwIfAborted();
+      mayBeQueued = true;
+      await io(() => active.finish());
+    } catch (err) {
+      if (!writeError && !mayBeQueued || err instanceof TransferIdleError || transfer.signal?.aborted) throw err;
+      writeError = err;
+    }
     const parts: Uint8Array[] = [];
     let length = 0;
     while (true) {
@@ -445,6 +473,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
       if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
       parts.push(chunk);
     }
+    if (!length && writeError) throw writeError;
     const reply = decodeObject(Buffer.concat(parts, length), "reply");
     if (reply.ok === true && reply.id === header.id) return header.id;
     if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));

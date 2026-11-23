@@ -47,9 +47,10 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
+import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { readTransferLimits } from "./config";
-import { checkIncomingFiles } from "./peers/transfer-limits";
+import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
 import { brokerAttachmentStage, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
@@ -237,9 +238,10 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   const parent = join(dir, "send-attachments");
   const staged = join(parent, request.id);
   try {
-    if (stage) {
+    if (remote) {
       await mkdir(parent, { recursive: true, mode: 0o700 });
-      request.files = await stage(staged);
+      if (stage) request.files = await stage(staged);
+      else { await mkdir(staged, { mode: 0o700 }); request.files = []; }
     }
     const result = await submitWatchdogRequest(
       dir,
@@ -251,13 +253,13 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
         alreadyStarted:
           "The watchdog had already taken the message, so it may still be delivered; check with the recipient before sending it again.",
       },
-      deps.timeoutMs ?? SPAWN_CLIENT_TIMEOUT_MS,
-      deps,
+      deps.timeoutMs ?? (remote ? IDLE_TIMEOUT_MS : SPAWN_CLIENT_TIMEOUT_MS),
+      remote ? { ...deps, claimedWorkIsLive: deps.watchdogLive ?? hasLiveWatchdog } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
   } finally {
-    if (stage) await rm(staged, { recursive: true, force: true });
+    if (remote) await rm(staged, { recursive: true, force: true });
   }
 }
 
@@ -471,8 +473,17 @@ export async function handleSendRequest(
       const files = parsed.request.files ?? [];
       const limits = checkIncomingFiles(files, await readTransferLimits(), { machine: await readMachineName() });
       if (!limits.ok) return brokerFail(limits.error);
-      const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files) : undefined;
-      return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), undefined, stage);
+      const controller = new AbortController();
+      const staged = join(ctx.agentDir, "send-attachments", ctx.id);
+      const checkClient = () => {
+        if (parsed.request.files && !existsSync(staged)) controller.abort();
+      };
+      checkClient();
+      const timer = setInterval(checkClient, 250);
+      try {
+        const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, controller.signal) : undefined;
+        return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal, stage);
+      } finally { clearInterval(timer); }
     }
     if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
     if (resolved.isSystemCoordinator) {

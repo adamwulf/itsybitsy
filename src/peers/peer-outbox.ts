@@ -3,8 +3,8 @@ import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
 export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { MAX_HEADER_BYTES } from "./transfer-limits";
+import { constants, existsSync, renameSync, writeFileSync } from "node:fs";
+import { IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { IbCommandResult } from "../ib-commands";
@@ -14,7 +14,7 @@ import { isSandboxedProcess } from "../sandbox-detect";
 import type { RepoEntry } from "../registry";
 import { peerOutboxDir } from "../runtime-names";
 import { hasLivePeerWatcher } from "./endpoint-lock";
-import { SEND_UNKNOWN } from "./peer-link";
+import { SEND_UNKNOWN, type OutgoingTransfer } from "./peer-link";
 import { targetLabel } from "./receive-message";
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./send-frame";
 
@@ -93,7 +93,10 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       if (signal?.aborted) return interruptedSend("unpublished");
       throw err;
     }
-    const deadline = Date.now() + 10_000;
+    let deadline = Date.now() + IDLE_TIMEOUT_MS;
+    let lastProgress = "";
+    const total = header.files.reduce((sum, file) => sum + file.size, 0);
+    if (total > 5 * 1024 ** 2) console.error(`sending ${header.files.length} files (${(total / 1024 ** 2).toFixed(1)} MB) to ${peer}…`);
     while (!signal?.aborted && Date.now() < deadline) {
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
@@ -104,15 +107,23 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       } catch (err) {
         if (!missing(err)) throw err;
       }
+      try {
+        const progress = await readFile(join(claimed, "progress"), "utf8");
+        if (progress !== lastProgress) {
+          lastProgress = progress;
+          deadline = Date.now() + IDLE_TIMEOUT_MS;
+        }
+      } catch (err) { if (!missing(err)) throw err; }
       await Bun.sleep(50);
     }
     const withdrawn = await withdrawPublishedRequest(dir, staging);
+    if (!withdrawn) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 });
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
   } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(detail(err)); }
 }
 
-type Send = (peer: string, header: SendHeader) => Promise<string>;
+type Send = (peer: string, header: SendHeader, transfer: OutgoingTransfer) => Promise<string>;
 
 // A peer id (64 ASCII characters) and the JSON object wrapping the wire header.
 const MAX_ENVELOPE_BYTES = MAX_HEADER_BYTES + 128;
@@ -195,7 +206,31 @@ export function createPeerOutboxPoll(now = Date.now) {
               const { peer, header: raw } = await readRequest(join(dir, "request.json"));
               const header = parseSendHeader(raw);
               if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
-              result = { ok: true, id: await send(peer, header) };
+              const controller = new AbortController();
+              let bytes = 0;
+              let recorded = -1;
+              let updated = 0;
+              // Publish bytes at most four times a second. The heartbeat
+              // distinguishes a live worker (including its ACK wait) from a
+              // crashed watcher. Wire I/O enforces its own progress deadline.
+              const tick = () => {
+                try {
+                  if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort();
+                  if (bytes === recorded && now() - updated < 5000) return;
+                  updated = now();
+                  recorded = bytes;
+                  writeFileSync(join(dir, "progress.tmp"), JSON.stringify({ bytes, updated }), { mode: 0o600 });
+                  renameSync(join(dir, "progress.tmp"), join(dir, "progress"));
+                } catch (err) { controller.abort(err); }
+              };
+              tick();
+              const timer = setInterval(tick, 250);
+              try {
+                result = { ok: true, id: await send(peer, header, {
+                  filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; },
+                }) };
+                tick();
+              } finally { clearInterval(timer); }
             } catch (err) { result = { ok: false, error: detail(err) }; }
             await writeJson(dir, "result.json", result);
           } catch (err) {

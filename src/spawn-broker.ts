@@ -185,7 +185,7 @@ export async function submitWatchdogRequest(
   request: { id: string },
   wording: WatchdogRequestWording,
   timeoutMs: number,
-  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain"> = {},
+  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain" | "claimedWorkIsLive"> = {},
 ): Promise<IbCommandResult> {
   const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
   const now = deps.now ?? Date.now;
@@ -200,7 +200,7 @@ export async function submitWatchdogRequest(
   }
 
   const resultFile = join(spawnResultDir(agentDir), `${request.id}.json`);
-  const deadline = now() + timeoutMs;
+  let deadline = now() + timeoutMs;
   while (!deps.signal?.aborted) {
     const file = Bun.file(resultFile);
     if (await file.exists()) {
@@ -222,7 +222,11 @@ export async function submitWatchdogRequest(
         // parse failure as "not ready" only until the deadline.
       }
     }
-    if (now() >= deadline) break;
+    if (now() >= deadline) {
+      if (!deps.claimedWorkIsLive || await Bun.file(join(spawnRequestDir(agentDir), request.id + ".json")).exists() ||
+          !await deps.claimedWorkIsLive(agentDir)) break;
+      deadline = now() + timeoutMs;
+    }
     await sleep(pollMs);
   }
 
@@ -245,6 +249,7 @@ export async function submitWatchdogRequest(
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
 
 export interface SpawnClientDeps {
+  claimedWorkIsLive?: (agentDir: string) => Promise<boolean>;
   /** A claimed request may have enqueued its snapshots before the reply was lost. */
   onUncertain?: () => void;
   signal?: AbortSignal;

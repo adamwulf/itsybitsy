@@ -67,3 +67,21 @@ test("the complete encoded header is validated before probing watcher liveness",
   const header = textHeader({ kind: "system" }, "x".repeat(MAX_HEADER_BYTES - 1), { kind: "system" });
   expect(await handoffRemoteMessage("peer", header)).toMatchObject({ ok: false, stderr: "Send header exceeds 262144 bytes" });
 });
+
+test("claimed request publishes byte progress and propagates CLI interruption to the stream owner", async () => {
+  await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "read", { kind: "user" });
+  const controller = new AbortController();
+  const result = handoffRemoteMessage("peer", header, controller.signal);
+  await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
+  const poll = pollPeerOutbox(async (_peer, _header, transfer) => {
+    transfer.onProgress!(192);
+    return new Promise((_, reject) => transfer.signal!.addEventListener("abort", () => reject(Error("cancelled")), { once: true }));
+  }, () => {});
+  const claimed = join(base, ".claimed", header.id);
+  await waitFor(async () => (await Bun.file(join(claimed, "progress")).json().catch(() => null))?.bytes === 192);
+  controller.abort();
+  expect((await result).exitCode).toBe(130);
+  await poll;
+  expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: false, error: "cancelled" });
+});

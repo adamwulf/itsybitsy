@@ -671,7 +671,7 @@ export class PeerService {
     return this.poller.fetchCoordinatorPane(peerId);
   }
 
-  async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard"): Promise<string> {
+  async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
     if (source === "dashboard") {
       if (this.remoteStartDenial !== null) throw new Error(remoteSendDenial(this.remoteStartDenial));
       if (header.from.kind !== "user") throw new Error("Dashboard sends require a user sender");
@@ -680,7 +680,7 @@ export class PeerService {
     if (peer === null) throw new Error("Machine is no longer paired");
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
-    const id = await requestSend(conn, header, this.deps.setTimer);
+    const id = await requestSend(conn, header, this.deps.setTimer, transfer);
     const line = `Sent a message to ${peer}/${targetLabel(header.target)}`;
     this.deps.log(line);
     if (source === "handoff") this.deps.notice?.(line);
@@ -852,7 +852,7 @@ export class PeerService {
     this.poller.start();
     const poll = this.deps.pollOutbox;
     if (poll) this.outboxTimer = setInterval(() => {
-      void poll((peer, header) => this.sendRemoteMessage(peer, header, "handoff"), this.deps.log, () => this.endpoint === ep && !this.shuttingDown)
+      void poll((peer, header, transfer) => this.sendRemoteMessage(peer, header, "handoff", transfer), this.deps.log, () => this.endpoint === ep && !this.shuttingDown)
         .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`));
     }, 250);
     return { kind: "bound" };

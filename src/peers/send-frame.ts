@@ -176,7 +176,7 @@ export async function requireSendFin(stream: ReadStream, options: FileBodyOption
 
 /** Only the caller knows when the last file has been sent and may finish the stream. */
 export async function sendFileBody(
-  { handle, size }: Pick<ManifestEntry, "handle" | "size">, stream: { write(bytes: number[]): Promise<number> }, options: FileBodyOptions = {},
+  { handle, size }: Pick<ManifestEntry, "handle" | "size">, stream: { write(bytes: Uint8Array): Promise<number> }, options: FileBodyOptions = {},
 ): Promise<void> {
   const chunks = fileChunks(handle, size);
   let offer = CHUNK_BYTES;
@@ -187,7 +187,7 @@ export async function sendFileBody(
     const chunk = next.value;
     let offset = 0;
     while (offset < chunk.length) {
-      const bytes = Array.from(chunk.subarray(offset, offset + offer));
+      const bytes = chunk.subarray(offset, offset + offer);
       const count = await waitForIO(options, () => stream.write(bytes));
       if (!Number.isInteger(count) || count <= 0 || count > bytes.length) throw new Error("Invalid stream write count");
       offset += count;

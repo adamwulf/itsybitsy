@@ -537,7 +537,7 @@ export async function handleSendRequest(
       const textProgress = join(spawnResultDir(ctx.agentDir), ctx.id + ".progress");
       const pid = parsed.request.clientPid!;
       const origin: TransferOwner = { pid, start: stagingOwnerStart(pid) };
-      if (transferOwnerState(origin, 0) !== "verified-live" || (!files.length && (!ctx.createdMs || origin.start! * 1000 > ctx.createdMs))) {
+      if (!files.length && (transferOwnerState(origin, 0) !== "verified-live" || !ctx.createdMs || origin.start! * 1000 > ctx.createdMs)) {
         return brokerFail("Cannot verify the remote send client");
       }
       let clientIdentity: string | undefined;

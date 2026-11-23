@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { fixtureProcessStart } from "./test-cli-driver";
 import * as fs from "fs/promises";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -726,7 +727,8 @@ describe("send broker", () => {
       const { submitWatchdogRequest } = await import("./spawn-broker");
       let now = 0;
       const ready = join(spawnRequestDir(agentDir), ID_A + ".json");
-      const publish = () => Bun.write(join(spawnResultDir(agentDir), ID_A + ".json"), JSON.stringify({ id: ID_A, ok: true, exitCode: 0 }));
+      await mkdir(spawnResultDir(agentDir), { recursive: true });
+      const publish = () => writeFileSync(join(spawnResultDir(agentDir), ID_A + ".json"), JSON.stringify({ id: ID_A, ok: true, exitCode: 0 }));
       const rename = fs.rename;
       const spy = spyOn(fs, "rename").mockImplementation(async (from, to) => {
         if (from === ready && when === "withdrawal") await publish();
@@ -736,7 +738,7 @@ describe("send broker", () => {
         const result = await submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
           { request: "send", action: "send", alreadyStarted: "claimed" }, 100, { now: () => now,
             sleep: async () => { await rm(ready, { force: true }); now += 100; },
-            readProgress: async () => { if (now && when === "progress") await publish(); return 0; },
+            readProgress: async () => { if (now && when === "progress") { publish(); return new Promise<number>(() => {}); } return 0; },
           });
         expect(result.ok).toBe(true);
       } finally { spy.mockRestore(); }

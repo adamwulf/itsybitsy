@@ -218,7 +218,7 @@ test("snapshot visibility follows each acquisition generation through a clock ro
   const { readConnectedPeers } = await import("./remote-agents");
   const lock = await acquireEndpointLock(ME);
   if (!lock.acquired) throw Error("fixture lock unavailable");
-  const peers = [{ name: "laptop", connected: true, agents: [] }];
+  const peers = [{ name: "laptop", id: "peer", lastOkAt: 1, connected: true, agents: [] }];
   const file = join(peerDir(), "remote-agents.json");
   await writeFile(file, JSON.stringify({ generation: lock.generation, peers }));
   await fs.utimes(file, new Date(0), new Date(0));

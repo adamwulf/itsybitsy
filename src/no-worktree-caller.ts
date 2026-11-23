@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "path";
 import { readdir, realpath } from "fs/promises";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
-import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
+import { isValidAgentId, isValidPeerSenderIdSegment, tmuxSessionTarget } from "./validation";
 import { userInfo } from "os";
 
 export interface NoWorktreeCaller {
@@ -161,7 +161,7 @@ async function systemPanePid(): Promise<number | null> {
   const { IB_COORDINATOR_SESSION } = await import("./coordinator");
   const { COORDINATOR_PANE_COMMAND, COORDINATOR_PANE_ID, runCoordinatorCommand } = await import("./tmux-poller");
   const match = `#{==:#{pane_id}:#{pane_dead}:#{pane_current_command},#{${COORDINATOR_PANE_ID}}:0:#{${COORDINATOR_PANE_COMMAND}}}`;
-  const res = await runCoordinatorCommand(["tmux", "list-panes", "-s", "-t", "=" + IB_COORDINATOR_SESSION,
+  const res = await runCoordinatorCommand(["tmux", "list-panes", "-s", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
     "-F", `#{?${match},#{pane_pid},}`], 2000);
   if (res.code !== 0) {
     if (/can't find session|no server running|no such file or directory/i.test(res.error)) return null;
@@ -195,12 +195,13 @@ export async function resolveNoWorktreeCaller(
   // HOME is model-controlled. Resolve the operator home from the OS account.
   const strict = deps.remoteSender === true || deps.dashboardAncestry !== undefined;
   const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir, strict);
-  if (!deps.dashboardAncestry && await isRegisteredAgentWorktree(cwd, roots)) {
+  const callerPath = deps.remoteSender ? await realpath(cwd) : cwd;
+  if (!deps.dashboardAncestry && await isRegisteredAgentWorktree(callerPath, roots)) {
     if (!deps.remoteSender) return null;
-    const [, repoPath, id] = runtimeNames.matchWorktreeCaller(await realpath(cwd))!;
+    const [, repoPath, id] = runtimeNames.matchWorktreeCaller(callerPath)!;
     return { repoPath: repoPath!, agentDir: runtimeNames.agentDir(repoPath!, id!), meta: { id } };
   }
-  if (deps.remoteSender && runtimeNames.matchWorktreeCaller(cwd)) {
+  if (deps.remoteSender && (runtimeNames.matchWorktreeCaller(cwd) || runtimeNames.matchWorktreeCaller(callerPath))) {
     throw new Error("Cannot verify remote sender: invalid registered worktree backlink");
   }
   for (const repoPath of roots) {
@@ -225,7 +226,7 @@ export async function resolveNoWorktreeCaller(
         continue;
       }
       if ((!deps.remoteSender && meta.worktree !== false) || (dottedCoordinator && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
-      if (deps.remoteSender && meta.worktree === false && meta.claude_pid === "" && (cwd === repoPath || cwd.startsWith(repoPath + "/"))) {
+      if (deps.remoteSender && meta.worktree === false && meta.claude_pid === "" && (callerPath === repoPath || callerPath.startsWith(repoPath + "/"))) {
         throw new Error("Cannot verify remote sender: shared-checkout agent has no recorded process identity");
       }
       if (strict && meta.claude_pid !== "") {

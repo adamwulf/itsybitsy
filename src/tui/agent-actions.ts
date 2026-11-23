@@ -70,7 +70,7 @@ import { collectorHealthDetail, type CollectorHealth } from "../sandbox-collecto
 import { remoteControlDetail, type RemoteControlStatus } from "../remote-control-light";
 import { telegramHelpDetail, type TelegramConnectionView } from "../channels/connection-view";
 
-const SCROLL_STEP = 10;
+export const SCROLL_STEP = 10;
 
 /** Track active diff tool process so we can kill it before relaunching */
 let activeDiffProc: { proc: ReturnType<typeof Bun.spawn>; agentId: string } | null = null;

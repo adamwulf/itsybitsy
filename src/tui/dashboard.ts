@@ -452,12 +452,12 @@ function remoteTitle(entry: RemoteEntry): string {
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
  */
-function renderRemotePanes(entry: RemoteEntry, pane: RemoteCoordinatorPane, mainWidth: number, leftPaneW: number, height: number): string[] {
+function renderRemotePanes(entry: RemoteEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
   const placeholder = (text: string, width: number) =>
     padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), height);
-  const center = entry.kind === "remote-coordinator" ? pane.render(lw, height) : placeholder(remoteCenterText(entry), lw);
+  const center = placeholder(remoteCenterText(entry), lw);
   const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw);
   const sep = `${DIM_GRAY}│${RESET}`;
   return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
@@ -508,6 +508,7 @@ class StatusBarComponent implements Component {
    * would refuse.
    */
   remoteSelected = false;
+  remoteCoordinatorSelected = false;
   remoteRepoSelected = false;
   hasResolvableWarnings = false;
 
@@ -533,7 +534,7 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.remoteSelected) {
-      row1Left = `${DIM}j/k: select    J/K: repo    p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorSelected ? ";/l: scroll    " : ""}p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -1947,9 +1948,17 @@ export class DashboardComponent implements Component {
   refuseOnRemoteRow(key: string): boolean {
     const remote = this.remoteSelection;
     if (remote === null || isRemoteAllowedKey(key)) return false;
+    if (remote.kind === "remote-coordinator" && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
+  }
+
+  private scrollOutput(up: boolean): void {
+    if (this.remoteSelection?.kind === "remote-coordinator") {
+      this.remotePane.scroll(up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP);
+    } else if (up) agentActions.handleScrollUp(this);
+    else agentActions.handleScrollDown(this);
   }
 
   showDialog(dialog: NonNullable<DialogState>) {
@@ -2136,8 +2145,8 @@ export class DashboardComponent implements Component {
       { label: "help — ?", key: "?", action: () => agentActions.handleHelp(this) },
       { label: "setup (Hooks, Config, Peers) — h", key: "h", action: () => agentActions.handleSetup(this) },
       { label: "setup: Peers tab — I", key: "I", action: () => agentActions.handleSetup(this, PEERS_TAB) },
-      { label: "scroll up — ;", key: ";", action: () => agentActions.handleScrollUp(this) },
-      { label: "scroll down — l", key: "l", action: () => agentActions.handleScrollDown(this) },
+      { label: "scroll up — ;", key: ";", action: () => this.scrollOutput(true) },
+      { label: "scroll down — l", key: "l", action: () => this.scrollOutput(false) },
     ];
 
     const allItems = commands.map((c) => c.label);
@@ -2350,6 +2359,7 @@ export class DashboardComponent implements Component {
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
     this.statusBar.remoteSelected = remote !== null;
+    this.statusBar.remoteCoordinatorSelected = remote?.kind === "remote-coordinator";
     this.statusBar.remoteRepoSelected = remote?.kind === "remote-repo-header";
 
     // Wire info panel
@@ -3385,8 +3395,8 @@ export class DashboardComponent implements Component {
       }
     }
     // Scroll
-    else if (data === ";") { agentActions.handleScrollUp(this); }
-    else if (data === "l") { agentActions.handleScrollDown(this); }
+    else if (data === ";") { this.scrollOutput(true); }
+    else if (data === "l") { this.scrollOutput(false); }
     // Agent/repo actions — context-sensitive on whether a repo header is selected
     else if (data === "x") {
       // §17.3 manage-team: when a team ANCHOR is the GLOBAL selection
@@ -3613,7 +3623,8 @@ export class DashboardComponent implements Component {
     // stay on screen while j/k move through the tree.
     const remote = this.remoteSelection;
     const remoteView = remote !== null && !isTreeMode;
-    const isFullWidth = !remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode));
+    const remoteCoordinator = remoteView && remote.kind === "remote-coordinator" ? remote : null;
+    const isFullWidth = remoteCoordinator !== null || (!remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode)));
 
     // Header
     const noticeColor = this.lastSentNoticeKind === "error" ? RED : YELLOW;
@@ -3674,8 +3685,8 @@ export class DashboardComponent implements Component {
     const teamsActiveForTitle = this.activeSelectionSource === "teams";
     const teamSelectedForTitle =
       teamsActiveForTitle && !isCoordinatorView && this.channelPane.teamName !== null;
-    const mainTitleSep = isCoordinatorView
-      ? this.buildCoordinatorTitleSeparator(mainWidth)
+    const mainTitleSep = isCoordinatorView || remoteCoordinator
+      ? this.buildCoordinatorTitleSeparator(mainWidth, remoteCoordinator?.peerName)
       : teamSelectedForTitle
         ? this.buildTeamTitleSeparator(mainWidth, leftPaneW, this.channelPane.teamName!)
         : remoteView
@@ -3789,10 +3800,12 @@ export class DashboardComponent implements Component {
       this.coordinatorInputField.active = false;
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
+    } else if (remoteCoordinator) {
+      mainLines = [mainTitleSep, ...this.remotePane.render(mainWidth, availableHeight)];
     } else if (remoteView) {
       // A remote row: placeholders only. No tmux pane, right pane or input
       // field renders, so nothing local is drawn for (or loaded by) it.
-      mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight)];
+      mainLines = [mainTitleSep, ...renderRemotePanes(remote, mainWidth, leftPaneW, availableHeight)];
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
       // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set
@@ -4043,15 +4056,15 @@ export class DashboardComponent implements Component {
   }
 
   /** Build title separator for system coordinator full-width view */
-  private buildCoordinatorTitleSeparator(mainWidth: number): string {
-    const leftTitle = " System Coordinator ";
-    const rightTitle = this.coordinatorViewMode === "TMUX" ? " TMUX " : " DASHBOARD ";
+  private buildCoordinatorTitleSeparator(mainWidth: number, peer?: string): string {
+    const leftTitle = peer === undefined ? " System Coordinator " : ` ${peer}/@system `;
+    const rightTitle = peer !== undefined || this.coordinatorViewMode === "TMUX" ? " TMUX " : " DASHBOARD ";
     const leftPad = 3;
     const rightPad = 3;
     const currentFocus = this.focusManager.current();
     const coordFocused = currentFocus === "coordinator";
     const leftTitleStyle = coordFocused ? `${REVERSE}${BOLD}` : BOLD;
-    const fillCount = Math.max(1, mainWidth - leftPad - leftTitle.length - rightTitle.length - rightPad);
+    const fillCount = Math.max(1, mainWidth - leftPad - visibleWidth(leftTitle) - visibleWidth(rightTitle) - rightPad);
     return truncateToWidth(
       `${DIM_GRAY}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}` +
       `${BOLD}${rightTitle}${RESET}` +

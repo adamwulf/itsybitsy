@@ -59,3 +59,22 @@ test("a denied selection displays the reason without scheduling a read", () => {
   expect(fetch).not.toHaveBeenCalled();
   expect(every).not.toHaveBeenCalled();
 });
+
+test("scrollback clamps at each wrap width while the error line stays visible", async () => {
+  let tick: () => void = () => {};
+  const fetch = mock(async () => ({ state: "running", text: "abcdefgh\nijklmnop\nqrstuvwx" }));
+  const pane = new RemoteCoordinatorPane(fetch, () => {}, (_ms, poll) => { tick = poll; return () => {}; });
+  pane.select("A");
+  await Promise.resolve();
+  fetch.mockRejectedValueOnce(new Error("down"));
+  tick();
+  await Promise.resolve();
+  const rows = (w: number) => pane.render(w, 3).map(stripAnsi);
+  expect(rows(8)).toEqual(["ijklmnop", "qrstuvwx", "down"]);
+  pane.scroll(100);
+  expect(rows(4)).toEqual(["abcd", "efgh", "down"]);
+  expect(rows(8)).toEqual(["abcdefgh", "ijklmnop", "down"]);
+  pane.scroll(-1);
+  expect(rows(8)).toEqual(["ijklmnop", "qrstuvwx", "down"]);
+  pane.select(null);
+});

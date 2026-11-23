@@ -10002,6 +10002,31 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("the peer coordinator uses main width and its scroll keys affect only its capture", async () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const last = "peer-output-".repeat(8);
+    service.fetchCoordinatorPane.mockResolvedValue({ state: "running", text: [
+      ...Array.from({ length: (process.stdout.rows || 24) + 20 }, (_, i) => "line " + i), last,
+    ].join("\n") });
+    try {
+      selectByKey(dashboard, PEER_B + "/@system");
+      await Promise.resolve();
+      const screen = () => stripAnsi(dashboard.render(180).join("\n"));
+      expect(screen()).toContain(last);
+      dashboard.handleInput(";");
+      expect(screen()).not.toContain(last);
+      expect(dashboard.coordinatorPane.scrollBack).toBe(0);
+      expect(dashboard.rightPane.scrollOffset).toBe(0);
+      dashboard.handleInput("l");
+      expect(screen()).toContain(last);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
   test("a highlighted coordinator shows the startup denial, then the remote capture when permitted", async () => {
     const { dashboard, service } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
@@ -10009,16 +10034,16 @@ describe("Unified peer repos in the Agents tree", () => {
     try {
       service.remoteStartDenial = "Dashboard is inside tmux";
       selectByKey(dashboard, PEER_B + "/@system");
-      expect(paneText(dashboard.render(180), 2)).toContain("Dashboard is inside tmux");
+      expect(stripAnsi(dashboard.render(180).join("\n"))).toContain("Dashboard is inside tmux");
       expect(service.fetchCoordinatorPane).not.toHaveBeenCalled();
       service.remoteStartDenial = null;
       service.set({});
-      await waitFor(() => paneText(dashboard.render(180), 2).includes("peer capture"));
+      await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("peer capture"));
       expect(service.fetchCoordinatorPane.mock.calls).toEqual([[PEER_B]]);
       dashboard.handleInput("s");
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
       dashboard.handleInput("k");
-      expect(paneText(dashboard.render(180), 2)).not.toContain("peer capture");
+      expect(stripAnsi(dashboard.render(180).join("\n"))).not.toContain("peer capture");
     } finally {
       running.mockRestore();
       dashboard.stopPolling();
@@ -10049,7 +10074,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
     for (let i = 0; i < 128; i++) {
       const key = String.fromCharCode(i);
-      if (isRemoteAllowedKey(key)) continue;
+      if (isRemoteAllowedKey(key) || key === ";" || key === "l") continue;
       resetNotice(dashboard);
       dashboard.handleInput(key);
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);

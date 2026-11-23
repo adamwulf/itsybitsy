@@ -1781,6 +1781,18 @@ describe("endpoint owner peer-outbox polling", () => {
     } finally { await locked.shutdown(); await owner.shutdown(); }
   });
 
+  test("a malformed peer list leaves the lock owner recovering without binding", async () => {
+    const events: string[] = [];
+    const { service, binds } = makeService({ recoverTransfers: async () => { events.push("recover"); },
+      readPeers: async () => { events.push("read peers"); throw Error("invalid peer list"); } });
+    try {
+      await service.bootIfPaired();
+      expect(events).toEqual(["recover", "read peers"]);
+      expect(binds).toHaveLength(0);
+      expect(service.view().peersError).toBe("invalid peer list");
+    } finally { await service.shutdown(); }
+  });
+
   test("a suspended recovery retains the service lock through endpoint close", async () => {
     const held = Promise.withResolvers<void>();
     const entered = Promise.withResolvers<void>();

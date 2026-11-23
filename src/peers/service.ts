@@ -450,23 +450,20 @@ export class PeerService {
         else if (!this.cancelRetryTimer) void this.bootIfPaired();
       }, 30_000);
     }
-    let peers: Peer[];
-    try {
-      peers = await this.deps.readPeers();
-      this.peers = peers;
-      this.peersError = null;
-    } catch (err) {
-      this.peersError = errorDetail(err);
-      this.deps.log(`peering: not binding at boot: ${this.peersError}`);
-      this.notify();
-      return;
-    }
-    this.notify();
-    if (!peers.length && !this.deps.recoverTransfers) return;
     if (this.endpoint) { await this.recoverTransfers(); return; }
-    if (peers.length) this.deps.log(`peering: binding at boot for ${peers.length} paired peer${peers.length === 1 ? "" : "s"}`);
-    this.startBind();
+    if (!this.deps.recoverTransfers && (!await this.readPeersAtBoot() || !this.peers.length)) return;
+    this.startBind(false, !!this.deps.recoverTransfers);
     if (this.binding !== null) await this.binding;
+  }
+
+  private async readPeersAtBoot() {
+    await this.refreshPeers();
+    if (this.peersError) {
+      this.deps.log(`peering: not binding at boot: ${this.peersError}`);
+      return false;
+    }
+    if (this.peers.length) this.deps.log(`peering: binding at boot for ${this.peers.length} paired peer${this.peers.length === 1 ? "" : "s"}`);
+    return true;
   }
 
   /**
@@ -486,11 +483,11 @@ export class PeerService {
    * which it replaces. `retry` marks the retry timer's bind, which first
    * checks that something still needs the endpoint.
    */
-  private startBind(retry = false): void {
+  private startBind(retry = false, readPeersAtBoot = false): void {
     const kind = this.status.kind;
     if (this.shuttingDown || this.binding !== null || kind === "starting" || kind === "listening") return;
     this.cancelRetry();
-    this.track(this.bindOrStop(retry));
+    this.track(this.bindOrStop(retry, readPeersAtBoot));
   }
 
   /** Hold `binding` until `work` settles, so no bind starts meanwhile. */
@@ -506,7 +503,7 @@ export class PeerService {
    * outcome asks for: a retry after a failure, none when another `ib watch`
    * owns the endpoint. The retry timer's bind first re-reads `peers.json`.
    */
-  private async bindOrStop(retry: boolean): Promise<void> {
+  private async bindOrStop(retry: boolean, readPeersAtBoot: boolean): Promise<void> {
     if (retry) {
       const notNeeded = await this.whyNotNeeded();
       if (this.shuttingDown) return;
@@ -515,7 +512,7 @@ export class PeerService {
         return;
       }
     }
-    const outcome = await this.bind();
+    const outcome = await this.bind(readPeersAtBoot);
     if (outcome.kind === "failed") this.retryLater(outcome.failure);
     else if (outcome.kind === "disabled" && this.failures > 0) this.stopRetrying("another ib watch owns the endpoint");
   }
@@ -880,7 +877,7 @@ export class PeerService {
    * poller. Every failure is shown, leaves the lock released, and is returned
    * for the caller to log once with the retry it arms (retryLater).
    */
-  private async bind(): Promise<BindOutcome> {
+  private async bind(readPeersAtBoot: boolean): Promise<BindOutcome> {
     this.setStatus({ kind: "starting" });
     let lock: EndpointLockResult;
     try {
@@ -891,6 +888,7 @@ export class PeerService {
       return { kind: "failed", failure: message };
     }
     if (!lock.acquired) {
+      if (readPeersAtBoot) await this.refreshPeers();
       if (this.dialogOpen || this.peers.length) {
         try { this.selfId = (await this.deps.loadIdentity()).id; this.identityError = null; }
         catch (err) { this.identityError = errorDetail(err); }
@@ -902,7 +900,8 @@ export class PeerService {
     this.lockHeld = true;
     await this.recoverTransfers();
     if (this.shuttingDown) return { kind: "shutting-down" };
-    if (!this.dialogOpen && !this.peers.length) {
+    const readable = !readPeersAtBoot || await this.readPeersAtBoot();
+    if (!readable || !this.dialogOpen && !this.peers.length) {
       this.setStatus({ kind: "idle" });
       return { kind: "bound" };
     }

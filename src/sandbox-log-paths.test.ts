@@ -88,6 +88,8 @@ test("shipped floor denies the peering secret key despite the ~/.itsybitsy read 
     for (const op of ["file-write*", "file-link"]) {
       expect(profile).toContain(`(deny ${op} (regex #"${deliveredAttachmentPattern}") (with message "${tag}"))`);
     }
+    // Both aliases reach the writable /private/tmp vnode in the kernel.
+    expect(profile).toContain('(allow file-write* (subpath "/private/tmp"))');
     for (const root of ["/tmp", "/private/tmp"]) {
       const pattern = new RegExp(deliveredAttachmentPattern);
       expect(pattern.test(root + "/itsybitsy-attachments-example")).toBe(true);

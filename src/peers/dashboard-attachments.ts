@@ -1,8 +1,21 @@
 import { realpathArgument } from "./attachment-manifest";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { references } from "../message-attachments";
 import { userHome } from "../home";
 import { canonicalizeSandboxPath } from "../sandbox";
+
+async function resolveMissingReference(path: string) {
+  const suffix: string[] = [];
+  let prefix = path;
+  for (;;) {
+    try { return resolve(await realpathArgument(prefix), ...suffix.reverse()); }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT" || prefix === "/") throw err;
+      suffix.push(basename(prefix));
+      prefix = dirname(prefix);
+    }
+  }
+}
 
 /** Use the input field's parser. A peer's repo path is a display string:
  * compare its spelling, but never look it up on the local filesystem. */
@@ -29,7 +42,9 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
         if (!ref.quote && /^\/[\w-]+$/.test(path)) break;
         if (!ref.quote && /[.,;:!\)\]}]$/.test(path)) { path = path.slice(0, -1); continue; }
-        if (inside(remoteRoot, resolve(absolute)) || (local && inside(local, canonicalizeSandboxPath(absolute)))) {
+        const localPath = await resolveMissingReference(absolute);
+        const peerOnly = !inside(localRoot, absolute) && inside(remoteRoot, absolute) && inside(remoteRoot, resolve(absolute));
+        if (peerOnly || inside(local, localPath)) {
           if (ref.start === 0) noPassthrough = true;
           break;
         }

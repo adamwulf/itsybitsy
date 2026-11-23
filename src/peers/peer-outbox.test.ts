@@ -88,6 +88,7 @@ test("claimed request publishes byte progress and propagates CLI interruption to
   controller.abort();
   expect(await result).toMatchObject({ exitCode: 130, stderr: "outcome unknown — check the recipient" });
   await poll;
+  await expect(fs.stat(claimed)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("a claimed cancellation with a failed signal still has an unknown outcome", async () => {
@@ -143,4 +144,17 @@ test("staging without a record survives until hard expiry regardless of the name
   expect(await fs.readdir(parent)).toHaveLength(1);
   await poll(created + 24 * 3600_000);
   expect(await fs.readdir(parent)).toEqual([]);
+});
+
+test.each(["absent", "null", "unverifiable"])("a ready request with %s ownership cannot send", async kind => {
+  const h = textHeader({ kind: "system" }, "hi", { kind: "user" });
+  const dir = join(base, h.id);
+  await mkdir(dir, { recursive: true });
+  await Bun.write(join(dir, "request.json"), JSON.stringify({ peer: "peer", header: h }));
+  if (kind !== "absent") await writeTransferOwner(dir, { pid: process.pid, start: kind === "null" ? null : 100 });
+  if (kind === "unverifiable") processStartEpochSecondsCtx.set(() => null);
+  let sent = false;
+  await pollPeerOutbox(async () => { sent = true; return h.id; }, () => {});
+  expect(sent).toBe(false);
+  expect(await Bun.file(join(dir, "request.json")).exists()).toBe(true);
 });

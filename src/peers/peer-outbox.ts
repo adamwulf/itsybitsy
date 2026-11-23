@@ -128,8 +128,13 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       await Bun.sleep(50);
     }
     const withdrawn = await withdrawPublishedRequest(dir, staging);
-    if (!withdrawn) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
-      .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
+    if (!withdrawn) {
+      await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
+        .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
+      if (existsSync(join(claimed, "result.json"))) {
+        trackSendCleanup(rm(claimed, { recursive: true, force: true }), "Cancelled peer result cleanup failed");
+      }
+    }
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
   } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(detail(err)); }
@@ -247,7 +252,11 @@ export function createPeerOutboxPoll(now = Date.now) {
               .catch(err => log(`peer-outbox: could not remove sent files: ${detail(err)}`));
           } catch (err) {
             if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
-          } finally { active.delete(dir); }
+          } finally {
+            if (existsSync(join(dir, "cancel"))) await rm(dir, { recursive: true, force: true })
+              .catch(err => log(`peer-outbox: cancelled claim cleanup failed: ${detail(err)}`));
+            active.delete(dir);
+          }
         }
       } finally { workers--; }
     }

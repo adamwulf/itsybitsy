@@ -813,3 +813,34 @@ test("shutdown during the dedupe read prevents the queue append", async () => {
     expect(await readOutbox(dir)).toEqual([]);
   } finally { resume.resolve(); held.mockRestore(); await service.shutdown(); }
 });
+
+test("a replay of another stream's idle failure keeps its connection for the next exchange", async () => {
+  const { requestAgents } = await import("./peer-link");
+  await receiveFixture();
+  const clock = createFakeClock();
+  const read = Promise.withResolvers<void>();
+  const originalClock = createFakeClock();
+  const req = header({ files: [manifestFile("a")] });
+  const original = receiver(req, "peer", paired, { read: () => {
+    read.resolve(); return new Promise(() => {});
+  } }, { setTimer: originalClock.setTimer }).catch(err => err);
+  await read.promise;
+  const { a, b } = createMemoryLink("peer", "local");
+  const waiting = Promise.withResolvers<void>();
+  const serving = serveTrustedConnection(b, {
+    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: clock.setTimer,
+    receiveMessage: (h, p, name, body, options) => receiver(h, p, name, body, { ...options,
+      admitted: owns => { options?.admitted?.(owns); waiting.resolve(); } }),
+  });
+  try {
+    const stream = await a.openBi();
+    await stream.writeAll(encodeSendHeader(req));
+    await waiting.promise;
+    originalClock.advance(60_000);
+    await original;
+    expect(JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)))).toMatchObject({ op: "error" });
+    await Bun.sleep(0);
+    clock.advance(5000);
+    expect(await requestAgents(a)).toMatchObject({ agents: [] });
+  } finally { a.close(0, "done"); await serving; }
+});

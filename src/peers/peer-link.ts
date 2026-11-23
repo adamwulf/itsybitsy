@@ -629,16 +629,21 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
 /** One request on its own stream. Every error stays here. */
 async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
+  let reading = false;
+  async function read(limit: number) {
+    reading = true;
+    try { return await stream.read(limit); } finally { reading = false; }
+  }
   try {
     // Every valid sized header begins with zero (the cap is 256 KiB).
     // Other ops begin with JSON. Peek one byte without waiting for FIN.
     const options = { setTimer: deps.setTimer };
-    const first = await waitForIO(options, () => stream.read(1));
+    const first = await waitForIO(options, () => read(1));
     if (first[0] === 0) {
       let prefix: Uint8Array | undefined = first;
       let receivedFin = false;
       const reader = { read: async (limit: number) => {
-        const chunk = prefix ?? await stream.read(limit);
+        const chunk = prefix ?? await read(limit);
         prefix = undefined;
         if (!chunk.length) receivedFin = true;
         return chunk;
@@ -666,7 +671,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         if (header.files.length) stopUnreadBody();
         reply = encodeJson({ ok: true, id: header.id });
       } catch (err) {
-        stalledRead = err instanceof TransferIdleError;
+        stalledRead = reading && err instanceof TransferIdleError;
         // STOP_SENDING is independent of the send half. The error ACK can
         // finish even if the native reader is still unwinding a stalled read.
         stopUnreadBody();
@@ -680,7 +685,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     let length = first.length;
     while (true) {
       const limit = Math.min(CHUNK_BYTES, NEW_AGENT_MAX_REQUEST_BYTES - length + 1);
-      const part = await waitForIO(options, () => stream.read(limit));
+      const part = await waitForIO(options, () => read(limit));
       if (!part.length) break;
       if (part.length > limit || length + part.length > NEW_AGENT_MAX_REQUEST_BYTES) throw new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
       if (length + part.length > payload.length) {

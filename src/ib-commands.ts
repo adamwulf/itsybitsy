@@ -1,3 +1,8 @@
+import { fullyQualifiedAgentId } from "./tui/row-keys";
+import { initializeMachineName } from "./machine-name";
+import { getRepoId, readRepoId } from "./repo-id";
+import { canonicalRepoPath, sameRepoPath } from "./repo-identity";
+export { getRepoId } from "./repo-id";
 import * as runtimeNames from "./runtime-names";
 /**
  * Async wrappers for ib mutation commands.
@@ -33,6 +38,7 @@ import {
   clearAgentOperation,
   TRANSIENT_FRESH_MS,
   readAllAgents,
+  readAgentsOfRepos,
   readRepoAgents,
   detectAgentStates,
   mutateAgentMeta,
@@ -45,6 +51,8 @@ import {
   acquireOutboxLock,
   releaseOutboxLock,
   agentOutboxDir,
+  registeredQueueRepo,
+  queueDirForKey,
   type OutboxMessage,
   type AcquireLockOpts,
 } from "./outbox";
@@ -91,7 +99,7 @@ import {
   REGULAR_AGENT_INTERCEPT_MATCHER,
   resolveUserStatusLine,
 } from "./settings-builder";
-import { listRepos, repoDisplayName, type RepoEntry } from "./registry";
+import { listRepos, readRegistryStrict, repoDisplayName, type RepoEntry } from "./registry";
 import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
 import {
   type Team,
@@ -174,6 +182,8 @@ export interface IbCommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** Teardown diagnostics also included in stderr for command-line callers. */
+  cleanupWarnings?: string;
 }
 
 /**
@@ -538,7 +548,7 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
       ok: false,
       exitCode: 1,
       stdout: "",
-      stderr: `Could not retire agent '${agent.id}'`,
+      stderr: [`Could not retire agent '${agent.id}'`, ...teardown.warnings].join("\n"),
     };
   }
   const { prunedTeams } = teardown;
@@ -555,7 +565,7 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
     `tmux=${tmuxSession || "<none>"} pid=${agent.meta.claude_pid || "<none>"}`
   );
 
-  return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };
+  return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: teardown.warnings.join("\n") };
 }
 
 /** Spawn context for git/tmux operations performed while reconstructing an agent. */
@@ -619,7 +629,7 @@ function selectRetirementArchive(
         : "Retired agent not found",
     };
   }
-  const repoPaths = new Set(recoverable.map((match) => resolve(match.repoPath)));
+  const repoPaths = new Set(recoverable.map((match) => canonicalRepoPath(match.repoPath)));
   if (repoPaths.size > 1) {
     return {
       error:
@@ -657,8 +667,11 @@ export async function rehireAgent(
     path: repo.path,
     name: repoDisplayName(repo),
   }));
+  if (opts.repoPath && !repos.some((r) => sameRepoPath(r.path, opts.repoPath))) {
+    repoInputs.push({ path: opts.repoPath, name: basename(opts.repoPath) });
+  }
   const { agents: activeAgents } = await readAllAgents(repoInputs, false);
-  const activeId = activeAgents.find((agent) => agent.id === agentId);
+  const activeId = activeAgents.find((agent) => agent.id === agentId && (!opts.repoPath || sameRepoPath(agent.repoPath, opts.repoPath)));
   if (activeId) {
     return {
       ok: false,
@@ -855,9 +868,12 @@ export async function rehireAgent(
     }
   }
 
+  let agentDirCreated = false;
+  let worktreeAttempted = false;
   let worktreeCreated = false;
+  let reservedQueue: string | undefined;
   const rollback = async () => {
-    if (manifest.worktree) {
+    if (worktreeAttempted) {
       if (worktreeCreated) {
         await rehireSpawnCtx.run([
           "git", "-C", repoPath, "worktree", "remove", worktreePath, "--force",
@@ -867,13 +883,41 @@ export async function rehireAgent(
         "git", "-C", repoPath, "branch", "-D", branchName,
       ]).catch(() => {});
     }
-    await rm(agentDir, { recursive: true, force: true }).catch(() => {});
+    if (agentDirCreated) await rm(agentDir, { recursive: true, force: true }).catch(() => {});
+    if (reservedQueue) {
+      await rm(reservedQueue, { recursive: true, force: true }).catch(err => {
+        warnings.push(`Warning: could not remove reserved queue directory ${reservedQueue}: ${err}`);
+      });
+    }
   };
 
   try {
-    await mkdir(agentDir, { recursive: true });
+    await mkdir(agentsDir, { recursive: true });
+    await mkdir(agentDir);
+    agentDirCreated = true;
+
+    // The restored agent can receive messages as soon as its meta is visible.
+    // Reserve the stored key before publishing it, including when resume fails.
+    const queueKey = archived.meta.queue_key;
+    if (queueKey !== undefined) {
+      const queueDir = agentOutboxDir({ id: agentId, meta: archived.meta });
+      await mkdir(dirname(queueDir), { recursive: true });
+      try {
+        await mkdir(queueDir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        throw new Error(
+          `Archived queue key '${queueKey}' is already reserved at ${queueDir}. ` +
+          "Check 'ib list' for a live owner first. Move the directory aside and retry only after verifying " +
+          "that the retirement warning names this path and that no active agent's meta.json in any " +
+          "unregistered repo still uses this key.",
+        );
+      }
+      reservedQueue = queueDir;
+    }
 
     if (manifest.worktree) {
+      worktreeAttempted = true;
       const worktreeResult = await rehireSpawnCtx.run([
         "git", "-C", repoPath, "worktree", "add", worktreePath,
         "-b", branchName, retainedRef!,
@@ -978,17 +1022,21 @@ export async function rehireAgent(
       ok: false,
       exitCode: 1,
       stdout: "",
-      stderr: `Could not reconstruct agent '${agentId}': ${err instanceof Error ? err.message : String(err)}`,
+      stderr: [
+        `Could not reconstruct agent '${agentId}': ${err instanceof Error ? err.message : String(err)}`,
+        ...warnings,
+      ].join("\n"),
     };
   }
 
   const restoredRepo = repos.find(
-    (repo) => resolve(repo.path) === resolve(repoPath),
+    (repo) => sameRepoPath(repo.path, repoPath),
   );
   const restoredAgent: Agent = {
     id: agentId,
     repoPath,
     repoName: restoredRepo ? repoDisplayName(restoredRepo) : basename(repoPath),
+    repoRegistryName: restoredRepo ? restoredRepo.name : basename(repoPath),
     meta: (await Bun.file(join(agentDir, "meta.json")).json()) as AgentMeta,
     state: "stopped",
     age: "",
@@ -1065,7 +1113,7 @@ export async function rehireAgent(
   const managerId = archived.meta.manager;
   const managerAgent = managerId
     ? activeAgents.find(
-      (a) => a.id === managerId && resolve(a.repoPath) === resolve(repoPath),
+      (a) => a.id === managerId && sameRepoPath(a.repoPath, repoPath),
     )
     : undefined;
   if (managerAgent) {
@@ -1362,46 +1410,26 @@ async function resolveCodexGitRoots(
   return { ok: true, commonDir, profileGitRoots: { gitDir, commonDir } };
 }
 
-/**
- * Clean up orphaned tmux sessions — sessions with the itsybitsy- prefix
- * that don't correspond to any remaining agent directory.
- */
-async function cleanupOrphanedTmuxSessions(agentsDir: string): Promise<number> {
-  let cleaned = 0;
+/** Clean up orphaned tmux sessions belonging to this repository. */
+async function cleanupOrphanedTmuxSessions(repoPath: string, agentsDir: string): Promise<number> {
+  const repoId = await readRepoId(repoPath).catch(() => null);
+  if (!repoId) return 0;
+  const entries = await readdir(agentsDir, { withFileTypes: true }).catch(() => null);
+  if (!entries) return 0;
 
-  // Build list of remaining agent IDs
-  const knownIds: string[] = [];
-  try {
-    const entries = await readdir(agentsDir, { withFileTypes: true });
-    for (const e of entries) {
-      if (e.isDirectory()) knownIds.push(e.name);
-    }
-  } catch { /* agents dir may not exist */ }
-
-  // List tmux sessions
+  const prefix = runtimeNames.tmuxSessionName(repoId, "");
+  const knownIds = new Set(entries.filter(entry => entry.isDirectory()).map(entry => entry.name));
   const listResult = await nukeResumeSpawnCtx.run(["tmux", "list-sessions", "-F", "#{session_name}"]);
-  if (listResult.exitCode !== 0 || !listResult.stdout) return 0;
+  if (listResult.exitCode !== 0) return 0;
 
-  const sessions = listResult.stdout.split("\n").filter((s) => s.trim());
-  for (const session of sessions) {
-    if (!runtimeNames.isAgentTmuxSession(session)) continue;
-
-    // Extract agent ID: strip prefix (itsybitsy-<repoid>-<agentid>)
-    // The session format is: itsybitsy-<8hex>-<agentid>
-    // We need to match the agent ID portion against known IDs
-    const parts = session.split("-");
-    // Session: "itsybitsy-<repoid>-agent-<hex>" or "itsybitsy-<repoid>-<name>"
-    // The repo ID is parts[1], agent ID is everything after "itsybitsy-<repoid>-"
-    if (parts.length < 3) continue;
-    const agentId = parts.slice(2).join("-");
-
-    const isKnown = knownIds.includes(agentId);
-    if (!isKnown) {
-      const killResult = await nukeResumeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(session)]);
-      if (killResult.exitCode === 0) cleaned++;
-    }
+  let cleaned = 0;
+  for (const session of listResult.stdout.split("\n")) {
+    if (!session.startsWith(prefix)) continue;
+    const agentId = session.slice(prefix.length);
+    if (!agentId || knownIds.has(agentId)) continue;
+    const killResult = await nukeResumeSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(session)]);
+    if (killResult.exitCode === 0) cleaned++;
   }
-
   return cleaned;
 }
 
@@ -1413,7 +1441,8 @@ async function nukeAgentList(
   repoPath: string,
   agentsDir: string,
   agentIds: string[],
-): Promise<{ killed: number; failed: number; orphansKilled: number }> {
+): Promise<{ killed: number; failed: number; orphansKilled: number; warnings: string[] }> {
+  const warnings: string[] = [];
   let killed = 0;
   let failed = 0;
 
@@ -1450,7 +1479,7 @@ async function nukeAgentList(
     // Teardown — captures the pruned (team, id) pairs even on the failure path
     // (the prune ran inside archiveAgent regardless of the final dir-removal).
     try {
-      const { prunedTeams } = await teardownAgent(
+      const { prunedTeams, warnings: cleanupWarnings } = await teardownAgent(
         repoPath,
         id,
         agentDir,
@@ -1469,6 +1498,7 @@ async function nukeAgentList(
           removeSandboxProfile(agentDir);
         },
       );
+      warnings.push(...cleanupWarnings);
       allPruned.push(...prunedTeams);
       killed++;
     } catch { /* teardown error — count as failure */
@@ -1477,7 +1507,7 @@ async function nukeAgentList(
   }
 
   // Clean up orphaned tmux sessions
-  const orphansKilled = await cleanupOrphanedTmuxSessions(agentsDir);
+  const orphansKilled = await cleanupOrphanedTmuxSessions(repoPath, agentsDir);
 
   // Scan for orphaned Claude processes
   if (killed > 0 || orphansKilled > 0) {
@@ -1488,7 +1518,7 @@ async function nukeAgentList(
   // system sender, to surviving teammates only (§16.5). Best-effort.
   await emitCoalescedLeaveNotice(allPruned, await listRepos());
 
-  return { killed, failed, orphansKilled };
+  return { killed, failed, orphansKilled, warnings };
 }
 
 /**
@@ -1506,7 +1536,7 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
   // Get all descendants (includes the agent itself)
   const descendants = await getDescendantsRecursive(agentsDir, agent.id);
 
-  const { killed, failed, orphansKilled } = await nukeAgentList(agent.repoPath, agentsDir, descendants);
+  const { killed, failed, orphansKilled, warnings } = await nukeAgentList(agent.repoPath, agentsDir, descendants);
 
   if (failed > 0 && killed === 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `All ${failed} agent(s) failed to kill` };
@@ -1521,7 +1551,7 @@ export async function nukeAgent(agent: Agent): Promise<IbCommandResult> {
     `killed=${killed} failed=${failed} orphans=${orphansKilled}`
   );
 
-  return { ok: true, exitCode: 0, stdout, stderr: "" };
+  return { ok: true, exitCode: 0, stdout, stderr: warnings.join("\n") };
 }
 
 /**
@@ -1543,7 +1573,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
     }
   } catch { /* agents dir may not exist */ }
 
-  const { killed, failed, orphansKilled } = await nukeAgentList(repoPath, agentsDir, agentsToKill);
+  const { killed, failed, orphansKilled, warnings } = await nukeAgentList(repoPath, agentsDir, agentsToKill);
 
   if (failed > 0 && killed === 0 && agentsToKill.length > 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `All ${failed} agent(s) failed to kill` };
@@ -1557,7 +1587,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
     `[nuke-all] repo=${repoPath} killed=${killed} failed=${failed} orphans=${orphansKilled}`
   );
 
-  return { ok: true, exitCode: 0, stdout, stderr: "" };
+  return { ok: true, exitCode: 0, stdout, stderr: warnings.join("\n") };
 }
 
 /**
@@ -1585,16 +1615,28 @@ async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
   // Spawn a fresh coordinator. newAgent's coordinator path generates the
   // agent ID from the repo basename, so it lands at the same ID we just
   // tore down.
+  const cleanupWarnings = nukeResult.stderr;
   const spawnResult = await newAgent(
     agent.repoPath,
     "You are the per-repo coordinator. Await instructions.",
     { type: REPO_COORDINATOR_TYPE },
-  );
+  ).catch(err => ({
+    ok: false,
+    stderr: err instanceof Error ? err.message : String(err),
+    stdout: "",
+  }));
   if (!spawnResult.ok) {
-    return { ok: false, exitCode: 1, stdout: "", stderr: `Reset failed during respawn: ${spawnResult.stderr || spawnResult.stdout}` };
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: [`Reset failed during respawn: ${spawnResult.stderr || spawnResult.stdout}`, cleanupWarnings]
+        .filter(Boolean).join("\n"),
+      cleanupWarnings,
+    };
   }
 
-  return { ok: true, exitCode: 0, stdout: `Reset coordinator ${agent.id}`, stderr: "" };
+  return { ok: true, exitCode: 0, stdout: `Reset coordinator ${agent.id}`, stderr: cleanupWarnings, cleanupWarnings };
 }
 
 /**
@@ -1679,11 +1721,6 @@ export async function resumeAgent(
       stderr: "Cannot resume worktree:false Claude agent: could not resolve the trusted running ib command",
     };
   }
-
-  // Ensure the central per-agent outbox dir exists before the agent starts so
-  // the first enqueue doesn't race a missing-dir append. Idempotent — no-op
-  // when the dir already exists.
-  await mkdir(agentOutboxDir(agent.id), { recursive: true });
 
   // Acquire the long-running-op guard at the VERY TOP — above the coordinator
   // early-return below — so coordinator resets are guarded against a double-R
@@ -2322,6 +2359,9 @@ ${qAbsExitScript}
       await chmod(resumeScript, 0o755);
     }
 
+    // Create the same queue directory a fresh spawn provides before launch.
+    await mkdir(agentOutboxDir(agent), { recursive: true });
+
     // Ensure tmux server is running
     const startServerResult = await nukeResumeSpawnCtx.run(["tmux", "start-server"]);
     if (startServerResult.exitCode !== 0) {
@@ -2532,7 +2572,7 @@ export async function respawnAgent(agent: Agent): Promise<IbCommandResult> {
   const detachSession = `ib-respawn-${agent.id}`;
   const command = `sleep 1; ib respawn-self ${agent.id}`;
   const result = await nukeResumeSpawnCtx.run([
-    "tmux", "new-session", "-d", "-s", detachSession, command,
+    "tmux", "new-session", "-d", "-c", agent.repoPath, "-s", detachSession, command,
   ]);
   if (result.exitCode !== 0) {
     await logAgent(agentDir, `[respawn] failed to launch detached worker: ${result.stderr.trim()}`);
@@ -3140,6 +3180,7 @@ export async function reassignAgent(agent: Agent, newManager: string | null): Pr
         id: targetId,
         repoPath: agent.repoPath,
         repoName: agent.repoName,
+        repoRegistryName: agent.repoRegistryName,
         meta: targetMeta as Agent["meta"],
         state: "running",
         age: "",
@@ -3237,7 +3278,7 @@ export async function ackAgent(agent: Agent, opts: AckAgentOptions = {}): Promis
 async function ackAgentForCaller(agent: Agent, caller: ResolvedCallerContext | null, skipUnavailable = false): Promise<IbCommandResult> {
   const fail = (stderr: string): IbCommandResult => ({ ok: false, exitCode: 1, stdout: "", stderr });
   const callerId = caller && typeof caller.meta.id === "string" ? caller.meta.id : "";
-  const sameRepo = !!caller?.repoPath && resolve(caller.repoPath) === resolve(agent.repoPath);
+  const sameRepo = !!caller?.repoPath && sameRepoPath(agent.repoPath, caller.repoPath, callerId);
   if (!callerId || !sameRepo || agent.archived || agent.meta.manager !== callerId) {
     return fail(
       agent.meta.manager
@@ -3885,13 +3926,12 @@ export async function mergeAgent(
     // 17-19. Archive artifacts, remove questions, remove agent dir. archiveAgent
     // also prunes this agent from every team (§16.5); hoist the pruned pairs out
     // of the timed block so the leave-notice fan-out below can see them.
-    let prunedTeams: Array<{ team: string; id: string }> = [];
-    await timed("merge", "archive", async () => {
+    const archived = await timed("merge", "archive", async () => {
       await logAgent(agentDir, "Merge complete - archiving and closing agent");
       const res = await archiveAgent(agent.repoPath, agent.id, agentDir);
-      prunedTeams = res.prunedTeams;
       await removeAgentQuestions(agent.repoPath, agent.id);
       try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      return res;
     });
 
     // 20. Scan for orphaned Claude processes
@@ -3899,12 +3939,12 @@ export async function mergeAgent(
 
     // merge = single-agent departure → per-agent leave notice to surviving
     // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
-    await emitPerAgentLeaveNotice(prunedTeams, await listRepos());
+    await emitPerAgentLeaveNotice(archived.prunedTeams, await listRepos());
 
     const successStdout = mergedSha
       ? `Closed agent: ${agent.id} (merged to ${targetBranch} at ${mergedSha})`
       : `Closed agent: ${agent.id}`;
-    return { ok: true, exitCode: 0, stdout: successStdout, stderr: "" };
+    return { ok: true, exitCode: 0, stdout: successStdout, stderr: archived.warnings.join("\n") };
   } finally {
     // Clear the op marker on every return path. On the SUCCESS path the agent
     // dir was already removed at step 17-19, so this writes into a now-gone
@@ -4238,9 +4278,9 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
 const DRAIN_SETTLE_GAP_MS = 250;
 
 /**
- * Drain the outbox for `agent` under the per-session lock: pop queued messages
- * one at a time and `deliverMessage` each, with a short settle gap between
- * consecutive messages so they land as DISTINCT prompts.
+ * Drain the outbox for `agent` under the queue directory's lock. Pop queued
+ * messages one at a time and `deliverMessage` each, with a short settle gap
+ * between consecutive messages so they land as distinct prompts.
  *
  * Correctness guarantees:
  *   - Only the lock holder delivers, so two drains can never interleave their
@@ -4316,7 +4356,7 @@ export async function hasLiveWatchdog(agentDir: string): Promise<boolean> {
  *    sender process — see `resolveSenderId`).
  * 2. ENQUEUE the message to the agent's `outbox.jsonl`.
  * 3. If a live watchdog exists, RETURN immediately — the watchdog drains the
- *    queue under the per-session lock. Otherwise drain inline under the lock
+ *    queue under its directory lock. Otherwise drain inline under the same lock
  *    (the sender becomes the drainer for this batch). This preserves the
  *    historical behavior of `ib send` to a stopped/complete agent (which
  *    restarts it) and the coordinator path.
@@ -4382,12 +4422,11 @@ export async function sendMessage(
   // coordinator has no agent dir, so its queue/lock live in the coordinator
   // home directly so all coordinator senders serialize against ONE queue).
   // Otherwise the per-agent queue lives under the CENTRAL outbox root
-  // (`agentOutboxDir(id)` → `~/.itsybitsy/agents/<id>/`) so codex agents
+  // (selected by `agentOutboxDir`) so codex agents
   // running under `-s workspace-write` can write to other agents' outboxes.
   // Log/state writes still target the per-worktree agent dir
   // (`deliverMessage`), which is correct for both cases.
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
-  const queueDir = opts?.outboxDir ?? agentOutboxDir(agent.id);
 
   // Resolve sender at ENQUEUE time (depends on the sender process's cwd).
   const fromId = resolveSenderId(agent.repoPath, opts);
@@ -4446,12 +4485,11 @@ export async function sendMessage(
     noPassthrough = staged.noPassthrough ?? staged.staged;
   }
 
-  // Enqueue. The agent dir is created by spawn; for the rare case it is
-  // missing, enqueueOutbox mkdir's the queue dir so a queued message is never
-  // silently dropped. A genuine write failure surfaces as an error rather than
-  // an unhandled rejection.
+  let queueDir: string;
   try {
-    await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough });
+    queueDir = opts?.outboxDir ?? agentOutboxDir(agent);
+    const reservedKey = opts?.outboxDir === undefined ? agent.meta.queue_key : undefined;
+    await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough }, reservedKey);
   } catch (err) {
     // Enqueue failed — nothing is queued. Undo any staged copies so an
     // abandoned attempt leaves no unused attachment behind (no partial copy).
@@ -4921,22 +4959,38 @@ async function fireRemoveLeaveNotice(
   }
 }
 
-/**
- * Resolve an agent id/nickname to its FULL id (exact match only), using the
- * same matcher as `ib send` (`matchAgentById`). Returns `{ id }` on a match,
- * or `{ error }` on not-found. Used by `ib team add/remove`.
- */
+type TeamMemberTarget = string | Pick<Agent, "id" | "repoPath">;
+
+/** Resolve CLI operands, or validate the exact agent already selected in the dashboard. */
 async function resolveFullAgentId(
-  partial: string,
+  target: TeamMemberTarget,
   repos: RepoEntry[],
 ): Promise<{ id: string } | { error: string }> {
-  const { matchAgentById } = await import("./resolve-target");
-  const { agents } = await readAllAgents(repos.map((r) => ({ path: r.path, name: repoDisplayName(r) })), false);
-  const match = matchAgentById(partial, agents);
-  if (!match) {
-    return { error: `Error: agent not found: ${partial}` };
+  let agent: Pick<Agent, "id" | "repoPath">;
+  if (typeof target === "string") {
+    const { resolveAgentTarget } = await import("./resolve-target");
+    const resolved = await resolveAgentTarget(target, repos);
+    if (!resolved.agent) return { error: resolved.error ?? `Agent not found: ${target}` };
+    agent = resolved.agent;
+  } else {
+    agent = target;
   }
-  return { id: match.id };
+  const label = typeof target === "string" ? target : `${target.repoPath}/${target.id}`;
+  const error = `Cannot store '${label}' in the team roster: bare id '${agent.id}' does not identify this agent reliably`;
+  const index = repos.findLastIndex((repo) => sameRepoPath(repo.path, agent.repoPath));
+  if (index === -1) return { error };
+  // Entries before the selected repo cannot override it in a last-wins map.
+  const [selected, later] = await Promise.all([
+    readAgentsOfRepos([repos[index]!], false),
+    readAgentsOfRepos(repos.slice(index + 1), false),
+  ]);
+  const hasId = (member: Agent) => member.id === agent.id;
+  const rosterMember = later.agents.findLast(hasId) ?? selected.agents.findLast(hasId);
+  if (later.errors.length || !rosterMember || !sameRepoPath(rosterMember.repoPath, agent.repoPath) ||
+      (rosterMember.storageDir && basename(rosterMember.storageDir) !== agent.id)) {
+    return { error };
+  }
+  return { id: agent.id };
 }
 
 /**
@@ -4971,7 +5025,7 @@ export async function teamCreate(name: string, opts?: { createdBy?: string }): P
 
 /**
  * `ib team add <name> <agent-id>` (§16.3). Errors if the team does not exist;
- * resolves `<agent-id>` via the same partial matcher as `ib send`; no-op success
+ * resolves the agent address via the shared resolver; no-op success
  * if already a member; fires the JOIN notice (§16.4.1) on a real add.
  *
  * Internal-use `opts.suppressJoinNotice` (TUI team-creation wizard only — NOT a
@@ -4982,15 +5036,15 @@ export async function teamCreate(name: string, opts?: { createdBy?: string }): P
  */
 export async function teamAdd(
   name: string,
-  agentIdOrPartial: string,
+  target: TeamMemberTarget,
   repos: RepoEntry[],
   opts?: { suppressJoinNotice?: boolean },
-): Promise<IbCommandResult> {
+): Promise<IbCommandResult & { added?: boolean }> {
   const n = normalizeTeamName(name);
   if (!(await getTeam(n))) {
     return teamErr(`Error: team @${n} not found`);
   }
-  const resolved = await resolveFullAgentId(agentIdOrPartial, repos);
+  const resolved = await resolveFullAgentId(target, repos);
   if ("error" in resolved) return teamErr(resolved.error);
   const id = resolved.id;
 
@@ -5000,39 +5054,43 @@ export async function teamAdd(
     return teamErr(`Error: team @${n} not found`);
   }
   if (!added) {
-    return teamOk(`agent ${id} is already in @${n}`);
+    return { ...teamOk(`agent ${id} is already in @${n}`), added };
   }
   // Persist-then-notify (§16.4.1): membership write committed under the lock;
   // fan the join notice to the post-write snapshot. Best-effort.
   await fireJoinNotice(n, team, id, repos, opts?.suppressJoinNotice === true);
-  return teamOk(`Added ${id} to @${n}`);
+  return { ...teamOk(`Added ${id} to @${n}`), added };
 }
 
 /**
  * `ib team remove <name> <agent-id>` (§16.3). Errors if the team does not exist;
- * resolves `<agent-id>` via the same partial matcher as `ib send`; no-op success
+ * resolves the agent address via the shared resolver; no-op success
  * if not a member; fires the per-agent LEAVE notice (§16.4.2) on a real removal.
  */
-export async function teamRemove(name: string, agentIdOrPartial: string, repos: RepoEntry[]): Promise<IbCommandResult> {
+export async function teamRemove(name: string, target: TeamMemberTarget, repos: RepoEntry[]): Promise<IbCommandResult & { removed?: boolean }> {
   const n = normalizeTeamName(name);
   if (!(await getTeam(n))) {
     return teamErr(`Error: team @${n} not found`);
   }
-  const resolved = await resolveFullAgentId(agentIdOrPartial, repos);
+  const resolved = await resolveFullAgentId(target, repos);
   if ("error" in resolved) return teamErr(resolved.error);
-  const id = resolved.id;
+  return teamRemoveStoredMember(name, resolved.id, repos);
+}
 
+/** Remove an exact roster entry, including one whose agent is no longer visible. */
+export async function teamRemoveStoredMember(name: string, id: string, repos: RepoEntry[]): Promise<IbCommandResult & { removed?: boolean }> {
+  const n = normalizeTeamName(name);
   const { removed, team } = await removeMember(n, id);
   if (!team) {
     return teamErr(`Error: team @${n} not found`);
   }
   if (!removed) {
-    return teamOk(`agent ${id} was not in @${n}`);
+    return { ...teamOk(`agent ${id} was not in @${n}`), removed };
   }
   // Persist-then-notify (§16.4.2): leave notice to the post-write snapshot
   // (the departed id is already absent). Best-effort.
   await fireRemoveLeaveNotice(n, team, id, repos);
-  return teamOk(`Removed ${id} from @${n}`);
+  return { ...teamOk(`Removed ${id} from @${n}`), removed };
 }
 
 /**
@@ -5794,40 +5852,6 @@ async function countAgents(agentsDir: string): Promise<number> {
 }
 
 /**
- * Read the repo-id from .itsybitsy/repo-id (or create one).
- * Mirrors get_repo_id() in ib bash.
- */
-export async function getRepoId(repoPath: string): Promise<string> {
-  const repoIdFile = runtimeNames.repoIdFile(repoPath);
-  let existing = "";
-  try {
-    existing = (await Bun.file(repoIdFile).text()).trim();
-  } catch (err) {
-    // Only a file that is genuinely absent may be (re)created. Any other read
-    // failure (a sandboxed agent's EPERM/EACCES, an I/O error) means an id may
-    // already exist that we simply cannot see; generating a new one would
-    // silently re-key every tmux session name (`itsybitsy-<repoId>-<agent>`)
-    // and sealed record of the repo. Fail loudly instead.
-    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      throw new Error(
-        `Cannot read repository id ${repoIdFile}: ${err instanceof Error ? err.message : String(err)}. ` +
-          `Refusing to generate a new id over one that may already exist.`,
-      );
-    }
-  }
-  if (/^[0-9a-f]{8}$/.test(existing)) return existing;
-  if (existing) throw new Error(`Invalid repository id in ${repoIdFile}: expected 8 lowercase hexadecimal characters`);
-
-  // Generate new 8 hex char ID
-  const bytes = new Uint8Array(4);
-  crypto.getRandomValues(bytes);
-  const newId = Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
-  await mkdir(runtimeNames.runtimeDir(repoPath), { recursive: true });
-  await Bun.write(repoIdFile, newId + "\n");
-  return newId;
-}
-
-/**
  * Build settings.local.json content for an agent worktree.
  * Mirrors build_agent_settings() + build_settings_json() in ib bash.
  */
@@ -6034,7 +6058,7 @@ export function buildClaudePidBootstrapCommand(
  * 1.  Validate prompt (required)
  * 2.  Ensure .itsybitsy/agents/ and .itsybitsy/archive/ dirs exist
  * 3.  Auto-detect manager from cwd if not provided
- * 4.  Validate manager (resolve partial ID, check not a worker)
+ * 4.  Validate manager (resolve its address, check it can manage children)
  * 5.  Load config for model, maxAgents, permissions, prompts
  * 6.  Model fallback: --model > config.model > 'claude:opus'
  * 7.  Max agents check
@@ -6196,6 +6220,23 @@ export async function newAgent(
   prompt: string,
   opts?: NewAgentOptions
 ): Promise<IbCommandResult> {
+  const cleanupWarnings: string[] = [];
+  try {
+    const result = await spawnAgent(repoPath, prompt, opts, cleanupWarnings);
+    result.stderr = [result.stderr, ...cleanupWarnings].filter(Boolean).join("\n");
+    return result;
+  } catch (err) {
+    for (const warning of cleanupWarnings) logWarning(warning);
+    throw err;
+  }
+}
+
+async function spawnAgent(
+  repoPath: string,
+  prompt: string,
+  opts: NewAgentOptions | undefined,
+  cleanupWarnings: string[],
+): Promise<IbCommandResult> {
   // 1. Validate prompt
   if (!prompt || !prompt.trim()) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Error: prompt required" };
@@ -6237,6 +6278,15 @@ export async function newAgent(
   // Configuration
   let useWorktree = opts?.noWorktree !== true;
 
+  let repos: RepoEntry[];
+  let queueRepo: string | undefined;
+  try {
+    ({ repos } = await readRegistryStrict());
+    queueRepo = await registeredQueueRepo(rootRepoPath, repos);
+  } catch (err) {
+    return { ok: false, exitCode: 1, stdout: "", stderr: String(err) };
+  }
+
   // Ensure agent types directory is initialized + load the requested type.
   const { ensureAgentTypesDir } = await import("./agent-types");
   try {
@@ -6269,8 +6319,7 @@ export async function newAgent(
   // spawned in the wrong repo should fail with the repo error, not silently
   // succeed via idempotency.
   if (agentTypeDef.repos !== undefined) {
-    const allKnownRepos = await listRepos();
-    const entry = allKnownRepos.find((r) => r.path === rootRepoPath);
+    const entry = repos.find((r) => r.path === rootRepoPath);
     const basenameOnly = basename(rootRepoPath);
     // Trim whitespace on the candidates as a defensive parallel to the
     // `allowed` list's .trim() — a nickname with trailing whitespace in
@@ -6316,7 +6365,7 @@ export async function newAgent(
   //    Coordinators are top-level agents — never auto-detect a manager (SPEC §12.2.3)
   if (!manager && !coordinatorMode) {
     const sameRepoCaller = callerContext?.repoPath &&
-      resolve(callerContext.repoPath) === resolve(rootRepoPath);
+      sameRepoPath(rootRepoPath, callerContext.repoPath);
     const callerId = callerContext && typeof callerContext.meta.id === "string"
       ? callerContext.meta.id
       : "";
@@ -6399,24 +6448,17 @@ export async function newAgent(
     // as spawner.
     //
     // The stored agent_id is the `@<repo-name>` sentinel (not the coordinator's
-    // actual agent_id) so the watchdog routes notifications through resolveTarget,
+    // actual agent_id) so the watchdog looks up the current coordinator in repo_path,
     // which is robust to the coordinator being killed and re-created.
     if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
       try {
         const repos = await listRepos();
-        const repoMatch = repos.find(r => r.path === cwd);
+        const repoMatch = repos.find(r => sameRepoPath(r.path, cwd));
         if (repoMatch) {
           const coordStatus = await checkCoordinatorExists(cwd);
           if (coordStatus.exists && coordStatus.agentId) {
-            // Stamp with `basename(cwd)` — the same invariant that
-            // `getCoordinatorAgentId()` uses for the coordinator's actual
-            // agent ID. The access checks in agent-path.ts and the
-            // routing in notifySpawner @<repo-name> both compare the
-            // sentinel suffix against the coordinator's agent ID, so
-            // they must use the same source of truth. Using the registry
-            // `name` (or worse, the nickname) would silently break access
-            // any time a user passed a custom name via `ib add <path>
-            // <custom-name>` or set a nickname.
+            // The ownership gate checks the coordinator id in the sentinel.
+            // notifySpawner finds the current coordinator by its recorded repo_path.
             spawnedBy = {
               agent_id: `@${basename(cwd)}`,
               repo_path: cwd,
@@ -6468,15 +6510,19 @@ export async function newAgent(
 
   // 4. Validate manager
   if (manager) {
-    // Resolve partial ID
-    const resolveResult = await resolveAgentId(agentsDir, manager);
-    if ("error" in resolveResult) {
-      const suffix = resolveResult.matches.length > 0
-        ? `: ${resolveResult.matches.join(", ")}`
-        : "";
-      return { ok: false, exitCode: 1, stdout: "", stderr: `Error: ${resolveResult.error} for '${manager}'${suffix}` };
+    if (opts?.manager) {
+      const { resolveAgentTarget } = await import("./resolve-target");
+      const scope = repos.some((repo) => sameRepoPath(repo.path, rootRepoPath)) ? repos :
+        [...repos, { path: rootRepoPath, name: basename(rootRepoPath) }];
+      const { agent, error } = await resolveAgentTarget(manager, scope, callerCwd);
+      if (!agent || !sameRepoPath(agent.repoPath, rootRepoPath)) {
+        return { ok: false, exitCode: 1, stdout: "", stderr: error ?? "Manager must belong to the new agent's repo" };
+      }
+      manager = agent.id;
+    } else {
+      const inferred = await resolveAgentId(agentsDir, manager);
+      if ("error" in inferred) return { ok: false, exitCode: 1, stdout: "", stderr: inferred.error };
     }
-    manager = resolveResult.resolved;
 
     // Check manager is not a worker. A per-agent `canSpawnChildren: true`
     // override lets a worker manage sub-agents — mirror the intercept-task
@@ -6673,12 +6719,6 @@ export async function newAgent(
     };
   }
 
-  // Do not allocate lifecycle directories until the CLI/worktree shape is
-  // known to be supported. In particular, rejected non-Claude
-  // worktree:false requests must leave an otherwise untouched repo untouched.
-  await mkdir(agentsDir, { recursive: true });
-  await mkdir(archiveDir, { recursive: true });
-
   // Codex spawn-path preconditions (SPEC §5.4 step 2 + §7 risk 14). Run
   // BEFORE any worktree/tmux work so a fail here doesn't leave residual
   // state behind. The path-safety check guards the TOML-in-shell quoting
@@ -6871,7 +6911,6 @@ export async function newAgent(
   }
 
   // 8. Generate agent ID
-  const repos = await listRepos();
   let id: string;
   if (coordinatorMode) {
     id = getCoordinatorAgentId(rootRepoPath);
@@ -6925,9 +6964,12 @@ export async function newAgent(
     }
   }
 
+  const machine = await initializeMachineName();
   // Get repo-id for session naming
   const repoId = await getRepoId(rootRepoPath);
   const tmuxSession = runtimeNames.tmuxSessionName(repoId, id);
+
+  const queueKey = fullyQualifiedAgentId(machine, queueRepo ?? `~${repoId}`, id);
 
   // 9. Uniqueness check
   const agentDir = join(agentsDir, id);
@@ -6957,13 +6999,30 @@ export async function newAgent(
     }
   }
 
-  // 10. Create agent directory
+  // 10. Allocate lifecycle directories only after the queue identity is valid.
+  const queueDir = queueDirForKey(queueKey, id);
+  await mkdir(dirname(queueDir), { recursive: true });
+  try {
+    await mkdir(queueDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    return { ok: false, exitCode: 1, stdout: "", stderr: `Cannot spawn '${id}': queue directory already exists at ${queueDir}` };
+  }
+  // Only this spawn reserved the leaf. Release it on every refusal or thrown
+  // error until the verified tmux session takes ownership.
+  await using reservation = {
+    committed: false,
+    async [Symbol.asyncDispose]() {
+      if (this.committed) return;
+      try {
+        await rm(queueDir, { recursive: true, force: true });
+      } catch (err) {
+        cleanupWarnings.push(`Warning: could not remove reserved queue directory ${queueDir}: ${err}`);
+      }
+    },
+  };
+  await mkdir(archiveDir, { recursive: true });
   await mkdir(agentDir, { recursive: true });
-  // The per-agent outbox now lives under the CENTRAL coordinator-home root
-  // (so codex agents under `-s workspace-write` can write to other agents'
-  // outboxes — see agentOutboxDir). mkdir it before the agent starts so the
-  // first enqueue doesn't race a missing-dir append.
-  await mkdir(agentOutboxDir(id), { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
   // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are
@@ -7023,6 +7082,7 @@ export async function newAgent(
     id,
     session_id: sessionUuid,
     tmux_session: tmuxSession,
+    queue_key: queueKey,
     prompt,
     manager: manager || null,
     created: createdAt.toISOString(),
@@ -7966,6 +8026,7 @@ ${qStartExitScript}
     return { ok: false, exitCode: 1, stdout: "", stderr: `Error: tmux session '${tmuxSession}' failed to start${suffix}` };
   }
 
+  reservation.committed = true;
   await logSpawn(agentDir, spawnerAgentDir, id, `spawn OK: agent ${id} running (tmux=${tmuxSession} workPath=${workPath})`);
 
   // 19. Output agent ID

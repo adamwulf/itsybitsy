@@ -303,7 +303,7 @@ async function findAckedChildren(agentsDir: string, parentId: string, childIds: 
 
 async function readMeta(
   agentDir: string,
-): Promise<{ manager?: string; tmux_session?: string; archived?: boolean } | null> {
+): Promise<{ manager?: string; tmux_session?: string; queue_key?: string; archived?: boolean } | null> {
   try {
     const metaPath = join(agentDir, "meta.json");
     const raw = await readFile(metaPath, "utf-8");
@@ -628,23 +628,25 @@ export async function executeResultActions(
 
 /**
  * Build a minimal `Agent` for the hook's `sendMessage` calls. Only the fields
- * `sendMessage`/`deliverMessage` read (`id`, `repoPath`, `meta.tmux_session`)
+ * `sendMessage`/`deliverMessage` read (`id`, `repoPath`, session and queue identity)
  * are populated; the rest are inert defaults.
  */
 function buildHookAgent(
   id: string,
   repoPath: string,
   tmuxSession: string,
-  meta: { manager?: string } | null,
+  meta: { manager?: string; queue_key?: string } | null,
 ): import("../agents").Agent {
   return {
     id,
     repoPath,
     repoName: "",
+    repoRegistryName: "",
     meta: {
       id,
       session_id: "",
       tmux_session: tmuxSession,
+      queue_key: meta?.queue_key,
       prompt: "",
       manager: meta?.manager ?? null,
       created: "",

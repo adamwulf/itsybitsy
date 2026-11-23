@@ -6,6 +6,7 @@ import * as runtimeNames from "./runtime-names";
  */
 
 import { join, dirname, resolve } from "path";
+import type { ReadableStreamDefaultReader } from "node:stream/web";
 import {
   readdir,
   mkdir,
@@ -17,7 +18,7 @@ import {
   readlink,
   symlink,
 } from "fs/promises";
-import { SpawnContext } from "./types";
+import { SpawnContext, type SpawnResult } from "./types";
 import {
   isValidAgentId,
   isValidTmuxSession,
@@ -586,6 +587,7 @@ export async function captureTmuxOutputToFile(
  * emits NO notice and only performs the membership write.
  */
 export interface ArchiveAgentResult {
+  warnings: string[];
   /** Archive folder path, or null if there were no artifacts to archive. */
   archivePath: string | null;
   /** `(team, id)` pairs this agent was pruned from (empty if it was in no team). */
@@ -645,10 +647,24 @@ export async function archiveAgent(
     }
   }
 
-  if (!hasOutput && !hasLog && !hasMeta && !preparedRetirement) {
-    return { archivePath: null, prunedTeams };
+  const warnings: string[] = [];
+  const live = await readAgentMeta(agentDir);
+  let identity = live;
+  if (!live.meta && preparedRetirement) {
+    const snapshot = await readAgentMeta(join(preparedRetirement.payloadDir, RUNTIME_DIR));
+    // A missing snapshot adds no information about the live metadata.
+    if (!snapshot.missing) identity = snapshot;
   }
-
+  let queueDir: string | undefined;
+  try {
+    if (!identity.meta) throw new Error(identity.error ?? "No readable agent metadata");
+    queueDir = agentOutboxDir({ id: agentId, meta: identity.meta });
+  } catch (err) {
+    warnings.push(`Warning: skipped queue cleanup for '${agentId}': ${(err as Error).message}`);
+  }
+  if (!hasOutput && !hasLog && live.missing && !preparedRetirement) {
+    return { archivePath: null, prunedTeams, warnings };
+  }
   await mkdir(archiveFolder, { recursive: true });
 
   // output.log — move
@@ -672,7 +688,7 @@ export async function archiveAgent(
   }
 
   // meta.json — copy
-  if (hasMeta) {
+  if (hasMeta && identity === live) {
     try {
       await cp(join(agentDir, "meta.json"), join(archiveFolder, "meta.json"));
     } catch { /* ignore */ }
@@ -782,13 +798,15 @@ export async function archiveAgent(
   // torn down, so there is no live tmux session to deliver to. The outbox
   // now lives under the CENTRAL coordinator-home root (agentOutboxDir), not
   // beside meta.json in the per-worktree agent dir; deleteAgentOutbox also
-  // best-effort rmdir's the per-agent outbox subdir. The statusline's Claude
+  // removes the per-agent outbox subdir. The statusline's Claude
   // rate-limit record lives in the same folder and must go first, or the
   // rmdir fails and the folder stays for good.
-  await deleteClaudeRateLimits(agentOutboxDir(agentId));
-  await deleteAgentOutbox(agentOutboxDir(agentId));
+  if (queueDir) {
+    warnings.push(...await deleteClaudeRateLimits(queueDir));
+    warnings.push(...await deleteAgentOutbox(queueDir));
+  }
 
-  return { archivePath: archiveFolder, prunedTeams };
+  return { archivePath: archiveFolder, prunedTeams, warnings };
 }
 
 // ── teardownAgent ────────────────────────────────────────────────────────────
@@ -829,7 +847,7 @@ export async function teardownAgent(
   logMsg: string = "Agent killed",
   preparedRetirement?: PreparedRetirement,
   beforeRemove?: () => Promise<void>,
-): Promise<{ ok: boolean; prunedTeams: Array<{ team: string; id: string }> }> {
+): Promise<{ ok: boolean; prunedTeams: Array<{ team: string; id: string }>; warnings: string[] }> {
   const tmuxSession = meta.tmux_session;
 
   if (!isValidTmuxSession(tmuxSession)) {
@@ -839,7 +857,7 @@ export async function teardownAgent(
     // silently left in its teams until a later lazy prune self-healed it.
     const prunedTeams = await pruneAgentFromAllTeams(agentId);
     logWarning(`[agent-lifecycle] Invalid tmux session name in meta for agent ${agentId}: ${tmuxSession}`);
-    return { ok: false, prunedTeams };
+    return { ok: false, prunedTeams, warnings: [] };
   }
 
   // 1. Log
@@ -920,7 +938,7 @@ export async function teardownAgent(
   // 8. Archive — also performs the eager team-membership prune (§16.5) and
   // returns the pruned (team, id) pairs, which we thread up to the command
   // layer so it can fan out the leave notice.
-  const { prunedTeams } = await archiveAgent(
+  const { prunedTeams, warnings } = await archiveAgent(
     repoPath,
     agentId,
     agentDir,
@@ -935,9 +953,9 @@ export async function teardownAgent(
   // 10. Remove agent directory
   try {
     await rm(agentDir, { recursive: true, force: true });
-    return { ok: true, prunedTeams };
+    return { ok: true, prunedTeams, warnings };
   } catch {
-    return { ok: false, prunedTeams };
+    return { ok: false, prunedTeams, warnings };
   }
 }
 
@@ -1106,32 +1124,76 @@ export async function isRunningAsAgent(cwd?: string): Promise<boolean> {
 
 // ── resolveGitRoot ───────────────────────────────────────────────────────────
 
-/**
- * Resolve the root repository path (handles worktrees).
- * Uses git -C repoPath rev-parse --show-toplevel, with git-common-dir
- * fallback for worktree resolution.
- */
-export async function resolveGitRoot(repoPath: string): Promise<string | null> {
+async function readGitPipe(
+  stream: ReadableStream<Uint8Array> | null,
+  readers: ReadableStreamDefaultReader<Uint8Array>[],
+): Promise<string> {
+  if (!stream) return "";
+  const reader = stream.getReader();
+  readers.push(reader);
+  const decoder = new TextDecoder();
+  let text = "";
   try {
-    // Get the common git directory (shared across all worktrees)
-    const commonResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--git-common-dir"]);
-    if (commonResult.exitCode !== 0) {
-      // Fallback
-      const topResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--show-toplevel"]);
-      return topResult.exitCode === 0 ? topResult.stdout : null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function runGitRootQuery(repoPath: string, flags: string[], signal?: AbortSignal) {
+  const deadline = Promise.withResolvers<never>();
+  const onAbort = () => deadline.reject(signal?.reason);
+  const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  let proc: SpawnResult | undefined;
+  try {
+    signal?.throwIfAborted();
+    signal?.addEventListener("abort", onAbort);
+    proc = spawnCtx.runner(
+      ["git", "-C", repoPath, "rev-parse", ...flags],
+      { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
+    );
+    const [exitCode, stdout] = await Promise.race([
+      Promise.all([proc.exited, readGitPipe(proc.stdout, readers), readGitPipe(proc.stderr, readers)]),
+      deadline.promise,
+    ]);
+    return { exitCode, stdout };
+  } catch (err) {
+    // A wrapper's descendants can hold the pipes open after the wrapper dies.
+    for (const reader of readers) void reader.cancel().catch(() => {});
+    try { proc?.kill?.("SIGKILL"); } catch { /* the child may have already exited */ }
+    throw err;
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/** Resolve the main repository root, including from inside a linked worktree. */
+export async function resolveGitRoot(repoPath: string, signal?: AbortSignal): Promise<string | null> {
+  const query = (...flags: string[]) => runGitRootQuery(repoPath, flags, signal);
+  try {
+    const combined = await query("--git-common-dir", "--git-dir", "--show-toplevel");
+    if (combined.exitCode === 0) {
+      const fields = combined.stdout.replace(/\n$/, "").split("\n");
+      const [commonDir, gitDir, topLevel] = fields.map((field) => field.trim());
+      if (fields.length === 3 && commonDir && gitDir && topLevel) {
+        return commonDir === ".git" || commonDir === gitDir ? topLevel : dirname(resolve(repoPath, commonDir));
+      }
     }
 
-    const commonDir = commonResult.stdout;
-    const gitDirResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--git-dir"]);
-
-    // If common_dir is ".git" or matches --git-dir, we're in the main repo
-    if (commonDir === ".git" || commonDir === gitDirResult.stdout) {
-      const topResult = await spawnCtx.run(["git", "-C", repoPath, "rev-parse", "--show-toplevel"]);
-      return topResult.exitCode === 0 ? topResult.stdout : null;
+    // A path can contain a newline, and --show-toplevel can fail inside a
+    // worktree's admin directory even when its common directory is usable.
+    const common = await query("--git-common-dir");
+    if (common.exitCode === 0) {
+      const commonDir = common.stdout.trim();
+      const gitDir = await query("--git-dir");
+      if (commonDir !== ".git" && commonDir !== gitDir.stdout.trim()) return dirname(resolve(repoPath, commonDir));
     }
-
-    // common_dir points to the shared .git directory — resolve to absolute, then go up one level
-    return dirname(resolve(repoPath, commonDir));
+    const top = await query("--show-toplevel");
+    return top.exitCode === 0 ? top.stdout.trim() : null;
   } catch {
     return null;
   }

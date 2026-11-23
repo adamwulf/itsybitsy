@@ -24,6 +24,7 @@ import { loadRegistry, setRepoDefaultAgentType, setRepoNotes } from "../registry
 import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { peerSnapshot } from "../peers/peer-link";
 import type { RepoEntry } from "../registry";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow, expandTabs } from "../tmux-poller";
@@ -39,13 +40,13 @@ import {
   isCoordinatorRestartCommand,
   restartSystemCoordinatorFresh,
 } from "../coordinator";
-import type { Agent, FlatEntry, PendingQuestion } from "../agents";
+import type { Agent, FlatEntry, RemoteEntry, PendingQuestion } from "../agents";
 import { agentWorktreePath } from "../agents";
 import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from "../git-status";
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
-import { wordWrapLines, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
+import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
@@ -82,6 +83,7 @@ import { FocusManager } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
+import { initializeMachineName } from "../machine-name";
 import {
   DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH,
   getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
@@ -103,6 +105,10 @@ import {
   type RemoteControlFiles, type RemoteControlFilesOptions, type RemoteControlStatus,
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
+import { buildPeersDialogContent, newPeersDialog, syncPeersDialog, type PeersDialogService } from "./peers-dialog";
+import { PeerService, defaultPeerServiceDeps } from "../peers/service";
+import type { PeerLinkState } from "../peers/poller";
+import { remoteDisplayName } from "./peer-repos";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -412,6 +418,46 @@ function padToWidth(str: string, width: number): string {
   return str + (needsReset ? RESET : "") + " ".repeat(width - vw);
 }
 
+/** The right pane's text for a selected remote row, in every mode (SPEC §20.5). */
+export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
+
+/** The center pane's text for a selected remote row (SPEC §20.5). */
+export function remoteCenterText(entry: RemoteEntry): string {
+  switch (entry.kind) {
+    case "remote-agent":
+      return `Remote agent on ${entry.peerName} (read-only)`;
+    case "remote-repo-header":
+      return `Remote repo on ${entry.peerName} (read-only)`;
+  }
+}
+
+/** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
+function remoteTitle(entry: RemoteEntry): string {
+  switch (entry.kind) {
+    case "remote-agent":
+      return `${entry.peerName}/${remoteDisplayName(entry.remote)}`;
+    case "remote-repo-header":
+      return `${entry.peerName}/${entry.repoName}`;
+  }
+}
+
+/**
+ * The main area for a selected remote row (SPEC §20.5): the center
+ * placeholder and the right pane's "not available" placeholder, side by side
+ * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
+ * (the right pane is often narrow), and a word longer than the pane is broken.
+ */
+function renderRemotePlaceholders(entry: RemoteEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
+  const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
+  const rw = Math.max(1, mainWidth - lw - 1);
+  const placeholder = (text: string, width: number) =>
+    padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), height);
+  const center = placeholder(remoteCenterText(entry), lw);
+  const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw);
+  const sep = `${DIM_GRAY}│${RESET}`;
+  return center.map((line, i) => padToWidth(line, lw) + sep + (right[i] ?? ""));
+}
+
 /**
  * Footer clock format: 24-hour HH:MM. Built once and reused — toLocaleTimeString()
  * builds a new formatter on every call, which was ~5% of an idle `ib watch`
@@ -451,6 +497,12 @@ class StatusBarComponent implements Component {
   codexUsageError = false;
   version = "";
   repoHeaderSelected = false;
+  /**
+   * A remote row is selected (SPEC §20.5): the footer lists only keys
+   * the read-only guard allows (isRemoteAllowedKey), not the agent actions it
+   * would refuse.
+   */
+  remoteSelected = false;
   hasResolvableWarnings = false;
 
   invalidate(): void {}
@@ -474,7 +526,10 @@ class StatusBarComponent implements Component {
 
     let row1Left: string;
     let row2Left: string;
-    if (this.repoHeaderSelected) {
+    if (this.remoteSelected) {
+      row1Left = `${DIM}j/k: select    J/K: repo    p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers    (read-only remote agent)${RESET}`;
+    } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    a: new agent    ?: help    h: setup    A: add repo${fixHint}${RESET}`;
@@ -627,6 +682,15 @@ class DialogOverlayComponent implements Component {
         });
         return { title: `${dialog.prompt}`, contentLines: [headerLine, queryLine, ...itemLines] };
       }
+      case "cleanup-warnings": {
+        const rows = dialog.text.split("\n").flatMap(line => wrapSingleLine(line, innerWidth));
+        const height = Math.max(1, (process.stdout.rows || 24) - 4);
+        dialog.offset = Math.min(dialog.offset, Math.max(0, rows.length - height));
+        const content = rows.slice(dialog.offset, dialog.offset + height);
+        const hint = rows.length > height ? "↑/↓ scroll · Esc close" : "Esc close";
+        content.push(`${DIM}${truncateToWidth(hint, innerWidth, "")}${RESET}`);
+        return { title: "Cleanup warnings", contentLines: content };
+      }
       case "help": {
         const lines = dialog.lines.map((line) => truncateToWidth(line, innerWidth, ""));
         return { title: "Help", contentLines: lines };
@@ -668,8 +732,47 @@ class DialogOverlayComponent implements Component {
       case "permissions-editor": {
         return buildPermissionsEditorContent(dialog, innerWidth);
       }
+      case "peers": {
+        return buildPeersDialogContent(dialog, innerWidth);
+      }
     }
   }
+}
+
+/** The notice for a key refused on a remote row (SPEC §20.5). */
+export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
+
+/**
+ * The read-only guard's allowlist (SPEC §20.5): the only keys that work while
+ * the effective selection is a remote row. Every other key, including
+ * any key added to the dashboard later, is refused, so no action can reach a
+ * remote row by default.
+ *
+ * - navigation and focus: j/k, J/K, the arrows, Tab and Shift+Tab, `[` `]` `{` `}`;
+ * - the sidebar tabs 1, 2 and 3;
+ * - pane cycling: p and n (and ←/→, their arrow forms);
+ * - the `@` jump: it lists only local rows (handleFuzzyAgent keeps only local
+ *   kinds), so it is the quick way back from a remote row;
+ * - help `?`, the command palette `/` (whose commands pass this same guard) and Peers `I`;
+ * - quit (Ctrl+C, which the TUI's input listener handles before the dashboard).
+ *
+ * The footer's remote hints (StatusBarComponent.remoteSelected) list these keys.
+ */
+export function isRemoteAllowedKey(data: string): boolean {
+  switch (data) {
+    case "j": case "k": case "J": case "K":
+    case "\t": case "\x1b[Z":
+    case "[": case "]": case "{": case "}":
+    case "1": case "2": case "3":
+    case "p": case "n":
+    case "@":
+    case "?": case "/": case "I":
+      return true;
+  }
+  return matchesKey(data, Key.up) || matchesKey(data, Key.down)
+    || matchesKey(data, Key.left) || matchesKey(data, Key.right)
+    || matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))
+    || matchesKey(data, Key.ctrl("c"));
 }
 
 /** Minimum terminal width for sidebar layout */
@@ -715,14 +818,29 @@ export class DashboardComponent implements Component {
   private repoCoordinatorPoller: TmuxPoller;
   /** The tmux session currently being polled for repo coordinator */
   repoCoordinatorSession: string | null = null;
-  currentAgentId: string | null = null;
+  /**
+   * The effective selection's agent as its fully qualified id (SPEC §17.1),
+   * `"__coordinator__"` for the system coordinator, null otherwise. A change of
+   * it is a selection change (syncSelectedAgent), so moving between two agents
+   * with the same bare id in two repos resets and reloads the panes.
+   */
+  currentAgentKey: string | null = null;
   /** Repo path whose notes are currently loaded into the info-panel notes editor. */
   private notesEditorRepoPath: string | null = null;
   /** Snapshot of notes text taken when the user entered the notes sub-field — used to revert on Escape. */
   private notesEditorOriginal: string = "";
   _dialog: DialogState = null;
+  private pendingCleanupWarnings: Array<Extract<DialogState, { type: "cleanup-warnings" }>> = [];
   private overlayHandle: OverlayHandle | null = null;
   private dialogOverlay: DialogOverlayComponent;
+  /**
+   * The iroh endpoint service behind the Peers dialog (`I`). launchDashboard
+   * sets the real one (src/peers/service.ts); a dashboard built in a test has
+   * none unless the test sets a fake, so no test can bind a real endpoint.
+   */
+  peerService: PeersDialogService | null = null;
+  /** The poller state the Agents tree's remote rows were last built from. */
+  private peerLinks: readonly PeerLinkState[] = [];
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
   private noticeCounter = 0;
@@ -887,7 +1005,7 @@ export class DashboardComponent implements Component {
    */
   private hasAutoSelectedFirstAgent = false;
   private _questionsFocused = false;
-  /** Cache of which agents have an attached tmux client */
+  /** Cache of which agents have an attached tmux client, by fully qualified id (SPEC §17.1) */
   private _clientAttached: Map<string, boolean> = new Map();
   private clientCheckTimer: ReturnType<typeof setInterval> | null = null;
   /**
@@ -1190,11 +1308,24 @@ export class DashboardComponent implements Component {
   }
 
   /**
-   * Mark an agent as a favorite (no toggle). The new-agent form calls this for
-   * an agent made while the Favorites tab shows (SPEC §17.1).
+   * This machine's name (src/machine-name.ts), the first segment of every
+   * local row key (SPEC §17.1). launchDashboard sets it before the first list
+   * arrives; every component that keys or shows a local agent gets it.
    */
-  addFavorite(agentId: string) {
-    this.agentTree.addFavorite(agentId);
+  setMachineName(name: string) {
+    this.agentTree.machineName = name;
+    this.teamsTree.machineName = name;
+    this.rightPane.machineName = name;
+    this.infoPanel.machineName = name;
+  }
+
+  /**
+   * Mark the agent with this fully qualified id as a favorite (no toggle). The
+   * new-agent form calls this for an agent made while the Favorites tab shows
+   * (SPEC §17.1).
+   */
+  addFavorite(key: string) {
+    this.agentTree.addFavorite(key);
     this.favoritesChanged();
   }
 
@@ -1574,6 +1705,7 @@ export class DashboardComponent implements Component {
 
   setRepos(repos: RepoEntry[]) {
     this.repos = repos;
+    this.agentTree.registeredRepos = repos;
   }
 
   setDiffTool(tool: string | undefined) {
@@ -1726,7 +1858,89 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
+  /** Poll updates can affect the unified tree, a remote selection, and the Peers dialog. */
+  setPeerService(service: PeersDialogService): void {
+    this.peerService = service;
+    service.onChange(() => {
+      const changed = this.refreshPeerRepos();
+      const dialog = this._dialog;
+      if (dialog?.type === "peers") {
+        syncPeersDialog(dialog);
+        this.tui?.requestRender();
+      } else if (changed) {
+        this.tui?.requestRender();
+      }
+    });
+    this.refreshPeerRepos();
+  }
+
+  private refreshPeerRepos(): boolean {
+    const links = this.peerService?.view().links ?? [];
+    // Stable snapshot references from the poller make dialog-only changes cheap.
+    if (links.length === this.peerLinks.length && links.every((link, i) => {
+      const old = this.peerLinks[i]!;
+      return link.id === old.id && link.name === old.name && link.repos === old.repos && link.agents === old.agents
+        && link.connected === old.connected && (link.connected || link.lastOkAt === old.lastOkAt);
+    })) return false;
+    this.peerLinks = links;
+    const treeVisible = this.sidebarMode !== "teams" || this.rightPane.mode === "TREE";
+    const width = this.rightPane.mode === "TREE" ? this.getMainWidth() : this.sidebarWidth;
+    const before = treeVisible ? this.agentTree.render(width) : [];
+    const previous = this.remoteSelection;
+    this.agentTree.setPeerLinks(links);
+    const selected = this.remoteSelection;
+    // The connector can change when another root appears. Only the tree displays it.
+    const details = (entry: RemoteEntry | null) => entry?.kind === "remote-agent"
+      ? [entry.peerName, entry.remote, entry.stale, entry.lastOkAt] : entry;
+    const selectionChanged = JSON.stringify(details(previous)) !== JSON.stringify(details(selected));
+    if (selectionChanged) this.syncSelectedAgent();
+    if (selectionChanged || !treeVisible) return selectionChanged;
+    const after = this.agentTree.render(width);
+    return before.length !== after.length || before.some((line, i) => line !== after[i]);
+  }
+
+  /** Only the Agents tree can own a remote selection. */
+  get remoteSelection(): RemoteEntry | null {
+    return this.activeSelectionSource === "agents" ? this.agentTree.selectedRemote : null;
+  }
+
+  /**
+   * The read-only guard (SPEC §20.5): while the effective selection is a
+   * remote row, refuse `key` with a notice unless isRemoteAllowedKey
+   * allows it. Returns true when it refused. The key dispatch (handleInput)
+   * and the command palette both go through it.
+   */
+  private refuseOnRemoteRow(key: string): boolean {
+    const remote = this.remoteSelection;
+    if (remote === null || isRemoteAllowedKey(key)) return false;
+    this.setNotice(remote.kind === "remote-repo-header" && key === "a"
+      ? "Starting agents on another machine comes in the next phase"
+      : REMOTE_READ_ONLY_NOTICE, "error");
+    return true;
+  }
+
+  /** `I`: open the Peers dialog. Opening it binds the endpoint if boot has not already. */
+  openPeersDialog(): void {
+    const service = this.peerService;
+    if (!service) {
+      this.setNotice("Peering is not available here", "error");
+      return;
+    }
+    this.showDialog(newPeersDialog(service, this.agentTree.machineName));
+    service.openDialog();
+  }
+
   showDialog(dialog: NonNullable<DialogState>) {
+    if (dialog.type === "cleanup-warnings" && (this._dialog || this.pendingCleanupWarnings.length > 0)) {
+      this.pendingCleanupWarnings.push(dialog);
+      return;
+    }
+    this.openDialog(dialog);
+  }
+
+  private openDialog(dialog: NonNullable<DialogState>) {
+    // Replacing the Peers dialog closes it: pairing is accepted only while it is open.
+    if (this._dialog?.type === "peers" && dialog !== this._dialog) this._dialog.service.closeDialog();
     this._dialog = dialog;
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
@@ -1746,10 +1960,19 @@ export class DashboardComponent implements Component {
   }
 
   closeDialog() {
+    if (this._dialog?.type === "peers") this._dialog.service.closeDialog();
     this._dialog = null;
     this.overlayHandle?.hide();
     this.overlayHandle = null;
     this.tui?.requestRender();
+    if (this.pendingCleanupWarnings.length > 0) {
+      // A dialog may synchronously hand off to another dialog as it closes.
+      queueMicrotask(() => {
+        if (this._dialog) return;
+        const next = this.pendingCleanupWarnings.shift();
+        if (next) this.openDialog(next);
+      });
+    }
   }
 
   setNotice(text: string, kind: "info" | "error") {
@@ -1842,7 +2065,9 @@ export class DashboardComponent implements Component {
   // --- Command palette ---
 
   private handleCommandPalette() {
-    type Command = { label: string; action: () => void };
+    // `key` is the command's own key, which the read-only guard checks (a
+    // mode jump has none and is refused on a remote row, as `d`/`e`/`q` are).
+    type Command = { label: string; key?: string; action: () => void };
     const commands: Command[] = [
       { label: "AGENT LOG — show agent log", action: () => this.jumpToMode("AGENT LOG") },
       { label: "WATCHDOG LOG — show watchdog log", action: () => this.jumpToMode("WATCHDOG LOG") },
@@ -1854,28 +2079,29 @@ export class DashboardComponent implements Component {
       { label: "DIFF — run ib diff", action: () => this.jumpToMode("DIFF", true) },
       { label: "STATUS — run ib status", action: () => this.jumpToMode("STATUS", true) },
       { label: "QUESTIONS — show pending questions", action: () => this.jumpToMode("QUESTIONS") },
-      { label: "send message — s", action: () => agentActions.handleSend(this) },
-      { label: "merge agent — m", action: () => agentActions.handleMerge(this) },
-      { label: "retire agent — x", action: () => agentActions.handleRetire(this) },
-      { label: "force kill agent — !", action: () => agentActions.handleNuke(this) },
-      { label: "resume agent — R", action: () => agentActions.handleResume(this) },
-      { label: "pause agent — P", action: () => agentActions.handlePause(this) },
-      { label: "reassign manager — r", action: () => agentActions.handleReassign(this) },
-      { label: "nickname agent — N", action: () => agentActions.handleRename(this) },
-      { label: "new agent — a", action: () => agentActions.handleNewAgent(this) },
-      { label: "open worktree — w", action: () => agentActions.handleOpenWorktree(this) },
-      { label: "open diff in tool — o", action: () => agentActions.handleOpenDiffTool(this) },
-      { label: "open diff vs manager in tool — O", action: () => agentActions.handleOpenDiffToolVsManager(this) },
-      { label: "open in Ghostty (repo/worktree) — G", action: () => agentActions.handleOpenGhostty(this) },
-      { label: "open in Ghostty (Claude tmux) — C", action: () => agentActions.handleOpenGhosttyTmux(this) },
-      { label: "debug snapshot — S", action: () => agentActions.handleSnapshot(this) },
-      { label: "fuzzy jump to agent/repo/coordinator — @", action: () => agentActions.handleFuzzyAgent(this) },
-      { label: "add repo — A", action: () => agentActions.handleAddRepo(this) },
-      { label: "remove repo — D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
-      { label: "help — ?", action: () => agentActions.handleHelp(this) },
-      { label: "setup — h", action: () => agentActions.handleSetup(this) },
-      { label: "scroll up — ;", action: () => agentActions.handleScrollUp(this) },
-      { label: "scroll down — l", action: () => agentActions.handleScrollDown(this) },
+      { label: "send message — s", key: "s", action: () => agentActions.handleSend(this) },
+      { label: "merge agent — m", key: "m", action: () => agentActions.handleMerge(this) },
+      { label: "retire agent — x", key: "x", action: () => agentActions.handleRetire(this) },
+      { label: "force kill agent — !", key: "!", action: () => agentActions.handleNuke(this) },
+      { label: "resume agent — R", key: "R", action: () => agentActions.handleResume(this) },
+      { label: "pause agent — P", key: "P", action: () => agentActions.handlePause(this) },
+      { label: "reassign manager — r", key: "r", action: () => agentActions.handleReassign(this) },
+      { label: "nickname agent — N", key: "N", action: () => agentActions.handleRename(this) },
+      { label: "new agent — a", key: "a", action: () => agentActions.handleNewAgent(this) },
+      { label: "open worktree — w", key: "w", action: () => agentActions.handleOpenWorktree(this) },
+      { label: "open diff in tool — o", key: "o", action: () => agentActions.handleOpenDiffTool(this) },
+      { label: "open diff vs manager in tool — O", key: "O", action: () => agentActions.handleOpenDiffToolVsManager(this) },
+      { label: "open in Ghostty (repo/worktree) — G", key: "G", action: () => agentActions.handleOpenGhostty(this) },
+      { label: "open in Ghostty (Claude tmux) — C", key: "C", action: () => agentActions.handleOpenGhosttyTmux(this) },
+      { label: "debug snapshot — S", key: "S", action: () => agentActions.handleSnapshot(this) },
+      { label: "fuzzy jump to agent/repo/coordinator — @", key: "@", action: () => agentActions.handleFuzzyAgent(this) },
+      { label: "add repo — A", key: "A", action: () => agentActions.handleAddRepo(this) },
+      { label: "remove repo — D", key: "D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
+      { label: "help — ?", key: "?", action: () => agentActions.handleHelp(this) },
+      { label: "setup — h", key: "h", action: () => agentActions.handleSetup(this) },
+      { label: "peers — I", key: "I", action: () => this.openPeersDialog() },
+      { label: "scroll up — ;", key: ";", action: () => agentActions.handleScrollUp(this) },
+      { label: "scroll down — l", key: "l", action: () => agentActions.handleScrollDown(this) },
     ];
 
     const allItems = commands.map((c) => c.label);
@@ -1889,7 +2115,10 @@ export class DashboardComponent implements Component {
       selectedIndex: 0,
       onSelect: (originalIndex: number) => {
         this.closeDialog();
-        commands[originalIndex]!.action();
+        const command = commands[originalIndex]!;
+        // The palette is a second way to press a key: the same read-only guard.
+        if (this.refuseOnRemoteRow(command.key ?? "")) return;
+        command.action();
         this.tui?.requestRender();
       },
     });
@@ -1958,9 +2187,15 @@ export class DashboardComponent implements Component {
       this.agentTree.healthReports = this.watcher.healthReports;
     }
 
-    const qIds = new Set<string>();
-    for (const q of questions) qIds.add(q.agent);
-    this.agentTree.questionAgentIds = qIds;
+    // The red name: the full ids of the agents with a pending question. A
+    // question names its agent by repo and id; the same id in another repo is
+    // another agent.
+    const askers = new Set(questions.map((q) => `${q.repoPath}\0${q.agent}`));
+    const qKeys = new Set<string>();
+    for (const agent of agents) {
+      if (askers.has(`${agent.repoPath}\0${agent.id}`)) qKeys.add(this.agentTree.agentKey(agent));
+    }
+    this.agentTree.questionAgentKeys = qKeys;
 
     const filtered = this.rightPane.filteredQuestions;
     if (this.rightPane.questionsSelectedIndex >= filtered.length) {
@@ -1977,7 +2212,7 @@ export class DashboardComponent implements Component {
         return best;
       }, null);
       if (newest) {
-        this.agentTree.selectAgentById(newest.agent.id);
+        this.agentTree.selectAgent(newest.agent);
       }
     }
 
@@ -2042,18 +2277,23 @@ export class DashboardComponent implements Component {
     // unreachable from the Teams panel. When the Teams tree owns the active
     // selection we suppress them so a leftover repo-header selection in the
     // (inactive) Agents tree doesn't bleed into the main area.
-    const selected = teamsActive
-      ? teamMemberAgent
-      : this.agentTree.selectedAgent;
-    const isCoordinator = !teamsActive && this.agentTree.isSystemCoordinatorSelected;
-    const selectedRepoHeader = teamsActive ? null : this.agentTree.selectedRepoHeader;
-    const selectedRepoPath = teamsActive ? null : this.agentTree.selectedRepoPath;
+    const selection = teamsActive ? null : this.agentTree.selection;
+    const selected = selection?.kind === "agent" ? selection.agent : teamMemberAgent;
+    const isCoordinator = selection?.kind === "system-coordinator";
+    const repo = selection?.kind === "repo-header" ? selection : null;
+    const selectedRepoHeader = repo?.repoName ?? null;
+    const selectedRepoPath = repo?.repoPath ?? null;
+    // A remote row (SPEC §20.5). It is none of the above: `selected`,
+    // `isCoordinator` and the repo header are all empty for it, so every local
+    // path below (tmux pollers, git probe, right-pane loaders, the per-repo
+    // coordinator) sees no selection. Only the info panel and render() use it.
+    const remote = this.remoteSelection;
 
     // Update focus cycling for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
 
     // When entering coordinator mode (transition, not every tick), reset view and focus
-    const wasCoordinator = this.currentAgentId === "__coordinator__";
+    const wasCoordinator = this.currentAgentKey === "__coordinator__";
     if (isCoordinator && !wasCoordinator) {
       this.coordinatorViewMode = "TMUX";
       const focus = this.focusManager.current();
@@ -2067,12 +2307,14 @@ export class DashboardComponent implements Component {
     }
 
     this.rightPane.agent = selected;
-    this.rightPane.selectedRepoHeader = selectedRepoHeader;
+    this.rightPane.selectedRepo = repo;
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
+    this.statusBar.remoteSelected = remote !== null;
 
     // Wire info panel
     this.infoPanel.agent = selected;
+    this.infoPanel.remote = remote;
     this.infoPanel.isSystemCoordinatorSelected = isCoordinator;
     this.infoPanel.selectedRepoHeader = selectedRepoHeader;
     this.infoPanel.selectedRepoPath = selectedRepoPath;
@@ -2184,8 +2426,8 @@ export class DashboardComponent implements Component {
         this.savedModeIndex = this.modeIndex;
       }
       jumpToMode(this, "REPO");
-    } else if ((selected || isCoordinator) && currentMode === "REPO") {
-      // Agent or coordinator selected while in REPO mode — restore previous mode
+    } else if ((selected || isCoordinator || remote) && currentMode === "REPO") {
+      // Agent, coordinator or remote row selected while in REPO mode — restore previous mode
       // Fall back to AGENT LOG if saved mode would be empty (ERRORS/QUESTIONS with no content)
       const savedMode = PANE_MODES[this.savedModeIndex]!;
       const wouldSkip =
@@ -2205,18 +2447,23 @@ export class DashboardComponent implements Component {
         this.focusManager.setFocus("agent-tree");
       }
     }
-    // Switch repo coordinator input field agent
+    // Switch repo coordinator input field agent. Its draft is keyed by full id
+    // (SPEC §17.1): a per-repo coordinator's id is the folder's name, so two
+    // repos with one folder name have coordinators with one id.
+    const repoCoordinator = this.rightPane.repoCoordinatorAgent;
     this.repoCoordinatorInputField.switchAgent(
-      this.rightPane.repoCoordinatorAgent?.id ?? null
+      repoCoordinator ? this.agentTree.agentKey(repoCoordinator) : null
     );
 
-    // Determine the effective ID for change detection
-    const newId = isCoordinator ? "__coordinator__" : (selected?.id ?? null);
-    if (newId !== this.currentAgentId) {
-      this.currentAgentId = newId;
+    // Determine the effective key for change detection: the agent's fully
+    // qualified id, so the same bare id in another repo is a change too.
+    const newKey = isCoordinator ? "__coordinator__" : (selected ? this.agentTree.agentKey(selected) : null);
+    if (newKey !== this.currentAgentKey) {
+      this.currentAgentKey = newKey;
       this.setTerminalTitle(isCoordinator ? "ib: coordinator" : (selected ? `ib: ${selected.id}` : "ib"));
       this.tmuxPane.resetForAgent();
-      this.inputField.switchAgent(newId);
+      // Drafts are kept per agent, by full id.
+      this.inputField.switchAgent(newKey);
       this.coordinatorInputField.switchAgent(isCoordinator ? "__coordinator__" : null);
       this.rightPane.resetTailLogs();
       this.rightPane.promptContent = null;
@@ -2260,6 +2507,10 @@ export class DashboardComponent implements Component {
         // TUI at a new width.
       }
     }
+
+    // On a remote row the right pane is a placeholder, so j/k must move the
+    // tree, never a hidden QUESTIONS cursor.
+    if (remote) this.setQuestionsFocused(false);
 
     this.rightPane.updateContent();
     triggerAsyncLoadIfNeeded(this);
@@ -2353,7 +2604,7 @@ export class DashboardComponent implements Component {
       // Agents tree owns the active selection; mirror into the Teams tree.
       const sel = this.agentTree.selection;
       if (sel?.kind === "agent") {
-        if (!this.teamsTree.selectMemberByAgentId(sel.agent.id)) {
+        if (!this.teamsTree.selectMemberByKey(this.agentTree.agentKey(sel.agent))) {
           this.teamsTree.deselect();
         }
       } else {
@@ -2365,7 +2616,7 @@ export class DashboardComponent implements Component {
     // activeSelectionSource === "teams" — Teams tree owns selection.
     const sel = this.teamsTree.selection;
     if (sel?.kind === "agent") {
-      if (!this.agentTree.selectAgentById(sel.agent.id)) {
+      if (!this.agentTree.selectAgent(sel.agent)) {
         this.agentTree.deselect();
       }
     } else {
@@ -2379,12 +2630,12 @@ export class DashboardComponent implements Component {
    * member row selected in the Teams tree, while the Teams tab is showing.
    *
    * When the Teams tree owns the selection, that row IS the selection. When
-   * the Agents tree owns it, the row is only the mirror's highlight, and the
-   * mirror matches by bare id (`selectMemberByAgentId`) — with the same id in
-   * two repos it can highlight the other repo's agent. So a mirrored row
-   * counts only when it is the very agent the Agents tree has selected (same
-   * id AND repo). Otherwise this returns null and `x` acts on the Agents-tree
-   * selection, as it did before the picker existed.
+   * the Agents tree owns it, the row is only the mirror's highlight
+   * (`selectMemberByKey`, by fully qualified id), which can be stale: the
+   * Teams list is rebuilt asynchronously and a failed mirror leaves the old
+   * row. So a mirrored row counts only when it is the very agent the Agents
+   * tree has selected (same id AND repo). Otherwise this returns null and `x`
+   * acts on the Agents-tree selection, as it did before the picker existed.
    */
   private teamMemberRowForX(): { teamName: string; agent: Agent } | null {
     if (this.sidebarMode !== "teams") return null;
@@ -2520,6 +2771,7 @@ export class DashboardComponent implements Component {
     } finally {
       this.gitStatusInFlight = false;
     }
+    // The same id in another repo has another worktree, so this is per agent.
     if (this.infoPanel.agent?.id !== agent.id ||
         agentWorktreePath(this.infoPanel.agent) !== agentWorktreePath(agent)) return;
     if (this.infoPanel.gitCleanliness === cleanliness && this.infoPanel.gitHead === head &&
@@ -2532,7 +2784,8 @@ export class DashboardComponent implements Component {
 
   /** Check if the selected agent's tmux session has an attached client, start/stop polling accordingly */
   private checkClientAttached(agent: Agent) {
-    const agentId = agent.id;
+    // By fully qualified id: the same bare id in another repo is another agent.
+    const agentKey = this.agentTree.agentKey(agent);
     const session = agent.meta.tmux_session;
 
     const doCheck = async () => {
@@ -2540,16 +2793,16 @@ export class DashboardComponent implements Component {
 
       // Discard result if the agent changed while we were awaiting
       const current = this.agentTree.selectedAgent;
-      if (!current || current.id !== agentId) return;
+      if (!current || this.agentTree.agentKey(current) !== agentKey) return;
 
-      const wasAttached = this._clientAttached.get(agentId) ?? false;
-      this._clientAttached.set(agentId, attached);
+      const wasAttached = this._clientAttached.get(agentKey) ?? false;
+      this._clientAttached.set(agentKey, attached);
 
       if (attached && !this.clientCheckTimer) {
         // Start polling every 3s to detect disconnect
         this.clientCheckTimer = setInterval(() => {
           const sel = this.agentTree.selectedAgent;
-          if (!sel || sel.id !== agentId) {
+          if (!sel || this.agentTree.agentKey(sel) !== agentKey) {
             // Agent switched away, stop polling
             if (this.clientCheckTimer) {
               clearInterval(this.clientCheckTimer);
@@ -2590,7 +2843,7 @@ export class DashboardComponent implements Component {
     if (!repoPath) return;
     const repo = this.repos.find((r) => r.path === repoPath);
     if (!repo) return;
-    const result = await setRepoDefaultAgentType(repoPath, newType);
+    const result = await setRepoDefaultAgentType(repoPath, newType).catch((err: Error) => ({ ok: false, message: err.message }));
     if (!result.ok) {
       this.setNotice(result.message, "error");
       return;
@@ -2608,11 +2861,12 @@ export class DashboardComponent implements Component {
   private async persistNotes(repoPath: string, notes: string): Promise<void> {
     const repo = this.repos.find((r) => r.path === repoPath);
     if (!repo) return;
-    const result = await setRepoNotes(repoPath, notes);
+    const result = await setRepoNotes(repoPath, notes).catch((err: Error) => ({ ok: false, message: err.message }));
     if (!result.ok) {
       this.setNotice(result.message, "error");
       return;
     }
+    if (this.notesEditorRepoPath === repoPath) this.notesEditorOriginal = notes;
     if (notes.length > 0) {
       repo.notes = notes;
     } else {
@@ -2629,7 +2883,6 @@ export class DashboardComponent implements Component {
     const current = this.infoPanel.notesEditor.getText();
     if (current === this.notesEditorOriginal) return;
     const repoPath = this.notesEditorRepoPath;
-    this.notesEditorOriginal = current;
     void this.persistNotes(repoPath, current);
   }
 
@@ -2658,6 +2911,10 @@ export class DashboardComponent implements Component {
   handleInput(data: string): void {
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;
+
+    // The read-only guard (SPEC §20.5): ONE check, ahead of every key handler,
+    // so a key added later is refused on a remote row by default.
+    if (this.refuseOnRemoteRow(data)) return;
 
     // When active-agent panel is focused, use three-level sub-focus: pane → input → send.
     // In 'pane' sub-focus, dashboard shortcuts work normally. In 'input', the input field
@@ -2857,7 +3114,6 @@ export class DashboardComponent implements Component {
       if (data === "\t" || matchesKey(data, Key.tab)) {
         if (this.infoPanel.subField === "default-type") {
           this.infoPanel.subField = "notes";
-          this.notesEditorOriginal = this.infoPanel.notesEditor.getText();
           this.tui?.requestRender();
           return;
         }
@@ -2901,7 +3157,7 @@ export class DashboardComponent implements Component {
       this.focusManager.current() === "info"
       && this.agentTree.selectedRepoHeader != null
     ) {
-      // Notes sub-field: Escape reverts to the snapshot taken on entry,
+      // Notes sub-field: Escape reverts to the last saved notes,
       // any other key is routed to the multi-line editor.
       if (this.infoPanel.subField === "notes") {
         if (matchesKey(data, Key.escape) || data === "\x1b") {
@@ -3173,6 +3429,8 @@ export class DashboardComponent implements Component {
     else if (data === "O") { agentActions.handleOpenDiffToolVsManager(this); }
     // Help dialog
     else if (data === "?") { agentActions.handleHelp(this); }
+    // Peers dialog: this install's id, paired peers, pairing
+    else if (data === "I") { this.openPeersDialog(); }
     // Setup dialog
     else if (data === "h") { agentActions.handleSetup(this); }
     // Re-check repo health
@@ -3200,7 +3458,7 @@ export class DashboardComponent implements Component {
         ? this.teamsTree.selection
         : this.agentTree.selection;
       if (sel?.kind === "agent") {
-        const nowFavorite = this.agentTree.toggleFavorite(sel.agent.id);
+        const nowFavorite = this.agentTree.toggleFavorite(this.agentTree.agentKey(sel.agent));
         const name = agentDisplayName(sel.agent);
         this.setNotice(nowFavorite ? `Favorited ${name}` : `Unfavorited ${name}`, "info");
         this.favoritesChanged();
@@ -3311,7 +3569,13 @@ export class DashboardComponent implements Component {
     const isCoordinatorView =
       this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected;
     const isTreeMode = this.rightPane.mode === "TREE";
-    const isFullWidth = isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode);
+    // A selected remote row (SPEC §20.5) draws two placeholders in the
+    // split layout, whatever the right-pane mode, except TREE: that mode draws
+    // the tree itself in the main area (the sidebar hides its own), and it must
+    // stay on screen while j/k move through the tree.
+    const remote = this.remoteSelection;
+    const remoteView = remote !== null && !isTreeMode;
+    const isFullWidth = !remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode));
 
     // Header
     const noticeColor = this.lastSentNoticeKind === "error" ? RED : YELLOW;
@@ -3376,7 +3640,13 @@ export class DashboardComponent implements Component {
       ? this.buildCoordinatorTitleSeparator(mainWidth)
       : teamSelectedForTitle
         ? this.buildTeamTitleSeparator(mainWidth, leftPaneW, this.channelPane.teamName!)
-        : this.buildMainTitleSeparator(mainWidth, leftPaneW, isTreeMode, isFullWidth);
+        : remoteView
+          ? this.buildSplitTitleSeparator(
+            mainWidth, leftPaneW,
+            ` ${truncateToWidth(remoteTitle(remote), Math.max(1, leftPaneW - 8), "…")} `,
+            ` ${this.rightPane.mode} `,
+          )
+          : this.buildMainTitleSeparator(mainWidth, leftPaneW, isTreeMode, isFullWidth);
 
     let mainLines: string[];
     // Reset agentless before branching; only the TMUX branch sets it true
@@ -3481,6 +3751,10 @@ export class DashboardComponent implements Component {
       this.coordinatorInputField.active = false;
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
+    } else if (remoteView) {
+      // A remote row: placeholders only. No tmux pane, right pane or input
+      // field renders, so nothing local is drawn for (or loaded by) it.
+      mainLines = [mainTitleSep, ...renderRemotePlaceholders(remote, mainWidth, leftPaneW, availableHeight)];
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
       // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set
@@ -3695,15 +3969,22 @@ export class DashboardComponent implements Component {
    * lines up with the chat | log seam.
    */
   private buildTeamTitleSeparator(mainWidth: number, leftPaneW: number, teamName: string): string {
-    const leftTitle = ` @${teamName} CHAT `;
-    const rightTitle = ` @${teamName} LOG `;
+    return this.buildSplitTitleSeparator(mainWidth, leftPaneW, ` @${teamName} CHAT `, ` @${teamName} LOG `);
+  }
+
+  /**
+   * A title separator over the split layout: `leftTitle` over the left pane and
+   * `rightTitle` over the right, with the `┬` on the seam. The team view (chat
+   * | log) and a remote row's placeholders (SPEC §20.5) use it.
+   */
+  private buildSplitTitleSeparator(mainWidth: number, leftPaneW: number, leftTitle: string, rightTitle: string): string {
     const leftPad = 3;
     const rightPad = 3;
     const leftDashColor = DIM_GRAY;
     const rightDashColor = DIM_GRAY;
-    // Focus-aware highlight, mirroring buildMainTitleSeparator: in the team view
-    // the LEFT (CHAT) pane is the "active-agent" focus target and the RIGHT (LOG)
-    // pane is the "right-pane" target (TEAMS_FOCUS_ORDER in focus.ts). The focused
+    // Focus-aware highlight, mirroring buildMainTitleSeparator: the LEFT pane
+    // is the "active-agent" focus target and the RIGHT pane the "right-pane"
+    // target (in the team view, TEAMS_FOCUS_ORDER in focus.ts). The focused
     // tab gets the REVERSE highlight; the other stays plain BOLD.
     const currentFocus = this.focusManager.current();
     const leftFocused = currentFocus === "active-agent";
@@ -3712,8 +3993,8 @@ export class DashboardComponent implements Component {
     const rightTitleStyle = rightFocused ? `${REVERSE}${BOLD}` : BOLD;
 
     const splitAt = leftPaneW + 1;
-    const leftHalfDashes = Math.max(1, splitAt - leftPad - leftTitle.length);
-    const rightHalfDashes = Math.max(1, mainWidth - splitAt - rightTitle.length - rightPad);
+    const leftHalfDashes = Math.max(1, splitAt - leftPad - visibleWidth(leftTitle));
+    const rightHalfDashes = Math.max(1, mainWidth - splitAt - visibleWidth(rightTitle) - rightPad);
     const leftDashStr = "─".repeat(Math.max(0, leftHalfDashes - 1)) + "┬";
     const sep =
       `${leftDashColor}${"─".repeat(leftPad)}${RESET}${leftTitleStyle}${leftTitle}${RESET}` +
@@ -3761,6 +4042,7 @@ export class DashboardComponent implements Component {
 export async function launchDashboard(): Promise<void> {
   const bootStart = Date.now();
   logToWatchLog("[startup] launchDashboard initiated");
+  const machine = await initializeMachineName();
   const registry = await loadRegistry();
   const repos = registry.repos;
   logToWatchLog(`[startup] registry loaded: ${repos.length} repos (+${Date.now() - bootStart}ms)`);
@@ -3854,6 +4136,10 @@ export async function launchDashboard(): Promise<void> {
   const telegramWake = tgToken !== "" ? new WakeDetector({ log: logToWatchLog }) : null;
 
   const dashboard = new DashboardComponent();
+  // The first segment of every local agent key (SPEC §17.1): read from
+  // ~/.itsybitsy/machine-name, or set once from the computer name. Before the
+  // layout, so favorites and the first selection use it.
+  dashboard.setMachineName(machine);
   const savedLayout = await loadLayout();
   if (savedLayout) {
     dashboard.applyLayout(savedLayout);
@@ -3895,6 +4181,20 @@ export async function launchDashboard(): Promise<void> {
     telegramWake?.start();
     dashboard.telegramStatusTimer = setInterval(() => telegramMonitor.refresh(), 5_000);
   }
+  // Peering (src/peers/service.ts): nothing is loaded or bound here. The
+  // endpoint binds at boot when peers.json lists a peer (bootIfPaired, started
+  // at the end of this function once the watcher's first scan is done), or
+  // else the first time the Peers dialog (`I`) opens, and stays up until
+  // quitDashboard shuts it down; after a failed bind or accept loop the
+  // service rebinds on its own with backoff (SPEC §20.3). Logs go to watch.log. That first bind stalls
+  // the UI once, for about a third of a second: the dynamic import in
+  // src/peers/iroh.ts evaluates the napi addon synchronously on the event loop.
+  // The trusted link answers peers from the watcher's last fully detected
+  // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
+  // and never carries a state that detection has not filled in yet.
+  const peerService = new PeerService(defaultPeerServiceDeps(logToWatchLog, () =>
+    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [])));
+  dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read
   //   (src/sandbox-collector-light.ts), not `ib sandbox-collector status`.
@@ -4061,6 +4361,14 @@ export async function launchDashboard(): Promise<void> {
       telegramBootPromise,
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
     ]);
+    // Stop the peer poller, close the iroh endpoint (if boot or the Peers
+    // dialog bound it) and release the endpoint lock. Raced like Telegram:
+    // under the n0 preset close() can take about a second, and a stuck one
+    // must not hold up the exit.
+    const stopPeers = Promise.race([
+      peerService.shutdown(),
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
     // Flush layout save to disk before exiting, then release coordinator
     Promise.all([
       flushPendingSave().catch(() => { /* ignore write errors on exit */ }),
@@ -4068,6 +4376,7 @@ export async function launchDashboard(): Promise<void> {
       stopOutbox.catch(() => { /* ignore — already raced */ }),
       finishBoot.catch(() => { /* ignore — boot was best effort */ }),
       disposeTelegramMonitor.catch(() => { /* ignore — already raced */ }),
+      stopPeers.catch(() => { /* ignore — already raced */ }),
     ]).then(() => {
       // Release coordinator ref — if last ref, kills the tmux session
       // and pauses all per-repo coordinators
@@ -4145,4 +4454,11 @@ export async function launchDashboard(): Promise<void> {
   logToWatchLog(`[startup] dashboard.startPolling() called, starting watcher (+${Date.now() - bootStart}ms)`);
   await watcher.start();
   logToWatchLog(`[startup] watcher.start() resolved (+${Date.now() - bootStart}ms)`);
+  // Peering at boot, in the background like Telegram, once the first agent
+  // tree has been drawn: a paired install binds the endpoint (taking the
+  // endpoint lock first) and starts polling its peers. Starting it here keeps
+  // the one-time addon-load stall out of the watcher's first scan, and means
+  // the trusted link never answers with the empty pre-scan list. It never
+  // throws; shutdown waits for the bind.
+  void peerService.bootIfPaired();
 }

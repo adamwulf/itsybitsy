@@ -61,6 +61,7 @@ import * as runtimeNames from "./runtime-names";
  *     directory for a symlink after the check, while the merge runs.
  */
 
+import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
 import { lstat } from "fs/promises";
 import { basename, join, resolve } from "path";
@@ -112,11 +113,20 @@ export interface LifecycleRequest {
 
 /** What the CLI asks for; the request id is added by the client. */
 export type LifecycleCommand =
-  | { op: "retire"; target: string }
-  | { op: "merge"; target: string; keep?: boolean }
+  | { op: "retire"; target: string; targetRepoPath?: string }
+  | { op: "merge"; target: string; targetRepoPath?: string; keep?: boolean }
   | { op: "rehire"; target: string };
 
 type ParsedLifecycleRequest = { ok: true; request: LifecycleRequest } | { ok: false; error: string };
+
+/** Rehire can carry an unresolved archive address. Only the resolved id becomes a path. */
+function validLifecycleTarget(op: unknown, target: string): boolean {
+  if (isValidAgentId(target)) return true;
+  if (op !== "rehire" || /[\p{Cc}\p{Cf}]/u.test(target)) return false;
+  const parts = target.split("/");
+  return parts.length <= 3 && parts.every((s) => s !== "" && s !== "." && s !== "..") &&
+    (isValidAgentId(parts.at(-1)!) || (parts.length === 1 && target.startsWith("@")));
+}
 
 /** Strictly parse an untrusted request; only the allowlisted fields survive. */
 export function parseLifecycleRequest(text: string, expectedId: string): ParsedLifecycleRequest {
@@ -138,8 +148,8 @@ export function parseLifecycleRequest(text: string, expectedId: string): ParsedL
   if (typeof obj.op !== "string" || !(LIFECYCLE_OPS as readonly string[]).includes(obj.op)) {
     return { ok: false, error: "lifecycle request has an unsupported op" };
   }
-  // The target becomes a path segment and a command argument: a plain agent id only.
-  if (typeof obj.target !== "string" || !isValidAgentId(obj.target)) {
+  // Retire and merge carry canonical ids. Rehire resolves its archive address on the watchdog.
+  if (typeof obj.target !== "string" || !validLifecycleTarget(obj.op, obj.target)) {
     return { ok: false, error: "lifecycle request has an invalid target" };
   }
   if (obj.keep !== undefined && (obj.op !== "merge" || typeof obj.keep !== "boolean")) {
@@ -171,7 +181,7 @@ export async function requestLifecycleViaWatchdog(
   const { op, target } = command;
   // `ib rehire` takes the id straight from the command line; refuse a bad one
   // here, with the direct path's message, rather than queue it.
-  if (!isValidAgentId(target)) return brokerFail(`Invalid agent id: ${target}`);
+  if (!validLifecycleTarget(op, target)) return brokerFail(`Invalid agent id: ${target}`);
 
   let caller: ResolvedCallerContext | null;
   try {
@@ -240,6 +250,9 @@ export async function routeLifecycleThroughWatchdog(
 ): Promise<IbCommandResult | null> {
   const caller = await resolveRoutedCaller(deps);
   if (!caller) return null;
+  if (command.op !== "rehire" && command.targetRepoPath && !sameRepoPath(command.targetRepoPath, caller.repoPath)) {
+    return brokerFail(`A sandboxed agent can ${command.op} only agents in its own repo`);
+  }
   return requestLifecycleViaWatchdog(command, { ...deps, resolveCaller: async () => caller });
 }
 
@@ -294,7 +307,7 @@ async function authorizeLifecycle(
  * id can match.
  */
 async function findAgentInRepo(repoPath: string, agentId: string): Promise<Agent | null> {
-  const repo = (await listRepos()).find((entry) => resolve(entry.path) === resolve(repoPath));
+  const repo = (await listRepos()).find((entry) => sameRepoPath(entry.path, repoPath));
   const name = repo ? repoDisplayName(repo) : basename(repoPath);
   const { agents } = await readAllAgents([{ path: repoPath, name }], false);
   const directory = runtimeNames.agentDir(repoPath, agentId);
@@ -312,11 +325,21 @@ export async function handleLifecycleRequest(
   const parsed = parseLifecycleRequest(ctx.text, ctx.id);
   if (!parsed.ok) return brokerFail(`Error: ${parsed.error}`);
   const request = parsed.request;
-  const { op, target } = request;
+  const { op } = request;
+  let target = request.target;
 
   // Identity comes from the agent's own sealed record, never from the request.
   const requester = await verifyBrokerRequester(ctx.agentId, ctx.repoPath, ctx.agentDir, op, deps);
   if (!requester.ok) return requester.result;
+
+  if (op === "rehire") {
+    const { resolveAgentTarget } = await import("./resolve-target");
+    const repos = await listRepos();
+    const { agent, error } = await resolveAgentTarget(target, repos, join(ctx.agentDir, "repo"), "rehire");
+    if (!agent) return brokerFail(error ?? `Agent not found: ${target}`);
+    if (!sameRepoPath(agent.repoPath, ctx.repoPath)) return brokerFail("A sandboxed agent can rehire only agents in its own repo");
+    target = agent.id;
+  }
 
   // An agent is never its own target. The rule reads `manager` from the
   // TARGET's meta.json; for a self-target that is the requester's own file,

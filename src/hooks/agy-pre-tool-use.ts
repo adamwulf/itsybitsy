@@ -24,7 +24,9 @@
  * Output contract: `{"decision":"allow"|"deny","reason":"…"}`.
  */
 
-import { join } from "path";
+import { realpathSync } from "node:fs";
+import { stat } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { isValidAgentId } from "../validation";
 import { mutateAgentMeta } from "../agents";
 import { logAgent } from "../agent-lifecycle";
@@ -48,6 +50,23 @@ import {
 import { buildAgentAccessTable } from "./paths-table";
 import { translateAgyTool, buildAgyAllowOutput, buildAgyDenyOutput } from "./agy-tools";
 import { findShellMetachar } from "./shell-metachar";
+
+/** Resolve each prefix before applying "..", which Bun's realpath normalizes. */
+async function resolveRunCommandCwd(path: string): Promise<string | undefined> {
+  const [prefix, ...afterParent] = path.split(/\/\.\.(?=\/|$)/);
+  let directory = prefix || "/";
+  try {
+    for (const suffix of afterParent) {
+      const actual = realpathSync.native(directory);
+      if (!(await stat(actual)).isDirectory()) return undefined;
+      directory = join(actual, "..", suffix);
+    }
+    const actual = realpathSync.native(directory);
+    return (await stat(actual)).isDirectory() ? actual : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Format tool args for denial logs, matching the Claude/codex hook style. */
 function formatToolArgs(toolArgs: Record<string, unknown>): string {
@@ -315,19 +334,28 @@ export async function hookAgyPreToolUse(
     // CommandLine the same way, BEFORE the path/allow-list decision. A non-ib or
     // non-manager-only command returns null and falls through unchanged.
     let ibDenial: HookDecision | null = null;
+    let checkedArgs = toolArgs;
     if (toolName === "run_command") {
       const rc =
         toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)
           ? (toolArgs as Record<string, unknown>)
           : {};
       const command = typeof rc.CommandLine === "string" ? rc.CommandLine : "";
-      if (command) {
-        ibDenial = await checkIbCommandAccess(command, agentId, ctxResolved.agentsDir);
+      const requestedCwd = typeof rc.Cwd === "string" && rc.Cwd ? rc.Cwd : ".";
+      // Keep each component until the OS follows symlinks. Joining or
+      // resolving lexically first can change which directory ".." reaches.
+      const path = isAbsolute(requestedCwd) ? requestedCwd : `${ctx.worktreePath}/${requestedCwd}`;
+      const cwd = await resolveRunCommandCwd(path);
+      if (cwd) {
+        checkedArgs = { ...rc, Cwd: cwd };
+        if (command) ibDenial = await checkIbCommandAccess(command, agentId, ctxResolved.agentsDir, cwd);
+      } else {
+        ibDenial = { decision: "deny", reason: `run_command Cwd rejected (${requestedCwd}): cannot establish directory identity` };
       }
     }
 
     const decision =
-      ibDenial ?? checkAgyPreToolUse({ toolName, toolArgs }, ctx, permissions.deny);
+      ibDenial ?? checkAgyPreToolUse({ toolName, toolArgs: checkedArgs }, ctx, permissions.deny);
 
     if (decision.decision === "allow") {
       write(buildAgyAllowOutput(decision.reason));

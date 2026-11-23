@@ -515,7 +515,9 @@ later_step(sub {
     for my $file (@rewrite) {
         later_step(sub { rewrite($file, sub { my $s = shift; $s =~ s/IttyBitty/ItsyBitsy/g; $s =~ s/ittybitty/itsybitsy/g; $s }, 'agent-type prose') });
     }
-    for my $a (children("$home/.itsybitsy/agents")) {
+    my @machines = grep { plain_directory($_) } children("$home/.itsybitsy/agents");
+    my @repos = grep { plain_directory($_) } map { children($_) } @machines;
+    for my $a (map { children($_) } @repos) {
         next unless plain_directory($a);
         my $queue = "$a/outbox.jsonl";
         next unless exists_checked($queue);

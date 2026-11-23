@@ -256,6 +256,7 @@ describe("CLI routing cannot reach a live agent", () => {
     repo = await cli.addRepo("caller-repo");
     caller = await cli.addAgent(repo, "agent-caller", { canSpawnChildren: true });
     peer = await cli.addAgent(repo, "agent-peer", { manager: "agent-caller" });
+    await Bun.write(join(repo, ".itsybitsy", "archive", "retired", "meta.json"), JSON.stringify({ id: "agent-gone" }));
     calls = [];
   });
 
@@ -361,7 +362,7 @@ describe("CLI routing cannot reach a live agent", () => {
       { args: ["new-agent", "--repo", "caller-repo", "x"], message: "--repo is not supported inside the sandbox" },
       { args: ["new-agent", "--spawned-by", "agent-x", "x"], message: "--spawned-by / --spawned-by-repo are internal" },
       { args: ["send", "--from", "agent-other", "agent-peer", "x"], message: "--from for another agent is not supported" },
-      { args: ["ask", "--id", "agent-other", "x"], message: "--id for another agent is not supported" },
+      { args: ["ask", "--id", "agent-peer", "x"], message: "--id for another agent is not supported" },
     ])("the client refuses `ib $args.0 $args.1` before anything is queued", async ({ args, message }) => {
       await writeHeartbeat(caller);
       const result = await cli.run([...args], { cwd: caller.sessionCwd, sandboxed: true });
@@ -546,6 +547,7 @@ describe("CLI routing cannot reach a live agent", () => {
       (await readFile(outboxFile(home, id), "utf-8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
 
     beforeEach(async () => {
+      for (const home of [cli.home, live.home]) await Bun.write(join(home, ".itsybitsy", "machine-name"), "studio");
       // The live recipient has the same id and already has a queue: a write that
       // followed the id, or a HOME it should not have, changes these bytes.
       await Bun.write(
@@ -699,6 +701,7 @@ describe("CLI routing cannot reach a live agent", () => {
       ["hooks", "statusline", SELF], ["hooks", "intercept-task", SELF],
       ["team", "create", "t1"], ["team", "add", "t1", PEER], ["team", "remove", "t1", PEER], ["team", "delete", "t1"],
       ["roster", "t1"],
+      ["peer", "id"], ["peer", "list"], ["peer", "remove", "x"],
       ["tgallow", "1"], ["tgdeny", "1"], ["tgsend", "x"], ["tgreact", "x"], ["tgsendfile", "$ROOT/domains.txt"], ["tgtyping"],
     ];
 

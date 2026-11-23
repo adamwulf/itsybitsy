@@ -161,7 +161,7 @@ describe("Info panel health summary", () => {
 describe("REPO pane health section", () => {
   test("shows health section with warnings sorted by severity", () => {
     const pane = new RightPaneComponent();
-    pane.selectedRepoHeader = "my-repo";
+    pane.selectedRepo = { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo" };
     pane.allAgents = [makeFlatRepoHeader("my-repo", "/test/repo", false)];
     pane.healthReport = makeReport("/test/repo", [
       makeWarning({ severity: "info", message: "Info msg" }),
@@ -187,7 +187,7 @@ describe("REPO pane health section", () => {
 
   test("shows fix suggestions when available", () => {
     const pane = new RightPaneComponent();
-    pane.selectedRepoHeader = "my-repo";
+    pane.selectedRepo = { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo" };
     pane.allAgents = [makeFlatRepoHeader("my-repo", "/test/repo", false)];
     pane.healthReport = makeReport("/test/repo", [
       makeWarning({ severity: "error", message: "Leaked hook", fix: "Remove the hook entry" }),
@@ -201,7 +201,7 @@ describe("REPO pane health section", () => {
 
   test("shows ✅ when clean", () => {
     const pane = new RightPaneComponent();
-    pane.selectedRepoHeader = "my-repo";
+    pane.selectedRepo = { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo" };
     pane.allAgents = [makeFlatRepoHeader("my-repo", "/test/repo", false)];
     pane.healthReport = makeReport("/test/repo", []);
     pane.setMode("REPO");
@@ -213,7 +213,7 @@ describe("REPO pane health section", () => {
 
   test("shows ✅ when no health report", () => {
     const pane = new RightPaneComponent();
-    pane.selectedRepoHeader = "my-repo";
+    pane.selectedRepo = { kind: "repo-header", repoName: "my-repo", repoPath: "/repos/my-repo" };
     pane.allAgents = [makeFlatRepoHeader("my-repo", "/test/repo", false)];
     pane.healthReport = undefined;
     pane.setMode("REPO");

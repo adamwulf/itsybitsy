@@ -66,6 +66,12 @@ paths:
     # seal is written by unsandboxed lifecycle ops (newAgent/refresh/rehire) or,
     # for a sandboxed spawner, through the unsandboxed tmux server.
     - "~/.itsybitsy/sealed"
+    # This install's iroh peering secret key (docs/plans/iroh-peering.md).
+    # Whoever reads it can act as this install to every paired peer, so deny
+    # read and write; deny wins over the ~/.itsybitsy read floor above. Only
+    # `ib peer` (human-only) and `ib watch` use it. An installed _all.md gets
+    # this line by hand; there is no migration.
+    - "~/.itsybitsy/peer/secret.key"
 sandbox:
   # Omitted enablement inherits; the final default is true. More-specific
   # types can set sandbox: false or sandbox.enabled: false, or turn it back on.

@@ -54,6 +54,7 @@ import {
 import { createTeam, getTeam, addMember } from "./teams";
 import { readChannel, channelPath } from "./team-channel";
 import { resolveTarget } from "./index";
+import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 import { setUserHome, resetUserHome } from "./home";
 
 // A fresh transient that makes sendMessage believe a live watchdog will drain,
@@ -180,9 +181,12 @@ describe("teams: sendMessage threads team into the outbox", () => {
     tempDir = await mkdtemp(join(tmpdir(), "team-send-thread-"));
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
+    setUserHome(tempDir);
+    await Bun.write(join(tempDir, ".itsybitsy", "machine-name"), "studio");
+    await saveRegistry({ repos: [{ name: "test", path: tempDir }] });
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = agentOutboxDir("agent-abc");
+    queueDir = agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner(() => makeSpawnResult());
@@ -192,6 +196,7 @@ describe("teams: sendMessage threads team into the outbox", () => {
   afterEach(async () => {
     resetSendSpawnRunner();
     resetUserConfigPath();
+    resetUserHome();
     resetCoordinatorHome();
     isPidAliveCtx.reset();
     await rm(tempDir, { recursive: true, force: true });
@@ -262,16 +267,20 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
     setUserHome(baseDir);
+    await Bun.write(join(baseDir, ".itsybitsy", "machine-name"), "studio");
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
     setSendSpawnRunner(() => makeSpawnResult());
+    tmuxSpawnCtx.set(() => makeSpawnResult());
     isPidAliveCtx.set(() => true);
     resetReadAgentMetaCache();
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
+    tmuxSpawnCtx.reset();
     resetUserConfigPath();
     resetCoordinatorHome();
     isPidAliveCtx.reset();
@@ -344,7 +353,7 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     // Prefix-only input must be rejected.
     const prefixRes = await teamAdd("backend", "agent-newc", repos());
     expect(prefixRes.ok).toBe(false);
-    expect(prefixRes.stderr).toContain("agent not found: agent-newc");
+    expect(prefixRes.stderr).toContain("Agent not found: agent-newc");
 
     // Full id resolves and fires the join notice.
     const res = await teamAdd("backend", "agent-newcomer", repos());
@@ -389,6 +398,28 @@ describe("teams: command layer (create/add/remove/list/delete/roster/send)", () 
     expect(res.stdout).toContain("already in @backend");
     // No join notice fired (the agent was already a member).
     expect(await readOutbox(queueDirOf("agent-a"))).toEqual([]);
+  });
+
+  test("roster changes require visibility only in repos that can override the selected agent", async () => {
+    await teamCreate("backend");
+    await plantAgent("agent-a");
+    const [selected] = repos();
+    const hidden = { path: join(baseDir, "hidden"), name: "hidden" };
+    await Bun.write(join(hidden.path, ".itsybitsy", "agents"), "not a directory");
+    const target = `@${selected!.name}/agent-a`;
+    const members = async () => (await getTeam("backend"))?.members;
+    const earlier = [hidden, selected!];
+    expect((await teamAdd("backend", target, earlier)).ok).toBe(true);
+    expect(await members()).toEqual(["agent-a"]);
+    expect((await teamRemove("backend", target, earlier)).ok).toBe(true);
+    expect(await members()).toEqual([]);
+
+    const later = [selected!, hidden];
+    expect((await teamAdd("backend", target, later)).stderr).toContain("does not identify this agent reliably");
+    expect(await members()).toEqual([]);
+    await addMember("backend", "agent-a");
+    expect((await teamRemove("backend", target, later)).stderr).toContain("does not identify this agent reliably");
+    expect(await members()).toEqual(["agent-a"]);
   });
 
   // --- teamRemove ---------------------------------------------------------
@@ -709,7 +740,9 @@ describe("teams: resolveTarget team branch", () => {
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
     setUserHome(baseDir);
+    await Bun.write(join(baseDir, ".itsybitsy", "machine-name"), "studio");
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
     resetReadAgentMetaCache();
   });

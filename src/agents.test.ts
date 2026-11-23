@@ -1,3 +1,4 @@
+import { resetUserHome, setUserHome } from "./home";
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, readdir, unlink, utimes, writeFile, open, chmod } from "fs/promises";
@@ -1514,6 +1515,11 @@ describe("readPendingQuestions", () => {
     expect(questions.length).toBe(1);
     expect(questions[0]!.id).toBe("q-1");
     expect(questions[0]!.status).toBe("pending");
+    // Tagged with the repo it was read from (not stored in the file), so the
+    // asking agent is named by repo and id.
+    expect(questions[0]!.repoPath).toBe(tempDir);
+    const stored = await Bun.file(join(tempDir, ".itsybitsy", "user-questions.json")).json();
+    expect(stored.questions[0].repoPath).toBeUndefined();
   });
 
   test("filters out questions from agents that no longer exist", async () => {
@@ -2969,7 +2975,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(true);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(true);
   });
 
   test("returns true for recently created child (creating)", () => {
@@ -2978,7 +2984,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "p1", state: "waiting", created_epoch: recent } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(true);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(true);
   });
 
   test("returns false for child with meta.state === waiting (not recently created)", () => {
@@ -2986,7 +2992,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "p1", state: "waiting", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(false);
   });
 
   test("returns false for child with meta.state === complete", () => {
@@ -2994,7 +3000,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "p1", state: "complete", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(false);
   });
 
   test("skips archived children even when state === running", () => {
@@ -3003,7 +3009,7 @@ describe("anyChildActive", () => {
       archived: true,
       meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(false);
   });
 
   test("skips children whose manager field does not match", () => {
@@ -3011,7 +3017,7 @@ describe("anyChildActive", () => {
       id: "c1",
       meta: { manager: "other-parent", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [child])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: child.repoPath }, [child])).toBe(false);
   });
 
   test("returns true when at least one of many children is active", () => {
@@ -3023,11 +3029,11 @@ describe("anyChildActive", () => {
       id: "c2",
       meta: { manager: "p1", state: "running", created_epoch: oldEpoch } as Partial<AgentMeta> as AgentMeta,
     });
-    expect(anyChildActive("p1", [waitingChild, runningChild])).toBe(true);
+    expect(anyChildActive({ id: "p1", repoPath: runningChild.repoPath }, [waitingChild, runningChild])).toBe(true);
   });
 
   test("returns false when allAgents is empty", () => {
-    expect(anyChildActive("p1", [])).toBe(false);
+    expect(anyChildActive({ id: "p1", repoPath: "/repo" }, [])).toBe(false);
   });
 });
 
@@ -7215,9 +7221,13 @@ describe("archive cleanup deletes meta.transient.json", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "itsybitsy-archive-transient-"));
+    setUserHome(join(tempDir, "home"));
+    await Bun.write(join(tempDir, "home", ".itsybitsy", "machine-name"), "studio");
+    await Bun.write(join(tempDir, ".itsybitsy", "repo-id"), "deadbeef");
   });
 
   afterEach(async () => {
+    resetUserHome();
     await rm(tempDir, { recursive: true, force: true });
   });
 

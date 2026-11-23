@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
-import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, checkManagerCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, matchProtectedWrite } from "./agent-path";
+import { checkPathAccess, toolMatchesPattern, parseIbCommand, checkIbCommandAccess, checkManagerCommandAccess, claudeProjectDirFor, hookCheckPath, META_WRITE_DENY_REASON, META_UNREADABLE_DENY_REASON, SEAL_HELPER_RESULT_WRITE_DENY_REASON, agentProtectedWritePaths, systemProtectedWritePaths, protectedConfigWriteDenyReason, peerDirWriteDenyReason, matchProtectedWrite } from "./agent-path";
 import type { PathCheckInput, PathCheckContext } from "./agent-path";
 import { join } from "path";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile, symlink } from "fs/promises";
@@ -1599,6 +1599,18 @@ describe("checkPathAccess — .agents/ boundary-file write protection", () => {
 // ── parseIbCommand ───────────────────────────────────────────────────────────
 
 describe("parseIbCommand", () => {
+  test("joins an empty-word continuation and keeps continuations inside operands invalid", () => {
+    const continuation = "\\" + "\n";
+    for (const indent of ["", "  "]) {
+      expect(parseIbCommand("ib retire " + continuation + indent + "foo")).toEqual({
+        subcommand: "retire", targetId: "foo",
+      });
+    }
+    expect(parseIbCommand("i" + continuation + "b retire foo")).toBeNull();
+    expect(parseIbCommand("ib re" + continuation + "tire foo")).toBeNull();
+    expect(parseIbCommand("ib retire fo" + continuation + "o")).toBeNull();
+  });
+
   test("parses ib retire <id>", () => {
     const result = parseIbCommand("ib retire agent-abc12345");
     expect(result).toEqual({ subcommand: "retire", targetId: "agent-abc12345" });
@@ -1624,9 +1636,9 @@ describe("parseIbCommand", () => {
     expect(result).toEqual({ subcommand: "resume", targetId: "agent-abc12345" });
   });
 
-  test("skips flags before agent id", () => {
-    const result = parseIbCommand("ib retire --force agent-abc12345");
-    expect(result).toEqual({ subcommand: "retire", targetId: "agent-abc12345" });
+  test("skips merge flags before the agent address", () => {
+    const result = parseIbCommand("ib merge --force agent-abc12345");
+    expect(result).toEqual({ subcommand: "merge", targetId: "agent-abc12345" });
   });
 
   test("parses ib send (send is parsed but unrestricted in access check)", () => {
@@ -1649,9 +1661,9 @@ describe("parseIbCommand", () => {
     expect(result).toBeNull();
   });
 
-  test("returns null for invalid agent id (contains special chars)", () => {
+  test("preserves a machine/repo/agent address", () => {
     const result = parseIbCommand("ib retire not/an/agent");
-    expect(result).toBeNull();
+    expect(result).toEqual({ subcommand: "retire", targetId: "not/an/agent" });
   });
 });
 
@@ -1664,16 +1676,20 @@ describe("checkIbCommandAccess", () => {
   beforeEach(async () => {
     tmpDir = await import("fs/promises").then((fs) => fs.mkdtemp("/tmp/ib-test-ib-access-"));
     agentsDir = join(tmpDir, ".itsybitsy", "agents");
+    const home = join(tmpDir, "home");
+    setUserHome(home);
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: tmpDir, name: "repo" }] }));
   });
 
   afterEach(async () => {
+    resetUserHome();
     await rm(tmpDir, { recursive: true, force: true });
   });
 
   async function writeAgentMeta(id: string, meta: object): Promise<void> {
     const agentDir = join(agentsDir, id);
     await mkdir(agentDir, { recursive: true });
-    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(meta));
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, ...meta }));
   }
 
   async function writeRetiredMeta(id: string, meta: object): Promise<void> {
@@ -1814,7 +1830,7 @@ describe("checkIbCommandAccess", () => {
     expect(result?.reason).toContain("only the manager");
   });
 
-  test("rehire is exact-id-only and denies an archived nickname target", async () => {
+  test("rehire resolves an exact archived nickname for the manager", async () => {
     setUserHome(join(tmpDir, "home"));
     try {
       await writeRetiredMeta("agent-target1", {
@@ -1826,7 +1842,7 @@ describe("checkIbCommandAccess", () => {
         "agent-manager1",
         agentsDir,
       );
-      expect(result?.decision).toBe("deny");
+      expect(result).toBeNull();
     } finally {
       resetUserHome();
     }
@@ -1862,6 +1878,17 @@ describe("checkIbCommandAccess", () => {
       // Not even the target's manager could be recognised here.
       expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
       expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-other111", agentsDir)).toBeNull();
+    });
+
+    test("defers a bare name that also exists on a connected peer", async () => {
+      setSandboxedProcessOverride(() => true);
+      await hideArchive();
+      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify([{
+        name: "other", id: "peer", connected: true, lastOkAt: 1,
+        agents: [{ repo: "app", id: "agent-target1", nickname: null, state: "waiting" }],
+      }]));
+      expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
     });
 
     test("still decides when the sandbox can read the archive (a worktree:false agent)", async () => {
@@ -1997,7 +2024,7 @@ describe("checkIbCommandAccess", () => {
     const result = await checkIbCommandAccess("ib retire agent-target1", "agent-manager1", agentsDir);
     expect(result).not.toBeNull();
     expect(result!.decision).toBe("deny");
-    expect(result!.reason).toContain("not found in any registered repo");
+    expect(result!.reason).toContain("Agent not found: agent-target1");
   });
 
   test("allows merge when calling agent is the manager", async () => {
@@ -2053,6 +2080,51 @@ describe("checkIbCommandAccess", () => {
   test("a message that only mentions ib bounce is not a bounce", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     expect(await checkIbCommandAccess('ib send agent-target1 "ask @system to run ib bounce"', "agent-manager1", agentsDir)).toBeNull();
+  });
+
+  const PEER_COMMANDS = [
+    "ib peer",
+    "ib peer id",
+    "ib peer list",
+    "ib peer remove laptop-b",
+    `ib peer remove ${"a".repeat(64)}`,
+    "ib peer --help",
+    "/usr/local/bin/ib peer id",
+    "ib 'peer' list",
+    // Glued to an operator: tokenizeBashPaths splits only on whitespace.
+    "ib list;ib peer id",
+    "ib list&&ib peer id",
+    "ib list|ib peer id",
+    "ib list;(ib peer id)",
+    "ib list||ib peer list",
+    "ib list&ib peer list",
+    "ib list `ib peer id`",
+    "ib peer;true",
+    "ib peer>/tmp/peer-out",
+    "ib peer<<<x",
+    // Quotes or escapes inside the word.
+    "ib pe''er id",
+    'ib "pe"er id',
+    "ib p\\eer id",
+  ];
+
+  test("denies every ib peer subcommand to a regular agent — user-only", async () => {
+    for (const command of PEER_COMMANDS) {
+      const result = await checkIbCommandAccess(command, "agent-manager1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib peer' is a user-only command");
+    }
+  });
+
+  test("a message that only mentions ib peer is not a peer command", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    expect(await checkIbCommandAccess('ib send agent-target1 "ask the user to run ib peer remove x"', "agent-manager1", agentsDir)).toBeNull();
+    expect(await checkIbCommandAccess("ib send agent-target1 <<'EOF'\nib peer id\nEOF", "agent-manager1", agentsDir)).toBeNull();
+  });
+
+  test("other ib commands whose names start with peer are not gated", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    expect(await checkIbCommandAccess("ib send agent-target1 peer", "agent-manager1", agentsDir)).toBeNull();
   });
 
   test("merge-check is unrestricted — returns null even for non-manager", async () => {
@@ -2143,6 +2215,15 @@ describe("checkIbCommandAccess", () => {
     }
   });
 
+  test("per-repo coordinator CANNOT run ib peer — user-only", async () => {
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
+    for (const command of PEER_COMMANDS) {
+      const result = await checkIbCommandAccess(command, "itsybitsy", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib peer' is a user-only command");
+    }
+  });
+
   test("per-repo coordinator CANNOT bounce ib watch — system coordinator only", async () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     const result = await checkIbCommandAccess("ib bounce", "itsybitsy", agentsDir);
@@ -2207,6 +2288,24 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess("ib bounce", "@system", agentsDir)).toBeNull();
   });
 
+  test("@system is also denied ib peer — user-only, not even @system may run it", async () => {
+    for (const command of PEER_COMMANDS) {
+      const result = await checkIbCommandAccess(command, "@system", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib peer' is a user-only command");
+    }
+  });
+
+  test("@system may still send a message that only mentions ib peer, even with operators in it", async () => {
+    for (const command of [
+      'ib send agent-target1 "run ib list;ib peer id"',
+      "ib send agent-target1 'ib list&&ib peer id'",
+      "ib send agent-target1 <<'EOF'\nib list;ib peer id\nEOF",
+    ]) {
+      expect(await checkIbCommandAccess(command, "@system", agentsDir)).toBeNull();
+    }
+  });
+
   test("@system is also denied nuke — nuke is user-only, not even @system may run it", async () => {
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
     const result = await checkIbCommandAccess("ib nuke agent-target1", "@system", agentsDir);
@@ -2215,10 +2314,9 @@ describe("checkIbCommandAccess", () => {
     expect(result!.reason).toContain("user-only");
   });
 
-  test("@system can run retire on a target that doesn't exist (no found-in-repo check)", async () => {
-    // No target meta written — @system bypass returns null before existence check
+  test("@system must still resolve the manager-command target", async () => {
     const result = await checkIbCommandAccess("ib retire agent-target1", "@system", agentsDir);
-    expect(result).toBeNull();
+    expect(result?.reason).toContain("Agent not found: agent-target1");
   });
 
   // ── --model on new-agent is user-only ──────────────────────────────────────
@@ -2733,6 +2831,51 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
     expect(result.reason).toBe(protectedConfigWriteDenyReason(CONFIG));
   });
 
+  // ~/.itsybitsy/peer holds the iroh secret key and peers.json, the list of
+  // installs trusted to connect; @system takes Telegram input.
+  const PEER_DIR = join(ITSY, "peer");
+  const PEERS_JSON = join(PEER_DIR, "peers.json");
+
+  test("the resolver alone WOULD allow a write under peer/ (control)", () => {
+    const ctx = { ...systemCtx(), protectedWritePaths: [] };
+    expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: PEERS_JSON } }), ctx).decision).toBe("allow");
+  });
+
+  for (const target of [PEERS_JSON, join(PEER_DIR, "secret.key"), join(PEER_DIR, "endpoint.lock")]) {
+    test(`@system Write to ${target.slice(ITSY.length + 1)} → DENIED`, () => {
+      const result = checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: target } }), systemCtx());
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toBe(peerDirWriteDenyReason(PEER_DIR));
+      expect(result.reason).toContain("human-only 'ib peer'");
+      expect(result.reason).not.toContain("may read it");
+    });
+  }
+
+  test("@system Bash redirects into peer/ → DENIED", () => {
+    setUserHome("/Users/test");
+    try {
+      for (const command of [
+        `echo [] > ${PEERS_JSON}`,
+        "echo [] > ~/.itsybitsy/peer/peers.json",
+        'ib list >> "$HOME/.itsybitsy/peer/peers.json"',
+      ]) {
+        const result = checkPathAccess(
+          makeInput({ toolName: "Bash", toolInput: { command }, cwd: ITSY }),
+          systemCtx(),
+        );
+        expect(result.decision).toBe("deny");
+        expect(result.reason).toBe(peerDirWriteDenyReason(PEER_DIR));
+      }
+    } finally {
+      resetUserHome();
+    }
+  });
+
+  test("@system Read of peers.json → ALLOWED (writes blocked, reads untouched)", () => {
+    const result = checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: PEERS_JSON } }), systemCtx());
+    expect(result.decision).toBe("allow");
+  });
+
   test("a normal agent is unaffected by @system's protected list (only its own meta.json is protected)", () => {
     // The normal fixture agent has no config.json/agent-types guard; a write to a
     // path outside its worktree is governed by the resolver, not this guard.
@@ -2898,6 +3041,9 @@ describe("hookCheckPath with @system", () => {
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), "sys-coord-hook-check-"));
     setUserHome(tempHome);
+    const repo = join(tempHome, "app");
+    await Bun.write(join(tempHome, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: repo, name: "app" }] }));
+    await Bun.write(join(repo, ".itsybitsy", "agents", "agent-foo", "meta.json"), JSON.stringify({ id: "agent-foo" }));
     // Create the system coordinator home with an allow list permitting Bash(ib:*)
     const claudeDir = join(tempHome, ".itsybitsy", ".claude");
     await mkdir(claudeDir, { recursive: true });

@@ -13,6 +13,7 @@ import {
 } from "./agent-status";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
+import { saveRegistry } from "../registry";
 import { makeSpawnResult } from "../test-utils";
 import { WATCHDOG_SENTINEL } from "../watchdog";
 import { setUserHome, resetUserHome } from "../home";
@@ -27,8 +28,8 @@ import {
  * Per-process itsybitsy home for the whole file.
  *
  * The temp dirs this file already creates cover the AGENT dir, but not the
- * outbox: `executeResultActions` delivers through `agentOutboxDir`, which is
- * `<itsybitsy home>/agents/<agent id>/` — a completely different tree. Left at
+ * outbox. `executeResultActions` uses `agentOutboxDir` under the coordinator
+ * home. Keyless fixtures use `<itsybitsy home>/agents/<agent>/`. Left at
  * its default that home is the developer's REAL `~/.itsybitsy`, so running this
  * file wrote `agents/test-agent-001/outbox.jsonl` and
  * `agents/manager-001/outbox.jsonl` straight into the user's live agent
@@ -54,9 +55,10 @@ import {
  */
 let testHome: string;
 
-beforeAll(() => {
+beforeAll(async () => {
   testHome = mkdtempSync(join(tmpdir(), "ib-agent-status-home-"));
   setUserHome(testHome);
+  await Bun.write(join(testHome, ".itsybitsy", "machine-name"), "studio");
   setCoordinatorHome(join(testHome, ".itsybitsy"));
 });
 
@@ -205,7 +207,8 @@ async function createTempAgentDir(): Promise<{
   cleanup: () => Promise<void>;
 }> {
   const base = await mkdtemp(join(tmpdir(), "ib-hook-test-"));
-  const agentsDir = join(base, "agents");
+  const agentsDir = join(base, ".itsybitsy", "agents");
+  await saveRegistry({ repos: [{ path: base, name: "fixture" }] });
   const agentId = "test-agent-001";
   const agentDir = join(agentsDir, agentId);
   await mkdir(agentDir, { recursive: true });
@@ -1289,6 +1292,28 @@ describe("executeResultActions — watchdog attribution on delivery", () => {
       .filter((c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l"))
       .map((c) => c[c.length - 1]!);
   }
+
+  test.each(["nudge", "notify_manager"] as const)("%s queues for its recipient's original identity", async (action) => {
+    const { writeAgentTransient } = await import("../agents");
+    const { readOutbox } = await import("../outbox");
+    const id = action === "nudge" ? ctx.agentId : "manager-001";
+    const recipientDir = join(ctx.agentsDir, id);
+    await mkdir(recipientDir, { recursive: true });
+    await writeMeta(ctx.agentDir, { id: ctx.agentId, tmux_session: "ib-self", manager: "manager-001" });
+    const key = `studio/fixture/${id}`;
+    await mkdir(join(coordHome, "agents", key), { recursive: true });
+    await writeMeta(recipientDir, { id, tmux_session: "ib-recipient", queue_key: key });
+    await saveRegistry({ repos: [{ path: join(ctx.agentsDir, "../.."), name: "renamed" }] });
+    await writeAgentTransient(recipientDir, {
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), has_background_tasks: false,
+      tmux_compacting: false, tmux_rate_limited: false, tmux_api_error: false, tmux_api_terms: false, tmux_api_safeguard: false,
+    });
+    await executeResultActions({ state: "running", action, message: "queued by hook" }, ctx.agentDir, ctx.agentsDir);
+    const messages = await readOutbox(join(coordHome, "agents", key));
+    expect(messages.map((m) => m.message)).toEqual(["queued by hook"]);
+    expect(await readOutbox(join(coordHome, "agents", "studio", "renamed", id))).toEqual([]);
+    expect(deliveredPayloads()).toEqual([]);
+  });
 
   test("self-nudge is delivered with the [sent by watchdog]: prefix (not raw)", async () => {
     await writeMeta(ctx.agentDir, { id: ctx.agentId, tmux_session: "ib-test", state: "waiting" });

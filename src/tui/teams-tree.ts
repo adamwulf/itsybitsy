@@ -34,6 +34,8 @@ import {
   favoriteStar,
 } from "./agent-tree";
 import { RESET, BOLD, DIM, REVERSE } from "./colors";
+import { localAgentKey } from "./row-keys";
+import { FALLBACK_MACHINE_NAME } from "../machine-name";
 
 const MIN_STATE_COL_WIDTH = 8; // length of "complete"
 
@@ -202,9 +204,16 @@ export class TeamsTreeComponent implements Component {
   private hasSelection = false;
   /** Focus-driven dimming, matching AgentTreeComponent.suppressSelection. */
   suppressSelection = false;
-  /** Favorite agent ids — member rows show a ★ for these. Set by the
-   *  dashboard before render (the Agents tree owns the set). */
+  /** This machine's name, as the Agents tree's (the dashboard sets both). */
+  machineName: string = FALLBACK_MACHINE_NAME;
+  /** Fully qualified ids of the favorite agents — member rows show a ★ for
+   *  these. Set by the dashboard before render (the Agents tree owns the set). */
   favoriteAgentIds: ReadonlySet<string> = new Set();
+
+  /** A member agent's fully qualified id (SPEC §17.1): the same key as its Agents-tree row. */
+  private memberKey(agent: Agent): string {
+    return localAgentKey(this.machineName, agent);
+  }
 
   /**
    * Lines this tree may render, set by the sidebar before each render. A
@@ -345,9 +354,11 @@ export class TeamsTreeComponent implements Component {
   }
 
   /**
-   * §17.1 Phase 2 mirror: find the FIRST `team-member` row whose agent id
-   * matches and select it (visual only — the dashboard updates
-   * `activeSelectionSource` separately when appropriate). If the agent appears
+   * §17.1 Phase 2 mirror: find the FIRST `team-member` row whose agent has
+   * this fully qualified id (`<machine>/<repo>/<agent>`, the Agents tree's row
+   * key) and select it (visual only — the dashboard updates
+   * `activeSelectionSource` separately when appropriate). The same id in
+   * another repo is another agent and never matches. If the agent appears
    * under multiple teams, the first occurrence wins (the team registry order
    * from `listTeams()` is stable). Returns true on a hit, false otherwise.
    *
@@ -355,11 +366,11 @@ export class TeamsTreeComponent implements Component {
    * sidebar toggle visually highlights the active agent in the newly visible
    * tree when possible.
    */
-  selectMemberByAgentId(agentId: string): boolean {
+  selectMemberByKey(key: string): boolean {
     const list = this._flatList;
     for (let i = 0; i < list.length; i++) {
       const row = list[i]!;
-      if (row.kind === "team-member" && row.agent.id === agentId) {
+      if (row.kind === "team-member" && this.memberKey(row.agent) === key) {
         this.selectedIndex = i;
         this.hasSelection = true;
         this.ensureSelectedVisible();
@@ -439,7 +450,7 @@ export class TeamsTreeComponent implements Component {
     let maxNameWidth = 0;
     for (const item of list) {
       if (item.kind === "team-member") {
-        const isFavorite = this.favoriteAgentIds.has(item.agent.id);
+        const isFavorite = this.favoriteAgentIds.has(this.memberKey(item.agent));
         maxNameWidth = Math.max(maxNameWidth, memberNamePrefixWidth(item.agent, item.connector, isFavorite));
       }
     }
@@ -455,7 +466,7 @@ export class TeamsTreeComponent implements Component {
       if (item.kind === "team-header") {
         lines.push(formatTeamHeaderRow(item.teamName, item.memberCount, selected, width));
       } else {
-        const isFavorite = this.favoriteAgentIds.has(item.agent.id);
+        const isFavorite = this.favoriteAgentIds.has(this.memberKey(item.agent));
         lines.push(formatTeamMemberRow(item.agent, item.connector, selected, width, maxNameWidth, stateColWidth, isFavorite));
       }
     }

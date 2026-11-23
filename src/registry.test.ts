@@ -1,11 +1,13 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes } from "./registry";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, symlink } from "fs/promises";
+import { chmod, mkdtemp, open, stat, rm, mkdir, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { createTeam } from "./teams";
 import { setUserHome, resetUserHome } from "./home";
+import { createCliFixture } from "./test-cli-runner";
+import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 
 // Override registry path for tests
 let tempDir: string;
@@ -31,6 +33,63 @@ describe("registry", () => {
     await saveRegistry(data);
     const loaded = await loadRegistry();
     expect(loaded.repos).toEqual(data.repos);
+  });
+
+  test("a reader holding the old registry sees a complete snapshot across a save", async () => {
+    const oldRegistry = { repos: [{ path: "/repo/a", name: "first" }] };
+    const newRegistry = { repos: [{ path: "/repo/b", name: "second" }] };
+    await saveRegistry(oldRegistry);
+    const reader = await open(join(tempDir, ".itsybitsy", "repos.json"), "r");
+    try {
+      await saveRegistry(newRegistry);
+      expect(JSON.parse(await reader.readFile("utf8"))).toEqual(oldRegistry);
+      expect(await loadRegistry()).toEqual(newRegistry);
+    } finally {
+      await reader.close();
+    }
+  });
+
+  test("atomic saves create a private file and preserve existing permissions", async () => {
+    const path = join(tempDir, ".itsybitsy", "repos.json");
+    await saveRegistry({ repos: [] });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    await chmod(path, 0o640);
+    await saveRegistry({ repos: [{ name: "new", path: "/new" }] });
+    expect((await stat(path)).mode & 0o777).toBe(0o640);
+  });
+
+  test("all registry mutations refuse malformed input and preserve its bytes", async () => {
+    const path = join(tempDir, ".itsybitsy", "repos.json");
+    const bytes = '{"repos":[{"path":"/existing","name":"one"},';
+    await Bun.write(path, bytes);
+    const changes = [
+      () => addRepo("/new", "two"), () => removeRepo("/existing"),
+      () => renameRepo("/existing", "renamed"), () => setRepoNotes("/existing", "notes"),
+      () => setRepoDefaultAgentType("/existing", "worker"),
+    ];
+    for (const change of changes) {
+      await expect(change()).rejects.toThrow("Cannot read repo registry");
+      expect(await Bun.file(path).text()).toBe(bytes);
+    }
+  });
+
+  test("a registry I/O error prevents a mutation", async () => {
+    const path = join(tempDir, ".itsybitsy", "repos.json");
+    // A directory in place of the file reliably makes the read fail, even as root.
+    await mkdir(path, { recursive: true });
+    const marker = join(path, "original");
+    await Bun.write(marker, "original contents");
+    await expect(addRepo("/new", "new")).rejects.toThrow("Cannot read repo registry");
+    expect(await Bun.file(marker).text()).toBe("original contents");
+  });
+
+  test("refuses a nickname matching another registered name or nickname in a different case", async () => {
+    const repos = [{ path: "/one", name: "One", nickname: "First" }, { path: "/two", name: "Two" }];
+    await saveRegistry({ repos });
+    for (const nickname of ["ONE", "fIrSt"]) {
+      expect((await renameRepo("/two", nickname)).ok).toBe(false);
+      expect(await listRepos()).toEqual(repos);
+    }
   });
 
   test("addRepo adds a new repo", async () => {
@@ -64,6 +123,100 @@ describe("registry", () => {
     const result = await addRepo(repoDir);
     expect(result.ok).toBe(false);
     expect(result.message).toContain("Already registered");
+  });
+
+  test("ib add (addRepo, basename) refuses a name already registered, case-insensitively", async () => {
+    const first = join(tempDir, "a", "website");
+    const second = join(tempDir, "b", "App");
+    await mkdir(first, { recursive: true });
+    await mkdir(second, { recursive: true });
+    expect((await addRepo(first, "app")).ok).toBe(true);
+    const result = await addRepo(second);
+    expect(result.ok).toBe(false);
+    expect(result.message).toBe(`"App" is already the name of a registered repo (${first}) — repo names must be unique; use ib add <path> <name>`);
+    expect((await listRepos()).map((r) => r.path)).toEqual([first]);
+    // The way forward the refusal names: the same folder under another name.
+    const named = await addRepo(second, "app-two");
+    expect(named.ok).toBe(true);
+    expect((await listRepos()).map((r) => r.name)).toEqual(["app", "app-two"]);
+  });
+
+  test("folder browser [ Add ] (addRepo with a name) refuses a registered name or nickname, case-insensitively", async () => {
+    await saveRegistry({ repos: [{ path: "/x/one", name: "one" }, { path: "/x/two", name: "two", nickname: "web" }] });
+    const dir = join(tempDir, "folder");
+    await mkdir(dir);
+    const refusal = (await addRepo(dir, "ONE")).message;
+    expect(refusal).toContain("already the name of a registered repo (/x/one)");
+    // [ Add ] shows the same hint: register it from the CLI under another name.
+    expect(refusal).toEndWith("use ib add <path> <name>");
+    expect((await addRepo(dir, "Web")).message).toContain("already the name of a registered repo (/x/two)");
+    expect((await addRepo(dir, "three")).ok).toBe(true);
+  });
+
+  test("a symlink to a second git repo collides with a registered subdirectory by root basename", async () => {
+    const first = join(tempDir, "client-a", "app");
+    const registered = join(first, "src");
+    const second = join(tempDir, "client-b", "App");
+    const alias = join(tempDir, "mobile");
+    await mkdir(registered, { recursive: true });
+    await mkdir(second, { recursive: true });
+    await Bun.$`git init --quiet`.cwd(first);
+    await Bun.$`git init --quiet`.cwd(second);
+    await symlink(second, alias);
+
+    expect((await addRepo(registered, "website")).ok).toBe(true);
+    const result = await addRepo(alias, "phone");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(`folder name "App" is already used by registered repo "website" (${registered})`);
+    expect(await listRepos()).toEqual([{ path: registered, name: "website" }]);
+  });
+
+  test("a stalled git root lookup is killed and falls back to the registered folder basename", async () => {
+    const existing = { path: join(tempDir, "offline", "app"), name: "website" };
+    await saveRegistry({ repos: [existing] });
+    const signals: (number | string | undefined)[] = [];
+    const cancelled: string[] = [];
+    const started = Promise.withResolvers<void>();
+    const exit = Promise.withResolvers<number>();
+    const deadline = new AbortController();
+    const timer = spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    lifecycleSpawnCtx.set((cmd) => {
+      if (cmd[2] !== existing.path) return { stdout: null, stderr: null, exited: Promise.resolve(128) };
+      started.resolve();
+      return {
+        stdout: new ReadableStream({ cancel() { cancelled.push("stdout"); } }),
+        stderr: new ReadableStream({ cancel() { cancelled.push("stderr"); } }),
+        exited: exit.promise,
+        kill: (signal) => { signals.push(signal); },
+      };
+    });
+    try {
+      const registration = addRepo(join(tempDir, "App"), "mobile");
+      await started.promise;
+      expect(timer.mock.calls).toEqual([[2_000], [2_000]]);
+      deadline.abort();
+      const result = await registration;
+      expect(signals).toEqual(["SIGKILL"]);
+      expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
+      expect(Bun.peek(exit.promise)).toBe(exit.promise);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(`folder name "App" is already used by registered repo "website" (${existing.path})`);
+      expect(await listRepos()).toEqual([existing]);
+    } finally {
+      exit.resolve(137);
+      timer.mockRestore();
+      lifecycleSpawnCtx.reset();
+    }
+  });
+
+  test("adding a different basename preserves existing duplicate names and folder basenames", async () => {
+    const existing = [{ path: "/x/one", name: "app" }, { path: "/y/one", name: "app" }];
+    await saveRegistry({ repos: existing });
+    expect(await listRepos()).toEqual(existing);
+    const dir = join(tempDir, "other");
+    await mkdir(dir);
+    expect((await addRepo(dir)).ok).toBe(true);
+    expect(await listRepos()).toEqual([...existing, { path: dir, name: "other" }]);
   });
 
   test("addRepo rejects 'coordinator' basename", async () => {
@@ -487,7 +640,7 @@ describe("registry team-name collision refusal", () => {
     await mkdir(repoDir, { recursive: true });
     const result = await addRepo(repoDir, "backend");
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("already a team name");
+    expect(result.message).toBe(`"backend" is already a team name — choose a different repo name; use ib add <path> <name>`);
   });
 
   test("addRepo allows a name with no team collision", async () => {
@@ -564,5 +717,74 @@ describe("registry team-name collision refusal", () => {
     expect(result.ok).toBe(true);
     const repos = await listRepos();
     expect(repos[0]!.nickname).toBeUndefined();
+  });
+});
+
+describe("ib add [path] [name] (CLI)", () => {
+  test("a taken registry name is refused with the way forward, and the name argument registers it", async () => {
+    const cli = await createCliFixture();
+    try {
+      const first = join(cli.root, "website");
+      const second = join(cli.root, "elsewhere", "app");
+      const options = { allowedProcesses: [first, second].map(path => ["git", "-C", path, "rev-parse"]) };
+      expect((await cli.run(["add", first, "app"], options)).exitCode).toBe(0);
+      await mkdir(second, { recursive: true });
+
+      const refused = await cli.run(["add", second], options);
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stdout).toContain(`"app" is already the name of a registered repo`);
+      expect(refused.stdout).toContain("use ib add <path> <name>");
+
+      const added = await cli.run(["add", second, "app-two"], options);
+      expect(added.exitCode).toBe(0);
+      expect(added.stdout).toContain(`Added: app-two (${second})`);
+      const registry = await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).json();
+      expect(registry.repos.map((r: { name: string }) => r.name)).toEqual(["app", "app-two"]);
+    } finally {
+      await cli.cleanup();
+    }
+  });
+
+  test("a folder basename already registered at another path is refused with or without a custom name", async () => {
+    const cli = await createCliFixture();
+    try {
+      const first = join(cli.root, "app");
+      const second = join(cli.root, "elsewhere", "App");
+      const options = { allowedProcesses: [first, second].map(path => ["git", "-C", path, "rev-parse"]) };
+      await mkdir(first);
+      await mkdir(second, { recursive: true });
+      expect((await cli.run(["add", first, "website"], options)).exitCode).toBe(0);
+
+      for (const args of [["add", second], ["add", second, "app-two"]]) {
+        const result = await cli.run(args, options);
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toContain(`folder name "App" is already used by registered repo "website" (${first})`);
+      }
+      const registry = await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).json();
+      expect(registry.repos).toEqual([{ path: first, name: "website" }]);
+    } finally {
+      await cli.cleanup();
+    }
+  });
+
+  test("a flag-like name or a third argument is refused with the usage text, and nothing is registered", async () => {
+    const cli = await createCliFixture();
+    try {
+      const folder = join(cli.root, "folder");
+      await mkdir(folder, { recursive: true });
+      for (const args of [
+        ["add", folder, "--name", "app-two"], ["add", folder, "--name"], ["add", folder, "-x"], ["add", folder, "one", "two"],
+        // A flag where the path goes: it would register a nonexistent <cwd>/--name.
+        ["add", "--name", "app-two"], ["add", "-x"],
+      ]) {
+        const run = await cli.run(args);
+        expect(run.exitCode).toBe(1);
+        expect(run.stderr).toContain("Usage: ib add [path] [name]");
+        expect(run.stdout).not.toContain("Added:");
+      }
+      expect(await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).exists()).toBe(false);
+    } finally {
+      await cli.cleanup();
+    }
   });
 });

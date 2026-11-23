@@ -20,7 +20,12 @@ describe("hookStatusline", () => {
     home = await mkdtemp(join(tmpdir(), "statusline-hook-test-"));
     projectDir = join(home, "project");
     await mkdir(join(projectDir, ".claude"), { recursive: true });
+    for (const id of ["agent-a", "agent-cli"]) {
+      await Bun.write(join(projectDir, ".itsybitsy", "agents", id, "meta.json"), JSON.stringify({ id, tmux_session: `itsybitsy-deadbeef-${id}` }));
+    }
     setUserHome(home);
+    await Bun.write(join(home, ".itsybitsy", "machine-name"), "studio");
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({ repos: [{ name: "repo", path: projectDir }] }));
     setCoordinatorHome(join(home, ".itsybitsy"));
     const calls: { command: string; input: string }[] = [];
     runs = calls;
@@ -55,6 +60,7 @@ describe("hookStatusline", () => {
   }
 
   function recordPath(agentId: string): string {
+    if (agentId === "@system") return join(home, ".itsybitsy", CLAUDE_RATE_LIMITS_FILE);
     return join(home, ".itsybitsy", "agents", agentId, CLAUDE_RATE_LIMITS_FILE);
   }
 
@@ -71,6 +77,23 @@ describe("hookStatusline", () => {
       five_hour: { used_percentage: 9, resets_at: NOW_S + 3600 },
       seven_day: { used_percentage: 11, resets_at: NOW_S + 86_400 },
     });
+  });
+
+  test("records under the saved key when the registry and machine identity are unavailable", async () => {
+    const file = join(projectDir, ".itsybitsy", "agents", "agent-a", "meta.json");
+    const meta = await Bun.file(file).json();
+    await Bun.write(file, JSON.stringify({ ...meta, queue_key: "spawn-host/first-name/agent-a" }));
+    await rm(join(home, ".itsybitsy", "machine-name"));
+    await Bun.write(join(home, ".itsybitsy", "repos.json"), "{");
+    await hookStatusline(statuslineInput(), "agent-a", NOW_MS);
+    expect(await Bun.file(join(home, ".itsybitsy", "agents", "spawn-host", "first-name", "agent-a", CLAUDE_RATE_LIMITS_FILE)).exists()).toBe(true);
+  });
+
+  test("a worktree statusline records usage for its owning repo", async () => {
+    const worktree = join(projectDir, ".itsybitsy", "agents", "agent-a", "repo");
+    await mkdir(worktree, { recursive: true });
+    await hookStatusline(statuslineInput({ workspace: { project_dir: worktree } }), "agent-a", NOW_MS);
+    expect(await Bun.file(recordPath("agent-a")).exists()).toBe(true);
   });
 
   test("the project's statusLine wins over the user's", async () => {
@@ -135,6 +158,20 @@ describe("hookStatusline", () => {
     expect(result.output).toBe("line from user-statusline\n");
     expect(runs).toEqual([{ command: "user-statusline", input: "not json" }]);
     expect(await Bun.file(recordPath("agent-a")).exists()).toBe(false);
+  });
+
+  test("CLI records flat usage for a keyless agent without a machine name", async () => {
+    const file = join(home, ".itsybitsy", "machine-name");
+    await rm(file);
+    await writeUserSettings({ statusLine: { type: "command", command: "printf footer" } });
+    const result = await runIsolatedCli(["hooks", "statusline", "agent-cli"], {
+      cwd: projectDir, home, stdin: statuslineInput(),
+      allowedProcesses: [["/bin/sh", "-c", "printf footer"]],
+    });
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("footer");
+    expect(await Bun.file(file).exists()).toBe(false);
+    expect(await Bun.file(recordPath("agent-cli")).exists()).toBe(true);
   });
 
   test("CLI: records the input and prints the user's statusline byte-for-byte", async () => {

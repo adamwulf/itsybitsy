@@ -10,6 +10,7 @@ import * as runtimeNames from "./runtime-names";
  * Phase 15-B: complete/running/creating/compacting/stopped/rate_limited handlers.
  */
 
+import { sameRepoPath } from "./repo-identity";
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
@@ -429,11 +430,18 @@ export function clearTrackers(): void {
  * Find an agent by ID in the agents list.
  * Used to look up a manager agent for sending notifications.
  */
-function findAgent(agents: Agent[], id: string): Agent | undefined {
+function spawnerChildAddress(agent: Agent, allAgents: Agent[]): string {
+  if (sameRepoPath(agent.repoPath, agent.meta.spawned_by?.repo_path)) return agent.id;
+  // The per-agent watchdog constructs its own Agent without registry metadata.
+  const repo = agent.repoRegistryName || findAgent(allAgents, agent.id, agent.repoPath)?.repoRegistryName;
+  return repo ? `@${repo}/${agent.id}` : `${agent.id} (repo ${agent.repoPath})`;
+}
+
+function findAgent(agents: Agent[], id: string, repoPath: string | null): Agent | undefined {
   for (const agent of agents) {
-    if (agent.id === id) return agent;
+    if (agent.id === id && sameRepoPath(agent.repoPath, repoPath)) return agent;
     // Search children recursively
-    const found = findAgent(agent.children, id);
+    const found = findAgent(agent.children, id, repoPath);
     if (found) return found;
   }
   return undefined;
@@ -457,7 +465,7 @@ export async function notifyManager(
   const managerId = agent.meta.manager;
   if (!managerId) return false;
 
-  const manager = findAgent(allAgents, managerId);
+  const manager = findAgent(allAgents, managerId, agent.repoPath);
   if (!manager) return false;
 
   const result = await sendMessage(manager, message, { fromAgent: WATCHDOG_SENTINEL });
@@ -496,7 +504,7 @@ export async function notifySpawner(
   // already enforce mutual exclusivity by skipping notifySpawner when manager
   // is set. This guard remains so direct callers (and tests) still get the
   // same dedupe semantics as before.
-  if (spawner.agent_id === agent.meta.manager) return false;
+  if (spawner.agent_id === agent.meta.manager && sameRepoPath(agent.repoPath, spawner.repo_path)) return false;
 
   // @system → deliver via the same direct-tmux path `ib send @system` uses.
   if (spawner.agent_id === "@system") {
@@ -511,22 +519,13 @@ export async function notifySpawner(
 
   // @<repo-name> → resolve to that repo's per-repo coordinator.
   if (spawner.agent_id.startsWith("@")) {
-    const repoName = spawner.agent_id.slice(1);
     try {
-      const { basename: pathBasename } = await import("path");
-      const repos = await listReposFn();
-      // Match by `basename(repo.path)`, NOT repo.name or repoDisplayName.
-      // This is the same invariant `getCoordinatorAgentId()` uses for the
-      // coordinator's actual agent ID. ib-commands stamps the @<repo-name>
-      // sentinel with basename(cwd) for the same reason. Any other lookup
-      // here (registry name, nickname) silently breaks for repos whose
-      // user-overridden name differs from the directory basename.
-      const repo = repos.find((r) => pathBasename(r.path) === repoName);
+      const repo = (await listReposFn()).find((entry) => sameRepoPath(entry.path, spawner.repo_path));
       if (!repo) return false;
       const { checkCoordinatorExists } = await import("./coordinator");
       const coordStatus = await checkCoordinatorExists(repo.path);
-      if (!coordStatus.exists || !coordStatus.agentId) return false;
-      const coordinator = findAgent(allAgents, coordStatus.agentId);
+      if (!coordStatus.exists) return false;
+      const coordinator = findAgent(allAgents, coordStatus.agentId, spawner.repo_path);
       if (!coordinator) return false;
       const result = await sendMessage(coordinator, message, { fromAgent: WATCHDOG_SENTINEL });
       return result.ok;
@@ -537,7 +536,7 @@ export async function notifySpawner(
 
   // Real agent ID — existing path.
   try {
-    const spawnerAgent = findAgent(allAgents, spawner.agent_id);
+    const spawnerAgent = findAgent(allAgents, spawner.agent_id, spawner.repo_path);
     if (!spawnerAgent) return false;
     const result = await sendMessage(spawnerAgent, message, { fromAgent: WATCHDOG_SENTINEL });
     return result.ok;
@@ -731,7 +730,7 @@ async function handleWaiting(
   // empty. A future maintainer must not replace this with an agent.children
   // walk or the CLI watchdog path will silently break.
   const allAgents = await getAllAgents();
-  if (anyChildActive(agent.id, allAgents)) return;
+  if (anyChildActive(agent, allAgents)) return;
 
   // Acknowledged by the manager: no reminders for this waiting episode.
   if (await ackSuppresses(agent, tracker, "waiting")) return;
@@ -766,7 +765,7 @@ async function handleWaiting(
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `Agent ${agent.id} you spawned recently started waiting for input (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
+        `Agent ${spawnerChildAddress(agent, allAgents)} you spawned recently started waiting for input (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
         allAgents,
       );
     } else {
@@ -834,7 +833,7 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `Agent ${agent.id} you spawned has an unknown state - may need attention (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
+        `Agent ${spawnerChildAddress(agent, allAgents)} you spawned has an unknown state - may need attention (reminder ${reminderNum}/${MAX_MANAGER_NOTIFICATIONS})`,
         allAgents,
       );
     } else {
@@ -939,7 +938,7 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
     } else if (agent.meta.spawned_by) {
       notified = await notifySpawner(
         agent,
-        `Agent ${agent.id} you spawned recently completed`,
+        `Agent ${spawnerChildAddress(agent, allAgents)} you spawned recently completed`,
         allAgents,
       );
     } else {
@@ -1419,6 +1418,22 @@ export function resetPerAgentSleep(): void {
   sleepFn = (ms) => Bun.sleep(ms);
 }
 
+type OutboxWatch = (
+  dir: string,
+  listener: (event: string, filename: string | null) => void,
+) => Pick<FSWatcher, "close">;
+
+let watchOutboxFn: OutboxWatch = watch;
+
+/** Override the outbox directory watcher for testing. */
+export function setPerAgentOutboxWatch(fn: OutboxWatch): void {
+  watchOutboxFn = fn;
+}
+
+export function resetPerAgentOutboxWatch(): void {
+  watchOutboxFn = watch;
+}
+
 /** Injectable sleep for global watchdog testing */
 let watchdogSleepFn: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms);
 
@@ -1855,26 +1870,19 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   // permission auto-accept Enter), in EITHER direction. Those bare writes
   // bypass `deliverMessage` and the file `.outbox.lock`, so the mutex (not the
   // file lock) is what keeps them from interleaving with a delivered message's
-  // chunks+Enter. `drainOutbox` ALSO takes the per-session file lock, which
+  // chunks+Enter. `drainOutbox` also takes the queue directory's file lock, which
   // serializes the drain against any inline sender in another process.
   const drainAgent: Agent = {
     id: agentId,
     repoPath,
     repoName: "",
+    repoRegistryName: "",
     meta,
     state: "running",
     age: "",
     archived: false,
     children: [],
   };
-  // The per-agent outbox now lives under the CENTRAL coordinator-home root
-  // (`agentOutboxDir(agentId)` → `~/.itsybitsy/agents/<id>/`), not under the
-  // per-worktree agent dir. We watch that dir for outbox appends and drain
-  // from it. Ensure it exists so fs.watch doesn't throw on a fresh agent
-  // whose first outbox enqueue hasn't happened yet.
-  const outboxQueueDir = agentOutboxDir(agentId);
-  try { mkdirSync(outboxQueueDir, { recursive: true }); } catch { /* best-effort */ }
-
   let drainQueued = false;
   const drainNow = async (): Promise<void> => {
     // Coalesce redundant triggers: if a drain is already queued/running, one
@@ -1889,27 +1897,35 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     await runSessionExclusive(agentId, async () => {
       drainQueued = false; // allow new triggers to queue once we're delivering
       try {
-        await perAgentDrainFn(drainAgent, outboxQueueDir);
-      } catch { /* never crash the watchdog on a drain error */ }
+        const dir = agentOutboxDir(drainAgent);
+        watchQueue(dir);
+        await perAgentDrainFn(drainAgent, dir);
+      } catch (error) {
+        console.error(`[watchdog] Cannot drain queue for ${agentId}: ${error}`);
+      }
     });
   };
 
   // Event-driven drain via fs.watch on the central outbox dir. Debounced so a
   // burst of appends coalesces into one drain. If fs.watch is unavailable or
-  // throws, fall back silently to per-tick draining — the test suite does not
-  // depend on fs.watch firing.
-  let watcher: FSWatcher | null = null;
+  // throws, fall back silently to per-tick draining.
+  let watcher: ReturnType<OutboxWatch> | null = null;
   let watchDebounce: ReturnType<typeof setTimeout> | null = null;
-  try {
-    watcher = watch(outboxQueueDir, (_event, filename) => {
-      // Only react to outbox changes (filename may be null on some platforms —
-      // in that case react to any change, the mutex + file lock keep it safe).
-      if (filename && filename !== OUTBOX_FILENAME) return;
-      if (watchDebounce) clearTimeout(watchDebounce);
-      watchDebounce = setTimeout(() => { void drainNow(); }, OUTBOX_WATCH_DEBOUNCE_MS);
-    });
-  } catch {
-    watcher = null; // fs.watch unavailable — per-tick draining still covers it
+  let watchedDir: string | undefined;
+  function watchQueue(dir: string): void {
+    if (dir === watchedDir) return;
+    watcher?.close();
+    watchedDir = dir;
+    try {
+      mkdirSync(dir, { recursive: true });
+      watcher = watchOutboxFn(dir, (_event, filename) => {
+        if (filename && filename !== OUTBOX_FILENAME) return;
+        if (watchDebounce) clearTimeout(watchDebounce);
+        watchDebounce = setTimeout(() => { void drainNow(); }, OUTBOX_WATCH_DEBOUNCE_MS);
+      });
+    } catch {
+      watcher = null; // fs.watch unavailable — per-tick draining still covers it
+    }
   }
 
   // ── Spawn-request broker ──────────────────────────────────────────────────
@@ -1982,7 +1998,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         // failure must never crash the watchdog.
         try {
           const allAgents = await makeLazyAllAgents()();
-          const self = findAgent(allAgents, agentId);
+          const self = findAgent(allAgents, agentId, repoPath);
           if (self) {
             await notifyManager(
               self,
@@ -2206,6 +2222,7 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
         id: agentId,
         repoPath,
         repoName: "",
+        repoRegistryName: "",
         meta,
         state: resolvedState,
         age: "",

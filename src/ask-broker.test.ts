@@ -110,7 +110,7 @@ describe("ask broker", () => {
       lifecycle: {
         authorize: async () => null,
         findAgent: async (_repoPath, id) =>
-          ({ id, repoPath: repo, repoName: "repo", meta: { id } as unknown as AgentMeta, state: "waiting", age: "", archived: false, children: [] }) as Agent,
+          ({ id, repoPath: repo, repoName: "repo", repoRegistryName: "repo", meta: { id } as unknown as AgentMeta, state: "waiting", age: "", archived: false, children: [] }) as Agent,
         retire: async (agent) => {
           retired.push(agent);
           return { ok: true, exitCode: 0, stdout: `Closed agent: ${agent.id}`, stderr: "" };

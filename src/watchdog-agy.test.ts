@@ -51,6 +51,7 @@ import {
   setSendSpawnRunner,
   resetSendSpawnRunner,
 } from "./ib-commands";
+import { setUserHome, resetUserHome } from "./home";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { OUTBOX_FILENAME, agentOutboxDir } from "./outbox";
 import { AGY_HEARTBEAT_FILENAME } from "./hooks/agy-pre-invocation";
@@ -62,7 +63,7 @@ function agyMeta(id: string, extra?: Record<string, unknown>) {
     meta: {
       id,
       session_id: `sid-${id}`,
-      tmux_session: `tmux-${id}`,
+      tmux_session: `itsybitsy-abcdef01-${id}`,
       prompt: "test",
       manager: null,
       created: "2026-09-01T00:00:00Z",
@@ -87,8 +88,12 @@ function recordingRunner(sink: string[][]) {
 
 describe("Phase 3 — agy watchdog fallback keystrokes", () => {
   let sentKeys: string[][];
+  let home: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), "agy-wd-home-"));
+    setUserHome(home);
+    await Bun.write(join(home, ".itsybitsy", "machine-name"), "studio");
     sentKeys = [];
     setWatchdogSpawnRunner(recordingRunner(sentKeys));
     setPerAgentProbeTmuxPane(async () => ({ status: "live" }));
@@ -101,7 +106,9 @@ describe("Phase 3 — agy watchdog fallback keystrokes", () => {
     clearAllAgentsCache();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    resetUserHome();
+    await rm(home, { recursive: true, force: true });
     resetWatchdogSpawnRunner();
     resetPerAgentProbeTmuxPane();
     resetPerAgentCaptureTmux();
@@ -175,6 +182,8 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     tempRepo = await mkdtemp(join(tmpdir(), "agy-wd-repo-"));
     tempHome = await mkdtemp(join(tmpdir(), "agy-wd-home-"));
     setCoordinatorHome(tempHome);
+    setUserHome(tempHome);
+    await Bun.write(join(tempHome, ".itsybitsy", "machine-name"), "studio");
     agentId = "agy-hb";
     agentDir = join(tempRepo, ".itsybitsy", "agents", agentId);
     await mkdir(agentDir, { recursive: true });
@@ -207,6 +216,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     resetWatchdogReadAllAgents();
     resetSendSpawnRunner();
     resetCoordinatorHome();
+    resetUserHome();
     clearAllAgentsCache();
     await rm(tempRepo, { recursive: true, force: true });
     await rm(tempHome, { recursive: true, force: true });
@@ -262,7 +272,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     const manager = {
       id: managerId,
       session_id: "sid-mgr",
-      tmux_session: "tmux-mgr-1",
+      tmux_session: "itsybitsy-abcdef01-mgr-1",
       prompt: "manage",
       manager: null,
       created: "2026-09-01T00:00:00Z",
@@ -303,7 +313,7 @@ describe("Phase 3 — agy heartbeat liveness", () => {
     await runForTicks(3, { heartbeatExists: false });
 
     // The warning was enqueued to the manager's outbox exactly once.
-    const outboxPath = join(agentOutboxDir(managerId), OUTBOX_FILENAME);
+    const outboxPath = join(agentOutboxDir({ id: managerId, meta: null }), OUTBOX_FILENAME);
     const outbox = await readFile(outboxPath, "utf8").catch(() => "");
     expect(outbox).toContain("hooks never fired");
     const lines = outbox.split("\n").filter((l) => l.trim().length > 0);

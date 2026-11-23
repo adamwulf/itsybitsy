@@ -680,6 +680,9 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
   });
 
   test("run_command 'ib retire <other>' is denied when the caller is not the manager (checkIbCommandAccess parity)", async () => {
+    await Bun.write(join(tempHome, ".itsybitsy", "repos.json"), JSON.stringify({
+      version: 1, repos: [{ path: join(tempHome, "fake-repo"), name: "fake-repo" }],
+    }));
     // Create a sibling target agent this caller does not manage.
     const agentsDir = join(agentDir, "..");
     const targetDir = join(agentsDir, "agent-target");
@@ -693,6 +696,29 @@ describe("hookAgyPreToolUse — {decision,reason} contract", () => {
     }));
     expect(parsed.decision).toBe("deny");
     expect(parsed.reason).toContain("manager or spawner");
+  });
+
+  test("manager ownership and literal operands are enforced by run_command dispatch", async () => {
+    async function dispatch(CommandLine: string) {
+      return run(JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine, Cwd: join(agentDir, "repo") } } }));
+    }
+    await Bun.write(join(agentDir, "..", "other", "meta.json"), JSON.stringify({ id: "other", manager: "another" }));
+    expect((await dispatch("ib retire other <<'NOTE'\ntext with an unmatched ' quote\nNOTE")).reason).toContain("manager or spawner");
+    for (const command of ["ib retire", "ib re\\\ntire other", "ib retire oth\\\ner", "ib $verb other", "ib retire $target"]) {
+      expect((await dispatch(command)).decision).toBe("deny");
+    }
+    await Bun.write(join(agentDir, "..", "child", "meta.json"), JSON.stringify({ id: "child", manager: "agent-test01" }));
+    expect((await dispatch("ib retire child \\\n  --force")).decision).toBe("allow");
+    expect((await dispatch("ib retire child \\\n  --force\nib list")).decision).toBe("deny");
+    expect((await dispatch("ib retire --help")).decision).toBe("allow");
+  });
+
+  test("run_command 'ib peer id' is denied — ib peer is user-only (checkIbCommandAccess parity)", async () => {
+    const parsed = await run(JSON.stringify({
+      toolCall: { name: "run_command", args: { CommandLine: "ib peer id", Cwd: join(agentDir, "repo") } },
+    }));
+    expect(parsed.decision).toBe("deny");
+    expect(parsed.reason).toContain("'ib peer' is a user-only command");
   });
 
   test("an agent-type deny (Write) is loaded and enforced end-to-end", async () => {

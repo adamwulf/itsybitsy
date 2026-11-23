@@ -13,7 +13,7 @@ import {
   lstat,
 } from "fs/promises";
 import { tmpdir } from "os";
-import { chmodSync, existsSync, realpathSync, symlinkSync } from "fs";
+import { chmodSync, existsSync, renameSync, writeFileSync, realpathSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
 import {
   isPidAliveCtx,
@@ -156,6 +156,13 @@ import { claudeProjectDirFor, claudeScratchpadDirFor } from "./hooks/paths-table
 // be declared stuck.
 setDefaultTimeout(60_000);
 
+/** Register the fixture's repo under a throwaway user home for real queue operations. */
+async function useFixtureRepo(repo: string, home = join(repo, ".itsybitsy", "test-home")) {
+  setUserHome(home);
+  await saveRegistry({ repos: [{ path: repo, name: "test-repo" }] });
+  await Bun.write(join(home, ".itsybitsy", "machine-name"), "test-machine");
+}
+
 function makeAgent(
   id: string,
   repoPath: string,
@@ -264,6 +271,7 @@ describe("ib-commands", () => {
     beforeEach(async () => {
       spawnCalls = [];
       tempDir = await mkdtemp(join(tmpdir(), "send-test-"));
+      await useFixtureRepo(tempDir);
       // Create agent directory for log writing
       await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-abc"), { recursive: true });
 
@@ -272,8 +280,8 @@ describe("ib-commands", () => {
       // user's ~/.itsybitsy/config.json.
       setUserConfigPath(join(tempDir, "config.json"));
 
-      // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>,
-      // not under the per-worktree agent dir. Without this isolation, queued
+      // Keyless fixtures use getCoordinatorHome() / agents / <agent>.
+      // Without this isolation, queued
       // messages would accumulate in the developer's real
       // ~/.itsybitsy/agents/agent-abc/outbox.jsonl and leak from one test into
       // the next (sendMessage drains inline when no live watchdog), inflating
@@ -288,6 +296,7 @@ describe("ib-commands", () => {
     });
 
     afterEach(async () => {
+      resetUserHome();
       resetSendSpawnRunner();
       resetUserConfigPath();
       const { resetCoordinatorHome } = await import("./coordinator");
@@ -935,12 +944,13 @@ describe("sendMessage outbox integration", () => {
   // / agent.log / state writes. The outbox queue itself now lives under the
   // CENTRAL coordinator-home root (see queueDir below).
   let agentDir: string;
-  // Central outbox queue dir — agentOutboxDir(id) under setCoordinatorHome.
+  // Central outbox queue dir — agentOutboxDir(agent) under setCoordinatorHome.
   let queueDir: string;
 
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-outbox-"));
+    await useFixtureRepo(tempDir);
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     // Point the coordinator-home to a sandbox subdir so agentOutboxDir() resolves
@@ -948,7 +958,7 @@ describe("sendMessage outbox integration", () => {
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = agentOutboxDir("agent-abc");
+    queueDir = agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
@@ -958,6 +968,7 @@ describe("sendMessage outbox integration", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     resetSendSpawnRunner();
     resetUserConfigPath();
     const { resetCoordinatorHome } = await import("./coordinator");
@@ -1112,12 +1123,13 @@ describe("sendMessage send-time attachment staging", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-stage-"));
+    await useFixtureRepo(tempDir);
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(join(tempDir, "coord-home"));
     const { agentOutboxDir } = await import("./outbox");
-    queueDir = agentOutboxDir("agent-abc");
+    queueDir = agentOutboxDir(_makeAgent({ repoPath: tempDir, id: "agent-abc" }));
     await mkdir(queueDir, { recursive: true });
     setUserConfigPath(join(tempDir, "config.json"));
     setSendSpawnRunner((cmd: string[]) => {
@@ -1127,6 +1139,7 @@ describe("sendMessage send-time attachment staging", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     resetSendSpawnRunner();
     resetUserConfigPath();
     resetMessageAttachmentStagerForTesting();
@@ -1431,7 +1444,6 @@ describe("teamSend send-time attachment staging", () => {
   let baseDir: string;
   let homeDir: string;
   let repoDir: string;
-  let originalHome: string | undefined;
 
   function queueDirOf(id: string): string {
     return join(homeDir, "agents", id);
@@ -1465,10 +1477,10 @@ describe("teamSend send-time attachment staging", () => {
     repoDir = join(baseDir, "repo");
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
-    originalHome = process.env.HOME;
-    process.env.HOME = baseDir;
+    setUserHome(baseDir);
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
     setSendSpawnRunner(() => makeSpawnResult());
@@ -1484,8 +1496,7 @@ describe("teamSend send-time attachment staging", () => {
     resetCoordinatorHome();
     isPidAliveCtx.reset();
     resetReadAgentMetaCache();
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     await rm(baseDir, { recursive: true, force: true });
   });
 
@@ -1782,6 +1793,7 @@ describe("retireAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "kill-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
     // Mock both the lifecycle spawn runner and the kill/pause spawn runner
     const runner = mockSpawnFn(spawnCalls);
@@ -1790,6 +1802,7 @@ describe("retireAgent (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     lifecycleSpawnCtx.reset();
     resetKillPauseSpawnRunner();
     resetSandboxProxyKillForTesting();
@@ -1836,7 +1849,7 @@ describe("retireAgent (native)", () => {
   test("retire uses checked authenticated seal cleanup when direct deletion is denied", async () => {
     const id = "agent-retire-sealed";
     const sealHome = join(tempDir, "seal-home");
-    setUserHome(sealHome);
+    await useFixtureRepo(tempDir, sealHome);
     const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     const agent = makeAgent(id, tempDir, "running", {
       sandbox: { enabled: true, rawAllow: [], domains: [] },
@@ -2037,6 +2050,8 @@ describe("retire → rehire recovery", () => {
     tempDir = await mkdtemp(join(tmpdir(), "rehire-integration-"));
     originalHome = process.env.HOME;
     process.env.HOME = join(tempDir, "home");
+    setUserHome(process.env.HOME);
+    await Bun.write(join(process.env.HOME, ".itsybitsy", "machine-name"), "studio");
     await git("init", tempDir);
     await git("-C", tempDir, "config", "user.email", "test@example.com");
     await git("-C", tempDir, "config", "user.name", "Test User");
@@ -2065,6 +2080,7 @@ describe("retire → rehire recovery", () => {
     resetSealDirectVerifyForTesting();
     resetSealCapabilityCommandForTesting();
     isPidAliveCtx.reset();
+    resetUserHome();
     process.env.HOME = originalHome;
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -2075,7 +2091,7 @@ describe("retire → rehire recovery", () => {
   // "successfully resumes a retired no-worktree Claude agent" test above.
   async function plantRehirableArchive(
     agentId: string,
-    opts: { manager?: string | null; includeSettings?: boolean; worker?: boolean } = {},
+    opts: { manager?: string | null; includeSettings?: boolean; worker?: boolean; queueKey?: string } = {},
   ): Promise<{ archiveKey: string; archiveDir: string }> {
     const archiveKey = `20260703-120000-${agentId}`;
     const archiveDir = join(tempDir, ".itsybitsy", "archive", archiveKey);
@@ -2083,6 +2099,7 @@ describe("retire → rehire recovery", () => {
     const meta = makeAgent(agentId, tempDir, "stopped", {
       tmux_session: `itsybitsy-1a2b3c4d-${agentId}`,
       worktree: false,
+      queue_key: opts.queueKey,
       model: "claude:sonnet",
       claude_pid: "",
       session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -2150,11 +2167,11 @@ describe("retire → rehire recovery", () => {
     });
   }
 
-  // The manager's CENTRAL outbox queue dir (getCoordinatorHome()/agents/<id>).
-  // With HOME=tempDir/home and no setCoordinatorHome override, this resolves under
-  // tempDir/home/.itsybitsy.
-  function managerQueueDir(managerId: string): string {
-    return join(tempDir, "home", ".itsybitsy", "agents", managerId);
+  // The keyless manager fixture uses the flat queue at
+  // tempDir/home/.itsybitsy/agents/<agent>.
+  async function managerQueueDir(managerId: string): Promise<string> {
+    const { agentOutboxDir } = await import("./outbox");
+    return agentOutboxDir({ id: managerId, meta: null });
   }
 
   // Spawn runner matching the existing no-worktree success test: tmux
@@ -2178,6 +2195,22 @@ describe("retire → rehire recovery", () => {
     };
   }
 
+  test("rehire and resume restore the archived queue key after the repo name changes", async () => {
+    const id = "agent-rehire";
+    const { archiveDir } = await plantRehirableArchive(id);
+    const archiveMeta = join(archiveDir, "meta.json");
+    const key = `previous-machine/previous-repo/${id}`;
+    await Bun.write(archiveMeta, JSON.stringify({ ...await Bun.file(archiveMeta).json(), queue_key: key }));
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+    const result = await rehireAgent(id);
+    expect(result.ok).toBe(true);
+    const { meta } = await readAgentMeta(join(tempDir, ".itsybitsy", "agents", id));
+    expect(meta?.queue_key).toBe(key);
+    expect(existsSync(join(tempDir, "home", ".itsybitsy", "agents", key))).toBe(true);
+  });
+
   test("notifies a surviving live manager exactly once when a sub-agent is rehired", async () => {
     const agentId = "agent-sub";
     const managerId = "agent-mgr";
@@ -2196,7 +2229,7 @@ describe("retire → rehire recovery", () => {
     expect(result.stdout).toContain(`Rehired agent: ${agentId}`);
 
     const { readOutbox } = await import("./outbox");
-    const queue = await readOutbox(managerQueueDir(managerId));
+    const queue = await readOutbox(await managerQueueDir(managerId));
     expect(queue.length).toBe(1);
     expect(queue[0]!.message).toBe(`your sub agent ${agentId} has been rehired`);
     expect(queue[0]!.fromAgent).toBe(agentId);
@@ -2218,7 +2251,7 @@ describe("retire → rehire recovery", () => {
     expect(result.ok).toBe(true);
 
     const { readOutbox } = await import("./outbox");
-    expect(await readOutbox(managerQueueDir("agent-bystander"))).toEqual([]);
+    expect(await readOutbox(await managerQueueDir("agent-bystander"))).toEqual([]);
   });
 
   // The watchdog lifecycle broker rehires for a sandboxed agent, in that
@@ -2242,6 +2275,19 @@ describe("retire → rehire recovery", () => {
     } finally {
       await rm(otherRepo, { recursive: true, force: true });
     }
+  });
+
+  test("a repo-scoped rehire checks active nicknames across the registry", async () => {
+    const other = join(tempDir, "other-repo");
+    const id = "archived-id";
+    await plantRehirableArchive(id);
+    await Bun.write(join(other, ".itsybitsy", "agents", "other-id", "meta.json"),
+      JSON.stringify({ id: "other-id", nickname: id }));
+    await Bun.write(join(tempDir, "home", ".itsybitsy", "repos.json"), JSON.stringify({
+      version: 1, repos: [{ name: "one", path: tempDir }, { name: "two", path: other }],
+    }));
+    const result = await rehireAgent(id, { repoPath: tempDir });
+    expect(result.stderr).toContain("collides with active nickname on 'other-id'");
   });
 
   for (const [legacyRole, worker] of [["manager", false], ["worker", true]] as const) {
@@ -2320,7 +2366,7 @@ describe("retire → rehire recovery", () => {
     expect(result.ok).toBe(true);
 
     const { readOutbox } = await import("./outbox");
-    expect(await readOutbox(managerQueueDir(managerId))).toEqual([]);
+    expect(await readOutbox(await managerQueueDir(managerId))).toEqual([]);
   });
 
   test("enabled rehire resumes when its sandboxed caller cannot read the new seal", async () => {
@@ -2619,6 +2665,73 @@ describe("retire → rehire recovery", () => {
     expect(await git("-C", tempDir, "rev-parse", manifest.headRef)).toBe(
       manifest.gitHead,
     );
+  });
+
+  test("rehire accepts messages after resume preflight fails", async () => {
+    const id = "agent-return";
+    const queueKey = `original-host/original-repo/${id}`;
+    const { archiveDir } = await plantRehirableArchive(id, { queueKey });
+    const archiveMetaPath = join(archiveDir, "meta.json");
+    const archiveMeta = await Bun.file(archiveMetaPath).json();
+    delete archiveMeta.session_id;
+    await Bun.write(archiveMetaPath, JSON.stringify(archiveMeta));
+    setRehireSpawnRunner(successRunner());
+    setNukeResumeSpawnRunner(successRunner());
+
+    const result = await rehireAgent(id);
+    expect(result.ok).toBe(false);
+    expect(result.stdout).toContain("Reconstructed stopped agent");
+    expect(result.stderr).toContain("session_id");
+    const meta = await Bun.file(join(tempDir, ".itsybitsy", "agents", id, "meta.json")).json();
+    expect(meta.queue_key).toBe(queueKey);
+
+    setSendSpawnRunner(() => makeSpawnResult(1)); // No running tmux session.
+    try {
+      const sent = await sendMessage(makeAgent(id, tempDir, "stopped", meta), "for the next resume", {
+        cwd: "/",
+        stageAttachments: true, // Dashboard sends acknowledge a durable enqueue.
+      });
+      expect(sent.ok).toBe(true);
+    } finally {
+      resetSendSpawnRunner();
+    }
+    const { readOutbox } = await import("./outbox");
+    const queue = join(tempDir, "home", ".itsybitsy", "agents", queueKey);
+    expect((await readOutbox(queue)).map(message => message.message)).toEqual(["for the next resume"]);
+  });
+
+  test("rehire reports an occupied archived queue and preserves its messages", async () => {
+    const id = "agent-return";
+    const queueKey = `studio/registered/${id}`;
+    await plantRehirableArchive(id, { queueKey });
+    const queue = join(tempDir, "home", ".itsybitsy", "agents", queueKey);
+    const { enqueueOutbox, readOutbox } = await import("./outbox");
+    const message = await enqueueOutbox(queue, { message: "already queued", fromAgent: "", raw: false });
+    setRehireSpawnRunner(successRunner());
+
+    const result = await rehireAgent(id);
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(`Archived queue key '${queueKey}' is already reserved at ${queue}`);
+    expect(result.stderr).toContain("Check 'ib list' for a live owner first.");
+    expect(result.stderr).toContain(
+      "Move the directory aside and retry only after verifying that the retirement warning names this path " +
+      "and that no active agent's meta.json in any unregistered repo still uses this key.",
+    );
+    expect(await readOutbox(queue)).toEqual([message]);
+    expect(existsSync(join(tempDir, ".itsybitsy", "agents", id, "meta.json"))).toBe(false);
+  });
+
+  test("a failed reconstruction releases the queue it reserved", async () => {
+    const id = "agent-return";
+    const queueKey = `studio/registered/${id}`;
+    const { archiveDir } = await plantRehirableArchive(id, { queueKey });
+    await rm(join(archiveDir, "exit-check.sh"));
+    setRehireSpawnRunner(successRunner());
+
+    const result = await rehireAgent(id);
+    expect(result.stderr).toContain("retirement archive is missing exit-check.sh");
+    expect(existsSync(join(tempDir, "home", ".itsybitsy", "agents", queueKey))).toBe(false);
+    expect(existsSync(join(tempDir, ".itsybitsy", "agents", id))).toBe(false);
   });
 
   test("successfully resumes a retired no-worktree Claude agent", async () => {
@@ -3028,6 +3141,7 @@ describe("nukeAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "nuke-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep") || cmd.includes("list-sessions")
@@ -3037,6 +3151,7 @@ describe("nukeAgent (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
@@ -3138,6 +3253,7 @@ describe("nukeAllAgents (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "nukeall-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
     const runner = mockSpawnFnWithFailures(spawnCalls, (cmd) =>
       cmd.includes("has-session") || cmd.includes("pgrep") || cmd.includes("list-sessions")
@@ -3147,6 +3263,7 @@ describe("nukeAllAgents (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     await rm(tempDir, { recursive: true, force: true });
@@ -3188,6 +3305,16 @@ describe("nukeAllAgents (native)", () => {
     expect(result.stdout).toContain("Nuked 0 agent(s)");
   });
 
+  test.each(["repo id", "agents directory"])("skips the orphan session sweep without a %s", async missing => {
+    const agentsDir = join(tempDir, ".itsybitsy", "agents");
+    const repoIdPath = join(tempDir, ".itsybitsy", "repo-id");
+    if (missing === "repo id") await mkdir(agentsDir);
+    else await Bun.write(repoIdPath, "abcd1234");
+    expect((await nukeAllAgents(tempDir)).ok).toBe(true);
+    expect(spawnCalls.some(cmd => cmd.includes("list-sessions"))).toBe(false);
+    if (missing === "repo id") expect(existsSync(repoIdPath)).toBe(false);
+  });
+
   test("skips directories without meta.json", async () => {
     await mkdir(join(tempDir, ".itsybitsy", "agents", "no-meta"), { recursive: true });
 
@@ -3207,6 +3334,7 @@ describe("nukeAllAgents (native)", () => {
 
 describe("resumeAgent (native)", () => {
   let tempDir: string;
+  let fixtureHome: string;
   let spawnCalls: string[][];
 
   // Default runner mimics the canonical "stopped agent, no live tmux" path:
@@ -3250,6 +3378,8 @@ describe("resumeAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "resume-test-"));
+    fixtureHome = await mkdtemp("/tmp/ib-home-");
+    await useFixtureRepo(tempDir, fixtureHome);
     spawnCalls = [];
     dispatcherDryRunCalls = [];
     const runner = makeDefaultResumeRunner(spawnCalls);
@@ -3275,6 +3405,8 @@ describe("resumeAgent (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
+    await rm(fixtureHome, { recursive: true, force: true });
     lifecycleSpawnCtx.reset();
     resetNukeResumeSpawnRunner();
     resetSendSpawnRunner();
@@ -3963,9 +4095,9 @@ describe("resumeAgent (native)", () => {
         spawnCalls.push(cmd);
         const cmdStr = cmd.join(" ");
         if (cmdStr.includes("tmux has-session")) return makeSpawnResult(1);
-        if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+        if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(0, `.git\n.git\n${coordTempDir}`);
+        if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
         if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, coordTempDir);
-        if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
         if (cmdStr.includes("capture-pane")) return makeSpawnResult(0, "Claude Code v1.0");
         return makeSpawnResult(0);
       };
@@ -4600,6 +4732,7 @@ describe("mergeAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "merge-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
   });
 
@@ -4824,7 +4957,7 @@ describe("mergeAgent (native)", () => {
 
   test("succeeds with full merge sequence and includes merge commit SHA in stdout", async () => {
     const sealHome = join(tempDir, "seal-home");
-    setUserHome(sealHome);
+    await useFixtureRepo(tempDir, sealHome);
     const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     const agent = makeAgent("agent-abc", tempDir);
@@ -4868,7 +5001,7 @@ describe("mergeAgent (native)", () => {
 
   test("merge reports checked seal cleanup failure before removing agent state", async () => {
     const sealHome = join(tempDir, "seal-home");
-    setUserHome(sealHome);
+    await useFixtureRepo(tempDir, sealHome);
     const id = "agent-seal-cleanup-failure";
     const agentDir = join(tempDir, ".itsybitsy", "agents", id);
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -5814,7 +5947,7 @@ describe("mergeAgent --keep (real git)", () => {
     homeDir = await mkdtemp(join(tmpdir(), "merge-keep-home-"));
     originalHome = process.env.HOME;
     process.env.HOME = homeDir;
-    setUserHome(homeDir);
+    await useFixtureRepo(tempDir, homeDir);
     setUserConfigPath(join(homeDir, ".itsybitsy", "config.json"));
     await git("init", "-q", "-b", "main", tempDir);
     await git("-C", tempDir, "config", "user.email", "test@example.com");
@@ -6133,12 +6266,14 @@ describe("newAgent (native)", () => {
         return makeSpawnResult("", 0);
       }
 
-      // git rev-parse --git-common-dir (resolveGitRoot)
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${tempDir}`, 0);
+
+      // git rev-parse --git-common-dir
       if (cmdStr.includes("--git-common-dir")) {
         return makeSpawnResult(".git", 0);
       }
 
-      // git rev-parse --show-toplevel (resolveGitRoot)
+      // git rev-parse --show-toplevel
       if (cmdStr.includes("--show-toplevel")) {
         return makeSpawnResult(tempDir, 0);
       }
@@ -6249,6 +6384,9 @@ describe("newAgent (native)", () => {
     const fakeHome = join(tempDir, "home");
     await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
     process.env.HOME = fakeHome;
+    setUserHome(fakeHome);
+    await Bun.write(join(fakeHome, ".itsybitsy", "machine-name"), "studio");
+    await saveRegistry({ repos: [{ path: tempDir, name: basename(tempDir) }] });
     // Populate the embedded defaults (including _all.md and _non_coordinator.md).
     // ensureAgentTypesDir() writes all embedded files only on first run.
     await (await import("./agent-types")).ensureAgentTypesDir();
@@ -6261,9 +6399,7 @@ describe("newAgent (native)", () => {
     // Also set the lifecycle spawn runner (used by resolveGitRoot)
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(tempDir, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${tempDir}`, 0);
       return makeSpawnResult("", 0);
     });
   });
@@ -6281,6 +6417,7 @@ describe("newAgent (native)", () => {
     setSealDeleteForTesting(null);
     lifecycleSpawnCtx.reset();
     resetUserConfigPath();
+    resetUserHome();
     if (originalHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -10167,6 +10304,154 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(meta.worker).toBe(true);
   });
 
+  test("newAgent initializes the machine identity before creating its queue", async () => {
+    const file = join(tempDir, "home", ".itsybitsy", "machine-name");
+    await rm(file);
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("first spawn", { name: "first-agent" });
+    expect(result.ok).toBe(true);
+    const machine = (await Bun.file(file).text()).trim();
+    expect(machine).not.toBe("");
+    const { meta } = await readAgentMeta(join(agentsDir, "first-agent"));
+    expect(meta?.queue_key).toBe(`${machine}/${basename(tempDir)}/first-agent`);
+    expect(await readdir(join(tempDir, "home", ".itsybitsy", "agents", machine, basename(tempDir))))
+      .toContain("first-agent");
+  });
+
+  test.each(["duplicate name", "malformed registry"])("refuses %s before allocating lifecycle or queue directories", async (reason) => {
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const home = join(tempDir, "home", ".itsybitsy");
+    if (reason === "duplicate name") {
+      await saveRegistry({ repos: [{ path: tempDir, name: "Repo" }, { path: "/other", name: "repo" }] });
+    } else {
+      await Bun.write(join(home, "repos.json"), "{");
+    }
+    const result = await callNewAgent("first spawn", { name: "review" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(reason === "duplicate name" ? "Ambiguous queue" : "Cannot read repo registry");
+    expect(existsSync(agentsDir)).toBe(false);
+    expect(existsSync(join(tempDir, ".itsybitsy", "archive"))).toBe(false);
+    expect(existsSync(join(home, "agents"))).toBe(false);
+  });
+
+  test.each([true, false])("coordinator reset preserves teardown warnings (respawn succeeds: %p)", async succeeds => {
+    const id = basename(tempDir);
+    const options = { type: "repo-coordinator" };
+    setWatchdogSpawnFn(() => ({ pid: 99971 }));
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    expect((await callNewAgent("original coordinator", options)).ok).toBe(true);
+    const meta = await Bun.file(join(agentsDir, id, "meta.json")).json();
+    const leftover = join(tempDir, "home", ".itsybitsy", "agents", meta.queue_key, "outbox.jsonl");
+    await mkdir(leftover);
+    if (succeeds) {
+      // The old reservation remains, but respawn uses the new registration.
+      await saveRegistry({ repos: [{ path: tempDir, name: "renamed" }] });
+    }
+
+    spawnCalls = [];
+    setNukeResumeSpawnRunner(() => makeSpawnResult("", 1));
+    setKillPauseSpawnRunner(() => makeSpawnResult("", 1));
+    setNewAgentCallerMetaReader(() => null);
+    try {
+      const result = await resumeAgent(makeAgent(id, tempDir, "running", meta));
+      expect(result).toMatchObject({ ok: succeeds });
+      expect(result.stderr).toContain(`Warning: could not unlink ${leftover}:`);
+      expect(result.cleanupWarnings).toContain(leftover);
+      if (!succeeds) expect(result.stderr).toContain("Reset failed during respawn:");
+    } finally {
+      resetKillPauseSpawnRunner();
+      resetNewAgentCallerMetaReader();
+    }
+  });
+
+  test("a live coordinator keeps its queue when a second same-basename checkout takes its registry name", async () => {
+    const { addRepo, removeRepo } = await import("./registry");
+    const first = join(tempDir, "a", "project");
+    const second = join(tempDir, "b", "project");
+    await mkdir(first, { recursive: true });
+    await mkdir(second, { recursive: true });
+    // Each fixture checkout is its own root, including the pre-registered tempDir.
+    lifecycleSpawnCtx.set((cmd) => {
+      const fields = cmd.slice(4).map(flag => flag === "--show-toplevel" ? cmd[2] : ".git");
+      return makeSpawnResult(fields.join("\n"), 0);
+    });
+    const live = new Set<string>();
+    const spawn = mockSpawnRunner();
+    setNewAgentSpawnRunner((cmd) => {
+      if (cmd[0] === "tmux" && cmd[1] === "has-session") {
+        const target = cmd[cmd.indexOf("-t") + 1]!.slice(1, -1);
+        return makeSpawnResult("", live.has(target) ? 0 : 1);
+      }
+      if (cmd[0] === "tmux" && cmd[1] === "new-session") live.add(cmd[cmd.indexOf("-s") + 1]!);
+      return spawn(cmd);
+    });
+    expect((await addRepo(first, "shared")).ok).toBe(true);
+    expect((await newAgent(first, "start", { type: "repo-coordinator", _cwd: first })).ok).toBe(true);
+    const queueDir = join(tempDir, "home", ".itsybitsy", "agents", "studio", "shared", "project");
+    const file = join(queueDir, "outbox.jsonl");
+    await Bun.write(file, "pending for first");
+    expect((await removeRepo(first)).ok).toBe(true);
+    expect((await addRepo(second, "shared")).ok).toBe(true);
+    const refused = await newAgent(second, "start", { type: "repo-coordinator", _cwd: second });
+    expect(refused.ok).toBe(false);
+    expect(refused.stderr).toContain(`queue directory already exists at ${queueDir}`);
+    expect(existsSync(join(second, ".itsybitsy", "agents", "project"))).toBe(false);
+    expect(await Bun.file(file).text()).toBe("pending for first");
+    expect(live.size).toBe(1);
+  });
+
+  test("sending to a saved retired recipient leaves its key free for a fresh spawn", async () => {
+    const id = "review";
+    const options = { name: id, noWorktree: true };
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    expect((await callNewAgent("original", options)).ok).toBe(true);
+    const meta = await Bun.file(join(agentsDir, id, "meta.json")).json();
+    const saved = makeAgent(id, tempDir, "running", meta);
+    const queue = join(tempDir, "home", ".itsybitsy", "agents", meta.queue_key);
+    setKillPauseSpawnRunner(() => makeSpawnResult("", 1));
+    try {
+      const retired = await retireAgent(saved);
+      expect(retired.stderr).toBe("");
+      expect(retired.ok).toBe(true);
+    } finally {
+      resetKillPauseSpawnRunner();
+    }
+    const late = await sendMessage(saved, "from the open dialog", { cwd: "/" });
+    expect(late.ok).toBe(false);
+    expect(late.stderr).toContain(`agent ${meta.queue_key} no longer exists`);
+    expect(existsSync(queue)).toBe(false);
+    spawnCalls = [];
+    expect((await callNewAgent("replacement", options)).ok).toBe(true);
+    expect(existsSync(queue)).toBe(true);
+  });
+
+  test("a reservation cleanup warning preserves the worktree failure", async () => {
+    const parent = join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir));
+    const spawn = mockSpawnRunner({ failWorktree: true });
+    setNewAgentSpawnRunner(cmd => {
+      if (cmd.includes("worktree") && cmd.includes("add")) {
+        renameSync(parent, parent + ".held");
+        writeFileSync(parent, "obstruct removal of the queue leaf");
+      }
+      return spawn(cmd);
+    });
+    const failed = await callNewAgent("task", { name: "review" });
+    expect(failed.ok).toBe(false);
+    expect(failed.stderr).toContain("could not create worktree");
+    expect(failed.stderr).toContain(`Warning: could not remove reserved queue directory ${join(parent, "review")}:`);
+  });
+
+  test("a failed worktree allocation releases the reserved queue for a retry", async () => {
+    const queueDir = join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir), "review");
+    setNewAgentSpawnRunner(mockSpawnRunner({ failWorktree: true }));
+    const failure = await callNewAgent("task", { name: "review" });
+    expect(failure.stderr).toContain("could not create worktree");
+    expect(existsSync(queueDir)).toBe(false);
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    expect((await callNewAgent("task", { name: "review" })).ok).toBe(true);
+    expect(existsSync(queueDir)).toBe(true);
+  });
+
   test("writes meta.json with state='creating' BEFORE git worktree add runs", async () => {
     // Verifies Fix 1: the early meta.json write happens before any slow step.
     // On large repos, `git worktree add` can take 60-90s. Without the early
@@ -10603,9 +10888,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -10644,9 +10927,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -10656,6 +10937,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     const coordId = result.stdout.trim();
     const meta = await Bun.file(join(coordRepo, ".itsybitsy", "agents", coordId, "meta.json")).json();
+    expect(meta.queue_key).toBe(`studio/~c00d0002/${coordId}`);
     expect(meta.agentType).toBe("repo-coordinator");
     expect(meta.model).toBe("claude:claude-opus-4-7");
 
@@ -11115,6 +11397,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(worktreeAdd).toBeUndefined();
 
     // Agent dir should be cleaned up
+    expect(existsSync(join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir), "test-held"))).toBe(false);
     const exists = await Bun.file(join(agentsDir, "test-held", "meta.json")).exists().catch(() => false);
     expect(exists).toBe(false);
   });
@@ -11122,6 +11405,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   test("cleans up on tmux new-session failure", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner({ failTmuxNewSession: true }));
     const result = await callNewAgent("task", { name: "test-fail-tmux" });
+    expect(existsSync(join(tempDir, "home", ".itsybitsy", "agents", "studio", basename(tempDir), "test-fail-tmux"))).toBe(false);
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("tmux session");
 
@@ -11326,7 +11610,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     setNewAgentSpawnRunner(mockSpawnRunner());
     const result = await callNewAgent("task", { manager: "nonexistent" });
     expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("No matching agent found");
+    expect(result.stderr).toContain("Agent not found: nonexistent");
   });
 
   test("noWorktree mode skips worktree creation", async () => {
@@ -11583,9 +11867,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -11748,9 +12030,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -11796,9 +12076,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(".git", 0);
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(coordRepo, 0);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
       return makeSpawnResult("", 0);
     });
 
@@ -11815,41 +12093,23 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   // --- Group K: repo name collision enforcement ---
 
   test("K1: rejects --name matching a repo display name (nickname)", async () => {
-    const originalHome = process.env.HOME;
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
-    process.env.HOME = fakeHome;
-    try {
-      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
-        repos: [{ path: "/tmp/some-repo", name: "some-repo", nickname: "my-agent" }],
-      }));
-      setNewAgentSpawnRunner(mockSpawnRunner());
-      const result = await callNewAgent("task", { name: "my-agent" });
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain('collides with registered repo name');
-    } finally {
-      process.env.HOME = originalHome;
-      await rm(fakeHome, { recursive: true, force: true });
-    }
+    await saveRegistry({
+      repos: [{ path: "/tmp/some-repo", name: "some-repo", nickname: "my-agent" }],
+    });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "my-agent" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('collides with registered repo name');
   });
 
   test("K2: rejects --name matching a repo basename", async () => {
-    const originalHome = process.env.HOME;
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
-    process.env.HOME = fakeHome;
-    try {
-      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
-        repos: [{ path: "/tmp/tools-repo", name: "tools" }],
-      }));
-      setNewAgentSpawnRunner(mockSpawnRunner());
-      const result = await callNewAgent("task", { name: "tools" });
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain('collides with registered repo name');
-    } finally {
-      process.env.HOME = originalHome;
-      await rm(fakeHome, { recursive: true, force: true });
-    }
+    await saveRegistry({
+      repos: [{ path: "/tmp/tools-repo", name: "tools" }],
+    });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "tools" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('collides with registered repo name');
   });
 
   test("K3: rejects --name 'system' as reserved", async () => {
@@ -11860,76 +12120,44 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   });
 
   test("K4: allows --name that doesn't collide with any repo", async () => {
-    const originalHome = process.env.HOME;
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-collision-test-"));
-    process.env.HOME = fakeHome;
-    try {
-      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
-        repos: [{ path: "/tmp/other-repo", name: "other-repo" }],
-      }));
-      setNewAgentSpawnRunner(mockSpawnRunner());
-      const result = await callNewAgent("task", { name: "unique-name" });
-      expect(result.ok).toBe(true);
-    } finally {
-      process.env.HOME = originalHome;
-      await rm(fakeHome, { recursive: true, force: true });
-    }
+    await saveRegistry({
+      repos: [{ path: "/tmp/other-repo", name: "other-repo" }],
+    });
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "unique-name" });
+    expect(result.ok).toBe(true);
+    const { meta } = await readAgentMeta(join(agentsDir, "unique-name"));
+    expect(meta?.queue_key).toBe("studio/~abcd1234/unique-name");
   });
 
   test("K5: rejects --name matching an existing agent's nickname (global)", async () => {
-    const originalHome = process.env.HOME;
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-nick-collision-"));
-    process.env.HOME = fakeHome;
-    try {
-      // Register THIS repo (tempDir) so readAllAgents() scans it, then plant an
-      // existing agent whose nickname is "taken".
-      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
-        repos: [{ path: tempDir, name: "nick-repo" }],
-      }));
-      // The agent-types dir must exist for newAgent's ensureAgentTypesDir().
-      await (await import("./agent-types")).ensureAgentTypesDir();
-      const existingDir = join(agentsDir, "agent-existing");
-      await mkdir(existingDir, { recursive: true });
-      await Bun.write(join(existingDir, "meta.json"), JSON.stringify({ id: "agent-existing", nickname: "taken", tmux_session: "t-existing" }));
-      resetReadAgentMetaCache();
+    await saveRegistry({
+      repos: [{ path: tempDir, name: "nick-repo" }],
+    });
+    const existingDir = join(agentsDir, "agent-existing");
+    await mkdir(existingDir, { recursive: true });
+    await Bun.write(join(existingDir, "meta.json"), JSON.stringify({ id: "agent-existing", nickname: "taken", tmux_session: "t-existing" }));
+    resetReadAgentMetaCache();
 
-      setNewAgentSpawnRunner(mockSpawnRunner());
-      const result = await callNewAgent("task", { name: "taken" });
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain("collides with an existing agent nickname");
-    } finally {
-      if (originalHome === undefined) delete process.env.HOME;
-      else process.env.HOME = originalHome;
-      await rm(fakeHome, { recursive: true, force: true });
-    }
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "taken" });
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("collides with an existing agent nickname");
   });
 
   test("K6: allows --name matching an ARCHIVED agent's nickname", async () => {
-    const originalHome = process.env.HOME;
-    const fakeHome = await mkdtemp(join(tmpdir(), "ib-nick-collision-archived-"));
-    process.env.HOME = fakeHome;
-    try {
-      await mkdir(join(fakeHome, ".itsybitsy"), { recursive: true });
-      await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
-        repos: [{ path: tempDir, name: "nick-repo" }],
-      }));
-      await (await import("./agent-types")).ensureAgentTypesDir();
-      // Plant an ARCHIVED agent whose nickname is "taken" — should NOT block reuse.
-      const archiveDir = join(tempDir, ".itsybitsy", "archive", "agent-archived");
-      await mkdir(archiveDir, { recursive: true });
-      await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id: "agent-archived", nickname: "taken", tmux_session: "t-archived" }));
-      resetReadAgentMetaCache();
+    await saveRegistry({
+      repos: [{ path: tempDir, name: "nick-repo" }],
+    });
+    // Plant an ARCHIVED agent whose nickname is "taken" — should NOT block reuse.
+    const archiveDir = join(tempDir, ".itsybitsy", "archive", "agent-archived");
+    await mkdir(archiveDir, { recursive: true });
+    await Bun.write(join(archiveDir, "meta.json"), JSON.stringify({ id: "agent-archived", nickname: "taken", tmux_session: "t-archived" }));
+    resetReadAgentMetaCache();
 
-      setNewAgentSpawnRunner(mockSpawnRunner());
-      const result = await callNewAgent("task", { name: "taken" });
-      expect(result.ok).toBe(true);
-    } finally {
-      if (originalHome === undefined) delete process.env.HOME;
-      else process.env.HOME = originalHome;
-      await rm(fakeHome, { recursive: true, force: true });
-    }
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    const result = await callNewAgent("task", { name: "taken" });
+    expect(result.ok).toBe(true);
   });
 
   // --- Spawn logging tests ---
@@ -12892,13 +13120,14 @@ describe("reassignAgent (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "reassign-test-"));
+    await useFixtureRepo(tempDir);
     // Mock send spawn runner so notifications don't actually send
     setSendSpawnRunner((cmd: string[]) => ({
       stdout: new Response("").body!,
       stderr: new Response("").body!,
       exited: Promise.resolve(cmd.includes("has-session") ? 1 : 0), // no tmux sessions
     } as SpawnResult));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // Keyless fixtures use getCoordinatorHome() / agents / <agent>.
     // Isolate so the reassign-notification sendMessage calls don't bleed into
     // the developer's real ~/.itsybitsy/agents/.../outbox.jsonl or leak from
     // one test to the next (sendMessage drains inline when no live watchdog).
@@ -12907,6 +13136,7 @@ describe("reassignAgent (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     resetSendSpawnRunner();
     const { resetCoordinatorHome } = await import("./coordinator");
     resetCoordinatorHome();
@@ -14623,9 +14853,9 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
       }
       if (cmdStr.includes("worktree remove")) return makeSpawnResult(0);
       if (cmdStr.includes("branch -D")) return makeSpawnResult(0);
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(0, `.git\n.git\n${tempDir}`);
+      if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
       if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, tempDir);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
       if (cmdStr.includes("which gh")) return makeSpawnResult(1);
       if (cmdStr.includes("git") && cmd[cmd.length - 1] === "remote") return makeSpawnResult(0);
       if (cmdStr.includes("capture-pane")) return makeSpawnResult(0, "Claude Code v1.0");
@@ -14678,9 +14908,7 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
 
     lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
       const cmdStr = cmd.join(" ");
-      if (cmdStr.includes("--git-common-dir")) return makeSpawnResult(0, ".git");
-      if (cmdStr.includes("--show-toplevel")) return makeSpawnResult(0, tempDir);
-      if (cmdStr.includes("--git-dir")) return makeSpawnResult(0, ".git");
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(0, `.git\n.git\n${tempDir}`);
       return makeSpawnResult(0);
     });
   });
@@ -15790,6 +16018,7 @@ describe("respawnSelf (native)", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "respawn-self-test-"));
+    await useFixtureRepo(tempDir);
     spawnCalls = [];
     const runner = mockSpawnFn(spawnCalls);
     lifecycleSpawnCtx.set(runner);
@@ -15798,6 +16027,7 @@ describe("respawnSelf (native)", () => {
   });
 
   afterEach(async () => {
+    resetUserHome();
     lifecycleSpawnCtx.reset();
     resetKillPauseSpawnRunner();
     resetNukeResumeSpawnRunner();
@@ -15939,9 +16169,11 @@ describe("long-running-op guard", () => {
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "op-guard-test-"));
+    await useFixtureRepo(tempDir);
   });
 
   afterEach(async () => {
+    resetUserHome();
     isPidAliveCtx.reset();
     nowMsCtx.reset();
     lifecycleSpawnCtx.reset();
@@ -16311,10 +16543,9 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
   let baseDir: string;
   let homeDir: string;
   let repoDir: string;
-  let originalHome: string | undefined;
   let spawnCalls: string[][];
 
-  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<id>/
+  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<agent>/
   // under our test setCoordinatorHome(homeDir)). The per-worktree agent dir
   // still hosts meta.json / meta.transient.json / agent.log — only the message
   // queue lives here.
@@ -16369,12 +16600,12 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
     repoDir = join(baseDir, "repo");
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
-    originalHome = process.env.HOME;
-    process.env.HOME = baseDir;
+    setUserHome(baseDir);
     spawnCalls = [];
 
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
     await saveRegistry({ repos: [{ path: repoDir, name: basename(repoDir) }] });
 
@@ -16407,13 +16638,40 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
     resetUserConfigPath();
     resetCoordinatorHome();
     isPidAliveCtx.reset();
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     resetReadAgentMetaCache();
     await rm(baseDir, { recursive: true, force: true });
   });
 
   // --- retireAgent ---------------------------------------------------------
+
+  test("retire finishes and reports every leftover queue or usage file", async () => {
+    const id = "agent-leaver";
+    const agentDir = await plantDeparting(id);
+    const dir = queueDirOf(id);
+    const leftovers = ["outbox.jsonl", "outbox.jsonl.tmp", "claude-rate-limits.json.tmp.123"];
+    for (const file of leftovers) await mkdir(join(dir, file));
+    await Bun.write(join(dir, ".outbox.lock"), "lock");
+    const result = await retireAgent(agentOf(id));
+    expect(result.ok).toBe(true);
+    for (const file of leftovers) expect(result.stderr).toContain(`Warning: could not unlink ${join(dir, file)}:`);
+    expect(existsSync(agentDir)).toBe(false);
+    expect(await readdir(dir)).not.toContain(".outbox.lock");
+  });
+
+  test.each(["nuke", "nuke-all"])("%s returns each cleanup warning once", async command => {
+    const id = "agent-leaver";
+    await plantDeparting(id);
+    const dir = queueDirOf(id);
+    const children = ["outbox.jsonl", "claude-rate-limits.json"];
+    for (const child of children) await mkdir(join(dir, child));
+    const result = command === "nuke" ? await nukeAgent(agentOf(id)) : await nukeAllAgents(repoDir);
+    expect(result.ok).toBe(true);
+    for (const child of children) {
+      const prefix = `Warning: could not unlink ${join(dir, child)}:`;
+      expect(result.stderr.split("\n").filter(line => line.startsWith(prefix))).toHaveLength(1);
+    }
+  });
 
   test("retireAgent fires a per-agent leave notice to survivors, stamped to the departed id", async () => {
     const { createTeam, addMember, getTeam } = await import("./teams");
@@ -16511,7 +16769,11 @@ describe("teams: teardown leave-notices (retire / merge / nuke)", () => {
     lifecycleSpawnCtx.set(mergeRunner);
     setMergeSpawnRunner(mergeRunner);
 
+    const leftover = join(queueDirOf("agent-merged"), "outbox.jsonl.tmp");
+    await mkdir(leftover);
     const res = await mergeAgent(agentOf("agent-merged"), repoDir);
+    expect(res.stderr).toContain(`Warning: could not unlink ${leftover}:`);
+    expect(existsSync(join(repoDir, ".itsybitsy", "agents", "agent-merged"))).toBe(false);
     expect(res.ok).toBe(true);
 
     const team = await getTeam("backend");
@@ -16685,10 +16947,9 @@ describe("teamAdd suppressJoinNotice opt", () => {
   let baseDir: string;
   let homeDir: string;
   let repoDir: string;
-  let originalHome: string | undefined;
   let repoEntry: import("./registry").RepoEntry;
 
-  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<id>/
+  // Returns the CENTRAL outbox queue dir for `id` (~/.itsybitsy/agents/<agent>/
   // under our test setCoordinatorHome(homeDir)). The per-worktree agent dir
   // still hosts meta.json / meta.transient.json / agent.log — only the message
   // queue lives here.
@@ -16721,10 +16982,10 @@ describe("teamAdd suppressJoinNotice opt", () => {
     repoDir = join(baseDir, "repo");
     await mkdir(homeDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
-    originalHome = process.env.HOME;
-    process.env.HOME = baseDir;
+    setUserHome(baseDir);
     const { setCoordinatorHome } = await import("./coordinator");
     setCoordinatorHome(homeDir);
+    await Bun.write(join(homeDir, "machine-name"), "test-machine");
     setUserConfigPath(join(homeDir, "config.json"));
     repoEntry = { path: repoDir, name: basename(repoDir) };
     await saveRegistry({ repos: [repoEntry] });
@@ -16739,8 +17000,7 @@ describe("teamAdd suppressJoinNotice opt", () => {
     resetUserConfigPath();
     resetCoordinatorHome();
     isPidAliveCtx.reset();
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    resetUserHome();
     resetReadAgentMetaCache();
     await rm(baseDir, { recursive: true, force: true });
   });

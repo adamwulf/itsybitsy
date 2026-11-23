@@ -35,7 +35,7 @@ describe("InfoPanelComponent", () => {
 
   test("renders agent info with stoplight indicators", () => {
     const panel = new InfoPanelComponent();
-    panel.displayHeight = 10;
+    panel.displayHeight = 11;
     const agent = makeAgent({ id: "agent-abc" });
     // Use current process PID so the "alive" check passes
     agent.meta.claude_pid = String(process.pid);
@@ -50,7 +50,7 @@ describe("InfoPanelComponent", () => {
     expect(text).toContain("Watchdog");
     expect(text).toContain("opus");
     expect(text).toContain("Test summary text");
-    expect(lines.length).toBe(10);
+    expect(lines.length).toBe(11);
   });
 
   describe("CLI process stoplight label", () => {
@@ -193,6 +193,18 @@ describe("InfoPanelComponent", () => {
     });
   });
 
+  test("a Full id row shows machine/repo registry name/agent, for two agents with one id in two repos", () => {
+    const panel = new InfoPanelComponent();
+    panel.displayHeight = 12;
+    panel.machineName = "studio";
+    const fullId = () => panel.render(60).map(stripAnsi).find((l) => l.startsWith("Full id:"));
+    panel.agent = makeAgent({ id: "dup", repoPath: "/repos/alpha", repoName: "alpha" });
+    expect(fullId()).toBe("Full id: studio/alpha/dup");
+    // A nicknamed repo: the tree shows "Beta Repo", the id uses the registry name.
+    panel.agent = makeAgent({ id: "dup", repoPath: "/repos/beta", repoName: "Beta Repo" });
+    expect(fullId()).toBe("Full id: studio/beta/dup");
+  });
+
   test("renders a red Claude dot when a live PID started after the agent", () => {
     const panel = new InfoPanelComponent();
     const agent = makeAgent({ id: "agent-recycled" });
@@ -231,8 +243,8 @@ describe("InfoPanelComponent", () => {
 
   test("renders model name from agent meta", () => {
     const panel = new InfoPanelComponent();
-    // 4 stoplights + Type + Sandbox + Paths + Model + "Summary:" header + 1 body line
-    panel.displayHeight = 10;
+    // 4 stoplights + Type + Sandbox + Paths + Full id + Model + "Summary:" header + 1 body line
+    panel.displayHeight = 11;
     const agent = makeAgent({ id: "agent-xyz" });
     agent.meta.model = "sonnet";
     agent.meta.prompt = "build a widget";
@@ -741,7 +753,7 @@ describe("InfoPanelComponent", () => {
 
     test("team branch takes precedence and does not break agent rendering", () => {
       const panel = new InfoPanelComponent();
-      panel.displayHeight = 8;
+      panel.displayHeight = 9;
       panel.selectedTeam = { name: "ops", createdEpoch: 1700000000, createdBy: "@system", memberCount: 1 };
       let text = panel.render(60).map(stripAnsi).join("\n");
       expect(text).toContain("@ops");

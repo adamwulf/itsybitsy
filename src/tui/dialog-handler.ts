@@ -11,6 +11,7 @@ import { RESET, BOLD, DIM, REVERSE, GREEN, DIM_GRAY } from "./colors";
 import { resolvePasteText, cancelPaste, sanitizePasteForSingleLine } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { sanitizeAgentNameInput } from "../validation";
+import { handlePeersDialogInput, type PeersDialogState } from "./peers-dialog";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
@@ -83,6 +84,7 @@ export type DialogState =
       onCancel?: () => void;
     } & DialogCommon)
   | ({ type: "fuzzy"; prompt: string; query: string; allItems: string[]; filteredIndices: number[]; filteredItems: string[]; selectedIndex: number; onSelect: (originalIndex: number) => void } & DialogCommon)
+  | ({ type: "cleanup-warnings"; text: string; offset: number } & DialogCommon)
   | ({ type: "help"; lines: string[] } & DialogCommon)
   | ({
       type: "textarea";
@@ -152,6 +154,8 @@ export type DialogState =
       scrollOffset: number;
       onSave: (allowList: string[], denyList: string[]) => void;
     } & DialogCommon)
+  /** The Peers dialog (`I`): src/tui/peers-dialog.ts. */
+  | (PeersDialogState & DialogCommon)
   | null;
 
 /** Folder-browser focus targets, in visual (Tab) order. */
@@ -239,10 +243,24 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
     return true;
   }
 
+  if (dialog.type === "cleanup-warnings") {
+    if (data === "j" || matchesKey(data, Key.down)) dialog.offset++;
+    else if (data === "k" || matchesKey(data, Key.up)) dialog.offset = Math.max(0, dialog.offset - 1);
+    else if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) ctx.closeDialog();
+    ctx.tui?.requestRender();
+    return true;
+  }
+
   if (dialog.type === "help") {
     // Any key dismisses help
     ctx.closeDialog();
     return true;
+  }
+
+  // The Peers dialog gives Esc its own meaning at each stage (cancel, keep the
+  // name, close), so it runs before the generic Escape below.
+  if (dialog.type === "peers") {
+    return handlePeersDialogInput(ctx, dialog, data);
   }
 
   // Escape: permissions-editor in input mode exits input mode first.

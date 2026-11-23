@@ -107,10 +107,11 @@ describe("CLI --help end-to-end", () => {
     expect(exitCode).toBe(0);
   });
 
-  test("rehire --help prints exact-id recovery usage", async () => {
+  test("rehire --help lists qualified archive addresses", async () => {
     const { stdout, exitCode } = await runCli(["rehire", "--help"]);
     expect(stdout).toContain("Usage: ib rehire");
-    expect(stdout).toContain("exact agent ID");
+    expect(stdout).toContain("exact agent ID or nickname");
+    expect(stdout).toContain("machine/repo/agent");
     expect(exitCode).toBe(0);
   });
 

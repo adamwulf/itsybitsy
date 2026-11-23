@@ -16,7 +16,7 @@ import * as runtimeNames from "./runtime-names";
 import { watch, type FSWatcher } from "fs";
 import { join } from "path";
 import { readAllAgents, buildAgentTree, flattenAgentTree, readPendingQuestions, detectAgentStates, computeAge } from "./agents";
-import type { Agent, FlatEntry, PendingQuestion, ReadAgentsResult } from "./agents";
+import type { Agent, FlatEntry, PendingQuestion, ReadAgentsResult, RepoReadInput } from "./agents";
 import { repoDisplayName } from "./registry";
 import type { RepoEntry } from "./registry";
 import { checkRepoHealth, checkGlobalHealth } from "./health-check";
@@ -64,13 +64,13 @@ export async function mapInChunks<T, R>(
  * coordinator's coordinatorSpawnCtx).
  */
 export interface WatcherAgentsApi {
-  readAllAgents: (repos: Array<{ path: string; name: string }>, includeArchived: boolean) => Promise<ReadAgentsResult>;
+  readAllAgents: (repos: RepoReadInput[], includeArchived: boolean) => Promise<ReadAgentsResult>;
   detectAgentStates: (
     agents: Agent[],
     opts?: { reap?: boolean; confirmTmuxMissingAcrossPolls?: boolean }
   ) => Promise<void>;
   buildAgentTree: (agents: Agent[]) => Agent[];
-  flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string }[], coordinator?: { state: string; age: string }, groupByParent?: boolean) => FlatEntry[];
+  flattenAgentTree: (roots: Agent[], repos?: string[] | { name: string; path: string; registryName?: string }[], coordinator?: { state: string; age: string }, groupByParent?: boolean) => FlatEntry[];
   readPendingQuestions: (repoPath: string) => Promise<PendingQuestion[]>;
 }
 
@@ -98,6 +98,7 @@ export class AgentWatcher {
   private refreshQueued = false;
   private hasCompletedInitialRefresh = false;
   private _lastAgents: Agent[] = [];
+  private _lastDetectedAgents: Agent[] = [];
   private _lastLiveTmuxSessions: Set<string> = new Set();
   /** Cached coordinator tmux session_created epoch — immutable for the session
    * lifetime, so we query tmux display-message once and reuse. Cleared when
@@ -123,6 +124,19 @@ export class AgentWatcher {
   /** Public read-only access to the most recently loaded agents list */
   get lastAgents(): Agent[] {
     return this._lastAgents;
+  }
+
+  /**
+   * The agents last passed to onUpdate: state detection has finished for every
+   * one of them, so none is still the placeholder "unknown" that readAllAgents
+   * starts with. `lastAgents` is replaced at the start of a refresh, before
+   * detection fills the states in over several awaits; this one only once the
+   * pass is done. Each refresh builds new Agent objects, so a later pass never
+   * rewrites these. Empty until the first refresh completes. The trusted peer
+   * link serves it (src/peers/peer-link.ts).
+   */
+  get lastDetectedAgents(): Agent[] {
+    return this._lastDetectedAgents;
   }
 
   /** Public read-only access to the most recent live tmux session set. */
@@ -400,7 +414,10 @@ export class AgentWatcher {
     const tRefreshStart = isInitial ? Date.now() : 0;
     try {
       const agentsApi = agentsCtx.fn;
-      const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r) }));
+      // The display name is what the tree shows; the registry name keys its rows
+      // and is what a peer is sent (SPEC §17.1, §20.4), so a nickname rename
+      // never re-keys a row.
+      const reposWithDisplayNames = this.repos.map((r) => ({ path: r.path, name: repoDisplayName(r), registryName: r.name }));
       // Skip archived agents: the dashboard never renders them (flattenAgentTree
       // drops every archived row) and re-stat'ing thousands of immutable archived
       // meta.json files on every refresh tick is pure waste. See readAllAgents docs.
@@ -431,7 +448,7 @@ export class AgentWatcher {
       const tDetectMs = isInitial ? Date.now() - tDetectStart : 0;
 
       const roots = agentsApi.buildAgentTree(agents);
-      const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path }));
+      const repoInfos = this.repos.map((r) => ({ name: repoDisplayName(r), path: r.path, registryName: r.name }));
       const flatList = agentsApi.flattenAgentTree(roots, repoInfos, coordinatorInfo, this.groupByParent);
 
       // Read pending questions from all repos
@@ -454,6 +471,7 @@ export class AgentWatcher {
       this.runHealthChecks();
 
       if (!this.running) return;
+      this._lastDetectedAgents = agents;
       this.events.onUpdate(agents, flatList, questions, orphanedTmuxSessions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));

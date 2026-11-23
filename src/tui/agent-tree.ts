@@ -4,11 +4,16 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { resolveAgentIcon, isVisibleUnderRunningFilter, subtreeHasNonStopped, type Agent, type FlatEntry } from "../agents";
+import { resolveAgentIcon, isRunningState, isVisibleUnderRunningFilter, subtreeHasNonStopped, type Agent, type FlatEntry, type RemoteEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
-import { RESET, BOLD, DIM, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
+import { RESET, BOLD, DIM, ITALIC, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
+import { collectPeerRepos, peerEntryKey, remoteDisplayName, truncatePeerField, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
+import { repoDisplayName, type RepoEntry } from "../registry";
+import type { PeerLinkState } from "../peers/poller";
+import { localAgentKey, repoRowKey } from "./row-keys";
+import { FALLBACK_MACHINE_NAME } from "../machine-name";
 
 export const MAX_TREE_HEIGHT = 7;
 const MIN_STATE_COL_WIDTH = 8; // minimum: length of "complete"
@@ -176,33 +181,130 @@ export function formatCoordinatorRow(
 const SYSTEM_COORDINATOR_ID = "__system-coordinator__";
 
 /**
+ * The selection key of a row on the machine named `machine`, or null for an
+ * inert one (parent-header). Every agent row is keyed by its fully qualified
+ * id `<machine>/<repo>/<agent>` and a repo header by `/<lowercased repo>`
+ * (src/tui/row-keys.ts); a remote agent uses its peer's name as the
+ * machine (peerEntryKey). The system coordinator keeps its sentinel.
+ */
+function entryKey(f: FlatEntry, machine: string): string | null {
+  switch (f.kind) {
+    case "system-coordinator":
+      return SYSTEM_COORDINATOR_ID;
+    case "repo-header":
+      return repoRowKey(f.repoRegistryName);
+    case "parent-header":
+      return null;
+    case "agent":
+      return localAgentKey(machine, f.agent);
+    case "remote-repo-header":
+    case "remote-agent":
+      return peerEntryKey(f);
+  }
+}
+
+/** Widest state column for remote agents: a remote state is the other install's text. */
+const MAX_REMOTE_STATE_COL_WIDTH = 16;
+
+/**
+ * The color of a state the other install sent (already through displayState).
+ * Only a state's own entry counts: indexing the color table with remote text
+ * such as `constructor` or `toString` would otherwise draw an inherited
+ * function's source on the row.
+ */
+export function remoteStateColor(state: string): string {
+  const colors = getStateColors();
+  return Object.hasOwn(colors, state) ? colors[state]! : colors.unknown!;
+}
+
+/** Reverse-video a selected row across its full width, as the local rows do. */
+function highlightRow(truncated: string, selected: boolean, width: number): string {
+  if (!selected) return truncated;
+  const pad = Math.max(0, width - visibleWidth(truncated));
+  return `${REVERSE}${truncated.replaceAll(RESET, RESET + REVERSE)}${" ".repeat(pad)}${RESET}`;
+}
+
+export function formatRemoteRepoRow(
+  entry: Extract<RemoteEntry, { kind: "remote-repo-header" }>,
+  selected: boolean,
+  width: number,
+): string {
+  const triangle = entry.agentCount ? "▾" : "▸";
+  const name = truncatePeerField(entry.repoName, width - 2);
+  return highlightRow(truncateToWidth(`${BOLD}${triangle} ${name}${RESET}`, width, ""), selected, width);
+}
+
+/**
+ * A remote agent row: `<connector><name>  <state>`, indented under its repo
+ * header. The name and the state are cut to their columns (nameColWidth and
+ * stateColWidth come from the visible remote rows, already capped to the
+ * width), so a long remote value cannot push the state off the row. Dimmed
+ * while the peer is not connected.
+ */
+export function formatRemoteAgentRow(
+  entry: Extract<RemoteEntry, { kind: "remote-agent" }>,
+  selected: boolean,
+  width: number,
+  nameColWidth: number,
+  stateColWidth: number,
+): string {
+  const prefix = entry.connector;
+  const name = truncatePeerField(remoteDisplayName(entry.remote), Math.max(1, nameColWidth - visibleWidth(prefix)));
+  const namePad = " ".repeat(Math.max(0, nameColWidth - visibleWidth(prefix) - visibleWidth(name)));
+  const fullState = displayState(entry.remote.state);
+  const state = truncatePeerField(fullState, stateColWidth);
+  const statePad = " ".repeat(Math.max(0, stateColWidth - visibleWidth(state)));
+  const line = entry.stale
+    ? `${ITALIC}${DIM}${prefix}${name}${namePad}  ${state}${statePad}${RESET}`
+    : `${ITALIC}${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${statePad}${RESET}`;
+  return highlightRow(truncateToWidth(line, width, ""), selected, width);
+}
+
+/** The name and state column widths for the visible remote agent rows at `width`. */
+function remoteColumnWidths(visible: FlatEntry[], width: number, localIndent: string): { nameColWidth: number; stateColWidth: number } {
+  let nameColWidth = 0;
+  let stateColWidth = MIN_STATE_COL_WIDTH;
+  let indent = localIndent;
+  for (const item of visible) {
+    if (item.kind === "remote-repo-header") indent = "";
+    if (item.kind !== "remote-agent") continue;
+    nameColWidth = Math.max(nameColWidth, visibleWidth(indent + item.connector + remoteDisplayName(item.remote)));
+    stateColWidth = Math.max(stateColWidth, visibleWidth(displayState(item.remote.state)));
+  }
+  stateColWidth = Math.min(stateColWidth, MAX_REMOTE_STATE_COL_WIDTH);
+  return { nameColWidth: Math.min(nameColWidth, Math.max(1, width - 2 - stateColWidth)), stateColWidth };
+}
+
+/**
  * Rebuild box-drawing connectors (├──, └──, │) for the visible agents in
  * `entries`. Used when a filter hides intermediate agents — the connectors
  * computed at flatten time reference now-hidden ancestors, so each visible
  * agent's effective parent is the nearest visible ancestor in its
  * meta.manager chain, and "is last sibling" is recomputed against the
  * visible siblings only. Repo headers and the system coordinator pass
- * through untouched; order of entries is preserved. `allAgents` provides
- * the full agent lookup so the chain can walk past hidden ancestors.
+ * through untouched; order of entries is preserved. `allAgents` maps every
+ * agent's fully qualified id (on the machine named `machine`) to the agent,
+ * so the chain can walk past hidden ancestors. Every map here is keyed by
+ * fully qualified id, so the same agent id in two repos never mixes.
  */
-function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<string, Agent>): FlatEntry[] {
+function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<string, Agent>, machine: string): FlatEntry[] {
   const hasRepoHeaders = entries.some((e) => e.kind === "repo-header");
-  // Visible agent ids — to decide which managers in the chain are kept.
-  const visibleIds = new Set<string>();
+  // Visible agent keys — to decide which managers in the chain are kept.
+  const visibleKeys = new Set<string>();
   for (const e of entries) {
-    if (e.kind === "agent") visibleIds.add(e.agent.id);
+    if (e.kind === "agent") visibleKeys.add(localAgentKey(machine, e.agent));
   }
 
-  // For each visible agent, compute its effective parent id (nearest visible
+  // For each visible agent, compute its effective parent (nearest visible
   // ancestor in its meta.manager chain) and its visible-ancestor chain (root
-  // → A's parent), preserving the original meta.manager order. The chain is
-  // constrained to the same repoName as the agent (ib supports cross-repo
-  // spawn, but the agent tree groups agents by repo — a cross-repo manager
-  // would point at a parent that isn't in the same group's sibling pool, so
-  // we treat the agent as an effective root of its own repo). A visited set
-  // guards against meta.manager cycles (self-reference, A→B→A); without it
-  // the loop would hang the TUI on every render.
-  const effectiveParentId = new Map<string, string | null>();
+  // → A's parent), preserving the original meta.manager order. A manager is
+  // always in its agent's own repo (`ib new-agent` resolves it in that repo's
+  // agents dir), so each manager is looked up under the agent's repo; one the
+  // lookup does not find ends the chain, and the agent is an effective root
+  // of its repo. A visited set guards against meta.manager cycles
+  // (self-reference, A→B→A); without it the loop would hang the TUI on every
+  // render.
+  const effectiveParentKey = new Map<string, string | null>();
   const ancestorChain = new Map<string, string[]>();
   for (const e of entries) {
     if (e.kind !== "agent") continue;
@@ -212,17 +314,17 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
     while (mgr) {
       if (visited.has(mgr)) break;
       visited.add(mgr);
-      const parentAgent = allAgents.get(mgr);
-      // Only include managers that are visible AND in the same repo.
-      if (parentAgent && parentAgent.repoName === e.agent.repoName && visibleIds.has(mgr)) {
-        chain.push(mgr);
-      }
+      const mgrKey = localAgentKey(machine, { repoRegistryName: e.agent.repoRegistryName, id: mgr });
+      const parentAgent = allAgents.get(mgrKey);
       if (!parentAgent) break;
+      // Only include managers that are visible.
+      if (visibleKeys.has(mgrKey)) chain.push(mgrKey);
       mgr = parentAgent.meta.manager;
     }
     chain.reverse();
-    ancestorChain.set(e.agent.id, chain);
-    effectiveParentId.set(e.agent.id, chain.length > 0 ? chain[chain.length - 1]! : null);
+    const key = localAgentKey(machine, e.agent);
+    ancestorChain.set(key, chain);
+    effectiveParentKey.set(key, chain.length > 0 ? chain[chain.length - 1]! : null);
   }
 
   // Per repo group, determine each visible agent's "is last visible sibling"
@@ -239,14 +341,14 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
     for (let j = groupStart; j < i; j++) {
       const e = entries[j]!;
       if (e.kind !== "agent") continue;
-      const parent = effectiveParentId.get(e.agent.id) ?? null;
-      lastByParent.set(parent, e.agent.id);
+      const key = localAgentKey(machine, e.agent);
+      lastByParent.set(effectiveParentKey.get(key) ?? null, key);
     }
     for (let j = groupStart; j < i; j++) {
       const e = entries[j]!;
       if (e.kind !== "agent") continue;
-      const parent = effectiveParentId.get(e.agent.id) ?? null;
-      isLastSibling.set(e.agent.id, lastByParent.get(parent) === e.agent.id);
+      const key = localAgentKey(machine, e.agent);
+      isLastSibling.set(key, lastByParent.get(effectiveParentKey.get(key) ?? null) === key);
     }
     groupStart = i + 1;
   }
@@ -256,7 +358,7 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
   // flattenAgentTree's `multiRoot ? [isLast] : []`). Hoisted out of the
   // per-agent loop to keep this O(N) instead of O(N²).
   let visibleRootCount = 0;
-  for (const p of effectiveParentId.values()) if (p === null) visibleRootCount++;
+  for (const p of effectiveParentKey.values()) if (p === null) visibleRootCount++;
 
   // Build connector strings from the ancestor chain + per-node last-sibling
   // bits. Matches flattenAgentTree's connector format exactly.
@@ -266,10 +368,11 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
       result.push(e);
       continue;
     }
-    const chain = ancestorChain.get(e.agent.id) ?? [];
+    const key = localAgentKey(machine, e.agent);
+    const chain = ancestorChain.get(key) ?? [];
     const ancestorIsLast: boolean[] = [];
-    for (const ancestorId of chain) ancestorIsLast.push(isLastSibling.get(ancestorId) ?? true);
-    ancestorIsLast.push(isLastSibling.get(e.agent.id) ?? true);
+    for (const ancestorKey of chain) ancestorIsLast.push(isLastSibling.get(ancestorKey) ?? true);
+    ancestorIsLast.push(isLastSibling.get(key) ?? true);
     // Roots: when there's no repo header (single-repo mode), a sole visible
     // root gets no connector — matches flattenAgentTree's `multiRoot ? [isLast] : []`.
     if (chain.length === 0 && !hasRepoHeaders && visibleRootCount <= 1) {
@@ -289,21 +392,36 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
 /** Agent tree component with height constraint and scrolling */
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
+  private visibleCache: { inputs: unknown[]; rows: FlatEntry[] } | null = null;
+  private peerRepos = new Map<string, PeerRepo>();
+  /** Local single-repo trees normally omit their header. Peering needs its registration, even when empty. */
+  registeredRepos: readonly RepoEntry[] = [];
   private selectedIndex = 0;
   private _maxHeight = MAX_TREE_HEIGHT;
   private scrollOffset = 0;
+  /** The selected row's key (entryKey): what keeps the selection on its row as the list changes. */
   private selectedId: string | null = null;
+  /**
+   * The selected local row's repo path (a repo header's own, an agent's); null
+   * for the system coordinator, a remote row or no selection. Set with
+   * selectedId. Rows share a key only for duplicate registry names from before
+   * names were unique (SPEC §17.1 Row keys); the key plus this path names the
+   * one row the user chose (matchesSelection), through refreshes, rows added
+   * or removed above it, and the V filter's sticky reveal.
+   */
+  private selectedRowRepo: string | null = null;
   /**
    * Whether the Agents panel currently has a selected row (§17.1). The panel
    * STARTS in no-selection and only enters the selected state via j/k
-   * (moveSelection), shift+j/k (moveToRepo), selectAgentById (the @-jump),
+   * (moveSelection), shift+j/k (moveToRepo), selectAgent/selectAgentByKey (the @-jump),
    * selectByRepoPath, or selectSystemCoordinator. selectedIndex is kept as a non-negative value for the
    * scroll math even when nothing is selected; hasSelection is the single
    * source of truth for "is anything selected". When false, `selection`
    * returns null and no row renders in reverse video.
    */
   private hasSelection = false;
-  questionAgentIds: Set<string> = new Set();
+  /** Fully qualified ids (agentKey) of the agents with a pending question: their names render red. */
+  questionAgentKeys: Set<string> = new Set();
   healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
   /**
@@ -344,13 +462,20 @@ export class AgentTreeComponent implements Component {
    * session-only.) */
   pinnedRepoPaths: Set<string> = new Set();
 
-  /** Agent ids the user has favorited via '.', plus agents made from the
-   * Favorites tab (keyed by bare agent id, like selection). Drives the
-   * Favorites view filter below and the yellow ★ on agent rows in every tab.
-   * Persisted across sessions in ~/.itsybitsy/layout.json
-   * (LayoutState.favoriteAgentIds) — the dashboard restores it in
-   * applyLayout() and writes it in persistLayout() after each change. Ids of
-   * agents that no longer exist are kept (never pruned). */
+  /**
+   * This machine's name (src/machine-name.ts): the first segment of every
+   * local agent key (SPEC §17.1, src/tui/row-keys.ts). The dashboard sets it at
+   * startup, before any row is selected or favorited.
+   */
+  machineName: string = FALLBACK_MACHINE_NAME;
+
+  /** Fully qualified ids (`<machine>/<repo>/<agent>`, like selection) of the
+   * agents the user has favorited via '.', plus agents made from the
+   * Favorites tab. Drives the Favorites view filter below and the yellow ★ on
+   * agent rows in every tab. Persisted across sessions in
+   * ~/.itsybitsy/layout.json (LayoutState.favoriteAgentIds) — the dashboard
+   * restores it in applyLayout() and writes it in persistLayout() after each
+   * change. Ids of agents that no longer exist are kept (never pruned). */
   favoriteAgentIds: Set<string> = new Set();
 
   /**
@@ -392,6 +517,7 @@ export class AgentTreeComponent implements Component {
   setFlatList(list: FlatEntry[]) {
     const wasEmpty = this._flatList.length === 0;
     this._flatList = list;
+    this.visibleCache = null;
     // §17.1: setFlatList must NOT silently (re-)assert a selection. On first
     // populate (and any repopulate) the panel STAYS in whatever selection state
     // it was already in. Repopulating while in no-selection keeps it in
@@ -413,13 +539,106 @@ export class AgentTreeComponent implements Component {
     }
   }
 
+  /** A local agent's row key: its fully qualified id on this machine. */
+  agentKey(agent: Agent): string {
+    return localAgentKey(this.machineName, agent);
+  }
+
+  /** The selection key of a row (see entryKey), or null for a parent-header. */
+  private rowKey(f: FlatEntry): string | null {
+    return entryKey(f, this.machineName);
+  }
+
+  /** Whether `key` is a local row's: this machine's, or the system coordinator's. */
+  private isLocalKey(key: string): boolean {
+    return key === SYSTEM_COORDINATOR_ID || key.startsWith(`${this.machineName}/`);
+  }
+
+  /** Whether the local agent is a favorite. */
+  isFavorite(agent: Agent): boolean {
+    return this.favoriteAgentIds.has(this.agentKey(agent));
+  }
+
+  setPeerLinks(links: readonly PeerLinkState[]): void {
+    this.peerRepos = collectPeerRepos(links);
+    this.visibleCache = null;
+    this.resyncAfterFilterChange();
+  }
+
+  private localRows(): FlatEntry[] {
+    const rows = this.flatList.filter((f) => f.kind !== "agent" || !f.agent.archived);
+    const repo = this.registeredRepos.length === 1 ? this.registeredRepos[0] : undefined;
+    if (!repo || (!this.peerRepos.size && this.selectedId !== repoRowKey(repo.name))
+        || rows.some((row) => row.kind === "repo-header")) return rows;
+    const agents = rows.filter((row) => row.kind === "agent");
+    const header: FlatEntry = { kind: "repo-header", repoName: repoDisplayName(repo), repoRegistryName: repo.name,
+      repoPath: repo.path, hasAgents: agents.length > 0, hasRunningAgents: agents.some((r) => isRunningState(r.agent.state)),
+      hasNonStoppedAgents: agents.some((r) => isVisibleUnderRunningFilter(r.agent.state)) };
+    const coordinator = rows.filter((r) => r.kind === "system-coordinator");
+    // A single root in the headerless layout has no leading connector.
+    const oneRoot = agents.filter((r) => r.depth === 0).length === 1;
+    return [...coordinator, header, ...agents.map((r) => oneRoot
+      ? { ...r, connector: r.depth === 0 ? "└── " : "    " + r.connector } : r)];
+  }
+
+  /** Insert each peer forest after its local agents. Unmatched repos follow in display order. */
+  private unifiedRows(local: FlatEntry[]): FlatEntry[] {
+    if (this.peerRepos.size === 0) return local;
+    const remaining = new Map(this.peerRepos);
+    const rows: FlatEntry[] = [];
+    const agentsFor = (repo: PeerRepo) => visibleRemoteAgents(repo, (row) => this.isSelectedRow(row)
+      || (!this.favoritesOnly && (this.repoFilter !== "running-only" || isVisibleUnderRunningFilter(row.remote.state))));
+    for (let i = 0; i < local.length; i++) {
+      const header = local[i]!;
+      const repo = header.kind === "repo-header" ? remaining.get(repoRowKey(header.repoRegistryName)) : undefined;
+      if (header.kind !== "repo-header" || !repo) {
+        rows.push(header);
+        continue;
+      }
+      remaining.delete(repoRowKey(header.repoRegistryName));
+      const agents = agentsFor(repo);
+      rows.push(agents.length > 0 && !header.hasAgents ? { ...header, hasAgents: true } : header);
+      while (local[i + 1]?.kind === "agent") rows.push(local[++i]!);
+      for (const agent of agents) rows.push(agent);
+    }
+    for (const repo of remaining.values()) {
+      rows.push(repo.header);
+      for (const agent of agentsFor(repo)) rows.push(agent);
+    }
+    return rows;
+  }
+
   get visibleList(): FlatEntry[] {
-    const base = this.flatList.filter((f) =>
-      f.kind === "repo-header" || f.kind === "system-coordinator" || f.kind === "parent-header" || !f.agent.archived
-    );
-    if (this.repoFilter === "all" && !this.favoritesOnly) return base;
+    // Local lists can be edited in place before the watcher publishes them.
+    // Cache the merged view for one published pair of local and peer snapshots.
+    if (this.peerRepos.size === 0) return this.buildVisibleList();
+    const single = this.registeredRepos.length === 1 ? this.registeredRepos[0] : undefined;
+    const inputs: unknown[] = [single?.name, single?.nickname, single?.path, this.repoFilter, this.favoritesOnly];
+    if (this.repoFilter !== "all" || this.favoritesOnly) {
+      inputs.push(this.machineName, this.hasSelection, this.selectedId, this.selectedRowRepo, this._stickyRevealedRepoPath);
+    }
+    // These public sets can change in place. Only the active filters depend on them.
+    if (this.repoFilter !== "all") {
+      inputs.push(this.pinnedRepoPaths.size);
+      for (const path of this.pinnedRepoPaths) inputs.push(path);
+    }
+    if (this.favoritesOnly) {
+      for (const id of this.favoriteAgentIds) inputs.push(id);
+    }
+    const cached = this.visibleCache;
+    if (cached && inputs.length === cached.inputs.length && inputs.every((v, i) => v === cached.inputs[i])) {
+      return cached.rows;
+    }
+    const rows = this.buildVisibleList();
+    this.visibleCache = { inputs, rows };
+    return rows;
+  }
+
+  private buildVisibleList(): FlatEntry[] {
+    const base = this.unifiedRows(this.localRows());
+    if (!this.peerRepos.size && this.repoFilter === "all" && !this.favoritesOnly) return base;
     // Running-only and the Favorites view can hide intermediate agents, so
-    // they need an id → agent lookup over the whole flat list (the favorites
+    // they need a key → agent lookup over the whole flat list (the favorites
     // ancestor walk and the connector rebuild). Build it once per read —
     // visibleList is read many times per render.
     const needsLookup = this.favoritesOnly || this.repoFilter === "running-only";
@@ -429,19 +648,29 @@ export class AgentTreeComponent implements Component {
     if (this.repoFilter !== "all") entries = this.applyRepoFilter(entries);
     if (this.favoritesOnly) entries = this.dropAgentlessRepoHeaders(entries);
     entries = this.pruneEmptyParentHeaders(entries);
-    if (!needsLookup) return entries;
+
     // The precomputed connectors reference hidden ancestors, so rebuild them
     // against only the visible subset.
-    return recomputeConnectorsForVisible(entries, allAgents);
+    if (needsLookup) entries = recomputeConnectorsForVisible(entries, allAgents, this.machineName);
+    if (this.peerRepos.size > 0) {
+      // A following remote root continues the local roots' outermost branch.
+      let remoteFollows = false;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const row = entries[i]!;
+        if (row.kind !== "agent") remoteFollows = row.kind === "remote-agent";
+        else if (remoteFollows) entries[i] = { ...row, connector: row.connector.replace(/^└/, "├").replace(/^    /, "│   ") };
+      }
+    }
+    return entries;
   }
 
-  /** Map every agent id in the flat list to its agent. */
+  /** Map every agent's fully qualified id in the flat list to the agent. */
   private buildAgentLookup(): Map<string, Agent> {
-    const byId = new Map<string, Agent>();
+    const byKey = new Map<string, Agent>();
     for (const e of this._flatList) {
-      if (e.kind === "agent") byId.set(e.agent.id, e.agent);
+      if (e.kind === "agent") byKey.set(this.agentKey(e.agent), e.agent);
     }
-    return byId;
+    return byKey;
   }
 
   /**
@@ -449,37 +678,37 @@ export class AgentTreeComponent implements Component {
    * favorite ancestor, or is the selected row. The system coordinator and the
    * headers pass through — dropAgentlessRepoHeaders and
    * pruneEmptyParentHeaders remove the empty headers after the V filter ran.
-   * `byId` maps every agent id in the flat list to its agent.
+   * `byKey` maps every agent's fully qualified id in the flat list to it.
    */
-  private applyFavoritesFilter(entries: FlatEntry[], byId: Map<string, Agent>): FlatEntry[] {
-    const selectedId = this.hasSelection ? this.selectedId : null;
+  private applyFavoritesFilter(entries: FlatEntry[], byKey: Map<string, Agent>): FlatEntry[] {
     return entries.filter((f) => {
       if (f.kind !== "agent") return true;
-      return f.agent.id === selectedId || this.hasFavoriteInChain(f.agent, byId);
+      return this.isSelectedRow(f) || this.hasFavoriteInChain(f.agent, byKey);
     });
   }
 
   /**
-   * True if `agent` or any ancestor in its meta.manager chain IN THE SAME REPO
-   * is a favorite. The walk stops at a manager that lives in another repo (the
-   * same-repoName rule as recomputeConnectorsForVisible). A manager that is
-   * gone from the flat list (retired/merged — ib does not cascade) still
-   * counts if its id is a favorite, so the orphans of a gone favorite manager
-   * keep showing; the walk ends there because the gone manager's own manager
-   * is unknown. Agents a favorite spawns in other repos record only
+   * True if `agent` or any ancestor in its meta.manager chain is a favorite.
+   * A manager is always in its agent's own repo (`ib new-agent` resolves it in
+   * that repo's agents dir), so each one is looked up, and checked, under the
+   * agent's repo: the same id in another repo is another agent. A manager that
+   * is gone from the flat list (retired/merged — ib does not cascade) still
+   * counts if it is a favorite, so the orphans of a gone favorite manager keep
+   * showing; the walk ends there because the gone manager's own manager is
+   * unknown. Agents a favorite spawns in other repos record only
    * meta.spawned_by, never meta.manager, and are not followed. A visited set
    * guards against meta.manager cycles.
    */
-  private hasFavoriteInChain(agent: Agent, byId: Map<string, Agent>): boolean {
-    if (this.favoriteAgentIds.has(agent.id)) return true;
+  private hasFavoriteInChain(agent: Agent, byKey: Map<string, Agent>): boolean {
+    if (this.isFavorite(agent)) return true;
     const visited = new Set<string>([agent.id]);
     let mgr = agent.meta.manager;
     while (mgr) {
       if (visited.has(mgr)) return false;
       visited.add(mgr);
-      const parent = byId.get(mgr);
-      if (parent && parent.repoName !== agent.repoName) return false;
-      if (this.favoriteAgentIds.has(mgr)) return true;
+      const mgrKey = localAgentKey(this.machineName, { repoRegistryName: agent.repoRegistryName, id: mgr });
+      if (this.favoriteAgentIds.has(mgrKey)) return true;
+      const parent = byKey.get(mgrKey);
       if (!parent) return false;
       mgr = parent.meta.manager;
     }
@@ -494,13 +723,11 @@ export class AgentTreeComponent implements Component {
    * concept, so a pinned favoriteless repo is hidden too.
    */
   private dropAgentlessRepoHeaders(entries: FlatEntry[]): FlatEntry[] {
-    const selectedHeaderId = this.hasSelection && this.selectedId?.startsWith("repopath:")
-      ? this.selectedId
-      : null;
     return entries.filter((f, i) => {
-      if (f.kind !== "repo-header") return true;
-      if (selectedHeaderId === `repopath:${f.repoPath}`) return true;
-      return entries[i + 1]?.kind === "agent";
+      if (f.kind !== "repo-header" && f.kind !== "remote-repo-header") return true;
+      if (this.isSelectedRow(f)) return true;
+      const next = entries[i + 1];
+      return next?.kind === "agent" || next?.kind === "remote-agent";
     });
   }
 
@@ -511,33 +738,18 @@ export class AgentTreeComponent implements Component {
    */
   private applyRepoFilter(entries: FlatEntry[]): FlatEntry[] {
     const sticky = this._stickyRevealedRepoPath;
-    const selectedAgentId = this.hasSelection && this.selectedId !== null && !this.selectedId.startsWith("repopath:") && this.selectedId !== SYSTEM_COORDINATOR_ID
-      ? this.selectedId
-      : null;
-    return entries.filter((f) => {
-      if (f.kind === "system-coordinator") return true;
-      // Parent-directory group headers are a pure display device — they carry
-      // no running/stopped semantics and are never hidden by the V-filter.
-      if (f.kind === "parent-header") return true;
-      if (f.kind === "repo-header") {
-        // non-empty gates on any agents at all; running-only gates on any
-        // NON-STOPPED agent (a repo whose agents are all stopped is hidden).
-        const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasNonStoppedAgents;
-        if (passes) return true;
-        if (this.pinnedRepoPaths.has(f.repoPath)) return true;
-        return sticky !== null && f.repoPath === sticky;
-      }
-      // f.kind === "agent": only hide individual agents in running-only mode.
-      if (this.repoFilter !== "running-only") return true;
-      // running-only hides ONLY stopped agents; every other state is shown.
-      if (isVisibleUnderRunningFilter(f.agent.state)) return true;
-      // Keep an agent visible if any descendant in its subtree is non-stopped,
-      // so managers retain their hierarchical context instead of having their
-      // surviving children orphaned under a hidden (stopped) parent.
-      if (subtreeHasNonStopped(f.agent)) return true;
-      // Keep the currently-selected agent visible even if it is stopped, so a
-      // filter flip doesn't yank the selection out from under the user.
-      return selectedAgentId !== null && f.agent.id === selectedAgentId;
+    const agentsVisible = entries.filter((f) => {
+      if (f.kind !== "agent" || this.repoFilter !== "running-only") return true;
+      // Keep local managers that provide context for a non-stopped descendant.
+      return isVisibleUnderRunningFilter(f.agent.state) || subtreeHasNonStopped(f.agent) || this.isSelectedRow(f);
+    });
+    return agentsVisible.filter((f, i) => {
+      if (f.kind !== "repo-header" && f.kind !== "remote-repo-header") return true;
+      const next = agentsVisible[i + 1];
+      if (next?.kind === "agent" || next?.kind === "remote-agent" || this.isSelectedRow(f)) return true;
+      if (f.kind === "remote-repo-header") return false;
+      const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasNonStoppedAgents;
+      return passes || this.pinnedRepoPaths.has(f.repoPath) || f.repoPath === sticky;
     });
   }
 
@@ -569,7 +781,7 @@ export class AgentTreeComponent implements Component {
   }
 
   /**
-   * Recompute _stickyRevealedRepoPath from the current selectedId. Called after
+   * Recompute _stickyRevealedRepoPath from the current selection. Called after
    * every selection mutation so the filter has a stable input across the rest
    * of the operation. No-op when repoFilter === "all" (filter ignores sticky
    * anyway), but we still null it out so a later toggle starts clean.
@@ -579,15 +791,10 @@ export class AgentTreeComponent implements Component {
       this._stickyRevealedRepoPath = null;
       return;
     }
-    let repoPath: string | null = null;
-    if (this.selectedId.startsWith("repopath:")) {
-      repoPath = this.selectedId.slice("repopath:".length);
-    } else if (this.selectedId !== SYSTEM_COORDINATOR_ID) {
-      const found = this._flatList.find(
-        (f) => f.kind === "agent" && f.agent.id === this.selectedId
-      );
-      if (found && found.kind === "agent") repoPath = found.agent.repoPath;
-    }
+    // The selected local row's repo (a repo header's own, or an agent's),
+    // remembered with the key, so a row that shares the key is never revealed
+    // in its place.
+    const repoPath = this.selectedRowRepo;
     if (repoPath === null) {
       this._stickyRevealedRepoPath = null;
       return;
@@ -595,7 +802,7 @@ export class AgentTreeComponent implements Component {
     // Only stick if the matching repo-header would otherwise be filtered
     // out by the active filter — otherwise it's already visible on its own
     // merits and sticky would just hide stale state on the next toggle.
-    const header = this._flatList.find(
+    const header = this.localRows().find(
       (f) => f.kind === "repo-header" && f.repoPath === repoPath
     );
     if (!header || header.kind !== "repo-header") {
@@ -606,6 +813,29 @@ export class AgentTreeComponent implements Component {
       ? !header.hasAgents
       : !header.hasNonStoppedAgents;
     this._stickyRevealedRepoPath = wouldBeHidden ? repoPath : null;
+  }
+
+  /** The repo of a local row (a repo header's own, an agent's), or null. */
+  private static rowRepoPath(f: FlatEntry): string | null {
+    return f.kind === "repo-header" ? f.repoPath : f.kind === "agent" ? f.agent.repoPath : null;
+  }
+
+  /**
+   * Whether `f` is the row named by `key` and the remembered selectedRowRepo:
+   * its key, and for a local row its repo too. Rows share a key only for
+   * duplicate registry names from before names were unique (SPEC §17.1 Row
+   * keys); the repo tells them apart. A remote row has no repo, so its
+   * key alone names it.
+   */
+  private matchesSelection(f: FlatEntry, key: string | null): boolean {
+    if (key === null || this.rowKey(f) !== key) return false;
+    const repo = AgentTreeComponent.rowRepoPath(f);
+    return repo === null || this.selectedRowRepo === null || repo === this.selectedRowRepo;
+  }
+
+  /** Whether `f` is the selected row (matchesSelection with the selected key). */
+  private isSelectedRow(f: FlatEntry): boolean {
+    return this.hasSelection && this.matchesSelection(f, this.selectedId);
   }
 
   /**
@@ -639,21 +869,24 @@ export class AgentTreeComponent implements Component {
     this.resyncAfterFilterChange();
   }
 
-  /** Toggle whether the agent is a favorite. Returns the new state. */
-  toggleFavorite(agentId: string): boolean {
-    const nowFavorite = !this.favoriteAgentIds.has(agentId);
-    if (nowFavorite) this.favoriteAgentIds.add(agentId);
-    else this.favoriteAgentIds.delete(agentId);
+  /**
+   * Toggle whether the agent with this fully qualified id (agentKey) is a
+   * favorite. Returns the new state.
+   */
+  toggleFavorite(key: string): boolean {
+    const nowFavorite = !this.favoriteAgentIds.has(key);
+    if (nowFavorite) this.favoriteAgentIds.add(key);
+    else this.favoriteAgentIds.delete(key);
     // In the Favorites view this adds or removes rows (the selected row stays
     // by the carve-out), so re-resolve like a pin toggle.
     this.resyncAfterFilterChange();
     return nowFavorite;
   }
 
-  /** Mark the agent as a favorite; a no-op when it already is one. */
-  addFavorite(agentId: string): void {
-    if (this.favoriteAgentIds.has(agentId)) return;
-    this.favoriteAgentIds.add(agentId);
+  /** Mark the agent with this fully qualified id as a favorite; a no-op when it already is one. */
+  addFavorite(key: string): void {
+    if (this.favoriteAgentIds.has(key)) return;
+    this.favoriteAgentIds.add(key);
     this.resyncAfterFilterChange();
   }
 
@@ -688,6 +921,11 @@ export class AgentTreeComponent implements Component {
       // parent-header rows are inert (non-selectable) — nothing is "selected"
       // when the index happens to land on one.
       if (item.kind === "parent-header") return null;
+      // A remote row is its own selection kind, never `agent`: nothing
+      // that reads a local agent from the selection can be handed a remote one.
+      if (item.kind === "remote-repo-header" || item.kind === "remote-agent") {
+        return { kind: "remote", entry: item };
+      }
       return { kind: "agent", agent: item.agent };
     }
     return null;
@@ -696,6 +934,12 @@ export class AgentTreeComponent implements Component {
   get selectedAgent(): Agent | null {
     const sel = this.selection;
     return sel?.kind === "agent" ? sel.agent : null;
+  }
+
+  /** The selected remote row (SPEC §20.5), or null when the selection is local or empty. */
+  get selectedRemote(): RemoteEntry | null {
+    const sel = this.selection;
+    return sel?.kind === "remote" ? sel.entry : null;
   }
 
   get selectedRepoHeader(): string | null {
@@ -712,19 +956,33 @@ export class AgentTreeComponent implements Component {
     return this.selection?.kind === "system-coordinator";
   }
 
-  /** Select agent by ID. Returns true if found. Force-selects (§17.1/§17.3). */
-  selectAgentById(agentId: string): boolean {
+  /**
+   * Select the local agent row with this fully qualified id (agentKey).
+   * Returns true if found. Force-selects (§17.1/§17.3).
+   */
+  selectAgentByKey(key: string): boolean {
+    const row = this._flatList.find((f) => f.kind === "agent" && this.agentKey(f.agent) === key);
+    return row?.kind === "agent" ? this.selectAgentRow(key, row.agent.repoPath) : false;
+  }
+
+  /** Select this local agent's row (its fully qualified id, in its own repo). Returns true if found. */
+  selectAgent(agent: Agent): boolean {
+    return this.selectAgentRow(this.agentKey(agent), agent.repoPath);
+  }
+
+  /** Select the agent row with this key in the repo at `repoPath`. */
+  private selectAgentRow(key: string, repoPath: string): boolean {
     // An agent's repo by definition has agents, so sticky-reveal clears when
     // landing on one. Update selectedId+hasSelection first, then refresh sticky,
     // then re-find the index against the post-sticky visibleList — same
     // ordering used by updateSelectedId so the cursor never drifts.
-    const found = this._flatList.find((f) => f.kind === "agent" && f.agent.id === agentId);
-    if (!found || found.kind !== "agent") return false;
-    this.selectedId = agentId;
+    const isRow = (f: FlatEntry) => f.kind === "agent" && f.agent.repoPath === repoPath && this.agentKey(f.agent) === key;
+    if (!this._flatList.some(isRow)) return false;
+    this.selectedId = key;
+    this.selectedRowRepo = repoPath;
     this.hasSelection = true;
     this.updateStickyReveal();
-    const visible = this.visibleList;
-    const idx = visible.findIndex((f) => f.kind === "agent" && f.agent.id === agentId);
+    const idx = this.visibleList.findIndex(isRow);
     if (idx === -1) return false;
     this.selectedIndex = idx;
     this.ensureSelectedVisible();
@@ -736,11 +994,13 @@ export class AgentTreeComponent implements Component {
     // Repo headers may be filtered out by repoFilter; set selectedId first
     // so updateStickyReveal can decide whether to keep the header visible,
     // then re-find selectedIndex in the post-sticky visibleList.
-    const headerExists = this._flatList.some(
+    const header = this.localRows().find(
       (f) => f.kind === "repo-header" && f.repoPath === repoPath
     );
-    if (!headerExists) return false;
-    this.selectedId = `repopath:${repoPath}`;
+    if (!header) return false;
+    this.selectedId = this.rowKey(header);
+    // By path, not key: two headers can share a key (SPEC §17.1 Row keys).
+    this.selectedRowRepo = repoPath;
     this.hasSelection = true;
     this.updateStickyReveal();
     const visible = this.visibleList;
@@ -757,6 +1017,7 @@ export class AgentTreeComponent implements Component {
     // just clears sticky-reveal before the index is found.
     if (!this._flatList.some((f) => f.kind === "system-coordinator")) return false;
     this.selectedId = SYSTEM_COORDINATOR_ID;
+    this.selectedRowRepo = null;
     this.hasSelection = true;
     this.updateStickyReveal();
     const idx = this.visibleList.findIndex((f) => f.kind === "system-coordinator");
@@ -774,6 +1035,7 @@ export class AgentTreeComponent implements Component {
   deselect(): void {
     this.hasSelection = false;
     this.selectedId = null;
+    this.selectedRowRepo = null;
     this.updateStickyReveal();
   }
 
@@ -848,12 +1110,14 @@ export class AgentTreeComponent implements Component {
       this.selectedIndex = delta === 1 ? visible.length - 1 : 0;
     }
 
+    // J/K treat local and remote-only repo headers as the same navigation anchors.
+    const isRepoAnchor = (f: FlatEntry | undefined): boolean => f?.kind === "repo-header" || f?.kind === "remote-repo-header";
     const current = visible[this.selectedIndex];
-    const isRepoHeader = !fromNoSelection && current?.kind === "repo-header";
+    const isRepoHeader = !fromNoSelection && isRepoAnchor(current);
 
     if (isRepoHeader) {
       // Original behavior: cycle through repo headers only.
-      const repoIndices = visible.map((f, i) => (f.kind === "repo-header" ? i : -1)).filter((i) => i !== -1);
+      const repoIndices = visible.map((f, i) => (isRepoAnchor(f) ? i : -1)).filter((i) => i !== -1);
       if (repoIndices.length === 0) return;
       let currentRepoIdx = repoIndices.indexOf(this.selectedIndex);
       if (currentRepoIdx === -1) currentRepoIdx = 0;
@@ -867,28 +1131,30 @@ export class AgentTreeComponent implements Component {
     // Agent or coordinator selected: build agent-group anchor list.
     // Anchors are the system-coordinator (if present) plus each repo-header,
     // ordered by their position in the visible list.
-    const anchors: { kind: "system-coordinator" | "repo-header"; index: number }[] = [];
+    const anchors: { kind: "system-coordinator" | "repo-header" | "remote-repo-header"; index: number }[] = [];
     for (let i = 0; i < visible.length; i++) {
       const item = visible[i]!;
-      if (item.kind === "system-coordinator" || item.kind === "repo-header") {
+      if (item.kind === "system-coordinator" || item.kind === "repo-header" || item.kind === "remote-repo-header") {
         anchors.push({ kind: item.kind, index: i });
       }
     }
     if (anchors.length === 0) return;
 
-    // Helper: get agent indices for the repo anchor at anchors[ai]. When
-    // skipStopped is set, stopped agents are excluded so jumping always lands
-    // on a live (non-stopped) agent.
+    // Helper: get agent indices for the repo anchor at anchors[ai] (its local
+    // and remote agents). When skipStopped is set,
+    // stopped agents are excluded so jumping always lands on a live
+    // (non-stopped) agent.
     const agentsForAnchor = (ai: number, skipStopped: boolean): number[] => {
       const anchor = anchors[ai]!;
-      if (anchor.kind !== "repo-header") return [];
+      if (anchor.kind === "system-coordinator") return [];
       const nextAnchor = anchors[ai + 1];
       const endPos = nextAnchor ? nextAnchor.index : visible.length;
       const result: number[] = [];
       for (let i = anchor.index + 1; i < endPos; i++) {
         const item = visible[i];
-        if (item?.kind !== "agent") continue;
-        if (skipStopped && item.agent.state === "stopped") continue;
+        const state = item?.kind === "agent" ? item.agent.state : item?.kind === "remote-agent" ? item.remote.state : null;
+        if (state === null) continue;
+        if (skipStopped && state === "stopped") continue;
         result.push(i);
       }
       return result;
@@ -967,30 +1233,33 @@ export class AgentTreeComponent implements Component {
       if (target === -1) return;
       this.selectedIndex = target;
     }
-    const item = visible[this.selectedIndex]!;
-    if (item.kind === "system-coordinator") {
-      this.selectedId = SYSTEM_COORDINATOR_ID;
-    } else if (item.kind === "repo-header") {
-      this.selectedId = `repopath:${item.repoPath}`;
-    } else if (item.kind === "parent-header") {
-      // Unreachable after the skip above, but keep selectedId sane rather than
-      // touching item.agent.
-      return;
-    } else {
-      this.selectedId = item.agent.id;
-    }
+    // A parent-header has no key: unreachable after the skip above, but keep
+    // selectedId sane rather than inventing one.
+    const row = visible[this.selectedIndex]!;
+    const key = this.rowKey(row);
+    if (key === null) return;
+    this.selectedId = key;
+    this.selectedRowRepo = AgentTreeComponent.rowRepoPath(row);
     this.updateStickyReveal();
     // Re-resolve selectedIndex inline (NOT via resolveSelection, which would
     // call back into updateSelectedId on a miss). The sticky update above may
     // have changed visibleList's shape; selectedIndex must follow.
-    const updatedVisible = this.visibleList;
-    const idx = updatedVisible.findIndex((f) => {
-      if (f.kind === "system-coordinator") return this.selectedId === SYSTEM_COORDINATOR_ID;
-      if (f.kind === "repo-header") return `repopath:${f.repoPath}` === this.selectedId;
-      if (f.kind === "parent-header") return false;
-      return f.agent.id === this.selectedId;
-    });
+    const idx = this.indexOfKey(this.visibleList, key, this.selectedIndex);
     if (idx !== -1) this.selectedIndex = idx;
+  }
+
+  /**
+   * The index in `rows` of the selected row (matchesSelection: `key`, and for a
+   * local row the remembered repo): `preferred` when the row there is it, else
+   * the first row that is, else -1. Rows share a key only for duplicates
+   * registered before names were unique (two repos with one name, two peers
+   * with one name; SPEC §17.1 Row keys); for local rows the repo tells them
+   * apart, and preferring the current index keeps a remote row in place.
+   */
+  private indexOfKey(rows: FlatEntry[], key: string, preferred: number): number {
+    const at = rows[preferred];
+    if (at !== undefined && this.matchesSelection(at, key)) return preferred;
+    return rows.findIndex((f) => this.matchesSelection(f, key));
   }
 
   /**
@@ -1042,17 +1311,19 @@ export class AgentTreeComponent implements Component {
       this.ensureSelectedVisible();
       return;
     }
-    const idx = visible.findIndex((f) => {
-      if (f.kind === "system-coordinator") return this.selectedId === SYSTEM_COORDINATOR_ID;
-      if (f.kind === "repo-header") return `repopath:${f.repoPath}` === this.selectedId;
-      if (f.kind === "parent-header") return false;
-      return f.agent.id === this.selectedId;
-    });
+    const selectedId = this.selectedId;
+    const idx = this.indexOfKey(visible, selectedId, this.selectedIndex);
     if (idx !== -1) {
       this.selectedIndex = idx;
+      this.selectedRowRepo = AgentTreeComponent.rowRepoPath(visible[idx]!);
     } else {
-      // Selected item gone — clamp to valid range
       this.selectedIndex = Math.min(this.selectedIndex, visible.length - 1);
+      if (this.selectedRowRepo !== null || this.isLocalKey(selectedId)) {
+        const local = (row: FlatEntry) => row.kind === "agent" || row.kind === "repo-header" || row.kind === "system-coordinator";
+        const previous = visible.slice(0, this.selectedIndex + 1).findLastIndex(local);
+        const nearest = previous >= 0 ? previous : visible.findIndex(local);
+        if (nearest >= 0) this.selectedIndex = nearest;
+      }
       this.updateSelectedId();
     }
     this.ensureSelectedVisible();
@@ -1142,13 +1413,17 @@ export class AgentTreeComponent implements Component {
     let maxNameWidth = 0;
     for (const item of visible) {
       if (item.kind === "agent") {
-        const isFavorite = this.favoriteAgentIds.has(item.agent.id);
+        const isFavorite = this.isFavorite(item.agent);
         maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, repoIndent + item.connector, isFavorite));
       } else if (item.kind === "system-coordinator") {
         maxNameWidth = Math.max(maxNameWidth, visibleWidth("◆ coordinator"));
       }
     }
     const stateColWidth = computeStateColWidth(visible);
+    // Remote agents align their own columns, so the local ones are the
+    // same with or without them.
+    const remoteColumns = remoteColumnWidths(visible, width, repoIndent);
+    const remoteOnlyStart = visible.findIndex((row) => row.kind === "remote-repo-header");
 
     // Scroll indicator at top (indented with the subtree when grouping so it
     // doesn't float left of the rows it summarizes).
@@ -1158,7 +1433,14 @@ export class AgentTreeComponent implements Component {
 
     for (let i = start; i < end; i++) {
       const item = visible[i]!;
-      if (item.kind === "system-coordinator") {
+      if (item.kind === "remote-repo-header") {
+        lines.push(formatRemoteRepoRow(item, selectionActive && i === this.selectedIndex, width));
+      } else if (item.kind === "remote-agent") {
+        lines.push(formatRemoteAgentRow(
+          { ...item, connector: (remoteOnlyStart < 0 || i < remoteOnlyStart ? repoIndent : "") + item.connector }, selectionActive && i === this.selectedIndex, width,
+          remoteColumns.nameColWidth, remoteColumns.stateColWidth,
+        ));
+      } else if (item.kind === "system-coordinator") {
         lines.push(formatCoordinatorRow(
           item.state, item.age,
           selectionActive && i === this.selectedIndex,
@@ -1190,11 +1472,11 @@ export class AgentTreeComponent implements Component {
           lines.push(truncated);
         }
       } else {
-        const hasQ = this.questionAgentIds.has(item.agent.id);
+        const hasQ = this.questionAgentKeys.has(this.agentKey(item.agent));
         // Indent the whole agent row with its repo subtree when grouping is
         // active (prefix the box-drawing connector), so agents render UNDER
         // their repo-header instead of left of it.
-        const isFavorite = this.favoriteAgentIds.has(item.agent.id);
+        const isFavorite = this.isFavorite(item.agent);
         lines.push(formatAgentRow(item.agent, repoIndent + item.connector, selectionActive && i === this.selectedIndex, width, maxNameWidth, stateColWidth, hasQ, isFavorite));
       }
     }
@@ -1238,9 +1520,9 @@ export class AgentTreeComponent implements Component {
    * agents with no orphans left here).
    */
   private favoritesEmptyHint(): string {
-    const byId = this.buildAgentLookup();
+    const byKey = this.buildAgentLookup();
     const hasFavoriteRow = this._flatList.some(
-      (f) => f.kind === "agent" && !f.agent.archived && this.hasFavoriteInChain(f.agent, byId),
+      (f) => f.kind === "agent" && !f.agent.archived && this.hasFavoriteInChain(f.agent, byKey),
     );
     return hasFavoriteRow ? "No favorites match the V filter" : "No favorites — press . on an agent";
   }

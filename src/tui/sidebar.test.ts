@@ -8,6 +8,7 @@ import { makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator
 import { stripAnsi } from "../parse-state";
 import type { FlatEntry } from "../agents";
 import { REVERSE, DIM, UNDERLINE } from "./colors";
+import { keyOf as treeKeyOf } from "./test-tree-keys";
 
 function makeSidebar(): SidebarComponent {
   const tree = new AgentTreeComponent();
@@ -281,7 +282,7 @@ describe("SidebarComponent", () => {
     const treeRows = () => sidebar.render(SIDEBAR_WIDTH).map(stripAnsi).findIndex((l) => l.includes("Info")) - 1;
     expect(treeRows()).toBe(3);
     // Favorites with one favorite: base 1, the tree clamps to 1 row on screen.
-    sidebar.agentTree.toggleFavorite("a1");
+    sidebar.agentTree.toggleFavorite(treeKeyOf(sidebar.agentTree, "a1"));
     sidebar.agentTree.setFavoritesOnly(true);
     sidebar.sidebarMode = "favorites";
     expect(treeRows()).toBe(1);
@@ -465,7 +466,7 @@ describe("SidebarComponent — Favorites tab", () => {
     const plain = makeAgent({ id: "agent-plain" });
     sidebar.agentTree.setFlatList([makeFlatAgent(fav), makeFlatAgent(plain)]);
     // The dashboard turns the tree's filter on with the mode (setSidebarMode).
-    sidebar.agentTree.toggleFavorite("agent-fav");
+    sidebar.agentTree.toggleFavorite(treeKeyOf(sidebar.agentTree, "agent-fav"));
     sidebar.agentTree.setFavoritesOnly(true);
 
     const lines = sidebar.render(SIDEBAR_WIDTH);
@@ -511,7 +512,7 @@ describe("SidebarComponent — Favorites tab", () => {
     sidebar.sidebarMode = "favorites";
     const stopped = makeAgent({ id: "agent-stopped", state: "stopped" });
     sidebar.agentTree.setFlatList([makeFlatSystemCoordinator(), makeFlatAgent(stopped)]);
-    sidebar.agentTree.toggleFavorite("agent-stopped");
+    sidebar.agentTree.toggleFavorite(treeKeyOf(sidebar.agentTree, "agent-stopped"));
     sidebar.agentTree.setFavoritesOnly(true);
     sidebar.agentTree.setRepoFilter("running-only");
     const lines = sidebar.render(SIDEBAR_WIDTH).map(stripAnsi);

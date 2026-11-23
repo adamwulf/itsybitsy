@@ -36,6 +36,7 @@
  * which now run outside the sandbox (text only: one argv entry, no shell).
  */
 
+import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
 import { dirname } from "path";
 import {
@@ -182,11 +183,11 @@ export async function requestAskViaWatchdog(
 export async function routeAskThroughWatchdog(
   question: string,
   agentId: string,
-  deps: SpawnClientDeps = {},
+  deps: SpawnClientDeps & { targetRepoPath?: string } = {},
 ): Promise<IbCommandResult | null> {
   const caller = await resolveRoutedCaller(deps);
   if (!caller) return null;
-  if (agentId !== caller.meta.id) {
+  if (agentId !== caller.meta.id || (deps.targetRepoPath !== undefined && !sameRepoPath(deps.targetRepoPath, caller.repoPath))) {
     return brokerFail(
       "Error: --id for another agent is not supported inside the sandbox: a sandboxed agent asks the user only as itself, through its watchdog.",
     );

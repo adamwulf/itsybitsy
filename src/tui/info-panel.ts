@@ -5,12 +5,13 @@
  */
 
 import type { Component } from "@mariozechner/pi-tui";
-import { truncateToWidth } from "@mariozechner/pi-tui";
-import type { Agent, FlatEntry } from "../agents";
+import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { Agent, FlatEntry, RemoteEntry } from "../agents";
+import { peerLinkStateText } from "./peers-dialog";
 import { isPidAliveCtx, isPidAliveSinceCtx } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getStateColors } from "./color-scheme";
-import { displayState } from "./agent-tree";
+import { displayState, remoteStateColor } from "./agent-tree";
 import { wrapLines, padLines } from "./wrap";
 import { RESET, BOLD, DIM, DIM_GRAY, GREEN, RED, YELLOW } from "./colors";
 import type { WorktreeCleanliness } from "../git-status";
@@ -19,6 +20,9 @@ import { NotesEditorComponent } from "./notes-editor";
 import { _formatTimestamp } from "../agent-lifecycle";
 import { cliDisplayName, kernelSandboxStatus, metadataCli } from "../agent-cli";
 import { resolvePathsConfig } from "../sandbox";
+import { FALLBACK_MACHINE_NAME } from "../machine-name";
+import { localAgentKey } from "./row-keys";
+import { peerEntryKey, truncatePeerField } from "./peer-repos";
 
 /**
  * Team-mode payload for the info panel (SPEC §17.3c). Parallel to the
@@ -43,6 +47,15 @@ export type InfoSubField = "default-type" | "notes";
 
 export class InfoPanelComponent implements Component {
   agent: Agent | null = null;
+  /** This machine's name, as the Agents tree's: the first segment of the "Full id:" row. */
+  machineName: string = FALLBACK_MACHINE_NAME;
+  /**
+   * The selected remote row (SPEC §20.5): a remote agent or a remote-only repo header.
+   * The dashboard's selection sync sets it, and
+   * clears it on any local or empty selection. It is never an `Agent`, so
+   * none of the local agent rows below (stoplights, git, paths) can show for it.
+   */
+  remote: RemoteEntry | null = null;
   isSystemCoordinatorSelected = false;
   /**
    * Team mode (§17.3c): when set, the render branch shows team metadata. The
@@ -90,6 +103,9 @@ export class InfoPanelComponent implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
+    if (this.remote) {
+      return this.renderRemoteInfo(this.remote, width);
+    }
     if (this.agent) {
       return this.renderAgentInfo(width);
     }
@@ -187,6 +203,10 @@ export class InfoPanelComponent implements Component {
       lines.push(truncateToWidth(`${DIM}Paths:${RESET} runtime roots only`, width, ""));
     }
 
+    // The agent's fully qualified id, its row key (SPEC §17.1): the machine
+    // and the repo's registry name it belongs to. The tree shows only the name.
+    lines.push(truncateToWidth(`${DIM}Full id:${RESET} ${localAgentKey(this.machineName, agent)}`, width, ""));
+
     // Identity line — only shown when a nickname is set, so the canonical id
     // stays visible/copyable: `nickname (id: <id>)`. The sidebar tree shows the
     // nickname ALONE, so without this the real id would be hidden. When there's
@@ -222,6 +242,48 @@ export class InfoPanelComponent implements Component {
       }
     }
 
+    return padLines(lines, this.displayHeight);
+  }
+
+  /**
+   * A selected remote row (SPEC §20.5), read-only. A remote agent shows
+   * the fields its install sent: id, nickname, repo, state, type and manager,
+   * with the peer's name. Every value is cut to the panel's width, so a long
+   * remote value cannot break the layout.
+   */
+  private renderRemoteInfo(entry: RemoteEntry, width: number): string[] {
+    const lines: string[] = [];
+    const title = (text: string) => lines.push(truncateToWidth(`${BOLD}${text}${RESET} ${DIM}(read-only)${RESET}`, width, ""));
+    const field = (label: string, value: string) => lines.push(truncateToWidth(`${DIM}${label}:${RESET} ${value}`, width, ""));
+    const notConnected = `${DIM}(peer not connected)${RESET}`;
+    switch (entry.kind) {
+      case "remote-agent": {
+        const agent = entry.remote;
+        const state = displayState(agent.state);
+        const stateText = entry.stale
+          ? `${DIM}${state}${RESET} ${notConnected}`
+          : `${remoteStateColor(state)}${state}${RESET}`;
+        title("Remote agent");
+        const connection = peerLinkStateText({ connected: !entry.stale, lastOkAt: entry.lastOkAt }, Date.now());
+        const nameWidth = width - visibleWidth(`Machine:  · ${connection}`);
+        field("Machine", `${truncatePeerField(entry.peerName, nameWidth)} · ${connection}`);
+        field("Id", agent.id);
+        field("Full id", peerEntryKey(entry));
+        field("Nickname", agent.nickname ?? "—");
+        field("Repo", agent.repoName);
+        field("Path", agent.repoPath);
+        field("State", stateText);
+        field("Type", agent.agentType ?? "—");
+        field("Manager", agent.manager ?? "—");
+        break;
+      }
+      case "remote-repo-header":
+        title("Remote repo");
+        field("Peer", entry.peerName);
+        field("Repo", entry.repoName);
+        field("Agents", String(entry.agentCount));
+        break;
+    }
     return padLines(lines, this.displayHeight);
   }
 

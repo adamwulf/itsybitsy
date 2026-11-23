@@ -1,6 +1,8 @@
-import { join, resolve, basename } from "path";
+import { join, resolve, basename, isAbsolute } from "path";
 import { userHome } from "./home";
-import { mkdir, realpath } from "fs/promises";
+import { mkdir, open, realpath, rename, stat, unlink } from "fs/promises";
+import { resolveGitRoot } from "./agent-lifecycle";
+import { getCoordinatorAgentId } from "./coordinator";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
 // because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
@@ -118,25 +120,57 @@ function registryPath(): string {
   return join(itsybitsyDir(), "repos.json");
 }
 
+/** Queue identity requires a complete registry. Only a fresh install (ENOENT) has no entries. */
+export async function readRegistryStrict(): Promise<RegistryData> {
+  const path = registryPath();
+  try {
+    const data = await Bun.file(path).json();
+    if (!Array.isArray(data?.repos)) throw new Error("expected a repos array");
+    for (const [index, repo] of data.repos.entries()) {
+      if (typeof repo?.path !== "string" || !isAbsolute(repo.path) ||
+          typeof repo.name !== "string" || !repo.name.trim() || repo.name.includes("/") ||
+          repo.name === "." || repo.name === ".." || repo.name.startsWith("~") ||
+          [repo.nickname, repo.defaultAgentType, repo.notes].some((v) => v !== undefined && typeof v !== "string")) {
+        throw new Error(`invalid repository entry at index ${index}`);
+      }
+    }
+    return { repos: data.repos };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { repos: [] };
+    throw new Error(`Cannot read repo registry ${path}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
+}
+
 export async function loadRegistry(): Promise<RegistryData> {
   try {
-    const file = Bun.file(registryPath());
-    if (!(await file.exists())) {
-      return { repos: [] };
-    }
-    const data = await file.json();
-    if (!data || !Array.isArray(data.repos)) {
-      return { repos: [] };
-    }
-    return { repos: data.repos } as RegistryData;
-  } catch { /* expected: file missing or malformed JSON */
+    const data = await Bun.file(registryPath()).json();
+    return { repos: Array.isArray(data?.repos) ? data.repos : [] };
+  } catch {
     return { repos: [] };
   }
 }
 
 export async function saveRegistry(data: RegistryData): Promise<void> {
   await mkdir(itsybitsyDir(), { recursive: true });
-  await Bun.write(registryPath(), JSON.stringify(data, null, 2) + "\n");
+  const path = registryPath();
+  const tmp = `${path}.${crypto.randomUUID()}.tmp`;
+  const existing = await stat(path).catch((err: NodeJS.ErrnoException) => {
+    if (err.code !== "ENOENT") throw err;
+    return null;
+  });
+  const file = await open(tmp, "wx", 0o600);
+  try {
+    try {
+      await file.writeFile(JSON.stringify(data, null, 2) + "\n");
+      if (existing) await file.chmod(existing.mode & 0o7777);
+    } finally {
+      await file.close();
+    }
+    await rename(tmp, path);
+  } catch (err) {
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
 }
 
 /**
@@ -149,15 +183,26 @@ export function repoNameFromFolder(folderName: string): string {
   return folderName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
 }
 
+/** The way forward from a taken name for `ib add` and the folder browser's [ Add ]: name the repo yourself. */
+export const ADD_NAME_HINT = "use ib add <path> <name>";
+/** The way forward from a taken name for [ New Repo ], which names the repo after the folder it creates. */
+export const NEW_REPO_NAME_HINT = "choose another folder name";
+
+async function coordinatorFolderName(path: string): Promise<string> {
+  return getCoordinatorAgentId((await resolveGitRoot(path, AbortSignal.timeout(2_000))) || path);
+}
+
 /**
  * Why `repoName` at `resolvedPath` cannot be added to `registry`, or null if
  * it can. These are addRepo's rules, kept in one place so createRepo can check
- * them before it creates a folder on disk.
+ * them before it creates a folder on disk. `nameHint` ends a refusal of a taken
+ * name (another repo's or a team's): what the caller can do instead.
  */
 export async function checkNewRepoEntry(
   resolvedPath: string,
   repoName: string,
   registry: RegistryData,
+  nameHint: string = ADD_NAME_HINT,
 ): Promise<string | null> {
   const canonicalRepo = await realpath(resolvedPath).catch(() => resolve(resolvedPath));
   const canonicalHome = await realpath(userHome()).catch(() => resolve(userHome()));
@@ -179,12 +224,30 @@ export async function checkNewRepoEntry(
   // teams). Bidirectional with team-create's collision refusal (SPEC §16.1).
   // Case-SENSITIVE strict lookup, matching the resolver and getTeam's exact keys.
   if ((await getTeam(normalizeTeamName(repoName))) !== null) {
-    return `"${repoName}" is already a team name — choose a different repo name (e.g. ib add <path> <name>)`;
+    return `"${repoName}" is already a team name — choose a different repo name; ${nameHint}`;
   }
 
   // Check for duplicate
   if (registry.repos.some((r) => r.path === resolvedPath)) {
     return `Already registered: ${resolvedPath}`;
+  }
+
+  const folderName = await coordinatorFolderName(resolvedPath);
+  const lowerFolderName = folderName.toLowerCase();
+  for (const existing of registry.repos) {
+    if ((await coordinatorFolderName(existing.path)).toLowerCase() === lowerFolderName) {
+      return `Cannot register ${resolvedPath}: its repo root folder name "${folderName}" is already used by registered repo "${existing.name}" (${existing.path}). A repo's coordinator is named after its folder, so two registered repos cannot share a folder name.`;
+    }
+  }
+
+  // Repo names are unique, case-insensitively: a repo's name is the middle
+  // segment of its agents' row keys in `ib watch` (`<machine>/<repo>/<agent>`,
+  // SPEC §17.1). A nickname counts as a name, since it is what the tree shows.
+  // Only new entries are checked; duplicates already registered stay.
+  const lower = repoName.toLowerCase();
+  const clash = registry.repos.find((r) => r.name.toLowerCase() === lower || r.nickname?.toLowerCase() === lower);
+  if (clash) {
+    return `"${repoName}" is already the name of a registered repo (${clash.path}) — repo names must be unique; ${nameHint}`;
   }
 
   return null;
@@ -193,7 +256,7 @@ export async function checkNewRepoEntry(
 export async function addRepo(repoPath: string, name?: string): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
   const repoName = name ?? basename(resolved);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
 
   const error = await checkNewRepoEntry(resolved, repoName, registry);
   if (error) {
@@ -207,7 +270,7 @@ export async function addRepo(repoPath: string, name?: string): Promise<{ ok: bo
 
 export async function removeRepo(repoPath: string): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
   const before = registry.repos.length;
   registry.repos = registry.repos.filter((r) => r.path !== resolved);
   let removedPath = resolved;
@@ -230,7 +293,7 @@ export async function removeRepo(repoPath: string): Promise<{ ok: boolean; messa
 
 export async function renameRepo(repoPath: string, nickname: string): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
   const entry = registry.repos.find((r) => r.path === resolved);
   if (!entry) {
     return { ok: false, message: `Not found: ${resolved}` };
@@ -245,8 +308,9 @@ export async function renameRepo(repoPath: string, nickname: string): Promise<{ 
       return { ok: false, message: `"coordinator" is a reserved name` };
     }
     // Reject nicknames that collide with another repo's display name or basename
+    const lower = trimmed.toLowerCase();
     const collision = registry.repos.find((r) =>
-      r.path !== resolved && (repoDisplayName(r) === trimmed || r.name === trimmed)
+      r.path !== resolved && (repoDisplayName(r).toLowerCase() === lower || r.name.toLowerCase() === lower)
     );
     if (collision) {
       return { ok: false, message: `Name "${trimmed}" already used by ${collision.path}` };
@@ -271,7 +335,7 @@ export async function setRepoDefaultAgentType(
   type: string | null,
 ): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
   const entry = registry.repos.find((r) => r.path === resolved);
   if (!entry) {
     return { ok: false, message: `Not found: ${resolved}` };
@@ -296,7 +360,7 @@ export async function setRepoNotes(
   notes: string | null,
 ): Promise<{ ok: boolean; message: string }> {
   const resolved = resolve(repoPath);
-  const registry = await loadRegistry();
+  const registry = await readRegistryStrict();
   const entry = registry.repos.find((r) => r.path === resolved);
   if (!entry) {
     return { ok: false, message: `Not found: ${resolved}` };

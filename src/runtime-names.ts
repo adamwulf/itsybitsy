@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { userHome } from "./home";
 
 export const RUNTIME_DIR_NAME = ".itsybitsy";
 export const TMUX_SESSION_PREFIX = "itsybitsy-";
@@ -17,6 +18,18 @@ export const archiveDir = (repo: string): string => join(runtimeDir(repo), "arch
 export const promptsDir = (repo: string): string => join(runtimeDir(repo), "prompts");
 export const repoIdFile = (repo: string): string => join(runtimeDir(repo), "repo-id");
 export const userQuestionsFile = (repo: string): string => join(runtimeDir(repo), "user-questions.json");
+
+// iroh peering (docs/plans/iroh-peering.md): one directory per install, under
+// the user home, never under a repo. Resolved through userHome() so tests
+// redirect it with setUserHome().
+export const peerDir = (): string => join(userHome(), RUNTIME_DIR_NAME, "peer");
+export const peerSecretKeyFile = (): string => join(peerDir(), "secret.key");
+export const peersFile = (): string => join(peerDir(), "peers.json");
+export const peerEndpointLockFile = (): string => join(peerDir(), "endpoint.lock");
+
+// This machine's name (src/machine-name.ts): the first segment of every local
+// row key in `ib watch` (SPEC §17.1). Set once, then always read from here.
+export const machineNameFile = (): string => join(userHome(), RUNTIME_DIR_NAME, "machine-name");
 
 export const tmuxSessionName = (repoId: string, id: string): string => `${TMUX_SESSION_PREFIX}${repoId}-${id}`;
 export const agentIdFromTmuxSession = (name: string): string | null => /^itsybitsy-[a-f0-9]{8}-(.+)$/.exec(name)?.[1] ?? null;

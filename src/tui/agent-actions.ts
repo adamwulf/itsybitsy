@@ -1,3 +1,4 @@
+import { sameRepoPath } from "../repo-identity";
 import * as runtimeNames from "../runtime-names";
 /**
  * Agent action handlers — extracted from DashboardComponent.
@@ -11,6 +12,7 @@ import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion } from "../agents";
 import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
+import { canonicalizeSandboxPath } from "../sandbox";
 import { createRepo } from "../create-repo";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
@@ -18,7 +20,7 @@ import {
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
-  teamCreate, teamAdd, teamDelete, teamRemove,
+  teamCreate, teamAdd, teamDelete, teamRemove, teamRemoveStoredMember,
   writeMetaJsonAtomic, sealAgentRecord,
 } from "../ib-commands";
 import { sanitizeAgentNameInput } from "../validation";
@@ -41,6 +43,7 @@ import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../
 import type { ConfigResult } from "../config";
 import { fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
+import { fullyQualifiedAgentId } from "./row-keys";
 import type { PaneMode, TailLogMode } from "./pane-manager";
 import { isTailLogMode } from "./pane-manager";
 import { RESET, BOLD, DIM, RED } from "./colors";
@@ -171,10 +174,13 @@ export interface ActionCtx {
   agentTree: {
     selectedAgent: Agent | null;
     selectedRepoHeader: string | null;
+    selectedRepoPath: string | null;
     isSystemCoordinatorSelected: boolean;
     flatList: FlatEntry[];
     visibleList: FlatEntry[];
-    selectAgentById(id: string): boolean;
+    /** This machine's name: the first segment of a local agent's fully qualified id (SPEC §17.1). */
+    machineName: string;
+    selectAgent(agent: Agent): boolean;
     selectByRepoPath(repoPath: string): boolean;
     selectSystemCoordinator(): boolean;
   };
@@ -218,10 +224,11 @@ export interface ActionCtx {
    */
   setSidebarMode: (mode: import("./sidebar").SidebarMode) => void;
   /**
-   * §17.1 Favorites tab: mark an agent as a favorite (no toggle) and persist
-   * it. The new-agent form calls it for an agent made from the Favorites tab.
+   * §17.1 Favorites tab: mark the agent with this fully qualified id
+   * (`<machine>/<repo>/<agent>`) as a favorite (no toggle) and persist it. The
+   * new-agent form calls it for an agent made from the Favorites tab.
    */
-  addFavorite(agentId: string): void;
+  addFavorite(key: string): void;
   /**
    * §17.3 / §17.3a: the Teams-tree handle. Lets `handleSend` read the team
    * anchor (`{ kind: "team", teamName }`) selected in the Teams panel, since
@@ -324,6 +331,21 @@ export function handleRetire(ctx: ActionCtx) {
   confirmRetire(ctx, agent);
 }
 
+function showTeardownResult(ctx: ActionCtx, summary: string, warnings: string, kind: "info" | "error" = "info") {
+  ctx.setNotice(summary, kind);
+  if (warnings) ctx.showDialog({ type: "cleanup-warnings", text: `${summary}\n\n${warnings}`, offset: 0 });
+}
+
+function showCoordinatorResetResult(ctx: ActionCtx, agent: Agent, result: IbCommandResult) {
+  if (result.ok) {
+    showTeardownResult(ctx, `Reset coordinator ${agent.id}`, result.stderr);
+  } else if (result.cleanupWarnings) {
+    showTeardownResult(ctx, `Could not reset coordinator ${agent.id}`, result.stderr, "error");
+  } else {
+    ctx.setNotice(`Reset failed: ${result.stderr || result.stdout}`, "error");
+  }
+}
+
 /**
  * The retire flow for one agent: a confirm dialog, then `retireAgent`. Shared
  * by `x` on an agent (`handleRetire`) and the "Retire" row of the team-member
@@ -340,7 +362,7 @@ function confirmRetire(ctx: ActionCtx, agent: Agent) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const result = await retireAgent(agent);
-        if (result.ok) ctx.setNotice(`Retired ${agent.id}`, "info");
+        if (result.ok) showTeardownResult(ctx, `Retired ${agent.id}`, result.stderr);
         else ctx.setNotice(`Retire failed: ${result.stderr || result.stdout}`, "error");
       });
     },
@@ -421,7 +443,7 @@ export function handleNuke(ctx: ActionCtx) {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
         const result = await nukeAgent(agent);
-        if (result.ok) ctx.setNotice(`Nuked ${agent.id}`, "info");
+        if (result.ok) showTeardownResult(ctx, `Nuked ${agent.id}`, result.stderr);
         else ctx.setNotice(`Nuke failed: ${result.stderr || result.stdout}`, "error");
       });
     },
@@ -442,7 +464,7 @@ export function handleNukeAll(ctx: ActionCtx) {
         ctx.closeDialog();
         ctx.executeAndRefresh(async () => {
           const result = await nukeAllAgents(repo.path);
-          if (result.ok) ctx.setNotice(`Nuked all agents in ${repoDisplayName(repo)}`, "info");
+          if (result.ok) showTeardownResult(ctx, `Nuked all agents in ${repoDisplayName(repo)}`, result.stderr);
           else ctx.setNotice(`Nuke-all failed: ${result.stderr || result.stdout}`, "error");
         });
       },
@@ -467,7 +489,7 @@ export function handleNukeAll(ctx: ActionCtx) {
           ctx.closeDialog();
           ctx.executeAndRefresh(async () => {
             const result = await nukeAllAgents(repo.path);
-            if (result.ok) ctx.setNotice(`Nuked all agents in ${repoDisplayName(repo)}`, "info");
+            if (result.ok) showTeardownResult(ctx, `Nuked all agents in ${repoDisplayName(repo)}`, result.stderr);
             else ctx.setNotice(`Nuke-all failed: ${result.stderr || result.stdout}`, "error");
           });
         },
@@ -483,10 +505,9 @@ export function handleResume(ctx: ActionCtx) {
   }
 
   // Repo header selected: spawn or reset per-repo coordinator
-  const repoHeader = ctx.agentTree.selectedRepoHeader;
-  if (!ctx.agentTree.selectedAgent && repoHeader) {
-    const repo = ctx.repos.find((r) => repoDisplayName(r) === repoHeader);
-    if (!repo) return;
+  const repoPath = ctx.agentTree.selectedRepoPath;
+  if (repoPath) {
+    const repoName = ctx.agentTree.selectedRepoHeader ?? basename(repoPath);
 
     // UI-layer in-flight guard for the SPAWN path. The durable op-guard inside
     // resumeAgent() covers the reset case, but a first-time coordinator spawn
@@ -494,17 +515,17 @@ export function handleResume(ctx: ActionCtx) {
     // it. Without this, two rapid 'R' presses both see `exists:false` and both
     // newAgent() into the same deterministic dir → partial/duplicate spawn.
     // Keyed per-repo and released in the finally below; intentionally narrow.
-    const spawnKey = `repo:${repo.path}`;
+    const spawnKey = `repo:${repoPath}`;
     if (coordinatorSpawnsInFlight.has(spawnKey)) {
-      ctx.setNotice(`Coordinator action already in progress for ${repoDisplayName(repo)}…`, "error");
+      ctx.setNotice(`Coordinator action already in progress for ${repoName}…`, "error");
       return;
     }
     coordinatorSpawnsInFlight.add(spawnKey);
 
-    ctx.setNotice(`Resetting coordinator for ${repoDisplayName(repo)}…`, "info");
+    ctx.setNotice(`Resetting coordinator for ${repoName}…`, "info");
     ctx.executeAndRefresh(async () => {
       try {
-        const coordStatus = await checkCoordinatorExists(repo.path);
+        const coordStatus = await checkCoordinatorExists(repoPath);
         if (coordStatus.exists) {
           // Coordinator exists — full reset (kill + respawn). Allowed regardless
           // of state: a running coordinator with stale permissions/hooks is the
@@ -512,18 +533,18 @@ export function handleResume(ctx: ActionCtx) {
           // and routes to the reset path. The durable op-guard inside
           // resumeAgent() (kind `restarting`) refuses a concurrent reset and
           // surfaces "Agent is currently restarting…" as the failure stderr.
+          const canonicalRepoPath = canonicalizeSandboxPath(repoPath);
           const agent = (ctx.watcher?.lastAgents ?? [])
-            .find(a => a.id === coordStatus.agentId);
+            .find(a => a.id === coordStatus.agentId && canonicalizeSandboxPath(a.repoPath) === canonicalRepoPath);
           if (agent) {
             const result = await resumeAgent(agent);
-            if (result.ok) ctx.setNotice(`Reset coordinator ${agent.id}`, "info");
-            else ctx.setNotice(`Reset failed: ${result.stderr || result.stdout}`, "error");
+            showCoordinatorResetResult(ctx, agent, result);
           } else {
             ctx.setNotice(`Coordinator ${coordStatus.agentId} not found in agent tree`, "error");
           }
         } else {
           // No coordinator — spawn one
-          const result = await newAgent(repo.path, "You are the per-repo coordinator. Await instructions.", { type: REPO_COORDINATOR_TYPE });
+          const result = await newAgent(repoPath, "You are the per-repo coordinator. Await instructions.", { type: REPO_COORDINATOR_TYPE });
           if (result.ok) ctx.setNotice(`Spawned coordinator ${result.stdout}`, "info");
           else ctx.setNotice(`Spawn failed: ${result.stderr || result.stdout}`, "error");
         }
@@ -553,7 +574,8 @@ export function handleResume(ctx: ActionCtx) {
   ctx.setNotice(`Resuming ${agent.id}…`, "info");
   ctx.executeAndRefresh(async () => {
     const result = await resumeAgent(agent);
-    if (result.ok) ctx.setNotice(`Resumed ${agent.id}`, "info");
+    if (agent.meta.agentType === REPO_COORDINATOR_TYPE) showCoordinatorResetResult(ctx, agent, result);
+    else if (result.ok) ctx.setNotice(`Resumed ${agent.id}`, "info");
     else ctx.setNotice(`Resume failed: ${result.stderr || result.stdout}`, "error");
   });
 }
@@ -736,9 +758,8 @@ export function handleAddAgentToTeam(ctx: ActionCtx, memberRowAgent?: Agent) {
  * a member id to ONE live agent through an `id → Agent` map in which the last
  * agent with that id wins. This uses the same rule over the same list the
  * Teams tree is built from, so the picker calls an agent a member exactly when
- * the Teams tree shows it under that team. (`handleManageRoster` and the
- * create wizard's pre-check do NOT follow that rule: they match the bare id,
- * so they check every live agent that has it.)
+ * the Teams tree shows it under that team. Manage roster checks the same
+ * live member. The create wizard prechecks the selected repo and id.
  *
  * When the id is not in `live` at all (no watcher update yet), the bare id is
  * all there is to go by.
@@ -749,7 +770,7 @@ function isRosterMember(team: Team, agent: Agent, live: Agent[]): boolean {
   for (const a of live) {
     if (a.id === agent.id) resolved = a;
   }
-  return !resolved || resolved.repoPath === agent.repoPath;
+  return !resolved || sameRepoPath(resolved.repoPath, agent.repoPath);
 }
 
 /**
@@ -772,7 +793,7 @@ function showTeamPicker(ctx: ActionCtx, agent: Agent, teams: Array<{ name: strin
     ...joinable.map((t) => ({ label: t.name, run: () => runAddMember(ctx, agent, t.name) })),
     ...joined.map((t) => ({
       label: `Remove from @${t.name}`,
-      run: () => confirmRemoveMember(ctx, t.name, agent.id, `${agent.repoName}/${agent.id}`),
+      run: () => confirmRemoveMember(ctx, t.name, agent, `${agent.repoName}/${agent.id}`),
     })),
     { label: "+ Create new team…", run: () => runCreateTeam(ctx, "", agent) },
   ];
@@ -793,14 +814,13 @@ function showTeamPicker(ctx: ActionCtx, agent: Agent, teams: Array<{ name: strin
 }
 
 /**
- * Confirm, then remove one member from a team via `teamRemove` (the CLI path),
- * so the audit log, the channel record and the "left the team" notices match
- * `ib team remove <name> <agent-id>` exactly (§16.4.2). `label` is the
- * `<repo>/<id>` form shown to the user; `memberId` is the bare roster id.
+ * Confirm, then remove one member with the shared audit and notice flow
+ * (§16.4.2). A live row carries its selected repo. An unresolved roster row
+ * carries the exact stored id and needs no address lookup.
  * Shared by the manage-team picker, the agent's team picker and the
  * team-member picker.
  */
-function confirmRemoveMember(ctx: ActionCtx, teamName: string, memberId: string, label: string) {
+function confirmRemoveMember(ctx: ActionCtx, teamName: string, member: Agent | string, label: string) {
   ctx.showDialog({
     type: "confirm",
     prompt: `Remove ${label} from @${teamName}?`,
@@ -810,7 +830,9 @@ function confirmRemoveMember(ctx: ActionCtx, teamName: string, memberId: string,
     onYes: () => {
       ctx.closeDialog();
       ctx.executeAndRefresh(async () => {
-        const result = await teamRemove(teamName, memberId, ctx.repos);
+        const result = typeof member === "string"
+          ? await teamRemoveStoredMember(teamName, member, ctx.repos)
+          : await teamRemove(teamName, member, ctx.repos);
         if (result.ok) ctx.setNotice(result.stdout || `Removed ${label} from @${teamName}`, "info");
         else ctx.setNotice(result.stderr || result.stdout || `Remove failed`, "error");
       });
@@ -889,7 +911,7 @@ function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent
   }
 
   const items = liveAgents.map((a) => `${a.repoName}/${a.id} (${displayState(a.state)})`);
-  const checked = liveAgents.map((a) => preCheckAgent?.id === a.id);
+  const checked = liveAgents.map((a) => preCheckAgent?.id === a.id && sameRepoPath(a.repoPath, preCheckAgent.repoPath));
 
   ctx.showDialog({
     type: "multi-select",
@@ -926,7 +948,7 @@ function openMemberPicker(ctx: ActionCtx, teamName: string, preCheckAgent: Agent
         for (const i of checkedIndices) {
           const agent = liveAgents[i];
           if (!agent) continue;
-          const addResult = await teamAdd(teamName, agent.id, ctx.repos, { suppressJoinNotice: true });
+          const addResult = await teamAdd(teamName, agent, ctx.repos, { suppressJoinNotice: true });
           if (addResult.ok) addedCount++;
           else addFailures++;
         }
@@ -1011,7 +1033,7 @@ function openFirstMessagePrompt(ctx: ActionCtx, teamName: string, addedCount: nu
  */
 function runAddMember(ctx: ActionCtx, agent: Agent, teamName: string) {
   ctx.executeAndRefresh(async () => {
-    const result = await teamAdd(teamName, agent.id, ctx.repos);
+    const result = await teamAdd(teamName, agent, ctx.repos);
     if (result.ok) ctx.setNotice(result.stdout || `Added ${agent.id} to @${teamName}`, "info");
     else ctx.setNotice(result.stderr || result.stdout || `Add to team failed`, "error");
   });
@@ -1050,36 +1072,20 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
       ctx.setNotice("No agents to manage", "error");
       return;
     }
-    const memberSet = new Set(team.members);
-    const liveIds = new Set(liveAgents.map((a) => a.id));
     const items = liveAgents.map((a) => `${a.repoName}/${a.id} (${displayState(a.state)})`);
-    const checked = liveAgents.map((a) => memberSet.has(a.id));
+    const initialChecked = liveAgents.map((a) => isRosterMember(team, a, liveAgents));
 
     ctx.showDialog({
       type: "multi-select",
       prompt: `Manage roster: @${teamName}`,
       items,
-      checked,
+      checked: [...initialChecked],
       selectedIndex: 0,
       onSubmit: (checkedIndices: number[]) => {
         ctx.closeDialog();
-        const nextMemberIds = new Set<string>();
-        for (const i of checkedIndices) {
-          const a = liveAgents[i];
-          if (a) nextMemberIds.add(a.id);
-        }
-        const toAdd: string[] = [];
-        const toRemove: string[] = [];
-        for (const id of nextMemberIds) {
-          if (!memberSet.has(id)) toAdd.push(id);
-        }
-        // Only remove ids the dialog actually showed — a stale id in
-        // team.members with no live Agent record cannot have been
-        // unchecked by the user; treating its absence as "remove" would
-        // conflate "row didn't exist" with "user opted out."
-        for (const id of memberSet) {
-          if (liveIds.has(id) && !nextMemberIds.has(id)) toRemove.push(id);
-        }
+        const nextChecked = new Set(checkedIndices);
+        const toAdd = liveAgents.filter((_, i) => !initialChecked[i] && nextChecked.has(i));
+        const toRemove = liveAgents.filter((_, i) => initialChecked[i] && !nextChecked.has(i));
         if (toAdd.length === 0 && toRemove.length === 0) {
           ctx.setNotice(`Roster unchanged for @${teamName}`, "info");
           return;
@@ -1095,17 +1101,19 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
           // instead of silently rolling up into the failure count.
           const isTeamGone = (stderr: string): boolean =>
             stderr.includes(`team @${teamName} not found`);
-          for (const id of toAdd) {
-            const r = await teamAdd(teamName, id, ctx.repos);
-            if (r.ok) added++;
-            else if (isTeamGone(r.stderr)) { teamGone = true; break; }
+          for (const agent of toAdd) {
+            const r = await teamAdd(teamName, agent, ctx.repos);
+            if (r.ok) {
+              if (r.added) added++;
+            } else if (isTeamGone(r.stderr)) { teamGone = true; break; }
             else failures++;
           }
           if (!teamGone) {
-            for (const id of toRemove) {
-              const r = await teamRemove(teamName, id, ctx.repos);
-              if (r.ok) removed++;
-              else if (isTeamGone(r.stderr)) { teamGone = true; break; }
+            for (const agent of toRemove) {
+              const r = await teamRemove(teamName, agent, ctx.repos);
+              if (r.ok) {
+                if (r.removed) removed++;
+              } else if (isTeamGone(r.stderr)) { teamGone = true; break; }
               else failures++;
             }
           }
@@ -1137,7 +1145,7 @@ export function handleManageRoster(ctx: ActionCtx, teamName: string) {
  * Reads the team via `getTeam` so an empty team (no members) just shows the
  * "Disband team @<name>" option with no remove rows. If the team vanished
  * between display and selection, the underlying handlers (`handleDisbandTeam`
- * for disband, `teamRemove` for member-removal) surface the not-found state
+ * for disband and the team removal helpers) surface the not-found state
  * exactly as if it had vanished mid-`x`.
  *
  * Note on `x` on a team MEMBER row in the Teams tree: that path is NOT routed
@@ -1157,7 +1165,7 @@ export function handleManageTeam(ctx: ActionCtx, teamName: string) {
     const memberItems = team.members.map((id) => {
       const agent = byId.get(id);
       const label = agent ? `${agent.repoName}/${id}` : id;
-      return { memberId: id, label };
+      return { member: agent ?? id, label };
     });
     const items = [
       `Disband team @${teamName}`,
@@ -1175,7 +1183,7 @@ export function handleManageTeam(ctx: ActionCtx, teamName: string) {
           return;
         }
         const member = memberItems[index - 1]!;
-        confirmRemoveMember(ctx, teamName, member.memberId, member.label);
+        confirmRemoveMember(ctx, teamName, member.member, member.label);
       },
     });
   });
@@ -1210,7 +1218,7 @@ export function handleManageTeamMember(ctx: ActionCtx, teamName: string, agent: 
     selectedIndex: 0,
     onSelect: (index: number) => {
       ctx.closeDialog();
-      if (index === 0) confirmRemoveMember(ctx, teamName, agent.id, label);
+      if (index === 0) confirmRemoveMember(ctx, teamName, agent, label);
       else if (index === 1 && canRetire) confirmRetire(ctx, agent);
     },
   });
@@ -1310,7 +1318,7 @@ export function handleMerge(ctx: ActionCtx) {
             const notice = keep
               ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
               : `Merged ${agent.id}`;
-            ctx.setNotice(notice, "info");
+            showTeardownResult(ctx, notice, result.stderr);
           } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
         });
       },
@@ -1863,9 +1871,12 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
             const result = await newAgent(repo.path, processedPrompt, opts);
             if (result.ok) {
               ctx.closeDialog();
-              // newAgent's stdout is the new agent's id. A coordinator has no
-              // row in the Agents tree, so `.` could never unfavorite it.
-              if (favoriteOnCreate && agentType !== REPO_COORDINATOR_TYPE) ctx.addFavorite(result.stdout.trim());
+              // newAgent's stdout is the new agent's id; its row is keyed by the
+              // repo's registry name (SPEC §17.1). A coordinator has no row in
+              // the Agents tree, so `.` could never unfavorite it.
+              if (favoriteOnCreate && agentType !== REPO_COORDINATOR_TYPE) {
+                ctx.addFavorite(fullyQualifiedAgentId(ctx.agentTree.machineName, repo.name, result.stdout.trim()));
+              }
               ctx.pendingSelectNewestInRepo = repo.path;
               ctx.setNotice(`Created new agent in ${repoDisplayName(repo)}`, "info");
             } else {
@@ -1881,14 +1892,24 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry) {
   });
 }
 
+/**
+ * The agent that asked `q`: the tree's agent with the question's id in the
+ * question's repo (an id is unique only per repo, SPEC §17.1), or null.
+ */
+function questionAgent(ctx: ActionCtx, q: PendingQuestion): Agent | null {
+  const entry = ctx.agentTree.flatList.find(
+    (f) => f.kind === "agent" && f.agent.id === q.agent && f.agent.repoPath === q.repoPath,
+  );
+  return entry?.kind === "agent" ? entry.agent : null;
+}
+
 export function handleAnswerQuestion(ctx: ActionCtx) {
   const questions = ctx.rightPane.filteredQuestions;
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
-  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
-  const answerAgent = agentEntry.agent;
+  const answerAgent = questionAgent(ctx, q);
+  if (!answerAgent) { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   // The dialog is frozen while a send is in flight (no re-submit, no cancel) and
   // the draft is kept on failure. `answered` records that the answer was ACCEPTED
   // for delivery so it is never resent — the acknowledge is what may still be
@@ -1944,10 +1965,10 @@ export function handleAcknowledgeQuestion(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  const agentEntry = ctx.agentTree.flatList.find((f) => f.kind === "agent" && f.agent.id === q.agent);
-  if (!agentEntry || agentEntry.kind !== "agent") { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
+  const asker = questionAgent(ctx, q);
+  if (!asker) { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   ctx.executeAndRefresh(async () => {
-    const result = await acknowledgeQuestion(agentEntry.agent.repoPath, q.id);
+    const result = await acknowledgeQuestion(asker.repoPath, q.id);
     if (result.ok) ctx.setNotice(`Acknowledged ${q.id}`, "info");
     else ctx.setNotice(`Acknowledge failed: ${result.stderr || result.stdout}`, "error");
   });
@@ -1958,7 +1979,8 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
-  if (ctx.agentTree.selectAgentById(q.agent)) {
+  const asker = questionAgent(ctx, q);
+  if (asker && ctx.agentTree.selectAgent(asker)) {
     // §17.1 Phase 2: jumping from the QUESTIONS pane to an agent is an
     // Agents-panel operation — make the Agents tree the active source and
     // ensure the sidebar shows it (parallel to the @-fuzzy jump). The
@@ -1975,6 +1997,9 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
 }
 
 export function handleFuzzyAgent(ctx: ActionCtx) {
+  // visibleList includes remote rows (SPEC §20.5). The jump lists
+  // only local rows because the filters below keep just the agent,
+  // repo-header and system-coordinator kinds: do not widen them to peer kinds.
   const visible = ctx.agentTree.visibleList;
   const agentEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "agent" }> => f.kind === "agent");
   const repoEntries = visible.filter((f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header");
@@ -2041,7 +2066,7 @@ export function handleFuzzyAgent(ctx: ActionCtx) {
         ctx.jumpToMode("REPO");
         ctx.tui?.requestRender();
       } else {
-        ctx.agentTree.selectAgentById(selected.entry.agent.id);
+        ctx.agentTree.selectAgent(selected.entry.agent);
         ctx.syncSelectedAgent();
         ctx.jumpToMode("AGENT LOG");
         ctx.tui?.requestRender();
@@ -2302,6 +2327,7 @@ export function handleHelp(ctx: ActionCtx) {
       header("App"),
       row("?", "help"),
       row("h", "setup"),
+      row("I", "peers: this install's id, pairing"),
       row("Ctrl-C", "quit"),
       "",
       `${DIM}Press any key to dismiss${RESET}`,
@@ -2587,20 +2613,14 @@ export function handleOpenGhostty(ctx: ActionCtx) {
     })();
     return;
   }
-  // No agent selected — check for repo header
-  const repoHeader = ctx.agentTree.selectedRepoHeader;
-  if (repoHeader) {
-    const headerEntry = ctx.agentTree.flatList.find(
-      (f): f is Extract<FlatEntry, { kind: "repo-header" }> => f.kind === "repo-header" && f.repoName === repoHeader
-    );
-    if (headerEntry) {
-      openPathInGhostty(headerEntry.repoPath).then((result) => {
-        ctx.setNotice(result.message, result.ok ? "info" : "error");
-      }).catch((err) => {
-        ctx.setNotice(`Ghostty error: ${err}`, "error");
-      });
-      return;
-    }
+  const repoPath = ctx.agentTree.selectedRepoPath;
+  if (repoPath) {
+    openPathInGhostty(repoPath).then((result) => {
+      ctx.setNotice(result.message, result.ok ? "info" : "error");
+    }).catch((err) => {
+      ctx.setNotice(`Ghostty error: ${err}`, "error");
+    });
+    return;
   }
   ctx.setNotice("No agent or repo selected", "error");
 }

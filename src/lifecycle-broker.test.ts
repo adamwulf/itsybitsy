@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
+import { chmod, mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
 import type { Agent, AgentMeta } from "./agents";
 import { resetUserHome, setUserHome } from "./home";
 import { hasLiveWatchdog } from "./ib-commands";
@@ -14,6 +14,7 @@ import {
   routeLifecycleThroughWatchdog,
   type LifecycleServerDeps,
 } from "./lifecycle-broker";
+import { checkIbCommandAccess } from "./hooks/agent-path";
 import { setSandboxedProcessOverride } from "./sandbox-detect";
 import { processSpawnRequests, spawnRequestDir, spawnResultDir, type SpawnServerDeps } from "./spawn-broker";
 import { runPerAgentWatchdog } from "./watchdog";
@@ -57,7 +58,7 @@ describe("lifecycle broker", () => {
   }
 
   const agentRecord = (id: string): Agent =>
-    ({ id, repoPath: repo, repoName: "repo", meta: { id } as unknown as AgentMeta, state: "waiting", age: "", archived: false, children: [] }) as Agent;
+    ({ id, repoPath: repo, repoName: "repo", repoRegistryName: "repo", meta: { id } as unknown as AgentMeta, state: "waiting", age: "", archived: false, children: [] }) as Agent;
 
   async function queue(id: string, body: unknown): Promise<void> {
     await mkdir(spawnRequestDir(agentDir), { recursive: true });
@@ -219,6 +220,81 @@ describe("lifecycle broker", () => {
       expect(await result(ID_A)).toMatchObject({ ok: true, stdout: `Rehired agent: ${CHILD_ID}` });
     });
 
+    test.each([true, false])("a hidden archive defers machine-qualified rehire to the watchdog (owned=%s)", async (owned) => {
+      await Bun.write(join(home, ".itsybitsy", "machine-name"), "laptop");
+      await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({
+        version: 1, repos: [{ path: repo, name: "test" }],
+      }));
+      await writeArchive(CHILD_ID, { manager: owned ? MANAGER_ID : "someone-else" });
+      const worktree = join(agentDir, "repo");
+      await mkdir(worktree);
+      const archive = join(repo, ".itsybitsy", "archive");
+      const target = `laptop/${CHILD_ID}`;
+      await chmod(archive, 0o000);
+      setSandboxedProcessOverride(() => true);
+      try {
+        expect(await checkIbCommandAccess(`ib rehire ${target}`, MANAGER_ID, agentsDir, worktree)).toBeNull();
+      } finally {
+        await chmod(archive, 0o755);
+        setSandboxedProcessOverride(null);
+      }
+      const { deps, rehired } = server();
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire", target }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual(owned ? [{ agentId: CHILD_ID, opts: { repoPath: repo } }] : []);
+      expect((await result(ID_A)).ok).toBe(owned);
+    });
+
+    test("a reused nickname defers to the watchdog when the caller's archive is hidden", async () => {
+      await Bun.write(join(home, ".itsybitsy", "machine-name"), "laptop");
+      await Bun.write(join(home, ".itsybitsy", "repos.json"), JSON.stringify({
+        version: 1, repos: [{ path: repo, name: "test" }],
+      }));
+      await writeAgent("active-id", { nickname: "reused", manager: "someone-else" });
+      await writeArchive(CHILD_ID, { nickname: "reused", manager: MANAGER_ID });
+      const worktree = join(agentDir, "repo");
+      await mkdir(worktree);
+      const archive = join(repo, ".itsybitsy", "archive");
+      const targets = ["reused", "@test/reused", "laptop/reused", "laptop/test/reused"];
+      await chmod(archive, 0o000);
+      setSandboxedProcessOverride(() => true);
+      try {
+        for (const target of targets) {
+          expect(await checkIbCommandAccess(`ib rehire ${target}`, MANAGER_ID, agentsDir, worktree)).toBeNull();
+        }
+        expect(await checkIbCommandAccess("ib rehire active-id", MANAGER_ID, agentsDir, worktree)).toMatchObject({
+          decision: "deny", reason: expect.stringContaining("manager or spawner"),
+        });
+      } finally {
+        await chmod(archive, 0o755);
+        setSandboxedProcessOverride(null);
+      }
+
+      const { deps, rehired } = server();
+      for (const [index, target] of targets.entries()) {
+        const id = (index + 1).toString(16).repeat(32);
+        await queue(id, retireRequest(id, { op: "rehire", target }));
+        await processSpawnRequests(MANAGER_ID, repo, deps);
+        expect(await result(id)).toMatchObject({
+          ok: false, stderr: expect.stringContaining(`@test/active-id or @test/${CHILD_ID}`),
+        });
+      }
+      expect(rehired).toEqual([]);
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire", target: `@test/${CHILD_ID}` }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([{ agentId: CHILD_ID, opts: { repoPath: repo } }]);
+    });
+
+    test("does not create a qualified name for the requester's unregistered repo", async () => {
+      await writeArchive(CHILD_ID, { manager: MANAGER_ID });
+      const { deps, rehired } = server();
+      const name = basename(repo);
+      await queue(ID_A, retireRequest(ID_A, { op: "rehire", target: `@${name}/${CHILD_ID}` }));
+      await processSpawnRequests(MANAGER_ID, repo, deps);
+      expect(rehired).toEqual([]);
+      expect((await result(ID_A)).stderr).toContain(`no repo or team named: ${name}`);
+    });
+
     test("an archive that belonged to another manager is refused", async () => {
       await writeArchive(CHILD_ID, { manager: "someone-else" });
       const { deps, rehired } = server();
@@ -349,7 +425,7 @@ describe("lifecycle broker", () => {
       await queue(ID_A, retireRequest(ID_A, { op: "rehire" }));
       await processSpawnRequests(MANAGER_ID, repo, deps);
       expect(rehired).toEqual([]);
-      expect((await result(ID_A)).stderr).toContain(`retired agent '${CHILD_ID}' not found in this repository`);
+      expect((await result(ID_A)).stderr).toContain(`Agent not found: ${CHILD_ID}`);
     });
 
     test("the target is resolved from the requester's repo on disk", async () => {

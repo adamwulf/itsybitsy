@@ -262,11 +262,22 @@ describe("layout persistence", () => {
     expect(loadedB!.pinnedRepoPaths).toBeUndefined();
   });
 
-  test("favoriteAgentIds round-trips through save then load", async () => {
-    await saveLayout({ ...sampleLayout, favoriteAgentIds: ["agent-1", "mgr"] });
+  test("favoriteAgentIds (fully qualified ids) round-trip through save then load", async () => {
+    await saveLayout({ ...sampleLayout, favoriteAgentIds: ["studio/web/agent-1", "Laptop B/api/mgr"] });
     const loaded = await loadLayout();
     expect(loaded).not.toBeNull();
-    expect(loaded!.favoriteAgentIds).toEqual(["agent-1", "mgr"]);
+    expect(loaded!.favoriteAgentIds).toEqual(["studio/web/agent-1", "Laptop B/api/mgr"]);
+  });
+
+  test("loadLayout silently drops a favorite that is not a fully qualified id (an old bare id)", async () => {
+    await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
+      ...sampleLayout,
+      favoriteAgentIds: ["agent-1", "studio/web/agent-2", "web/agent-3", "studio//agent-4", "a/b/c/d", 7, null],
+    }));
+    const loaded = await loadLayout();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.favoriteAgentIds).toEqual(["studio/web/agent-2"]);
+    expect(loaded!.sidebarWidth).toBe(sampleLayout.sidebarWidth);
   });
 
   test("loadLayout tolerates a MISSING favoriteAgentIds (rest of layout preserved)", async () => {
@@ -283,8 +294,8 @@ describe("layout persistence", () => {
     expect(loaded!.favoriteAgentIds).toBeUndefined();
   });
 
-  test("loadLayout drops a MALFORMED favoriteAgentIds without discarding the layout", async () => {
-    for (const bad of ["agent-1", ["agent-1", 7], { id: "agent-1" }, null]) {
+  test("loadLayout drops a MALFORMED (non-array) favoriteAgentIds without discarding the layout", async () => {
+    for (const bad of ["studio/web/agent-1", { id: "agent-1" }, null]) {
       await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({
         sidebarWidth: 60,
         splitPaneLeftWidth: 80,

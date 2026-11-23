@@ -22,14 +22,14 @@ import {
   handleOpenDiffTool, handleOpenDiffToolVsManager, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
   handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
-  effectiveSpawnCapability, handleAnswerQuestion,
+  effectiveSpawnCapability, handleAnswerQuestion, handleAcknowledgeQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
-  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageTeam, handleManageTeamMember,
+  handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageRoster, handleManageTeam, handleManageTeamMember,
   handleFolderBrowser, newRepoPrompt, newAgentFormTypeOrder,
 } from "./agent-actions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
-import { readTeams, createTeam, addMember, deleteTeam } from "../teams";
+import { readTeams, createTeam, addMember, removeMember, deleteTeam } from "../teams";
 import { teamLogPath, channelPath, appendChannelMessage, appendTeamLog } from "../team-channel";
 import { existsSync } from "node:fs";
 import { saveRegistry, loadRegistry } from "../registry";
@@ -95,6 +95,7 @@ function noopSpawnRunner(): SpawnResult {
 function makeMockCtx(overrides?: {
   agent?: Agent | null;
   repoHeader?: string | null;
+  repoPath?: string;
   repos?: RepoEntry[];
   flatList?: FlatEntry[];
   leftWidth?: number;
@@ -158,10 +159,12 @@ function makeMockCtx(overrides?: {
     agentTree: {
       selectedAgent: overrides?.agent ?? null,
       selectedRepoHeader: overrides?.repoHeader ?? null,
+      selectedRepoPath: overrides?.repoPath ?? null,
       isSystemCoordinatorSelected: false,
       flatList: overrides?.flatList ?? [],
       visibleList: overrides?.flatList ?? [],
-      selectAgentById: () => true,
+      machineName: "studio",
+      selectAgent: () => true,
       selectByRepoPath: () => true,
       selectSystemCoordinator: () => true,
     },
@@ -266,7 +269,7 @@ function makeMockCtx(overrides?: {
 
 // Per-test isolated repo root + coordinator home. sendMessage now writes a
 // real outbox.jsonl + .outbox.lock under the CENTRAL outbox dir
-// (`agentOutboxDir(id)` → `<coordinatorHome>/agents/<id>/`), so send-path
+// (under `<coordinatorHome>/agents/`), so send-path
 // tests MUST pin both: a fresh repoPath (the agent's worktree, used for
 // log/state writes) AND a fresh coordinator home (so the central queue dir
 // resolves into the sandbox instead of the developer's real ~/.itsybitsy/).
@@ -284,6 +287,8 @@ beforeEach(async () => {
   sendRepoDir = await mkdtemp(join(tmpdir(), "agent-actions-send-"));
   const { setCoordinatorHome } = await import("../coordinator");
   setCoordinatorHome(join(sendRepoDir, "coord-home"));
+  setUserHome(sendRepoDir);
+  await Bun.write(join(sendRepoDir, ".itsybitsy", "machine-name"), "studio");
 });
 
 afterEach(async () => {
@@ -295,6 +300,7 @@ afterEach(async () => {
   tmuxSpawnCtx.reset();
   const { resetCoordinatorHome } = await import("../coordinator");
   resetCoordinatorHome();
+  resetUserHome();
   await rm(sendRepoDir, { recursive: true, force: true });
 });
 
@@ -623,7 +629,7 @@ describe("handleResume", () => {
       // so handleResume takes the SPAWN branch (the path the durable guard
       // can't cover).
       const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-doublepress", name: "my-repo" }];
-      const { ctx } = makeMockCtx({ repoHeader: "my-repo", repos });
+      const { ctx } = makeMockCtx({ repoHeader: "my-repo", repoPath: repos[0]!.path, repos });
 
       // Hold each executeAndRefresh body pending so the in-flight key stays set
       // across the second synchronous press (mirrors the real race: the first
@@ -646,7 +652,7 @@ describe("handleResume", () => {
 
     test("in-flight key is released after the spawn body completes", async () => {
       const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-release", name: "my-repo" }];
-      const { ctx, flushActions } = makeMockCtx({ repoHeader: "my-repo", repos });
+      const { ctx, flushActions } = makeMockCtx({ repoHeader: "my-repo", repoPath: repos[0]!.path, repos });
 
       // The default makeMockCtx executeAndRefresh runs the body to completion
       // (checkCoordinatorExists → exists:false → newAgent stubbed by the noop
@@ -662,7 +668,7 @@ describe("handleResume", () => {
 
     test("in-flight key is released even when the spawn body THROWS", async () => {
       const repos: RepoEntry[] = [{ path: "/tmp/ib-no-coord-throw", name: "my-repo" }];
-      const { ctx, flushActions } = makeMockCtx({ repoHeader: "my-repo", repos });
+      const { ctx, flushActions } = makeMockCtx({ repoHeader: "my-repo", repoPath: repos[0]!.path, repos });
 
       // Force the spawn body to throw: checkCoordinatorExists → exists:false →
       // newAgent rejects because its spawn runner throws. The body's `finally`
@@ -745,12 +751,13 @@ describe("handleSend", () => {
 
   test("onSubmit calls sendMessage", async () => {
     const agent = makeAgent({ id: "agent-1", repoPath: sendRepoDir });
+    agent.meta.tmux_session = "itsybitsy-abcd1234-agent-1";
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent });
     handleSend(ctx);
     const d = assertDialog(dialogs[0]!, "textarea");
     d.onSubmit("Hello agent");
     await flushActions();
-    expect(notices.some((n) => n.includes("Sent to agent-1") || n.includes("Send failed"))).toBe(true);
+    expect(notices).toContain("Sent to agent-1");
   });
 
   test("empty message cancels send", () => {
@@ -773,14 +780,16 @@ describe("handleSend", () => {
   });
 
   test("per-repo coordinator send calls sendMessage", async () => {
-    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir, meta: { agentType: "repo-coordinator" } as any });
+    const coordAgent = makeAgent({ id: "coord-1", repoPath: sendRepoDir });
+    coordAgent.meta.agentType = "repo-coordinator";
+    coordAgent.meta.tmux_session = "itsybitsy-abcd1234-coord-1";
     const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repoHeader: "my-repo" });
     ctx.rightPane.repoCoordinatorAgent = coordAgent;
     handleSend(ctx);
     const d = assertDialog(dialogs[0]!, "textarea");
     d.onSubmit("Hello coordinator");
     await flushActions();
-    expect(notices.some((n) => n.includes("Sent to coord-1") || n.includes("Send failed"))).toBe(true);
+    expect(notices).toContain("Sent to coord-1");
   });
 
   test("does nothing when repo header selected but no coordinator agent", () => {
@@ -1230,7 +1239,7 @@ describe("handleFuzzyAgent system coordinator", () => {
       flatList: [makeFlatSystemCoordinator(), makeFlatAgent(makeAgent({ id: "agent-fuzz4" }))],
     });
     const calls: string[] = [];
-    ctx.agentTree.selectAgentById = () => { calls.push("selectAgentById"); return true; };
+    ctx.agentTree.selectAgent = () => { calls.push("selectAgent"); return true; };
     ctx.agentTree.selectSystemCoordinator = () => { calls.push("selectSystemCoordinator"); return true; };
     ctx.syncSelectedAgent = () => { calls.push("syncSelectedAgent"); };
     ctx.jumpToMode = (mode) => { calls.push(`jumpToMode:${mode}`); };
@@ -1876,6 +1885,7 @@ describe("handleAddPermission spawn toggle re-seals (A4 G3)", () => {
 });
 
 describe("effectiveSpawnCapability", () => {
+  beforeEach(async () => { await (await import("../agent-types")).ensureAgentTypesDir(); });
   test("per-agent canSpawnChildren override wins over type/worker (true)", async () => {
     const agent = makeAgent({ id: "agent-1", meta: { worker: true, agentType: "worker", canSpawnChildren: true } as any });
     expect(await effectiveSpawnCapability(agent)).toBe(true);
@@ -2155,15 +2165,21 @@ describe("handleFuzzyAgent — §17.3 @-jump force-select in Agents panel", () =
 });
 
 describe("handleGoToQuestionAgent — sidebar tab", () => {
-  const question: PendingQuestion = { id: "q1", agent: "agent-q", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending" };
+  // The question's agent has a row in the tree; the jump selects that row's agent.
+  const asker = makeAgent({ id: "agent-q" });
+  const question: PendingQuestion = { id: "q1", agent: "agent-q", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending", repoPath: asker.repoPath };
 
   test("from the Teams tab: switches to Agents and makes Agents the active source", () => {
     const { ctx, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
       sidebarMode: "teams",
       activeSelectionSource: "teams",
       questions: [question],
+      flatList: [makeFlatAgent(asker)],
     });
+    const selected: Agent[] = [];
+    ctx.agentTree.selectAgent = (agent) => { selected.push(agent); return true; };
     handleGoToQuestionAgent(ctx);
+    expect(selected).toEqual([asker]);
     expect(setSidebarModeCalls).toEqual(["agents"]);
     expect(setActiveSelectionSourceCalls).toEqual(["agents"]);
   });
@@ -2172,6 +2188,7 @@ describe("handleGoToQuestionAgent — sidebar tab", () => {
     const { ctx, setSidebarModeCalls, setActiveSelectionSourceCalls } = makeMockCtx({
       sidebarMode: "favorites",
       questions: [question],
+      flatList: [makeFlatAgent(asker)],
     });
     handleGoToQuestionAgent(ctx);
     expect(setSidebarModeCalls).toEqual([]);
@@ -2249,6 +2266,7 @@ async function setupTeamsFixture(): Promise<{
   await mkdir(homeDir, { recursive: true });
   await mkdir(repoDir, { recursive: true });
   setUserHome(baseDir);
+  await Bun.write(join(baseDir, ".itsybitsy", "machine-name"), "studio");
   setCoordinatorHome(homeDir);
   setUserConfigPath(join(homeDir, "config.json"));
   const repoEntry: RepoEntry = { path: repoDir, name: basename(repoDir) };
@@ -2934,23 +2952,95 @@ describe("handleAddAgentToTeam", () => {
     expect(assertDialog(dialogs[1]!, "multi-select").checked).toEqual([true]);
   });
 
-  test("same id in two repos: adding the twin that is not the member reports 'already in' and changes nothing", async () => {
-    // The roster holds the bare id once and cannot hold both twins, so the add
-    // entry offered to the non-member twin is a reported no-op.
+  test("team actions keep the selected twin's repo when both are used from the same cwd", async () => {
+    tmuxSpawnCtx.set(noopSpawnRunner);
+    const web = join(fx.baseDir, "web");
     await plantTestAgent(fx.repoDir, "agent-twin");
+    await plantTestAgent(web, "agent-twin");
     await createTeam("backend", "user", 1700000000);
-    await addMember("backend", "agent-twin");
     const twinA = makeAgent({ id: "agent-twin", repoPath: fx.repoDir, repoName: "api" });
-    const twinB = makeAgent({ id: "agent-twin", repoPath: "/repos/web", repoName: "web" });
-    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ agent: twinA, repos: [fx.repoEntry], lastAgents: [twinA, twinB] });
-    const d = await openPicker(ctx, dialogs);
-    expect(d.allItems).toEqual(["backend", "+ Create new team…"]);
-    d.onSelect(0);
-    await flushActions();
-    expect(notices).toEqual(["agent agent-twin is already in @backend"]);
-    expect((await readTeams()).teams["backend"]!.members).toEqual(["agent-twin"]);
-    // No second join was logged.
-    expect(await readTeamAuditLog("backend")).not.toContain("joined");
+    const twinB = makeAgent({ id: "agent-twin", repoPath: web, repoName: "web" });
+    const repos = [fx.repoEntry, { path: web, name: "web" }];
+    const lastAgents = [twinA, twinB];
+    const members = async () => (await readTeams()).teams["backend"]!.members;
+    const previous = process.cwd();
+    process.chdir(fx.repoDir);
+    try {
+      for (const [agent, accepted] of [[twinA, false], [twinB, true]] as const) {
+        const add = makeMockCtx({ agent, repos, lastAgents });
+        (await openPicker(add.ctx, add.dialogs)).onSelect(0);
+        await add.flushActions();
+        expect(await members()).toEqual(accepted ? ["agent-twin"] : []);
+        expect(add.notices[0]).toContain(accepted ? "Added agent-twin" : "does not identify this agent reliably");
+      }
+
+      for (const [agent, accepted] of [[twinA, false], [twinB, true]] as const) {
+        const remove = makeMockCtx({ agent, repos, lastAgents });
+        handleManageTeamMember(remove.ctx, "backend", agent);
+        assertDialog(remove.dialogs[0]!, "select").onSelect(0);
+        assertDialog(remove.dialogs[1]!, "confirm").onYes();
+        await remove.flushActions();
+        expect(await members()).toEqual(accepted ? [] : ["agent-twin"]);
+        expect(remove.notices[0]).toContain(accepted ? "Removed agent-twin" : "does not identify this agent reliably");
+      }
+
+      for (const added of [true, false]) {
+        const roster = makeMockCtx({ repos, lastAgents });
+        handleManageRoster(roster.ctx, "backend");
+        await roster.flushActions();
+        const editor = assertDialog(roster.dialogs[0]!, "multi-select");
+        expect(editor.checked).toEqual([false, !added]);
+        const dialogCtx: DialogCtx = { _dialog: editor, repos, tui: null, closeDialog: () => {} };
+        handleDialogInput(dialogCtx, "j");
+        handleDialogInput(dialogCtx, " ");
+        handleDialogInput(dialogCtx, "\r");
+        await roster.flushActions();
+        expect(await members()).toEqual(added ? ["agent-twin"] : []);
+        expect(roster.notices[0]).toContain(added ? "+1" : "-1");
+      }
+
+      const create = makeMockCtx({ agent: twinB, repos, lastAgents });
+      const picker = await openPicker(create.ctx, create.dialogs);
+      picker.onSelect(picker.allItems.length - 1);
+      assertDialog(create.dialogs[1]!, "input").onSubmit("new-team");
+      await create.flushActions();
+      const selected = assertDialog(create.dialogs[2]!, "multi-select");
+      expect(selected.checked).toEqual([false, true]);
+      selected.onSubmit([1]);
+      await create.flushActions();
+      expect((await readTeams()).teams["new-team"]!.members).toEqual(["agent-twin"]);
+    } finally {
+      process.chdir(previous);
+    }
+  });
+
+  test("the roster summary counts no writes when another edit already made the requested changes", async () => {
+    tmuxSpawnCtx.set(noopSpawnRunner);
+    const leaving = "agent-leaving";
+    const joining = "agent-joining";
+    await plantTestAgent(fx.repoDir, leaving);
+    await plantTestAgent(fx.repoDir, joining);
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", leaving);
+    const repos = [fx.repoEntry];
+    const lastAgents = [leaving, joining].map((id) => makeAgent({ id, repoPath: fx.repoDir }));
+    const roster = makeMockCtx({ repos, lastAgents });
+    handleManageRoster(roster.ctx, "backend");
+    await roster.flushActions();
+    const editor = assertDialog(roster.dialogs[0]!, "multi-select");
+    expect(editor.checked).toEqual([true, false]);
+    const dialogCtx: DialogCtx = { _dialog: editor, repos, tui: null, closeDialog: () => {} };
+    handleDialogInput(dialogCtx, " ");
+    handleDialogInput(dialogCtx, "j");
+    handleDialogInput(dialogCtx, " ");
+
+    await removeMember("backend", leaving);
+    await addMember("backend", joining);
+    handleDialogInput(dialogCtx, "\r");
+    await roster.flushActions();
+
+    expect((await readTeams()).teams["backend"]!.members).toEqual([joining]);
+    expect(roster.notices).toEqual(["Updated @backend: no changes"]);
   });
 });
 
@@ -3072,6 +3162,7 @@ function mkAgent(id: string, repoName: string): Agent {
     id,
     repoPath: `/repos/${repoName}/${id}`,
     repoName,
+    repoRegistryName: repoName,
     meta: {
       id,
       session_id: `sess-${id}`,
@@ -3170,17 +3261,20 @@ describe("handleManageTeam", () => {
   });
 
   test("confirming Remove calls teamRemove which prunes the roster + fires the leave notice", async () => {
-    // teamRemove resolves the member id via readAllAgents, so we plant real
-    // agent dirs on disk for both members. The live `lastAgents` is unrelated
-    // (it only drives the picker's label format) but we keep it consistent
-    // with the planted dirs.
+    tmuxSpawnCtx.set(noopSpawnRunner);
+    const web = join(fx.baseDir, "web");
     await plantTestAgent(fx.repoDir, "agent-aaa");
-    await plantTestAgent(fx.repoDir, "agent-bbb");
+    await plantTestAgent(web, "agent-bbb");
     await createTeam("backend", "user", 1700000000);
     await addMember("backend", "agent-aaa");
     await addMember("backend", "agent-bbb");
-    const lastAgents = [mkAgent("agent-aaa", "api"), mkAgent("agent-bbb", "web")];
-    const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+    const lastAgents = [
+      makeAgent({ id: "agent-aaa", repoPath: fx.repoDir, repoName: "api" }),
+      makeAgent({ id: "agent-bbb", repoPath: web, repoName: "web" }),
+    ];
+    const { ctx, dialogs, notices, flushActions } = makeMockCtx({
+      repos: [fx.repoEntry, { path: web, name: "web" }], lastAgents,
+    });
     handleManageTeam(ctx, "backend");
     await flushActions();
     const picker = assertDialog(dialogs[0]!, "select");
@@ -3195,6 +3289,31 @@ describe("handleManageTeam", () => {
     const reg = await readTeams();
     expect(reg.teams["backend"]!.members).toEqual(["agent-aaa"]);
     expect(notices.some((n) => n.includes("Removed") && n.includes("backend"))).toBe(true);
+    expect(await readTeamAuditLog("backend")).toContain("agent agent-bbb left");
+  });
+
+  test("confirming an unresolved row removes only the stored ID even if another member has that nickname", async () => {
+    tmuxSpawnCtx.set(noopSpawnRunner);
+    const survivor = "agent-live";
+    const dir = await plantTestAgent(fx.repoDir, survivor);
+    const metaPath = join(dir, "meta.json");
+    await Bun.write(metaPath, JSON.stringify({ ...await Bun.file(metaPath).json(), nickname: "stale-with-nickname" }));
+    await createTeam("backend", "user", 1700000000);
+    await addMember("backend", survivor);
+    const lastAgents = [makeAgent({ id: survivor, repoPath: fx.repoDir })];
+    for (const id of ["stale-with-nickname", "stale-without-match"]) {
+      await addMember("backend", id);
+      const { ctx, dialogs, notices, flushActions } = makeMockCtx({ repos: [fx.repoEntry], lastAgents });
+      handleManageTeam(ctx, "backend");
+      await flushActions();
+      const picker = assertDialog(dialogs[0]!, "select");
+      picker.onSelect(picker.items.indexOf(`Remove ${id}`));
+      assertDialog(dialogs[1]!, "confirm").onYes();
+      await flushActions();
+      expect((await readTeams()).teams["backend"]!.members).toEqual([survivor]);
+      expect(notices).toEqual([`Removed ${id} from @backend`]);
+      expect(await readTeamAuditLog("backend")).toContain(`agent ${id} left`);
+    }
   });
 
   test("cancelling the Remove confirm leaves the roster intact", async () => {
@@ -3451,6 +3570,30 @@ describe("handleFolderBrowser", () => {
     } finally {
       createRepoSpawnCtx.reset();
     }
+  });
+
+  test.each(["Add", "New Repo"])("[ %s ] refuses a folder basename registered at another path", async (action) => {
+    const parent = join(fx.baseDir, "elsewhere");
+    const target = join(parent, "Repo");
+    await mkdir(parent);
+    const existing = { path: fx.repoDir, name: "website" };
+    await saveRegistry({ repos: [existing] });
+    const { ctx, dialogs, notices } = makeMockCtx({ repos: [existing] });
+    await handleFolderBrowser(ctx);
+    const browser = assertDialog(dialogs[0]!, "folder-browser");
+    if (action === "Add") {
+      await mkdir(target);
+      browser.onSelect(target);
+    } else {
+      browser.onNewRepo(parent);
+      assertDialog(dialogs[1]!, "input").onSubmit("Repo");
+    }
+
+    const notice = await waitForValue(() => notices[0], { message: "the registration refusal", timeoutMs: WAIT_MS });
+    expect(notice).toContain(`folder name "Repo" is already used by registered repo "${existing.name}" (${existing.path})`);
+    expect((await loadRegistry()).repos).toEqual([existing]);
+    expect(existsSync(target)).toBe(action === "Add");
+    expect(existsSync(join(target, ".git"))).toBe(false);
   });
 });
 
@@ -3816,7 +3959,7 @@ describe("handleAnswerQuestion — deliver the answer before acknowledging", () 
   function openAnswerDialog(repoDir: string) {
     const agent = makeAgent({ id: "agent-1", repoPath: repoDir });
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
-    const question: PendingQuestion = { id: "q1", agent: "agent-1", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending" };
+    const question: PendingQuestion = { id: "q1", agent: "agent-1", question: "?", timestamp: "2026-01-01T00:00:00Z", status: "pending", repoPath: repoDir };
     const mock = makeMockCtx({ agent, flatList, questions: [question] });
     let closeCalls = 0;
     mock.ctx.closeDialog = () => { closeCalls++; };
@@ -3858,6 +4001,55 @@ describe("handleAnswerQuestion — deliver the answer before acknowledging", () 
       expect(notices.some((n) => n.includes("Answered"))).toBe(true);
     } finally {
       await rm(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  test("with one agent id in two repos, g, A and Enter act on the asking repo's agent (SPEC §17.1)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "aa-twin-q-"));
+    try {
+      const twins: Agent[] = [];
+      const questions: PendingQuestion[] = [];
+      for (const repo of ["alpha", "beta"]) {
+        const repoPath = join(base, repo);
+        await mkdir(join(repoPath, ".itsybitsy"), { recursive: true });
+        const q = { id: `q-${repo}`, agent: "dup", question: `${repo}?`, timestamp: "2026-01-01T00:00:00Z", status: "pending" as const };
+        await Bun.write(join(repoPath, ".itsybitsy", "user-questions.json"), JSON.stringify({ questions: [q] }));
+        questions.push({ ...q, repoPath });
+        twins.push(makeAgent({ id: "dup", repoPath, repoName: repo }));
+      }
+      const [alpha, beta] = twins as [Agent, Agent];
+      const status = async (repo: string) =>
+        (await Bun.file(join(base, repo, ".itsybitsy", "user-questions.json")).json()).questions[0].status;
+      const { ctx, dialogs, flushActions } = makeMockCtx({ flatList: [makeFlatAgent(alpha), makeFlatAgent(beta)], questions });
+
+      // g on beta's question selects beta's agent, not the first "dup".
+      ctx.rightPane.questionsSelectedIndex = 1;
+      const selected: Agent[] = [];
+      ctx.agentTree.selectAgent = (agent) => { selected.push(agent); return true; };
+      handleGoToQuestionAgent(ctx);
+      expect(selected).toEqual([beta]);
+
+      // A acknowledges it in beta's repo only.
+      handleAcknowledgeQuestion(ctx);
+      await flushActions();
+      expect(await status("beta")).toBe("acknowledged");
+      expect(await status("alpha")).toBe("pending");
+
+      // Enter on beta's question (re-opened) answers beta's agent: beta is the
+      // second "dup" row, so a bare-id lookup would answer alpha.
+      await Bun.write(join(base, "beta", ".itsybitsy", "user-questions.json"),
+        JSON.stringify({ questions: [{ ...questions[1]!, repoPath: undefined }] }));
+      const sentTo: Agent[] = [];
+      setStagedSenderForTests(async (agent) => { sentTo.push(agent); return { ok: true, exitCode: 0, stdout: "", stderr: "" }; });
+      ctx.rightPane.questionsSelectedIndex = 1;
+      handleAnswerQuestion(ctx);
+      assertDialog(dialogs.at(-1)!, "textarea").onSubmit("yes");
+      await flushActions();
+      expect(sentTo).toEqual([beta]);
+      expect(await status("beta")).toBe("acknowledged");
+      expect(await status("alpha")).toBe("pending");
+    } finally {
+      await rm(base, { recursive: true, force: true });
     }
   });
 

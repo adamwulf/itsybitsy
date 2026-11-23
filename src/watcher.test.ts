@@ -626,6 +626,51 @@ describe("AgentWatcher", () => {
       });
     });
 
+    test("lastDetectedAgents is the list last passed to onUpdate: read while detection is pending, it never shows 'unknown'", async () => {
+      // readAllAgents builds new Agent objects every pass, each starting as "unknown".
+      const first = makeAgent("agent-1");
+      first.state = "unknown";
+      const second = makeAgent("agent-1");
+      second.state = "unknown";
+      mockReadAllAgents
+        .mockResolvedValueOnce(readResult({ agents: [first] }))
+        .mockResolvedValue(readResult({ agents: [second] }));
+      let gate: Promise<void> | null = null;
+      mockDetectAgentStates.mockImplementation(async (agents: Agent[]) => {
+        if (gate) await gate;
+        for (const a of agents) a.state = a === first ? "running" : "waiting";
+      });
+      mockBuildAgentTree.mockImplementation((agents) => agents);
+      mockFlattenAgentTree.mockImplementation((roots) => roots.map((a) => makeFlatAgent(a)));
+      mockReadPendingQuestions.mockResolvedValue([]);
+
+      const updates: Agent[][] = [];
+      const watcher = new AgentWatcher([{ path: tempDir, name: "test" }], { onUpdate: (agents) => updates.push(agents) });
+      expect(watcher.lastDetectedAgents).toEqual([]);
+      await watcher.start();
+      expect(watcher.lastDetectedAgents.map((a) => a.state)).toEqual(["running"]);
+
+      // A second pass blocks inside detection.
+      let release!: () => void;
+      gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const pass = watcher.refresh();
+      await waitFor(() => watcher.lastAgents[0] === second, { message: "second pass read its agents" });
+      await Bun.sleep(5);
+      // lastAgents already holds the undetected list; lastDetectedAgents does not.
+      expect(watcher.lastAgents.map((a) => a.state)).toEqual(["unknown"]);
+      expect(watcher.lastDetectedAgents).toEqual([first]);
+      expect(watcher.lastDetectedAgents.map((a) => a.state)).toEqual(["running"]);
+
+      release();
+      await pass;
+      expect(watcher.lastDetectedAgents).toEqual([second]);
+      expect(watcher.lastDetectedAgents.map((a) => a.state)).toEqual(["waiting"]);
+      expect(updates.at(-1)).toBe(watcher.lastDetectedAgents);
+      watcher.stop();
+    });
+
     test("detectAgentStates changes state between refreshes", async () => {
       const agent1 = makeAgent("agent-1");
 
@@ -701,6 +746,7 @@ describe("AgentWatcher", () => {
         question: "Should I proceed?",
         timestamp: "2026-03-05T00:00:00Z",
         status: "pending",
+        repoPath: tempDir,
       };
       mockReadPendingQuestions.mockResolvedValue([question]);
 
@@ -726,8 +772,8 @@ describe("AgentWatcher", () => {
       let callCount = 0;
       mockReadPendingQuestions.mockImplementation(async () => {
         callCount++;
-        if (callCount === 1) return [{ id: "q-1", agent: "a1", question: "Q1", timestamp: "t1", status: "pending" as const }];
-        return [{ id: "q-2", agent: "a2", question: "Q2", timestamp: "t2", status: "pending" as const }];
+        if (callCount === 1) return [{ id: "q-1", agent: "a1", question: "Q1", timestamp: "t1", status: "pending" as const, repoPath: tempDir }];
+        return [{ id: "q-2", agent: "a2", question: "Q2", timestamp: "t2", status: "pending" as const, repoPath: tempDir2 }];
       });
 
       let receivedQuestions: PendingQuestion[] = [];
@@ -1428,5 +1474,61 @@ describe("health-check throttling (D2)", () => {
       expect(seen.sort((x, y) => x - y)).toEqual([0, 1, 2, 3, 4]);
       expect(out).toEqual(["0:a", "1:b", "2:c", "3:d", "4:e"]);
     });
+  });
+});
+
+// SPEC §17.1 Row keys / §20.4: rows are keyed, and peers are sent, by a repo's
+// REGISTRY name, never its nickname. This runs the watcher with the real reader
+// (readAgentsOfRepos: no tmux) and the real buildAgentTree / flattenAgentTree,
+// so it covers the watcher handing `registryName: r.name` to both and the
+// reader copying it onto each agent.
+describe("AgentWatcher registry names", () => {
+  let base: string;
+
+  beforeEach(async () => {
+    base = await mkdtemp(join(tmpdir(), "itsybitsy-watcher-registry-"));
+    coordinatorSpawnCtx.set(() => ({ stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(1) }) as any);
+    tmuxPollerSpawnCtx.set(() => ({ stdout: new Response("").body!, stderr: new Response("").body!, exited: Promise.resolve(1) }) as any);
+  });
+
+  afterEach(async () => {
+    agentsCtx.reset();
+    coordinatorSpawnCtx.reset();
+    tmuxPollerSpawnCtx.reset();
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("a nicknamed repo's agents and header carry the registry name; the display name stays the nickname", async () => {
+    const real = await import("./agents");
+    const { toRemoteAgents } = await import("./peers/peer-link");
+    agentsCtx.set({
+      readAllAgents: async (repos, includeArchived) => ({
+        ...(await real.readAgentsOfRepos(repos, includeArchived)),
+        orphanedTmuxSessions: [],
+        liveTmuxSessions: new Set<string>(),
+      }),
+      detectAgentStates: async () => {},
+      buildAgentTree: real.buildAgentTree,
+      flattenAgentTree: real.flattenAgentTree,
+      readPendingQuestions: async () => [],
+    });
+    const web = join(base, "web");
+    const other = join(base, "other");
+    for (const repo of [web, other]) await mkdir(join(repo, ".itsybitsy", "agents"), { recursive: true });
+    await mkdir(join(web, ".itsybitsy", "agents", "agent-1"));
+    await writeFile(join(web, ".itsybitsy", "agents", "agent-1", "meta.json"), JSON.stringify({ id: "agent-1", created_epoch: 1, model: "claude:sonnet", prompt: "x", manager: null }));
+
+    let seen: { agents: Agent[]; flat: FlatEntry[] } | null = null;
+    const repos: RepoEntry[] = [{ path: web, name: "web", nickname: "Website" }, { path: other, name: "other" }];
+    const watcher = new AgentWatcher(repos, { onUpdate: (agents, flat) => { seen = { agents, flat }; } });
+    await watcher.start();
+    watcher.stop();
+
+    const { agents, flat } = seen!;
+    expect(agents.map((a) => [a.repoName, a.repoRegistryName])).toEqual([["Website", "web"]]);
+    const header = flat.find((f) => f.kind === "repo-header" && f.repoPath === web);
+    expect(header).toMatchObject({ kind: "repo-header", repoName: "Website", repoRegistryName: "web" });
+    // What a peer is sent: shown as the nickname, keyed by the registry name.
+    expect(toRemoteAgents(agents)[0]).toMatchObject({ repoName: "Website", repoRegistryName: "web" });
   });
 });

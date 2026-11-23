@@ -8,6 +8,7 @@ import { tmpdir } from "os";
 import { userHome } from "../home";
 import { mkdir, rename } from "fs/promises";
 import { MIN_SIDEBAR, MAX_SIDEBAR } from "./sidebar";
+import { isFullyQualifiedAgentId } from "./row-keys";
 
 export { MIN_SIDEBAR, MAX_SIDEBAR };
 
@@ -35,11 +36,13 @@ export interface LayoutState {
    */
   pinnedRepoPaths?: string[];
   /**
-   * Agent ids the user has favorited via '.' in the dashboard tree, plus agents
-   * made with the new-agent form from the Favorites tab (the ★ and the
-   * Favorites sidebar tab). Persisted so favorites survive an `ib watch`
-   * restart. Optional and validated exactly like pinnedRepoPaths. Ids of
-   * agents that no longer exist are kept as-is (no pruning).
+   * Fully qualified ids (`<machine>/<repo>/<agent>`, SPEC §17.1) of the agents
+   * the user has favorited via '.' in the dashboard tree, plus agents made
+   * with the new-agent form from the Favorites tab (the ★ and the Favorites
+   * sidebar tab). Persisted so favorites survive an `ib watch` restart.
+   * Optional; loadLayout keeps only the entries that are fully qualified ids,
+   * so an old bare id is dropped (favorite it again). Ids of agents that no
+   * longer exist are kept as-is (no pruning).
    */
   favoriteAgentIds?: string[];
 }
@@ -113,12 +116,13 @@ export async function loadLayout(): Promise<LayoutState | null> {
     ) {
       result.pinnedRepoPaths = data.pinnedRepoPaths;
     }
-    // Optional: favoriteAgentIds — same rule as pinnedRepoPaths.
-    if (
-      Array.isArray(data.favoriteAgentIds) &&
-      data.favoriteAgentIds.every((id: unknown) => typeof id === "string")
-    ) {
-      result.favoriteAgentIds = data.favoriteAgentIds;
+    // Optional: favoriteAgentIds. A missing or non-array value is dropped like
+    // pinnedRepoPaths; in an array, only the fully qualified ids are kept, so
+    // an old bare id (or any other entry) is dropped silently.
+    if (Array.isArray(data.favoriteAgentIds)) {
+      result.favoriteAgentIds = data.favoriteAgentIds.filter(
+        (id: unknown): id is string => typeof id === "string" && isFullyQualifiedAgentId(id),
+      );
     }
     return result;
   } catch {

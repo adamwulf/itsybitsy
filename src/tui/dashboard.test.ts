@@ -1,6 +1,6 @@
-import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, spyOn } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, writeFile } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir, realpath, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentFileWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
@@ -29,6 +29,19 @@ import { newRepoPrompt } from "./agent-actions";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
+import { formatSince, type PeersDialogService } from "./peers-dialog";
+import type { PeerServiceView } from "../peers/service";
+import { parsePairTarget, type PairStage } from "../peers/pairing";
+import type { RemoteAgent } from "../peers/peer-link";
+import type { PeerLinkState } from "../peers/poller";
+import { peerEntryKey } from "./peer-repos";
+import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
+import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
+import { DIM, ITALIC, RED } from "./colors";
+import { getStateColors } from "./color-scheme";
+import * as agentActions from "./agent-actions";
+import * as ghostty from "../ghostty";
+import * as paneManager from "./pane-manager";
 
 // Many tests below simulate resize keystrokes, which call persistLayout() and
 // schedule debounced layout saves. Route them to a temp file so a test run can
@@ -86,7 +99,9 @@ function mockSendSpawnRunner(calls: { args: string[]; cwd: string }[]) {
 }
 
 function makeAgent(id: string, repoPath: string, archived = false): Agent {
-  return _makeAgent({ id, repoPath, archived });
+  const agent = _makeAgent({ id, repoPath, archived });
+  agent.meta.tmux_session = `itsybitsy-abcdef01-${id}`;
+  return agent;
 }
 
 /**
@@ -994,8 +1009,8 @@ describe("DashboardComponent dialog and action handlers", () => {
   let actionTempDir: string | null = null;
   let configTempDir: string;
   // Writable repo root for send tests: sendMessage ENQUEUES to the agent's
-  // CENTRAL outbox dir (`<coordinatorHome>/agents/<id>/`), and the recipient
-  // log/state writes still target the per-worktree agent dir — so send targets
+  // flat outbox dir (`<coordinatorHome>/agents/<agent>/`). The recipient's
+  // log and state writes go to the per-worktree agent dir, so send targets
   // need a real (writable) repoPath rather than a synthetic /repos/... path.
   // The coordinator home itself is pinned to configTempDir/coord-home in
   // beforeEach so the central queue stays inside the sandbox.
@@ -1009,7 +1024,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
     setUserConfigPath(join(configTempDir, "config.json"));
     sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-send-"));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // The keyless fixtures use getCoordinatorHome() / agents / <agent>.
     // Without this isolation, dashboard sends from this test suite would
     // accumulate in the developer's real ~/.itsybitsy/agents/agent-test/
     // outbox.jsonl, then leak into the next test run when sendMessage drains
@@ -1018,7 +1033,33 @@ describe("DashboardComponent dialog and action handlers", () => {
     setCoordinatorHome(join(configTempDir, "coord-home"));
     // Agent seals belong to the fixture, not the developer's home directory.
     setUserHome(configTempDir);
+    await Bun.write(join(configTempDir, ".itsybitsy", "machine-name"), "studio");
     await (await import("../agent-types")).ensureAgentTypesDir();
+  });
+
+  test("registry errors in repo settings surface a notice and leave failed notes available for retry", async () => {
+    const repo = { path: "/repos/test", name: "test", defaultAgentType: "worker", notes: "before" };
+    const registry = join(configTempDir, ".itsybitsy", "repos.json");
+    const view = makeDashboard();
+    view.setRepos([repo]);
+    view.onUpdate([], [makeFlatRepoHeader("test", repo.path, false, false, false)], [], []);
+    expect(view.agentTree.selectByRepoPath(repo.path)).toBe(true);
+    view.syncSelectedAgent();
+    await Bun.write(registry, "{");
+    view.handleInput("\t"); // focus the default type
+    view.handleInput("\x7f"); // clear type
+    await waitFor(() => view.notice?.includes(registry) === true);
+    expect(repo.defaultAgentType).toBe("worker");
+    view.setNotice("", "info");
+    view.handleInput("\t"); // focus notes
+    view.infoPanel.notesEditor.setText("new draft");
+    view.handleInput("\x1b[Z"); // blur notes
+    await waitFor(() => view.notice?.includes(registry) === true);
+    expect(repo.notes).toBe("before");
+    await Bun.write(registry, JSON.stringify({ repos: [repo] }));
+    view.handleInput("\t");
+    view.handleInput("\x1b[Z"); // retry the same draft
+    await waitFor(async () => (await Bun.file(registry).json()).repos[0].notes === "new draft");
   });
 
   async function setupDashboardWithAgent(state = "running") {
@@ -1032,7 +1073,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     // Mandatory sandbox: a resumable agent carries an enabled sandbox + paths.
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-test",
-      tmux_session: "tmux-agent-test",
+      tmux_session: "itsybitsy-abcdef01-agent-test",
       worktree: false,
       agentType: "manager",
       sandbox: { enabled: true, rawAllow: [], domains: [] },
@@ -1139,6 +1180,213 @@ describe("DashboardComponent dialog and action handlers", () => {
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
   });
 
+  test.each(["repo header", "coordinator row"])("reset from the %s shows cleanup warnings even when respawn fails", async entry => {
+    await setupDashboardWithAgent();
+    const repo = { path: actionTempDir!, name: "project" };
+    const agent = makeAgent("agent-test", repo.path);
+    const key = "studio/project/agent-test";
+    const agentDir = join(repo.path, ".itsybitsy", "agents", agent.id);
+    agent.meta = {
+      ...await Bun.file(join(agentDir, "meta.json")).json(),
+      agentType: "repo-coordinator",
+      prompt: "Coordinate work in this repository.",
+      queue_key: key,
+    };
+    await sealAgentRecord(repo.path, agent.id, agent.meta as unknown as Record<string, unknown>, agentDir);
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
+    const leftover = join(configTempDir, "coord-home", "agents", key, "outbox.jsonl");
+    await mkdir(leftover, { recursive: true });
+    await Bun.write(join(configTempDir, ".itsybitsy", "repos.json"), "{");
+    setNewAgentCallerMetaReader(() => null);
+    setNewAgentSpawnRunner(() => makeSpawnResult(1));
+
+    dashboard.setRepos([repo]);
+    dashboard.setWatcher({ lastAgents: [agent], refresh: () => {}, setGroupByParent: () => {}, healthReports: new Map() } as any);
+    dashboard.onUpdate([agent], [
+      makeFlatRepoHeader(repo.name, repo.path, false, false, false),
+      makeFlatAgent(agent),
+    ], []);
+    if (entry === "repo header") expect(dashboard.agentTree.selectByRepoPath(repo.path)).toBe(true);
+    else expect(dashboard.agentTree.selectAgent(agent)).toBe(true);
+    dashboard.syncSelectedAgent();
+    try {
+      dashboard.handleInput("R");
+      await dashboard.flushPendingActions();
+    } finally {
+      resetNewAgentCallerMetaReader();
+    }
+    expect({ dialog: dashboard.dialog, notice: dashboard.notice }).toMatchObject({ dialog: { type: "cleanup-warnings" } });
+    const dialog = assertDialog(dashboard.dialog, "cleanup-warnings");
+    expect(dialog.text).toContain("Reset failed during respawn");
+    expect(dialog.text).toContain(`could not unlink ${leftover}:`);
+  });
+
+  test.each([false, true])("reset from a repo header tears down only that repo's same-named coordinator (duplicate display names: %p)", async duplicateNames => {
+    await setupDashboardWithAgent();
+    const nickname = duplicateNames ? "shared" : undefined;
+    const first = { path: join(actionTempDir!, "first", "project"), name: "first", nickname };
+    const second = { path: join(actionTempDir!, "second", "project"), name: "second", nickname };
+    await mkdir(first.path, { recursive: true });
+    await mkdir(second.path, { recursive: true });
+
+    // The registry path may have a different spelling from the watched path.
+    const linkedParent = join(actionTempDir!, "linked");
+    await mkdir(linkedParent);
+    const linkedSecond = { ...second, path: join(linkedParent, "project") };
+    await symlink(second.path, linkedSecond.path);
+
+    async function plantCoordinator(repo: typeof first, repoId: string) {
+      const repoPath = await realpath(repo.path);
+      const agent = makeAgent("project", repoPath);
+      agent.repoName = repo.nickname ?? repo.name;
+      agent.repoRegistryName = repo.name;
+      Object.assign(agent.meta, {
+        agentType: "repo-coordinator",
+        prompt: "Coordinate work in this repository.",
+        worktree: false,
+        sandbox: { enabled: false, rawAllow: [], domains: [] },
+        tmux_session: `itsybitsy-${repoId}-project`,
+        queue_key: `studio/${repo.name}/project`,
+      });
+      const metaPath = join(repoPath, ".itsybitsy", "agents", agent.id, "meta.json");
+      await Bun.write(join(repoPath, ".itsybitsy", "repo-id"), repoId);
+      await Bun.write(metaPath, JSON.stringify(agent.meta));
+      return { agent, metaPath };
+    }
+
+    const a = await plantCoordinator(first, "a1b2c3d4");
+    const b = await plantCoordinator(second, "e5f6a7b8");
+    const agents = [a.agent, b.agent];
+    const repos = [first, linkedSecond];
+    await Bun.write(join(configTempDir, ".itsybitsy", "repos.json"), JSON.stringify({ repos }));
+    dashboard.setRepos(repos);
+    dashboard.setWatcher({ lastAgents: agents, refresh: () => {}, setGroupByParent: () => {}, healthReports: new Map() } as any);
+    dashboard.onUpdate(agents, [
+      makeFlatRepoHeader(a.agent.repoName, first.path, false, false, false, first.name),
+      makeFlatAgent(a.agent),
+      makeFlatRepoHeader(b.agent.repoName, linkedSecond.path, false, false, false, linkedSecond.name),
+      makeFlatAgent(b.agent),
+    ], []);
+    expect(dashboard.agentTree.selectByRepoPath(linkedSecond.path)).toBe(true);
+    dashboard.syncSelectedAgent();
+
+    const kills: string[] = [];
+    setNukeResumeSpawnRunner(cmd => {
+      if (cmd[1] === "list-sessions") {
+        return makeSpawnResult(0, agents.map(agent => agent.meta.tmux_session).join("\n"));
+      }
+      if (cmd[1] === "kill-session") kills.push(cmd[cmd.indexOf("-t") + 1]!);
+      return makeSpawnResult();
+    });
+    setNewAgentSpawnRunner(() => makeSpawnResult(1)); // Stop the reset at respawn.
+    setNewAgentCallerMetaReader(() => null);
+    try {
+      dashboard.handleInput("R");
+      await dashboard.flushPendingActions();
+    } finally {
+      resetNewAgentCallerMetaReader();
+    }
+    expect(dashboard.notice).toContain("Reset failed during respawn");
+    expect(await Bun.file(a.metaPath).json()).toEqual(a.agent.meta);
+    expect(kills).toEqual([`=${b.agent.meta.tmux_session}:`]);
+    const archive = join(b.agent.repoPath, ".itsybitsy", "archive");
+    const entries = await readdir(archive);
+    expect(entries).toHaveLength(1);
+    expect(await Bun.file(join(archive, entries[0]!, "meta.json")).json()).toEqual(b.agent.meta);
+  });
+
+  test("cleanup warnings wait for a send draft opened while teardown runs", async () => {
+    await setupDashboardWithAgent();
+    const departing = dashboard.agentTree.selectedAgent!;
+    const recipient = makeAgent("agent-recipient", sendRepoDir);
+    dashboard.onUpdate([departing, recipient], [makeFlatAgent(departing), makeFlatAgent(recipient)], []);
+    expect(dashboard.agentTree.selectAgent(departing)).toBe(true);
+    dashboard.syncSelectedAgent();
+
+    const leftover = join(configTempDir, "coord-home", "agents", departing.id, "outbox.jsonl");
+    await mkdir(leftover, { recursive: true });
+    const teardownStarted = Promise.withResolvers<void>();
+    const finishProbe = Promise.withResolvers<number>();
+    lifecycleSpawnCtx.set(cmd => {
+      if (cmd[0] === "tmux" && cmd[1] === "has-session") {
+        teardownStarted.resolve();
+        return { ...makeSpawnResult(1), exited: finishProbe.promise };
+      }
+      return makeSpawnResult();
+    });
+
+    dashboard.handleInput("!");
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    await teardownStarted.promise;
+    try {
+      expect(dashboard.agentTree.selectAgent(recipient)).toBe(true);
+      dashboard.syncSelectedAgent();
+      dashboard.handleInput("s");
+      const draft = assertDialog(dashboard.dialog, "textarea");
+      for (const ch of "message in progress") dashboard.handleInput(ch);
+      finishProbe.resolve(1);
+      await dashboard.flushPendingActions();
+
+      expect(dashboard.dialog).toBe(draft);
+      expect(draft.buffer.getText()).toBe("message in progress");
+      dashboard.handleInput("\x1b");
+      await Promise.resolve();
+      const warnings = assertDialog(dashboard.dialog, "cleanup-warnings");
+      expect(warnings.text).toContain(`could not unlink ${leftover}:`);
+    } finally {
+      finishProbe.resolve(1);
+    }
+  });
+
+  test.each([["x", "Retired"], ["m", "Merged"], ["!", "Nuked"]])("%s shows complete, scrollable cleanup warnings at 80 columns", async (key, summary) => {
+    await setupDashboardWithAgent();
+    if (key === "m") {
+      await mkdir(join(actionTempDir!, ".itsybitsy", "agents", "agent-test", "repo"), { recursive: true });
+    }
+    const dir = join(configTempDir, "coord-home", "agents", "agent-test");
+    const paths = ["outbox.jsonl", "claude-rate-limits.json"].map(name => join(dir, name));
+    for (const path of paths) await mkdir(path, { recursive: true });
+
+    dashboard.handleInput(key);
+    await dashboard.flushPendingActions();
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    await dashboard.flushPendingActions();
+    const dialog = assertDialog(dashboard.dialog, "cleanup-warnings");
+
+    const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+    Object.defineProperty(process.stdout, "rows", { value: 10, configurable: true });
+    try {
+      const render = () => ((dashboard as any).dialogOverlay.render(80) as string[])
+        .slice(1, -2).map(row => stripAnsi(row).slice(3, -1).trimEnd());
+      const rows = render();
+      expect(rows[0]).toContain(summary);
+      expect(paths.some(path => !rows.join("").includes(`could not unlink ${path}:`))).toBe(true);
+      let stabilized = false;
+      // Each additional wrapped row consumes at least one character or newline.
+      for (let presses = 0; presses < dialog.text.length; presses++) {
+        const offset = dialog.offset;
+        dashboard.handleInput("j");
+        const viewport = render();
+        if (dialog.offset === offset) {
+          stabilized = true;
+          break;
+        }
+        rows.push(viewport.at(-1)!);
+      }
+      expect(stabilized).toBe(true);
+      expect(dialog.offset).toBeGreaterThan(0);
+      const text = rows.join("");
+      for (const path of paths) expect(text).toContain(`could not unlink ${path}:`);
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+    } finally {
+      if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+      else Reflect.deleteProperty(process.stdout, "rows");
+    }
+  });
+
   test("retire confirm dialog: Enter on default Cancel dismisses", async () => {
     await setupDashboardWithAgent();
     dashboard.handleInput("x");
@@ -1213,7 +1461,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await mkdir(agentDir, { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
       id: "agent-one",
-      tmux_session: "tmux-agent-one",
+      tmux_session: "itsybitsy-abcdef01-agent-one",
     }));
 
     const noopSpawn = (cmd: string[]) => ({
@@ -1357,7 +1605,7 @@ describe("DashboardComponent dialog and action handlers", () => {
     await mkdir(join(agentsDir, "agent-test"), { recursive: true });
     await mkdir(join(agentsDir, "agent-manager"), { recursive: true });
     await Bun.write(join(agentsDir, "agent-test", "meta.json"), JSON.stringify({
-      id: "agent-test", tmux_session: "tmux-agent-test", manager: "",
+      id: "agent-test", tmux_session: "itsybitsy-abcdef01-agent-test", manager: "",
     }));
     await Bun.write(join(agentsDir, "agent-manager", "meta.json"), JSON.stringify({
       id: "agent-manager", tmux_session: "tmux-agent-manager",
@@ -2015,9 +2263,9 @@ describe("DashboardComponent dialog and action handlers", () => {
         if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
         return makeResult("", 0);
       }
-      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeResult(`.git\n.git\n${newAgentTempDir}`, 0);
+      if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
-      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("which gh")) return makeResult("", 1);
       if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
       if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
@@ -2125,9 +2373,9 @@ describe("DashboardComponent dialog and action handlers", () => {
         if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
         return makeResult("", 0);
       }
-      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeResult(`.git\n.git\n${newAgentTempDir}`, 0);
+      if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
-      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("which gh")) return makeResult("", 1);
       if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
       if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
@@ -2207,9 +2455,9 @@ describe("DashboardComponent dialog and action handlers", () => {
           if (repoIdx > 0 && repoIdx < cmd.length) require("fs").mkdirSync(cmd[repoIdx]!, { recursive: true });
           return makeResult("", 0);
         }
-        if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+        if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeResult(`.git\n.git\n${newAgentTempDir}`, 0);
+        if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeResult(".git", 0);
         if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
-        if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
         if (cmdStr.includes("which gh")) return makeResult("", 1);
         if (cmd[cmd.length-1] === "remote") return makeResult("", 0);
         if (cmdStr.includes("capture-pane")) return makeResult("Claude Code v1.0", 0);
@@ -2221,6 +2469,7 @@ describe("DashboardComponent dialog and action handlers", () => {
 
       try {
         dashboard = makeDashboard();
+        dashboard.setMachineName("studio");
         dashboard.setRepos([{ path: newAgentTempDir, name: "only-repo" }]);
 
         dashboard.handleInput(tabKey);
@@ -2247,10 +2496,12 @@ describe("DashboardComponent dialog and action handlers", () => {
         // meta.json is written before the late spawn steps — only the notice
         // shows that newAgent returned ok.
         expect(dashboard.notice).toBe("Created new agent in only-repo");
-        expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(expectFavorite ? [meta.id] : []);
+        // The favorite is the new agent's fully qualified id: machine/repo/id.
+        const fullId = `studio/only-repo/${meta.id}`;
+        expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(expectFavorite ? [fullId] : []);
         if (expectFavorite) {
           await flushPendingSave();
-          expect((await loadLayout())!.favoriteAgentIds).toEqual([meta.id]);
+          expect((await loadLayout())!.favoriteAgentIds).toEqual([fullId]);
         }
       } finally {
         cancelPendingSave();
@@ -2309,9 +2560,9 @@ describe("DashboardComponent dialog and action handlers", () => {
       });
       if (cmdStr.includes("is-inside-work-tree")) return makeResult("true\n", 0);
       if (cmdStr.includes("status --porcelain")) return makeResult(" M dirty-file.ts\n", 0);
-      if (cmdStr.includes("--git-common-dir")) return makeResult(".git", 0);
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeResult(`.git\n.git\n${newAgentTempDir}`, 0);
+      if (cmdStr.includes("--git-common-dir") || cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("--show-toplevel")) return makeResult(newAgentTempDir, 0);
-      if (cmdStr.includes("--git-dir")) return makeResult(".git", 0);
       if (cmdStr.includes("worktree add")) return makeResult("fatal: simulated failure\n", 1);
       return makeResult("", 0);
     };
@@ -2395,7 +2646,7 @@ describe("Cross-repo send (E key)", () => {
   let dashboard: DashboardComponent;
   let sentMessages: { target: string; message: string }[] = [];
   // Writable repo root for the full-flow send test — sendMessage enqueues to
-  // the target's CENTRAL outbox dir (`<coordinatorHome>/agents/<id>/`), so
+  // the target's flat outbox dir (`<coordinatorHome>/agents/<agent>/`), so
   // the send target needs both a real repoPath (for log/state writes) and a
   // pinned coordinator home (so the central queue dir resolves into the
   // sandbox, not the developer's real ~/.itsybitsy/).
@@ -2415,19 +2666,22 @@ describe("Cross-repo send (E key)", () => {
 
   beforeEach(async () => {
     sendRepoDir = await mkdtemp(join(tmpdir(), "dashboard-esend-"));
-    // Per-agent outboxes now live under getCoordinatorHome() / agents / <id>.
+    // These keyless fixtures use getCoordinatorHome() / agents / <agent>.
     // Without this isolation, queued messages from the full-flow send test
     // would land in the developer's real ~/.itsybitsy/agents/agent-b/ and
     // leak into subsequent runs (sendMessage drains inline when no live
     // watchdog), inflating sentMessages.
     const { setCoordinatorHome } = await import("../coordinator");
     setCoordinatorHome(join(sendRepoDir, "coord-home"));
+    setUserHome(sendRepoDir);
+    await Bun.write(join(sendRepoDir, ".itsybitsy", "machine-name"), "studio");
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
     const { resetCoordinatorHome } = await import("../coordinator");
     resetCoordinatorHome();
+    resetUserHome();
     await rm(sendRepoDir, { recursive: true, force: true });
   });
 
@@ -2578,7 +2832,7 @@ describe("Cross-repo send (E key)", () => {
 
     // Verify message was sent to agent-b's tmux session
     expect(sentMessages.length).toBeGreaterThanOrEqual(1);
-    const msg = sentMessages.find((m) => m.target === "=tmux-agent-b:");
+    const msg = sentMessages.find((m) => m.target === "=itsybitsy-abcdef01-agent-b:");
     expect(msg).toBeDefined();
     expect(msg!.message).toContain("hello cross-repo");
   });
@@ -2744,12 +2998,15 @@ describe("DashboardComponent right pane and navigation features", () => {
     // developer's ~/.itsybitsy/config.json.
     configTempDir = await mkdtemp(join(tmpdir(), "dashboard-config-"));
     setUserConfigPath(join(configTempDir, "config.json"));
+    setUserHome(configTempDir);
+    await Bun.write(join(configTempDir, ".itsybitsy", "machine-name"), "studio");
   });
 
   afterEach(async () => {
     resetSendSpawnRunner();
     resetDiffStatusSpawnRunner();
     resetUserConfigPath();
+    resetUserHome();
     await rm(configTempDir, { recursive: true, force: true });
   });
 
@@ -2845,6 +3102,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: "/repos/test",
     }];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
@@ -2870,6 +3128,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: "/repos/test",
     }];
     dashboard.onUpdate([agent], flatList, questions);
 
@@ -2899,6 +3158,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: tempRepo,
     }];
     dashboard.onUpdate([agent], flatList, questions);
 
@@ -2941,6 +3201,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "Should I proceed?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: tempRepo,
     }];
     dashboard.onUpdate([agent], flatList, questions);
 
@@ -2963,8 +3224,8 @@ describe("DashboardComponent right pane and navigation features", () => {
       makeFlatAgent(agent1),
     ];
     const questions: PendingQuestion[] = [
-      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
-      { id: "q-2", agent: "agent-a", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending" },
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending", repoPath: "/repos/test" },
+      { id: "q-2", agent: "agent-a", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending", repoPath: "/repos/test" },
     ];
     dashboard.onUpdate([agent1], flatList, questions);
 
@@ -2992,8 +3253,8 @@ describe("DashboardComponent right pane and navigation features", () => {
       makeFlatAgent(agent2, { connector: "└── " }),
     ];
     const questions: PendingQuestion[] = [
-      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
-      { id: "q-2", agent: "agent-b", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending" },
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending", repoPath: "/repos/test" },
+      { id: "q-2", agent: "agent-b", question: "Q2?", timestamp: "2026-03-05T15:01:00Z", status: "pending", repoPath: "/repos/test" },
     ];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
@@ -3009,7 +3270,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     const agent = makeAgent("agent-a", "/repos/test");
     const flatList: FlatEntry[] = [makeFlatAgent(agent)];
     const questions: PendingQuestion[] = [
-      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending" },
+      { id: "q-1", agent: "agent-a", question: "Q1?", timestamp: "2026-03-05T15:00:00Z", status: "pending", repoPath: "/repos/test" },
     ];
     dashboard.onUpdate([agent], flatList, questions);
 
@@ -3022,7 +3283,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(dashboard.questionsSelectedIndex).toBe(0); // clamped
   });
 
-  test("selectAgentById via g in QUESTIONS navigates correctly", () => {
+  test("g in QUESTIONS selects the question's agent", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
     const agent2 = makeAgent("agent-b", "/repos/test");
@@ -3036,6 +3297,7 @@ describe("DashboardComponent right pane and navigation features", () => {
       question: "test?",
       timestamp: "2026-03-05T15:00:00Z",
       status: "pending",
+      repoPath: "/repos/test",
     }];
     dashboard.onUpdate([agent1, agent2], flatList, questions);
 
@@ -3070,6 +3332,132 @@ describe("DashboardComponent right pane and navigation features", () => {
     expect(dashboard.currentMode).toBe("INITIAL PROMPT");
   });
 
+  test("moving between two agents with one id in two repos reloads the right pane and the info panel", async () => {
+    const base = await mkdtemp(join(tmpdir(), "ib-dash-twin-"));
+    try {
+      const twins: Agent[] = [];
+      for (const repo of ["alpha", "beta"]) {
+        const repoPath = join(base, repo);
+        const agentDir = join(repoPath, ".itsybitsy", "agents", "dup");
+        await mkdir(agentDir, { recursive: true });
+        await writeFile(join(agentDir, "agent.log"), `log of ${repo}/dup\n`);
+        twins.push(_makeAgent({ id: "dup", repoPath, repoName: repo, state: "running" }));
+      }
+      const [alpha, beta] = twins as [Agent, Agent];
+      dashboard = makeDashboard();
+      dashboard.setMachineName("studio");
+      dashboard.onUpdate([alpha, beta], [
+        makeFlatRepoHeader("alpha", alpha.repoPath, true, true, true),
+        makeFlatAgent(alpha),
+        makeFlatRepoHeader("beta", beta.repoPath, true, true, true),
+        makeFlatAgent(beta),
+      ], []);
+      const logText = () => (dashboard.rightPane.agentLogContent ?? []).map(stripAnsi).join("\n");
+
+      dashboard.handleInput("j"); // alpha's dup
+      expect(dashboard.currentAgentKey).toBe("studio/alpha/dup");
+      await waitFor(() => logText().includes("log of alpha/dup"), { timeoutMs: WAIT_TIMEOUT_MS, message: "alpha's log" });
+
+      dashboard.handleInput("j"); // beta's header
+      dashboard.handleInput("j"); // beta's dup: the same bare id, another agent
+      expect(dashboard.selectedAgent).toBe(beta);
+      expect(dashboard.currentAgentKey).toBe("studio/beta/dup");
+      expect(dashboard.infoPanel.agent).toBe(beta);
+      await waitFor(() => logText().includes("log of beta/dup"), { timeoutMs: WAIT_TIMEOUT_MS, message: "beta's log" });
+      expect(logText()).not.toContain("alpha");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("the input draft is kept per agent: two agents with one id in two repos do not share it", () => {
+    dashboard = makeDashboard();
+    dashboard.setMachineName("studio");
+    const alpha = _makeAgent({ id: "dup", repoPath: "/repos/alpha", repoName: "alpha" });
+    const beta = _makeAgent({ id: "dup", repoPath: "/repos/beta", repoName: "beta" });
+    dashboard.onUpdate([alpha, beta], [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true, true, true),
+      makeFlatAgent(alpha),
+      makeFlatRepoHeader("beta", "/repos/beta", true, true, true),
+      makeFlatAgent(beta),
+    ], []);
+    const select = (agent: Agent) => {
+      dashboard.agentTree.selectAgent(agent);
+      dashboard.syncSelectedAgent();
+    };
+    select(alpha);
+    for (const ch of "for alpha") dashboard.inputField.handleInput(ch);
+    expect(dashboard.inputField.getText()).toBe("for alpha");
+    select(beta);
+    expect(dashboard.inputField.getText()).toBe("");
+    select(alpha);
+    expect(dashboard.inputField.getText()).toBe("for alpha");
+  });
+
+  test("the per-repo coordinator draft is kept per repo, also when two repos' coordinators share an id", () => {
+    tmuxPollerSpawnCtx.set(() => makeSpawnResult(1));
+    try {
+      dashboard = makeDashboard();
+      dashboard.setMachineName("studio");
+      // Two folders named "app": the second registered as `ib add <path> app-two`.
+      // A per-repo coordinator's id is its folder's name, so both are "app".
+      const coordA = _makeAgent({ id: "app", repoPath: "/x/app", repoName: "app" });
+      const coordB = _makeAgent({ id: "app", repoPath: "/y/app", repoName: "app-two", repoRegistryName: "app-two" });
+      for (const coord of [coordA, coordB]) coord.meta.agentType = "repo-coordinator";
+      dashboard.watcher = {
+        lastAgents: [coordA, coordB],
+        lastLiveTmuxSessions: new Set<string>(),
+        healthReports: new Map(),
+        refresh: () => {},
+        updateRepos: () => {},
+        recheckHealth: () => {},
+      } as unknown as DashboardComponent["watcher"];
+      dashboard.onUpdate([coordA, coordB], [
+        makeFlatRepoHeader("app", "/x/app"),
+        makeFlatRepoHeader("app-two", "/y/app", false, false, false, "app-two"),
+      ], []);
+      const selectRepo = (path: string) => {
+        dashboard.agentTree.selectByRepoPath(path);
+        dashboard.syncSelectedAgent();
+      };
+      selectRepo("/x/app");
+      expect(dashboard.rightPane.repoCoordinatorAgent).toBe(coordA);
+      for (const ch of "to the first") dashboard.repoCoordinatorInputField.handleInput(ch);
+      selectRepo("/y/app");
+      expect(dashboard.rightPane.repoCoordinatorAgent).toBe(coordB);
+      expect(dashboard.repoCoordinatorInputField.getText()).toBe("");
+      selectRepo("/x/app");
+      expect(dashboard.repoCoordinatorInputField.getText()).toBe("to the first");
+    } finally {
+      tmuxPollerSpawnCtx.reset();
+    }
+  });
+
+  test("a question marks (red) and filters to its own repo's agent, not another repo's agent with the same id", () => {
+    dashboard = makeDashboard();
+    dashboard.setMachineName("studio");
+    const alpha = _makeAgent({ id: "dup", repoPath: "/repos/alpha", repoName: "alpha" });
+    const beta = _makeAgent({ id: "dup", repoPath: "/repos/beta", repoName: "beta" });
+    const question: PendingQuestion = { id: "q-1", agent: "dup", question: "?", timestamp: "t", status: "pending", repoPath: "/repos/beta" };
+    dashboard.onUpdate([alpha, beta], [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true, true, true),
+      makeFlatAgent(alpha),
+      makeFlatRepoHeader("beta", "/repos/beta", true, true, true),
+      makeFlatAgent(beta),
+    ], [question]);
+    expect([...dashboard.agentTree.questionAgentKeys]).toEqual(["studio/beta/dup"]);
+    dashboard.agentTree.maxHeight = 20;
+    const redRows = dashboard.agentTree.render(60).filter((l) => l.includes(`${RED}dup`));
+    expect(redRows).toHaveLength(1);
+    // The QUESTIONS list of alpha's agent is empty; beta's has the question.
+    dashboard.agentTree.selectAgent(alpha);
+    dashboard.syncSelectedAgent();
+    expect(dashboard.rightPane.filteredQuestions).toEqual([]);
+    dashboard.agentTree.selectAgent(beta);
+    dashboard.syncSelectedAgent();
+    expect(dashboard.rightPane.filteredQuestions).toEqual([question]);
+  });
+
   test("selecting another agent drops every log mode's content and cached window", () => {
     dashboard = makeDashboard();
     const agent1 = makeAgent("agent-a", "/repos/test");
@@ -3081,7 +3469,7 @@ describe("DashboardComponent right pane and navigation features", () => {
     dashboard.onUpdate([agent1, agent2], flatList, []);
     dashboard.jumpToMode("WATCHDOG LOG");
     const staleWindow = {
-      agentId: "agent-a", fileSize: 1, atTop: true, loadedLineCount: 1,
+      agentKey: dashboard.agentTree.agentKey(agent1), fileSize: 1, atTop: true, loadedLineCount: 1,
       displayHeight: 10, scrollOffset: 0, bufferRows: 20,
     };
     const rp = dashboard.rightPane;
@@ -3306,7 +3694,7 @@ describe("focus cycling", () => {
     const fav = makeAgent("agent-fav", "/repos/test");
     const plain = makeAgent("agent-plain", "/repos/test");
     dashboard.agentTree.setFlatList([makeFlatAgent(fav), makeFlatAgent(plain)]);
-    dashboard.agentTree.toggleFavorite("agent-fav");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-fav"));
     dashboard.teamsTree.setFlatList([
       { kind: "team-header", teamName: "t1", memberCount: 0, createdEpoch: 1, createdBy: "@system" },
     ]);
@@ -3331,8 +3719,8 @@ describe("focus cycling", () => {
     const fav = makeAgent("agent-fav", "/repos/test");
     const plain = makeAgent("agent-plain", "/repos/test");
     dashboard.onUpdate([fav, plain], [makeFlatAgent(fav), makeFlatAgent(plain)], []);
-    dashboard.agentTree.toggleFavorite("agent-fav");
-    expect(dashboard.agentTree.selectAgentById("agent-plain")).toBe(true);
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-fav"));
+    expect(selectById(dashboard.agentTree, "agent-plain")).toBe(true);
     dashboard.syncSelectedAgent();
     dashboard.handleInput("3");
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-plain");
@@ -3540,6 +3928,7 @@ describe("formatAgentRow full-width highlight", () => {
       id: "agent-abc",
       repoPath: "/repos/test",
       repoName: "test",
+      repoRegistryName: "test",
       state: "running",
       age: "1m",
       archived: false,
@@ -3652,6 +4041,7 @@ describe("formatAgentRow compact mode", () => {
       id: "agent-abc",
       repoPath: "/repos/test",
       repoName: "test",
+      repoRegistryName: "test",
       state: "running",
       age: "1m",
       archived: false,
@@ -4138,12 +4528,13 @@ describe("Orphaned tmux sessions (Phase 10)", () => {
 
     dashboard.jumpToMode("TREE");
     // Render and split each line at the sidebar/main separator (vertical bar `│`).
-    // The tree row should only appear in the main column, never the sidebar column.
+    // The tree row should only appear in the main column, never the sidebar
+    // column (whose info panel names the agent only in its "Full id:" row).
     const lines = dashboard.render(160).map(stripAnsi);
     let sidebarHasTreeRow = false;
     for (const l of lines) {
       const sidebar = l.split("│")[0] ?? "";
-      if (sidebar.includes("agent-dup-test")) {
+      if (sidebar.includes("agent-dup-test") && !sidebar.includes("Full id:")) {
         sidebarHasTreeRow = true;
         break;
       }
@@ -5215,38 +5606,41 @@ describe("applyLayout", () => {
       sidebarWidth: 60,
       splitPaneLeftWidth: 80,
       heightOffsets: { tree: 0, info: 0, coordinator: 0 },
-      favoriteAgentIds: ["agent-1", "agent-2"],
+      favoriteAgentIds: ["studio/web/agent-1", "studio/api/agent-2"],
     });
-    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["agent-1", "agent-2"]);
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["studio/web/agent-1", "studio/api/agent-2"]);
     dashboard.applyLayout({
       sidebarWidth: 60,
       splitPaneLeftWidth: 80,
       heightOffsets: { tree: 0, info: 0, coordinator: 0 },
     });
-    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["agent-1", "agent-2"]);
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["studio/web/agent-1", "studio/api/agent-2"]);
   });
 
-  test("'.' on an agent toggles it as a favorite, persists it, and applyLayout(loadLayout()) restores it", async () => {
+  test("'.' on an agent toggles it as a favorite, persists its fully qualified id, and applyLayout(loadLayout()) restores it", async () => {
     const dashboard = makeDashboard();
+    dashboard.setMachineName("studio");
     const agent = makeAgent("agent-star", "/repos/test");
     dashboard.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
-    expect(dashboard.agentTree.selectAgentById("agent-star")).toBe(true);
+    expect(selectById(dashboard.agentTree, "agent-star")).toBe(true);
     dashboard.handleInput(".");
-    expect(dashboard.agentTree.favoriteAgentIds.has("agent-star")).toBe(true);
+    expect(dashboard.agentTree.favoriteAgentIds.has(treeKeyOf(dashboard.agentTree, "agent-star"))).toBe(true);
     expect(dashboard.notice).toBe("Favorited agent-star");
     // The repo is not pinned — '.' on an agent never pins.
     expect(dashboard.agentTree.pinnedRepoPaths.size).toBe(0);
 
     await flushPendingSave();
     const saved = await loadLayout();
-    expect(saved!.favoriteAgentIds).toEqual(["agent-star"]);
+    expect(saved!.favoriteAgentIds).toEqual(["studio/test/agent-star"]);
     const restored = makeDashboard();
+    restored.setMachineName("studio");
     restored.applyLayout(saved!);
-    expect(restored.agentTree.favoriteAgentIds.has("agent-star")).toBe(true);
+    restored.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
+    expect(restored.agentTree.isFavorite(agent)).toBe(true);
 
     // Second press unfavorites and persists the removal.
     dashboard.handleInput(".");
-    expect(dashboard.agentTree.favoriteAgentIds.has("agent-star")).toBe(false);
+    expect(dashboard.agentTree.favoriteAgentIds.has(treeKeyOf(dashboard.agentTree, "agent-star"))).toBe(false);
     expect(dashboard.notice).toBe("Unfavorited agent-star");
     await flushPendingSave();
     expect((await loadLayout())!.favoriteAgentIds).toEqual([]);
@@ -5265,11 +5659,11 @@ describe("applyLayout", () => {
         { kind: "team-header", teamName: "backend", memberCount: 1, createdEpoch: 1, createdBy: "@system" },
         { kind: "team-member", teamName: "backend", agent, connector: "  " },
       ]);
-      dashboard.agentTree.selectAgentById("agent-star");
+      selectById(dashboard.agentTree, "agent-star");
       expect(stripAnsi(dashboard.render(160).join("\n"))).not.toContain("★");
       dashboard.handleInput(".");
       expect(stripAnsi(dashboard.render(160).join("\n"))).toMatch(/★ agent-star/);
-      expect(dashboard.rightPane.favoriteAgentIds.has("agent-star")).toBe(true);
+      expect(dashboard.rightPane.favoriteAgentIds.has("local/test/agent-star")).toBe(true);
       dashboard.handleInput("2");
       expect(stripAnsi(dashboard.render(160).join("\n"))).toMatch(/★ \S*agent-star/);
       cancelPendingSave();
@@ -5278,12 +5672,40 @@ describe("applyLayout", () => {
     }
   });
 
+  test("two local repos with one agent id: j reaches each, the info panel shows its full id, '.' favorites only it", () => {
+    const dashboard = makeDashboard();
+    dashboard.setMachineName("studio");
+    const alpha = _makeAgent({ id: "dup", repoPath: "/repos/alpha", repoName: "alpha" });
+    const beta = _makeAgent({ id: "dup", repoPath: "/repos/beta", repoName: "beta" });
+    dashboard.onUpdate([alpha, beta], [
+      makeFlatRepoHeader("alpha", "/repos/alpha", true, true, true),
+      makeFlatAgent(alpha),
+      makeFlatRepoHeader("beta", "/repos/beta", true, true, true),
+      makeFlatAgent(beta),
+    ], []);
+    dashboard.infoPanel.displayHeight = 20;
+    const fullId = () => dashboard.infoPanel.render(60).map(stripAnsi).find((l) => l.startsWith("Full id:"));
+
+    dashboard.handleInput("j"); // the first row was auto-selected: now alpha's dup
+    expect(dashboard.selectedAgent).toBe(alpha);
+    expect(fullId()).toBe("Full id: studio/alpha/dup");
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    expect(dashboard.selectedAgent).toBe(beta);
+    expect(fullId()).toBe("Full id: studio/beta/dup");
+
+    dashboard.handleInput(".");
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["studio/beta/dup"]);
+    expect(dashboard.agentTree.isFavorite(alpha)).toBe(false);
+    cancelPendingSave();
+  });
+
   test("'.' notice uses the agent's nickname", () => {
     const dashboard = makeDashboard();
     const agent = makeAgent("agent-nick", "/repos/test");
     agent.meta.nickname = "builder";
     dashboard.onUpdate([agent], [makeFlatAgent(agent)], []);
-    dashboard.agentTree.selectAgentById("agent-nick");
+    selectById(dashboard.agentTree, "agent-nick");
     dashboard.handleInput(".");
     expect(dashboard.notice).toBe("Favorited builder");
   });
@@ -5301,7 +5723,7 @@ describe("applyLayout", () => {
     dashboard.handleInput("j"); // member
     expect(dashboard.activeSelectionSource).toBe("teams");
     dashboard.handleInput(".");
-    expect(dashboard.agentTree.favoriteAgentIds.has("agent-member")).toBe(true);
+    expect(dashboard.agentTree.favoriteAgentIds.has(treeKeyOf(dashboard.agentTree, "agent-member"))).toBe(true);
     expect(dashboard.notice).toBe("Favorited agent-member");
   });
 
@@ -5336,7 +5758,7 @@ describe("applyLayout", () => {
     dashboard.handleInput(".");
     expect(dashboard.notice).toBe("Select an agent or repo header");
     expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
-    dashboard.agentTree.toggleFavorite("agent-a");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-a"));
     dashboard.handleInput("j");
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-a");
     expect(dashboard.agentTree.visibleList[0]!.kind).toBe("system-coordinator");
@@ -5347,12 +5769,12 @@ describe("applyLayout", () => {
     const a = makeAgent("agent-a", "/repos/test");
     const b = makeAgent("agent-b", "/repos/test");
     dashboard.onUpdate([a, b], [makeFlatAgent(a), makeFlatAgent(b)], []);
-    dashboard.agentTree.toggleFavorite("agent-a");
-    dashboard.agentTree.toggleFavorite("agent-b");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-a"));
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "agent-b"));
     dashboard.handleInput("3");
-    dashboard.agentTree.selectAgentById("agent-b");
+    selectById(dashboard.agentTree, "agent-b");
     dashboard.handleInput(".");
-    expect(dashboard.agentTree.favoriteAgentIds.has("agent-b")).toBe(false);
+    expect(dashboard.agentTree.favoriteAgentIds.has(treeKeyOf(dashboard.agentTree, "agent-b"))).toBe(false);
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-b");
     dashboard.handleInput("k");
     expect(dashboard.agentTree.selectedAgent?.id).toBe("agent-a");
@@ -5565,7 +5987,7 @@ describe("sidebar height resize ({/} keys)", () => {
     dashboard.sidebar.displayHeight = 30;
     const agents = Array.from({ length: 10 }, (_, i) => makeAgent(`a${i}`, "/repos/test"));
     dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
-    dashboard.agentTree.toggleFavorite("a0");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "a0"));
     for (let i = 0; i < 4; i++) dashboard.handleInput("{"); // Agents tree 7 → 3 rows
     dashboard.handleInput("3");
     dashboard.handleInput("}"); // Favorites (base 1): clamped, then grown
@@ -5587,8 +6009,8 @@ describe("sidebar height resize ({/} keys)", () => {
     dashboard.agentTree.setFlatList(agents.map((a) => makeFlatAgent(a)));
     // Agents (base 7) shrunk to 5 rows.
     dashboard.sidebar.heightOffsets = { tree: -2, info: 2, coordinator: 0 };
-    dashboard.agentTree.toggleFavorite("a1");
-    dashboard.agentTree.toggleFavorite("a2");
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "a1"));
+    dashboard.agentTree.toggleFavorite(treeKeyOf(dashboard.agentTree, "a2"));
     dashboard.handleInput("3");
     // Favorites (base 2) shows the tree at its 1-row minimum: { can't shrink it.
     dashboard.handleInput("{");
@@ -7613,6 +8035,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     beforeEach(async () => {
       homeTmp = await mkdtemp(join(tmpdir(), "dash-roster-home-"));
       setUserHome(homeTmp);
+      await Bun.write(join(homeTmp, ".itsybitsy", "machine-name"), "studio");
       // Stub the send spawn runner. These tests plant REAL agent dirs so the
       // roster wrappers can resolve bare ids, which means teamAdd/teamRemove's
       // join/leave fan-out reaches the real delivery path and spawns real tmux
@@ -7778,6 +8201,7 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
     beforeEach(async () => {
       homeTmp = await mkdtemp(join(tmpdir(), "dash-member-home-"));
       setUserHome(homeTmp);
+      await Bun.write(join(homeTmp, ".itsybitsy", "machine-name"), "studio");
       setSendSpawnRunner(() => makeSpawnResult());
     });
     afterEach(async () => {
@@ -7917,19 +8341,20 @@ describe("DashboardComponent — §17 Teams panel wiring", () => {
       expect(assertDialog(dashboard.dialog, "select").items[0]).toBe(`Remove ${a.repoName}/agent-tm1 from @backend`);
     });
 
-    test("'x' on a mirrored row that is ANOTHER repo's same-id agent acts on the selected agent, not the row", () => {
+    test("the mirror never highlights ANOTHER repo's same-id agent, and 'x' acts on the selected agent", () => {
       // api/review is selected in the Agents tab and is on no team; the
-      // roster's "review" is web/review. The mirror matches by bare id.
+      // roster's "review" is web/review. The mirror matches by fully
+      // qualified id, so it leaves web/review's row alone.
       const selected = makeAgent("review", "/tmp/repo-api");
       selected.repoName = "api";
       const twin = makeAgent("review", "/tmp/repo-web");
       twin.repoName = "web";
       const dashboard = dashboardWith([selected], [header("backend"), member("backend", twin)]);
       dashboard.handleInput("j"); // select api/review in the Agents tab
-      dashboard.handleInput("2"); // the mirror highlights web/review's row
+      dashboard.handleInput("2"); // no Teams row is this agent's
       expect(dashboard.activeSelectionSource).toBe("agents");
       expect(dashboard.agentTree.selectedAgent).toBe(selected);
-      expect(dashboard.teamsTree.selectedMember?.agent).toBe(twin);
+      expect(dashboard.teamsTree.selectedMember).toBeNull();
 
       // No picker offering to remove or retire web/review: `x` is the retire
       // confirm for the Agents-tree selection, as before the picker existed.
@@ -8650,7 +9075,7 @@ describe("tabs on screen under an overlay", () => {
     { mode: "DIFF", fill: (rp, lines) => { rp.diffContent = lines; } },
     { mode: "STATUS", fill: (rp, lines) => { rp.statusContent = lines; } },
     { mode: "QUESTIONS", fill: (rp, lines) => {
-      rp.questions = lines.map((question, i) => ({ id: `q${i}`, agent: "agent-a", question, timestamp: "", status: "pending" }));
+      rp.questions = lines.map((question, i) => ({ id: `q${i}`, agent: "agent-a", question, timestamp: "", status: "pending", repoPath: "/repos/test" }));
     } },
   ];
 
@@ -8713,5 +9138,1283 @@ describe("New Repo folder-name dialog title", () => {
     const border = topBorder("/tmp/projects");
     expect(border).toStartWith("┌─ New repo in /tmp/projects: ─");
     expect(visibleWidth(border)).toBe(DIALOG_WIDTH);
+  });
+});
+
+const PEERS_SELF = "5e".repeat(32);
+const PEERS_OTHER = "0a".repeat(32);
+
+/**
+ * A scripted stand-in for the peer service (src/peers/service.ts), for the
+ * Peers dialog and the tree's remote rows. `set` changes its view and
+ * notifies like the real one.
+ */
+class FakePeerService implements PeersDialogService {
+  state: PeerServiceView = {
+    status: { kind: "listening" },
+    selfId: PEERS_SELF,
+    identityError: null,
+    peers: [],
+    peersError: null,
+    session: null,
+    links: [],
+  };
+  calls: string[] = [];
+  private listeners = new Set<() => void>();
+  private nextId = 0;
+
+  view(): PeerServiceView {
+    return this.state;
+  }
+  openDialog(): void {
+    this.calls.push("open");
+  }
+  closeDialog(): void {
+    this.calls.push("close");
+  }
+  /** Validates with the real parsePairTarget, so inline errors are the real ones. */
+  pairWith(input: string): string | null {
+    this.calls.push(`pair:${input}`);
+    const target = parsePairTarget(input, this.state.selfId);
+    if (!target.ok) return target.error;
+    this.setSession("initiator", { stage: "connecting" });
+    return null;
+  }
+  submitCode(code: string): void {
+    this.calls.push(`code:${code}`);
+  }
+  submitName(name: string | null): void {
+    this.calls.push(`name:${name}`);
+  }
+  cancel(): void {
+    this.calls.push("cancel");
+  }
+  dismiss(): void {
+    this.calls.push("dismiss");
+  }
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  set(view: Partial<PeerServiceView>): void {
+    this.state = { ...this.state, ...view };
+    for (const listener of this.listeners) listener();
+  }
+  /** A new session (new id) in `stage`. */
+  setSession(role: "initiator" | "responder", stage: PairStage): void {
+    this.set({ session: { id: ++this.nextId, role, peerId: PEERS_OTHER, stage } });
+  }
+  /** The same session, moved to `stage`. */
+  setStage(stage: PairStage): void {
+    this.set({ session: { ...this.state.session!, stage } });
+  }
+}
+
+// The Peers dialog (`I`, src/tui/peers-dialog.ts). The dashboard gets a
+// scripted fake service, never the real one, so no test here binds an endpoint
+// or loads the iroh addon.
+describe("Peers dialog", () => {
+  const SELF = PEERS_SELF;
+  const OTHER = PEERS_OTHER;
+  const OTHER_SHORT = OTHER.slice(0, 10);
+
+  function open(): { dashboard: DashboardComponent; service: FakePeerService } {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    dashboard.handleInput("I");
+    return { dashboard, service };
+  }
+
+  function rendered(dashboard: DashboardComponent): string[] {
+    return (dashboard as any).dialogOverlay.render(DIALOG_WIDTH) as string[];
+  }
+
+  const text = (dashboard: DashboardComponent) => stripAnsi(rendered(dashboard).join("\n"));
+
+  test("I opens the dialog and asks the service to start (bind once)", () => {
+    const { dashboard, service } = open();
+    expect(assertDialog(dashboard.dialog, "peers").idValue).toBe("");
+    expect(service.calls).toEqual(["open"]);
+    const out = text(dashboard);
+    expect(out).toContain("┌─ Peers ─");
+    expect(out).toContain("This install's id");
+    expect(out).toContain(SELF);
+    expect(out).toContain("accepting pairing requests while this dialog is open");
+    expect(out).toContain("Paired peers");
+    expect(out).toContain("none yet");
+    expect(out).toContain("Pair with id");
+    expect(out).toContain("Enter: pair    Esc: close");
+  });
+
+  test("without a peer service, I shows a notice and opens nothing", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("I");
+    expect(dashboard.dialog).toBeNull();
+  });
+
+  test("the help lists I, and its whole description fits the help dialog", () => {
+    const dashboard = makeDashboard();
+    dashboard.handleInput("?");
+    const lines = assertDialog(dashboard.dialog, "help").lines.map(stripAnsi);
+    expect(lines).toContain(`  ${"I".padEnd(18)}peers: this install's id, pairing`);
+    // The help dialog is 72 wide (68 inside), so the row is drawn uncut.
+    const drawn = stripAnsi(((dashboard as any).dialogOverlay.render(72) as string[]).join("\n"));
+    expect(drawn).toMatch(/│ {4}I {17}peers: this install's id, pairing +│/);
+  });
+
+  test("the / command palette has a peers entry that opens the dialog", () => {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    dashboard.handleInput("/");
+    const palette = assertDialog(dashboard.dialog, "fuzzy");
+    const index = palette.allItems.indexOf("peers — I");
+    expect(index).toBeGreaterThanOrEqual(0);
+    palette.onSelect(index);
+    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    expect(service.calls).toEqual(["open"]);
+  });
+
+  test("the idle view lists paired peers and every endpoint status", () => {
+    const { dashboard, service } = open();
+    service.set({ peers: [{ id: OTHER, name: "Laptop B", pairedAt: "x" }, { id: "1b".repeat(32), name: "C", pairedAt: "y" }] });
+    let out = text(dashboard);
+    expect(out).toContain(`Laptop B  ${OTHER_SHORT}`);
+    expect(out).toContain(`C         ${"1b".repeat(5)}`);
+    service.set({ status: { kind: "starting" } });
+    expect(text(dashboard)).toContain("starting…");
+    service.set({ status: { kind: "disabled", ownerPid: 4242 } });
+    expect(text(dashboard)).toContain("peering disabled: ib watch pid 4242 owns the endpoint");
+    service.set({ status: { kind: "error", message: "load: dlopen failed", retryAt: null } });
+    out = text(dashboard);
+    expect(out).toContain("peering unavailable: load: dlopen failed");
+    expect(out).not.toContain("retrying");
+    // A pending automatic rebind: the countdown, rounded up, and the last error.
+    service.set({ status: { kind: "error", message: "load: dlopen failed", retryAt: Date.now() + 9_500 } });
+    out = text(dashboard);
+    expect(out).toContain("peering unavailable; retrying in 10 s");
+    expect(out).toContain("last error: load: dlopen failed");
+    service.set({ status: { kind: "error", message: "load: dlopen failed", retryAt: Date.now() - 50 } });
+    expect(text(dashboard)).toContain("retrying in 1 s");
+    service.set({ selfId: null });
+    expect(text(dashboard)).toContain("loading…");
+    service.set({ identityError: "secret.key is not 64 lowercase hex characters", peersError: "peers.json: not valid JSON" });
+    out = text(dashboard);
+    expect(out).toContain("unavailable: secret.key is not 64 lowercase hex characters");
+    expect(out).toContain("peers.json: not valid JSON");
+  });
+
+  test("each paired peer shows its connection state: connected, last seen N ago with the error, or not connected yet", () => {
+    const { dashboard, service } = open();
+    const C = "1b".repeat(32);
+    const D = "2c".repeat(32);
+    const E = "3d".repeat(32);
+    service.set({
+      peers: [
+        { id: OTHER, name: "Laptop B", pairedAt: "x" },
+        { id: C, name: "C", pairedAt: "x" },
+        { id: D, name: "D", pairedAt: "x" },
+        { id: E, name: "E", pairedAt: "x" },
+      ],
+      // E has no link state yet: the poller has not reached it.
+      links: [
+        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] },
+        { id: C, name: "C", connected: false, lastOkAt: Date.now() - 125_000, lastError: "closed by the other side", repos: [], agents: [] },
+        { id: D, name: "D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
+      ],
+    });
+    const rows = rendered(dashboard).map(stripAnsi);
+    const row = (prefix: string) => rows.find((r) => r.includes(prefix)) ?? "";
+    expect(row(`Laptop B  ${OTHER_SHORT}`)).toContain(`Laptop B  ${OTHER_SHORT}  ● connected`);
+    expect(row(`C         ${"1b".repeat(5)}`)).toContain(`C         ${"1b".repeat(5)}  ● last seen 2m ago`);
+    expect(row(`D         ${"2c".repeat(5)}`)).toContain(`D         ${"2c".repeat(5)}  ● not connected yet`);
+    expect(row(`E         ${"3d".repeat(5)}`)).not.toContain("●");
+    // The last error sits on the line under its peer.
+    expect(rows[rows.findIndex((r) => r.includes("last seen 2m ago")) + 1]).toContain("    closed by the other side");
+    expect(rows[rows.findIndex((r) => r.includes("not connected yet")) + 1]).toContain("    timed out");
+    // A connected peer shows no error line.
+    expect(rows[rows.findIndex((r) => r.includes("● connected")) + 1]).toContain(`C         ${"1b".repeat(5)}`);
+
+    // A change from the service redraws the state.
+    service.set({ links: [{ id: OTHER, name: "Laptop B", connected: false, lastOkAt: Date.now() - 3_000, lastError: "not a peer", repos: [], agents: [] }] });
+    const out = text(dashboard);
+    expect(out).toContain(`Laptop B  ${OTHER_SHORT}  ● last seen 3s ago`);
+    expect(out).toContain("not a peer");
+  });
+
+  test("with no peer section on screen, a service change renders only while the Peers dialog is open", () => {
+    const dashboard = makeDashboard();
+    // Counts renders, and stands in for the overlay the dialog opens.
+    let renders = 0;
+    const counter = { renders: () => renders };
+    dashboard.setTui({
+      requestRender: () => {
+        renders++;
+      },
+      showOverlay: () => ({ hide: () => {} }),
+    } as unknown as TUI);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] };
+    // The Teams tab draws only its local tree.
+    dashboard.setSidebarMode("teams");
+
+    // Closed: the poller's background changes draw nothing.
+    service.set({ links: [link] });
+    service.set({ links: [{ ...link, connected: false, lastError: "timed out" }] });
+    expect(counter.renders()).toBe(0);
+
+    dashboard.handleInput("I");
+    const opened = counter.renders();
+    service.set({ links: [link] });
+    expect(counter.renders()).toBe(opened + 1);
+    // The open dialog redraws on every change, one the sections do not show included.
+    service.set({ status: { kind: "starting" } });
+    expect(counter.renders()).toBe(opened + 2);
+
+    dashboard.handleInput("\x1b"); // close it
+    const closed = counter.renders();
+    service.set({ links: [{ ...link, connected: false }] });
+    expect(counter.renders()).toBe(closed);
+  });
+
+  test("formatSince picks the largest whole unit", () => {
+    expect(formatSince(0)).toBe("0s");
+    expect(formatSince(59_999)).toBe("59s");
+    expect(formatSince(60_000)).toBe("1m");
+    expect(formatSince(3_599_000)).toBe("59m");
+    expect(formatSince(7_200_000)).toBe("2h");
+    expect(formatSince(3 * 86_400_000)).toBe("3d");
+    expect(formatSince(-5)).toBe("0s");
+  });
+
+  test("a narrow dialog wraps the full id instead of cutting it", () => {
+    const { dashboard } = open();
+    const narrow = stripAnsi(((dashboard as any).dialogOverlay.render(40) as string[]).join("\n"));
+    expect(narrow.replace(/[│\s]/g, "")).toContain(SELF);
+  });
+
+  for (const [label, paste] of [
+    ["a bracketed paste", (id: string) => [`\x1b[200~${id}\x1b[201~`]],
+    ["a bracketed paste split across reads", (id: string) => [`\x1b[200~${id.slice(0, 30)}`, `${id.slice(30)}\n\x1b[201~`]],
+    ["a plain multi-character paste", (id: string) => [id]],
+  ] as const) {
+    test(`a pasted 64-character id (${label}) fills the input, and Enter pairs with it`, () => {
+      const { dashboard, service } = open();
+      for (const chunk of paste(`  ${OTHER.toUpperCase()}`)) dashboard.handleInput(chunk);
+      const dialog = assertDialog(dashboard.dialog, "peers");
+      const typed = dialog.idValue;
+      expect(typed.trim()).toBe(OTHER.toUpperCase());
+      expect(text(dashboard)).toContain(OTHER.toUpperCase());
+      dashboard.handleInput("\r");
+      expect(service.calls.at(-1)).toBe(`pair:${typed}`);
+      expect(dialog.error).toBeNull();
+      expect(dialog.idValue).toBe("");
+      expect(text(dashboard)).toContain(`Connecting to ${OTHER_SHORT}…`);
+    });
+  }
+
+  test("an invalid id shows the error inline; typing clears it", () => {
+    const { dashboard } = open();
+    for (const ch of "abc123") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    expect(text(dashboard)).toContain("Not an id: an id is 64 hex characters.");
+    dashboard.handleInput("\x7f");
+    expect(text(dashboard)).not.toContain("Not an id");
+    expect(assertDialog(dashboard.dialog, "peers").idValue).toBe("abc12");
+    // This install's own id is refused too.
+    assertDialog(dashboard.dialog, "peers").idValue = SELF;
+    dashboard.handleInput("\r");
+    expect(text(dashboard)).toContain("That is this install's own id.");
+  });
+
+  test("initiator: connecting → code entry (with this install's short id) → verifying → naming → result", () => {
+    const { dashboard, service } = open();
+    service.setSession("initiator", { stage: "connecting" });
+    expect(text(dashboard)).toContain(`Connecting to ${OTHER_SHORT}…`);
+    expect(text(dashboard)).toContain("Esc: cancel");
+
+    service.setStage({ stage: "code-entry" });
+    let out = text(dashboard);
+    expect(out).toContain(`${OTHER_SHORT} is showing a pairing code. Type it here.`);
+    expect(out).toContain(`Code  (your id: ${SELF.slice(0, 10)})`);
+    expect(out).toContain("Enter: send code    Esc: cancel");
+
+    // A malformed code stays local (B allows one attempt) and shows inline.
+    for (const ch of "abc") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    expect(text(dashboard)).toContain("A code is 8 characters, like ABCD-1234.");
+    expect(service.calls.some((c) => c.startsWith("code:"))).toBe(false);
+    for (const ch of "d-l2o4") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    expect(service.calls.at(-1)).toBe("code:ABCD1204");
+
+    service.setStage({ stage: "verifying" });
+    expect(text(dashboard)).toContain(`Checking the code with ${OTHER_SHORT}…`);
+
+    service.setStage({ stage: "naming", savedName: OTHER_SHORT });
+    out = text(dashboard);
+    expect(out).toContain(`Paired with ${OTHER_SHORT}.`);
+    expect(out).toContain(`Name for ${OTHER_SHORT}:`);
+    expect(out).toContain(`Esc: keep "${OTHER_SHORT}"`);
+    for (const ch of "Laptop B") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    expect(service.calls.at(-1)).toBe("name:Laptop B");
+
+    service.setStage({ stage: "done", name: "Laptop B", alreadyPaired: false });
+    expect(text(dashboard)).toContain(`Paired with "Laptop B" (${OTHER_SHORT}).`);
+    expect(text(dashboard)).toContain("Press any key to continue");
+    dashboard.handleInput("x");
+    expect(service.calls.at(-1)).toBe("dismiss");
+    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+  });
+
+  test("responder: the request with its code, exactly as specified, then naming", () => {
+    const { dashboard, service } = open();
+    service.setSession("responder", { stage: "incoming" });
+    expect(text(dashboard)).toContain(`Pairing request from ${OTHER_SHORT}…`);
+    service.setStage({ stage: "code-shown", code: "ABCD1234", expiresAt: 0 });
+    expect(text(dashboard)).toContain(`Pairing request from ${OTHER_SHORT}. Code: ABCD-1234. Expires in 2 min.`);
+    expect(text(dashboard)).toContain("Esc: cancel");
+    service.setStage({ stage: "naming", savedName: OTHER_SHORT });
+    expect(text(dashboard)).toContain(`Name for ${OTHER_SHORT}:`);
+    service.setStage({ stage: "done", name: "Old name", alreadyPaired: true });
+    expect(text(dashboard)).toContain(`${OTHER_SHORT} was already paired, as "Old name".`);
+  });
+
+  test("the name prompt refuses, inline, another peer's name, this machine's name, and a /", () => {
+    const dashboard = makeDashboard();
+    dashboard.setMachineName("Studio");
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    dashboard.handleInput("I");
+    const THIRD = "0b".repeat(32);
+    service.set({
+      peers: [
+        { id: THIRD, name: "Laptop", pairedAt: "x" },
+        // The peer being named is already saved, under its short id.
+        { id: OTHER, name: OTHER_SHORT, pairedAt: "x" },
+      ],
+    });
+    service.setSession("initiator", { stage: "naming", savedName: OTHER_SHORT });
+    service.calls = [];
+    const submit = (name: string) => {
+      const dialog = assertDialog(dashboard.dialog, "peers");
+      dialog.sessionValue = "";
+      for (const ch of name) dashboard.handleInput(ch);
+      dashboard.handleInput("\r");
+      return dialog;
+    };
+
+    expect(submit("laptop").error).toBe(`Another peer is already named "Laptop".`);
+    expect(text(dashboard)).toContain(`Another peer is already named "Laptop".`);
+    expect(submit(" STUDIO ").error).toBe(`"Studio" is this machine's name.`);
+    expect(submit("home/office").error).toBe(`A name cannot contain "/".`);
+    expect(service.calls).toEqual([]);
+
+    // Typing clears the error; the peer's own saved name and a new name are fine.
+    dashboard.handleInput("x");
+    expect(assertDialog(dashboard.dialog, "peers").error).toBeNull();
+    submit(OTHER_SHORT.toUpperCase());
+    expect(service.calls).toEqual([`name:${OTHER_SHORT.toUpperCase()}`]);
+    submit("Desk");
+    expect(service.calls.at(-1)).toBe("name:Desk");
+    // Esc and a blank name still keep the saved name.
+    submit("   ");
+    expect(service.calls.at(-1)).toBe("name:   ");
+    dashboard.handleInput("\x1b");
+    expect(service.calls.at(-1)).toBe("name:null");
+  });
+
+  test("every failure renders its message", () => {
+    const { dashboard, service } = open();
+    const cases: Array<[PairStage, string]> = [
+      [{ stage: "failed", failure: { kind: "refused", reason: "not-accepting" } }, `Pairing refused: ${OTHER_SHORT} does not have its Peers dialog open.`],
+      [{ stage: "failed", failure: { kind: "refused", reason: "busy" } }, `Pairing refused: ${OTHER_SHORT} is busy with another pairing.`],
+      [{ stage: "failed", failure: { kind: "wrong-code" } }, "Wrong code."],
+      [{ stage: "failed", failure: { kind: "expired" } }, "The code expired."],
+      [{ stage: "failed", failure: { kind: "cancelled" } }, "Pairing cancelled."],
+      [{ stage: "failed", failure: { kind: "connection-failed", detail: "timed out" } }, "Connection failed: timed out"],
+      [{ stage: "failed", failure: { kind: "error", detail: "message is not JSON" } }, "Pairing failed: message is not JSON"],
+    ];
+    for (const [stage, message] of cases) {
+      service.setSession("initiator", stage);
+      expect(text(dashboard)).toContain(message);
+      expect(text(dashboard)).toContain("Press any key to continue");
+    }
+  });
+
+  test("Esc: cancels while pairing runs, keeps the name at the name prompt, leaves a result, closes from idle", () => {
+    const { dashboard, service } = open();
+    for (const stage of [
+      { stage: "connecting" },
+      { stage: "code-entry" },
+      { stage: "verifying" },
+      { stage: "incoming" },
+      { stage: "code-shown", code: "ABCD1234", expiresAt: 0 },
+    ] as PairStage[]) {
+      service.setSession("initiator", stage);
+      service.calls = [];
+      dashboard.handleInput("\x1b");
+      expect(service.calls).toEqual(["cancel"]);
+      expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    }
+    service.setSession("responder", { stage: "naming", savedName: OTHER_SHORT });
+    service.calls = [];
+    dashboard.handleInput("\x1b");
+    expect(service.calls).toEqual(["name:null"]);
+    service.setStage({ stage: "failed", failure: { kind: "cancelled" } });
+    service.calls = [];
+    dashboard.handleInput("\x1b");
+    expect(service.calls).toEqual(["dismiss"]);
+
+    service.set({ session: null });
+    service.calls = [];
+    dashboard.handleInput("\x1b");
+    expect(dashboard.dialog).toBeNull();
+    expect(service.calls).toEqual(["close"]);
+  });
+
+  test("keys that pick other actions do nothing while the dialog is open", () => {
+    const { dashboard, service } = open();
+    service.setSession("responder", { stage: "code-shown", code: "ABCD1234", expiresAt: 0 });
+    service.calls = [];
+    for (const key of ["x", "?", "a", "\r", "j"]) dashboard.handleInput(key);
+    expect(service.calls).toEqual([]);
+    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+  });
+
+  test("a new session starts with an empty input and no stale error", () => {
+    const { dashboard, service } = open();
+    service.setSession("initiator", { stage: "code-entry" });
+    for (const ch of "zz") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    const dialog = assertDialog(dashboard.dialog, "peers");
+    expect(dialog.sessionValue).toBe("zz");
+    expect(dialog.error).not.toBeNull();
+    service.setSession("responder", { stage: "naming", savedName: OTHER_SHORT });
+    expect(dialog.sessionValue).toBe("");
+    expect(dialog.error).toBeNull();
+  });
+
+  test("replacing the dialog closes it on the service (pairing is accepted only while it is open)", () => {
+    const { dashboard, service } = open();
+    dashboard.showDialog({ type: "help", lines: ["x"] });
+    expect(service.calls).toEqual(["open", "close"]);
+  });
+
+  test("every row fits the dialog in every stage", () => {
+    const { dashboard, service } = open();
+    service.set({
+      peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }],
+      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, lastError: "e".repeat(160), repos: null, agents: null }],
+    });
+    const stages: PairStage[] = [
+      { stage: "connecting" },
+      { stage: "code-entry" },
+      { stage: "code-shown", code: "ABCD1234", expiresAt: 0 },
+      { stage: "naming", savedName: "N".repeat(32) },
+      { stage: "failed", failure: { kind: "error", detail: "x".repeat(120) } },
+    ];
+    assertDialog(dashboard.dialog, "peers").idValue = "y".repeat(200);
+    for (const width of [DIALOG_WIDTH, 40]) {
+      service.set({ session: null });
+      const idle = (dashboard as any).dialogOverlay.render(width) as string[];
+      expect(idle.filter((row) => visibleWidth(row) !== width)).toEqual([]);
+      for (const stage of stages) {
+        service.setSession("initiator", stage);
+        const rows = (dashboard as any).dialogOverlay.render(width) as string[];
+        expect(rows.filter((row) => visibleWidth(row) !== width)).toEqual([]);
+      }
+    }
+  });
+});
+
+// The unified Agents tree and the read-only guard (SPEC §20.5). The
+// poller's state comes from the scripted FakePeerService; tmux and git go
+// through recording fakes, so nothing here reaches a real session or worktree.
+describe("Unified peer repos in the Agents tree", () => {
+  const PEER_B = "0b".repeat(32);
+  const PEER_C = "0c".repeat(32);
+  const PEER_D = "0d".repeat(32);
+  const WIDTH = 160;
+  /** The peers' names in links(): a remote row's key starts with its peer's name. */
+  const PEER_NAMES: Record<string, string> = { [PEER_B]: "Laptop B", [PEER_C]: "Laptop C", [PEER_D]: "Laptop D" };
+  /** A remote agent's selection key (peer-repos.ts peerEntryKey): `<peer name>/<repo>/<id>`. */
+  const agentKey = (peer: string, repo: string, id: string) => `${PEER_NAMES[peer]}/${repo}/${id}`;
+  const repoKey = (repo: string) => `/${repo.toLowerCase()}`;
+  const repos = (...names: string[]) => names.map((name) => ({ registryName: name, displayName: name }));
+  const WORKER_KEY = agentKey(PEER_B, "itsybitsy", "worker-abc");
+
+  let origRows: number;
+  let spawns: string[][];
+  beforeEach(() => {
+    origRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 40, writable: true, configurable: true });
+    const recorded: string[][] = [];
+    spawns = recorded;
+    tmuxPollerSpawnCtx.set((cmd: string[]) => {
+      recorded.push(cmd);
+      return makeSpawnResult(1);
+    });
+    gitStatusSpawnCtx.set((cmd: string[]) => {
+      recorded.push(cmd);
+      return makeSpawnResult(1);
+    });
+  });
+  afterEach(() => {
+    Object.defineProperty(process.stdout, "rows", { value: origRows, writable: true, configurable: true });
+    tmuxPollerSpawnCtx.reset();
+    gitStatusSpawnCtx.reset();
+  });
+
+  function remote(id: string, repoName: string, overrides: Partial<RemoteAgent> = {}): RemoteAgent {
+    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
+  }
+
+  /** Laptop B connected; Laptop C unreachable, last seen 2m ago; Laptop D never answered. */
+  function links(): PeerLinkState[] {
+    const now = Date.now();
+    return [
+      {
+        id: PEER_B, name: "Laptop B", connected: true, lastOkAt: now, lastError: null,
+        repos: repos("itsybitsy", "other-repo"),
+        agents: [
+          remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
+          remote("manager-def", "itsybitsy", { state: "waiting", agentType: "manager" }),
+          remote("agent-1", "other-repo", { state: "complete" }),
+        ],
+      },
+      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
+      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
+    ];
+  }
+
+  /** A dashboard whose one local agent is `agent-1` (selected), with `links()` as the poller's state. */
+  function setup(): { dashboard: DashboardComponent; service: FakePeerService; local: Agent } {
+    const dashboard = makeDashboard();
+    const local = makeAgent("agent-1", "/repos/local");
+    dashboard.onUpdate([local], [makeFlatAgent(local)], []);
+    const service = new FakePeerService();
+    service.state = { ...service.state, links: links() };
+    dashboard.setPeerService(service);
+    return { dashboard, service, local };
+  }
+
+  const keyOf = (dashboard: DashboardComponent): string | null => {
+    const row = dashboard.agentTree.selectedRemote;
+    return row ? peerEntryKey(row) : null;
+  };
+
+  /** Press j until the selected row is `key`: real navigation, through the guard. */
+  function selectByKey(dashboard: DashboardComponent, key: string): void {
+    for (let i = 0; i < 30 && keyOf(dashboard) !== key; i++) dashboard.handleInput("j");
+    expect(keyOf(dashboard)).toBe(key);
+  }
+
+  /** Every row of the Agents tree at `width`, uncut by the sidebar's height. */
+  function treeRows(dashboard: DashboardComponent, width = 60): string[] {
+    dashboard.agentTree.maxHeight = 100;
+    return dashboard.agentTree.render(width);
+  }
+
+  const resetNotice = (dashboard: DashboardComponent) => {
+    (dashboard as any).lastSentNotice = null;
+  };
+
+  /**
+   * The text of the main area's center (`pane` 2) or right (`pane` 1) pane in
+   * rendered `lines`, its wrapped lines joined: the cells after the sidebar's
+   * seam, split on the panes' seam.
+   */
+  function paneText(lines: string[], pane: 1 | 2): string {
+    return lines
+      .map((line) => stripAnsi(line).split("│"))
+      .filter((cells) => cells.length >= 3)
+      .map((cells) => cells[cells.length - pane]!.trim())
+      .filter((cell) => cell !== "")
+      .join(" ");
+  }
+
+  test("remote-only repos follow local rows in display order, with italic agents and dim stale rows", () => {
+    const { dashboard } = setup();
+    const raw = treeRows(dashboard);
+    expect(raw.map(stripAnsi).slice(1).map((r) => r.trimEnd().replace(/  +(waiting|running|complete)/, " $1"))).toEqual([
+      "▾ app", "└── agent-1 running",
+      "▾ itsybitsy", "└── manager-def waiting", "    └── abc-nick running",
+      "▾ other-repo", "└── agent-1 complete",
+    ]);
+    expect(raw.map((r) => r.includes(ITALIC))).toEqual([false, false, true, false, true, true, false, true]);
+    expect(raw[2]).toContain(DIM);
+    expect(raw[2]).not.toContain(getStateColors().running!);
+    expect(raw[4]).toContain(getStateColors().waiting!);
+  });
+
+  test("matches registry name across paths and case, keeping local order, labels, actions and selection", () => {
+    const dashboard = makeDashboard();
+    const local = makeAgent("manager", "/here/app");
+    const localChild = makeAgent("kid", "/here/app");
+    const header = makeFlatRepoHeader("Local nickname", "/here/app", true, true, true, "App");
+    const localOnly = makeFlatRepoHeader("Only here", "/here/other");
+    const localRows = [header, { ...makeFlatAgent(local), connector: "└── " },
+      { ...makeFlatAgent(localChild), depth: 1, connector: "    └── " }, localOnly];
+    dashboard.onUpdate([local, localChild], localRows, []);
+    dashboard.agentTree.selectByRepoPath(header.repoPath);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    const peer = (index: number, registry: string) => ({
+      ...links()[index]!, repos: [...repos(registry), { registryName: "remote", displayName: "Empty remote" }],
+      agents: [remote("kid", registry, { manager: "manager" }), remote("manager", registry)],
+    });
+    service.set({ links: [peer(0, "APP"), peer(1, "app")] });
+    expect(dashboard.agentTree.selectedRepoPath).toBe(header.repoPath);
+    expect(dashboard.agentTree.visibleList.map((r) => {
+      if (r.kind === "agent") return r.connector + r.agent.id;
+      if (r.kind === "remote-agent") return r.connector + peerEntryKey(r);
+      if (r.kind === "repo-header" || r.kind === "remote-repo-header") return [r.kind, r.repoName];
+    })).toEqual([
+      ["repo-header", "Local nickname"], "├── manager", "│   └── kid",
+      "├── Laptop B/APP/manager", "│   └── Laptop B/APP/kid",
+      "└── Laptop C/app/manager", "    └── Laptop C/app/kid",
+      ["repo-header", "Only here"], ["remote-repo-header", "Empty remote"],
+    ]);
+    const newAgent = spyOn(agentActions, "handleNewAgent").mockImplementation(() => {});
+    try {
+      dashboard.handleInput("a");
+      expect(newAgent).toHaveBeenCalledWith(dashboard);
+      dashboard.handleInput(".");
+      expect(dashboard.agentTree.pinnedRepoPaths.has(header.repoPath)).toBe(true);
+    } finally {
+      newAgent.mockRestore();
+    }
+    // Dropping and restoring the local registration keeps the same selected header.
+    dashboard.onUpdate([], [localOnly], []);
+    expect(keyOf(dashboard)).toBe("/app");
+    dashboard.onUpdate([local, localChild], localRows, []);
+    expect(dashboard.agentTree.selectedRepoPath).toBe(header.repoPath);
+    service.set({ links: [] });
+    expect(dashboard.agentTree.selectedRepoPath).toBe(header.repoPath);
+  });
+
+  test("one empty local registration still owns its shared header under running-only", () => {
+    const dashboard = makeDashboard();
+    dashboard.setRepos([{ name: "APP", nickname: "Local app", path: "/here/empty" }]);
+    dashboard.onUpdate([], [], []);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    service.set({ links: [links()[1]!] });
+    dashboard.agentTree.setRepoFilter("running-only");
+    expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["repo-header", "remote-agent"]);
+    expect(dashboard.agentTree.selectByRepoPath("/here/empty")).toBe(true);
+    service.set({ links: [] });
+    expect(dashboard.agentTree.selectedRepoHeader).toBe("Local app");
+  });
+
+  for (const hasLocalAgent of [false, true]) {
+    test(`synthesized header opens its local path and shows its local repo summary (local agent: ${hasLocalAgent})`, () => {
+      const dashboard = makeDashboard();
+      const repoPath = "/here/Local App";
+      dashboard.setRepos([{ name: "APP", nickname: "Local app", path: repoPath }]);
+      const agents = hasLocalAgent ? [makeAgent("local-worker", repoPath)] : [];
+      dashboard.onUpdate(agents, agents.map((agent) => makeFlatAgent(agent)), []);
+      const service = new FakePeerService();
+      dashboard.setPeerService(service);
+      service.set({ links: [links()[1]!] });
+      expect(dashboard.agentTree.selectByRepoPath(repoPath)).toBe(true);
+      dashboard.syncSelectedAgent();
+      const open = spyOn(ghostty, "openPathInGhostty").mockResolvedValue({ ok: true, message: "opened" });
+      try {
+        dashboard.handleInput("G");
+        expect(open).toHaveBeenCalledTimes(1);
+        expect(open).toHaveBeenCalledWith(repoPath);
+      } finally {
+        open.mockRestore();
+      }
+      for (const mode of ["REPO", "AGENT LOG"] as const) {
+        dashboard.rightPane.setMode(mode);
+        const rows = dashboard.rightPane.render(80).join("\n");
+        expect(rows).toContain("\x1b]8;;file:///here/Local%20App\x07/here/Local App\x1b]8;;\x07");
+        if (mode === "AGENT LOG") {
+          expect(stripAnsi(rows)).toContain(hasLocalAgent ? "▾ Local app" : "▸ Local app");
+          expect(stripAnsi(rows)).toContain(`Agents: ${agents.length}`);
+        }
+      }
+    });
+  }
+
+  test("Favorites repaints its selected local favorite when a peer adds or removes the single-repo header", () => {
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+    const local = makeAgent("fav", "/here/app");
+    dashboard.setRepos([{ name: "app", path: local.repoPath }]);
+    dashboard.onUpdate([local], [makeFlatAgent(local)], []);
+    dashboard.agentTree.addFavorite(dashboard.agentTree.agentKey(local));
+    dashboard.setSidebarMode("favorites");
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    const kinds = () => dashboard.agentTree.visibleList.map((row) => row.kind);
+    const before = counter.renders();
+    expect(kinds()).toEqual(["agent"]);
+    service.set({ links: [links()[1]!] });
+    expect(counter.renders()).toBe(before + 1);
+    expect(kinds()).toEqual(["repo-header", "agent"]);
+    service.set({ links: [] });
+    expect(counter.renders()).toBe(before + 2);
+    expect(kinds()).toEqual(["agent"]);
+    expect(dashboard.selectedAgent).toBe(local);
+  });
+
+  test("reuses merged rows across renders and invalidates on peer, local, filter and carve-out changes", () => {
+    const { dashboard, service, local } = setup();
+    const tree = dashboard.agentTree;
+    const initial = tree.visibleList;
+    treeRows(dashboard, 40);
+    treeRows(dashboard, 80);
+    expect(tree.visibleList).toBe(initial);
+    service.set({ links: [links()[1]!] });
+    const changed = tree.visibleList;
+    expect(changed).not.toBe(initial);
+    tree.setFlatList([makeFlatAgent(local)]);
+    expect(tree.visibleList).not.toBe(changed);
+    tree.setFavoritesOnly(true);
+    const favorites = tree.visibleList;
+    expect(favorites.map((r) => r.kind)).toEqual(["agent"]);
+    tree.deselect();
+    expect(tree.visibleList).toEqual([]);
+    expect(tree.visibleList).not.toBe(favorites);
+    tree.addFavorite(tree.agentKey(local));
+    expect(tree.visibleList.map((r) => r.kind)).toEqual(["agent"]);
+  });
+
+  test("identical paths with different registry names keep separate headers", () => {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.onUpdate([], [makeFlatRepoHeader("Same label", "/local", false, false, false, "a")], []);
+    dashboard.setPeerService(service);
+    service.set({ links: [{ ...links()[0]!, repos: [{ registryName: "b", displayName: "Same label" }],
+      agents: [remote("worker", "Same label", { repoRegistryName: "b", repoPath: "/local" })] }] });
+    expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["repo-header", "remote-repo-header", "remote-agent"]);
+  });
+
+  test("a remote state that names an inherited property is drawn as text, never as the property", () => {
+    const { dashboard, service } = setup();
+    const odd = ["constructor", "toString", "__proto__", "hasOwnProperty"];
+    service.set({ links: [{ ...links()[0]!, repos: repos("app"), agents: odd.map((state, i) => remote(`odd-${i}`, "app", { state })) }] });
+    const rows = treeRows(dashboard).join("\n");
+    for (const state of odd) expect(stripAnsi(rows)).toContain(state);
+    expect(rows).not.toContain("function");
+    expect(rows).not.toContain("[object");
+    selectByKey(dashboard, agentKey(PEER_B, "app", "odd-0"));
+    dashboard.infoPanel.displayHeight = 20;
+    const info = dashboard.infoPanel.render(60).join("\n");
+    expect(stripAnsi(info)).toContain("State: constructor");
+    expect(info).not.toContain("function");
+  });
+
+  test("running-only hides stopped remote agents and their empty header", () => {
+    const { dashboard, service } = setup();
+    service.set({ links: [{ ...links()[0]!, repos: repos("app"), agents: [remote("old", "app", { state: "stopped" })] }] });
+    dashboard.agentTree.setRepoFilter("running-only");
+    expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["agent"]);
+  });
+
+  for (const width of [40, 80]) {
+    test(`at ${width} columns a truncated nickname preserves state styling through selection and disconnect`, () => {
+      const { dashboard, service } = setup();
+      const name = "P".repeat(32);
+      const agent = remote("worker", "app", { nickname: "long nickname ".repeat(12), state: "waiting" });
+      const peer = { ...links()[0]!, name, repos: repos("app"), agents: [agent] };
+      service.set({ links: [peer] });
+      const assertStyle = (stale: boolean, selected: boolean) => {
+        const line = treeRows(dashboard, width).find((row) => row.includes("long nickname"))!;
+        expect(stripAnsi(line)).toContain("…");
+        // SGR 0 clears all three attributes. Look after the last reset before the state.
+        const atState = line.slice(0, line.indexOf("waiting")).split("\x1b[0m").at(-1)!;
+        expect(line).toContain("waiting");
+        expect(atState).toContain(ITALIC);
+        expect(atState.includes(DIM)).toBe(stale);
+        expect(atState.includes("\x1b[7m")).toBe(selected);
+        expect(line).toEndWith("\x1b[0m");
+        expect(visibleWidth(line)).toBe(width);
+      };
+      assertStyle(false, false);
+      selectByKey(dashboard, `${name}/app/worker`);
+      assertStyle(false, true);
+      dashboard.infoPanel.displayHeight = 20;
+      const machine = () => dashboard.infoPanel.render(width).map(stripAnsi).find((row) => row.startsWith("Machine:"))!.trimEnd();
+      const expectedLine = (connection: string) => {
+        const available = width - visibleWidth(`Machine:  · ${connection}`);
+        const label = available >= name.length ? name : name.slice(0, available - 1) + "…";
+        return `Machine: ${label} · ${connection}`;
+      };
+      expect(machine()).toBe(expectedLine("connected"));
+      service.set({ links: [{ ...peer, connected: false, lastOkAt: Date.now() - 125_000 }] });
+      assertStyle(true, true);
+      expect(machine()).toBe(expectedLine("last seen 2m ago"));
+      dashboard.handleInput("k");
+      assertStyle(true, false);
+    });
+
+    test(`at ${width} columns every row fits, long remote values are cut, and short states stay on screen`, () => {
+      const { dashboard, service } = setup();
+      const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
+      const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
+      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
+      const rows = treeRows(dashboard, width);
+      expect(rows.filter((r) => visibleWidth(r) > width)).toEqual([]);
+      const text = rows.map(stripAnsi);
+      expect(text.find((r) => r.includes("short"))).toContain("running");
+      expect(text.find((r) => r.includes("nnn"))).toContain("…");
+      // The info panel and the whole screen fit too, with the long row selected.
+      selectByKey(dashboard, `${"P".repeat(32)}/${"r".repeat(100)}/${"n".repeat(100)}`);
+      dashboard.infoPanel.displayHeight = 20;
+      expect(dashboard.infoPanel.render(width).filter((r) => visibleWidth(r) > width)).toEqual([]);
+      dashboard.sidebarWidth = width;
+      expect(dashboard.render(WIDTH).filter((r) => visibleWidth(r) > WIDTH)).toEqual([]);
+    });
+  }
+
+  test("same-id agents in a shared repo keep their own highlight and info when peer rows move or disconnect", () => {
+    const { dashboard, service, local } = setup();
+    const name = local.repoRegistryName;
+    dashboard.setRepos([{ name, path: local.repoPath }]);
+    const peer = (base: PeerLinkState, state: string): PeerLinkState => ({
+      ...base, connected: true, lastError: null, repos: repos(name), agents: [remote(local.id, name, { state })],
+    });
+    const [first, second] = links();
+    const b = peer(first!, "waiting");
+    const c = peer(second!, "complete");
+    service.set({ links: [b, c] });
+    expect(treeRows(dashboard).map(stripAnsi).filter((line) => line.includes(local.id))).toHaveLength(3);
+    selectByKey(dashboard, agentKey(PEER_B, name, local.id));
+    expect(dashboard.infoPanel.remote).toMatchObject({ peerId: PEER_B });
+    const key = agentKey(PEER_C, name, local.id);
+    selectByKey(dashboard, key);
+    const checkSelection = (linkState: string) => {
+      expect(keyOf(dashboard)).toBe(key);
+      const highlighted = treeRows(dashboard).filter((r) => r.includes("\x1b[7m")).map(stripAnsi);
+      expect(highlighted).toEqual([expect.stringContaining("complete")]);
+      dashboard.infoPanel.displayHeight = 20;
+      const info = dashboard.infoPanel.render(60).map(stripAnsi).join("\n");
+      expect(info).toContain(`Machine: Laptop C · ${linkState}`);
+      expect(info).toContain(`Full id: ${key}`);
+      expect(dashboard.selectedAgent).toBeNull();
+    };
+    checkSelection("connected");
+    const index = () => dashboard.agentTree.visibleList.findIndex((r) => r.kind === "remote-agent" && peerEntryKey(r) === key);
+    const originalIndex = index();
+    service.set({ links: [c] });
+    expect(index()).toBe(originalIndex - 1);
+    checkSelection("connected");
+    service.set({ links: [b, c] });
+    expect(index()).toBe(originalIndex);
+    checkSelection("connected");
+    service.set({ links: [b, { ...c, connected: false, lastOkAt: Date.now() - 125_000 }] });
+    checkSelection("last seen 2m ago");
+  });
+
+  test("the @ jump lists only local rows", () => {
+    const { dashboard } = setup();
+    dashboard.handleInput("@");
+    const items = assertDialog(dashboard.dialog, "fuzzy").allItems.map(stripAnsi);
+    expect(items.filter((item) => item.includes("agent-1"))).toHaveLength(1);
+    expect(items.some((item) => /Laptop|worker-abc|manager-def|itsybitsy|other-repo/.test(item))).toBe(false);
+  });
+
+  test("a selected remote agent: center and right placeholders in every mode but TREE, and its fields in the info panel", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
+      dashboard.jumpToMode(mode);
+      const lines = dashboard.render(WIDTH);
+      expect(paneText(lines, 2)).toBe("Remote agent on Laptop B (read-only)");
+      // The right pane is narrow at this width: the placeholder wraps rather than being cut.
+      expect(paneText(lines, 1)).toBe(REMOTE_RIGHT_PANE_TEXT);
+      expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
+      expect(stripAnsi(lines[1]!)).toContain(` ${mode} `);
+    }
+    dashboard.infoPanel.displayHeight = 20;
+    const info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd()).filter((r) => r !== "");
+    expect(info).toEqual([
+      "Remote agent (read-only)",
+      "Machine: Laptop B · connected",
+      "Id: worker-abc",
+      "Full id: Laptop B/itsybitsy/worker-abc",
+      "Nickname: abc-nick",
+      "Repo: itsybitsy",
+      "Path: /remote/itsybitsy",
+      "State: running",
+      "Type: worker",
+      "Manager: manager-def",
+    ]);
+
+    // TREE mode draws the tree itself in the main area, so it stays on screen
+    // while j/k move through the sections.
+    dashboard.jumpToMode("TREE");
+    const tree = stripAnsi(dashboard.render(WIDTH).join("\n"));
+    expect(tree).toContain("abc-nick");
+    expect(tree).not.toContain(REMOTE_RIGHT_PANE_TEXT);
+  });
+
+  test("a remote-only header keeps the repo placeholder, and a stale agent shows its last contact", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    expect(paneText(dashboard.render(WIDTH), 2)).toBe("Remote repo on Laptop B (read-only)");
+    dashboard.infoPanel.displayHeight = 20;
+    expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Agents: 2");
+    selectByKey(dashboard, agentKey(PEER_C, "app", "agent-1"));
+    expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Machine: Laptop C · last seen 2m ago");
+  });
+
+  test("on a remote row no local path runs: no tmux setAgent, no git probe, no right-pane loader", async () => {
+    const { dashboard } = setup();
+    // Let the local agent's first git probe finish before recording.
+    await waitFor(() => !(dashboard as any).gitStatusInFlight, { timeoutMs: WAIT_TIMEOUT_MS, message: "the local git probe" });
+    const sessions: (string | null)[] = [];
+    for (const name of ["tmuxPoller", "coordinatorPoller", "repoCoordinatorPoller"]) {
+      const poller = (dashboard as any)[name];
+      const setAgent = poller.setAgent.bind(poller);
+      poller.setAgent = (session: string | null) => {
+        sessions.push(session);
+        setAgent(session);
+      };
+    }
+    const realTrigger = paneManager.triggerAsyncLoadIfNeeded;
+    const triggeredWith: unknown[] = [];
+    const loaders = [
+      spyOn(paneManager, "loadAgentLog"),
+      spyOn(paneManager, "loadTailLog"),
+      spyOn(paneManager, "loadAgentPrompt"),
+    ];
+    const trigger = spyOn(paneManager, "triggerAsyncLoadIfNeeded").mockImplementation((ctx, force) => {
+      triggeredWith.push(ctx.agentTree.selectedAgent);
+      realTrigger(ctx, force);
+    });
+    try {
+      spawns.length = 0;
+      selectByKey(dashboard, WORKER_KEY);
+      for (const mode of PANE_MODES) dashboard.jumpToMode(mode);
+      dashboard.jumpToMode("AGENT LOG");
+      for (const key of ["p", "n", "j", "k"]) dashboard.handleInput(key);
+      dashboard.loadTailLogIfNeeded("WATCHDOG LOG");
+      await (dashboard as any).refreshGitStatus();
+      dashboard.render(WIDTH);
+      await Bun.sleep(5);
+
+      expect(sessions.length).toBeGreaterThan(0);
+      expect(sessions.every((s) => s === null)).toBe(true);
+      for (const loader of loaders) expect(loader).not.toHaveBeenCalled();
+      expect(triggeredWith.length).toBeGreaterThan(0);
+      expect(triggeredWith.every((agent) => agent === null)).toBe(true);
+      expect(spawns).toEqual([]);
+      expect(dashboard.rightPane.agent).toBeNull();
+      expect(dashboard.tmuxPane.agent).toBeNull();
+      expect(dashboard.infoPanel.agent).toBeNull();
+    } finally {
+      for (const loader of loaders) loader.mockRestore();
+      trigger.mockRestore();
+    }
+  });
+
+  test("the guard refuses action keys on a remote row with the notice, and none of their handlers run", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const favorites = [...dashboard.agentTree.favoriteAgentIds];
+    const handlers = Object.keys(agentActions)
+      .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
+      .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
+    try {
+      for (const key of ["x", "m", "s", "R", "a", ".", "t", "!", "S", "o"]) {
+        resetNotice(dashboard);
+        dashboard.handleInput(key);
+        expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+        expect(dashboard.dialog).toBeNull();
+      }
+      for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
+      expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(favorites);
+      expect(keyOf(dashboard)).toBe(WORKER_KEY);
+    } finally {
+      for (const handler of handlers) handler.mockRestore();
+    }
+  });
+
+  test("all non-allowlisted keys are refused on a remote-only header before dispatch", () => {
+    const key = repoKey("itsybitsy");
+    const { dashboard } = setup();
+    selectByKey(dashboard, key);
+    const pinned = [...dashboard.agentTree.pinnedRepoPaths];
+    const handlers = Object.keys(agentActions)
+      .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
+      .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
+    try {
+      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => !isRemoteAllowedKey(k))) {
+        resetNotice(dashboard);
+        dashboard.handleInput(k);
+        expect(dashboard.notice).toBe(k === "a" ? "Starting agents on another machine comes in the next phase" : REMOTE_READ_ONLY_NOTICE);
+        expect(dashboard.dialog).toBeNull();
+      }
+      for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
+      expect([...dashboard.agentTree.pinnedRepoPaths]).toEqual(pinned);
+      expect(keyOf(dashboard)).toBe(key);
+    } finally {
+      for (const handler of handlers) handler.mockRestore();
+    }
+  });
+
+  test("one agent id in two repos of one peer: each row selects on its own, and the rows below stay reachable", () => {
+    const { dashboard, service } = setup();
+    const agents = () => [remote("dup", "alpha"), remote("dup", "beta", { state: "waiting" }), remote("after", "gamma")];
+    service.set({ links: [{ ...links()[0]!, repos: repos("alpha", "beta", "gamma"), agents: agents() }] });
+    const alpha = agentKey(PEER_B, "alpha", "dup");
+    const beta = agentKey(PEER_B, "beta", "dup");
+    selectByKey(dashboard, alpha);
+    expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", remote: { repoPath: "/remote/alpha" } });
+    dashboard.handleInput("j"); // beta's repo header
+    dashboard.handleInput("j");
+    expect(keyOf(dashboard)).toBe(beta);
+    expect(dashboard.infoPanel.remote).toMatchObject({ kind: "remote-agent", remote: { repoPath: "/remote/beta", state: "waiting" } });
+    expect(treeRows(dashboard).filter((r) => r.includes("\x1b[7m")).map((r) => stripAnsi(r).trim())).toEqual([expect.stringMatching(/^└── dup +waiting$/)]);
+    dashboard.handleInput("j");
+    dashboard.handleInput("j");
+    expect(keyOf(dashboard)).toBe(agentKey(PEER_B, "gamma", "after"));
+
+    // J from alpha's row lands on beta's; a refresh with new objects keeps beta's; so does the Favorites carve-out.
+    selectByKey(dashboard, alpha);
+    dashboard.handleInput("J");
+    expect(keyOf(dashboard)).toBe(beta);
+    service.set({ links: [{ ...links()[0]!, repos: repos("alpha", "beta", "gamma"), agents: agents() }] });
+    expect(keyOf(dashboard)).toBe(beta);
+    dashboard.handleInput("3");
+    expect(treeRows(dashboard).map((r) => stripAnsi(r).trim()).filter((r) => /▾|└──/.test(r))).toEqual([
+      "▾ beta",
+      expect.stringMatching(/^└── dup +waiting$/),
+    ]);
+  });
+
+  test("a vanished bottom-most local agent selects the local row above it", () => {
+    const dashboard = makeDashboard();
+    const a = makeAgent("agent-a", "/repos/local");
+    const b = makeAgent("agent-b", "/repos/local");
+    dashboard.onUpdate([a, b], [makeFlatAgent(a), makeFlatAgent(b)], []);
+    const service = new FakePeerService();
+    service.state = { ...service.state, links: links() };
+    dashboard.setPeerService(service);
+    dashboard.handleInput("j");
+    expect(dashboard.selectedAgent?.id).toBe("agent-b");
+
+    // agent-b is retired: the watcher's next list lacks it.
+    dashboard.onUpdate([a], [makeFlatAgent(a)], []);
+    expect(dashboard.selectedAgent?.id).toBe("agent-a");
+    expect(keyOf(dashboard)).toBeNull();
+    expect(dashboard.infoPanel.remote).toBeNull();
+  });
+
+  test("the footer lists only the keys a remote row allows, and the agent hints come back on a local row", () => {
+    const { dashboard, local } = setup();
+    const footer = () => ((dashboard as any).statusBar.render(WIDTH) as string[]).map(stripAnsi).join("\n");
+    expect(footer()).toContain("s: send");
+
+    selectByKey(dashboard, WORKER_KEY);
+    const text = footer();
+    const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers"];
+    for (const hint of shown) expect(text).toContain(hint);
+    for (const hint of ["s: send", "m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
+      expect(text).not.toContain(hint);
+    }
+    // Every key the remote footer names is one the guard allows.
+    for (const key of ["j", "k", "J", "K", "p", "n", "1", "2", "3", "[", "]", "{", "}", "@", "/", "?", "I"]) {
+      expect(isRemoteAllowedKey(key)).toBe(true);
+    }
+
+    for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
+    expect(footer()).toContain("s: send");
+  });
+
+  test("@ works on a remote row: it lists only local rows and lands on one", () => {
+    const { dashboard, local } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    resetNotice(dashboard);
+    dashboard.handleInput("@");
+    expect(dashboard.notice).not.toBe(REMOTE_READ_ONLY_NOTICE);
+    const jump = assertDialog(dashboard.dialog, "fuzzy");
+    const items = jump.allItems.map(stripAnsi);
+    expect(items.some((item) => /Laptop|worker-abc|manager-def|itsybitsy/.test(item))).toBe(false);
+    jump.onSelect(items.findIndex((item) => item.includes("agent-1")));
+    expect(dashboard.selectedAgent).toBe(local);
+    expect(keyOf(dashboard)).toBeNull();
+    expect(dashboard.infoPanel.remote).toBeNull();
+    expect(dashboard.infoPanel.agent).toBe(local);
+  });
+
+  test("every allowlisted key still works on a remote row", () => {
+    const onRemote = (): DashboardComponent => {
+      const { dashboard } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      resetNotice(dashboard);
+      return dashboard;
+    };
+    const notRefused = (dashboard: DashboardComponent) => expect(dashboard.notice).not.toBe(REMOTE_READ_ONLY_NOTICE);
+
+    // j / k / ↓ / ↑ move one row; J / K jump between repo anchors, remote ones included.
+    let d = onRemote();
+    d.handleInput("j");
+    expect(keyOf(d)).toBe(repoKey("other-repo"));
+    d.handleInput("k");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    d.handleInput("\x1b[B");
+    expect(keyOf(d)).toBe(repoKey("other-repo"));
+    d.handleInput("\x1b[A");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    d.handleInput("J");
+    expect(keyOf(d)).toBe(agentKey(PEER_B, "other-repo", "agent-1"));
+    d.handleInput("J");
+    expect(keyOf(d)).toBe(agentKey(PEER_C, "app", "agent-1"));
+    d.handleInput("K");
+    expect(keyOf(d)).toBe(agentKey(PEER_B, "other-repo", "agent-1"));
+    notRefused(d);
+
+    // Tab / Shift+Tab move the focus; [ ] { } resize the sidebar.
+    d = onRemote();
+    d.handleInput("\t");
+    expect(d.focus).toBe("info");
+    d.handleInput("\x1b[Z");
+    expect(d.focus).toBe("agent-tree");
+    const width = d.sidebarWidth;
+    d.handleInput("]");
+    expect(d.sidebarWidth).toBe(width + 5);
+    d.handleInput("[");
+    expect(d.sidebarWidth).toBe(width);
+    d.handleInput("}");
+    expect(d.sidebar.heightOffsets.tree).toBe(1);
+    d.handleInput("{");
+    expect(d.sidebar.heightOffsets.tree).toBe(0);
+    notRefused(d);
+
+    // 1 / 2 / 3 switch the tab; the remote row stays the global selection.
+    d = onRemote();
+    d.handleInput("2");
+    expect(d.sidebarMode).toBe("teams");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    d.handleInput("3");
+    expect(d.sidebarMode).toBe("favorites");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    d.handleInput("1");
+    expect(d.sidebarMode).toBe("agents");
+    expect(keyOf(d)).toBe(WORKER_KEY);
+    notRefused(d);
+
+    // p / n and ← / → cycle the right pane's mode.
+    d = onRemote();
+    for (const key of ["p", "n", "\x1b[D", "\x1b[C"]) {
+      const before = d.currentMode;
+      d.handleInput(key);
+      expect(d.currentMode).not.toBe(before);
+    }
+    notRefused(d);
+
+    // ? / / / I open their dialogs; Ctrl+C (handled before the dashboard) is never refused.
+    d = onRemote();
+    d.setPeerService(new FakePeerService());
+    for (const [key, type] of [["?", "help"], ["/", "fuzzy"], ["I", "peers"]] as const) {
+      d.handleInput(key);
+      expect(d.dialog?.type).toBe(type);
+      d.closeDialog();
+    }
+    d.handleInput("\x03");
+    notRefused(d);
+  });
+
+  test("the command palette goes through the same guard", () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const retire = spyOn(agentActions, "handleRetire").mockImplementation(() => {});
+    try {
+      const pick = (label: string) => {
+        dashboard.handleInput("/");
+        const palette = assertDialog(dashboard.dialog, "fuzzy");
+        palette.onSelect(palette.allItems.indexOf(label));
+      };
+      resetNotice(dashboard);
+      pick("retire agent — x");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(retire).not.toHaveBeenCalled();
+      resetNotice(dashboard);
+      pick("DIFF — run ib diff");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(dashboard.currentMode).not.toBe("DIFF");
+      pick("peers — I");
+      expect(dashboard.dialog?.type).toBe("peers");
+      expect(service.calls).toContain("open");
+    } finally {
+      retire.mockRestore();
+    }
+  });
+
+  test("the Favorites tab shows no peer rows, except the selected one with its headers", () => {
+    const { dashboard } = setup();
+    dashboard.handleInput("3");
+    expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("Laptop"))).toBe(false);
+    dashboard.handleInput("1");
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("3");
+    const rows = treeRows(dashboard).map((r) => stripAnsi(r).trimEnd());
+    expect(rows.filter((r) => /Laptop|▾|└──/.test(r))).toEqual([
+      "▾ itsybitsy",
+      "└── abc-nick  running",
+    ]);
+    expect(keyOf(dashboard)).toBe(WORKER_KEY);
+  });
+
+  test("poll updates redraw only a visible change in the Agents tab or TREE mode", () => {
+    const dashboard = makeDashboard();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+    const local = makeAgent("agent-1", "/repos/local");
+    dashboard.onUpdate([local], [makeFlatAgent(local)], []);
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+
+    let renders = counter.renders();
+    service.set({ links: links() });
+    expect(counter.renders()).toBe(renders + 1);
+    expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("abc-nick"))).toBe(true);
+
+    // Nothing the sections show: the same peers and lists, a dialog-only change.
+    renders = counter.renders();
+    service.set({ links: [...service.state.links] });
+    service.set({ status: { kind: "starting" } });
+    const connectedB = service.state.links[0]!;
+    service.set({ links: [{ ...connectedB, lastOkAt: connectedB.lastOkAt! + 5_000 }, ...service.state.links.slice(1)] });
+    expect(counter.renders()).toBe(renders);
+
+    // Disk paths appear only in the selected agent's info. Poll errors appear only in Peers.
+    const b = service.state.links[0]!;
+    const c = service.state.links[1]!;
+    service.set({ links: [{ ...b, agents: b.agents!.map((agent) => ({ ...agent, repoPath: "/elsewhere" })) },
+      { ...c, lastError: "still unreachable" }, ...service.state.links.slice(2)] });
+    expect(counter.renders()).toBe(renders);
+
+    // The Teams tab draws no section: rebuilt, but no render.
+    dashboard.setSidebarMode("teams");
+    service.set({ links: [{ ...service.state.links[0]!, connected: false }, ...service.state.links.slice(1)] });
+    expect(counter.renders()).toBe(renders);
+    expect(dashboard.agentTree.visibleList.find((r) => r.kind === "remote-agent" && r.peerId === PEER_B)).toMatchObject({ stale: true });
+    // TREE mode draws the Agents tree in the main area, whatever the tab.
+    dashboard.jumpToMode("TREE");
+    renders = counter.renders();
+    service.set({ links: [{ ...service.state.links[0]!, connected: true }, ...service.state.links.slice(1)] });
+    expect(counter.renders()).toBe(renders + 1);
+  });
+
+  test("a selected remote row that its peer drops moves the selection, and the panes follow", () => {
+    const { dashboard, service, local } = setup();
+    selectByKey(dashboard, repoKey("other-repo"));
+    service.set({ links: [] });
+    expect(keyOf(dashboard)).toBeNull();
+    expect(dashboard.selectedAgent).toBe(local);
+    expect(dashboard.infoPanel.remote).toBeNull();
+    expect(dashboard.infoPanel.agent).toBe(local);
   });
 });

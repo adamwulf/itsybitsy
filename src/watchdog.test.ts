@@ -2,10 +2,12 @@ import { test, expect, describe, beforeEach, afterEach, beforeAll, afterAll, moc
 import { join } from "path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
+import { setUserHome, resetUserHome } from "./home";
+import { saveRegistry } from "./registry";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { claudeUsageFromRecord, readClaudeUsage, recordClaudeRateLimits, type ClaudeRateLimits } from "./claude-rate-limits";
-import { agentOutboxDir, readOutbox } from "./outbox";
-import { makeAgent } from "./test-utils";
+import { agentOutboxDir, OUTBOX_FILENAME, readOutbox } from "./outbox";
+import { makeAgent, makeSpawnResult, waitFor } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
 import {
@@ -48,6 +50,8 @@ import {
   resetPerAgentReadMeta,
   setPerAgentSleep,
   resetPerAgentSleep,
+  setPerAgentOutboxWatch,
+  resetPerAgentOutboxWatch,
   setPerAgentReadState,
   resetPerAgentReadState,
   setPerAgentDrain,
@@ -78,8 +82,10 @@ import {
   resetWatchdogReadAck,
   type AgentTracker,
 } from "./watchdog";
-import { writeAgentState, resetListTmuxSessionsCache, type AgentAck } from "./agents";
+import { writeAgentTransient, writeAgentState, resetListTmuxSessionsCache, type AgentAck } from "./agents";
 import {
+  drainOutbox,
+  sendMessage,
   setSendSpawnRunner,
   resetSendSpawnRunner,
 } from "./ib-commands";
@@ -112,7 +118,7 @@ setDefaultTimeout(60_000);
  * Per-process itsybitsy home for the whole file.
  *
  * Every watchdog notification is delivered through the outbox, whose queue and
- * lock live at `<itsybitsy home>/agents/<agent id>/` (`agentOutboxDir`). Left
+ * lock live under `<itsybitsy home>/agents/` (`agentOutboxDir`). Left
  * at its default that home is the developer's REAL `~/.itsybitsy`, which is
  * shared with every other `bun test` process on the machine — and the agent ids
  * here are generic ("a1", "mgr", "spawner"), so two suites running at once
@@ -135,12 +141,16 @@ setDefaultTimeout(60_000);
  */
 let outboxHome: string;
 
-beforeAll(() => {
+beforeAll(async () => {
   outboxHome = mkdtempSync(join(tmpdir(), "ib-watchdog-home-"));
   setCoordinatorHome(outboxHome);
+  setUserHome(outboxHome);
+  await Bun.write(join(outboxHome, ".itsybitsy", "machine-name"), "studio");
+  await saveRegistry({ repos: [{ path: "/tmp/test", name: "test" }] });
 });
 
 afterAll(() => {
+  resetUserHome();
   resetCoordinatorHome();
   rmSync(outboxHome, { recursive: true, force: true });
 });
@@ -437,6 +447,17 @@ describe("watchdog", () => {
       expect(countSendKeysWithText(spawnMock, "recently started waiting")).toBe(0);
     });
 
+    test("a running child of a same-id manager in another repo leaves the waiter eligible", async () => {
+      setWatchdogCaptureTmux(async () => "no shells");
+      const mgr = agent("mgr", "running");
+      const waiter = agent("a1", "waiting", "mgr");
+      const foreign = agent("child", "running", "a1");
+      foreign.repoPath += "-other";
+      foreign.meta.state = "running";
+      for (let i = 0; i < INITIAL_NOTIFY_TICKS; i++) await tick([mgr, waiter, foreign]);
+      expect(countSendKeysWithText(spawnMock, "Your subtask a1 recently started waiting")).toBe(1);
+    });
+
     test("only waiting children → notification fires after threshold", async () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const mgr = agent("mgr", "running");
@@ -538,7 +559,7 @@ describe("watchdog", () => {
       setWatchdogCaptureTmux(async () => "⏵⏵ accept edits on · 1 shell");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", null); // no manager, but has spawner
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
       const agents = [spawner, a1];
 
       for (let i = 0; i < INITIAL_NOTIFY_TICKS + 5; i++) {
@@ -770,13 +791,28 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const worker = agent("w1", "waiting", "mgr");
 
-      await notifyManager(worker, "test message", [mgr, worker]);
+      const other = { ...mgr, repoPath: join(mgr.repoPath, "other"), meta: { ...mgr.meta, tmux_session: "wrong-manager" } };
+      await notifyManager(worker, "test message", [other, mgr, worker]);
+      expect(spawnMock.calls.some((c) => c.args.includes("=wrong-manager:"))).toBe(false);
 
       // Should have calls to tmux (has-session check + send-keys)
       const hasSessionCalls = spawnMock.calls.filter((c) =>
         c.args.includes("has-session")
       );
       expect(hasSessionCalls.length).toBeGreaterThan(0);
+    });
+
+    test("a spawner id in another repo is resolved by its recorded path", async () => {
+      const { notifySpawner } = await import("./watchdog");
+      const spawner = agent("parent", "running");
+      const wrong = { ...spawner, repoPath: join(spawner.repoPath, "other"),
+        meta: { ...spawner.meta, tmux_session: "wrong-spawner" } };
+      const worker = { ...agent("child", "waiting"), repoPath: wrong.repoPath };
+      worker.meta.spawned_by = { agent_id: spawner.id, repo_path: spawner.repoPath };
+      expect(await notifySpawner(worker, "test", [wrong, spawner, worker])).toBe(true);
+      const sends = spawnMock.calls.filter((c) => c.args.includes("send-keys"));
+      expect(sends.some((c) => c.args.includes(`=${spawner.meta.tmux_session}:`))).toBe(true);
+      expect(sends.some((c) => c.args.includes("=wrong-spawner:"))).toBe(false);
     });
 
     test("no-op when agent has no manager", async () => {
@@ -908,7 +944,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", "mgr");
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [mgr, spawner, a1],
@@ -924,14 +960,16 @@ describe("watchdog", () => {
       setWatchdogCaptureTmux(async () => "no shells");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "waiting", null);
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      spawner.repoPath += "-other";
+      a1.repoRegistryName = "Source";
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
-        () => countSendKeysWithText(spawnMock, "you spawned recently started waiting") > 0,
+        () => countSendKeysWithText(spawnMock, "@Source/a1 you spawned recently started waiting") > 0,
         "spawner notified that a1 started waiting",
       );
-      expect(countSendKeysWithText(spawnMock, "you spawned recently started waiting")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "@Source/a1 you spawned recently started waiting")).toBeGreaterThan(0);
     });
 
     test("waiting: no notification when neither manager nor spawner is set", async () => {
@@ -951,7 +989,7 @@ describe("watchdog", () => {
       const mgr = agent("mgr", "running");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "complete", "mgr");
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       // The watchdog "recently completed" is a delayed fallback — it only fires
       // after the agent has been continuously complete for
@@ -969,21 +1007,23 @@ describe("watchdog", () => {
     test("complete: spawner notified when manager is null", async () => {
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "complete", null);
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      spawner.repoPath += "-other";
+      a1.repoRegistryName = "Source";
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
-        () => countSendKeysWithText(spawnMock, "you spawned recently completed") > 0,
+        () => countSendKeysWithText(spawnMock, "@Source/a1 you spawned recently completed") > 0,
         "spawner notified that a1 completed",
       );
-      expect(countSendKeysWithText(spawnMock, "you spawned recently completed")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "@Source/a1 you spawned recently completed")).toBeGreaterThan(0);
     });
 
     test("unknown: manager wins — spawner is NOT notified", async () => {
       const mgr = agent("mgr", "running");
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "unknown", "mgr");
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [mgr, spawner, a1],
@@ -997,14 +1037,16 @@ describe("watchdog", () => {
     test("unknown: spawner notified when manager is null", async () => {
       const spawner = agent("spawner", "running");
       const a1 = agent("a1", "unknown", null);
-      a1.meta.spawned_by = { agent_id: "spawner", repo_path: "/tmp/other" };
+      spawner.repoPath += "-other";
+      a1.repoRegistryName = "Source";
+      a1.meta.spawned_by = { agent_id: "spawner", repo_path: spawner.repoPath };
 
       await tickUntil(
         [spawner, a1],
-        () => countSendKeysWithText(spawnMock, "you spawned has an unknown state") > 0,
+        () => countSendKeysWithText(spawnMock, "@Source/a1 you spawned has an unknown state") > 0,
         "spawner notified that a1's state is unknown",
       );
-      expect(countSendKeysWithText(spawnMock, "you spawned has an unknown state")).toBeGreaterThan(0);
+      expect(countSendKeysWithText(spawnMock, "@Source/a1 you spawned has an unknown state")).toBeGreaterThan(0);
     });
   });
 
@@ -1059,6 +1101,7 @@ describe("watchdog", () => {
       try {
         // Coordinator agent: id matches the repo basename.
         const coord = makeAgent({
+          repoPath: repoDir,
           id: repoBasename,
           state: "running",
           meta: {
@@ -1085,9 +1128,9 @@ describe("watchdog", () => {
           agentType: "repo-coordinator",
         }));
 
-        // The registry name DELIBERATELY differs from basename — the lookup
-        // must use basename(repo.path), not registry.name.
+        // Both registered paths end in myrepo. Only the stamped path owns this notification.
         setWatchdogListRepos(async () => [
+          { path: pjoin(parentDir, "other", "myrepo"), name: "other" },
           { path: repoDir, name: "completely-different-name" },
         ]);
 
@@ -1095,7 +1138,9 @@ describe("watchdog", () => {
         a1.meta.spawned_by = { agent_id: `@${repoBasename}`, repo_path: repoDir };
 
         const { notifySpawner } = await import("./watchdog");
-        const ok = await notifySpawner(a1, "hello @myrepo", [coord]);
+        const other = { ...coord, repoPath: pjoin(parentDir, "other", "myrepo"), meta: { ...coord.meta, tmux_session: "wrong-session" } };
+        const ok = await notifySpawner(a1, "hello @myrepo", [other, coord]);
+        expect(spawnMock.calls.some((c) => c.args.includes("=wrong-session:"))).toBe(false);
 
         expect(ok).toBe(true);
         const sendKeysCalls = spawnMock.calls.filter((c) =>
@@ -1800,7 +1845,7 @@ describe("watchdog", () => {
           state: "waiting",
           ack: { state: "waiting", by: "mgr", at: 1 },
         }));
-        const agents = [agent("mgr", "running"), a1];
+        const agents = [{ ...agent("mgr", "running"), repoPath: repo }, a1];
 
         await eligibleTick(agents, "a1");
         clearTrackers(); // a new watchdog process starts with a fresh tracker
@@ -2230,6 +2275,8 @@ describe("watchdog", () => {
         expect(nudges()[0]).toContain(`Usage has refreshed ${expectedText}`);
       });
 
+      const usageRecordDir = (id: string) => agentOutboxDir({ id, meta: null });
+
       test("a manual weekly reset nudges once a newer record reports the drop", async () => {
         // Real records under the test home. Idle agents keep the reading from
         // before the user reset the weekly limit (same resets_at); a newer
@@ -2238,19 +2285,19 @@ describe("watchdog", () => {
         const recordIds = ["rl-idle-a", "rl-idle-b", "rl-fresh"];
         setWatchdogFetchUsage(() => readClaudeUsage(new Date(now)));
         try {
-          await recordClaudeRateLimits("rl-idle-a", { seven_day: live(96) }, now - 1_200_000);
-          await recordClaudeRateLimits("rl-idle-b", { seven_day: live(100) }, now - 600_000);
+          await recordClaudeRateLimits(usageRecordDir("rl-idle-a"), { seven_day: live(96) }, now - 1_200_000);
+          await recordClaudeRateLimits(usageRecordDir("rl-idle-b"), { seven_day: live(100) }, now - 600_000);
           await tick([agent("a1", "rate_limited")]);
           expect(nudges()).toEqual([]);
 
           now += 5_000;
-          await recordClaudeRateLimits("rl-fresh", { seven_day: live(20) }, now);
+          await recordClaudeRateLimits(usageRecordDir("rl-fresh"), { seven_day: live(20) }, now);
           await tick([agent("a1", "rate_limited")]);
 
           expect(nudges().length).toBe(1);
           expect(nudges()[0]).toContain("Usage has refreshed (weekly 20%)");
         } finally {
-          for (const id of recordIds) rmSync(agentOutboxDir(id), { recursive: true, force: true });
+          for (const id of recordIds) rmSync(usageRecordDir(id), { recursive: true, force: true });
         }
       });
 
@@ -2266,17 +2313,17 @@ describe("watchdog", () => {
         const recordIds = ["rl-earlier", "rl-later"];
         setWatchdogFetchUsage(() => readClaudeUsage(new Date(now)));
         try {
-          await recordClaudeRateLimits("rl-earlier", windows(60), now - 600_000);
+          await recordClaudeRateLimits(usageRecordDir("rl-earlier"), windows(60), now - 600_000);
           await tick([agent("a1", "rate_limited")]);
           expect(nudges()).toEqual([]);
 
           now += 5_000;
-          await recordClaudeRateLimits("rl-later", windows(59), now);
+          await recordClaudeRateLimits(usageRecordDir("rl-later"), windows(59), now);
           await tick([agent("a1", "rate_limited")]);
 
           expect(nudges()).toEqual([]);
         } finally {
-          for (const id of recordIds) rmSync(agentOutboxDir(id), { recursive: true, force: true });
+          for (const id of recordIds) rmSync(usageRecordDir(id), { recursive: true, force: true });
         }
       });
 
@@ -3317,8 +3364,80 @@ describe("runPerAgentWatchdog", () => {
     resetWatchdogSpawnRunner();
     resetPerAgentReadState();
     resetPerAgentDrain();
+    resetPerAgentOutboxWatch();
     resetPerAgentSpawnBroker();
     clearAllAgentsCache();
+  });
+
+  test.each([undefined, "spawn-host/original-registration/review"])("watchdog drains a newly queued send between polls (stored key %p)", async (key) => {
+    const repo = join(outboxHome, "unregistered");
+    const target = makeAgent({ repoPath: repo, id: "review" });
+    target.meta.tmux_session = "itsybitsy-deadbeef-review";
+    if (key) {
+      target.meta.queue_key = key;
+      mkdirSync(join(outboxHome, "agents", key), { recursive: true });
+    }
+    const agentDir = join(repo, ".itsybitsy", "agents", target.id);
+    mkdirSync(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(target.meta));
+    // Neither the flat queue nor the stored key requires a repo identity read.
+    await Bun.write(join(repo, ".itsybitsy", "repo-id"), "unreadable to sender");
+    // The first tick writes a heartbeat that the sender checks against wall time.
+    currentTime = Date.now();
+    const expectedDir = join(outboxHome, "agents", key ?? "review");
+    const drainedDirs: string[] = [];
+    const watchers: Array<{ dir: string; notify: (event: string, filename: string | null) => void }> = [];
+    setPerAgentOutboxWatch((dir, notify) => {
+      watchers.push({ dir, notify });
+      return { close: () => {} };
+    });
+    const tmuxCalls: string[][] = [];
+    const isTextSend = (cmd: string[]) => cmd.includes("send-keys") && cmd.includes("-l");
+    let pollPaused = false;
+    let deliveredByWatch = false;
+    const stopPolling = Promise.withResolvers<void>();
+    setPerAgentReadMeta(async () => ({ meta: target.meta }));
+    setPerAgentReadState(async () => "running");
+    setPerAgentSleep(async () => {
+      pollPaused = true;
+      await stopPolling.promise;
+    });
+    setSendSpawnRunner(cmd => {
+      tmuxCalls.push(cmd);
+      return makeSpawnResult();
+    });
+    setPerAgentDrain(async (agent, dir) => {
+      drainedDirs.push(dir);
+      const callsBeforeDrain = tmuxCalls.length;
+      await drainOutbox(agent, dir);
+      if (tmuxCalls.slice(callsBeforeDrain).some(isTextSend)) deliveredByWatch = true;
+    });
+
+    const watchdog = runPerAgentWatchdog(target.id, repo);
+    try {
+      // The first empty drain registers the watcher. Hold the next poll
+      // and fire the registered callback independently of OS events.
+      await waitFor(() => pollPaused, { message: "watchdog paused between polls" });
+      expect(watchers.map(({ dir }) => dir)).toEqual([expectedDir]);
+      expect(await readOutbox(expectedDir)).toEqual([]);
+      expect((await sendMessage(target, "queued", { cwd: "/" })).ok).toBe(true);
+      expect((await readOutbox(expectedDir)).map(message => message.message)).toEqual(["queued"]);
+      expect(tmuxCalls.filter(isTextSend)).toEqual([]);
+
+      watchers[0]!.notify("rename", OUTBOX_FILENAME);
+      await waitFor(() => deliveredByWatch, { message: `watch callback delivery from ${expectedDir}` });
+      expect(await readOutbox(expectedDir)).toEqual([]);
+      const sends = tmuxCalls.filter(isTextSend);
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain(`=${target.meta.tmux_session}:`);
+      expect(sends[0]?.at(-1)).toContain("queued");
+    } finally {
+      worktreeExists = false;
+      stopPolling.resolve();
+      await watchdog;
+    }
+    expect(drainedDirs.length).toBeGreaterThanOrEqual(2);
+    expect(drainedDirs.every(dir => dir === expectedDir)).toBe(true);
   });
 
   describe("rate-limit recovery from real pane text", () => {
@@ -3352,7 +3471,7 @@ describe("runPerAgentWatchdog", () => {
     async function runPolls(polls: Array<[number, string, number]>): Promise<Array<[number, string]>> {
       const sent: Array<[number, string]> = [];
       let poll = 0;
-      const outbox = agentOutboxDir("agent-test1");
+      const outbox = agentOutboxDir({ id: "agent-test1", meta: null });
       // Take what the last poll queued, as a real drain would, so that the next
       // identical nudge isn't dropped as a duplicate of a pending one.
       const takeQueued = async () => {

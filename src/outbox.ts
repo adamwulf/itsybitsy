@@ -8,48 +8,79 @@
  * time interleave their chunks and Enters and land as one merged prompt.
  *
  * Fix: every write path ENQUEUES to a per-agent `outbox.jsonl` under
- * `<coordinatorHome>/agents/<id>/` (computed via `agentOutboxDir(id)`). The
+ * `<coordinatorHome>/agents/<machine>/<repo>/<id>/` for keyed agents.
+ * Keyless agents keep `<coordinatorHome>/agents/<id>/` so their existing
+ * watchdogs can deliver messages. Both paths come from `agentOutboxDir`. The
  * queue was moved out of the per-worktree agent dir so codex agents running
  * with `-s workspace-write` can write to any other agent's outbox — codex
  * spawns add the entire `<coordinatorHome>` as a writable root, and the
  * per-worktree agent dir is invisible to other sandboxes. A single drainer —
  * the agent's own watchdog (`runPerAgentWatchdog`), or a lock-guarded inline
  * fallback when no live watchdog exists — pops messages one at a time and
- * types them. A per-session advisory lock (`.outbox.lock`) guarantees only one
- * drainer ever writes to a given session, so two `send-keys`/`Enter` sequences
- * can never interleave. The system coordinator's outbox is the one exception:
- * it lives in `<coordinatorHome>` directly (not under `agents/`), and callers
- * pass that path explicitly via `sendMessage`'s `outboxDir` opt.
+ * types them. One advisory lock (`.outbox.lock`) per queue directory keeps
+ * drainers from interleaving their `send-keys`/`Enter` sequences. Keyless
+ * agents with the same ID share that lock across their tmux sessions.
+ * The system coordinator's queue directory is `<coordinatorHome>` itself.
+ * Its senders pass that path via `sendMessage`'s `outboxDir` option.
  *
- * There is intentionally NO central dispatcher: the queue and lock are keyed
- * per-agent (i.e. per tmux session), so busy multi-agent communication has no
- * single bottleneck. This is distinct from the Telegram channel outbox in
- * `src/channels/outbox.ts`, which is unrelated.
+ * There is no central dispatcher. Each queue is drained independently.
+ * The Telegram channel outbox lives in `src/channels/outbox.ts`.
  */
 
 import { join } from "path";
 import { rename, unlink, stat, readFile, appendFile, open, mkdir, rmdir } from "fs/promises";
+import type { RepoEntry } from "./registry";
+import type { AgentMeta } from "./agents";
 import { getCoordinatorHome } from "./coordinator";
+import { isValidAgentId } from "./validation";
 
 /** Filename for the per-agent message queue. */
 export const OUTBOX_FILENAME = "outbox.jsonl";
-/** Filename for the per-session delivery lock. */
+/** Filename for the delivery lock in each queue directory. */
 export const OUTBOX_LOCK_FILENAME = ".outbox.lock";
 
-/**
- * Per-agent outbox directory under the coordinator home
- * (`~/.itsybitsy/agents/<id>/`). Centralizing the queue out of each agent's
- * per-worktree directory lets a codex agent running with `-s workspace-write`
- * write to ANY other agent's outbox via `ib send` — codex agents are sandboxed
- * to their own worktree plus any roots passed via `--add-dir`, so we add this
- * single root to every codex spawn (see `buildCodexLaunchArgs`).
- *
- * The agent's own log, state, and meta still live under the per-worktree
- * `<repoPath>/.itsybitsy/agents/<id>/` — only the message-delivery queue and
- * its lock move here.
- */
-export function agentOutboxDir(agentId: string): string {
-  return join(getCoordinatorHome(), "agents", agentId);
+/** Resolve the registered segment from one registry snapshot, including symlinked repos. */
+export async function registeredQueueRepo(repoPath: string, repos: RepoEntry[]): Promise<string | undefined> {
+  let repo = repos.find((r) => r.path === repoPath);
+  if (!repo && repos.length) {
+    // The checkout path may differ from the registered path through a symlink.
+    const physical = await stat(repoPath).catch(() => null);
+    if (physical) {
+      for (const entry of repos) {
+        const candidate = await stat(entry.path).catch(() => null);
+        if (candidate?.ino === physical.ino && candidate.dev === physical.dev) {
+          repo = entry;
+          break;
+        }
+      }
+    }
+  }
+  if (!repo) return undefined;
+  const name = repo.name;
+  const matches = repos.filter((entry) => entry.name.toLowerCase() === name.toLowerCase());
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous queue for repo name '${name}' registered at: ${matches.map((entry) => entry.path).join(", ")}`);
+  }
+  return name;
+}
+
+type QueueAgent = { id: string; meta: Pick<AgentMeta, "queue_key"> | null };
+
+/** Validate persisted metadata before interpreting it as a relative path. */
+export function queueDirForKey(key: string, agentId: string): string {
+  const parts = typeof key === "string" ? key.split("/") : [];
+  if (parts.length !== 3 || parts[2] !== agentId ||
+      parts.some((part) => !part || part === "." || part === ".." || part.includes("\0"))) {
+    throw new Error(`Invalid queue key for '${agentId}': ${JSON.stringify(key)}`);
+  }
+  return join(getCoordinatorHome(), "agents", key);
+}
+
+/** Agents without a stored key keep the queue their original watchdog uses. */
+export function agentOutboxDir({ id, meta }: QueueAgent): string {
+  if (meta?.queue_key !== undefined) return queueDirForKey(meta.queue_key, id);
+  if (!isValidAgentId(id)) throw new Error(`Invalid agent id for queue: ${JSON.stringify(id)}`);
+  return join(getCoordinatorHome(), "agents", id);
 }
 
 /**
@@ -92,7 +123,7 @@ export interface OutboxMessage {
   noPassthrough?: boolean;
 }
 
-/** Path to an agent/coordinator outbox file, given the directory that holds meta.json. */
+/** Path to an agent/coordinator outbox file, given its queue directory. */
 export function outboxPath(dir: string): string {
   return join(dir, OUTBOX_FILENAME);
 }
@@ -104,7 +135,7 @@ export function outboxLockPath(dir: string): string {
 
 /**
  * Append one message to the outbox. A single small `appendFile` of one line is
- * atomic on POSIX (O_APPEND), and the per-session lock around the DRAIN means a
+ * atomic on POSIX (O_APPEND), and the queue directory's lock around the drain means a
  * concurrent drainer never truncates a half-written line: the drainer reads the
  * whole file, parses complete lines, and rewrites only the not-yet-delivered
  * remainder. An append that lands mid-drain is simply picked up next drain.
@@ -128,6 +159,7 @@ export function outboxLockPath(dir: string): string {
 export async function enqueueOutbox(
   dir: string,
   msg: Omit<OutboxMessage, "id" | "enqueuedAtMs"> & { id?: string; enqueuedAtMs?: number },
+  reservedKey?: string,
 ): Promise<OutboxMessage> {
   // Best-effort dedupe: if an identical pending message from the same sender is
   // already queued, return it instead of appending a second copy. Matches on
@@ -157,16 +189,18 @@ export async function enqueueOutbox(
     // the dedupe match above stable against pre-existing queued messages.
     noPassthrough: msg.noPassthrough === true ? true : undefined,
   };
-  // Ensure the agent/coordinator directory exists before appending. In
-  // production this dir always exists (created at spawn); creating it here is a
-  // no-message-loss safeguard so a queued message is never silently dropped on
-  // a missing dir (e.g. a synthetic-agent send target). mkdir recursive is a
-  // no-op when the dir already exists.
-  await mkdir(dir, { recursive: true });
-  // Single-line append. The trailing newline keeps each record on its own line
-  // so a partial write (extremely unlikely for a sub-PIPE_BUF line) is detected
-  // as an unparseable trailing fragment and skipped, never merged into another.
-  await appendFile(outboxPath(dir), JSON.stringify(record) + "\n");
+  // A stored key identifies a leaf reserved at spawn. A late send to a
+  // retired recipient must not recreate that reservation.
+  if (reservedKey === undefined) await mkdir(dir, { recursive: true });
+  // Append one newline-terminated record so a torn write can be skipped.
+  try {
+    await appendFile(outboxPath(dir), JSON.stringify(record) + "\n");
+  } catch (err) {
+    if (reservedKey !== undefined && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`agent ${reservedKey} no longer exists`);
+    }
+    throw err;
+  }
   return record;
 }
 
@@ -216,7 +250,7 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
 /**
  * Rewrite the outbox to exactly `remaining`, atomically (tmp + rename).
  *
- * IMPORTANT (no double-delivery, no loss): callers hold the per-session lock,
+ * IMPORTANT (no double-delivery, no loss): callers hold the queue directory's lock,
  * read the batch, deliver one message, then call this with the messages that
  * have NOT yet been delivered. To account for appends that arrived mid-drain
  * (other processes can append even while we hold the lock — the lock guards
@@ -243,36 +277,32 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
   await rename(tmpPath, path);
 }
 
-/**
- * Delete the outbox queue and its lock. Called from agent teardown
- * (archive/retire/nuke) alongside `deleteAgentTransient`. Best-effort:
- * any error (including ENOENT) is ignored.
- *
- * Also attempts to rmdir `dir` itself afterwards — when this is called against
- * the centralized per-agent outbox dir (`agentOutboxDir(id)`), that dir is
- * ours to create and clean up. The rmdir is best-effort: ENOENT (already
- * gone) and ENOTEMPTY (something else dropped a file in there) are both
- * ignored. The coordinator's outbox lives in `getCoordinatorHome()` directly,
- * which we must NOT rmdir; that case is explicitly short-circuited below as
- * defense-in-depth (ENOTEMPTY would also naturally protect it, but a guard
- * removes any latent footgun for a future caller that does pass it in).
- */
-export async function deleteAgentOutbox(dir: string): Promise<void> {
-  for (const p of [outboxPath(dir), outboxLockPath(dir)]) {
-    try {
-      await unlink(p);
-    } catch {
-      /* best-effort */
+/** Collect unlink failures so teardown can try each remaining file. */
+export async function unlinkQueueFile(path: string, warnings: string[]): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      warnings.push(`Warning: could not unlink ${path}: ${(err as Error).message}`);
     }
   }
-  // Never rmdir the coordinator home itself — that path is the system
-  // coordinator's outbox location, not an ephemeral per-agent subdir.
-  if (dir === getCoordinatorHome()) return;
-  try {
-    await rmdir(dir);
-  } catch {
-    /* best-effort — ENOENT/ENOTEMPTY both ignored */
+}
+
+export async function deleteAgentOutbox(dir: string): Promise<string[]> {
+  const warnings: string[] = [];
+  for (const path of [outboxPath(dir), outboxPath(dir) + ".tmp", outboxLockPath(dir)]) {
+    await unlinkQueueFile(path, warnings);
   }
+  if (dir !== getCoordinatorHome()) {
+    try {
+      await rmdir(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        warnings.push(`Warning: could not remove queue directory ${dir}: ${(err as Error).message}`);
+      }
+    }
+  }
+  return warnings;
 }
 
 /** A held lock — pass to `releaseOutboxLock` (always in a finally block). */
@@ -322,7 +352,7 @@ function tokenFromBody(body: string): string {
 }
 
 /**
- * Acquire the per-session advisory delivery lock via exclusive file creation
+ * Acquire the queue directory's advisory delivery lock via exclusive file creation
  * (O_CREAT|O_EXCL). On EEXIST the lock is held by someone else; retry with
  * backoff up to `timeoutMs`. Writes `<pid>:<token>` into the lock file (token
  * for ownership verification on release, pid for debuggability). Returns the

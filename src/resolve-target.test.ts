@@ -466,18 +466,15 @@ describe("Group G: findOwnRepo edge cases", () => {
 // Group K: Cross-cutting edge cases
 // ============================================================
 describe("Group K: Cross-cutting edge cases", () => {
-  test("K1: @app/ with empty agentId falls through to coordinator lookup", async () => {
-    // agentId = "" is falsy, so code treats @app/ same as @app (coordinator lookup)
-    // No coordinator added, should fail
-    const result = await resolveTarget("@app/", repos);
-    expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("no coordinator found for repo app"))).toBe(true);
+  test("K1: trailing slash after an existing coordinator is invalid", async () => {
+    addCoordinatorToRepo(repoA.path, "coord-a");
+    expect((await resolveTarget("@app/", repos)).agent).toBeNull();
+    expect(errorOutput).toEqual(["Agent not found: @app/"]);
   });
 
-  test("K2: @ alone treated as repo name empty string", async () => {
-    const result = await resolveTarget("@", repos);
-    expect(result.agent).toBeNull();
-    expect(errorOutput.some((e) => e.includes("no repo or team named:"))).toBe(true);
+  test("K2: an empty @ name is invalid", async () => {
+    expect((await resolveTarget("@", repos)).agent).toBeNull();
+    expect(errorOutput).toEqual(["Agent not found: @"]);
   });
 
   test("K3: multi-repo same agent ID - same-repo first wins", async () => {
@@ -515,12 +512,11 @@ describe("Group K: Cross-cutting edge cases", () => {
     expect(errorOutput.some((e) => e.includes("Agent not found: agent@123"))).toBe(true);
   });
 
-  test("K8: multiple slashes in @-addressing parses first slash only", async () => {
+  test("K8: multiple slashes in @-addressing are invalid", async () => {
     // No agents added, test error path
     const result = await resolveTarget("@app/agent/extra", repos);
     expect(result.agent).toBeNull();
-    // agentId = "agent/extra", won't match any agent
-    expect(errorOutput.some((e) => e.includes("Agent not found: agent/extra in repo app"))).toBe(true);
+    expect(errorOutput.some((e) => e.includes("Agent not found: @app/agent/extra"))).toBe(true);
   });
 
   test("K9: @system/something treated as repo name 'system/something' — fails differently", async () => {
@@ -560,7 +556,7 @@ describe("Group L: unreadable agents directories in not-found errors", () => {
     const result = await resolveTarget("cli-email-client", repos, repoA.path);
     expect(result.agent).toBeNull();
     expect(errorOutput).toEqual([
-      `Agent not found: cli-email-client (could not read ${unreadable}; a sandbox may block it)`,
+      `Cannot resolve 'cli-email-client' (could not read ${unreadable}; a sandbox may block it); use machine/repo/agent`,
     ]);
   });
 
@@ -615,7 +611,7 @@ describe("Group L: unreadable agents directories in not-found errors", () => {
     const unreadable = all.map(makeAgentsDirUnreadable);
     await resolveTarget("cli-email-client", all, "/tmp/outside");
     expect(errorOutput).toEqual([
-      `Agent not found: cli-email-client (could not read ${unreadable.slice(0, 3).join(", ")} +2 more; a sandbox may block it)`,
+      `Cannot resolve 'cli-email-client' (could not read ${unreadable.slice(0, 3).join(", ")} +2 more; a sandbox may block it); use machine/repo/agent`,
     ]);
   });
 
@@ -625,7 +621,8 @@ describe("Group L: unreadable agents directories in not-found errors", () => {
     expect(result).toEqual({
       agent: null,
       isSystemCoordinator: false,
-      error: `Agent not found: cli-email-client (could not read ${unreadable}; a sandbox may block it)`,
+      error: `Cannot resolve 'cli-email-client' (could not read ${unreadable}; a sandbox may block it); use machine/repo/agent`,
+      incompleteVisibility: { unreadableDirs: [unreadable] },
     });
     expect(errorOutput).toEqual([]);
   });

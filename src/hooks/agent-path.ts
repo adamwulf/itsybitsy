@@ -7,6 +7,7 @@ import * as runtimeNames from "../runtime-names";
  * their own agent.log, and general system paths.
  */
 
+import { sameRepoPath } from "../repo-identity";
 import { join, resolve, dirname, basename } from "path";
 import { userHome } from "../home";
 import { lstatSync } from "fs";
@@ -114,7 +115,8 @@ export interface PathCheckContext {
    * Files/dirs whose WRITES are denied (reads untouched). For a normal agent:
    * its own `<agentDir>/meta.json`. For @system: the agent-types dir, config.json,
    * repos.json, layout.json and the sealed dir under `~/.itsybitsy`, none of
-   * which @system may rewrite to widen itself (its worktree root is its whole home).
+   * which @system may rewrite to widen itself (its worktree root is its whole
+   * home), and the peer dir (the iroh secret key and the trusted-peer list).
    */
   protectedWritePaths: ProtectedWritePath[];
 }
@@ -229,10 +231,22 @@ function isSealHelperResultPath(filePath: string): boolean {
  * Deny reason for a WRITE to a protected coordinator-configuration path (the
  * @system agent-types dir, config.json, repos.json, layout.json, sealed). Names
  * the file so the Denials tab shows exactly what was refused. Reads are allowed.
- * Exported so tests can assert against it.
+ * Exported so tests can assert against it. The peer dir has its own reason,
+ * {@link peerDirWriteDenyReason}.
  */
 export function protectedConfigWriteDenyReason(path: string): string {
   return `Access denied: ${path} is a protected coordinator configuration path (agents may read it, not modify it — use 'ib' to change configuration)`;
+}
+
+/**
+ * Deny reason for a WRITE under @system's `~/.itsybitsy/peer/` (the iroh secret
+ * key and the trusted-peer list). Unlike the configuration paths, agents may
+ * not read all of it (`_all.md` denies secret.key) and no agent can change it
+ * through `ib` (`ib peer` is human-only), so it tells the agent to ask the user.
+ * Names the path for the Denials tab. Exported so tests can assert against it.
+ */
+export function peerDirWriteDenyReason(path: string): string {
+  return `Access denied: ${path} is managed by the human-only 'ib peer' command and ib watch; agents cannot modify it. Ask the user`;
 }
 
 /**
@@ -269,8 +283,10 @@ export function agentProtectedWritePaths(
 /**
  * The protected-write list for the @system coordinator, whose worktree root is
  * its whole `~/.itsybitsy` home: the agent-types dir (widening its own layers),
- * config.json / repos.json / layout.json (widening the harness), and the sealed
- * dir. `itsybitsyHome` is the resolved `~/.itsybitsy` directory. Each path is
+ * config.json / repos.json / layout.json (widening the harness), the sealed
+ * dir, and the peer dir (the iroh secret key and peers.json, the list of
+ * installs trusted to connect). `itsybitsyHome` is the resolved `~/.itsybitsy`
+ * directory. Each path is
  * canonicalized (symlink-resolving) so a symlinked parent cannot defeat the
  * match against the realpath'd inbound path.
  */
@@ -283,12 +299,14 @@ export function systemProtectedWritePaths(itsybitsyHome: string): ProtectedWrite
     const p = canonicalizeSandboxPath(join(itsybitsyHome, name));
     return { path: p, subtree: false, reason: protectedConfigWriteDenyReason(p) };
   };
+  const peer = canonicalizeSandboxPath(join(itsybitsyHome, "peer"));
   return [
     dir("agent-types"),
     file("config.json"),
     file("repos.json"),
     file("layout.json"),
     dir("sealed"),
+    { path: peer, subtree: true, reason: peerDirWriteDenyReason(peer) },
   ];
 }
 
@@ -532,7 +550,7 @@ export const SETTINGS_WRITE_DENY_REASON =
  * self-escalation), the agy boundary files (`.agents/hooks.json` / the rule
  * file, whose rewrite disables the hook gate on the next resume), or any
  * `protectedWritePaths` entry (a normal agent's own `<agentDir>/meta.json`, or
- * @system's agent-types/config/sealed). The hook can tell the agent's redirect
+ * @system's agent-types/config/sealed/peer). The hook can tell the agent's redirect
  * from `ib` writing the file, because it sees the command; the kernel cannot.
  *
  * Each candidate write-target token is RESOLVED against cwd (join + resolve +
@@ -654,7 +672,7 @@ const BASH_PATH_SYNTAX_DENY_REASON =
  * Only shell whitespace separates words; Unicode spaces are filename content.
  * Callers mask heredoc bodies before tokenizing because those bodies are data.
  */
-function tokenizeBashPaths(command: string): string[] | null {
+function tokenizeBashPaths(command: string, skipLeadingContinuations = false): string[] | null {
   const tokens: string[] = [];
   let token = "";
   let quote: "'" | '"' | null = null;
@@ -663,6 +681,9 @@ function tokenizeBashPaths(command: string): string[] | null {
     if (c === "\\" && quote !== "'") {
       const next = command[++i];
       if (next === undefined) return null;
+      // Outside quotes, Bash removes a continuation without starting a word.
+      // Keep continuations inside a word visible to literal-operand checks.
+      if (skipLeadingContinuations && !token && quote === null && next === "\n") continue;
       token += c + next;
     } else if (quote !== null) {
       token += c;
@@ -1099,9 +1120,10 @@ function checkBashCommandPaths(
 
   // Block bash mutations of the agent's protected files (.claude/settings*.json,
   // the agy boundary files, and every ctx.protectedWritePaths entry — a normal
-  // agent's own meta.json, or @system's config/agent-types/sealed) — agents must
-  // not grant themselves new permissions, disable their own hook gate, or rewrite
-  // the files the hook and harness read their configuration from.
+  // agent's own meta.json, or @system's config/agent-types/sealed/peer) — agents
+  // must not grant themselves new permissions, disable their own hook gate,
+  // rewrite the files the hook and harness read their configuration from, or
+  // change the install's peering identity and trusted peers.
   const settingsDenial = checkBashSettingsWrite(command, cwd, ctx);
   if (settingsDenial) return settingsDenial;
 
@@ -1194,7 +1216,8 @@ function checkFilePath(
   // the rule file, whose rewrite disables the hook gate on the next resume), or
   // any ctx.protectedWritePaths entry (a normal agent's own meta.json; for
   // @system the agent-types dir, config.json, repos.json, layout.json, sealed —
-  // all self-widening). Reads are allowed; only mutation tools are blocked.
+  // all self-widening — and peer, the iroh key and trusted peers). Reads are
+  // allowed here; only mutation tools are blocked.
   if (WRITE_TOOLS.has(toolName)) {
     const kind = worktreeProtectedFileKind(structural, worktreePath);
     if (kind === "settings") return { decision: "deny", reason: SETTINGS_WRITE_DENY_REASON };
@@ -1304,27 +1327,34 @@ const IB_MANAGER_ONLY_COMMANDS = new Set([
  * Returns { subcommand, targetId } when parsed, or null if not an ib command
  * that targets a specific agent.
  *
- * NOTE: This only matches commands starting with exactly "ib ". Alternate
- * invocations like `./ib retire` or `/usr/local/bin/ib retire` are not matched.
- * This is safe because agents are expected to have only `Bash(ib:*)` in their
- * allowList (not broader `Bash(*)`), so alternate paths are already blocked
- * by the allowList check before this function is called.
+ * Use the same positional operand as the CLI, including merge's leading
+ * flags and shell quoting around machine names containing spaces.
  */
 export function parseIbCommand(command: string): { subcommand: string; targetId: string } | null {
-  // Must start with "ib " or be exactly "ib"
-  if (command !== "ib" && !command.startsWith("ib ")) return null;
+  const words = tokenizeIbOperands(command);
+  return words ? parseManagerOperand(words) : null;
+}
 
-  const parts = command.trim().split(/\s+/);
-  // parts[0] = "ib", parts[1] = subcommand, parts[2] = agent-id (possibly)
-  if (parts.length < 3) return null;
+function tokenizeIbOperands(command: string): string[] | null {
+  return tokenizeBashPaths(maskHeredocBodies(command), true);
+}
 
-  const subcommand = parts[1]!;
-  // Find first non-flag argument as the target ID
-  const targetId = parts.slice(2).find((p) => !p.startsWith("-"));
-  if (!targetId) return null;
-  if (!isValidAgentId(targetId)) return null;
+/** Accept only literal shell words in positions used to authorize an action. */
+function literalWord(raw: string): string | undefined {
+  if (!/^(?:[\w@./:+%-]|\\[^\r\n]|'[^']*'|"(?:[^"\\$`]|\\["\\$`])*")+$/.test(raw)) return undefined;
+  return splitShellWord(raw).join("");
+}
 
-  return { subcommand, targetId };
+function parseManagerOperand(words: string[]): { subcommand: string; targetId: string } | null {
+  if (basename(literalWord(words[0] ?? "") ?? "") !== "ib") return null;
+  const subcommand = literalWord(words[1] ?? "");
+  if (!subcommand) return null;
+  for (const raw of words.slice(2)) {
+    const targetId = literalWord(raw);
+    if (!targetId) return null;
+    if (subcommand !== "merge" || !targetId.startsWith("-")) return { subcommand, targetId };
+  }
+  return null;
 }
 
 /**
@@ -1393,19 +1423,82 @@ const IB_TELEGRAM_OUTBOUND_COMMANDS = new Set(["tgsend", "tgsendfile", "tgreact"
 const IB_BOUNCE_COMMANDS = new Set(["bounce"]);
 
 /**
- * Detect an `ib <subcommand>` invocation for any subcommand in `subcommands`.
- * Same token scan as containsInternalIbInvocation: quoted words and heredoc
- * bodies are data, so a message that only mentions `ib tgsend` is not a
- * match. An untokenizable command never gets here —
+ * `ib peer` reads and changes this install's peering identity and its trusted
+ * peers (docs/plans/iroh-peering.md). Every subcommand is human-only: no agent,
+ * not even @system, may run it.
+ */
+const IB_PEER_COMMANDS = new Set(["peer"]);
+
+/** Unquoted characters that end a shell word: control and redirection operators. */
+const SHELL_OPERATOR_CHARS = new Set([";", "&", "|", "(", ")", "<", ">", "`"]);
+
+/**
+ * Split one tokenizeBashPaths token into the shell words it holds, each
+ * dequoted. tokenizeBashPaths splits only on whitespace, so `list;ib` is one
+ * token, though the shell starts a new command `ib` after the `;`. This breaks
+ * the token at every unquoted, unescaped operator character in
+ * SHELL_OPERATOR_CHARS, then removes quotes and backslash escapes the way the
+ * shell does for a literal word: `pe''er`, `"peer"` and `p\eer` all read as
+ * `peer`. Quoted text stays one word. Expansions (`$X`, `$(…)`, `$'…'`) are
+ * not resolved; see containsIbSubcommandInvocation for what that leaves.
+ */
+function splitShellWord(token: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < token.length; i++) {
+    const c = token[i]!;
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      else word += c;
+    } else if (quote === '"') {
+      if (c === '"') quote = null;
+      else if (c === "\\" && i + 1 < token.length && '$`"\\'.includes(token[i + 1]!)) word += token[++i];
+      else word += c;
+    } else if (c === "\\") {
+      if (i + 1 < token.length) word += token[++i];
+    } else if (c === "'" || c === '"') {
+      quote = c;
+    } else if (SHELL_OPERATOR_CHARS.has(c)) {
+      if (word) words.push(word);
+      word = "";
+    } else {
+      word += c;
+    }
+  }
+  if (word) words.push(word);
+  return words;
+}
+
+/**
+ * Detect an `ib <subcommand>` invocation for any subcommand in `subcommands`,
+ * including one glued to an operator (`ib list;ib peer id`, `ib list|ib peer`,
+ * `(ib peer id)`, `ib peer>out`) or spelled with quotes or escapes inside the
+ * word (`ib pe''er`). An untokenizable command never gets here —
  * containsInternalIbInvocation has already denied it.
+ *
+ * Quoted text and heredoc bodies are treated as data, so a message that only
+ * mentions `ib tgsend` is not a match. That is safe only for single quotes and
+ * quoted-delimiter heredocs (`<<'EOF'`). In double quotes and in an
+ * unquoted-delimiter heredoc the shell still runs command substitution, so
+ * `ib tgsend "id: $(ib peer id)"` runs `ib peer id`, and this scan does not
+ * see it.
+ *
+ * This scan does not stand alone. It also misses a redirect between `ib` and
+ * the subcommand (`ib 2>/dev/null peer id`), ANSI-C quoting (`ib $'peer' id`),
+ * and any other expansion that produces the subcommand. Agents other than
+ * @system are stopped by the chained-command check in checkIbCommandAccess.
+ * Coordinators, @system included, are stopped by the intercept-task hook's
+ * shell-metacharacter gate (findShellMetachar, SPEC §12.2.4), which rejects
+ * every one of these forms. Relaxing that gate reopens them.
  */
 function containsIbSubcommandInvocation(command: string, subcommands: ReadonlySet<string>): boolean {
   const tokens = tokenizeBashPaths(maskHeredocBodies(command));
   if (!tokens) return false;
-  for (let i = 0; i + 1 < tokens.length; i++) {
-    const executable = stripBashSurroundingQuotes(tokens[i]!);
-    if (basename(executable) !== "ib") continue;
-    if (subcommands.has(stripBashSurroundingQuotes(tokens[i + 1]!))) return true;
+  const words = tokens.flatMap(splitShellWord);
+  for (let i = 0; i + 1 < words.length; i++) {
+    if (basename(words[i]!) !== "ib") continue;
+    if (subcommands.has(words[i + 1]!)) return true;
   }
   return false;
 }
@@ -1438,12 +1531,13 @@ async function archiveHiddenBySandbox(repoRoot: string): Promise<boolean> {
 export async function checkIbCommandAccess(
   command: string,
   callingAgentId: string,
-  agentsDir: string
+  agentsDir: string,
+  cwd = resolve(agentsDir, "..", ".."),
 ): Promise<HookDecision | null> {
   // Shell line continuations are removed before execution. Normalize them
   // before authorization so a continued `ib sandbox seal ...` cannot evade
   // the internal-command guard.
-  const normalizedCommand = command.replace(/\\\r?\n/g, " ");
+  const normalizedCommand = command.replace(/\\\r?\n/g, "");
 
   // Seal is an internal tmux-server operation.  It must never be reachable
   // from an agent's Bash(ib:*) allowance: the command writes the protected
@@ -1491,21 +1585,33 @@ export async function checkIbCommandAccess(
     return { decision: "deny", reason: "Access denied: ib lifecycle dispatch is an internal operation" };
   }
 
+  // `ib peer` is user-only, like nuke, so this sits ahead of the @system
+  // early-return. Same shell-word scan as the Telegram gate below: a quoted
+  // message or heredoc body that only mentions `ib peer` is not denied. The
+  // scan's limits, and the metacharacter gates it relies on, are listed on
+  // containsIbSubcommandInvocation.
+  if (containsIbSubcommandInvocation(normalizedCommand, IB_PEER_COMMANDS)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: 'ib peer' is a user-only command — it manages this install's peering identity and trusted peers. Ask the user to run it",
+    };
+  }
+
   // @system has system-wide relationship authority, but cannot invoke the
   // internal lifecycle entry points above through its Bash tool. Legitimate
   // launch helpers call those commands directly and never enter PreToolUse.
-  if (callingAgentId === SYSTEM_AGENT_ID) return null;
+  const system = callingAgentId === SYSTEM_AGENT_ID;
 
   // Outbound Telegram belongs to @system alone: it is the only agent that
   // receives Telegram messages, so it is the only one that replies. Every
   // other agent — worker, manager, per-repo coordinator — is denied here.
-  if (containsIbSubcommandInvocation(normalizedCommand, IB_TELEGRAM_OUTBOUND_COMMANDS)) {
+  if (!system && containsIbSubcommandInvocation(normalizedCommand, IB_TELEGRAM_OUTBOUND_COMMANDS)) {
     return {
       decision: "deny",
       reason: "Access denied: 'ib tgsend', 'ib tgsendfile' and 'ib tgreact' are for the system coordinator only — it is the only agent that receives Telegram messages. Report to your manager (or to the user, if you have no manager) instead",
     };
   }
-  if (containsIbSubcommandInvocation(normalizedCommand, IB_BOUNCE_COMMANDS)) {
+  if (!system && containsIbSubcommandInvocation(normalizedCommand, IB_BOUNCE_COMMANDS)) {
     return {
       decision: "deny",
       reason: "Access denied: 'ib bounce' is for the system coordinator only — it quits ib watch and restarts the system coordinator. Report to your manager (or to the user, if you have no manager) instead",
@@ -1516,8 +1622,8 @@ export async function checkIbCommandAccess(
   // `ib send ...` can append a second lifecycle/internal command after `;`,
   // `&&`, a pipe, or a newline.  The scanner is quote/heredoc aware, so
   // punctuation in a quoted message remains usable.
-  if (/(?:^|[;&|\n]\s*)ib\s+/.test(normalizedCommand)) {
-    const shellHit = findShellMetachar(normalizedCommand);
+  if (!system && /(?:^|[;&|\n]\s*)ib\s+/.test(normalizedCommand)) {
+    const shellHit = findShellMetachar(command);
     if (shellHit) {
       return {
         decision: "deny",
@@ -1526,14 +1632,30 @@ export async function checkIbCommandAccess(
     }
   }
 
-  const parsed = parseIbCommand(normalizedCommand);
-  if (!parsed) return null;
-  if (!IB_MANAGER_ONLY_COMMANDS.has(parsed.subcommand)) return null;
-  return checkManagerCommandAccess(parsed.subcommand, parsed.targetId, callingAgentId, agentsDir);
+  const words = tokenizeBashPaths(maskHeredocBodies(normalizedCommand));
+  if (!words) return { decision: "deny", reason: "Access denied: cannot parse the ib command" };
+  if (basename(literalWord(words[0] ?? "") ?? "") !== "ib" || words.length === 1) return null;
+  const verb = literalWord(words[1]!);
+  const invalid = { decision: "deny", reason: "Access denied: ib requires a literal command and agent target" } as const;
+  if (!verb) return invalid;
+  if (!IB_MANAGER_ONLY_COMMANDS.has(verb)) return null;
+  // Authorize from the original literal operands. The normalized command
+  // identifies a wrapped verb, but a continuation in a trailing flag cannot
+  // change a verb or target that was already complete.
+  const rawWords = tokenizeIbOperands(command);
+  if (!rawWords || basename(literalWord(rawWords[0] ?? "") ?? "") !== "ib" ||
+      literalWord(rawWords[1] ?? "") !== verb) return invalid;
+  const args = rawWords.slice(2).map(literalWord);
+  if (args.every((arg) => arg !== undefined) && args.some((arg) => arg === "--help" || arg === "-h")) return null;
+  if (verb === "ack" && !args.length) return null;
+  const parsed = parseManagerOperand(rawWords);
+  if (!parsed) return invalid;
+  return checkManagerCommandAccess(parsed.subcommand, parsed.targetId, callingAgentId, agentsDir, { cwd });
 }
 
 /** Options for {@link checkManagerCommandAccess}. */
 export interface ManagerCommandAccessOptions {
+  cwd?: string;
   /**
    * The caller's meta.json, already read and verified by whoever calls this.
    * When given, the caller's own file is NOT read again: the watchdog broker
@@ -1560,7 +1682,7 @@ export interface ManagerCommandAccessOptions {
  *
  * Returns a deny decision, or null when the command is allowed. Unlike
  * `checkIbCommandAccess`, null here never means "not my concern": a command
- * that is not manager-only, or a target that is not a plain agent id, is
+ * that is not manager-only, or an unresolved target, is
  * DENIED. The watchdog lifecycle broker calls this directly, with structured
  * arguments, so nothing is lost or reinterpreted in a synthesized command line.
  */
@@ -1571,7 +1693,7 @@ export async function checkManagerCommandAccess(
   agentsDir: string,
   opts: ManagerCommandAccessOptions = {},
 ): Promise<HookDecision | null> {
-  if (!IB_MANAGER_ONLY_COMMANDS.has(subcommand) || !isValidAgentId(targetId)) {
+  if (!IB_MANAGER_ONLY_COMMANDS.has(subcommand) || ((opts.callerMeta || opts.ownArchiveOnly) && !isValidAgentId(targetId))) {
     return {
       decision: "deny",
       reason: `Access denied: 'ib ${subcommand}' on '${targetId}' is not a manager command on an agent id`,
@@ -1579,7 +1701,7 @@ export async function checkManagerCommandAccess(
   }
 
   const requestedSubcommand = subcommand;
-  const targetMetaPath = join(agentsDir, targetId, "meta.json");
+  let targetRepo: string;
   const callerRepoRoot = resolve(agentsDir, "..", "..");
 
   /** Is the CALLER a per-repo coordinator? From the verified meta when given. */
@@ -1607,7 +1729,7 @@ export async function checkManagerCommandAccess(
    */
   async function hasAccess(meta: Record<string, unknown>): Promise<boolean> {
     // Allow if caller is the manager
-    if (typeof meta.manager === "string" && meta.manager === callingAgentId) {
+    if (sameRepoPath(targetRepo, callerRepoRoot, callingAgentId) && meta.manager === callingAgentId) {
       return true;
     }
     // `ib ack` is the manager's alone.
@@ -1621,7 +1743,7 @@ export async function checkManagerCommandAccess(
       if (
         sb.agent_id === callingAgentId &&
         typeof sb.repo_path === "string" &&
-        resolve(sb.repo_path) === callerRepoRoot
+        sameRepoPath(sb.repo_path, callerRepoRoot, callingAgentId)
       ) {
         return true;
       }
@@ -1637,7 +1759,7 @@ export async function checkManagerCommandAccess(
     if (sb.agent_id !== SYSTEM_AGENT_ID) {
       const repoName = sb.agent_id.slice(1);
       if (typeof sb.repo_path !== "string") return false;
-      if (resolve(sb.repo_path) !== callerRepoRoot) return false;
+      if (!sameRepoPath(sb.repo_path, callerRepoRoot, callingAgentId)) return false;
       if (callingAgentId !== repoName) return false;
       return callerIsCoordinator();
     }
@@ -1652,139 +1774,42 @@ export async function checkManagerCommandAccess(
     return callerIsCoordinator();
   }
 
-  /** Decide a rehire from the newest recoverable archive in the caller's repo. */
-  async function ownArchiveDecision(): Promise<{ decided: boolean; decision: HookDecision | null }> {
-    const { findRetiredAgentArchives } = await import("../agent-lifecycle");
-    const archives = await findRetiredAgentArchives(callerRepoRoot, targetId);
-    const archived =
-      archives.find((entry) => entry.manifest !== null) ?? archives[0];
-    if (!archived) return { decided: false, decision: null };
-    const meta = archived.meta as unknown as Record<string, unknown>;
-    if (await hasCoordinatorBypass(meta)) return { decided: true, decision: null };
-    if (await hasAccess(meta)) return { decided: true, decision: null };
-    return {
-      decided: true,
-      decision: {
-        decision: "deny",
-        reason: `Access denied: only the manager or spawner of '${targetId}' can run 'ib rehire'`,
-      },
-    };
-  }
-
+  const denied = (reason: string): HookDecision => ({ decision: "deny", reason: `Access denied: ${reason}` });
+  let meta: Record<string, unknown> | undefined;
   if (opts.ownArchiveOnly) {
-    if (requestedSubcommand !== "rehire") {
-      return { decision: "deny", reason: `Access denied: 'ib ${subcommand}' has no archived target` };
-    }
-    try {
-      const own = await ownArchiveDecision();
-      if (own.decided) return own.decision;
-    } catch { /* deny below */ }
-    return {
-      decision: "deny",
-      reason: `Access denied: retired agent '${targetId}' not found in this repository`,
-    };
-  }
-
-  // Same-repo check: target exists in calling agent's repo
-  try {
-    const metaFile = Bun.file(targetMetaPath);
-    if (await metaFile.exists()) {
-      let meta: Record<string, unknown>;
-      try {
-        meta = await metaFile.json();
-      } catch {
-        // File exists but can't be parsed — deny rather than falling through
-        // to cross-repo check which could match a different agent with the same ID
-        return {
-          decision: "deny",
-          reason: `Access denied: cannot read meta for agent '${targetId}'`,
-        };
-      }
-
-      // Per-repo coordinator bypass: a per-repo coordinator may run 'retire' or
-      // 'reassign' on any non-coordinator agent within its own repo, even when
-      // it is not the target's manager or spawner. Only applies same-repo and
-      // never to other coordinators. (SPEC §12.2)
-      if (await hasCoordinatorBypass(meta)) return null;
-
-      if (await hasAccess(meta)) return null; // allow
-      return {
-        decision: "deny",
-        reason: subcommand === "ack"
-          ? `Access denied: only the manager of '${targetId}' can run 'ib ack'`
-          : `Access denied: only the manager or spawner of '${targetId}' can run 'ib ${subcommand}'`,
-      };
-    }
-  } catch { /* exists() failed — fall through to cross-repo check */ }
-
-  // Rehire targets live under timestamped archive folders, not agents/<id>.
-  // Resolve the newest recoverable same-repo archive and authorize against its
-  // immutable metadata using the same manager/spawner rules as active agents.
-  if (subcommand === "rehire") {
-    try {
-      const own = await ownArchiveDecision();
-      if (own.decided) return own.decision;
-    } catch { /* fall through to cross-repo archive search */ }
-
-    // A sandboxed worktree agent cannot list its repo's archive, so this rule
-    // cannot see whose agent the archive was and would deny every rehire. Do
-    // not decide here. A caller the archive is hidden from cannot rehire by
-    // itself: `ib rehire` either hands the request to the caller's watchdog,
-    // which applies this rule unsandboxed, where the archive is readable
-    // (lifecycle-broker.ts), or runs in this same sandbox, where rehireAgent
-    // cannot read the archive either.
-    if (await archiveHiddenBySandbox(callerRepoRoot)) return null;
-  }
-
-  // Cross-repo check: target not in this repo — search other repos
-  try {
+    if (subcommand !== "rehire") return denied(`'ib ${subcommand}' has no archived target`);
+    targetRepo = callerRepoRoot;
+  } else {
     const { listRepos } = await import("../registry");
-    const repos = await listRepos();
-    for (const repo of repos) {
-      // Skip our own repo (already checked above)
-      if (resolve(repo.path) === callerRepoRoot) continue;
-
-      const crossMetaPath = join(runtimeNames.runtimeDir(repo.path), "agents", targetId, "meta.json");
-      const crossMetaFile = Bun.file(crossMetaPath);
-      if (await crossMetaFile.exists()) {
-        let meta: Record<string, unknown>;
-        try {
-          meta = await crossMetaFile.json();
-        } catch {
-          return {
-            decision: "deny",
-            reason: `Access denied: cannot read meta for agent '${targetId}'`,
-          };
-        }
-        if (await hasAccess(meta)) return null; // allow
-        return {
-          decision: "deny",
-          reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib ${subcommand}'`,
-        };
-      }
-
-      if (subcommand === "rehire") {
-        const { findRetiredAgentArchives } = await import("../agent-lifecycle");
-        const archives = await findRetiredAgentArchives(repo.path, targetId);
-        const archived =
-          archives.find((entry) => entry.manifest !== null) ?? archives[0];
-        if (archived) {
-          if (await hasAccess(archived.meta as unknown as Record<string, unknown>)) {
-            return null;
-          }
-          return {
-            decision: "deny",
-            reason: `Access denied: only the spawner or manager of '${targetId}' can run 'ib rehire'`,
-          };
-        }
-      }
-    }
-  } catch { /* ignore — deny below */ }
-
-  return {
-    decision: "deny",
-    reason: `Access denied: agent '${targetId}' not found in any registered repo`,
-  };
+    const { resolveAgentTarget } = await import("../resolve-target");
+    // Broker requests already bind the canonical id to the requester's repo.
+    const repos = opts.callerMeta ? [{ path: callerRepoRoot, name: basename(callerRepoRoot) }] : await listRepos();
+    const { agent, error, incompleteVisibility } = await resolveAgentTarget(targetId, repos, opts.cwd ?? callerRepoRoot,
+      subcommand === "rehire" ? "rehire" : "agent");
+    // A sandbox-hidden archive can change resolution. Rehire's watchdog
+    // resolves the original address and checks ownership against the archive.
+    if (subcommand === "rehire" && incompleteVisibility?.unreadableDirs.some((dir) => {
+      const repoRoot = dirname(dirname(dir));
+      return dir === runtimeNames.archiveDir(repoRoot) && sameRepoPath(repoRoot, callerRepoRoot, callingAgentId);
+    }) && await archiveHiddenBySandbox(callerRepoRoot)) return null;
+    if (!agent) return denied(error ?? `Agent not found: ${targetId}`);
+    if (opts.callerMeta && agent.id !== targetId) return denied(`Agent not found: ${targetId}`);
+    targetRepo = agent.repoPath;
+    targetId = agent.id;
+    if (callingAgentId === SYSTEM_AGENT_ID && subcommand !== "ack") return null;
+    if (!agent.archived) meta = agent.meta as unknown as Record<string, unknown>;
+  }
+  if (!meta) {
+    const { findRetiredAgentArchives } = await import("../agent-lifecycle");
+    const archives = await findRetiredAgentArchives(targetRepo, targetId);
+    const archived = archives.find((entry) => entry.manifest !== null) ?? archives[0];
+    if (!archived) return denied(`retired agent '${targetId}' not found in this repository`);
+    meta = archived.meta as unknown as Record<string, unknown>;
+  }
+  if (sameRepoPath(targetRepo, callerRepoRoot, callingAgentId) && await hasCoordinatorBypass(meta)) return null;
+  if (await hasAccess(meta)) return null;
+  const owners = subcommand === "ack" ? "manager" : "manager or spawner";
+  return denied(`only the ${owners} of '${targetId}' can run 'ib ${subcommand}'`);
 }
 
 // ── CLI entry point ──────────────────────────────────────────────────────────
@@ -1900,8 +1925,9 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     worktreePath = home;
     rootRepo = home;
     // @system's worktree root is its whole ~/.itsybitsy home, so the resolver
-    // would grant writes to the agent-types dir and the harness config files;
-    // deny those writes structurally so @system cannot widen itself.
+    // would grant writes to the agent-types dir, the harness config files and
+    // the peer dir; deny those writes structurally so @system cannot widen
+    // itself or change which installs are trusted.
     protectedWritePaths = systemProtectedWritePaths(home);
     try {
       const policy = await buildSystemHookPolicy(userHome());
@@ -2051,7 +2077,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
   let decision: HookDecision;
   if (toolName === "Bash") {
     const command = String(toolInput.command ?? "");
-    decision = await checkIbCommandAccess(command, agentId, agentsDir)
+    decision = await checkIbCommandAccess(command, agentId, agentsDir, cwd)
       ?? checkPathAccess({ toolName, toolInput, cwd }, ctx);
   } else {
     decision = checkPathAccess({ toolName, toolInput, cwd }, ctx);

@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach, beforeEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, readdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, readdir, realpath, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
   logAgent,
@@ -25,6 +25,8 @@ import {
 } from "./agent-lifecycle";
 import { isPidAliveCtx, killPidCtx, sleepMsCtx } from "./agents";
 import { setWatchLogPath, resetWatchLogPath } from "./watch-log";
+import { setUserHome, resetUserHome } from "./home";
+import { machineNameFile } from "./runtime-names";
 import type { SpawnFn, SpawnResult } from "./types";
 
 /** Create a temp directory for test isolation */
@@ -32,8 +34,17 @@ async function makeTempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "lifecycle-test-"));
 }
 
+async function makeTempRepo(): Promise<string> {
+  const repo = await makeTempDir();
+  setUserHome(join(repo, "home"));
+  await Bun.write(machineNameFile(), "studio");
+  await Bun.write(join(repo, ".itsybitsy", "repo-id"), "deadbeef");
+  return repo;
+}
+
 describe("agent-lifecycle", () => {
   afterEach(() => {
+    resetUserHome();
     spawnCtx.reset();
     resetSandboxProxyKillForTesting();
   });
@@ -128,7 +139,7 @@ describe("agent-lifecycle", () => {
 
   describe("archiveAgent", () => {
     test("archives output.log, agent.log, meta.json", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const repoPath = dir;
       const agentId = "agent-test";
       const agentDir = join(dir, ".itsybitsy", "agents", agentId);
@@ -166,7 +177,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("archives settings.local.json (move) and debug-logs/ (copy)", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
       const archiveDir = join(dir, ".itsybitsy", "archive");
       await mkdir(agentDir, { recursive: true });
@@ -195,7 +206,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("returns null if nothing to archive", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-empty");
       await mkdir(agentDir, { recursive: true });
 
@@ -207,7 +218,7 @@ describe("agent-lifecycle", () => {
     });
 
     test("deletes outbox.jsonl and .outbox.lock (not archived)", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
       await mkdir(agentDir, { recursive: true });
       // The outbox queue now lives under the CENTRAL coordinator-home root.
@@ -217,17 +228,19 @@ describe("agent-lifecycle", () => {
       const { agentOutboxDir } = await import("./outbox");
       const coordHome = join(dir, "home", ".itsybitsy");
       setCoordinatorHome(coordHome);
-      const queueDir = agentOutboxDir("agent-test");
+      const queueDir = agentOutboxDir({ id: "agent-test", meta: null });
       await mkdir(queueDir, { recursive: true });
 
       try {
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
         // Pending queue + held lock at teardown time, in the central location.
         await Bun.write(join(queueDir, "outbox.jsonl"), '{"id":"x","message":"m","fromAgent":"","raw":false,"enqueuedAtMs":1}\n');
+        await Bun.write(join(queueDir, "outbox.jsonl.tmp"), "undelivered");
         await Bun.write(join(queueDir, ".outbox.lock"), String(process.pid));
 
         await archiveAgent(dir, "agent-test", agentDir);
 
+        expect(await readdir(join(queueDir, ".."))).toEqual([]);
         // Both are deleted from the central outbox dir and NOT archived
         // (runtime state only, no historical value).
         expect(await Bun.file(join(queueDir, "outbox.jsonl")).exists()).toBe(false);
@@ -244,18 +257,18 @@ describe("agent-lifecycle", () => {
     });
 
     test("removes the per-agent folder after a statusline rate-limit record was written", async () => {
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-test");
       await mkdir(agentDir, { recursive: true });
       const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
       const { agentOutboxDir } = await import("./outbox");
       const { recordClaudeRateLimits, CLAUDE_RATE_LIMITS_FILE } = await import("./claude-rate-limits");
       setCoordinatorHome(join(dir, "home", ".itsybitsy"));
-      const queueDir = agentOutboxDir("agent-test");
+      const queueDir = agentOutboxDir({ id: "agent-test", meta: null });
 
       try {
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-test"}');
-        await recordClaudeRateLimits("agent-test", { five_hour: { used_percentage: 9, resets_at: 1_900_000_000 } });
+        await recordClaudeRateLimits(queueDir, { five_hour: { used_percentage: 9, resets_at: 1_900_000_000 } });
         // A statusline run killed between its temp write and the rename.
         await Bun.write(join(queueDir, `${CLAUDE_RATE_LIMITS_FILE}.tmp.12345`), "{}");
 
@@ -263,7 +276,7 @@ describe("agent-lifecycle", () => {
 
         // Without the record removed first, the rmdir fails and the folder
         // stays for good (and every usage read scans it).
-        expect(await readdir(join(dir, "home", ".itsybitsy", "agents"))).toEqual([]);
+        expect(await readdir(join(queueDir, ".."))).toEqual([]);
       } finally {
         resetCoordinatorHome();
         await rm(dir, { recursive: true, force: true });
@@ -279,6 +292,8 @@ describe("agent-lifecycle", () => {
         setUserHome(join(dir, "home"));
         const repo = join(dir, "repo");
         await mkdir(repo);
+        await Bun.write(machineNameFile(), "studio");
+        await Bun.write(join(repo, ".itsybitsy", "repo-id"), "deadbeef");
         const git = async (...args: string[]) => {
           const proc = Bun.spawn(["git", ...args], { cwd: repo, stdout: "pipe", stderr: "pipe" });
           const text = await new Response(proc.stdout).text();
@@ -374,7 +389,7 @@ describe("agent-lifecycle", () => {
       const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
       setCoordinatorHome(home);
       try {
-        const dir = await makeTempDir();
+        const dir = await makeTempRepo();
         const agentDir = join(dir, ".itsybitsy", "agents", "agent-arch");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-arch"}');
@@ -412,7 +427,7 @@ describe("agent-lifecycle", () => {
       const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
       setCoordinatorHome(home);
       try {
-        const dir = await makeTempDir();
+        const dir = await makeTempRepo();
         const agentDir = join(dir, ".itsybitsy", "agents", "agent-solo");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-solo"}');
@@ -438,7 +453,7 @@ describe("agent-lifecycle", () => {
       const home = await mkdtemp(join(tmpdir(), "lc-teams-"));
       setCoordinatorHome(home);
       try {
-        const dir = await makeTempDir();
+        const dir = await makeTempRepo();
         const agentDir = join(dir, ".itsybitsy", "agents", "agent-empty");
         await mkdir(agentDir, { recursive: true }); // no output/agent/meta files
 
@@ -475,7 +490,7 @@ describe("agent-lifecycle", () => {
         } as SpawnResult;
       });
       try {
-        const dir = await makeTempDir();
+        const dir = await makeTempRepo();
         const agentDir = join(dir, ".itsybitsy", "agents", "agent-td");
         await mkdir(agentDir, { recursive: true });
         await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-td"}');
@@ -500,7 +515,7 @@ describe("agent-lifecycle", () => {
     test("teardownAgent terminates the detached sandbox proxy", async () => {
       const { setCoordinatorHome, resetCoordinatorHome } = await import("./coordinator");
       const home = await mkdtemp(join(tmpdir(), "lc-proxy-home-"));
-      const dir = await makeTempDir();
+      const dir = await makeTempRepo();
       const agentDir = join(dir, ".itsybitsy", "agents", "agent-proxy");
       await mkdir(agentDir, { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), '{"id":"agent-proxy"}');
@@ -611,71 +626,74 @@ describe("agent-lifecycle", () => {
   // ── resolveGitRoot ─────────────────────────────────────────────────────
 
   describe("resolveGitRoot", () => {
-    test("resolves a valid git repo root", async () => {
-      // Use the current repo as test target
-      const calls: string[][] = [];
-      spawnCtx.set((cmd: string[]) => {
-        calls.push(cmd);
-        const cmdStr = cmd.join(" ");
-        let stdout = "";
-        if (cmdStr.includes("--git-common-dir")) {
-          stdout = ".git";
-        } else if (cmdStr.includes("--show-toplevel")) {
-          stdout = "/repos/myproject";
-        } else if (cmdStr.includes("--git-dir")) {
-          stdout = ".git";
-        }
-        return {
-          stdout: new Response(stdout).body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
-      });
-
-      const result = await resolveGitRoot("/repos/myproject");
-      expect(result).toBe("/repos/myproject");
+    test("a pipe read error kills git and cancels its other open pipe", async () => {
+      const signals: (number | string | undefined)[] = [];
+      let cancelled = false;
+      spawnCtx.set(() => ({
+        stdout: new ReadableStream({ start(controller) { controller.error(new Error("pipe read failed")); } }),
+        stderr: new ReadableStream({ cancel() { cancelled = true; } }),
+        exited: new Promise<number>(() => {}),
+        kill: (signal) => { signals.push(signal); },
+      }));
+      expect(await resolveGitRoot("/project")).toBeNull();
+      expect(signals).toEqual(["SIGKILL"]);
+      expect(cancelled).toBe(true);
     });
 
-    test("resolves worktree with relative commonDir to absolute root", async () => {
-      spawnCtx.set((cmd: string[]) => {
-        const cmdStr = cmd.join(" ");
-        let stdout = "";
-        if (cmdStr.includes("--git-common-dir")) {
-          // Worktree: commonDir is relative path back to main repo's .git
-          stdout = "../../.git";
-        } else if (cmdStr.includes("--git-dir")) {
-          stdout = "/repos/myproject/.git/worktrees/my-worktree";
-        }
-        return {
-          stdout: new Response(stdout).body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
-      });
+    test("Git root lookup uses one process for unambiguous results and separate queries when needed", async () => {
+      const dir = await realpath(await makeTempDir());
+      try {
+        const gitConfig = join(dir, "gitconfig");
+        await Bun.write(gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n[core]\n\thooksPath = /dev/null\n");
+        // Use only fixture-owned configuration. Inherited GIT_DIR, GIT_WORK_TREE
+        // or GIT_INDEX_FILE could otherwise redirect a write out of this fixture.
+        const env = { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: "1" };
+        const git = (cwd: string, ...args: string[]) => Bun.$`git ${args}`.cwd(cwd).env(env).quiet();
+        const root = join(dir, "project");
+        const subdir = join(root, "src");
+        const worktree = join(dir, "linked");
+        const alias = join(dir, "alias");
+        await mkdir(subdir, { recursive: true });
+        await git(root, "init");
+        await git(root, "commit", "--allow-empty", "-m", "Initial");
+        await git(root, "worktree", "add", "--detach", worktree);
+        await symlink(worktree, alias);
 
-      // repoPath is the worktree; "../../.git" resolves relative to it
-      const result = await resolveGitRoot("/repos/myproject/worktrees/my-worktree");
-      expect(result).toBe("/repos/myproject");
+        const calls: string[][] = [];
+        spawnCtx.set((cmd, opts) => {
+          calls.push(cmd);
+          return Bun.spawn(cmd, { ...opts, env }) as SpawnResult;
+        });
+        for (const path of [root, subdir, worktree, alias]) {
+          calls.length = 0;
+          expect(await resolveGitRoot(path)).toBe(root);
+          expect(calls).toEqual([["git", "-C", path, "rev-parse", "--git-common-dir", "--git-dir", "--show-toplevel"]]);
+        }
+
+        const newlineRoot = join(dir, "line\nbreak");
+        await mkdir(newlineRoot);
+        await git(newlineRoot, "init");
+        calls.length = 0;
+        expect(await resolveGitRoot(newlineRoot)).toBe(newlineRoot);
+        expect(calls.slice(1).map((cmd) => cmd.slice(4))).toEqual([["--git-common-dir"], ["--git-dir"], ["--show-toplevel"]]);
+
+        const admin = (await git(worktree, "rev-parse", "--absolute-git-dir").text()).trim();
+        calls.length = 0;
+        expect(await resolveGitRoot(admin)).toBe(root);
+        expect(calls.slice(1).map((cmd) => cmd.slice(4))).toEqual([["--git-common-dir"], ["--git-dir"]]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
 
-    test("resolves worktree with absolute commonDir", async () => {
-      spawnCtx.set((cmd: string[]) => {
-        const cmdStr = cmd.join(" ");
-        let stdout = "";
-        if (cmdStr.includes("--git-common-dir")) {
-          stdout = "/repos/myproject/.git";
-        } else if (cmdStr.includes("--git-dir")) {
-          stdout = "/repos/myproject/.git/worktrees/my-worktree";
-        }
-        return {
-          stdout: new Response(stdout).body!,
-          stderr: new Response("").body!,
-          exited: Promise.resolve(0),
-        } as SpawnResult;
-      });
-
-      const result = await resolveGitRoot("/some/worktree/path");
-      expect(result).toBe("/repos/myproject");
+    test.each(["../../.git", "/repos/myproject/.git"])("resolves worktree common dir %s", async (commonDir) => {
+      const worktree = "/repos/myproject/worktrees/my-worktree";
+      spawnCtx.set(() => ({
+        stdout: new Response([commonDir, "/repos/myproject/.git/worktrees/my-worktree", worktree].join("\n")).body,
+        stderr: null,
+        exited: Promise.resolve(0),
+      }));
+      expect(await resolveGitRoot(worktree)).toBe("/repos/myproject");
     });
 
     test("returns null for non-git directory", async () => {

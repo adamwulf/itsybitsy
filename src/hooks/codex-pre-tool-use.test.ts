@@ -387,6 +387,16 @@ describe("hookCodexPreToolUse — codex JSON contract (gate (d))", () => {
     expect(parsed.hookSpecificOutput.permissionDecisionReason).toBe("tool denied by agent-type deny list");
   });
 
+  test("Bash 'ib peer id' is denied — ib peer is user-only (checkIbCommandAccess parity)", async () => {
+    const parsed = await runPayload({
+      tool_name: "Bash",
+      tool_input: { command: "ib peer id" },
+      cwd: join(agentDir, "repo"),
+    });
+    expect(parsed.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(parsed.hookSpecificOutput.permissionDecisionReason).toContain("'ib peer' is a user-only command");
+  });
+
   test("non-string cwd is denied instead of falling back to process.cwd", async () => {
     const parsed = await runPayload({
       tool_name: "Read",

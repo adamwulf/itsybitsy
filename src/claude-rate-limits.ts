@@ -4,9 +4,9 @@
  * Claude Code sends `rate_limits` to its statusLine command (Pro/Max accounts,
  * after the session's first API response). Every Claude session ib launches
  * runs `ib hooks statusline <id>` (src/hooks/statusline.ts), which records the
- * two windows here in `~/.itsybitsy/agents/<id>/claude-rate-limits.json`. The
- * `ib watch` status bar and the watchdog's rate-limit recovery combine the
- * records of all agents (see `combineWindows`).
+ * two windows in `claude-rate-limits.json` in the agent's queue directory
+ * (SPEC §4.1.1). The `ib watch` status bar and the watchdog's rate-limit
+ * recovery combine the records of all agents (see `combineWindows`).
  *
  * ib used to call the Anthropic usage API with the OAuth token from the macOS
  * keychain (`security find-generic-password`). On recent macOS a keychain read
@@ -15,9 +15,9 @@
  */
 
 import { join } from "path";
-import { mkdir, readdir, rename, unlink } from "fs/promises";
+import { mkdir, readdir, rename } from "fs/promises";
+import { unlinkQueueFile } from "./outbox";
 import { getCoordinatorHome } from "./coordinator";
-import { agentOutboxDir } from "./outbox";
 import { formatResetTime } from "./usage";
 import type { UsageData, UsageResult } from "./usage";
 
@@ -100,11 +100,10 @@ async function readRecord(path: string): Promise<ClaudeRateLimitsRecord | null> 
  * its 5-hour window exactly when it becomes usable again).
  */
 export async function recordClaudeRateLimits(
-  agentId: string,
+  dir: string,
   windows: ClaudeRateLimits,
   now: number = Date.now(),
 ): Promise<void> {
-  const dir = agentOutboxDir(agentId);
   const path = join(dir, CLAUDE_RATE_LIMITS_FILE);
   const previous = await readRecord(path);
   const merged: ClaudeRateLimits = {
@@ -135,21 +134,23 @@ function sameWindow(a: RateLimitWindow | undefined, b: RateLimitWindow | undefin
  * Delete an agent's record (and any temp file a killed statusline run left)
  * from its folder at teardown, so `deleteAgentOutbox` can remove the folder.
  */
-export async function deleteClaudeRateLimits(dir: string): Promise<void> {
+export async function deleteClaudeRateLimits(dir: string): Promise<string[]> {
+  const warnings: string[] = [];
   let entries: string[];
   try {
     entries = await readdir(dir);
-  } catch {
-    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      warnings.push(`Warning: could not list usage files in ${dir}: ${(err as Error).message}`);
+    }
+    return warnings;
   }
   for (const entry of entries) {
-    if (!entry.startsWith(CLAUDE_RATE_LIMITS_FILE)) continue;
-    try {
-      await unlink(join(dir, entry));
-    } catch {
-      // Best effort, like the rest of teardown.
+    if (entry === CLAUDE_RATE_LIMITS_FILE || entry.startsWith(`${CLAUDE_RATE_LIMITS_FILE}.tmp.`)) {
+      await unlinkQueueFile(join(dir, entry), warnings);
     }
   }
+  return warnings;
 }
 
 /**
@@ -220,6 +221,16 @@ export function claudeUsageFromRecord(record: ClaudeRateLimitsRecord, now: Date 
   };
 }
 
+async function subdirectories(dir: string): Promise<string[]> {
+  try {
+    return (await readdir(dir, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(dir, entry.name));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Claude plan usage from the records of every agent's statusline. All agents
  * share one account, so each window is combined across records
@@ -227,15 +238,13 @@ export function claudeUsageFromRecord(record: ClaudeRateLimitsRecord, now: Date 
  * session has recorded rate limits yet — nothing failed, there is no reading.
  */
 export async function readClaudeUsage(now: Date = new Date()): Promise<UsageResult> {
-  const agentsDir = join(getCoordinatorHome(), "agents");
-  let entries: string[];
-  try {
-    entries = await readdir(agentsDir);
-  } catch {
-    return { data: null, error: false };
-  }
+  const home = getCoordinatorHome();
+  // The first level can hold a flat legacy record and qualified repo folders.
+  const topLevelDirs = await subdirectories(join(home, "agents"));
+  const repoDirs = (await Promise.all(topLevelDirs.map(subdirectories))).flat();
+  const qualifiedAgentDirs = (await Promise.all(repoDirs.map(subdirectories))).flat();
   const records = (await Promise.all(
-    entries.map((entry) => readRecord(join(agentsDir, entry, CLAUDE_RATE_LIMITS_FILE))),
+    [home, ...topLevelDirs, ...qualifiedAgentDirs].map((dir) => readRecord(join(dir, CLAUDE_RATE_LIMITS_FILE))),
   )).filter((record): record is ClaudeRateLimitsRecord => record !== null);
   if (records.length === 0) return { data: null, error: false };
   const fiveHour = combineWindows(records, "five_hour");

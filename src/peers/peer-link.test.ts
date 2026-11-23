@@ -592,6 +592,29 @@ describe("coordinator-pane", () => {
     expect(side.logs.join(" ")).not.toContain("read the system coordinator pane");
   });
 
+  test("dialer filters an untrusted raw reply before rendering", async () => {
+    const { a, b } = createMemoryLink(ID_A, ID_B);
+    const read = requestCoordinatorPane(a);
+    const stream = await b.acceptBi();
+    await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
+    const link = "\x1b]8;;https://example.org\x07site\x1b]8;;\x07";
+    const unsafe = "\x1b]0;window title\x07\x1b[12;9Hhello\x1b]8;;file:///private\x07 label\x1b]8;;\x07 " + link;
+    await stream.writeAll(encode({ op: "coordinator-pane", state: "running", text: unsafe }));
+    await stream.finish();
+    expect(await read).toEqual({ state: "running", text: "hello label " + link });
+    a.close(0, "done");
+  });
+
+  test("drops the entire four-byte code point when only two of its bytes fit", async () => {
+    const envelope = { op: "coordinator-pane", state: "running", text: "" };
+    const suffix = "a".repeat(PEER_MAX_REPLY_BYTES - encode(envelope).length - 2);
+    const side = serve({ captureCoordinator: async () => ({ state: "running", text: "🔥" + suffix }) });
+    const bytes = await rawRequest(side.a, encode({ op: envelope.op }));
+    const reply = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes as Uint8Array));
+    expect(reply.text).toBe(suffix);
+    side.a.close(0, "done");
+  });
+
   for (const separator of ["\n", ""]) {
     test(`caps JSON bytes and keeps the newest text with separator ${JSON.stringify(separator)}`, async () => {
       const text = "oldest" + ('🔥"\\' + separator).repeat(150_000) + "newest\n\n";

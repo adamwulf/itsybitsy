@@ -206,7 +206,7 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
   - The dashboard input on remote agent rows, and notices.
   - The `ib send <machine>/…` CLI path.
 - **M3. Attachments.**
-  - **M3a built.** Local `ib send --attach`, live limits in Config, canonical sender read checks and the protected-identity watchdog check.
+  - **M3a built.** Local `ib send --attach`, live limits in Config, canonical sender read checks and the sandboxed single-link check on opened files.
   - **M3b pending.** Remote `ib send --attach` and the remaining transfer work below.
   - Dashboard staging for remote targets.
   - Streaming transfer and receiving.

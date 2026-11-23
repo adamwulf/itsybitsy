@@ -25,7 +25,7 @@ function fileIdentity(info: BigIntStats): string {
 
 /** Follow directory links once per identity. Only ENOENT from the initial
  * lstat of a root means an empty tree; failures below it invalidate the scan. */
-export async function protectedAttachmentIdentities(home: string): Promise<Set<string>> {
+async function protectedAttachmentIdentities(home: string): Promise<Set<string>> {
   const identities = new Set<string>();
   async function visit(path: string, info: BigIntStats) {
     const id = fileIdentity(info);
@@ -76,20 +76,18 @@ interface ManifestOptions {
   limits?: TransferLimits;
   machine: string;
   checkRead?: (source: string) => void;
-  /** Inside the kernel sandbox the watchdog alone enumerates the protected roots. */
-  checkWithWatchdog?: (identities: string[]) => Promise<void>;
+  sandboxed?: boolean;
 }
 
 export async function buildAttachmentManifest(
-  paths: readonly string[], { cwd, home, limits = DEFAULT_TRANSFER_LIMITS, machine, checkRead, checkWithWatchdog }: ManifestOptions,
+  paths: readonly string[], { cwd, home, limits = DEFAULT_TRANSFER_LIMITS, machine, checkRead, sandboxed }: ManifestOptions,
 ): Promise<ManifestEntry[]> {
   if (!paths.length) return [];
   const enabled = checkAttachmentsEnabled(limits, machine);
   if (!enabled.ok) throw new Error(enabled.error);
   const protectedDirs = protectedRoots(home).map(root =>
-    checkWithWatchdog ? metadataRealpath(root) ?? root : canonicalizeSandboxPath(root));
-  const protectedFiles = checkWithWatchdog ? undefined : await protectedAttachmentIdentities(home);
-  const identities: string[] = [];
+    sandboxed ? metadataRealpath(root) ?? root : canonicalizeSandboxPath(root));
+  const protectedFiles = sandboxed ? undefined : await protectedAttachmentIdentities(home);
   const entries = new Map<string, ManifestEntry>();
   try {
     for (const argument of paths) {
@@ -100,13 +98,13 @@ export async function buildAttachmentManifest(
         if (absolute.endsWith("/") || absolute.endsWith("/.")) throw new Error("directory spelling is not a regular file");
         // Metadata follows symlinks and ".." without opening an unreadable
         // ancestor. Only ask for on-disk case after the read check passes.
-        const candidate = checkWithWatchdog ? metadataRealpath(absolute) : await realpathArgument(absolute);
+        const candidate = sandboxed ? metadataRealpath(absolute) : await realpathArgument(absolute);
         if (!candidate) throw new Error("cannot resolve attachment path");
         if (protectedDirs.some(dir => candidate === dir || candidate.startsWith(dir + sep))) {
           throw new Error("protected attachment path");
         }
         checkRead?.(candidate);
-        const source = checkWithWatchdog ? await realpath(candidate) : candidate;
+        const source = sandboxed ? await realpath(candidate) : candidate;
         if (source !== candidate) checkRead?.(source);
         if (source !== candidate && protectedDirs.some(dir => source === dir || source.startsWith(dir + sep))) {
           throw new Error("protected attachment path");
@@ -122,12 +120,14 @@ export async function buildAttachmentManifest(
             const opened = await handle.stat({ bigint: true });
             if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
                 await realpath(source) !== source) throw new Error("file changed while opening");
+            if (sandboxed && opened.nlink !== 1n) {
+              throw new Error(`${source} has multiple hard links; copy it to a new file first`);
+            }
             if (protectedFiles?.has(fileIdentity(opened))) throw new Error("protected attachment identity");
             entry = { argument, source, handle, size: Number(opened.size), name: sanitizeAttachmentName(basename(absolute)), spellings: [] };
             const result = checkManifestLimits([...entries.values(), entry], limits, { machine });
             if (!result.ok) throw new Error(result.error);
             entries.set(source, entry);
-            identities.push(fileIdentity(opened));
           } catch (error) {
             await handle.close();
             throw error;
@@ -140,7 +140,6 @@ export async function buildAttachmentManifest(
         throw new Error(`Cannot attach ${JSON.stringify(argument)}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     }
-    await checkWithWatchdog?.(identities);
     return Array.from(entries.values());
   } catch (error) {
     await Promise.allSettled(Array.from(entries.values(), entry => entry.handle.close()));

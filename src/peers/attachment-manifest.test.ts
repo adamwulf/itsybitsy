@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { link, mkdtemp, mkdir, open, rename, symlink, rm, realpath, writeFile } from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -196,5 +197,22 @@ test("a trailing slash or dot requires a directory even if the underlying name i
   await writeFile(join(cwd, "report"), "ok");
   for (const argument of ["report/", "report/.", "~/work/report/./"]) {
     await expect(manifest([argument], { cwd, home, machine: "desk" })).rejects.toThrow(argument);
+  }
+});
+
+test("the sandbox single-link check uses the opened handle's current link count", async () => {
+  const path = join(cwd, "source");
+  await writeFile(path, "fixture");
+  const originalOpen = filesystem.open;
+  const opened = spyOn(filesystem, "open").mockImplementationOnce(async (...args) => {
+    const handle = await originalOpen(...args);
+    await link(path, join(cwd, "another-name"));
+    return handle;
+  });
+  try {
+    await expect(manifest([path], { cwd, home, machine: "desk", sandboxed: true })).rejects.toThrow("multiple hard links");
+    expect(opened).toHaveBeenCalledTimes(1);
+  } finally {
+    opened.mockRestore();
   }
 });

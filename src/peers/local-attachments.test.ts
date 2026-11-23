@@ -3,7 +3,7 @@ import { chmod, link, mkdir, readdir, realpath, rm, stat, truncate } from "node:
 import { basename, dirname, join } from "node:path";
 import { writeAgentTransient } from "../agents";
 import { resetUserHome, setUserHome } from "../home";
-import { withFixtureWatchdog, createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
+import { createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
 import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
 import { copyLocalAttachments } from "./local-attachments";
 
@@ -119,8 +119,8 @@ test("an unsandboxed agent's own deny rule covers a relative --attach even with 
   expect(await queue().exists()).toBe(false);
 });
 
-test.each(["ordinary", "protected link", "stopped watchdog"] as const)(
-  "sandboxed CLI with %s requires an explicit watchdog identity approval", async scenario => {
+test.each(["ordinary", "protected link"] as const)(
+  "sandboxed CLI with %s checks the opened source locally", async scenario => {
     setUserHome(fixture.home);
     const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
     const file = join(sender.sessionCwd, "report");
@@ -130,14 +130,12 @@ test.each(["ordinary", "protected link", "stopped watchdog"] as const)(
       await link(secret, file);
     } else await Bun.write(file, "ordinary data");
     const run = () => fixture.run(["send", "reader", "--attach", "./report", "inspect"], {
-      sandboxed: true, cwd: sender.sessionCwd, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+      sandboxed: true, cwd: sender.sessionCwd, actions: { sendMessage: "real" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
     });
-    const result = scenario === "stopped watchdog" ? await run() : await withFixtureWatchdog(sender, {
-      verifySeal: async () => ({ ok: true }),
-    }, run);
+    const result = await run();
     if (scenario !== "ordinary") {
       expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain(scenario === "protected link" ? "protected attachment identity" : "running sender watchdog");
+      expect(result.stderr).toContain("has multiple hard links; copy it to a new file first");
       expect(await queue().exists()).toBe(false);
       return;
     }
@@ -156,7 +154,7 @@ test.skipIf(process.getuid?.() === 0)("sandbox-routed CLI reports a kernel read 
   await Bun.write(file, "test fixture");
   await chmod(file, 0);
   const result = await fixture.run(["send", "reader", "--attach", "./unreadable", "read"], {
-    sandboxed: true, cwd: sender.sessionCwd, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+    sandboxed: true, cwd: sender.sessionCwd, actions: { sendMessage: "real" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
   });
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toMatch(/EACCES|permission denied/i);

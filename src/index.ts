@@ -1945,6 +1945,18 @@ export async function main() {
       // target, raw tokens — including ones that start with `-` — are joined
       // as the message body, so users can send messages like "-n hello".
       const sendArgs = args.slice(1);
+      // Check the raw tokens before --from or -f can consume an incomplete
+      // --attach as its own operand, even when help was requested.
+      const sendOptions = ["--attach", "--from", "-f", "--file", "-h", "--help"];
+      if (sendArgs.some((token, i) => token === "--attach" && (!sendArgs[i + 1] || sendOptions.includes(sendArgs[i + 1]!)))) {
+        console.error("Error: --attach requires a path");
+        process.exit(1);
+      }
+      if (wantsHelp) {
+        printCommandHelp("send");
+        return;
+      }
+
       let fromAgent: string | undefined;
       let filePath: string | undefined;
       const attachments: string[] = [];
@@ -1956,26 +1968,19 @@ export async function main() {
         // Existing scripts pass `ib send <id> -f <path>` and that must keep
         // working.
         if (tok === "--from") {
-          if (!sendArgs[i + 1] && !wantsHelp) { console.error("Error: --from requires a value"); process.exit(1); }
+          if (!sendArgs[i + 1]) { console.error("Error: --from requires a value"); process.exit(1); }
           fromAgent = sendArgs[++i];
           continue;
         }
         if (tok === "--attach") {
-          const path = sendArgs[i + 1];
-          if (!path || ["-f", "--file", "--from", "--attach", "--help", "-h"].includes(path)) {
-            console.error("Error: --attach requires a path");
-            process.exit(1);
-          }
-          attachments.push(path);
-          i++;
+          attachments.push(sendArgs[++i]!);
           continue;
         }
         if (tok === "-f" || tok === "--file") {
-          if (!sendArgs[i + 1] && !wantsHelp) { console.error(`Error: ${tok} requires a path`); process.exit(1); }
+          if (!sendArgs[i + 1]) { console.error(`Error: ${tok} requires a path`); process.exit(1); }
           filePath = sendArgs[++i];
           continue;
         }
-        if (wantsHelp) continue;
         if (!seenTarget) {
           // Before the target: anything starting with `-` is an unknown flag.
           if (tok.startsWith("-")) {
@@ -1989,11 +1994,6 @@ export async function main() {
           // After the target: tokens are message body, no flag parsing.
           filteredSendArgs.push(tok);
         }
-      }
-
-      if (wantsHelp) {
-        printCommandHelp("send");
-        return;
       }
 
       const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [--attach <file>]... [message...]\n  -f, --file <path>  Read message body from a file\n  --attach <file>    Copy a file for local recipients (repeatable)";

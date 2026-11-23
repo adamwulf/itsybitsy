@@ -314,6 +314,15 @@ test.each(["--help", "-h"])("%s before an incomplete --attach still reports the 
   expect(valid.stdout).toContain("--attach <file>");
 });
 
+test.each(["--from", "-f", "--file"])("%s cannot consume an incomplete --attach before either help flag", async option => {
+  for (const help of ["-h", "--help"]) {
+    const result = await fixture.run(["send", "reader", option, "--attach", help]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--attach requires a path");
+    expect(result.actions).toEqual([]);
+  }
+});
+
 test.each(["--help", "-h"])("send %s lists attachment usage", async flag => {
   const run = await fixture.run(["send", flag]);
   expect(run.exitCode).toBe(0);

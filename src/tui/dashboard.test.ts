@@ -10957,6 +10957,39 @@ describe("Unified peer repos in the Agents tree", () => {
     result.resolve("accepted");
   });
 
+  test("a local selection renders receipt admission, one coalesced progress burst, and removal", async () => {
+    const { PeerService, defaultPeerServiceDeps } = await import("../peers/service");
+    const { textHeader } = await import("../peers/peer-outbox");
+    const release = Promise.withResolvers<void>();
+    const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null),
+      receiveMessage: async (_header, _peer, _name, _body, options) => {
+        options.admitted?.(true);
+        for (let byte = 1; byte <= 100; byte++) options.onProgress?.(byte);
+        await release.promise;
+      },
+    });
+    const { dashboard } = setup();
+    dashboard.setPeerService(service);
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+    expect(dashboard.remoteSelection).toBeNull();
+    const notifications = mock(() => {});
+    service.onChange(notifications);
+    const header = textHeader({ kind: "system" }, "read", { kind: "user" });
+    header.files = [{ name: "f", size: 100, sha256: "0".repeat(64), spellings: ["f"] }];
+    const before = counter.renders();
+    const transfer = service.receiveTracked(header, PEER_B, async () => "peer");
+    try {
+      expect(notifications).toHaveBeenCalledTimes(1);
+      expect(counter.renders()).toBe(before + 1);
+      await waitFor(() => notifications.mock.calls.length === 2);
+      expect(counter.renders()).toBe(before + 2);
+      expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("100 / 100 bytes");
+    } finally { release.resolve(); await transfer; }
+    expect(notifications).toHaveBeenCalledTimes(3);
+    expect(counter.renders()).toBe(before + 3);
+  });
+
   test("selecting an inbound progress row and pressing Esc aborts that receipt", () => {
     const { dashboard, service } = setup();
     service.set({ incoming: [{ id: "first", label: "Laptop → worker", bytes: 3, total: 12 }] });

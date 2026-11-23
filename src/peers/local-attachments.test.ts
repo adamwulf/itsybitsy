@@ -25,8 +25,9 @@ afterEach(async () => {
   await fixture.cleanup();
 });
 
+const human = { pid: 300, parents: [[300, 1]] as [number, number][], terminal: "human" as const, identityCurrent: true };
 const queue = () => Bun.file(join(fixture.home, ".itsybitsy/agents/reader/outbox.jsonl"));
-const send = (...args: string[]) => fixture.run(["send", "reader", ...args], { actions: { sendMessage: "real" } });
+const send = (...args: string[]) => fixture.run(["send", "reader", ...args], { ancestry: human, actions: { sendMessage: "real" } });
 
 test.each([1, 2])("queues %i verified private snapshots, rewriting all spellings", async count => {
   const first = join(fixture.cwd, "one");
@@ -165,7 +166,7 @@ test.each(["@system", "@project"])("sends an attachment to %s through the coordi
   await fixture.addAgent(recipient.repoPath, "project", { agentType: "repo-coordinator", worktree: false });
   await Bun.write(join(fixture.cwd, "figure"), "fixture");
   const result = await fixture.run(["send", target, "--attach", "figure"], {
-    stdin: "Read figure", ancestry: { pid: 300, parents: [[300, 1]], identityCurrent: false }, actions: { sendToSystemCoordinator: "record", sendMessage: "record" },
+    stdin: "Read figure", ancestry: human, actions: { sendToSystemCoordinator: "record", sendMessage: "record" },
   });
   expect(result.exitCode, result.stderr).toBe(0);
   const action = result.actions[0]!;
@@ -185,7 +186,7 @@ test("team members receive the same verified snapshot", async () => {
     teams: { review: { created_epoch: 1, created_by: "", members: ["reader", "editor"] } },
   }));
   await Bun.write(join(fixture.cwd, "figure"), "fixture");
-  const result = await fixture.run(["send", "@review", "--attach", "figure", "Read figure"], { actions: { teamSend: "real" } });
+  const result = await fixture.run(["send", "@review", "--attach", "figure", "Read figure"], { ancestry: human, actions: { teamSend: "real" } });
   expect(result.exitCode, result.stderr).toBe(0);
   const reader = JSON.parse(await queue().text());
   const destination = reader.message.split(" → ")[1];
@@ -202,5 +203,32 @@ test("an unreadable transfer policy refuses the send", async () => {
   const result = await send("--attach", "file", "read");
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toContain("Cannot read attachment limits");
+  expect(await queue().exists()).toBe(false);
+});
+
+test.each(["@system", "repo coordinator"])("%s attachments follow that sender's own paths.deny", async kind => {
+  const state = join(fixture.home, ".itsybitsy");
+  const file = join(state, "private-fixture");
+  await Bun.write(file, "example");
+  const system = kind === "@system";
+  if (system) {
+    await Bun.write(join(state, "agent-types/system-coordinator.md"), `---\nname: system-coordinator\npaths:\n  deny:\n    - "${file}"\n---\n`);
+  } else {
+    await fixture.addAgent(recipient.repoPath, "project", { agentType: "repo-coordinator", worktree: false,
+      claude_pid: "200", claude_pid_epoch: 100, sandbox: { enabled: false }, paths: { deny: [file] } });
+  }
+  const result = await fixture.run(["send", "reader", "--attach", file, "read"], {
+    cwd: system ? state : recipient.repoPath,
+    ancestry: { ...human, terminal: "agent", parents: [[300, 200], [200, 1]], systemPanePid: 200 },
+    allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+  });
+  expect(result.stderr).toContain("paths.deny");
+  expect(result.stderr).toContain(await realpath(file));
+  expect(await queue().exists()).toBe(false);
+});
+
+test("attachments refuse an unidentified caller", async () => {
+  const result = await fixture.run(["send", "reader", "--attach", "file", "read"]);
+  expect(result.stderr).toContain("cannot verify the sender");
   expect(await queue().exists()).toBe(false);
 });

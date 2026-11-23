@@ -6,10 +6,10 @@ import { checkManifestLimits } from "./transfer-limits";
 import { readTransferLimits } from "../config";
 import { userHome } from "../home";
 import { resolveCallerAgentContext } from "../ib-commands";
-import { matchWorktreeCaller } from "../runtime-names";
+import { remoteCliCaller } from "./peer-outbox";
 import { isSandboxedProcess } from "../sandbox-detect";
-import { buildAgentAccessTable, pathDenialReason } from "../hooks/paths-table";
-import { resolvePreparedAccess } from "../sandbox";
+import { buildAgentAccessTable, buildSystemHookPolicy, pathDenialReason } from "../hooks/paths-table";
+import { resolvePreparedAccess, type PreparedAccessTable } from "../sandbox";
 import { readMachineName } from "../machine-name";
 import { buildAttachmentManifest, fileChunks, hashFile, type ManifestEntry } from "./attachment-manifest";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
@@ -49,18 +49,23 @@ export async function copyLocalAttachments(
 }
 
 async function senderAttachmentAccess(cwd: string) {
-  const caller = await resolveCallerAgentContext(cwd);
-  if (!caller) {
-    if (matchWorktreeCaller(cwd)) throw new Error("Cannot verify attachment sender metadata");
-    return {};
+  if (await remoteCliCaller.isHuman()) return {};
+  const unknown = "cannot verify the sender of an attachment";
+  const systemDir = join(userHome(), ".itsybitsy");
+  let access: PreparedAccessTable;
+  if (cwd === systemDir || cwd.startsWith(systemDir + "/")) {
+    if (!await remoteCliCaller.isSystem()) throw new Error(unknown);
+    access = (await buildSystemHookPolicy(userHome())).access;
+  } else {
+    const caller = await resolveCallerAgentContext(cwd);
+    if (!caller) throw new Error(unknown);
+    if (isSandboxedProcess()) return { sandboxed: true };
+    access = await buildAgentAccessTable({
+      meta: caller.meta, rootRepo: caller.repoPath, agentDir: caller.agentDir, agentsDir: dirname(caller.agentDir),
+      worktreePath: caller.meta.worktree === false ? caller.repoPath : join(caller.agentDir, "repo"),
+      kernelSandboxed: false,
+    });
   }
-  const sandboxed = isSandboxedProcess();
-  if (sandboxed) return { sandboxed: true };
-  const access = await buildAgentAccessTable({
-    meta: caller.meta, rootRepo: caller.repoPath, agentDir: caller.agentDir, agentsDir: dirname(caller.agentDir),
-    worktreePath: caller.meta.worktree === false ? caller.repoPath : join(caller.agentDir, "repo"),
-    kernelSandboxed: sandboxed,
-  });
   return {
     checkRead(source: string) {
       if (resolvePreparedAccess(access, source, "read") === "deny") throw new Error(pathDenialReason(access, source, "read", true));

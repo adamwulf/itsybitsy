@@ -390,13 +390,14 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
 
-async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal) {
+async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal, milestone?: () => void) {
   let offset = 0;
   while (offset < bytes.length) {
     const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
     const n = await waitForIO({ setTimer, signal }, () => stream.write(chunk));
     if (!Number.isInteger(n) || n <= 0 || n > chunk.length) throw new Error("Invalid send write count");
     offset += n;
+    milestone?.();
   }
 }
 
@@ -452,7 +453,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     }
   }
   async function writeRequest() {
-    if (files) { await writeWithProgress(active, bytes, setTimer, signal); options.onProgress?.(0); }
+    if (files) await writeWithProgress(active, bytes, setTimer, signal, () => options.onProgress?.(0));
     else await io(() => active.writeAll(bytes));
     for (const [index, file] of (files ?? []).entries()) {
       signal.throwIfAborted();

@@ -1,3 +1,4 @@
+import { peerOutboxDir } from "./runtime-names";
 import { describe, expect, spyOn, test } from "bun:test";
 import * as fs from "fs";
 import { existsSync } from "fs";
@@ -253,6 +254,8 @@ describe("sandbox profile emission", () => {
       tagged('(deny file-read* (subpath (param "TMUXSOCK")))'),
       tagged('(deny file-write* (subpath (param "TMUXSOCK")))'),
       tagged('(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))'),
+      tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
       tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
@@ -278,6 +281,8 @@ describe("sandbox profile emission", () => {
       // deny for a spawner.
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
       '(allow file-write* (subpath (param "PARENTCLAUDE")))',
+      tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
       tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
@@ -2515,4 +2520,11 @@ describe("anchorRelativePaths", () => {
     });
     expect(anchorRelativePaths(input, ANCHOR)).toEqual(input);
   });
+});
+
+test("an old broad type and raw grants cannot reopen the peer handoff for writes", () => {
+  const broad = "(allow file-write*)";
+  const profile = generateProfile(config({ rawAllow: [broad] }), paths({ allowWrite: ["/"] }), PARAMS);
+  const deny = tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`);
+  expect(profile.indexOf(deny)).toBeGreaterThan(profile.indexOf(broad));
 });

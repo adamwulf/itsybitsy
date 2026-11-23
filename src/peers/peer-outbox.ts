@@ -9,19 +9,17 @@ import { constants } from "node:fs";
 import { MAX_HEADER_BYTES } from "./transfer-limits";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { userHome } from "../home";
 import { resolveSenderId, resolveRemoteSharedCaller, type IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
 import { registeredQueueRepo } from "../outbox";
 import { readRepoId } from "../repo-id";
 import type { RepoEntry } from "../registry";
-import { matchWorktreeCaller, runtimeDir } from "../runtime-names";
+import { matchWorktreeCaller, peerOutboxDir } from "../runtime-names";
 import { hasLivePeerWatcher } from "./endpoint-lock";
 import { SEND_UNKNOWN } from "./peer-link";
 import { targetLabel } from "./receive-message";
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./send-frame";
 
-const root = () => join(runtimeDir(userHome()), "peer-outbox");
 const missing = (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOENT";
 const detail = (err: unknown) => err instanceof Error ? err.message : String(err);
 const fail = (stderr: string): IbCommandResult => ({ ok: false, exitCode: 1, stdout: "", stderr });
@@ -76,7 +74,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     if (signal?.aborted) return interruptedSend("unpublished");
     if (!await hasLivePeerWatcher()) return fail("remote sends need ib watch running on this machine");
     encodeSendHeader(parseSendHeader(header));
-    const base = root();
+    const base = peerOutboxDir();
     const dir = join(base, header.id);
     const staging = join(base, ".staging", header.id);
     const claimed = join(base, ".claimed", header.id);
@@ -155,7 +153,7 @@ export function createPeerOutboxPoll(now = Date.now) {
   }
 
   return async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {
-    const base = root();
+    const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
     if (base !== lastBase || now() >= nextSweep) {
       lastBase = base;

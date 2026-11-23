@@ -122,7 +122,7 @@ import {
 } from "./team-channel";
 import { timed } from "./perf";
 import { WATCHDOG_SENTINEL } from "./watchdog";
-import { resolveCodexPathGrants } from "./codex-paths";
+import { resolveAgentCodexPathGrants } from "./codex-paths";
 import {
   anchorRelativePaths,
   findRelativeEscapes,
@@ -2016,7 +2016,7 @@ export async function resumeAgent(
         try {
           // Replay frozen policy, expanding its globs against today's files.
           // Only sandbox refresh may replace this policy from live type files.
-          codexPathGrants = await resolveCodexPathGrants(resolvePathsConfig(agent.meta.paths));
+          codexPathGrants = await resolveAgentCodexPathGrants(resolvePathsConfig(agent.meta.paths));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           await logAgent(agentDir, `[resume] ${message}`);
@@ -6930,7 +6930,7 @@ async function spawnAgent(
     const anchoredPaths = anchorRelativePaths(mergedSandboxLayers.paths, rootRepoPath);
     resolvedPathsConfig = canonicalizePathsConfig(anchoredPaths, userHome());
     if (isCodexBackedCli(agentCli) && !resolvedSandboxConfig.enabled) {
-      codexPathGrants = await resolveCodexPathGrants(resolvedPathsConfig);
+      codexPathGrants = await resolveAgentCodexPathGrants(resolvedPathsConfig);
     }
   } catch (err) {
     return {

@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import { lstatSync, readdirSync, readlinkSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
+import { peerOutboxDir } from "./runtime-names";
 import { userHome } from "./home";
 
 /** Fully-resolved, spawn-time sandbox configuration. */
@@ -1503,6 +1504,9 @@ export function generateProfile(
   // atomically-published status/output, but it must never be able to forge or
   // remove them. Keep this write-only deny last so even rawAllow and a broad
   // authored /private/tmp allow cannot reopen mutation access.
+  const peerOutbox = canonicalizeSandboxPath(peerOutboxDir(sandboxHome(params.HOME)));
+  const handoff = `(subpath "${escapeSbplString(peerOutbox)}")`;
+  lines.push(denyRule(`file-write* ${handoff}`, tag), denyRule(`file-link ${handoff}`, tag));
   lines.push(denyRule(`file-write* ${SEAL_HELPER_RESULT_MATCHER}`, tag));
   // Seatbelt treats hard/symbolic-link creation as a distinct operation from
   // file-write*. Deny it explicitly so a protected inode cannot be aliased

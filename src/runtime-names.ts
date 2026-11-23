@@ -22,6 +22,7 @@ export const userQuestionsFile = (repo: string): string => join(runtimeDir(repo)
 // iroh peering (docs/plans/iroh-peering.md): one directory per install, under
 // the user home, never under a repo. Resolved through userHome() so tests
 // redirect it with setUserHome().
+export const peerOutboxDir = (home = userHome()): string => join(runtimeDir(home), "peer-outbox");
 export const peerDir = (): string => join(userHome(), RUNTIME_DIR_NAME, "peer");
 export const peerSecretKeyFile = (): string => join(peerDir(), "secret.key");
 export const peersFile = (): string => join(peerDir(), "peers.json");

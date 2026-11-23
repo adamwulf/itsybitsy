@@ -1,3 +1,5 @@
+import { canonicalizeSandboxPath } from "./sandbox";
+import { peerOutboxDir } from "./runtime-names";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -169,6 +171,11 @@ function denyKey(entry: OrderedPathEntry): string {
 function isMissing(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
   return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/** Mandatory agent policy also applies to previously installed type files. */
+export function resolveAgentCodexPathGrants(paths: PathsConfig): Promise<Record<string, Access>> {
+  return resolveCodexPathGrants({ ...paths, deny: [...paths.deny, canonicalizeSandboxPath(peerOutboxDir())] });
 }
 
 /**

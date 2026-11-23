@@ -269,6 +269,10 @@ export function agentProtectedWritePaths(
     path: canonicalizeSandboxPath(join(agentDir, "meta.json")),
     subtree: false,
     reason: META_WRITE_DENY_REASON,
+  }, {
+    path: canonicalizeSandboxPath(runtimeNames.peerOutboxDir()),
+    subtree: true,
+    reason: "Only ib send and the watchdog can publish remote send requests",
   }];
   if (protectIsolatedClaudeSettings) {
     protectedPaths.push({

@@ -1,6 +1,6 @@
 # iroh peering: messages and file attachments across machines
 
-Status: PROPOSED on 2026-11-23, waiting on Adam's answers to the open questions at the end. This plan supersedes feature B of [iroh-remote-coordinator-and-send.md](iroh-remote-coordinator-and-send.md); the decisions recorded there still apply. It follows [iroh-unified-repos.md](iroh-unified-repos.md).
+Status: APPROVED on 2026-11-23, with Adam's answers recorded under "Decisions (Adam, 2026-11-23)" below. M1–M4 are in progress. This plan supersedes feature B of [iroh-remote-coordinator-and-send.md](iroh-remote-coordinator-and-send.md); the decisions recorded there still apply. It follows [iroh-unified-repos.md](iroh-unified-repos.md).
 
 ## Goal (Adam, 2026-11-22 and 2026-11-23)
 
@@ -209,7 +209,27 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
   - Cancellation and progress.
 - **M4. Docs and the Phase 8 checklist.** Add these two-laptop steps: a text send in both directions, a file send in both directions, a size-limit refusal, and an offline peer.
 
-## Open questions for Adam (recommendation first)
+## Decisions (Adam, 2026-11-23). These supersede the values above.
+
+1. **Limits.**
+   - **Per file:** 1 GB.
+   - **Per message:** 2 GB total and at most 20 files. These are my values, since Adam set only the per-file limit.
+   - **Header:** 256 KB.
+   - **Where they live:** all limits are named constants in one module, `src/peers/transfer-limits.ts`.
+   - **Requirements at these sizes:**
+     - Streaming must keep memory bounded. Data moves in 64 KB chunks, the hash is computed as data arrives, and nothing is buffered whole.
+     - The receiver checks free disk space before it accepts a message. It uses `statfs` on `/tmp` and requires the total size plus a 1 GB margin.
+     - Progress shows on both sides, and cancel works on both sides.
+   - **Timeouts.** They are generous: there is no overall deadline, and a transfer fails only after 60 s with no progress in either direction. That allows for a 1 GB file over a slow relay.
+   - **Sender handoff.** It copies with `COPYFILE_FICLONE`. On APFS that makes a clone, which is nearly instant and uses no extra space, so a 1 GB `--attach` does not double disk use. On other filesystems it falls back to a normal copy.
+2. **`--attach`.** Yes: `ib send <target> --attach <file>`, repeatable. It also works for local sends, with the same copy and rewrite.
+3. **The other machine's coordinators.** Yes. Remote sends may reach the other machine's `@system` and its repo coordinators:
+   - the CLI forms `<machine>/@system` and `<machine>/@<repo>`;
+   - typing into the remote coordinator row. Its input box is enabled for user sends, and every other action on that row is still refused.
+   The other machine's normal `@system` and repo-coordinator send rules apply.
+4. **Retention.** Yes. Received files stay in `/tmp`, `ib` never deletes them, and the operating system cleans them up later.
+
+## Open questions for Adam (answered above)
 
 1. **Limits.** 25 MB per file, 100 MB per message, 20 files. Recommended: yes.
 2. **How agents attach.** Use an explicit `ib send <target> --attach <file>`, repeatable, and keep drag-and-drop detection in the dashboard. `--attach` also works for local sends, with the same copy and rewrite. Recommended: yes.

@@ -61,7 +61,7 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
-import { pollPeerOutbox } from "./peer-outbox";
+import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
 import type { SendHeader } from "./send-frame";
 import { requestSend } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
@@ -169,7 +169,7 @@ export interface PeerServiceDeps {
 export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
   return {
     notice,
-    pollOutbox: pollPeerOutbox,
+    pollOutbox: createPeerOutboxPoll(),
     receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,
     captureCoordinator: async () => {
@@ -852,7 +852,7 @@ export class PeerService {
     this.poller.start();
     const poll = this.deps.pollOutbox;
     if (poll) this.outboxTimer = setInterval(() => {
-      void poll((peer, header) => this.sendRemoteMessage(peer, header, "handoff"), this.deps.log)
+      void poll((peer, header) => this.sendRemoteMessage(peer, header, "handoff"), this.deps.log, () => this.endpoint === ep && !this.shuttingDown)
         .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`));
     }, 250);
     return { kind: "bound" };

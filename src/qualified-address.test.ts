@@ -341,7 +341,7 @@ describe("qualified agent addresses", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("timed out before ib watch claimed");
     await pollPeerOutbox(async () => { throw new Error("unexpected send"); }, () => {});
-    expect(await (await import("node:fs/promises")).readdir(join(cli.home, ".itsybitsy", "peer-outbox"))).toEqual([]);
+    expect((await (await import("node:fs/promises")).readdir(join(cli.home, ".itsybitsy", "peer-outbox"))).filter(name => !name.startsWith("."))).toEqual([]);
   }, 16_000);
 
   test("leading @ belongs to repo addressing", async () => {

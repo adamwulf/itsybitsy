@@ -17,7 +17,8 @@ beforeEach(async () => {
 afterEach(async () => { resetUserHome(); await rm(home, { recursive: true, force: true }); });
 
 test.each(["oversize", "symlink", "FIFO"])("refuses a %s peer request without sending", async kind => {
-  const dir = join(base, crypto.randomUUID());
+  const id = crypto.randomUUID();
+  const dir = join(base, id);
   await mkdir(dir, { recursive: true });
   const path = join(dir, "request.json");
   if (kind === "oversize") await Bun.write(path, Buffer.alloc(MAX_HEADER_BYTES + 129));
@@ -25,7 +26,7 @@ test.each(["oversize", "symlink", "FIFO"])("refuses a %s peer request without se
   if (kind === "FIFO") expect(await Bun.spawn(["mkfifo", path]).exited).toBe(0);
   let sends = 0;
   await pollPeerOutbox(async () => { sends++; return ""; }, () => {});
-  expect(await Bun.file(join(dir, "result.json")).json()).toMatchObject({ ok: false });
+  expect(await Bun.file(join(base, ".claimed", id, "result.json")).json()).toMatchObject({ ok: false });
   expect(sends).toBe(0);
 });
 

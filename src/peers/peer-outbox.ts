@@ -51,20 +51,24 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
   try {
     if (!await hasLivePeerWatcher()) return fail("remote sends need ib watch running on this machine");
     encodeSendHeader(parseSendHeader(header));
-    const dir = join(root(), header.id);
-    await mkdir(root(), { mode: 0o700, recursive: true });
-    await mkdir(dir, { mode: 0o700 });
+    const base = root();
+    const dir = join(base, header.id);
+    const staging = join(base, ".staging", header.id);
+    const claimed = join(base, ".claimed", header.id);
+    await mkdir(join(base, ".staging"), { mode: 0o700, recursive: true });
+    await mkdir(staging, { mode: 0o700 });
     try {
-      await writeJson(dir, "request.json", { peer, header });
+      await writeJson(staging, "request.json", { peer, header });
+      await rename(staging, dir);
     } catch (err) {
-      await rm(dir, { recursive: true, force: true });
+      await rm(staging, { recursive: true, force: true });
       throw err;
     }
     const deadline = Date.now() + 10_000;
     while (!signal?.aborted && Date.now() < deadline) {
       try {
-        const result = JSON.parse(await readFile(join(dir, "result.json"), "utf8"));
-        await rm(dir, { recursive: true, force: true });
+        const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
+        await rm(claimed, { recursive: true, force: true });
         return result.ok === true && result.id === header.id
           ? { ok: true, exitCode: 0, stdout: `Sent to ${targetLabel(header.target)}`, stderr: "" }
           : fail(result.error ?? SEND_UNKNOWN);
@@ -74,11 +78,11 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       await Bun.sleep(50);
     }
     const reason = signal?.aborted ? "Remote send interrupted" : "Remote send timed out";
-    try { await rename(join(dir, "request.json"), join(dir, "withdrawn.json")); } catch (err) {
+    try { await rename(dir, staging); } catch (err) {
       if (missing(err)) return fail(reason + ": " + SEND_UNKNOWN);
       throw err;
     }
-    await rm(dir, { recursive: true, force: true });
+    await rm(staging, { recursive: true, force: true });
     return fail(reason + " before ib watch claimed the request");
   } catch (err) { return fail(detail(err)); }
 }
@@ -104,43 +108,79 @@ async function readRequest(path: string) {
   } finally { await file.close(); }
 }
 
-let activeWorkers = 0;
-/** Only the bound endpoint owner polls. The rename wins against CLI cancellation
- * and concurrent polls. A claimed request from a previous owner is never replayed. */
-export async function pollPeerOutbox(send: Send, log: (line: string) => void): Promise<void> {
-  const base = root();
-  let entries;
-  try { entries = await readdir(base, { withFileTypes: true }); } catch (err) {
-    if (missing(err)) return;
-    throw err;
-  }
-  const ids = entries.filter(e => e.isDirectory() && requestId.test(e.name)).map(e => e.name).values();
-  async function processOne(id: string) {
-    const dir = join(base, id);
-    try {
-      if (Date.now() - (await stat(dir)).mtimeMs >= 600_000) {
-        await rm(dir, { recursive: true, force: true });
-        return;
-      }
-      const claimed = join(dir, "claimed.json");
-      await rename(join(dir, "request.json"), claimed);
-      let result;
+const retentionMs = 10 * 60_000;
+
+export function createPeerOutboxPoll(now = Date.now) {
+  const active = new Set<string>();
+  let nextSweep = 0;
+  let lastBase: string | undefined;
+  let workers = 0;
+
+  async function sweep(parent: string) {
+    let entries;
+    try { entries = await readdir(parent, { withFileTypes: true }); }
+    catch (err) { if (missing(err)) return; throw err; }
+    for (const entry of entries) {
+      const path = join(parent, entry.name);
+      if (!entry.isDirectory() || !requestId.test(entry.name) || active.has(path)) continue;
       try {
-        const { peer, header: raw } = await readRequest(claimed);
-        const header = parseSendHeader(raw);
-        if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
-        result = { ok: true, id: await send(peer, header) };
-      } catch (err) { result = { ok: false, error: detail(err) }; }
-      await writeJson(dir, "result.json", result);
-    } catch (err) {
-      if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
+        if (now() - (await stat(path)).mtimeMs >= retentionMs && !active.has(path)) {
+          await rm(path, { recursive: true, force: true });
+        }
+      } catch (err) { if (!missing(err)) throw err; }
     }
   }
-  async function worker() {
-    activeWorkers++;
-    try { for (const id of ids) await processOne(id); }
-    finally { activeWorkers--; }
-  }
-  const count = Math.min(4 - activeWorkers, entries.length);
-  await Promise.all(Array.from({ length: count }, worker));
+
+  return async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {
+    const base = root();
+    const claimed = join(base, ".claimed");
+    if (base !== lastBase || now() >= nextSweep) {
+      lastBase = base;
+      nextSweep = now() + 30_000;
+      await Promise.all([sweep(claimed), sweep(join(base, ".staging"))]);
+    }
+    if (!ownsEndpoint() || workers >= 4) return;
+    let entries;
+    try { entries = await readdir(base, { withFileTypes: true }); }
+    catch (err) { if (missing(err)) return; throw err; }
+    const ready = entries.filter(e => e.isDirectory() && requestId.test(e.name));
+    if (!ready.length) return;
+    await mkdir(claimed, { recursive: true, mode: 0o700 });
+    const ids = ready.map(e => e.name).values();
+    async function worker() {
+      workers++;
+      try {
+        for (const id of ids) {
+          if (!ownsEndpoint()) return;
+          const dir = join(claimed, id);
+          try {
+            await rename(join(base, id), dir);
+          } catch (err) {
+            if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
+            continue;
+          }
+          active.add(dir);
+          try {
+            if (now() - (await stat(dir)).mtimeMs >= retentionMs) {
+              await rm(dir, { recursive: true, force: true });
+              continue;
+            }
+            let result;
+            try {
+              const { peer, header: raw } = await readRequest(join(dir, "request.json"));
+              const header = parseSendHeader(raw);
+              if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
+              result = { ok: true, id: await send(peer, header) };
+            } catch (err) { result = { ok: false, error: detail(err) }; }
+            await writeJson(dir, "result.json", result);
+          } catch (err) {
+            if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
+          } finally { active.delete(dir); }
+        }
+      } finally { workers--; }
+    }
+    await Promise.all(Array.from({ length: Math.min(4 - workers, ready.length) }, worker));
+  };
 }
+
+export const pollPeerOutbox = createPeerOutboxPoll();

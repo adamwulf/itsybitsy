@@ -1383,10 +1383,10 @@ export class DashboardComponent implements Component {
     this.tmuxPoller.start();
     this.syncRemotePane();
     // The coordinator and repo-coordinator pollers only spawn `tmux capture-pane`
-    // when their panes are actually visible. updatePollerVisibility() starts the
+    // when their panes are actually visible. updatePaneVisibility() starts the
     // ones that should be live now and leaves the rest stopped (saves a tmux
     // spawn/sec per hidden pane).
-    this.updatePollerVisibility();
+    this.updatePaneVisibility();
     this.refreshUsage();
     this.usageTimer = setInterval(() => this.refreshUsage(), 240_000);
     // Live Codex usage (SPEC.md §6.6.3): the session logs go stale when a
@@ -1484,7 +1484,14 @@ export class DashboardComponent implements Component {
    * resume() fires an immediate poll, so a pane that just became visible is not
    * stale for up to 1s. The always-on selected-agent `tmuxPoller` is untouched.
    */
-  private updatePollerVisibility() {
+  private updatePaneVisibility() {
+    if (this.peerCoordinatorVisible) {
+      this.focusManager.skipTargets.add("right-pane");
+      const focus = this.focusManager.current();
+      if (focus === "right-pane" || focus === "active-agent") this.focusManager.setFocus("active-agent");
+    } else {
+      this.focusManager.skipTargets.delete("right-pane");
+    }
     // §17.1 Phase 2: gate the system coordinator poller on the active source
     // matching the render path. A stale coord pointer in the (inactive)
     // Agents tree must not keep the coordinator tmux poller running while
@@ -1933,6 +1940,10 @@ export class DashboardComponent implements Component {
     return before.length !== after.length || before.some((line, i) => line !== after[i]);
   }
 
+  private get peerCoordinatorVisible(): boolean {
+    return this.remoteSelection?.kind === "remote-coordinator" && this.rightPane.mode !== "TREE";
+  }
+
   /** Only the Agents tree can own a remote selection. */
   get remoteSelection(): RemoteEntry | null {
     return this.activeSelectionSource === "agents" ? this.agentTree.selectedRemote : null;
@@ -2088,7 +2099,7 @@ export class DashboardComponent implements Component {
     jumpToMode(this, mode, forceRefresh);
     // Entering/leaving REPO mode changes whether the per-repo coordinator pane
     // is visible — pause/resume its poller to match.
-    this.updatePollerVisibility();
+    this.updatePaneVisibility();
   }
 
   /** Reload a tail-log mode's window (or skip via cache) — called from scroll/resize handlers. */
@@ -2103,7 +2114,7 @@ export class DashboardComponent implements Component {
     // cyclePaneMode skips REPO (only entered via repo-header selection), but
     // keep the visibility sync here for symmetry with jumpToMode in case the
     // active mode changed.
-    this.updatePollerVisibility();
+    this.updatePaneVisibility();
   }
 
   // --- Command palette ---
@@ -2571,7 +2582,7 @@ export class DashboardComponent implements Component {
     // Selection (and the REPO-mode auto-switch above) may have changed which
     // coordinator pane is visible — pause/resume those pollers accordingly so
     // we don't spawn `tmux capture-pane` for off-screen panes.
-    this.updatePollerVisibility();
+    this.updatePaneVisibility();
   }
 
   /**
@@ -3338,7 +3349,7 @@ export class DashboardComponent implements Component {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
         // Switching to DASHBOARD hides the coordinator tmux output; switching
         // back to TMUX shows it again. Pause/resume the poller to match.
-        this.updatePollerVisibility();
+        this.updatePaneVisibility();
       } else {
         this.cyclePaneMode(1);
       }
@@ -3348,7 +3359,7 @@ export class DashboardComponent implements Component {
         // no-op in teams view (see "p" branch above)
       } else if (this.agentTree.isSystemCoordinatorSelected) {
         this.coordinatorViewMode = this.coordinatorViewMode === "TMUX" ? "DASHBOARD" : "TMUX";
-        this.updatePollerVisibility();
+        this.updatePaneVisibility();
       } else {
         this.cyclePaneMode(-1);
       }
@@ -3542,6 +3553,10 @@ export class DashboardComponent implements Component {
         // per-repo coordinator windows stay pinned to PINNED_TMUX_WIDTH. Their
         // panes reflow to the new mainWidth at display time via WordWrapCache, so
         // resizing the sidebar never repaints a coordinator TUI at a new width.
+        this.tui?.requestRender();
+      } else if (focus === "active-agent" && this.peerCoordinatorVisible) {
+        // The only divider borders the sidebar. Growing the capture shrinks the sidebar.
+        this.sidebarWidth = clampSidebarWidth(this.sidebarWidth - delta);
         this.tui?.requestRender();
       } else if (focus === "right-pane") {
         // Right pane focused: ] grows right (shrinks middle) = negative delta to handleResizeLeft
@@ -4061,7 +4076,7 @@ export class DashboardComponent implements Component {
     const leftPad = 3;
     const rightPad = 3;
     const currentFocus = this.focusManager.current();
-    const coordFocused = currentFocus === "coordinator";
+    const coordFocused = currentFocus === (peer === undefined ? "coordinator" : "active-agent");
     const leftTitleStyle = coordFocused ? `${REVERSE}${BOLD}` : BOLD;
     const fillCount = Math.max(1, mainWidth - leftPad - visibleWidth(leftTitle) - visibleWidth(rightTitle) - rightPad);
     return truncateToWidth(

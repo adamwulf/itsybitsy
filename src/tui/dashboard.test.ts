@@ -37,7 +37,7 @@ import type { PeerLinkState } from "../peers/poller";
 import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
-import { DIM, GREEN, ITALIC, RED, RESET, YELLOW } from "./colors";
+import { BOLD, DIM, GREEN, ITALIC, RED, RESET, REVERSE, YELLOW } from "./colors";
 import { getStateColors } from "./color-scheme";
 import * as settings from "../config";
 import * as agentActions from "./agent-actions";
@@ -9971,6 +9971,29 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.handleInput("k");
     expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
     expect(dashboard.coordinatorInputField.getText()).toBe("");
+  });
+
+  test("Tab visits the full-width peer capture once and resizing moves its visible divider", () => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.focusManager.setFocus("right-pane");
+    selectByKey(dashboard, PEER_B + "/@system");
+    expect(dashboard.focus).toBe("active-agent");
+    const initialSidebar = dashboard.sidebarWidth;
+    const initialSplit = dashboard.splitPane.getLeftWidth();
+    dashboard.handleInput("]");
+    expect(dashboard.sidebarWidth).toBe(initialSidebar - 5);
+    expect(dashboard.splitPane.getLeftWidth()).toBe(initialSplit);
+    for (const stop of ["agent-tree", "info", "active-agent"]) {
+      dashboard.handleInput("\t");
+      expect(dashboard.focus).toBe(stop);
+      expect(dashboard.focusManager.subFocus).toBe("pane");
+    }
+    expect(dashboard.render(180).join("")).toContain(REVERSE + BOLD + " Laptop B/@system ");
+    for (const stop of ["info", "agent-tree", "active-agent"]) {
+      dashboard.handleInput("\x1b[Z");
+      expect(dashboard.focus).toBe(stop);
+    }
   });
 
   test.each(["?", "/", "@", "I"])("dialog %s pauses coordinator reads and resumes once", async key => {

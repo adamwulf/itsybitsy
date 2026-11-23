@@ -649,3 +649,25 @@ test("a lost send acknowledgement reports uncertainty and never opens another st
   expect(a.closeInfo()).toBeNull();
   a.close(0, "done");
 });
+
+test("acknowledgement progress keeps a send alive beyond sixty seconds", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { textHeader } = await import("./peer-outbox");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock();
+  const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  const sent = requestSend(a, header, clock.setTimer);
+  try {
+    const stream = await b.acceptBi();
+    await stream.readToEnd(4096);
+    const reply = encode({ ok: true, id: header.id });
+    for (const part of [reply.subarray(0, 4), reply.subarray(4)]) {
+      await Bun.sleep(0);
+      clock.advance(40_000);
+      await stream.writeAll(part);
+    }
+    await stream.finish();
+    expect(await sent).toBe(header.id);
+    expect(clock.pending()).toBe(0);
+  } finally { a.close(0, "done"); }
+});

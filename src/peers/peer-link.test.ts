@@ -283,14 +283,18 @@ describe("serveTrustedConnection", () => {
 
   test("non-framed reads renew their idle deadline on each fragment", async () => {
     const side = serve({ snapshot });
-    const accept = side.b.acceptBi.bind(side.b);
-    spyOn(side.b, "acceptBi").mockImplementationOnce(async () => {
-      const stream = await accept();
-      const read = stream.read.bind(stream);
-      spyOn(stream, "read").mockImplementation(limit => { side.clock.advance(35_000); return read(Math.min(2, limit)); });
-      return stream;
-    });
-    try { expect(await requestAgents(side.a)).toEqual(snapshot()); }
+    try {
+      const stream = await side.a.openBi();
+      const bytes = encodePeerRequest("agents");
+      await stream.writeAll(bytes.subarray(0, 3));
+      await Bun.sleep(0);
+      side.clock.advance(35_000);
+      await stream.writeAll(bytes.subarray(3));
+      await Bun.sleep(0);
+      side.clock.advance(35_000);
+      await stream.finish();
+      expect(decodeAgentsReply(await stream.readToEnd(PEER_MAX_REPLY_BYTES))).toEqual(snapshot());
+    }
     finally { side.a.close(0, "done"); await side.done; }
   });
 

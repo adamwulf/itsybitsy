@@ -1781,6 +1781,29 @@ describe("endpoint owner peer-outbox polling", () => {
     } finally { await locked.shutdown(); await owner.shutdown(); }
   });
 
+  test("a suspended recovery retains the service lock through endpoint close", async () => {
+    const held = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    let hold = false;
+    const owner = makeService({ recoverTransfers: async () => { if (hold) { entered.resolve(); await held.promise; } } });
+    const other = makeService({ acquireLock: () => acquireEndpointLock(OTHER), releaseLock: () => releaseEndpointLock(OTHER),
+      recoverTransfers: async () => {} });
+    alive.add(OTHER.pid); starts.set(OTHER.pid, OTHER.startEpoch);
+    try {
+      owner.service.openDialog();
+      await waitFor(() => owner.service.view().status.kind === "listening");
+      hold = true;
+      const sweep = owner.service.bootIfPaired();
+      await entered.promise;
+      const closing = owner.service.shutdown();
+      await other.service.bootIfPaired();
+      expect(other.service.view().status.kind).toBe("disabled");
+      held.resolve(); await sweep; await closing;
+      await other.service.bootIfPaired();
+      expect(other.service.view().status.kind).toBe("idle");
+    } finally { held.resolve(); await owner.service.shutdown(); await other.service.shutdown(); }
+  });
+
   test("only the owner polls, overlapping ticks send each id once with four active, and endpoint loss stops claims", async () => {
     const base = join(home, ".itsybitsy", "peer-outbox");
     const owner = makeService({ pollOutbox: createPeerOutboxPoll() });
@@ -1844,12 +1867,12 @@ describe("endpoint owner peer-outbox polling", () => {
     let now = Date.now();
     const tick = createPeerOutboxPoll(() => now);
     let finishedAt = -1;
-    const poll: typeof tick = async (...args) => {
+    const poll: import("./peer-outbox").PeerOutboxPoll = async (...args) => {
       const startedAt = now;
       await tick(...args);
       finishedAt = startedAt;
     };
-    const { service } = makeService({ pollOutbox: poll });
+    const { service } = makeService({ pollOutbox: poll, recoverTransfers: () => tick.recover() });
     const send = spyOn(service, "sendRemoteMessage");
     try {
       service.openDialog();
@@ -1862,6 +1885,7 @@ describe("endpoint owner peer-outbox polling", () => {
       expect(await Bun.file(unread).exists()).toBe(true);
       alive.delete(OTHER.pid);
       now++;
+      await service.bootIfPaired();
       await waitFor(() => finishedAt === now);
       expect(await Bun.file(abandoned).exists()).toBe(false);
       expect(await Bun.file(unread).exists()).toBe(false);

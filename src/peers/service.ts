@@ -175,7 +175,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     notice,
     pollOutbox: poll,
     recoverTransfers: async () => {
-      await Promise.all([sweepOutgoingDirectories(recoveryRoot), poll(async () => { throw new Error("Recovery cannot send"); }, log, () => false)]);
+      await Promise.all([sweepOutgoingDirectories(recoveryRoot), poll.recover()]);
     },
     receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,

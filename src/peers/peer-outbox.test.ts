@@ -139,7 +139,7 @@ test("staging without a record survives until hard expiry regardless of the name
   const stranded = join(parent, crypto.randomUUID() + ".2147483647");
   await mkdir(stranded, { recursive: true });
   const created = (await fs.stat(stranded)).birthtimeMs;
-  const poll = (now: number) => createPeerOutboxPoll(() => now)(async () => { throw new Error("unexpected send"); }, () => {}, () => false);
+  const poll = (now: number) => createPeerOutboxPoll(() => now).recover();
   await poll(created + 24 * 3600_000 - 1);
   expect(await fs.readdir(parent)).toHaveLength(1);
   await poll(created + 24 * 3600_000);

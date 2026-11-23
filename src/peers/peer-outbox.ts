@@ -163,11 +163,8 @@ async function readRequest(path: string) {
 
 export function createPeerOutboxPoll(now = Date.now) {
   const active = new Set<string>();
-  let nextSweep = 0;
-  let lastBase: string | undefined;
   let workers = 0;
 
-  let sweeping: Promise<void> | undefined;
   async function sweep(parent: string, staging = false) {
     for (const name of await transferDirectoryBatch(parent)) {
       const id = staging ? name.replace(/\.[1-9]\d*$/, "") : name;
@@ -176,15 +173,14 @@ export function createPeerOutboxPoll(now = Date.now) {
     }
   }
 
-  return async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {
+  async function recover() {
+    const base = peerOutboxDir();
+    await Promise.all([sweep(base), sweep(join(base, ".claimed")), sweep(join(base, ".staging"), true)]);
+  }
+
+  async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
-    if (!sweeping && (base !== lastBase || now() >= nextSweep)) {
-      lastBase = base;
-      nextSweep = now() + 30_000;
-      sweeping = Promise.all([sweep(base), sweep(claimed), sweep(join(base, ".staging"), true)]).then(() => {}).finally(() => { sweeping = undefined; });
-    }
-    await sweeping;
     if (!ownsEndpoint() || workers >= 4) return;
     const ready = (await transferDirectoryBatch(base, "dispatch")).filter(name => requestId.test(name));
     if (!ready.length) return;
@@ -258,7 +254,9 @@ export function createPeerOutboxPoll(now = Date.now) {
       } finally { workers--; }
     }
     await Promise.all(Array.from({ length: Math.min(4 - workers, ready.length) }, worker));
-  };
+  }
+  return Object.assign(poll, { recover });
 }
 
-export const pollPeerOutbox = createPeerOutboxPoll();
+export type PeerOutboxPoll = (send: Send, log: (line: string) => void, ownsEndpoint?: () => boolean) => Promise<void>;
+export const pollPeerOutbox: PeerOutboxPoll = createPeerOutboxPoll();

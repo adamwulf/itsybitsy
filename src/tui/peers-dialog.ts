@@ -11,16 +11,17 @@
  * a result, and closes the dialog from the idle view.
  */
 
-import { matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { matchesKey, Key, visibleWidth } from "@mariozechner/pi-tui";
 import { describePairFailure } from "../peers/pairing";
 import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peers/pair-code";
 import type { RemoteNewAgentRequest } from "../peers/peer-link";
 import { peerLinkStatus, type PeerLinkStatus } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
-import { peerNameProblem, shortPeerId } from "../peers/store";
+import { peerNameProblem, shortPeerId, SHORT_ID_LENGTH } from "../peers/store";
 import { cancelPaste, isPasteInProgress, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
 import { BOLD, DIM, GREEN, RED, RESET, YELLOW } from "./colors";
 import type { DialogCtx } from "./dialog-handler";
+import { truncatePeerField } from "./peer-repos";
 import { deleteWord } from "./text-buffer";
 import { wordWrapSingleLine, wrapSingleLine } from "./wrap";
 
@@ -216,14 +217,22 @@ function peerListLines(view: PeerServiceView, innerWidth: number, maxLines: numb
   if (view.peersError !== null) return proseLines(view.peersError, innerWidth, RED).slice(0, maxLines);
   if (view.peers.length === 0) return [`${DIM}  none yet${RESET}`].slice(0, maxLines);
   const listed = view.peers.slice(0, MAX_LISTED_PEERS);
-  const nameWidth = Math.max(...listed.map((p) => visibleWidth(p.name)));
+  // Reserve the indent, both gaps, the short id and the longest status word.
+  const availableNameWidth = innerWidth - 6 - SHORT_ID_LENGTH - "connecting".length;
+  const nameWidth = Math.min(availableNameWidth, Math.max(...listed.map(p => visibleWidth(p.name))));
   const links = new Map(view.links.map((link) => [link.id, link]));
   const groups = listed.map(peer => {
     const lines: string[] = [];
-    const pad = " ".repeat(Math.max(0, nameWidth - visibleWidth(peer.name)));
     const link = links.get(peer.id);
     const state = peerLinkStateText(peerLinkStatus(link));
-    lines.push(truncateToWidth(`  ${peer.name}${pad}  ${DIM}${shortPeerId(peer.id)}${RESET}  ${state}`, innerWidth, ""));
+    const id = `${DIM}${shortPeerId(peer.id)}${RESET}`;
+    if (nameWidth > 0) {
+      const name = truncatePeerField(peer.name, nameWidth);
+      const pad = " ".repeat(nameWidth - visibleWidth(name));
+      lines.push(`  ${name}${pad}  ${id}  ${state}`);
+    } else {
+      lines.push(truncatePeerField(peer.name, innerWidth), ...wordWrapSingleLine(`${id}  ${state}`, innerWidth));
+    }
     if (link !== undefined && !link.connected && link.lastError !== null) {
       for (const line of wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4))) lines.push(`    ${RED}${line}${RESET}`);
     }

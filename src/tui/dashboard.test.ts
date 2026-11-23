@@ -9403,6 +9403,15 @@ describe("setup Peers tab", () => {
     expectRow(E, "connecting", YELLOW); // first dial in progress
   });
 
+  test("a long peer name leaves the short id and status visible at 40 columns", () => {
+    const { dashboard, service } = open();
+    service.set({ peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }] });
+    const rows = (dashboard as any).dialogOverlay.render(40) as string[];
+    const peer = rows.map(stripAnsi).find(row => row.includes(OTHER_SHORT))!;
+    expect(peer).toMatch(new RegExp(`N+…  ${OTHER_SHORT}  connecting`));
+    expect(visibleWidth(peer)).toBe(40);
+  });
+
   test("with no peer section on screen, a service change renders only while the Peers tab is open", () => {
     const dashboard = makeDashboard();
     // Counts renders, and stands in for the overlay the dialog opens.

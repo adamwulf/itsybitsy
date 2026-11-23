@@ -401,3 +401,23 @@ test("claim refuses a brokered send whose originating CLI died after publication
   expect(await result).toMatchObject({ ok: false, stderr: "Cannot verify the originating CLI" });
   expect(sends).toBe(0);
 });
+
+test("a full staging volume frees bodies and publishes the retained ACK", async () => {
+  const { ready, claimed, header } = await readyRequest();
+  await mkdir(join(ready, "files"));
+  await Bun.write(join(ready, "files", "0"), "attachment");
+  const rename = fs.rename;
+  const publication = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    if (to === join(claimed, "result.json") && await Bun.file(join(claimed, "files", "0")).exists()) {
+      throw Object.assign(Error("disk full"), { code: "ENOSPC" });
+    }
+    await rename(from, to);
+  });
+  let sends = 0;
+  try {
+    await createPeerOutboxPoll()(async () => { sends++; return header.id; }, () => {});
+    await waitFor(() => Bun.file(join(claimed, "result.json")).exists());
+    expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: true, id: header.id });
+    expect(sends).toBe(1);
+  } finally { publication.mockRestore(); }
+});

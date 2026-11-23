@@ -192,12 +192,18 @@ export function createPeerOutboxPoll(now = Date.now) {
   type DeliveryResult = { ok: true; id: string } | { ok: false; error: string };
   let workers = 0;
 
+  async function releaseBodies(dir: string, log: (line: string) => void, delay = 250): Promise<void> {
+    try { await rm(join(dir, "files"), { recursive: true, force: true }); }
+    catch (err) {
+      log(`peer-outbox: retrying sent file cleanup: ${detail(err)}`);
+      setTimeout(() => void releaseBodies(dir, log, Math.min(30_000, delay * 2)), delay).unref();
+    }
+  }
+
   async function finalize(dir: string, result: DeliveryResult, log: (line: string) => void, delay = 250): Promise<void> {
     try {
       if (!existsSync(join(dir, "cancel"))) {
         await writeJson(dir, "result.json", result);
-        await rm(join(dir, "files"), { recursive: true, force: true })
-          .catch(err => log(`peer-outbox: could not remove sent files: ${detail(err)}`));
       }
       if (existsSync(join(dir, "cancel"))) await rm(dir, { recursive: true, force: true });
     } catch (err) {
@@ -305,6 +311,7 @@ export function createPeerOutboxPoll(now = Date.now) {
               tick();
             } finally { clearInterval(timer); }
           } catch (err) { result = { ok: false, error: detail(err) }; }
+          void releaseBodies(dir, log);
           await finalize(dir, result, log);
           if (active.has(dir)) return;
         }

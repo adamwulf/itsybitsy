@@ -1,3 +1,4 @@
+import { requestLookup } from "./request-lookup";
 import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
 import { isCoordinatorType } from "./coordinator-type-names";
 import * as runtimeNames from "./runtime-names";
@@ -207,38 +208,36 @@ export async function submitWatchdogRequest(
   let lastProgress = 0;
   let progressRead: Promise<void> | undefined;
   let warnedProgress = false;
-  const readResult = async (): Promise<IbCommandResult | undefined> => {
-    const file = Bun.file(resultFile);
-    if (await file.exists()) {
-      try {
-        const result = (await file.json()) as Partial<SpawnResult>;
-        const cleanup = rm(resultFile, { force: true });
-        if (deps.cancelClaimed) trackSendCleanup(cleanup, "Remote broker result cleanup failed");
-        else await cleanup;
-        if (result.id !== request.id || typeof result.exitCode !== "number") {
-          deps.onUncertain?.();
-          return brokerFail(`Error: the watchdog returned a malformed ${wording.request} result`);
-        }
-        return {
-          ok: result.ok === true,
-          exitCode: result.exitCode,
-          stdout: typeof result.stdout === "string" ? result.stdout : "",
-          stderr: typeof result.stderr === "string" ? result.stderr : "",
-        };
-      } catch {
-        // A partially visible file cannot happen (atomic rename); treat a
-        // parse failure as "not ready" only until the deadline.
+  let resultDiagnostic: string | undefined;
+  const readResult = requestLookup(async (): Promise<IbCommandResult | undefined> => {
+    if (awaitingClaim) {
+      try { await stat(requestFile); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        awaitingClaim = false;
+        deadline = now() + timeoutMs;
       }
     }
+    let result: Partial<SpawnResult>;
+    try { result = await Bun.file(resultFile).json(); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
+    if (result.id !== request.id || typeof result.exitCode !== "number") {
+      deps.onUncertain?.();
+      return brokerFail(`Error: the watchdog returned a malformed ${wording.request} result`);
+    }
+    return { ok: result.ok === true, exitCode: result.exitCode,
+      stdout: typeof result.stdout === "string" ? result.stdout : "", stderr: typeof result.stderr === "string" ? result.stderr : "" };
+  }, err => { resultDiagnostic = String(err); });
+  const consume = async (result: IbCommandResult) => {
+    const cleanup = rm(resultFile, { force: true });
+    if (deps.cancelClaimed) trackSendCleanup(cleanup, "Remote broker result cleanup failed");
+    else await cleanup;
+    return result;
   };
   while (!deps.signal?.aborted) {
-    const result = await readResult();
-    if (result && !deps.signal?.aborted) return result;
+    const result = await readResult(deadline - now(), deps.signal);
+    if (result && !deps.signal?.aborted) return consume(result);
     if (deps.signal?.aborted) break;
-    if (awaitingClaim && !await Bun.file(requestFile).exists()) {
-      awaitingClaim = false;
-      deadline = now() + timeoutMs;
-    }
     if (!awaitingClaim && deps.readProgress) {
       progressRead ??= deps.readProgress().then(progress => {
         if (progress > lastProgress) {
@@ -260,10 +259,11 @@ export async function submitWatchdogRequest(
   // already has, the command may still finish — say so.
   let stillQueued: boolean;
   try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
-  catch (err) { deps.onUncertain?.(); return brokerFail(`Could not withdraw request: ${err}`); }
+  catch (err) { deps.onUncertain?.(); return brokerFail(`outcome unknown — check the recipient (could not withdraw request: ${err})`); }
   if (!stillQueued && !deps.signal?.aborted) {
-    const result = await readResult();
-    if (result && !deps.signal?.aborted) return result;
+    const result = await readResult(150, deps.signal);
+    if (result && !deps.signal?.aborted) return consume(result);
+    if (resultDiagnostic && !deps.signal?.aborted) return brokerFail(`outcome unknown — check the recipient (${resultDiagnostic})`);
   }
   if (!stillQueued && deps.signal?.aborted && deps.cancelClaimed) {
     await deps.cancelClaimed().catch(err => warnSendCleanup(`Could not signal claimed send cancellation: ${err}`));

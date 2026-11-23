@@ -1,3 +1,4 @@
+import { requestLookup } from "../request-lookup";
 import { transferOwnerState, type TransferOwner, finishRecovery, inspectTransferDirectory, reclaimTransfer, safeTransferParent, sweepEntries, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
@@ -7,7 +8,7 @@ export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
 import { constants, existsSync } from "node:fs";
 import { IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
-import { mkdir, open, opendir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, open, opendir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
@@ -126,19 +127,26 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     let polling = true;
 
     let resultDiagnostic: string | undefined;
-    const readResult = async (): Promise<IbCommandResult | undefined> => {
-      if (!claimed && !existsSync(dir)) claimed = await findClaim(base, header.id);
+    const readResult = requestLookup(async (): Promise<IbCommandResult | undefined> => {
+      if (!claimed) {
+        try { await access(dir); return; } catch (err) { if (!missing(err)) throw err; }
+        claimed = await findClaim(base, header.id);
+      }
       if (!claimed) return;
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
-        trackSendCleanup(rm(claimed, { recursive: true, force: true }), "Peer send result cleanup failed");
         return result.ok === true && result.id === header.id
           ? { ok: true, exitCode: 0, stdout: `Sent to ${targetLabel(header.target)}`, stderr: "" }
           : fail(result.error ?? SEND_UNKNOWN);
       } catch (err) {
         if (!missing(err)) resultDiagnostic = detail(err);
       }
-    };
+    }, err => { resultDiagnostic = detail(err); });
+    function consume(result: IbCommandResult) {
+      polling = false;
+      trackSendCleanup(rm(claimed!, { recursive: true, force: true }), "Peer send result cleanup failed");
+      return result;
+    }
     async function readProgress() {
       if (!claimed) return;
       try {
@@ -156,8 +164,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       }
     }
     while (!signal?.aborted) {
-      const result = await readResult();
-      if (result && !signal?.aborted) { polling = false; return result; }
+      const result = await readResult(deadline - performance.now(), signal);
+      if (result && !signal?.aborted) return consume(result);
       if (signal?.aborted) break;
       if (!claimedSeen && claimed) {
         claimedSeen = true;
@@ -170,20 +178,23 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     polling = false;
     const withdrawn = await withdrawPublishedRequest(dir, staging);
     if (!withdrawn) {
-      if (!signal?.aborted) {
-        const result = await readResult();
-        if (result && !signal?.aborted) return result;
+      // Reuse an outstanding lookup through the final check. A hung lookup
+      // cannot hold Ctrl-C or extend an ordinary timeout indefinitely.
+      if (!claimed || !signal?.aborted) {
+        const result = await readResult(150, signal?.aborted ? undefined : signal);
+        if (result && !signal?.aborted) return consume(result);
       }
-      claimed ??= await findClaim(base, header.id);
       if (claimed) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
-      const last = await readResult();
-      if (last && !signal?.aborted) return last;
+      if (!signal?.aborted) {
+        const last = await readResult(150, signal);
+        if (last && !signal?.aborted) return consume(last);
+      }
       if (resultDiagnostic && !signal?.aborted) return fail(`outcome unknown — check the recipient (${resultDiagnostic})`);
     }
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
-  } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(detail(err)); }
+  } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(published ? `outcome unknown — check the recipient (${detail(err)})` : detail(err)); }
 }
 
 type Send = (peer: string, header: SendHeader, transfer: OutgoingTransfer) => Promise<string>;

@@ -138,8 +138,9 @@ test("staging without a record survives until hard expiry regardless of the name
   const parent = join(base, ".staging");
   const stranded = join(parent, crypto.randomUUID() + ".2147483647");
   await mkdir(stranded, { recursive: true });
-  const created = (await fs.stat(stranded)).birthtimeMs;
+  const created = 100;
   const poll = (now: number) => createPeerOutboxPoll(() => now).recover();
+  await poll(created);
   await poll(created + 24 * 3600_000 - 1);
   expect(await fs.readdir(parent)).toHaveLength(1);
   await poll(created + 24 * 3600_000);
@@ -488,4 +489,26 @@ test("recovery keeps the published result and releases retained bodies", async (
   await createPeerOutboxPoll().recover();
   expect(await Bun.file(join(claimed, "result.json")).json()).toEqual(result);
   expect(await Bun.file(join(claimed, "files/0")).exists()).toBe(false);
+});
+
+test("a stalled result read releases the interrupted CLI with one lookup outstanding", async () => {
+  const h = textHeader({ kind: "system" }, "message", { kind: "user" });
+  await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
+  const resultPath = join(base, ".claimed", h.id + `@${process.pid}-100`, "result.json");
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const read = fs.readFile;
+  let attempts = 0;
+  const held = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof read>) => {
+    if (args[0] === resultPath) { attempts++; entered.resolve(); await release.promise; }
+    return read(...args);
+  }) as typeof read);
+  const control = new AbortController();
+  try {
+    const result = handoffRemoteMessage("peer", h, control.signal);
+    await waitFor(() => Bun.file(join(base, h.id, "request.json")).exists());
+    await createPeerOutboxPoll()(async () => h.id, () => {});
+    await entered.promise; control.abort();
+    expect(await result).toMatchObject({ exitCode: 130 });
+    expect(attempts).toBe(1);
+  } finally { release.resolve(); held.mockRestore(); }
 });

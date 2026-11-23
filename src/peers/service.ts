@@ -891,6 +891,10 @@ export class PeerService {
       return { kind: "failed", failure: message };
     }
     if (!lock.acquired) {
+      if (this.dialogOpen || this.peers.length) {
+        try { this.selfId = (await this.deps.loadIdentity()).id; this.identityError = null; }
+        catch (err) { this.identityError = errorDetail(err); }
+      }
       this.deps.log(`peering disabled: ib watch pid ${lock.ownerPid} owns the endpoint`);
       this.setStatus({ kind: "disabled", ownerPid: lock.ownerPid });
       return { kind: "disabled" };

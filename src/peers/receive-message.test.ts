@@ -880,3 +880,32 @@ test("a stalled framed read with a pending error reply closes once at the whole-
     expect(close).toHaveBeenCalledTimes(1);
   } finally { a.close(0, "done"); }
 });
+
+test("commit renames the owned partial at FIN and recovery leaves the published file", async () => {
+  const { sweepOutgoingDirectories } = await import("./transfer-owner");
+  const committed = await receiveFixture();
+  const staging = join(cli.root, "staging");
+  const finish = Promise.withResolvers<Uint8Array>();
+  const waiting = Promise.withResolvers<void>();
+  let first = true;
+  const receipt = receiver(header({ files: [manifestFile("abc")] }), "peer", paired, { read: async () => {
+    if (first) { first = false; return Buffer.from("abc"); }
+    waiting.resolve(); return finish.promise;
+  } });
+  try {
+    await waiting.promise;
+    const [name] = await readdir(join(staging, "incoming"));
+    expect(name).toMatch(/^[a-f0-9-]{36}\.partial$/);
+    const partial = join(staging, "incoming", name!);
+    const before = await stat(partial);
+    expect(await Bun.file(join(partial, "owner.json")).json()).toMatchObject({ pid: process.pid });
+    expect(await readdir(committed)).toEqual([]);
+    finish.resolve(new Uint8Array());
+    await receipt;
+    const dest = join(committed, "itsybitsy-attachments-" + name!.split(".")[0]);
+    expect((await stat(dest)).ino).toBe(before.ino);
+    await sweepOutgoingDirectories(staging, Date.now() + 86_400_000);
+    expect(await readdir(join(staging, "incoming"))).toEqual([]);
+    expect(await Bun.file(join(dest, "0/a.txt")).text()).toBe("abc");
+  } finally { finish.resolve(new Uint8Array()); await receipt; }
+});

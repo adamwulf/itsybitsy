@@ -308,8 +308,11 @@ test("a refusal preserves the shared connection for the next exchange", async ()
   await bootPair(a, b);
   await waitFor(() => !!link(a)?.connected);
   const connection = a.service["poller"].connectedConnection(b.id)!;
+  const filesDir = join(a.home, "refused");
+  await Bun.write(join(filesDir, "0"), "a");
+  const file = { name: "one", size: 1, sha256: new Bun.CryptoHasher("sha256").update("a").digest("hex"), spellings: ["./one"] };
   await expect(a.service.sendRemoteMessage(b.id, { op: "send", id: crypto.randomUUID(), from: { kind: "user" },
-    target: { kind: "agent", agent: "missing" }, message: "hello", files: [] }, "handoff")).rejects.toThrow("not found");
+    target: { kind: "agent", agent: "missing" }, message: "hello", files: [file] }, "handoff", { filesDir })).rejects.toThrow("not found");
   expect(await a.service.fetchCoordinatorPane(b.id)).toMatchObject({ text: "b coordinator" });
   expect(a.service["poller"].connectedConnection(b.id)).toBe(connection);
 });

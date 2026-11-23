@@ -604,21 +604,26 @@ async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerRe
 /** The handler owns the reply and teardown. A settled stop or reset is stream-local. */
 async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerResponderDeps, bytes: Uint8Array,
   stop?: Promise<void>, stalledRead = false) {
-  const stopping = stop && settledWithinGrace(stop, deps);
-  try {
+  const stopped = stop?.catch(() => {});
+  const writeReply = async () => {
     await writeWithProgress(stream, bytes, deps.setTimer);
     await waitForIO(deps, () => stream.finish());
-  } catch (err) {
-    const reset = await settledWithinGrace(stream.cancel(), deps);
-    if (!reset || err instanceof TransferIdleError) {
+  };
+  if (stalledRead) {
+    // The native read is still pending. Bound the entire ACK attempt before
+    // closing, with a delivery grace only if the reply actually settled.
+    if (await settledWithinGrace(writeReply(), deps) && await settledWithinGrace(conn.closed(), deps, 5000)) return;
+    closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
+    return;
+  }
+  try { await writeReply(); }
+  catch {
+    if (!await settledWithinGrace(stream.cancel(), deps)) {
       closeQuietly(conn, PEER_CLOSE.error, "send reply stalled");
       return;
     }
   }
-  if (stalledRead) {
-    // Allow delivery of the idle error before interrupting the outstanding native read.
-    if (!await settledWithinGrace(conn.closed(), deps, 5000)) closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
-  } else if (stopping && !await stopping) closeQuietly(conn, PEER_CLOSE.error, "receive stop stalled");
+  if (stopped && !await settledWithinGrace(stopped, deps)) closeQuietly(conn, PEER_CLOSE.error, "receive stop stalled");
 }
 
 /** One request on its own stream. Every error stays here. */

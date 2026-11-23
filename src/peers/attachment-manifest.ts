@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { constants, type BigIntStats } from "node:fs";
+import { lstat, open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { sanitizeAttachmentName } from "./attachment-name";
@@ -17,6 +17,43 @@ async function realpathArgument(absolute: string): Promise<string> {
     prefix = dirname(directory) + rest;
   }
   return realpath(prefix);
+}
+
+function fileIdentity(info: BigIntStats): string {
+  return `${info.dev}:${info.ino}`;
+}
+
+/** Follow directory links once per identity. Only ENOENT from the initial
+ * lstat of a root means an empty tree; failures below it invalidate the scan. */
+async function protectedIdentities(roots: string[]): Promise<Set<string>> {
+  const identities = new Set<string>();
+  async function visit(path: string, info: BigIntStats) {
+    const id = fileIdentity(info);
+    if (identities.has(id)) return;
+    identities.add(id);
+    if (!info.isDirectory()) return;
+    for (const name of await readdir(path)) {
+      const child = join(path, name);
+      await visit(child, await stat(child, { bigint: true }));
+    }
+    const after = await stat(path, { bigint: true });
+    if (fileIdentity(after) !== id || after.ctimeNs !== info.ctimeNs) throw new Error("directory changed during enumeration");
+  }
+  for (const root of roots) {
+    try {
+      const entry = await lstat(root, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (!entry) continue;
+      const info = entry.isSymbolicLink() ? await stat(root, { bigint: true }) : entry;
+      if (!info.isDirectory()) throw new Error("root is not a directory");
+      await visit(root, info);
+    } catch (error) {
+      throw new Error(`Cannot enumerate protected attachment tree ${JSON.stringify(root)}: ${error}`, { cause: error });
+    }
+  }
+  return identities;
 }
 
 export interface ManifestEntry {
@@ -42,7 +79,9 @@ export async function buildAttachmentManifest(
   if (!paths.length) return [];
   const enabled = checkAttachmentsEnabled(limits, machine);
   if (!enabled.ok) throw new Error(enabled.error);
-  const protectedDirs = ["peer", "sealed"].map(name => canonicalizeSandboxPath(join(home, ".itsybitsy", name)));
+  const roots = ["peer", "sealed"].map(name => join(home, ".itsybitsy", name));
+  const protectedDirs = roots.map(root => canonicalizeSandboxPath(root));
+  const protectedFiles = await protectedIdentities(roots);
   const entries = new Map<string, ManifestEntry>();
   try {
     for (const argument of paths) {
@@ -65,6 +104,7 @@ export async function buildAttachmentManifest(
             const opened = await handle.stat({ bigint: true });
             if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
                 await realpath(source) !== source) throw new Error("file changed while opening");
+            if (protectedFiles.has(fileIdentity(opened))) throw new Error("protected attachment identity");
             entry = { argument, source, handle, size: Number(opened.size), name: sanitizeAttachmentName(basename(absolute)), spellings: [] };
             const result = checkManifestLimits([...entries.values(), entry], limits, { machine });
             if (!result.ok) throw new Error(result.error);

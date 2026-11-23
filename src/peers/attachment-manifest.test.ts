@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { mkdtemp, mkdir, open, rename, symlink, rm, realpath, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, open, rename, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -144,4 +144,35 @@ test("case aliases on a case-insensitive filesystem share entries and respect pr
     await expect(manifest(["~/.ITSYBITSY/" + root.toUpperCase() + "/FIXTURE"], { cwd, home, machine: "desk" }))
       .rejects.toThrow("protected");
   }
+});
+
+test("rejects hard links to files anywhere in either protected tree", async () => {
+  for (const root of ["peer", "sealed"]) {
+    const nested = join(home, ".itsybitsy", root, "nested", "more");
+    await mkdir(nested, { recursive: true });
+    const protectedFile = join(nested, "fixture");
+    await writeFile(protectedFile, "example");
+    await link(protectedFile, join(cwd, root));
+    await expect(manifest([root], { cwd, home, machine: "desk" })).rejects.toThrow(/protected/);
+  }
+});
+
+test("absent protected roots allow a regular attachment", async () => {
+  await mkdir(join(home, ".itsybitsy"));
+  await writeFile(join(cwd, "report"), "ok");
+  expect(await manifest(["report"], { cwd, home, machine: "desk" })).toHaveLength(1);
+});
+
+test("a dangling protected root or descendant prevents sending an unrelated file", async () => {
+  const state = join(home, ".itsybitsy");
+  await mkdir(state);
+  await writeFile(join(cwd, "report"), "ok");
+  const peer = join(state, "peer");
+  await symlink(join(home, "missing"), peer);
+  const build = () => manifest(["report"], { cwd, home, machine: "desk" });
+  await expect(build()).rejects.toThrow(/protected/);
+  await rm(peer);
+  await mkdir(peer);
+  await symlink(join(home, "missing"), join(peer, "broken"));
+  await expect(build()).rejects.toThrow(/protected/);
 });

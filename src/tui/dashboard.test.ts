@@ -10097,13 +10097,26 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    for (let i = 0; i < 128; i++) {
-      const key = String.fromCharCode(i);
-      if (isRemoteAllowedKey(key) || key === ";" || key === "l") continue;
-      resetNotice(dashboard);
-      dashboard.handleInput(key);
-      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
-      expect(dashboard.dialog).toBeNull();
+    const refused = [
+      "s", "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "a", "N",
+      "d", "o", "O", "G", "C", "h", "E", "\x1b[200~pasted text\x1b[201~",
+    ];
+    const handlers = [
+      ...Object.keys(agentActions).filter(name => typeof (agentActions as Record<string, unknown>)[name] === "function")
+        .map(name => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined)),
+      spyOn(dashboard, "jumpToMode"), spyOn(dashboard.infoPanel.notesEditor, "handleInput"),
+      spyOn(dashboard.inputField, "handleInput"), spyOn(dashboard.coordinatorInputField, "handleInput"),
+    ];
+    try {
+      for (const key of refused) {
+        resetNotice(dashboard);
+        dashboard.handleInput(key);
+        expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+        expect(dashboard.dialog).toBeNull();
+      }
+      for (const handler of handlers) expect(handler).not.toHaveBeenCalled();
+    } finally {
+      for (const handler of handlers) handler.mockRestore();
     }
     expect(dashboard.agentTree.selectedAgent).toBeNull();
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");

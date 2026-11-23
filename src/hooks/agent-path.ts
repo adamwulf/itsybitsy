@@ -339,6 +339,7 @@ export function matchProtectedWrite(
   protectedWritePaths: ProtectedWritePath[],
   filePath: string,
 ): string | null {
+  if (runtimeNames.deliveredAttachmentPath.test(filePath)) return "Delivered attachments are read-only";
   if (isSealHelperResultPath(filePath)) return SEAL_HELPER_RESULT_WRITE_DENY_REASON;
   for (const entry of protectedWritePaths) {
     if (entry.subtree) {

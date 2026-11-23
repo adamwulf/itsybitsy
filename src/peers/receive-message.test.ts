@@ -549,7 +549,7 @@ test("a stuck sender reset closes the connection and releases a partial receipt"
   const sending = requestSend(a, header({ files: [manifestFile("abc")] }), timer, { filesDir, signal: controller.signal });
   await waitFor(async () => {
     const partials = join(cli.root, "staging/incoming");
-    const [root] = await readdir(partials).catch(() => []);
+    const root = (await readdir(partials).catch(() => [])).find(name => name.endsWith(".partial"));
     return !!root && (await stat(join(partials, root, "0/a.txt")).catch(() => null))?.size === 1;
   });
   controller.abort(Error("cancelled"));
@@ -904,16 +904,17 @@ test("commit renames the owned partial at FIN and recovery leaves the published 
   } });
   try {
     await waiting.promise;
-    const [name] = await readdir(join(staging, "incoming"));
+    const name = (await readdir(join(staging, "incoming"))).find(name => name.endsWith(".partial"));
     expect(name).toMatch(/^[a-f0-9-]{36}\.partial$/);
     const partial = join(staging, "incoming", name!);
     const before = await stat(partial);
-    expect(await Bun.file(join(partial, "owner.json")).json()).toMatchObject({ pid: process.pid });
+    expect(await Bun.file(partial.replace(/\.partial$/, ".owner")).json()).toMatchObject({ pid: process.pid });
     expect(await readdir(committed)).toEqual([]);
     finish.resolve(new Uint8Array());
     await receipt;
     const dest = join(committed, "itsybitsy-attachments-" + name!.split(".")[0]);
     expect((await stat(dest)).ino).toBe(before.ino);
+    expect(await readdir(dest)).toEqual(["0"]);
     await sweepOutgoingDirectories(staging, Date.now() + 86_400_000);
     expect(await readdir(join(staging, "incoming"))).toEqual([]);
     expect(await Bun.file(join(dest, "0/a.txt")).text()).toBe("abc");
@@ -987,7 +988,7 @@ test("a stalled destination write and close retain their reservation but release
     await wire.writeAll(Buffer.from("abc")); await wire.finish();
     await writing.promise; clock.advance(60_000);
     expect(JSON.parse(new TextDecoder().decode(await wire.readToEnd(4096))).reason).toContain("No progress");
-    expect(await readdir(incoming)).toHaveLength(1);
+    expect((await readdir(incoming)).filter(name => name.endsWith(".partial"))).toHaveLength(1);
     const next = () => exchange(header({ files: [manifestFile("x")] }), paired, false, Buffer.from("x"));
     expect(await next()).toMatchObject({ ok: true });
     release.resolve();

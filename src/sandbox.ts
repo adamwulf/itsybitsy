@@ -1,7 +1,7 @@
 import { randomBytes } from "crypto";
 import { lstatSync, readdirSync, readlinkSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
-import { peerDir, peerOutboxDir, transferStagingPaths } from "./runtime-names";
+import { peerDir, peerOutboxDir, deliveredAttachmentPath, deliveredAttachmentPattern, transferStagingPaths } from "./runtime-names";
 import { userHome } from "./home";
 
 /** Fully-resolved, spawn-time sandbox configuration. */
@@ -1198,6 +1198,7 @@ export function resolvePreparedAccess(
   }
   const canonical = canonicalizeAccessPath(prepared, absolutePath);
 
+  if (op === "write" && deliveredAttachmentPath.test(canonical)) return "deny";
   if (op === "write" && prepared.protectedWriteRoots?.some(root => canonical === root || canonical.startsWith(root + "/"))) return "deny";
   if (prepared.deny.some((entry) => orderedEntryMatches(entry, canonical))) {
     return "deny";
@@ -1508,6 +1509,8 @@ export function generateProfile(
     lines.push(denyRule(`network-outbound (remote unix-socket (subpath (param "${root.parameterName}")))`, tag));
   });
 
+  const delivered = `(regex #"${deliveredAttachmentPattern}")`;
+  lines.push(denyRule(`file-write* ${delivered}`, tag), denyRule(`file-link ${delivered}`, tag));
   for (const root of transferStagingPaths()) {
     const subtree = `(subpath "${escapeSbplString(root)}")`;
     lines.push(denyRule(`file-write* ${subtree}`, tag), denyRule(`file-link ${subtree}`, tag));

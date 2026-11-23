@@ -258,3 +258,9 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
 2. **How agents attach.** Use an explicit `ib send <target> --attach <file>`, repeatable, and keep drag-and-drop detection in the dashboard. `--attach` also works for local sends, with the same copy and rewrite. Recommended: yes.
 3. **Sending to the other machine's @system.** This covers `ib send <machine>/@system` and typing into the remote coordinator row. Recommended: yes, with the same rules as a local @system send.
 4. **Retention.** Received files stay in `/tmp` like local attachments, cleaned by the operating system, and `ib` never deletes them. Recommended: yes.
+
+## Behaviour changes beyond M3b
+
+Delivered attachment directories under `/tmp/itsybitsy-attachments-*` and the corresponding `/private/tmp` paths are read-only to agents. This includes local `--attach`, dashboard snapshots and published receiver snapshots. Agents can read the original and edit a copy elsewhere in their scratch space or project.
+
+An audit of ib source, the agent-type instructions, SPEC and README found no instruction telling agents to write, append or edit files inside a delivered directory. The production creators are local CLI staging in `src/peers/local-attachments.ts`, local dashboard sends in `src/message-attachments.ts`, dashboard attachment prompts in `src/tui/attachment-prompt.ts`, and remote publication in `src/peers/receive-message.ts`. SPEC §4.1 and §20 describe the path and staging behavior. README describes editing attachment limits and the message draft. These are configuration and composition actions.

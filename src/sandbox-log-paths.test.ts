@@ -84,7 +84,16 @@ test("shipped floor denies the peering secret key despite the ~/.itsybitsy read 
     // Kernel layer.
     const tag = newSandboxTag();
     const profile = generateProfile({ enabled: true, rawAllow: [], domains: [] }, paths, params, tag);
-    const { transferStagingPaths } = await import("./runtime-names");
+    const { deliveredAttachmentPattern, transferStagingPaths } = await import("./runtime-names");
+    for (const op of ["file-write*", "file-link"]) {
+      expect(profile).toContain(`(deny ${op} (regex #"${deliveredAttachmentPattern}") (with message "${tag}"))`);
+    }
+    for (const root of ["/tmp", "/private/tmp"]) {
+      const pattern = new RegExp(deliveredAttachmentPattern);
+      expect(pattern.test(root + "/itsybitsy-attachments-example")).toBe(true);
+      expect(pattern.test(root + "/itsybitsy-attachments-example/0/file")).toBe(true);
+      expect(pattern.test(root + "/other-file")).toBe(false);
+    }
     for (const path of transferStagingPaths()) {
       expect(profile).toContain(`(deny file-write* (subpath "${path}") (with message "${tag}"))`);
     }

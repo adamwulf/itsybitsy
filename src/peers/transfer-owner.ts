@@ -12,11 +12,11 @@ export function stagingOwnerStart(pid: number): number | null {
   return start !== null && Number.isSafeInteger(start) && start > 0 ? start : null;
 }
 
-export async function writeTransferOwner(dir: string, owner: TransferOwner) {
-  const temp = join(dir, ".owner-" + randomUUID());
+export async function writeTransferOwner(dir: string, owner: TransferOwner, name = "owner.json") {
+  const temp = join(dir, name === "owner.json" ? ".owner-" + randomUUID() : name + ".tmp");
   try {
     await writeFile(temp, JSON.stringify(owner), { flag: "wx", mode: 0o600 });
-    await rename(temp, join(dir, "owner.json"));
+    await rename(temp, join(dir, name));
   } finally { await rm(temp, { force: true }); }
 }
 
@@ -101,7 +101,7 @@ async function readBatch(parent: string, key: string, limit: number) {
   for (let i = 0; i < limit; i++) {
     const entry = await scan.handle.read();
     if (!entry) { await scan.handle.close(); scans.delete(key); break; }
-    if (entry.isDirectory()) entries.push(entry.name);
+    if (entry.isDirectory() || key.endsWith(":incoming") && entry.isFile()) entries.push(entry.name);
   }
   return entries;
 }
@@ -144,9 +144,9 @@ export async function makeOutgoingDirectory(root = transferStagingRoot()) {
   catch (err) { await rm(dir, { recursive: true, force: true }); throw err; }
 }
 
-export async function sweepEntries(parent: string, visit: (name: string) => Promise<void>) {
+export async function sweepEntries(parent: string, visit: (name: string) => Promise<void>, purpose = "sweep") {
   const failures: unknown[] = [];
-  for (const name of await transferDirectoryBatch(parent)) {
+  for (const name of await transferDirectoryBatch(parent, purpose)) {
     try { await visit(name); }
     catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") failures.push(err); }
   }
@@ -163,9 +163,27 @@ export async function sweepOutgoingDirectories(root = transferStagingRoot(), now
   await finishRecovery((["incoming", "outgoing"] as const).map(async name => {
     const area = await stagingArea(root, name);
     await sweepEntries(area, async entry => {
-      if (name === "incoming" ? !/^[a-f0-9-]{36}\.partial$/.test(entry) : !/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) return;
-      await sweepTransferDirectory(join(area, entry), now);
-    });
+      if (name === "outgoing") {
+        if (/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) await sweepTransferDirectory(join(area, entry), now);
+        return;
+      }
+      const match = /^([a-f0-9-]{36})\.(?:partial|owner(?:\.tmp)?)$/.exec(entry);
+      if (!match) return;
+      const prefix = join(area, match[1]!);
+      const info = await lstat(join(area, entry));
+      let file: FileHandle | undefined;
+      let owner: TransferOwner | undefined;
+      try {
+        file = await open(prefix + ".owner", constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+        owner = await readOwnerFields(file);
+      } catch { /* Missing or incomplete records use monotonic retention. */ }
+      finally { await file?.close(); }
+      if (reclaimTransfer(transferOwnerState(owner, 0), `${info.dev}:${info.ino}:${info.birthtimeMs}`, now)) {
+        await rm(prefix + ".partial", { recursive: true, force: true });
+        await rm(prefix + ".owner.tmp", { force: true });
+        await rm(prefix + ".owner", { force: true });
+      }
+    }, name);
   }));
 }
 

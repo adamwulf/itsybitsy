@@ -59,7 +59,8 @@ test("recovery ignores committed snapshots and refuses a symlink above a sweep r
   const committed = join(parent, name);
   for (const path of [partial, committed]) {
     await mkdir(path, { recursive: true, mode: 0o700 });
-    await writeTransferOwner(path, { pid: 42, start: 10 });
+    if (path === partial) await writeTransferOwner(join(parent, "incoming"), { pid: 42, start: 10 }, path.split("/").pop()!.replace(".partial", ".owner"));
+    else await writeTransferOwner(path, { pid: 42, start: 10 });
   }
   await symlink(join(root, "private"), join(root, "redirected"));
   await expect(sweepOutgoingDirectories(join(root, "redirected", "snapshots"))).rejects.toThrow("Unsafe transfer directory");

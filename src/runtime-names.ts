@@ -64,3 +64,7 @@ export function transferStagingPaths(): string[] {
 export function transferStagingRoot(): string {
   return transferStagingPaths()[process.platform === "darwin" ? 0 : 1]!;
 }
+
+// Both aliases are static: profile generation must not probe a delivered path.
+export const deliveredAttachmentPattern = "^/(private/)?tmp/itsybitsy-attachments-[^/]*(/|$)";
+export const deliveredAttachmentPath = new RegExp(deliveredAttachmentPattern, "i");

@@ -63,12 +63,16 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
   const root = join(storage.tempDir, "itsybitsy-attachments-" + id);
   const staging = storage.stagingRoot ?? (storage.tempDir === "/tmp" ? transferStagingRoot() : join(storage.tempDir, "staging"));
   const partial = join(await io(() => stagingArea(staging, "incoming")), id + ".partial");
-  let current: string | undefined;
+  const area = join(staging, "incoming");
+  const sidecar = join(area, id + ".owner");
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   const close = async () => { const file = handle; handle = undefined; await file?.close(); };
   const cleanup = async () => {
     const outstanding = pending;
-    const remove = async () => { if (current) await rm(current, { recursive: true, force: true }); };
+    const remove = async () => {
+      await rm(partial, { recursive: true, force: true });
+      await rm(sidecar, { force: true });
+    };
     const rollback = (async () => {
       await outstanding?.catch(() => {});
       try { await close(); } finally { await remove(); }
@@ -80,8 +84,8 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
     }
   };
   try {
-    await io(async () => { await mkdir(partial, { mode: 0o700 }); current = partial; });
-    await io(() => writeTransferOwner(partial, { pid: process.pid, start: stagingOwnerStart(process.pid) }));
+    await io(() => writeTransferOwner(area, { pid: process.pid, start: stagingOwnerStart(process.pid) }, id + ".owner"));
+    await io(() => mkdir(partial, { mode: 0o700 }));
     let received = 0;
     const mapping: AttachmentMapping[] = [];
     for (const [index, file] of header.files.entries()) {
@@ -100,12 +104,12 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
     await requireSendFin(body, options);
     return { message: rewriteAttachmentPaths(header.message, mapping, 1024 ** 2, 64 * 1024), cleanup,
       async commit() {
-        try { await io(async () => { await rename(partial, root); current = root; }); }
+        try { await io(() => rename(partial, root)); }
         catch (err) {
           if ((err as NodeJS.ErrnoException).code === "EXDEV") throw Error("Incoming staging and committed attachments must be on the same filesystem", { cause: err });
           throw err;
         }
-        await io(() => rm(join(root, "owner.json")));
+        await io(() => rm(sidecar));
       },
     };
   } catch (error) { await cleanup(); throw error; }

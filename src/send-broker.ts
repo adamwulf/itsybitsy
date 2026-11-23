@@ -303,9 +303,8 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     }
     let resolved;
     if (!localSyntax && !localMachine && !deferred) {
-      const sandboxedWorktree = !!worktree && isSandboxedProcess();
-      resolved = await resolveAddress(target, repos, cwd, sandboxedWorktree);
-      deferred = sandboxedWorktree && !!resolved.incompleteVisibility;
+      resolved = await resolveAddress(target, repos, cwd, !!worktree);
+      deferred = !!worktree && !!resolved.incompleteVisibility;
     }
     if (deps.signal?.aborted) return cancelled();
     if (deferred || resolved?.remote) {

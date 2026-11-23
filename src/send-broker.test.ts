@@ -783,12 +783,15 @@ describe("send broker", () => {
         return header.id;
       }, () => {}); }, 25);
       try {
+        const hiddenRepo = { name: "hidden", path: join(home, "hidden") };
+        await Bun.write(join(hiddenRepo.path, ".itsybitsy", "agents"), "unlistable directory");
         const route = async (target: string, hidden = false, text = MESSAGE) => {
           const answer = await routeCliSend(command({ target, readMessage: async () => text }), {
             cwd, watchdogLive: async () => true,
             resolveTarget: async (...args) => {
               if (target.includes("/")) throw new Error("qualified remote lookup in CLI");
-              if (hidden) return { agent: null, isSystemCoordinator: false, error: "Cannot resolve the target with the peer cache hidden", incompleteVisibility: { unreadableDirs: [peerDir] } };
+              expect(args[3]).toBe(true);
+              if (hidden) args[1] = [...repos, hiddenRepo];
               return (await import("./resolve-target")).resolveSendTarget(...args);
             },
             sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
@@ -802,10 +805,10 @@ describe("send broker", () => {
           target: { kind: "agent", repo: "remote", agent: "worker" }, files: [], message: MESSAGE,
         } }]);
         expect((await route("worker")).ok).toBe(true);
-        if (!disabled) {
-          expect((await route(TARGET_ID, true)).stderr).toContain("@<repo>/<agent> for a local send");
-          await writeAgent(targetRepo, "worker", {});
-          const ambiguity = await route("worker", true);
+        expect((await route(TARGET_ID, true)).stderr).toContain("@<repo>/<agent> for a local send");
+        await writeAgent(targetRepo, "worker", {});
+        for (const hidden of [true, false]) {
+          const ambiguity = await route("worker", hidden);
           expect(ambiguity.stderr).toContain("laptop/worker");
           expect(ambiguity.stderr).toContain("studio/worker");
         }

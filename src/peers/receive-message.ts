@@ -8,12 +8,12 @@ import { sanitizeAttachmentName } from "./attachment-name";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
 import { hasFreeSpace, VolumeReservations, watcherTmpReservations } from "./attachment-space";
 import { cleanRemoteText } from "./peer-link";
-import { checkIncomingFiles } from "./transfer-limits";
+import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./transfer-limits";
 import type { PairStream } from "./pairing";
 import { sendMessage, type PeerEnqueueOptions } from "../ib-commands";
 import { listRepos } from "../registry";
 import { resolveAgentTarget } from "../resolve-target";
-import { waitForIO, TransferIdleError, streamFileBody, requireSendFin, type FileBodyOptions, type SendHeader, type SendTarget } from "./send-frame";
+import { streamFileBody, requireSendFin, type FileBodyOptions, type SendHeader, type SendTarget } from "./send-frame";
 
 export function targetLabel(target: SendTarget): string {
   if (target.kind === "system") return "@system";
@@ -117,15 +117,21 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
       waiters++;
       const result = Promise.withResolvers<void>();
       const finish: Replay = failure => failure ? result.reject(failure.error) : result.resolve();
+      const closed = () => result.reject(options.signal!.reason);
+      const timeout = () => result.reject(new Error("still being received — outcome unknown"));
+      const setTimer = options.setTimer ?? ((ms, fn) => {
+        const timer = setTimeout(fn, ms); return () => clearTimeout(timer);
+      });
+      const cancel = setTimer(IDLE_TIMEOUT_MS, timeout);
       try {
         options.admitted?.(false);
+        options.signal?.throwIfAborted();
         earlier.add(finish);
-        try { return await waitForIO(options, () => result.promise); }
-        catch (err) {
-          if (err instanceof TransferIdleError) throw new Error("still being received — outcome unknown");
-          throw err;
-        }
+        options.signal?.addEventListener("abort", closed, { once: true });
+        return await result.promise;
       } finally {
+        cancel();
+        options.signal?.removeEventListener("abort", closed);
         earlier.delete(finish);
         waiters--;
       }

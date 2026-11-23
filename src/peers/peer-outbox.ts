@@ -42,7 +42,7 @@ export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd
     id = resolveSenderId("", { cwd: path });
     const worktree = matchWorktreeCaller(path);
     if (worktree) {
-      if (!id || !await isRegisteredAgentWorktree(path, [worktree[1]!])) throw new Error(unverifiable);
+      if (!id || !await registeredQueueRepo(worktree[1]!, repos) || !await isRegisteredAgentWorktree(path, [worktree[1]!])) throw new Error(unverifiable);
       from = await qualifiedAgentSender(id, worktree[1]!, repos);
     } else if (id === "@system") {
       from = { kind: "system" };

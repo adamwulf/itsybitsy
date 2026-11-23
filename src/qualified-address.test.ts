@@ -302,6 +302,11 @@ describe("qualified agent addresses", () => {
       expect((await send(["bad"], fake)).stderr).toContain("cannot verify the sender");
       expect(seen.map(h => h.from)).toEqual([{ kind: "user" }, { kind: "user" },
         { kind: "agent", id: "laptop-a/App/mgr" }, { kind: "user" }, { kind: "system" }, { kind: "agent", id: "laptop-a/App/mgr" }]);
+      const registry = join(cli.home, ".itsybitsy", "repos.json");
+      await Bun.write(registry, JSON.stringify({ repos: [] }));
+      expect((await send(["unregistered agent"], worktree)).stderr).toContain("cannot verify the sender");
+      expect((await send(["unregistered human"], worktree, "human")).exitCode).toBe(0);
+      expect(seen.at(-1)?.from).toEqual({ kind: "user" });
       expect(seen.every(h => h.files.length === 0)).toBe(true);
     } finally { clearInterval(timer); }
   });

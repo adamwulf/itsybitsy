@@ -2040,7 +2040,13 @@ export async function main() {
           console.error(err instanceof Error ? err.message : String(err));
           process.exit(1);
         });
-        await printAndExit(await handoffRemoteMessage(remote.peer, textHeader(remote.target, message, sender)));
+        const controller = new AbortController();
+        const interrupt = () => controller.abort();
+        process.on("SIGINT", interrupt);
+        let result;
+        try { result = await handoffRemoteMessage(remote.peer, textHeader(remote.target, message, sender), controller.signal); }
+        finally { process.off("SIGINT", interrupt); }
+        await printAndExit(controller.signal.aborted ? { ...result, exitCode: 130 } : result);
         break;
       }
 

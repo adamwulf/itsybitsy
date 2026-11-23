@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { MAX_HEADER_BYTES } from "./transfer-limits";
-import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { userHome } from "../home";
 import { resolveRemoteSharedCaller, type IbCommandResult } from "../ib-commands";
@@ -47,7 +47,7 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 }
 
 /** A claimed request might already have reached the other machine. Never re-submit it. */
-export async function handoffRemoteMessage(peer: string, header: SendHeader): Promise<IbCommandResult> {
+export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal): Promise<IbCommandResult> {
   try {
     if (!await hasLivePeerWatcher()) return fail("remote sends need ib watch running on this machine");
     encodeSendHeader(parseSendHeader(header));
@@ -61,7 +61,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader): Pr
       throw err;
     }
     const deadline = Date.now() + 10_000;
-    do {
+    while (!signal?.aborted && Date.now() < deadline) {
       try {
         const result = JSON.parse(await readFile(join(dir, "result.json"), "utf8"));
         await rm(dir, { recursive: true, force: true });
@@ -72,13 +72,14 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader): Pr
         if (!missing(err)) throw err;
       }
       await Bun.sleep(50);
-    } while (Date.now() < deadline);
-    try { await unlink(join(dir, "request.json")); } catch (err) {
-      if (missing(err)) return fail("Remote send timed out: " + SEND_UNKNOWN);
+    }
+    const reason = signal?.aborted ? "Remote send interrupted" : "Remote send timed out";
+    try { await rename(join(dir, "request.json"), join(dir, "withdrawn.json")); } catch (err) {
+      if (missing(err)) return fail(reason + ": " + SEND_UNKNOWN);
       throw err;
     }
     await rm(dir, { recursive: true, force: true });
-    return fail("Remote send timed out before ib watch claimed the request");
+    return fail(reason + " before ib watch claimed the request");
   } catch (err) { return fail(detail(err)); }
 }
 

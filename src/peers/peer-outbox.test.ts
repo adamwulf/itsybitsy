@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetUserHome, setUserHome } from "../home";
-import { pollPeerOutbox } from "./peer-outbox";
+import { waitFor } from "../test-utils";
+import { handoffRemoteMessage, textHeader, pollPeerOutbox } from "./peer-outbox";
 import { MAX_HEADER_BYTES } from "./transfer-limits";
 
 let home: string;
@@ -26,4 +27,21 @@ test.each(["oversize", "symlink", "FIFO"])("refuses a %s peer request without se
   await pollPeerOutbox(async () => { sends++; return ""; }, () => {});
   expect(await Bun.file(join(dir, "result.json")).json()).toMatchObject({ ok: false });
   expect(sends).toBe(0);
+});
+
+test.each([false, true])("interrupt after publication (claimed=%s)", async claimed => {
+  await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
+  const control = new AbortController();
+  const result = handoffRemoteMessage("peer", header, control.signal);
+  await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
+  const started = Promise.withResolvers<void>();
+  const hold = Promise.withResolvers<string>();
+  const poll = claimed ? pollPeerOutbox(async () => { started.resolve(); return hold.promise; }, () => {}) : undefined;
+  if (claimed) await started.promise;
+  control.abort();
+  try {
+    expect((await result).stderr).toContain(claimed ? "outcome unknown" : "before ib watch claimed");
+    expect(await Bun.file(join(base, header.id, "request.json")).exists()).toBe(false);
+  } finally { hold.resolve(header.id); await poll; }
 });

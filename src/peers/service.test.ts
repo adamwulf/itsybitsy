@@ -1,7 +1,7 @@
 import { createPeerOutboxPoll, handoffRemoteMessage, textHeader } from "./peer-outbox";
 import { isHumanSendTerminal, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { spyOn, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx, resetProcessStartEpochSecondsCache } from "../agents";
@@ -1763,6 +1763,24 @@ describe("toPairConnection maps iroh's TooLong to PairProtocolError", () => {
 });
 
 describe("endpoint owner peer-outbox polling", () => {
+  test("only the lock owner recovers a ready entry without peers or a bound endpoint", async () => {
+    const base = join(home, ".itsybitsy", "peer-outbox");
+    const dir = join(base, crypto.randomUUID());
+    await mkdir(dir, { recursive: true });
+    const { writeTransferOwner } = await import("./transfer-owner");
+    await writeTransferOwner(dir, { pid: OTHER.pid, start: OTHER.startEpoch });
+    const deps = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, agents: [], repos: [] }), () => {}, null, home);
+    const locked = new PeerService({ ...deps, acquireLock: async () => ({ acquired: false, ownerPid: 42 }) });
+    const owner = new PeerService(deps);
+    try {
+      await locked.bootIfPaired();
+      expect((await stat(dir)).isDirectory()).toBe(true);
+      await owner.bootIfPaired();
+      expect(await readdir(base)).toEqual([]);
+      expect(owner.view().status.kind).not.toBe("listening");
+    } finally { await locked.shutdown(); await owner.shutdown(); }
+  });
+
   test("only the owner polls, overlapping ticks send each id once with four active, and endpoint loss stops claims", async () => {
     const base = join(home, ".itsybitsy", "peer-outbox");
     const owner = makeService({ pollOutbox: createPeerOutboxPoll() });

@@ -479,7 +479,11 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
     if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
     throw new PeerProtocolError("Malformed send acknowledgement");
   } catch (err) {
-    void stream?.cancel().catch(() => {});
+    if (stream) {
+      if (!await settledWithinGrace(stream.cancel(), { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+    } else if (transfer.signal?.aborted || err instanceof TransferIdleError) {
+      closeQuietly(conn, PEER_CLOSE.error, "send open interrupted");
+    }
     if (mayBeQueued && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN);
     throw err;
   } finally { finished = true; }
@@ -567,7 +571,7 @@ async function startAgentWithDeadline(
 }
 
 /** Give the client time to consume its reply, or a reset time to acquire the native stream mutex. */
-async function settledWithinGrace(operation: Promise<unknown>, deps: PeerResponderDeps): Promise<boolean> {
+async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerResponderDeps, "setTimer">): Promise<boolean> {
   const deadline = Promise.withResolvers<false>();
   const cancel = deps.setTimer(5000, () => deadline.resolve(false));
   try {

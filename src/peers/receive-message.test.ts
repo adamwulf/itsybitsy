@@ -463,3 +463,37 @@ test("pending replay and framed header readers have independent watcher-wide cei
     expect(JSON.parse(new TextDecoder().decode(await excess.readToEnd(1024))).error).toContain("busy");
   } finally { links.forEach(link => link.a.close(0, "done")); await Promise.all(serving); }
 });
+
+test("a stuck sender reset closes the connection and releases a partial receipt", async () => {
+  const dir = await receiveFixture();
+  const filesDir = join(cli.root, "staged");
+  await mkdir(filesDir);
+  await Bun.write(join(filesDir, "0"), "abc");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const stream = await a.openBi();
+  a.openBi = async () => stream;
+  const write = stream.write.bind(stream);
+  stream.write = async bytes => {
+    if (bytes.length === 3) return write(bytes.subarray(0, 1));
+    if (bytes.length === 2) { await a.closed(); throw Error("closed"); }
+    return write(bytes);
+  };
+  stream.cancel = () => new Promise(() => {});
+  const controller = new AbortController();
+  const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms === 5000 ? 5 : ms); return () => clearTimeout(t); };
+  const handler = Promise.withResolvers<void>();
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    setTimer: timer, log() {}, receiveMessage: async (...args) => {
+      try { await receiver(...args); } finally { handler.resolve(); }
+    } });
+  const sending = requestSend(a, header({ files: [manifestFile("abc")] }), timer, { filesDir, signal: controller.signal });
+  await waitFor(async () => {
+    const [root] = await readdir(dir);
+    return !!root && (await stat(join(dir, root, "0/a.txt")).catch(() => null))?.size === 1;
+  });
+  controller.abort(Error("cancelled"));
+  await expect(sending).rejects.toThrow("cancelled");
+  await Promise.all([serving, handler.promise]);
+  expect(await readdir(dir)).toEqual([]);
+  await receiver(header({ files: [manifestFile("")] }), "sender", paired, { read: async () => Buffer.alloc(0) });
+});

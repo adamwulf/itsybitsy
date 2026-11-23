@@ -64,7 +64,9 @@ test("watchdog reclaims a dead CLI's staging before publication and leaves a liv
     const path = join(root, "send-attachments", id);
     await mkdir(path, { recursive: true });
     await writeFile(join(path, "0"), "partial");
-    const lease = join(spawnRequestDir(root), "." + id + ".staging");
+    const marker = join(spawnRequestDir(root), "." + id + ".staging");
+    await Bun.write(marker, "");
+    const lease = join(path, "lease");
     await Bun.write(lease, JSON.stringify({ pid: process.pid, start: selfProcessStartEpochSeconds() ?? Math.floor(Date.now()/1000 - process.uptime()) }));
     await sweepStagingLease(root, id, Date.now());
     expect(await Bun.file(join(path, "0")).exists()).toBe(true);

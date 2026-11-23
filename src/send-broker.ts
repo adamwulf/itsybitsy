@@ -48,11 +48,11 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
-import { constants, fstatSync, futimesSync } from "node:fs";
-import { mkdir, open, rm, stat } from "node:fs/promises";
+import { fstatSync, futimesSync } from "node:fs";
+import { mkdir, lstat, open, rm, stat } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
-import { brokerAttachmentStage, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
+import { brokerAttachmentStage, createBrokerProgress, openBrokerLease, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
@@ -228,29 +228,40 @@ export async function requestSendViaWatchdog(
 
 const STAGING_LEASE_MS = 60_000;
 
-// The queue already gives the watchdog a bounded request id to inspect. A
-// sibling lease appears before hashing starts, even if request.json never does.
+// The empty queue marker supplies an id to the watchdog even if the CLI
+// dies before publication. Ownership evidence lives in protected staging.
 async function startStagingLease(dir: string, id: string) {
   const queue = spawnRequestDir(dir);
   await mkdir(queue, { recursive: true, mode: 0o700 });
-  const path = join(queue, "." + id + ".staging");
-  const lease = await open(path, "wx", 0o600);
+  const marker = join(queue, "." + id + ".staging");
+  await (await open(marker, "wx", 0o600)).close();
+  const stage = join(dir, "send-attachments", id);
+  await mkdir(stage, { mode: 0o700 });
+  const lease = await open(join(stage, "lease"), "wx", 0o600);
   try {
     const start = selfProcessStartEpochSeconds() ?? Math.floor(Date.now() / 1000 - process.uptime());
     await lease.writeFile(JSON.stringify({ pid: process.pid, start }));
-  } catch (err) { await lease.close(); await rm(path, { force: true }); throw err; }
+  } catch (err) { await lease.close(); throw err; }
   const heartbeat = setInterval(() => { const now = new Date(); void lease.utimes(now, now).catch(() => {}); }, STAGING_LEASE_MS / 4);
   return async (removed: boolean) => {
     clearInterval(heartbeat);
     await lease.close();
-    if (removed) await rm(path, { force: true });
+    if (removed) await rm(marker, { force: true });
   };
 }
 
 export async function sweepStagingLease(dir: string, id: string, now: number) {
   if (!/^[0-9a-f]{32}$/.test(id)) return;
   const path = join(spawnRequestDir(dir), "." + id + ".staging");
-  const lease = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let lease;
+  try { lease = await openBrokerLease(dir, id); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (now - (await lstat(path)).mtimeMs < STAGING_LEASE_MS) return;
+    await removeAbandonedStaging(dir, id);
+    await rm(path, { force: true });
+    return;
+  }
   try {
     const info = await lease.stat();
     if (!info.isFile() || info.nlink !== 1 || info.size > 256) return;
@@ -286,10 +297,9 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   let releaseLease: ((removed: boolean) => Promise<void>) | undefined;
   try {
     if (remote) {
-      releaseLease = await startStagingLease(dir, request.id);
       await mkdir(parent, { recursive: true, mode: 0o700 });
-      if (stage) request.files = await stage(staged);
-      else { await mkdir(staged, { mode: 0o700 }); request.files = []; }
+      releaseLease = await startStagingLease(dir, request.id);
+      request.files = stage ? await stage(staged, true) : [];
     }
     const result = await submitWatchdogRequest(
       dir,

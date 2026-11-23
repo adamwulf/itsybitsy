@@ -7,7 +7,7 @@ import { hasFreeSpace } from "./attachment-space";
 import { withSenderManifest, type AttachmentSender } from "./local-attachments";
 import type { SendHeader } from "./send-frame";
 
-export type StageRemoteFiles = (dir: string) => Promise<SendHeader["files"]>;
+export type StageRemoteFiles = (dir: string, leasedDirectory?: boolean) => Promise<SendHeader["files"]>;
 
 export async function openStagedFile(path: string, size: number, flags = constants.O_NOFOLLOW) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | flags);
@@ -42,8 +42,8 @@ async function copyOpened(handle: FileHandle, size: number, destination: string,
   } finally { await copy.close(); }
 }
 
-export async function cloneAttachments(dir: string, entries: (ManifestEntry & { sha256: string })[], signal?: AbortSignal, clone = cloneByPath) {
-  await mkdir(dir, { mode: 0o700 });
+export async function cloneAttachments(dir: string, entries: (ManifestEntry & { sha256: string })[], signal?: AbortSignal, clone = cloneByPath, leasedDirectory = false) {
+  if (!leasedDirectory) await mkdir(dir, { mode: 0o700 });
   try {
     const total = entries.reduce((sum, entry) => sum + entry.size, 0);
     if (!await hasFreeSpace(dir, total)) throw new Error("Insufficient space for staged attachments and the 1 GiB reserve");
@@ -71,8 +71,8 @@ export async function cloneAttachments(dir: string, entries: (ManifestEntry & { 
 
 export function remoteAttachmentStage(paths: readonly AttachmentArgument[], sender: AttachmentSender, signal?: AbortSignal,
   onStaged?: (files: SendHeader["files"]) => void): StageRemoteFiles {
-  return dir => withSenderManifest(paths, sender, signal, async entries => {
-    const files = await cloneAttachments(dir, entries, signal);
+  return (dir, leasedDirectory) => withSenderManifest(paths, sender, signal, async entries => {
+    const files = await cloneAttachments(dir, entries, signal, cloneByPath, leasedDirectory);
     onStaged?.(files);
     return files;
   });
@@ -175,12 +175,18 @@ export function brokerAttachmentStage(agentDir: string, id: string, files: SendH
   };
 }
 
+export function openBrokerLease(agentDir: string, id: string) {
+  return withBrokerDirectory(agentDir, id, (_dir, path, noFollow) =>
+    open(join(path, "lease"), constants.O_RDONLY | constants.O_NONBLOCK | noFollow));
+}
+
 // Reclaim only protocol-owned entries through pinned directory handles. A
 // forged lease cannot make the watchdog recursively delete a supplied path.
 export async function removeAbandonedStaging(agentDir: string, id: string) {
   try {
     await withBrokerDirectory(agentDir, id, async dir => {
       await removeBrokerMember(dir, "progress");
+      await removeBrokerMember(dir, "lease");
       for (let n = 0; n < 100; n++) await removeBrokerMember(dir, String(n));
     });
     await withBrokerDirectory(agentDir, undefined, parent => removeBrokerMember(parent, id, true));

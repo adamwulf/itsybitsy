@@ -208,52 +208,63 @@ function inputLine(value: string, innerWidth: number): string {
   return `…${tail.join("")}`;
 }
 
-export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number): string[] {
+function proseLines(text: string, width: number, color = ""): string[] {
+  return wordWrapSingleLine(text, width).map(line => color ? `${color}${line}${RESET}` : line);
+}
+
+function peerListLines(view: PeerServiceView, innerWidth: number, maxLines: number): string[] {
+  if (view.peersError !== null) return proseLines(view.peersError, innerWidth, RED).slice(0, maxLines);
+  if (view.peers.length === 0) return [`${DIM}  none yet${RESET}`].slice(0, maxLines);
+  const listed = view.peers.slice(0, MAX_LISTED_PEERS);
+  const nameWidth = Math.max(...listed.map((p) => visibleWidth(p.name)));
+  const links = new Map(view.links.map((link) => [link.id, link]));
+  const groups = listed.map(peer => {
+    const lines: string[] = [];
+    const pad = " ".repeat(Math.max(0, nameWidth - visibleWidth(peer.name)));
+    const link = links.get(peer.id);
+    const state = peerLinkStateText(peerLinkStatus(link));
+    lines.push(truncateToWidth(`  ${peer.name}${pad}  ${DIM}${shortPeerId(peer.id)}${RESET}  ${state}`, innerWidth, ""));
+    if (link !== undefined && !link.connected && link.lastError !== null) {
+      for (const line of wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4))) lines.push(`    ${RED}${line}${RESET}`);
+    }
+    return lines;
+  });
+  // Keep each peer with its error, and reserve room for the count of hidden peers.
+  for (;;) {
+    const lines = groups.flat();
+    const hidden = view.peers.length - groups.length;
+    if (hidden > 0) lines.push(...proseLines(`  …and ${hidden} more (ib peer list shows all)`, innerWidth, DIM));
+    if (lines.length <= maxLines || groups.length === 0) return lines.slice(0, maxLines);
+    groups.pop();
+  }
+}
+
+export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number, maxLines: number): string[] {
   const view = d.service.view();
+  const header = [`${BOLD}This install's id${RESET}`];
+  if (view.selfId !== null) {
+    header.push(...wrapSingleLine(view.selfId, innerWidth));
+  } else if (view.identityError !== null) {
+    header.push(...proseLines(`unavailable: ${view.identityError}`, innerWidth, RED));
+  } else {
+    header.push(`${DIM}loading…${RESET}`);
+  }
+  for (const line of statusLines(view.status, Date.now())) header.push(...proseLines(line.text, innerWidth, line.color));
+  header.push("");
+
+  const pairing = buildPairingContent(d, view, innerWidth);
+  // Leave the active input, error and key hint together at the bottom of the overlay.
+  const room = Math.max(0, maxLines - pairing.length - 2); // Paired peers heading and separator
+  const top = header.slice(0, Math.max(0, room - 1));
+  return [...top, `${BOLD}Paired peers${RESET}`, ...peerListLines(view, innerWidth, room - top.length), "", ...pairing];
+}
+
+function buildPairingContent(d: PeersDialogState, view: PeerServiceView, innerWidth: number): string[] {
   const lines: string[] = [];
-  const prose = (text: string, color = "") => {
-    for (const line of wordWrapSingleLine(text, innerWidth)) lines.push(color ? `${color}${line}${RESET}` : line);
-  };
+  const prose = (text: string, color = "") => lines.push(...proseLines(text, innerWidth, color));
   const error = () => {
     if (d.error !== null) prose(d.error, RED);
   };
-
-  lines.push(`${BOLD}This install's id${RESET}`);
-  if (view.selfId !== null) {
-    for (const part of wrapSingleLine(view.selfId, innerWidth)) lines.push(part);
-  } else if (view.identityError !== null) {
-    prose(`unavailable: ${view.identityError}`, RED);
-  } else {
-    lines.push(`${DIM}loading…${RESET}`);
-  }
-  for (const line of statusLines(view.status, Date.now())) prose(line.text, line.color);
-  lines.push("");
-
-  lines.push(`${BOLD}Paired peers${RESET}`);
-  if (view.peersError !== null) {
-    prose(view.peersError, RED);
-  } else if (view.peers.length === 0) {
-    lines.push(`${DIM}  none yet${RESET}`);
-  } else {
-    const listed = view.peers.slice(0, MAX_LISTED_PEERS);
-    const nameWidth = Math.max(...listed.map((p) => visibleWidth(p.name)));
-    // The poller's state, once the endpoint has bound; until then, none.
-    const links = new Map(view.links.map((link) => [link.id, link]));
-    for (const peer of listed) {
-      const pad = " ".repeat(Math.max(0, nameWidth - visibleWidth(peer.name)));
-      const link = links.get(peer.id);
-      const state = peerLinkStateText(peerLinkStatus(link));
-      lines.push(truncateToWidth(`  ${peer.name}${pad}  ${DIM}${shortPeerId(peer.id)}${RESET}  ${state}`, innerWidth, ""));
-      if (link !== undefined && !link.connected && link.lastError !== null) {
-        for (const line of wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4))) lines.push(`    ${RED}${line}${RESET}`);
-      }
-    }
-    if (view.peers.length > listed.length) {
-      lines.push(`${DIM}  …and ${view.peers.length - listed.length} more (ib peer list shows all)${RESET}`);
-    }
-  }
-  lines.push("");
-
   let hint: string;
   const session = view.session;
   if (session === null) {

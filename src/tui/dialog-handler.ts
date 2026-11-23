@@ -1220,7 +1220,7 @@ export function buildSetupContent(
   if (dialog.tab === 0) {
     buildSetupTab0Content(dialog, lines, innerWidth);
   } else if (dialog.tab === PEERS_TAB) {
-    lines.push(...(dialog.peers ? buildPeersDialogContent(dialog.peers, innerWidth) : ["Peering is not available here"]));
+    lines.push(...(dialog.peers ? buildPeersDialogContent(dialog.peers, innerWidth, (process.stdout.rows || 24) - 2 - lines.length) : ["Peering is not available here"]));
   } else {
     buildConfigTabContent(dialog, lines, innerWidth);
   }

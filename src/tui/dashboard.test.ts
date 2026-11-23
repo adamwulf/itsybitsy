@@ -8984,6 +8984,27 @@ describe("idle render checks", () => {
   });
 });
 
+/**
+ * A real pi-tui TUI over an inert terminal. It is stopped, so the render
+ * that showOverlay() schedules never reaches doRender() (which writes a
+ * crash log under the real home on an over-width row); the test runs
+ * compositeOverlays() itself — the exact step doRender takes between
+ * render() and its width check. compositeOverlays is private in the typings.
+ */
+function overlayTui(width: number, height: number): { tui: TUI; composite: (lines: string[]) => string[] } {
+  const terminal = {
+    start() {}, stop() {}, async drainInput() {}, write() {},
+    get columns() { return width; }, get rows() { return height; },
+    get kittyProtocolActive() { return false; },
+    moveBy() {}, hideCursor() {}, showCursor() {},
+    clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {},
+  };
+  const tui = new TUI(terminal);
+  tui.stop();
+  const internals = tui as unknown as { compositeOverlays(lines: string[], width: number, height: number): string[] };
+  return { tui, composite: (lines) => internals.compositeOverlays(lines, width, height) };
+}
+
 describe("tabs on screen under an overlay", () => {
   // pi-tui's visibleWidth() counts \t as 3 columns, but the slicing it uses to
   // composite an overlay onto a row counts it as 0. A tab on a row under an
@@ -9001,27 +9022,6 @@ describe("tabs on screen under an overlay", () => {
   // Full-width views start their text at column 62: the tab is 60 columns in.
   const wideLines = (): string[] => Array.from({ length: 40 }, (_, i) => `${"x".repeat(60)}\tfrom x.rb:${i}`);
 
-  /**
-   * A real pi-tui TUI over an inert terminal. It is stopped, so the render
-   * that showOverlay() schedules never reaches doRender() (which writes a
-   * crash log under the real home on an over-width row); the test runs
-   * compositeOverlays() itself — the exact step doRender takes between
-   * render() and its width check. compositeOverlays is private in the typings.
-   */
-  function overlayTui(): { tui: TUI; composite: (lines: string[]) => string[] } {
-    const terminal = {
-      start() {}, stop() {}, async drainInput() {}, write() {},
-      get columns() { return WIDTH; }, get rows() { return ROWS; },
-      get kittyProtocolActive() { return false; },
-      moveBy() {}, hideCursor() {}, showCursor() {},
-      clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {},
-    };
-    const tui = new TUI(terminal);
-    tui.stop();
-    const internals = tui as unknown as { compositeOverlays(lines: string[], width: number, height: number): string[] };
-    return { tui, composite: (lines) => internals.compositeOverlays(lines, WIDTH, ROWS) };
-  }
-
   let origRows: number;
   beforeEach(() => {
     origRows = process.stdout.rows;
@@ -9034,7 +9034,7 @@ describe("tabs on screen under an overlay", () => {
   /** A dashboard on the overlay TUI, with `agents` in the tree (the first selected). */
   function dashboardWith(agents: Agent[]): { dashboard: DashboardComponent; composite: (lines: string[]) => string[] } {
     const dashboard = makeDashboard();
-    const { tui, composite } = overlayTui();
+    const { tui, composite } = overlayTui(WIDTH, ROWS);
     dashboard.setTui(tui);
     dashboard.onUpdate(agents, agents.map((agent) => makeFlatAgent(agent)), []);
     return { dashboard, composite };
@@ -9054,7 +9054,7 @@ describe("tabs on screen under an overlay", () => {
   test("witness: pi-tui overflows a row whose tab is beside an overlay", () => {
     // No expansion anywhere: this proves the harness reproduces pi-tui's bug,
     // and fails loudly if an upgrade changes how pi-tui slices a tab.
-    const { tui, composite } = overlayTui();
+    const { tui, composite } = overlayTui(WIDTH, ROWS);
     tui.showOverlay({ render: (width: number) => ["#".repeat(width)], invalidate() {} }, { width: 80, anchor: "center" });
     const base = Array.from({ length: ROWS }, () => `${"a".repeat(130)}\t${"b".repeat(27)}`);
     expect(visibleWidth(base[0]!)).toBe(WIDTH);
@@ -9667,6 +9667,35 @@ describe("setup Peers tab", () => {
     const { dashboard, service } = open();
     dashboard.showDialog({ type: "help", lines: ["x"] });
     expect(service.calls).toEqual(["open", "close"]);
+  });
+
+  test("a 24-row terminal keeps code entry, its validation error and the hint on screen", () => {
+    const originalRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 24, writable: true, configurable: true });
+    try {
+      const dashboard = makeDashboard();
+      const { tui, composite } = overlayTui(140, 24);
+      dashboard.setTui(tui);
+      const service = new FakePeerService();
+      const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+        lastError: "connection refused", repos: null, agents: null })) });
+      dashboard.setPeerService(service);
+      dashboard.handleInput("I");
+      service.setSession("initiator", { stage: "code-entry" });
+      dashboard.handleInput("12");
+      dashboard.handleInput("\r");
+      const visible = stripAnsi(composite(dashboard.render(140)).slice(-24).join("\n"));
+      expect(visible).toContain("Code  (your id:");
+      expect(visible).toContain("> 12█");
+      expect(visible).toContain("A code is 8 characters");
+      expect(visible).toContain("Enter: send code    Esc: cancel");
+      expect(visible).toContain("connection refused");
+      expect(visible).toMatch(/…and \d+ more/);
+      expect(visible).toContain("└" + "─".repeat(68) + "┘");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
+    }
   });
 
   test("every row fits the dialog in every stage", () => {

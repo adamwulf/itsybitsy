@@ -29,6 +29,7 @@
  * throws {@link PairProtocolError} when the stream is over its limit.
  */
 
+import { CHUNK_BYTES } from "./transfer-limits";
 import { encodeSendHeader, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
@@ -412,34 +413,43 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
   if (header.files.length) throw new Error("attachments are not supported yet");
   const bytes = encodeSendHeader(header);
   let stream: PairStream | undefined;
-  let expired = false;
+  let finished = false;
   let mayBeQueued = false;
-  const timeout = Promise.withResolvers<never>();
-  const cancelTimer = setTimer(30_000, () => {
-    expired = true;
-    timeout.reject(new Error(mayBeQueued ? SEND_UNKNOWN : "Remote send timed out"));
-    void stream?.cancel().catch(() => {});
-  });
-  const exchange = async () => {
-    stream = await conn.openBi();
-    if (expired) { await stream.cancel(); throw new Error("Remote send timed out"); }
-    await stream.writeAll(bytes);
-    if (expired) throw new Error("Remote send timed out");
+  const io = <T>(operation: () => Promise<T>) => waitForIO({ setTimer }, operation);
+  try {
+    const active = await io(async () => {
+      const opened = await conn.openBi();
+      if (finished) { await opened.cancel(); throw new Error("Remote send timed out"); }
+      return opened;
+    });
+    stream = active;
+    let offset = 0;
+    while (offset < bytes.length) {
+      const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
+      const n = await io(() => active.write(chunk));
+      if (!Number.isInteger(n) || n <= 0 || n > chunk.length) throw new Error("Invalid send write count");
+      offset += n;
+    }
     mayBeQueued = true;
-    await stream.finish();
-    const reply = decodeObject(await stream.readToEnd(PEER_MAX_REPLY_BYTES), "reply");
+    await io(() => active.finish());
+    const parts: Uint8Array[] = [];
+    let length = 0;
+    while (true) {
+      const chunk = await io(() => active.read(Math.min(CHUNK_BYTES, PEER_MAX_REPLY_BYTES + 1 - length)));
+      if (!chunk.length) break;
+      length += chunk.length;
+      if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
+      parts.push(chunk);
+    }
+    const reply = decodeObject(Buffer.concat(parts, length), "reply");
     if (reply.ok === true && reply.id === header.id) return header.id;
     if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
     throw new PeerProtocolError("Malformed send acknowledgement");
-  };
-  try {
-    return await Promise.race([exchange(), timeout.promise]);
   } catch (err) {
+    void stream?.cancel().catch(() => {});
     if (mayBeQueued && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN);
     throw err;
-  } finally {
-    cancelTimer();
-  }
+  } finally { finished = true; }
 }
 
 // ---------------------------------------------------------------------------

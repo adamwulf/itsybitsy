@@ -640,7 +640,8 @@ test("a lost send acknowledgement reports uncertainty and never opens another st
   const sent = requestSend(a, { ...header, files: [] }, clock.setTimer);
   const incoming = await b.acceptBi();
   await incoming.readToEnd(4096);
-  clock.advance(30_000);
+  await Bun.sleep(0);
+  clock.advance(60_000);
   await expect(sent).rejects.toThrow("outcome unknown — check the agent");
   expect(clock.pending()).toBe(0);
   expect(a.closeInfo()).toBeNull();

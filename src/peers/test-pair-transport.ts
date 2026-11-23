@@ -95,6 +95,8 @@ class MemoryStream implements PairStream {
     this.outgoing.cancel();
   }
 
+  async write(bytes: Uint8Array): Promise<number> { await this.writeAll(bytes); return bytes.length; }
+
   async writeAll(bytes: Uint8Array): Promise<void> {
     if (this.conn.closeInfo()) throw new Error("connection lost");
     this.outgoing.write(bytes);

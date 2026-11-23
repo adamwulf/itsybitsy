@@ -682,7 +682,7 @@ describe("send broker", () => {
           sleep: async () => {
             work = processSpawnRequests(SENDER_ID, senderRepo, deps);
             await entered.promise;
-            clock = SPAWN_CLIENT_TIMEOUT_MS;
+            clock = 60_000;
           },
         });
         if (!("result" in route)) throw new Error("expected remote broker route");

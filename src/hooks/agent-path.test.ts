@@ -4458,3 +4458,12 @@ test("a frozen kernel policy builds its peer-outbox guard without opening the ha
     } finally { realpath.mockRestore(); }
   } finally { resetUserHome(); }
 });
+
+test("agent file tools and shell redirects cannot write CLI attachment staging", () => {
+  const ctx = makeCtx();
+  const file = join(ctx.agentDir, "send-attachments", "request", "0");
+  for (const input of [
+    makeInput({ toolName: "Write", toolInput: { file_path: file } }),
+    makeInput({ toolName: "Bash", toolInput: { command: "echo hi > " + file } }),
+  ]) expect(checkPathAccess(input, ctx)).toMatchObject({ decision: "deny", reason: expect.stringContaining("Only ib send") });
+});

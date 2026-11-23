@@ -31,14 +31,15 @@ import * as runtimeNames from "./runtime-names";
  *
  * Trust model: the request is untrusted DATA and carries only the target and
  * the message text — never a sender, an agent id of the caller, a repo or a
- * path. The watchdog sends as its OWN agent (verified against the sealed
+ * source path to open. Remote manifests also carry file metadata and rewrite
+ * spellings. The watchdog reads only numbered, private request files. It sends as its OWN agent (verified against the sealed
  * record, as for a spawn) and passes that id as `fromAgent`, so a request
  * cannot send in another agent's name; `--from` for another agent is refused
  * on the client. The watchdog never delivers to the requester itself: a
  * recipient's `tmux_session` and heartbeat are files that agent can write, so
  * a send to itself would let it choose where the unsandboxed watchdog types
  * its text. A send to itself therefore stays on the direct path (isAgentAt,
- * targetIsCaller). Files never cross: the client reads `-f <path>` and stdin
+ * targetIsCaller). For local sends, the client reads `-f <path>` and stdin
  * inside the sandbox, and the watchdog never reads a path for the agent. It
  * also never sets `stageAttachments` (send-time attachment staging copies the
  * files a message names; outside the sandbox that would let an agent copy out
@@ -47,11 +48,11 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
-import { existsSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { fstatSync, futimesSync } from "node:fs";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
-import { brokerAttachmentStage, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
+import { brokerAttachmentStage, createBrokerProgress, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
@@ -87,6 +88,7 @@ export const SEND_OP = "send";
 /** Longest target accepted: an agent id or nickname, `@repo/agent`, a team. */
 export const SEND_MAX_TARGET_CHARS = 256;
 
+const LOCAL_TARGET_EXIT = 66; // Private broker result: no remote handoff was attempted.
 const LOCAL_REMOTE_TARGET = "The target resolves locally. Use @<repo>/<agent> for a local send or <machine>/<repo>/<agent> for a remote send.";
 const REQUEST_FIELDS = new Set(["v", "id", "op", "target", "message", "noPassthrough", "files"]);
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
@@ -173,7 +175,7 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
     return { ok: false, error: "send request has an invalid target" };
   }
   // Empty only, as on the direct path (`ib send` refuses "" and nothing else).
-  if (typeof obj.message !== "string" || obj.message === "") {
+  if (typeof obj.message !== "string" || (obj.message === "" && !(obj.op === "remote-send" && Array.isArray(obj.files) && obj.files.length))) {
     return { ok: false, error: "send request needs a non-empty message" };
   }
   if (Buffer.byteLength(obj.message, "utf8") > SPAWN_MAX_PROMPT_BYTES) {
@@ -254,7 +256,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
           "The watchdog had already taken the message, so it may still be delivered; check with the recipient before sending it again.",
       },
       deps.timeoutMs ?? (remote ? IDLE_TIMEOUT_MS : SPAWN_CLIENT_TIMEOUT_MS),
-      remote ? { ...deps, claimedWorkIsLive: deps.watchdogLive ?? hasLiveWatchdog } : deps,
+      remote ? { ...deps, readProgress: async () => (await stat(join(staged, "progress")).catch(() => null))?.mtimeMs ?? 0 } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
@@ -370,14 +372,17 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       if (deps.signal?.aborted) return cancelled();
       message ??= await (command.readRawMessage ?? command.readMessage)();
       if (deps.signal?.aborted) return cancelled();
-      if (!message) return { result: brokerFail(command.usage) };
+      if (!message && !command.attachments?.length) return { result: brokerFail(command.usage) };
+      const stage = command.attachmentSender && remoteAttachmentStage(command.attachments!, await command.attachmentSender(), deps.signal, files => {
+        const bytes = files.reduce((total, file) => total + file.size, 0);
+        if (bytes > 5 * 1024 ** 2) console.error(`sending ${files.length} files (${(bytes / 1024 ** 2).toFixed(1)} MB) to ${target}…`);
+      });
       if (sender.kind === "worktree") {
         const from = await qualifiedAgentSender(sender.id, sender.repoPath, repos)
           .catch(() => ({ kind: "agent", id: `//${sender.id}` } as const));
         checkRemoteSize(message, resolved?.remote?.target ?? minimumTarget, from);
-        const stage = command.attachmentSender && remoteAttachmentStage(command.attachments!, await command.attachmentSender(), deps.signal);
         const result = await submitSendRequest("remote-send", sender.agentDir, sender.id, target, message, deps, false, stage);
-        if (stage && !machine && result?.stderr === LOCAL_REMOTE_TARGET) {
+        if (stage && !machine && result?.exitCode === LOCAL_TARGET_EXIT) {
           const local = await routeSendThroughWatchdog(command, deps);
           return { result: local ?? result };
         }
@@ -388,7 +393,6 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       resolved ??= await resolveAddress(target, repos, cwd);
       if (deps.signal?.aborted) return cancelled();
       if (resolved.remote) {
-        const stage = command.attachmentSender && remoteAttachmentStage(command.attachments!, await command.attachmentSender(), deps.signal);
         return { result: await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender.from), deps.signal, stage) };
       }
     }
@@ -468,22 +472,33 @@ export async function handleSendRequest(
     // always passed: these functions otherwise detect the sender from the
     // cwd, which here is the watchdog's. `stageAttachments` is never set.
     if (sender) {
-      if (!resolved.remote) return brokerFail(LOCAL_REMOTE_TARGET);
+      if (!resolved.remote) {
+        const result = brokerFail(LOCAL_REMOTE_TARGET);
+        if (parsed.request.files?.length) result.exitCode = LOCAL_TARGET_EXIT;
+        return result;
+      }
       const { handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
       const files = parsed.request.files ?? [];
       const limits = checkIncomingFiles(files, await readTransferLimits(), { machine: await readMachineName() });
       if (!limits.ok) return brokerFail(limits.error);
       const controller = new AbortController();
-      const staged = join(ctx.agentDir, "send-attachments", ctx.id);
+      const marker = parsed.request.files ? await createBrokerProgress(ctx.agentDir, ctx.id) : undefined;
       const checkClient = () => {
-        if (parsed.request.files && !existsSync(staged)) controller.abort();
+        if (marker && !fstatSync(marker.fd).nlink) controller.abort();
       };
-      checkClient();
+      let updated = 0;
+      const progress = () => {
+        const now = Date.now();
+        if (marker && now - updated >= 250) {
+          updated = now;
+          futimesSync(marker.fd, now / 1000, now / 1000);
+        }
+      };
       const timer = setInterval(checkClient, 250);
       try {
-        const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, controller.signal) : undefined;
-        return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal, stage);
-      } finally { clearInterval(timer); }
+        const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, controller.signal, progress) : undefined;
+        return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal, stage, progress);
+      } finally { clearInterval(timer); await marker?.close(); }
     }
     if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
     if (resolved.isSystemCoordinator) {

@@ -3,7 +3,7 @@ import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
 export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
-import { constants, existsSync, renameSync, writeFileSync } from "node:fs";
+import { constants, existsSync, futimesSync, renameSync, writeFileSync } from "node:fs";
 import { IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -65,7 +65,7 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 }
 
 /** A claimed request might already have reached the other machine. Never re-submit it. */
-export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles): Promise<IbCommandResult> {
+export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles, onProgress?: () => void): Promise<IbCommandResult> {
   let published = false;
   try {
     if (signal?.aborted) return interruptedSend("unpublished");
@@ -81,7 +81,17 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     await mkdir(staging, { mode: 0o700 });
     try {
       if (stage) {
-        header = { ...header, files: await stage(join(staging, "files")) };
+        // The orphan sweep also visits .staging. Keep an active clone/hash
+        // alive on slow volumes for as long as the submitting process lives.
+        const lease = await open(staging, constants.O_RDONLY | constants.O_DIRECTORY);
+        let leaseError: unknown;
+        const heartbeat = setInterval(() => {
+          const now = Date.now() / 1000;
+          try { futimesSync(lease.fd, now, now); } catch (err) { leaseError = err; }
+        }, 30_000);
+        try { header = { ...header, files: await stage(join(staging, "files")) }; }
+        finally { clearInterval(heartbeat); await lease.close(); }
+        if (leaseError) throw leaseError;
         encodeSendHeader(parseSendHeader(header));
       }
       await writeJson(staging, "request.json", { peer, header });
@@ -93,10 +103,9 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       if (signal?.aborted) return interruptedSend("unpublished");
       throw err;
     }
-    let deadline = Date.now() + IDLE_TIMEOUT_MS;
+    let deadline = Date.now() + 10_000; // M2 claim window. Transfer progress uses the wire idle interval.
     let lastProgress = "";
-    const total = header.files.reduce((sum, file) => sum + file.size, 0);
-    if (total > 5 * 1024 ** 2) console.error(`sending ${header.files.length} files (${(total / 1024 ** 2).toFixed(1)} MB) to ${peer}…`);
+
     while (!signal?.aborted && Date.now() < deadline) {
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
@@ -110,6 +119,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       try {
         const progress = await readFile(join(claimed, "progress"), "utf8");
         if (progress !== lastProgress) {
+          onProgress?.();
           lastProgress = progress;
           deadline = Date.now() + IDLE_TIMEOUT_MS;
         }
@@ -117,7 +127,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       await Bun.sleep(50);
     }
     const withdrawn = await withdrawPublishedRequest(dir, staging);
-    if (!withdrawn) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 });
+    if (!withdrawn) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
+      .catch(err => { if (!missing(err)) throw err; });
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
   } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(detail(err)); }
@@ -232,6 +243,8 @@ export function createPeerOutboxPoll(now = Date.now) {
                 tick();
               } finally { clearInterval(timer); }
             } catch (err) { result = { ok: false, error: detail(err) }; }
+            await rm(join(dir, "files"), { recursive: true, force: true })
+              .catch(err => log(`peer-outbox: could not remove sent files: ${detail(err)}`));
             await writeJson(dir, "result.json", result);
           } catch (err) {
             if (!missing(err)) log(`peer-outbox: ${detail(err)}`);

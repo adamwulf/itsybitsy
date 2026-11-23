@@ -438,9 +438,9 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
     const active = await io(async () => {
       const opened = await conn.openBi();
       if (finished) { await opened.cancel(); throw new Error("Remote send timed out"); }
+      stream = opened;
       return opened;
     });
-    stream = active;
     await writeWithProgress(active, bytes, setTimer, transfer.signal);
     let sent = 0;
     // A receiver can reject the header and stop its read half before we
@@ -461,7 +461,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
       mayBeQueued = true;
       await io(() => active.finish());
     } catch (err) {
-      if (!writeError && !mayBeQueued || err instanceof TransferIdleError || transfer.signal?.aborted) throw err;
+      if ((!writeError && !mayBeQueued) || err instanceof TransferIdleError || transfer.signal?.aborted) throw err;
       writeError = err;
     }
     const parts: Uint8Array[] = [];

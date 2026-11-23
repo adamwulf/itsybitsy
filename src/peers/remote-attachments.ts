@@ -48,36 +48,49 @@ export async function cloneAttachments(dir: string, entries: (ManifestEntry & { 
   }
 }
 
-export function remoteAttachmentStage(paths: readonly string[], sender: AttachmentSender, signal?: AbortSignal): StageRemoteFiles {
-  return dir => withSenderManifest(paths, sender, signal, entries => cloneAttachments(dir, entries, signal));
+export function remoteAttachmentStage(paths: readonly string[], sender: AttachmentSender, signal?: AbortSignal,
+  onStaged?: (files: SendHeader["files"]) => void): StageRemoteFiles {
+  return dir => withSenderManifest(paths, sender, signal, async entries => {
+    const files = await cloneAttachments(dir, entries, signal);
+    onStaged?.(files);
+    return files;
+  });
 }
 
 // A broker request controls neither the directory nor the leaf spelling. On
 // Darwin O_NOFOLLOW_ANY also rejects symlinks in intermediate components.
 // Linux pins each child directory with an fd before opening the next one.
-async function openBrokerFile(agentDir: string, id: string, index: number, size: number) {
+async function withBrokerMember<T>(
+  agentDir: string, id: string, leaf: string, use: (path: string, noFollow: number) => Promise<T>,
+) {
+  if (!/^[0-9a-f]{32}$/.test(id)) throw new Error("Invalid broker attachment request id");
   const root = await realpath(agentDir);
   if (process.platform === "darwin") {
-    return openStagedFile(join(root, "send-attachments", id, String(index)), size, 0x20000000);
+    const O_NOFOLLOW_ANY = 0x20000000;
+    return use(join(root, "send-attachments", id, leaf), O_NOFOLLOW_ANY);
   }
   const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
   const parent = await open(join(root, "send-attachments"), flags);
   try {
     const request = await open(`/proc/self/fd/${parent.fd}/${id}`, flags);
-    try { return await openStagedFile(`/proc/self/fd/${request.fd}/${index}`, size); }
+    try { return await use(`/proc/self/fd/${request.fd}/${leaf}`, constants.O_NOFOLLOW); }
     finally { await request.close(); }
   } finally { await parent.close(); }
 }
 
-export function brokerAttachmentStage(agentDir: string, id: string, files: SendHeader["files"], signal?: AbortSignal): StageRemoteFiles {
-  if (!/^[0-9a-f]{32}$/.test(id)) throw new Error("Invalid broker attachment request id");
+export function createBrokerProgress(agentDir: string, id: string) {
+  return withBrokerMember(agentDir, id, "progress", (path, noFollow) =>
+    open(path, noFollow | constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600));
+}
+
+export function brokerAttachmentStage(agentDir: string, id: string, files: SendHeader["files"], signal?: AbortSignal, progress?: () => void): StageRemoteFiles {
   return async dir => {
     await mkdir(dir, { mode: 0o700 });
     const total = files.reduce((sum, file) => sum + file.size, 0);
     if (!await hasFreeSpace(dir, total)) throw new Error("Insufficient space for broker attachments and the 1 GiB reserve");
     for (const [index, file] of files.entries()) {
       signal?.throwIfAborted();
-      const handle = await openBrokerFile(agentDir, id, index, file.size);
+      const handle = await withBrokerMember(agentDir, id, String(index), (path, noFollow) => openStagedFile(path, file.size, noFollow));
       try {
         const copy = await open(join(dir, String(index)), "wx", 0o600);
         try {
@@ -86,6 +99,7 @@ export function brokerAttachmentStage(agentDir: string, id: string, files: SendH
             signal?.throwIfAborted();
             digest.update(chunk);
             await copy.writeFile(chunk);
+            progress?.();
           }
           if (digest.digest("hex") !== file.sha256) throw new Error("Broker attachment hash mismatch");
         } finally { await copy.close(); }

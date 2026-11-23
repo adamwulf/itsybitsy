@@ -43,6 +43,40 @@ async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnque
   return sendMessage(resolved.agent, header.message, opts);
 }
 
+type ReceiveStorage = { tempDir: string; hasFreeSpace: typeof hasFreeSpace };
+
+async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions) {
+  const limits = checkIncomingFiles(header.files, await readTransferLimits(), { machine: await readMachineName() });
+  if (!limits.ok) throw new Error(limits.error);
+  const total = header.files.reduce((sum, file) => sum + file.size, 0);
+  if (!await storage.hasFreeSpace(storage.tempDir, total)) throw new Error("Insufficient space for attachments and the 1 GiB reserve");
+  const root = await mkdtemp(join(storage.tempDir, "itsybitsy-attachments-"));
+  const cleanup = () => rm(root, { recursive: true, force: true });
+  try {
+    let received = 0;
+    const mapping: AttachmentMapping[] = [];
+    for (const [index, file] of header.files.entries()) {
+      const dir = join(root, String(index));
+      await mkdir(dir, { mode: 0o700 });
+      const destination = join(dir, sanitizeAttachmentName(file.name));
+      const handle = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try {
+        const digest = await streamFileBody(body, file.size, chunk => handle.writeFile(chunk), {
+          ...options, onProgress: bytes => options.onProgress?.(received + bytes),
+        });
+        if (digest !== file.sha256.toLowerCase()) throw new Error("Attachment hash mismatch");
+      } finally { await handle.close(); }
+      received += file.size;
+      mapping.push({ destination, spellings: file.spellings });
+    }
+    await requireSendFin(body, options);
+    return { message: rewriteAttachmentPaths(header.message, mapping), cleanup };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
 /** Shared across this watcher's inbound connections. Concurrent replays await the first enqueue. */
 export function createMessageReceiver(log: (line: string) => void, notice: (line: string) => void, now = Date.now, capacity = 4096,
   storage = { tempDir: "/tmp", hasFreeSpace },
@@ -52,7 +86,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
   const receiving = new Set<string>();
   return async (header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>,
     body?: Pick<PairStream, "read">, options: FileBodyOptions = {}) => {
-    if (!header.message) throw new Error("Message is empty");
+    if (!header.message && !header.files.length) throw new Error("Message is empty");
     const name = await readPeerName();
     if (name === null) throw new Error("not a peer");
 
@@ -68,7 +102,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
     if (accepted.size + pending.size >= capacity) throw new Error("busy, try again");
     const work = async () => {
       const { files } = header;
-      let root: string | undefined;
+      let staged: Awaited<ReturnType<typeof receiveAttachments>> | undefined;
       let bodyError: unknown;
       const total = files.reduce((sum, file) => sum + file.size, 0);
       if (files.length) {
@@ -79,40 +113,27 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
         const result = await enqueue(header, name, {
           log,
           senderKind: header.from.kind === "user" ? undefined : header.from.kind,
-          async beforeEnqueue() {
-            const mapping: AttachmentMapping[] = [];
-            if (files.length) {
-              if (!body) throw new Error("Missing attachment stream");
-              try {
-                const limits = checkIncomingFiles(files, await readTransferLimits(), { machine: await readMachineName() });
-                if (!limits.ok) throw new Error(limits.error);
-                if (!await storage.hasFreeSpace(storage.tempDir, total)) throw new Error("Insufficient space for attachments and the 1 GiB reserve");
-                root = await mkdtemp(join(storage.tempDir, "itsybitsy-attachments-"));
-                let received = 0;
-                for (const [index, file] of files.entries()) {
-                  const dir = join(root, String(index));
-                  await mkdir(dir, { mode: 0o700 });
-                  const destination = join(dir, sanitizeAttachmentName(file.name));
-                  const handle = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-                  try {
-                    const digest = await streamFileBody(body, file.size, chunk => handle.writeFile(chunk), {
-                      ...options, onProgress: bytes => options.onProgress?.(received + bytes),
-                    });
-                    if (digest !== file.sha256.toLowerCase()) throw new Error("Attachment hash mismatch");
-                  } finally { await handle.close(); }
-                  received += file.size;
-                  mapping.push({ destination, spellings: file.spellings });
+          prepareMessage: files.length ? async () => {
+            if (!body) throw new Error("Missing attachment stream");
+            let nextNotice = 0;
+            try {
+              staged = await receiveAttachments(header, body, storage, { ...options, onProgress: bytes => {
+                options.onProgress?.(bytes);
+                if (total > 5 * 1024 ** 2 && now() >= nextNotice) {
+                  nextNotice = now() + 1000;
+                  notice(`Receiving from ${name}: ${bytes} / ${total} bytes`);
                 }
-                await requireSendFin(body, options);
-              } catch (err) { bodyError = err; throw err; }
-            }
+              } });
+              return staged.message;
+            } catch (err) { bodyError = err; throw err; }
+          } : undefined,
+          async beforeEnqueue() {
             if (await readPeerName() === null) throw new Error("not a peer");
-            if (mapping.length) return rewriteAttachmentPaths(header.message, mapping);
           },
         });
         if (!result.ok) throw bodyError ?? new Error(result.stderr);
       } catch (error) {
-        if (root) await rm(root, { recursive: true, force: true });
+        await staged?.cleanup();
         throw error;
       } finally { if (files.length) receiving.delete(peerId); }
       accepted.set(key, now() + 600_000);

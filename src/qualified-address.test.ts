@@ -327,6 +327,74 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
+  test.each([false, true])("remote CLI publishes the original text, manifest and verified bytes (broker=%s)", async broker => {
+    await peer();
+    const cwd = broker ? worktree : cli.cwd;
+    await Bun.write(join(cwd, "report"), "snapshot");
+    const agentDir = dirname(worktree);
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
+    let processing: Promise<number> | undefined;
+    const watchdog = setInterval(() => {
+      if (broker) processing ??= processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }) })
+        .finally(() => { processing = undefined; });
+    }, 25);
+    const seen: SendHeader[] = [];
+    const timer = setInterval(() => { void pollPeerOutbox(async (_peer, header, transfer) => {
+      expect(await Bun.file(join(transfer.filesDir!, "0")).text()).toBe("snapshot");
+      seen.push(header);
+      return header.id;
+    }, () => {}); }, 25);
+    try {
+      const result = await cli.run(["send", "laptop-b/remote/remote-id", "--attach", "./report", "read ./report"], {
+        cwd, ancestry: human, sandboxed: broker, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(seen).toMatchObject([{ message: "read ./report", from: { kind: broker ? "agent" : "user" },
+        files: [{ name: "report", size: 8, spellings: ["./report", await realpath(join(cwd, "report"))] }] }]);
+      if (broker) expect(await readdir(join(agentDir, "send-attachments"))).toEqual([]);
+    } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
+  });
+
+  test("worktree Ctrl-C resets a claimed attachment transfer and releases both staging directories", async () => {
+    await peer();
+    const agentDir = dirname(worktree);
+    await Bun.write(join(worktree, "report"), "body");
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
+    const controller = new AbortController();
+    const cliSend = cli.run(["send", "laptop-b/remote-id", "--attach", "report", "read"], {
+      cwd: worktree, sandboxed: true, ancestry: human, interrupt: controller.signal,
+      allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+    });
+    try {
+      await waitFor(async () => (await readdir(spawnRequestDir(agentDir)).catch(() => [])).some(n => n.endsWith(".json")));
+      const broker = processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }) });
+      const base = join(cli.home, ".itsybitsy/peer-outbox");
+      await waitFor(async () => (await readdir(base).catch(() => [])).some(n => !n.startsWith(".")));
+      const entered = Promise.withResolvers<void>();
+      let reset = false;
+      let filesDir = "";
+      const watcher = pollPeerOutbox(async (_peer, _header, transfer) => {
+        filesDir = transfer.filesDir!;
+        entered.resolve();
+        return new Promise((_, reject) => transfer.signal!.addEventListener("abort", () => {
+          reset = true;
+          reject(Error("cancelled"));
+        }));
+      }, () => {});
+      await entered.promise;
+      controller.abort();
+      expect((await cliSend).exitCode).toBe(130);
+      await Promise.all([broker, watcher]);
+      expect(reset).toBe(true);
+      await expect(readdir(filesDir)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readdir(join(agentDir, "send-attachments"))).toEqual([]);
+    } finally { controller.abort(); await cliSend; }
+  });
+
   test("only the watchdog verifies a remote sender whose common Git directory is denied", async () => {
     await peer();
     const git = join(await realpath(app), ".git");

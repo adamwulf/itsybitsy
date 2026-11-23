@@ -395,3 +395,35 @@ test("multi-megabyte send streams through the receiver with bounded reads and cu
     expect((await stat(join(dir, root!, "0/large"))).size).toBe(size);
   } finally { a.close(0, "done"); await serving; }
 });
+
+test.each(["body", "ack"])("cancelling while the %s is pending resets the exchange", async stage => {
+  const filesDir = join(cli.root, "outgoing");
+  await mkdir(filesDir);
+  await Bun.write(join(filesDir, "0"), "x");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const stream = await a.openBi();
+  a.openBi = async () => stream;
+  const pending = Promise.withResolvers<void>();
+  if (stage === "body") {
+    const write = stream.write.bind(stream);
+    stream.write = async bytes => {
+      if (bytes.length !== 1) return write(bytes);
+      pending.resolve();
+      await a.closed();
+      throw new Error("closed");
+    };
+  } else {
+    const read = stream.read.bind(stream);
+    stream.read = limit => { pending.resolve(); return read(limit); };
+  }
+  const controller = new AbortController();
+  const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); };
+  const sending = requestSend(a, header({ files: [manifestFile("x")] }), timer, { filesDir, signal: controller.signal });
+  try {
+    const received = await b.acceptBi();
+    await pending.promise;
+    controller.abort(new Error("cancelled"));
+    await expect(sending).rejects.toThrow(stage === "body" ? "cancelled" : "outcome unknown");
+    await expect(received.writeAll(Buffer.from("late"))).rejects.toThrow();
+  } finally { a.close(0, "done"); }
+});

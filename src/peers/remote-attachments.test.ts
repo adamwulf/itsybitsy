@@ -45,6 +45,6 @@ test("watchdog takes only numbered, single-link files within its request and ver
     await rm(request, { recursive: true });
     await symlink(join(root, "valid"), request);
     await expect(stage(join(root, "linked-request"))).rejects.toThrow();
-    expect(() => brokerAttachmentStage(root, "../elsewhere", files)).toThrow();
+    await expect(brokerAttachmentStage(root, "../elsewhere", files)(join(root, "invalid-id"))).rejects.toThrow("Invalid broker");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

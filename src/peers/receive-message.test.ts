@@ -460,8 +460,18 @@ test("pending replay and framed header readers have independent watcher-wide cei
   try {
     for (let i = 0; i < 8; i++) await (await links[i % 2]!.a.openBi()).writeAll(Uint8Array.of(0));
     await waitFor(() => deps.headerReaders.size === 8);
-    const excess = await links[0]!.a.openBi();
-    expect(JSON.parse(new TextDecoder().decode(await excess.readToEnd(1024))).error).toContain("busy");
+    const conn = links[0]!.a;
+    const open = conn.openBi.bind(conn);
+    conn.openBi = async () => {
+      const stream = await open();
+      let count = 0;
+      stream.write = async () => {
+        if (++count === 1) return 1;
+        throw new Error("receiver stopped reading the header");
+      };
+      return stream;
+    };
+    await expect(requestSend(conn, header(), deps.setTimer)).rejects.toThrow("busy, try again");
   } finally { links.forEach(link => link.a.close(0, "done")); await Promise.all(serving); }
 });
 

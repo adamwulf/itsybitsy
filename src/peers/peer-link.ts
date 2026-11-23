@@ -452,12 +452,13 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
       stream = opened;
       return opened;
     });
-    await writeWithProgress(active, bytes, setTimer, transfer.signal);
     let sent = 0;
     // A receiver can reject the header and stop its read half before we
     // finish writing. Read its error ACK on the independent return half.
     let writeError: unknown;
     try {
+      try { await writeWithProgress(active, bytes, setTimer, transfer.signal); }
+      catch (err) { writeError = err; throw err; }
       for (const [index, file] of header.files.entries()) {
         const handle = await openStagedFile(join(transfer.filesDir!, String(index)), file.size);
         try {

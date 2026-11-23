@@ -2393,7 +2393,8 @@ export function handleHelp(ctx: ActionCtx) {
 
 export function handleSetup(ctx: ActionCtx, initialTab = 0) {
   const repoPath = ctx.repos[0]?.path ?? "";
-  let settings: ReturnType<typeof loadSetupSettings> | undefined;
+  let pending: ReturnType<typeof loadSetupSettings> | undefined;
+  let loaded: Awaited<ReturnType<typeof loadSetupSettings>> | undefined;
 
   const showSetupDialogForTab = (tab: number) => {
     if (tab !== PEERS_TAB && ctx.refuseOnRemoteRow("h")) return;
@@ -2411,15 +2412,12 @@ export function handleSetup(ctx: ActionCtx, initialTab = 0) {
         return;
       }
       dialog.peers = newPeersDialog(ctx.peerService, ctx.agentTree.machineName);
+      ctx.showDialog(dialog);
+      return;
     }
-    ctx.showDialog(dialog);
-    if (tab === PEERS_TAB) return;
 
-    // Show the requested tab immediately, including when leaving a pairing.
-    // Only Hooks and Config need data from disk.
-    settings ??= loadSetupSettings(repoPath);
-    settings.then(({ items, config }) => {
-      if (ctx.dialog !== dialog) return;
+    const fill = ({ items, config }: Awaited<ReturnType<typeof loadSetupSettings>>) => {
+      delete dialog.settingsMessage;
       dialog.items = items;
       if (tab === 1) {
         dialog.configItems = CONFIG_KEYS.map(def => ({ ...def, ...config[def.key]! }));
@@ -2428,11 +2426,25 @@ export function handleSetup(ctx: ActionCtx, initialTab = 0) {
           if (ctx.dialog === dialog) showSetupDialogForTab(tab);
         });
       }
-      ctx.tui?.requestRender();
-    }).catch(err => {
-      settings = undefined;
-      if (ctx.dialog === dialog) ctx.setNotice(`Setup error: ${err}`, "error");
-    });
+    };
+    if (loaded) {
+      fill(loaded);
+    } else {
+      dialog.settingsMessage = "Loading settings…";
+      pending ??= loadSetupSettings(repoPath);
+      pending.then(data => {
+        loaded = data;
+        if (ctx.dialog !== dialog) return;
+        fill(data);
+        ctx.tui?.requestRender();
+      }).catch(err => {
+        pending = undefined;
+        if (ctx.dialog !== dialog) return;
+        dialog.settingsMessage = `Setup error: ${err}`;
+        ctx.setNotice(dialog.settingsMessage, "error");
+      });
+    }
+    ctx.showDialog(dialog);
   };
   showSetupDialogForTab(initialTab);
 }

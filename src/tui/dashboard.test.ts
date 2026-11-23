@@ -39,6 +39,7 @@ import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
 import { DIM, GREEN, ITALIC, RED, RESET, YELLOW } from "./colors";
 import { getStateColors } from "./color-scheme";
+import * as settings from "../config";
 import * as agentActions from "./agent-actions";
 import * as ghostty from "../ghostty";
 import * as paneManager from "./pane-manager";
@@ -9282,6 +9283,38 @@ describe("setup Peers tab", () => {
     dashboard.handleInput("\x1b");
     expect(dashboard.dialog).toBeNull();
     expect(service.calls).toEqual(["open", "close", "open", "close", "open", "close"]);
+  });
+
+  test.each(["Config", "Peers"])("settings finish loading with %s visible", async visible => {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    const { promise, resolve } = Promise.withResolvers<settings.ConfigResult>();
+    const read = spyOn(settings, "readConfig").mockReturnValue(promise);
+    try {
+      dashboard.handleInput("h");
+      expect(text(dashboard)).toContain("Loading settings…");
+      dashboard.handleInput("2");
+      expect(text(dashboard)).toContain("Loading settings…");
+      expect(text(dashboard)).not.toContain("No configuration keys found");
+      await waitFor(() => read.mock.calls.length === 1, { message: "pending settings read" });
+      if (visible === "Peers") dashboard.handleInput("3");
+      resolve(Object.fromEntries(settings.CONFIG_KEYS.map(def => [def.key, { value: def.default, source: "default" }])));
+      await new Promise<void>(done => setImmediate(done));
+      if (visible === "Peers") {
+        expect(peersTab(dashboard)).toBeDefined();
+        expect(service.calls).toEqual(["open"]);
+        dashboard.handleInput("\x1b[Z");
+      }
+      expect(text(dashboard)).toContain(settings.CONFIG_KEYS[0]!.key);
+      dashboard.handleInput("1");
+      expect(text(dashboard)).toContain("Safety hooks");
+      dashboard.handleInput("2");
+      expect(text(dashboard)).toContain(settings.CONFIG_KEYS[0]!.key);
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      read.mockRestore();
+    }
   });
 
   test("Kitty Tab and Shift+Tab cycle setup in both directions", () => {

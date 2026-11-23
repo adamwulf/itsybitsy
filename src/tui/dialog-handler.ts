@@ -143,6 +143,7 @@ export type DialogState =
       tab: number; // 0=Hooks, 1=Config, 2=Peers
       /** Present only on the visible Peers tab. */
       peers?: PeersDialogState;
+      settingsMessage?: string;
       items: SetupItem[];
       selectedIndex: number;
       configItems?: ConfigDialogItem[];
@@ -1217,7 +1218,9 @@ export function buildSetupContent(
   lines.push(...wordWrapLines(`(${hint})`, innerWidth).map(line => `${DIM}${line}${RESET}`));
   lines.push("");
 
-  if (dialog.tab === 0) {
+  if (dialog.settingsMessage) {
+    lines.push(...wordWrapLines(dialog.settingsMessage, innerWidth));
+  } else if (dialog.tab === 0) {
     buildSetupTab0Content(dialog, lines, innerWidth);
   } else if (dialog.tab === PEERS_TAB) {
     lines.push(...(dialog.peers ? buildPeersDialogContent(dialog.peers, innerWidth, (process.stdout.rows || 24) - 2 - lines.length) : ["Peering is not available here"]));

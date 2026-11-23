@@ -88,12 +88,10 @@ test.each([
   expect(await queue().exists()).toBe(false);
 });
 
-test("refuses protected files and remote attachments", async () => {
+test("refuses protected files", async () => {
   const secret = join(fixture.home, ".itsybitsy/peer/fixture");
   await Bun.write(secret, "fixture");
   expect((await send("--attach", secret, "read")).stderr).toContain("protected attachment");
-  const remote = await fixture.run(["send", "laptop/@system", "--attach", "missing", "read"]);
-  expect(remote.stderr).toContain("attachments to other machines come in the next update");
   expect(await queue().exists()).toBe(false);
 });
 

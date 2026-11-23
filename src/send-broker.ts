@@ -45,9 +45,12 @@ import * as runtimeNames from "./runtime-names";
  * any file the watchdog can read).
  */
 
-import { encodeSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
+import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
-import { remoteAttachmentStage } from "./peers/remote-attachments";
+import { mkdir, rm } from "node:fs/promises";
+import { readTransferLimits } from "./config";
+import { checkIncomingFiles } from "./peers/transfer-limits";
+import { brokerAttachmentStage, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
@@ -83,8 +86,8 @@ export const SEND_OP = "send";
 /** Longest target accepted: an agent id or nickname, `@repo/agent`, a team. */
 export const SEND_MAX_TARGET_CHARS = 256;
 
-const REMOTE_ATTACHMENTS_ERROR = "attachments to other machines come in the next update";
-const REQUEST_FIELDS = new Set(["v", "id", "op", "target", "message", "noPassthrough"]);
+const LOCAL_REMOTE_TARGET = "The target resolves locally. Use @<repo>/<agent> for a local send or <machine>/<repo>/<agent> for a remote send.";
+const REQUEST_FIELDS = new Set(["v", "id", "op", "target", "message", "noPassthrough", "files"]);
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 
 /**
@@ -106,6 +109,7 @@ export interface SendRequest {
   target: string;
   message: string;
   noPassthrough?: true;
+  files?: SendHeader["files"];
 }
 
 type ParsedSendRequest = { ok: true; request: SendRequest } | { ok: false; error: string };
@@ -174,7 +178,16 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
   if (Buffer.byteLength(obj.message, "utf8") > SPAWN_MAX_PROMPT_BYTES) {
     return { ok: false, error: "send request message is too large" };
   }
-  return { ok: true, request: { v: 1, id: expectedId, op: obj.op, target: obj.target, message: obj.message, ...(obj.noPassthrough === true && { noPassthrough: true }) } };
+  let files: SendHeader["files"] | undefined;
+  if (obj.files !== undefined) {
+    if (obj.op !== "remote-send") return { ok: false, error: "Only remote requests may carry files" };
+    try {
+      const header = parseSendHeader({ op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "system" }, message: obj.message, files: obj.files });
+      encodeSendHeader(header);
+      files = header.files;
+    } catch (err) { return { ok: false, error: String(err) }; }
+  }
+  return { ok: true, request: { v: 1, id: expectedId, op: obj.op, target: obj.target, message: obj.message, ...(files && { files }), ...(obj.noPassthrough === true && { noPassthrough: true }) } };
 }
 
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
@@ -210,7 +223,7 @@ export async function requestSendViaWatchdog(
   return submitSendRequest("send", caller.agentDir, caller.meta.id, target, message, deps, noPassthrough);
 }
 
-async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false) {
+async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false, stage?: StageRemoteFiles) {
   const remote = op === "remote-send";
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!isBrokerableTarget(target)) return remote ? brokerFail("send request has an invalid target") : null;
@@ -221,21 +234,31 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!live) return remote ? brokerFail("Remote sends from a worktree agent need its watchdog running") : null;
   const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(noPassthrough && { noPassthrough: true }) };
-  const result = await submitWatchdogRequest(
-    dir,
-    callerId,
-    request,
-    {
-      request: "send",
-      action: `send the message to '${target}'`,
-      alreadyStarted:
-        "The watchdog had already taken the message, so it may still be delivered; check with the recipient before sending it again.",
-    },
-    deps.timeoutMs ?? SPAWN_CLIENT_TIMEOUT_MS,
-    deps,
-  );
-  if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
-  return result;
+  const parent = join(dir, "send-attachments");
+  const staged = join(parent, request.id);
+  try {
+    if (stage) {
+      await mkdir(parent, { recursive: true, mode: 0o700 });
+      request.files = await stage(staged);
+    }
+    const result = await submitWatchdogRequest(
+      dir,
+      callerId,
+      request,
+      {
+        request: "send",
+        action: `send the message to '${target}'`,
+        alreadyStarted:
+          "The watchdog had already taken the message, so it may still be delivered; check with the recipient before sending it again.",
+      },
+      deps.timeoutMs ?? SPAWN_CLIENT_TIMEOUT_MS,
+      deps,
+    );
+    if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
+    return result;
+  } finally {
+    if (stage) await rm(staged, { recursive: true, force: true });
+  }
 }
 
 /** What `ib send` hands the broker. */
@@ -339,11 +362,6 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       deferred = !!worktree && !!resolved.incompleteVisibility;
     }
     if (deps.signal?.aborted) return cancelled();
-    if (command.attachmentSender && deferred) {
-      // Only the watchdog can disambiguate a bare address across hidden repos.
-      const local = await routeSendThroughWatchdog(command, deps);
-      return { result: local ?? brokerFail(resolved?.error ?? "Cannot resolve local attachment target") };
-    }
     if (deferred || resolved?.remote) {
       const { cliRemoteSender, handoffRemoteMessage, qualifiedAgentSender, textHeader } = await import("./peers/peer-outbox");
       const sender = await cliRemoteSender(repos, command.fromAgent, cwd);
@@ -355,7 +373,12 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
         const from = await qualifiedAgentSender(sender.id, sender.repoPath, repos)
           .catch(() => ({ kind: "agent", id: `//${sender.id}` } as const));
         checkRemoteSize(message, resolved?.remote?.target ?? minimumTarget, from);
-        const result = await submitSendRequest("remote-send", sender.agentDir, sender.id, target, message, deps);
+        const stage = command.attachmentSender && remoteAttachmentStage(command.attachments!, await command.attachmentSender(), deps.signal);
+        const result = await submitSendRequest("remote-send", sender.agentDir, sender.id, target, message, deps, false, stage);
+        if (stage && !machine && result?.stderr === LOCAL_REMOTE_TARGET) {
+          const local = await routeSendThroughWatchdog(command, deps);
+          return { result: local ?? result };
+        }
         // A remote submission always selects a result, even without a watcher.
         return { result: result! };
       }
@@ -372,7 +395,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     if (brokered) return { result: brokered };
     resolved ??= await resolveAddress(target, repos, cwd);
     if (deps.signal?.aborted) return cancelled();
-    if (command.attachmentSender && resolved.remote) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
+    if (resolved.remote) return { result: brokerFail("Use a machine-qualified address to send remotely") };
     return resolved.error ? { result: brokerFail(resolved.error) } : { local: resolved };
   } catch (err) {
     return deps.signal?.aborted ? cancelled() : { result: brokerFail(err instanceof Error ? err.message : String(err)) };
@@ -443,11 +466,14 @@ export async function handleSendRequest(
     // always passed: these functions otherwise detect the sender from the
     // cwd, which here is the watchdog's. `stageAttachments` is never set.
     if (sender) {
-      if (!resolved.remote) return brokerFail("The target resolves locally. Use @<repo>/<agent> for a local send or <machine>/<repo>/<agent> for a remote send.");
+      if (!resolved.remote) return brokerFail(LOCAL_REMOTE_TARGET);
       const { handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
-      return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender));
+      const files = parsed.request.files ?? [];
+      const limits = checkIncomingFiles(files, await readTransferLimits(), { machine: await readMachineName() });
+      if (!limits.ok) return brokerFail(limits.error);
+      const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files) : undefined;
+      return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), undefined, stage);
     }
-    if (resolved.remote && opts.noPassthrough) return brokerFail(REMOTE_ATTACHMENTS_ERROR);
     if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
     if (resolved.isSystemCoordinator) {
       return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { ...opts, cwd: callerCwd });

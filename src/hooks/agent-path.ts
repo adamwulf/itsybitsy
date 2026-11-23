@@ -276,6 +276,10 @@ export function agentProtectedWritePaths(
     subtree: false,
     reason: META_WRITE_DENY_REASON,
   }, {
+    path: anchor(join(agentDir, "send-attachments")),
+    subtree: true,
+    reason: "Only ib send can stage remote attachments",
+  }, {
     path: anchor(runtimeNames.peerOutboxDir()),
     subtree: true,
     reason: "Only ib send and the watchdog can publish remote send requests",

@@ -125,7 +125,7 @@ describe("send-time message attachments", () => {
     await writeFile(external, "image");
     const mixed = await stageMessageAttachments(`Fix ./code.ts using ${external}`, repo, worktree);
     attempts.push(mixed);
-    expect(mixed.message).toStartWith("Fix ./code.ts using /tmp/itsybitsy-attachments-");
+    expect(mixed.message).toStartWith(`Fix ./code.ts using ${staging}/itsybitsy-attachments-`);
     expect(await readFile(stagedPaths(mixed.message)[0]!, "utf8")).toBe("image");
     const command = await stageMessageAttachments(`/compact focus on ${external}`, repo, worktree);
     attempts.push(command);

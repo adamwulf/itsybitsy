@@ -504,6 +504,28 @@ describe("ensureSystemCoordinator", () => {
     expect(newSession![newSession!.length - 1]).toBe("bash");
   });
 
+  test("a failed coordinator exits to a live shell only after revoking pane capture", async () => {
+    const router = createCommandRouter({ "has-session": { exitCode: 1 } });
+    let line = "";
+    coordinatorSpawnCtx.set((cmd, opts) => {
+      const launch = cmd.findIndex(arg => arg.startsWith("claude "));
+      if (launch >= 0) line = cmd.slice(launch, cmd.indexOf(";", launch)).join("");
+      return router(cmd, opts);
+    });
+    await ensureSystemCoordinator();
+    expect(line).toContain("claude --model");
+    // Run the actual launch line in bash. The failed CLI returns to its parent
+    // shell, which must see the marker cleared before it can run another command.
+    const script = [
+      "marker=1", "TMUX_PANE=%4", "claude() { return 42; }",
+      'tmux() { if [[ "$*" == "set-option -pu -t %4 @ib-system-coordinator" ]]; then marker=0; else return 1; fi; }',
+      line, 'echo "shell alive, marker=$marker"',
+    ].join("\n");
+    const proc = Bun.spawn(["bash", "-c", script], { stdout: "pipe", stderr: "pipe" });
+    expect(await new Response(proc.stdout).text()).toBe("shell alive, marker=0\n");
+    expect(await proc.exited).toBe(0);
+  });
+
   test("logs the resolved model and its source layer on spawn", async () => {
     coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 1 } }));
     await ensureSystemCoordinator();
@@ -1178,9 +1200,7 @@ describe("ensureSystemCoordinator", () => {
       if (cmd.includes("send-keys")) {
         const launch = cmd.findIndex(arg => arg.startsWith("claude --model"));
         if (launch >= 0) {
-          expect(cmd.slice(launch + 1)).toEqual([
-            "Enter", ";", "set-option", "-p", "-t", "=ib-coordinator:", "@ib-system-coordinator", "1",
-          ]);
+          expect(cmd.slice(-5)).toEqual([";", "send-keys", "-t", "=ib-coordinator:", "Enter"]);
           events.push("launch-claude");
         }
       }

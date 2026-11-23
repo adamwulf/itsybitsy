@@ -1031,10 +1031,14 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   logToWatchLog(
     `[coordinator] launch cmd (${resumeId ? "resume" : "fresh"}): ${claudeCmd}`,
   );
+  const target = tmuxSessionTarget(IB_COORDINATOR_SESSION);
+  // Install the marker before Enter so even a failed exec revokes it. Bash
+  // must finish revocation (or exit) before it can display another prompt.
+  const revoke = `tmux set-option -pu -t "$TMUX_PANE" ${COORDINATOR_PANE_MARKER} || exit`;
   await coordinatorSpawnCtx.run([
-    "tmux", "send-keys", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
-    claudeCmd, "Enter",
-    ";", "set-option", "-p", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), COORDINATOR_PANE_MARKER, "1",
+    "tmux", "send-keys", "-t", target, claudeCmd, `; ${revoke}`,
+    ";", "set-option", "-p", "-t", target, COORDINATOR_PANE_MARKER, "1",
+    ";", "send-keys", "-t", target, "Enter",
   ]);
 
   // Wait for Claude's UI to be ready so the resume-failure fallback below

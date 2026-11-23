@@ -244,30 +244,22 @@ export function messageBodyReader(
  * Default implementation calls `tmux has-session -t ib-coordinator`. Tests can
  * override via `setSystemCoordinatorHasSessionFn()` to avoid invoking tmux.
  */
-let systemCoordinatorHasSessionFn: (sessionName: string) => Promise<boolean> = async (
-  sessionName: string,
-) => {
-  const exit = await Bun.spawn(["tmux", "has-session", "-t", tmuxSessionTarget(sessionName)], {
-    stdout: "ignore",
-    stderr: "ignore",
-  }).exited;
-  return exit === 0;
-};
+async function probeSystemCoordinator(sessionName: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  const process = Bun.spawn(["tmux", "has-session", "-t", tmuxSessionTarget(sessionName)], {
+    stdout: "ignore", stderr: "ignore", signal, killSignal: "SIGKILL",
+  });
+  return await process.exited === 0;
+}
 
-export function setSystemCoordinatorHasSessionFn(
-  fn: (sessionName: string) => Promise<boolean>,
-): void {
+let systemCoordinatorHasSessionFn = probeSystemCoordinator;
+
+export function setSystemCoordinatorHasSessionFn(fn: typeof probeSystemCoordinator): void {
   systemCoordinatorHasSessionFn = fn;
 }
 
 export function resetSystemCoordinatorHasSessionFn(): void {
-  systemCoordinatorHasSessionFn = async (sessionName: string) => {
-    const exit = await Bun.spawn(["tmux", "has-session", "-t", tmuxSessionTarget(sessionName)], {
-      stdout: "ignore",
-      stderr: "ignore",
-    }).exited;
-    return exit === 0;
-  };
+  systemCoordinatorHasSessionFn = probeSystemCoordinator;
 }
 
 /**
@@ -320,10 +312,19 @@ export function buildSystemCoordinatorAgent(
 export async function sendToSystemCoordinator(
   message: string,
   opts?: { fromAgent?: string; cwd?: string; queueGuard?: import("./outbox").LocalQueueGuard; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean },
+  probeOptions?: import("./peers/send-frame").FileBodyOptions,
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   const { IB_COORDINATOR_SESSION } = await import("./coordinator");
   // Remote enqueue probes the delivery pane under its own bounded deadline.
-  if (!opts?.peerSend && !await systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION)) {
+  async function sessionRunning() {
+    if (!probeOptions) return systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION);
+    const { waitForIO } = await import("./peers/send-frame");
+    const probe = new AbortController();
+    const signal = probeOptions.signal ? AbortSignal.any([probeOptions.signal, probe.signal]) : probe.signal;
+    try { return await waitForIO({ ...probeOptions, signal }, () => systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION, signal)); }
+    finally { probe.abort(); }
+  }
+  if (!opts?.peerSend && !await sessionRunning()) {
     return {
       ok: false,
       exitCode: 1,

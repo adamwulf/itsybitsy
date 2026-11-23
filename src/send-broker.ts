@@ -506,9 +506,10 @@ export interface SendServerDeps {
 async function sendToSystemCoordinatorDefault(
   message: string,
   opts: { noPassthrough?: true; fromAgent: string; cwd: string },
+  probeOptions: FileBodyOptions,
 ): Promise<IbCommandResult> {
   const { sendToSystemCoordinator } = await import("./index");
-  return sendToSystemCoordinator(message, opts);
+  return sendToSystemCoordinator(message, opts, probeOptions);
 }
 
 /**
@@ -552,7 +553,8 @@ export async function handleSendRequest(
       const opts = queueGuard ? { ...sendOpts, queueGuard } : sendOpts;
       if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
       if (resolved.isSystemCoordinator) {
-        return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { ...opts, cwd: callerCwd });
+        return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { ...opts, cwd: callerCwd },
+          { signal: queueGuard?.signal ?? deps.transferSignal, setTimer: seams.setTimer });
       }
       // Never deliver to the requester itself (see isAgentAt). A team drops it
       // like the sender; a single target is refused.

@@ -330,6 +330,25 @@ describe("send broker", () => {
       expect((await result(ID_A)).stderr).toContain("belongs to this agent process");
     });
 
+    test("a stalled system session probe is cancelled and its late success cannot enqueue", async () => {
+      const { setSystemCoordinatorHasSessionFn, resetSystemCoordinatorHasSessionFn } = await import("./index");
+      const entered = Promise.withResolvers<void>(), reply = Promise.withResolvers<boolean>();
+      let signal: AbortSignal | undefined, timeout!: () => void;
+      setSystemCoordinatorHasSessionFn(async (_name, probeSignal) => {
+        signal = probeSignal; entered.resolve(); return reply.promise;
+      });
+      try {
+        const { deps } = server({ send: { setTimer: (_ms, cb) => { timeout = cb; return () => {}; } } });
+        await queue(ID_A, sendRequest(ID_A, { target: "@system" }));
+        const draining = processSpawnRequests(SENDER_ID, senderRepo, deps);
+        await entered.promise; timeout(); await draining;
+        expect(signal?.aborted).toBe(true);
+        expect((await result(ID_A)).stderr).toContain("No progress");
+        reply.resolve(true); await Bun.sleep(0);
+        expect(await Bun.file(join(home, ".itsybitsy/outbox.jsonl")).exists()).toBe(false);
+      } finally { reply.resolve(false); resetSystemCoordinatorHasSessionFn(); }
+    });
+
     test("an expired bare-name lookup releases the job before the next qualified request", async () => {
       await linkWorktree();
       const jobs = new Map<string, Promise<void>>();

@@ -812,7 +812,7 @@ describe("send broker", () => {
           expect(ambiguity.stderr).toContain("laptop/worker");
           expect(ambiguity.stderr).toContain("studio/worker");
         }
-        expect((await route("laptop/remote/worker", false, "x".repeat(SPAWN_MAX_PROMPT_BYTES + 1))).stderr).toContain("message is too large");
+        expect((await route("laptop/remote/worker", false, "x".repeat(300 * 1024))).stderr).toContain("Send header exceeds 262144 bytes");
         deps.send!.listRepos = async () => repos.filter(repo => repo.path !== senderRepo);
         expect((await route("laptop/remote/worker")).stderr).toContain("repo to be registered");
         expect(seen).toHaveLength(2);

@@ -35,7 +35,7 @@ const unverifiable = "cannot verify the sender of a remote send; run it from a t
 
 type RemoteSender =
   | { kind: "direct"; from: SendHeader["from"] }
-  | { kind: "worktree"; id: string; agentDir: string };
+  | { kind: "worktree"; id: string; repoPath: string; agentDir: string };
 
 export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd = process.cwd()): Promise<RemoteSender> {
   let id = "";
@@ -46,7 +46,7 @@ export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd
     const worktree = matchWorktreeCaller(path);
     if (worktree) {
       if (id !== worktree[2]) throw new Error(unverifiable);
-      sender = { kind: "worktree", id, agentDir: agentDir(worktree[1]!, id) };
+      sender = { kind: "worktree", id, repoPath: worktree[1]!, agentDir: agentDir(worktree[1]!, id) };
     } else if (id === "@system") {
       if (!await remoteCliCaller.isSystem()) throw new Error(unverifiable);
       sender = { kind: "direct", from: { kind: "system" } };
@@ -80,10 +80,10 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
   let published = false;
   try {
     if (signal?.aborted) return interruptedSend("unpublished");
+    encodeSendHeader(parseSendHeader(header));
     const live = await hasLivePeerWatcher();
     if (signal?.aborted) return interruptedSend("unpublished");
     if (!live) return fail("remote sends need ib watch running on this machine");
-    encodeSendHeader(parseSendHeader(header));
     const base = peerOutboxDir();
     const dir = join(base, header.id);
     const staging = join(base, ".staging", header.id);

@@ -45,6 +45,7 @@ import * as runtimeNames from "./runtime-names";
  * any file the watchdog can read).
  */
 
+import { encodeSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
 import { isSandboxedProcess } from "./sandbox-detect";
 import { sameRepoPath } from "./repo-identity";
@@ -282,6 +283,12 @@ export async function routeSendThroughWatchdog(
 
 type CliSendRoute = { result: IbCommandResult } | { local: ResolvedSendTarget };
 
+/** Bound the encoded header even when only the watchdog can resolve the raw
+ * address. Empty agent/repo fields account for the still-unknown label bytes. */
+function checkRemoteSize(message: string, target: SendTarget, from: SendHeader["from"]) {
+  encodeSendHeader({ op: "send", id: crypto.randomUUID(), message, target, from, files: [] });
+}
+
 /** Route machine-qualified worktree sends from their address alone. A bare
  * name uses the usual same-repo-first resolver. An inconclusive sandbox
  * lookup delegates the raw address, never a guessed remote id. */
@@ -296,10 +303,20 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
   try {
     let deferred = false;
     let localMachine = false;
+    let message: string | undefined;
+    const remoteName = machine ? target.slice(machine.length + 1) : "";
+    const minimumTarget: SendTarget = remoteName === "@system" ? { kind: "system" }
+      : remoteName.startsWith("@") && !remoteName.includes("/") ? { kind: "repo-coordinator", repo: remoteName.slice(1) }
+      : { kind: "agent", repo: "", agent: "" };
     if (machine) {
       const localName = await readMachineName().catch(() => "");
       localMachine = machine.toLowerCase() === localName.toLowerCase();
       deferred = !localMachine && (!!worktree || isSandboxedProcess());
+      if (!localMachine) {
+        message = await command.readMessage();
+        if (deps.signal?.aborted) return cancelled();
+        checkRemoteSize(message, minimumTarget, { kind: "user" });
+      }
     }
     let resolved;
     if (!localSyntax && !localMachine && !deferred) {
@@ -308,17 +325,21 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     }
     if (deps.signal?.aborted) return cancelled();
     if (deferred || resolved?.remote) {
-      const { cliRemoteSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
+      const { cliRemoteSender, handoffRemoteMessage, qualifiedAgentSender, textHeader } = await import("./peers/peer-outbox");
       const sender = await cliRemoteSender(repos, command.fromAgent, cwd);
       if (deps.signal?.aborted) return cancelled();
-      const message = await command.readMessage();
+      message ??= await command.readMessage();
       if (deps.signal?.aborted) return cancelled();
       if (!message) return { result: brokerFail(command.usage) };
       if (sender.kind === "worktree") {
+        const from = await qualifiedAgentSender(sender.id, sender.repoPath, repos)
+          .catch(() => ({ kind: "agent", id: `//${sender.id}` } as const));
+        checkRemoteSize(message, resolved?.remote?.target ?? minimumTarget, from);
         const result = await submitSendRequest("remote-send", sender.agentDir, sender.id, target, message, deps);
         // A remote submission always selects a result, even without a watcher.
         return { result: result! };
       }
+      checkRemoteSize(message, resolved?.remote?.target ?? minimumTarget, sender.from);
       resolved ??= await resolveAddress(target, repos, cwd);
       if (deps.signal?.aborted) return cancelled();
       if (resolved.remote) {

@@ -61,3 +61,9 @@ test("an interrupted direct send never publishes an already-cancelled request", 
   expect(outcome).toMatchObject({ exitCode: 130, stderr: expect.stringContaining("cancelled before sending") });
   expect(await Bun.file(join(base, header.id, "request.json")).exists()).toBe(false);
 });
+
+
+test("the complete encoded header is validated before probing watcher liveness", async () => {
+  const header = textHeader({ kind: "system" }, "x".repeat(MAX_HEADER_BYTES - 1), { kind: "system" });
+  expect(await handoffRemoteMessage("peer", header)).toMatchObject({ ok: false, stderr: "Send header exceeds 262144 bytes" });
+});

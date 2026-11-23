@@ -1,5 +1,5 @@
 import { waitFor } from "./test-utils";
-import { processSpawnRequests, SPAWN_MAX_PROMPT_BYTES, spawnRequestDir } from "./spawn-broker";
+import { processSpawnRequests, spawnRequestDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, open, readdir, rename, symlink, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
@@ -329,9 +329,11 @@ describe("qualified agent addresses", () => {
 
   test("a worktree without a live watchdog reports validation errors before liveness", async () => {
     const file = join(worktree, "large-message");
-    await Bun.write(file, "x".repeat(SPAWN_MAX_PROMPT_BYTES + 1));
+    await Bun.write(file, "x".repeat(300 * 1024));
     const send = (args: string[]) => cli.run(["send", "laptop-b/remote-id", ...args], { cwd: worktree, ancestry: human });
-    expect((await send(["-f", file])).stderr).toContain("message is too large");
+    expect((await send(["-f", file])).stderr).toContain("Send header exceeds 262144 bytes");
+    expect((await cli.run(["send", "laptop-b/remote-id", "-f", file], { ancestry: human })).stderr)
+      .toContain("Send header exceeds 262144 bytes");
     expect((await send(["hi"])).stderr).toContain("need its watchdog running");
   });
 

@@ -477,3 +477,15 @@ test("a submitting client that exits during the request read cannot dispatch", a
   expect(sends).toBe(0);
   expect(await Bun.file(join(claimed, "result.json")).json()).toMatchObject({ error: "Cannot verify the peer-outbox client" });
 });
+
+test("recovery keeps the published result and releases retained bodies", async () => {
+  const { header, ready, claimed } = await readyRequest();
+  await mkdir(join(base, ".claimed"));
+  await fs.rename(ready, claimed);
+  const result = { ok: true, id: header.id };
+  await Bun.write(join(claimed, "result.json"), JSON.stringify(result));
+  await Bun.write(join(claimed, "files/0"), "body");
+  await createPeerOutboxPoll().recover();
+  expect(await Bun.file(join(claimed, "result.json")).json()).toEqual(result);
+  expect(await Bun.file(join(claimed, "files/0")).exists()).toBe(false);
+});

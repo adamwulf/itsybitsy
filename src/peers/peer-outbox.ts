@@ -255,7 +255,10 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
       await rm(dir, { recursive: true, force: true });
       return;
     }
-    if (existsSync(join(dir, "result.json"))) return;
+    if (existsSync(join(dir, "result.json"))) {
+      await rm(join(dir, "files"), { recursive: true, force: true });
+      return;
+    }
     if (transferOwnerState(claim.owner, 0) === "proven-dead") {
       // A claim can survive a crash on either side of FIN. Never re-dispatch it.
       await rm(join(dir, "files"), { recursive: true, force: true });

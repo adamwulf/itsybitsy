@@ -49,8 +49,8 @@ test("restart @system reports the local launch and prints a registration warning
     // Only this fixture's executable is in PATH. It reaches readiness, then
     // fails the registration write after the launcher has returned.
     await Bun.write(tmux, [
-      "#!/bin/sh", 'case "$1" in',
-      'new-session) echo %4 ;;',
+      "#!/bin/sh", 'if [ "$1" = "-S" ]; then shift 2; fi', 'case "$1" in',
+      'new-session) printf "%s\\t%s\\n" "%4" "/fixture/socket" ;;',
       'capture-pane) echo "Claude Code v1.0.0" ;;',
       'display-message) echo claude ;;',
       'set-option) case "$*" in *@ib-system-coordinator-command*) echo "record write failed" >&2; exit 1 ;; esac ;;',
@@ -61,7 +61,7 @@ test("restart @system reports the local launch and prints a registration warning
     await Bun.write(git, "#!/bin/sh\nexit 0\n");
     await chmod(git, 0o755);
     const result = await runIsolatedCli(["restart", "@system"], {
-      home, env: { PATH: home }, allowedProcesses: [["tmux"], ["git"]],
+      home, env: { PATH: home }, allowedProcesses: [[tmux], ["tmux"], ["git"]],
     });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("System coordinator restart scheduled (fresh session)");

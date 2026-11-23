@@ -63,7 +63,7 @@ async function senderAttachmentAccess(sender: AttachmentSender) {
     access = await buildAgentAccessTable({
       meta: caller.meta, rootRepo: caller.repoPath, agentDir: caller.agentDir, agentsDir: dirname(caller.agentDir),
       worktreePath: caller.meta.worktree === false ? caller.repoPath : join(caller.agentDir, "repo"),
-      kernelSandboxed: metaKernelSandboxed(caller.meta), home: accountHome(),
+      kernelSandboxed: metaKernelSandboxed(caller.meta), home: accountHome(), forAttachments: true,
     });
   } else {
     access = (await buildSystemHookPolicy(accountHome())).access;

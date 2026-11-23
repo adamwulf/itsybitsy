@@ -99,6 +99,30 @@ describe("buildAgentAccessTable", () => {
     });
   }
 
+  test("a stored attachment table uses explicit Git grants only, while the hook keeps the common dir", async () => {
+    const repo = await realpath(tmp);
+    const common = join(repo, "admin");
+    await Bun.$`git init -q --separate-git-dir=${common} ${repo}`;
+    const agentDir = join(repo, ".itsybitsy/agents/reader");
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(worktreePath, { recursive: true });
+    const config = join(common, "config");
+    const input = { agentDir, worktreePath, rootRepo: repo, agentsDir: join(repo, ".itsybitsy/agents"), home: repo,
+      meta: { sandbox: { enabled: true }, canSpawnChildren: false, paths: { allowRead: [config] } } };
+    const spawn = spyOn(Bun, "spawn");
+    try {
+      const attachments = await buildAgentAccessTable({ ...input, forAttachments: true });
+      expect(spawn).not.toHaveBeenCalled();
+      expect(resolvePreparedAccess(attachments, common, "read")).toBe("deny");
+      expect(resolvePreparedAccess(attachments, join(common, "HEAD"), "read")).toBe("deny");
+      expect(resolvePreparedAccess(attachments, config, "read")).toBe("allow");
+      const hook = await buildAgentAccessTable(input);
+      expect(spawn.mock.calls[0]?.[0]).toEqual(["git", "rev-parse", "--git-common-dir"]);
+      expect(hook.allow.some(entry => entry.canonical === common)).toBe(true);
+      expect(resolvePreparedAccess(hook, join(common, "HEAD"), "write")).toBe("allow");
+    } finally { spawn.mockRestore(); }
+  });
+
   test("meta WITHOUT a paths key: worktree allowed, outside denied (strict)", async () => {
     const prepared = await build({ agentType: "worker" });
     const worktreePath = join(tmp, "repo");

@@ -42,7 +42,7 @@ import {
   type PathOperation,
   type PathsConfig,
   type PreparedAccessTable,
-  type SandboxProfileParams,
+  type AccessTableParams,
 } from "../sandbox";
 
 function claudeProjectPath(worktreePath: string, home: string): string {
@@ -112,7 +112,7 @@ export interface AgentAccessTableParams {
   agentsDir: string;
   rootRepo: string;
   /** The git common dir (resolved via `git rev-parse --git-common-dir`). */
-  gitDir: string;
+  gitDir: string | undefined;
   /**
    * The tmux socket DIRECTORY (tmuxSocketDirPath) — a deny root for
    * non-spawners. The builder canonicalizes it like every runtime root.
@@ -147,7 +147,7 @@ export interface AgentAccessTableParams {
  * profile that cannot access them (and no agy root to a Claude profile).
  */
 export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable {
-  const params: SandboxProfileParams = {
+  const params: AccessTableParams = {
     AGENTDIR: p.agentDir,
     WORKTREE: p.worktreePath,
     GITDIR: p.gitDir,
@@ -220,10 +220,15 @@ export async function buildAgentAccessTable(input: {
   rootRepo: string;
   home?: string;
   kernelSandboxed?: boolean;
+  /** Attachments cannot discover runtime grants by reading Git administration files. */
+  forAttachments?: boolean;
 }): Promise<PreparedAccessTable> {
   const kernelSandboxed = input.kernelSandboxed ?? metaKernelSandboxed(input.meta);
   const paths = resolvePathsConfig(input.meta.paths as PathsConfig | undefined);
-  const gitDir = await resolveGitCommonDir(input.worktreePath, input.rootRepo);
+  // No implicit Git root is persisted in meta. Stored paths still grant every
+  // explicit entry; hooks keep the runtime root needed for Git operations.
+  const gitDir = kernelSandboxed && input.forAttachments
+    ? undefined : await resolveGitCommonDir(input.worktreePath, input.rootRepo);
   const uid = process.getuid?.() ?? 0;
   const table = agentPathAccessTable({
     paths,

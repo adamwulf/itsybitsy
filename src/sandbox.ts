@@ -880,6 +880,9 @@ function orderedPathEntry(
   };
 }
 
+/** A stored attachment policy may have no recorded Git runtime root. */
+export type AccessTableParams = Omit<SandboxProfileParams, "GITDIR"> & { GITDIR: string | undefined };
+
 /**
  * Runtime ALLOW roots, keyed on the resolved spawn capability. AGENTDIR,
  * WORKTREE, and GITDIR are always read+write boot roots. REPOAGENTS is a write
@@ -892,19 +895,21 @@ function orderedPathEntry(
  * table (storedPathAccessTable).
  */
 function profileRuntimeAllowRoots(
-  params: SandboxProfileParams,
+  params: AccessTableParams,
   canonicalize: (path: string) => string = canonicalizeSandboxPath,
 ): ProfileRuntimePathRoot[] {
   const roots: ProfileRuntimePathRoot[] = [
     { path: canonicalize(params.AGENTDIR), op: "write", parameterName: "AGENTDIR" },
     { path: canonicalize(params.WORKTREE), op: "write", parameterName: "WORKTREE" },
-    { path: canonicalize(params.GITDIR), op: "write", parameterName: "GITDIR" },
-    {
-      path: canonicalize(params.REPOAGENTS),
-      op: params.canSpawnChildren ? "write" : "read",
-      parameterName: "REPOAGENTS",
-    },
   ];
+  if (params.GITDIR !== undefined) {
+    roots.push({ path: canonicalize(params.GITDIR), op: "write", parameterName: "GITDIR" });
+  }
+  roots.push({
+    path: canonicalize(params.REPOAGENTS),
+    op: params.canSpawnChildren ? "write" : "read",
+    parameterName: "REPOAGENTS",
+  });
   if (params.canSpawnChildren) {
     roots.push({
       path: canonicalize(params.PARENTCLAUDE),
@@ -960,7 +965,7 @@ function profileRuntimeAllowRoots(
  * deny row emits both read and write denies.
  */
 function profileRuntimeDenyRoots(
-  params: SandboxProfileParams,
+  params: AccessTableParams,
   canonicalize: (path: string) => string = canonicalizeSandboxPath,
 ): ProfileRuntimePathRoot[] {
   if (params.canSpawnChildren) return [];
@@ -972,7 +977,7 @@ function profileRuntimeDenyRoots(
 /** Build the canonical table used by both the profile and hook-side resolver. */
 export function sandboxPathAccessTable(
   paths: PathsConfig,
-  params: SandboxProfileParams,
+  params: AccessTableParams,
 ): PathAccessTable {
   const canonicalPaths = canonicalizePathsConfig(paths, sandboxHome(params.HOME));
   return {
@@ -982,7 +987,7 @@ export function sandboxPathAccessTable(
 }
 
 function runtimeRootRows(
-  params: SandboxProfileParams,
+  params: AccessTableParams,
   canonicalize: (path: string) => string,
 ): Pick<PathAccessTable, "runtimeRoots" | "runtimeDenyRoots"> {
   return {
@@ -1011,7 +1016,7 @@ function runtimeRootRows(
  */
 export function storedPathAccessTable(
   paths: PathsConfig,
-  params: SandboxProfileParams,
+  params: AccessTableParams,
 ): PathAccessTable {
   const stored = resolvePathsConfig(paths);
   const provisional = prepareAccessTable({

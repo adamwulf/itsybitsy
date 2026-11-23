@@ -4,6 +4,7 @@
  * for display, while watcher handles structural agent changes.
  */
 
+import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { keepAllowedLinks, linkifyMessageUrls } from "./hyperlinks";
 import { stripAnsi } from "./parse-state";
 import { SpawnContext } from "./types";

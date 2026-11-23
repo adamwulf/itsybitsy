@@ -10005,13 +10005,13 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.handleInput("]");
     expect(dashboard.sidebarWidth).toBe(initialSidebar - 5);
     expect(dashboard.splitPane.getLeftWidth()).toBe(initialSplit);
-    for (const stop of ["agent-tree", "info", "active-agent"]) {
+    for (const stop of ["agent-tree", "info", "active-agent"] as const) {
       dashboard.handleInput("\t");
       expect(dashboard.focus).toBe(stop);
       expect(dashboard.focusManager.subFocus).toBe("pane");
     }
     expect(dashboard.render(180).join("")).toContain(REVERSE + BOLD + " Laptop B/@system ");
-    for (const stop of ["info", "agent-tree", "active-agent"]) {
+    for (const stop of ["info", "agent-tree", "active-agent"] as const) {
       dashboard.handleInput("\x1b[Z");
       expect(dashboard.focus).toBe(stop);
     }

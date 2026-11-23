@@ -69,7 +69,7 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 }
 
 /** A claimed request might already have reached the other machine. Never re-submit it. */
-export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles, onProgress?: () => void): Promise<IbCommandResult> {
+export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles, onProgress?: () => void, beforePublish?: () => Promise<void>): Promise<IbCommandResult> {
   let published = false;
   try {
     if (signal?.aborted) return interruptedSend("unpublished");
@@ -93,6 +93,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
         encodeSendHeader(parseSendHeader(header));
       }
       await writeJson(staging, "request.json", { peer, header });
+      await beforePublish?.();
       signal?.throwIfAborted();
       await rename(staging, dir);
       published = true;

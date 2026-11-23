@@ -164,7 +164,7 @@ export async function sweepOutgoingDirectories(root = transferStagingRoot(), now
 
 /** A sandbox writes its PID alone. Only the watchdog observes and records its
  * start, after checking it predates the lease, and later verifies that stamp. */
-export async function inspectBrokerLease(dir: string, id: string): Promise<{ state: OwnerState; created: number }> {
+export async function inspectBrokerLease(dir: string, id: string): Promise<{ state: OwnerState; created: number; identity?: string }> {
   const info = await stagingDirectoryStat(dir, id);
   let created = info.birthtimeMs || info.ctimeMs;
   let lease: FileHandle | undefined;
@@ -176,6 +176,7 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
     const seed = await readOwnerFields(lease);
     if (!seed) return { state: "unverifiable", created };
     const observed = stagingOwnerStart(seed.pid);
+    const identity = `${leaseInfo.dev}:${leaseInfo.ino}:${seed.pid}:${observed}`;
     try { stamp = await openBrokerLease(dir, id, "owner.json"); }
     catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
@@ -185,12 +186,12 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
       try {
         stamp = await openBrokerLease(dir, id, "owner.json", true);
         await stamp.writeFile(JSON.stringify(candidate));
-        return { state: "verified-live", created };
+        return { state: "verified-live", created, identity };
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
       stamp = await openBrokerLease(dir, id, "owner.json");
     }
     const saved = await readOwnerFields(stamp);
-    return { state: transferOwnerState(saved?.pid === seed.pid ? saved : undefined, created, observed), created };
+    return { state: transferOwnerState(saved?.pid === seed.pid ? saved : undefined, created, observed), created, identity };
   } catch { return { state: "unverifiable", created }; }
   finally { await stamp?.close(); await lease?.close(); }
 }

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { processStartEpochSecondsCtx } from "./agents";
 import { fixtureProcessStart } from "./test-cli-driver";
 import { waitFor } from "./test-utils";
@@ -373,7 +374,7 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
-  test.each(["unavailable", "mismatched"])("watchdog refuses a remote send with %s owner evidence", async evidence => {
+  test.each(["unavailable", "mismatched", "changed during copy"])("watchdog refuses a remote send with %s owner evidence", async evidence => {
     await peer();
     const agentDir = dirname(worktree);
     await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
@@ -392,10 +393,14 @@ describe("qualified agent addresses", () => {
       await sweepStagingLease(agentDir, id!, Date.now());
       const stamp = await Bun.file(join(agentDir, "send-attachments", id!, "owner.json")).json();
       expect(stamp.start).toBe(fixtureProcessStart(stamp.pid));
-      processStartEpochSecondsCtx.set(pid => evidence === "unavailable" ? null : fixtureProcessStart(pid) + 1);
+      processStartEpochSecondsCtx.set(pid => {
+        if (evidence === "unavailable") return null;
+        const copying = existsSync(join(agentDir, "send-attachments", id!, "0"));
+        return fixtureProcessStart(pid) + (pid === stamp.pid && (evidence !== "changed during copy" || !copying) ? 1 : 0);
+      });
       await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }) });
       expect(await send).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("Cannot verify the staging lease owner") });
-      expect(await readdir(join(cli.home, ".itsybitsy/peer-outbox")).catch(() => [])).toEqual([]);
+      expect((await readdir(join(cli.home, ".itsybitsy/peer-outbox")).catch(() => [])).filter(name => !name.startsWith("."))).toEqual([]);
     } finally { controller.abort(); await send; }
   });
 

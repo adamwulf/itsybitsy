@@ -241,10 +241,12 @@ async function startStagingLease(stage: string) {
   }
 }
 
-async function requireActiveStagingLease(dir: string, id: string) {
-  if ((await inspectBrokerLease(dir, id)).state !== "verified-live") {
+async function requireActiveStagingLease(dir: string, id: string, expected?: string) {
+  const { state, identity } = await inspectBrokerLease(dir, id);
+  if (state !== "verified-live" || !identity || expected !== undefined && expected !== identity) {
     throw new Error("Cannot verify the staging lease owner");
   }
+  return identity;
 }
 
 export async function sweepStagingLease(dir: string, id: string, now: number) {
@@ -530,10 +532,11 @@ export async function handleSendRequest(
       if (!limits.ok) return brokerFail(limits.error);
       const controller = new AbortController();
       const textProgress = join(spawnResultDir(ctx.agentDir), ctx.id + ".progress");
+      let clientIdentity: string | undefined;
       let marker: Awaited<ReturnType<typeof createBrokerProgress>> | undefined;
       try {
         if (files.length) {
-          await requireActiveStagingLease(ctx.agentDir, ctx.id);
+          clientIdentity = await requireActiveStagingLease(ctx.agentDir, ctx.id);
           marker = await createBrokerProgress(ctx.agentDir, ctx.id);
         } else {
           deps.transferSignal?.throwIfAborted();
@@ -563,7 +566,8 @@ export async function handleSendRequest(
       const timer = setInterval(checkClient, 250);
       try {
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, signal, progress) : undefined;
-        const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), signal, stage, progress);
+        const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), signal, stage, progress,
+          files.length ? async () => { await requireActiveStagingLease(ctx.agentDir, ctx.id, clientIdentity); } : undefined);
         if (signal.aborted) return interruptedSend("claimed");
         return result;
       } finally {

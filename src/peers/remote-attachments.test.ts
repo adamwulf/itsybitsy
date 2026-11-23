@@ -53,3 +53,24 @@ test("watchdog takes only numbered, single-link files within its request and ver
     await expect(brokerAttachmentStage(root, "../elsewhere", files)(join(root, "invalid-id"))).rejects.toThrow("Invalid broker");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("watchdog reclaims a dead CLI's staging before publication and leaves a live lease alone", async () => {
+  const root = await mkdtemp("/tmp/ib-broker-lease-");
+  try {
+    const { sweepStagingLease } = await import("../send-broker");
+    const { spawnRequestDir } = await import("../spawn-broker");
+    const { selfProcessStartEpochSeconds } = await import("../agents");
+    const id = "c".repeat(32);
+    const path = join(root, "send-attachments", id);
+    await mkdir(path, { recursive: true });
+    await writeFile(join(path, "0"), "partial");
+    const lease = join(spawnRequestDir(root), "." + id + ".staging");
+    await Bun.write(lease, JSON.stringify({ pid: process.pid, start: selfProcessStartEpochSeconds() ?? Math.floor(Date.now()/1000 - process.uptime()) }));
+    await sweepStagingLease(root, id, Date.now());
+    expect(await Bun.file(join(path, "0")).exists()).toBe(true);
+    await Bun.write(lease, JSON.stringify({ pid: 2147483647, start: 1 }));
+    await sweepStagingLease(root, id, Date.now());
+    await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await Bun.file(lease).exists()).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

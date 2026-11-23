@@ -1,6 +1,6 @@
 import { constants as osConstants } from "node:os";
 import { constants } from "node:fs";
-import { copyFile, lstat, mkdir, open, realpath, rm, unlink, type FileHandle } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, realpath, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileChunks, hashFile, type ManifestEntry } from "./attachment-manifest";
 import { hasFreeSpace } from "./attachment-space";
@@ -82,21 +82,21 @@ export function remoteAttachmentStage(paths: readonly string[], sender: Attachme
 // Darwin O_NOFOLLOW_ANY also rejects symlinks in intermediate components.
 // Linux pins each child directory with an fd before opening the next one.
 async function withBrokerDirectory<T>(
-  agentDir: string, id: string, use: (dir: FileHandle, path: string, noFollow: number) => Promise<T>,
+  agentDir: string, id: string | undefined, use: (dir: FileHandle, path: string, noFollow: number) => Promise<T>,
 ) {
-  if (!/^[0-9a-f]{32}$/.test(id)) throw new Error("Invalid broker attachment request id");
+  if (id !== undefined && !/^[0-9a-f]{32}$/.test(id)) throw new Error("Invalid broker attachment request id");
   const root = join(await realpath(dirname(agentDir)), basename(agentDir));
   const flags = constants.O_RDONLY | constants.O_DIRECTORY;
   if (process.platform === "darwin") {
     const O_NOFOLLOW_ANY = 0x20000000;
-    const path = join(root, "send-attachments", id);
+    const path = join(root, "send-attachments", id ?? "");
     const request = await open(path, flags | O_NOFOLLOW_ANY);
     try { return await use(request, path, O_NOFOLLOW_ANY); }
     finally { await request.close(); }
   }
   let dir = await open(root, flags | constants.O_NOFOLLOW);
   try {
-    for (const name of ["send-attachments", id]) {
+    for (const name of id ? ["send-attachments", id] : ["send-attachments"]) {
       const next = await open(`/proc/self/fd/${dir.fd}/${name}`, flags | constants.O_NOFOLLOW);
       await dir.close();
       dir = next;
@@ -113,15 +113,21 @@ export function createBrokerProgress(agentDir: string, id: string) {
 // Finish the cross-volume move only after the private copy is verified.
 // unlinkat scopes deletion to the pinned request even if a parent is renamed.
 // Darwin's /dev/fd does not support directory-relative path traversal.
-async function releaseBrokerFile(dir: FileHandle, index: number) {
-  if (process.platform !== "darwin") return unlink(`/proc/self/fd/${dir.fd}/${index}`);
-  const { dlopen, FFIType, ptr } = await import("bun:ffi");
+async function removeBrokerMember(dir: FileHandle, leaf: string, directory = false) {
+  if (process.platform !== "darwin") {
+    const path = `/proc/self/fd/${dir.fd}/${leaf}`;
+    try { return await (directory ? rmdir(path) : unlink(path)); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; return; }
+  }
+  const { dlopen, FFIType, ptr, read } = await import("bun:ffi");
   const libc = dlopen("/usr/lib/libSystem.B.dylib", {
+    __error: { args: [], returns: FFIType.ptr },
     unlinkat: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   });
   try {
-    const name = Buffer.from(String(index) + "\0");
-    if (libc.symbols.unlinkat(dir.fd, ptr(name), 0) !== 0) throw new Error(`Could not release staged attachment ${index}`);
+    const name = Buffer.from(leaf + "\0");
+    if (libc.symbols.unlinkat(dir.fd, ptr(name), directory ? 0x80 /* AT_REMOVEDIR */ : 0) !== 0 &&
+        read.i32(libc.symbols.__error()!) !== osConstants.errno.ENOENT) throw new Error(`Could not remove staged member ${leaf}`);
   } finally { libc.close(); }
 }
 
@@ -162,9 +168,21 @@ export function brokerAttachmentStage(agentDir: string, id: string, files: SendH
             if (await hashFile({ handle: copy, size: file.size }, signal, progress) !== file.sha256) throw new Error("Broker attachment hash mismatch");
           } finally { await copy.close(); }
         } finally { await handle.close(); }
-        await releaseBrokerFile(request, index);
+        await removeBrokerMember(request, String(index));
       }
     });
     return files;
   };
+}
+
+// Reclaim only protocol-owned entries through pinned directory handles. A
+// forged lease cannot make the watchdog recursively delete a supplied path.
+export async function removeAbandonedStaging(agentDir: string, id: string) {
+  try {
+    await withBrokerDirectory(agentDir, id, async dir => {
+      await removeBrokerMember(dir, "progress");
+      for (let n = 0; n < 100; n++) await removeBrokerMember(dir, String(n));
+    });
+    await withBrokerDirectory(agentDir, undefined, parent => removeBrokerMember(parent, id, true));
+  } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
 }

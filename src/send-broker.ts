@@ -48,18 +48,18 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
-import { fstatSync, futimesSync } from "node:fs";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { constants, fstatSync, futimesSync } from "node:fs";
+import { mkdir, open, rm, stat } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
-import { brokerAttachmentStage, createBrokerProgress, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
+import { brokerAttachmentStage, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
 import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
 import { join } from "path";
-import type { Agent } from "./agents";
+import { isPidAliveCtx, processStartEpochSecondsCtx, selfProcessStartEpochSeconds, type Agent } from "./agents";
 import {
   hasLiveWatchdog,
   resolveCallerAgentContext,
@@ -76,7 +76,7 @@ import {
   brokerFail,
   isSameDirectory,
   resolveRoutedCaller, interruptedSend,
-  submitWatchdogRequest,
+  spawnRequestDir, submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
   type SpawnServerDeps,
@@ -226,6 +226,46 @@ export async function requestSendViaWatchdog(
   return submitSendRequest("send", caller.agentDir, caller.meta.id, target, message, deps, noPassthrough);
 }
 
+const STAGING_LEASE_MS = 60_000;
+
+// The queue already gives the watchdog a bounded request id to inspect. A
+// sibling lease appears before hashing starts, even if request.json never does.
+async function startStagingLease(dir: string, id: string) {
+  const queue = spawnRequestDir(dir);
+  await mkdir(queue, { recursive: true, mode: 0o700 });
+  const path = join(queue, "." + id + ".staging");
+  const lease = await open(path, "wx", 0o600);
+  try {
+    const start = selfProcessStartEpochSeconds() ?? Math.floor(Date.now() / 1000 - process.uptime());
+    await lease.writeFile(JSON.stringify({ pid: process.pid, start }));
+  } catch (err) { await lease.close(); await rm(path, { force: true }); throw err; }
+  const heartbeat = setInterval(() => { const now = new Date(); void lease.utimes(now, now).catch(() => {}); }, STAGING_LEASE_MS / 4);
+  return async () => { clearInterval(heartbeat); await lease.close(); await rm(path, { force: true }); };
+}
+
+export async function sweepStagingLease(dir: string, id: string, now: number) {
+  if (!/^[0-9a-f]{32}$/.test(id)) return;
+  const path = join(spawnRequestDir(dir), "." + id + ".staging");
+  const lease = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await lease.stat();
+    if (!info.isFile() || info.nlink !== 1 || info.size > 256) return;
+    if (now - info.mtimeMs < STAGING_LEASE_MS) {
+      const buffer = Buffer.alloc(257);
+      const { bytesRead } = await lease.read(buffer);
+      let owner;
+      try { owner = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return; }
+      if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0 || !Number.isSafeInteger(owner.start)) return;
+      if (isPidAliveCtx.fn(owner.pid)) {
+        const birth = processStartEpochSecondsCtx.fn(owner.pid);
+        if (birth === null || Math.abs(birth - owner.start) <= 2) return;
+      }
+    }
+    await removeAbandonedStaging(dir, id);
+    await rm(path, { force: true });
+  } finally { await lease.close(); }
+}
+
 async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false, stage?: StageRemoteFiles) {
   const remote = op === "remote-send";
   if (deps.signal?.aborted) return interruptedSend("unpublished");
@@ -239,8 +279,10 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(noPassthrough && { noPassthrough: true }) };
   const parent = join(dir, "send-attachments");
   const staged = join(parent, request.id);
+  let releaseLease: (() => Promise<void>) | undefined;
   try {
     if (remote) {
+      releaseLease = await startStagingLease(dir, request.id);
       await mkdir(parent, { recursive: true, mode: 0o700 });
       if (stage) request.files = await stage(staged);
       else { await mkdir(staged, { mode: 0o700 }); request.files = []; }
@@ -262,6 +304,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
     return result;
   } finally {
     if (remote) await rm(staged, { recursive: true, force: true });
+    await releaseLease?.();
   }
 }
 

@@ -34,6 +34,7 @@ import {
   BOUNCE_SIGNAL,
   IB_COORDINATOR_SESSION,
   acquireSystemCoordinator,
+  takeCoordinatorPaneWarning,
   ensureSystemCoordinator,
   releaseSystemCoordinator,
   sanitizeTmuxInput,
@@ -4279,6 +4280,8 @@ export async function launchDashboard(): Promise<void> {
   void dashboard.refreshRemoteControlStatus();
   void dashboard.refreshRemoteControlAfterLaunch(coordinatorStartup);
   dashboard.statusLightTimer = setInterval(() => {
+    const warning = takeCoordinatorPaneWarning();
+    if (warning) dashboard.setNotice(warning, "error");
     if (SANDBOX_DENIAL_COLLECTOR_ENABLED) {
       dashboard.setCollectorStatus(sandboxCollectorHealth({ previous: dashboard.collectorStatus }));
     }

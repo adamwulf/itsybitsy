@@ -837,6 +837,35 @@ export function getLastCoordinatorSpawnMode(): CoordinatorSpawnMode {
   return lastSpawnMode;
 }
 
+// A launch can also come from a restart or Telegram. The dashboard's status
+// tick delivers the warning once, after any local restart-success notice.
+let coordinatorPaneWarning: string | null = null;
+export function takeCoordinatorPaneWarning(): string | null {
+  const warning = coordinatorPaneWarning;
+  coordinatorPaneWarning = null;
+  return warning;
+}
+
+async function recordCoordinatorPane(paneId: string | null): Promise<void> {
+  try {
+    if (!paneId) throw new Error("tmux did not report the launched pane id");
+    const foreground = await coordinatorSpawnCtx.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
+    if (foreground.exitCode !== 0) throw new Error(foreground.stderr || "could not read the foreground command");
+    // Readiness text can outlive Claude. Never record the launcher's bash as the CLI.
+    if (!foreground.stdout || foreground.stdout === "bash") throw new Error("coordinator CLI is not in the foreground");
+    // Publish the id last. A partial record in the new session cannot enable capture.
+    const record = await coordinatorSpawnCtx.run([
+      "tmux", "set-option", "-t", paneId, COORDINATOR_PANE_COMMAND, foreground.stdout,
+      ";", "set-option", "-t", paneId, COORDINATOR_PANE_ID, paneId,
+    ]);
+    if (record.exitCode !== 0) throw new Error(record.stderr || "tmux could not save the pane binding");
+    coordinatorPaneWarning = null;
+  } catch (err) {
+    coordinatorPaneWarning = `Remote coordinator capture disabled: ${err instanceof Error ? err.message : String(err)}`;
+    logToWatchLog(`[coordinator] ${coordinatorPaneWarning}`);
+  }
+}
+
 /**
  * Ensure the system coordinator tmux session is running. If alive, returns
  * immediately. Otherwise launches Claude — resuming the newest non-cleared
@@ -1046,21 +1075,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const ready = await waitForCoordinatorReady();
   const readyMs = Date.now() - readyStart;
 
-  if (ready && paneId) {
-    const foreground = await coordinatorSpawnCtx.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
-    // Readiness text can outlive Claude. Never record the launcher's bash as the CLI.
-    if (foreground.exitCode === 0 && foreground.stdout && foreground.stdout !== "bash") {
-      const record = await coordinatorSpawnCtx.run([
-        "tmux", "set-option", "-t", paneId, COORDINATOR_PANE_COMMAND, foreground.stdout,
-        ";", "set-option", "-t", paneId, COORDINATOR_PANE_ID, paneId,
-      ]);
-      if (record.exitCode !== 0) {
-        const message = `Failed to record the system coordinator pane: ${record.stderr}`;
-        logToWatchLog(`[coordinator] ${message}`);
-        throw new Error(message);
-      }
-    }
-  }
+  if (ready) await recordCoordinatorPane(paneId);
 
   if (resumeId && !ready) {
     // Resume failed (likely a corrupt or version-mismatched transcript). Kill

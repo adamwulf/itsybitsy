@@ -14,6 +14,7 @@ import {
   sanitizeTmuxInput,
   ensureSystemCoordinator,
   acquireSystemCoordinator,
+  takeCoordinatorPaneWarning,
   releaseSystemCoordinator,
   restartSystemCoordinator,
   detectSystemCoordinatorState,
@@ -517,13 +518,39 @@ describe("ensureSystemCoordinator", () => {
     expect(await proc.exited).toBe(42);
   });
 
-  test("reports and logs a tmux failure while recording the coordinator pane", async () => {
-    coordinatorSpawnCtx.set(createCommandRouter({
-      "has-session": { exitCode: 1 }, "new-session": { stdout: "%4" },
-      "display-message": { stdout: "claude" }, "@ib-system-coordinator-command": { exitCode: 1 },
-    }));
-    await expect(ensureSystemCoordinator()).rejects.toThrow("Failed to record the system coordinator pane");
-    expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain("Failed to record");
+  test.each(["new-session id", "foreground read", "record write"])("a failed %s leaves the local coordinator running", async failure => {
+    let created = false;
+    let launches = 0;
+    coordinatorSpawnCtx.set((cmd) => {
+      let stdout = "";
+      let code = 0;
+      if (cmd[1] === "has-session") code = created ? 0 : 1;
+      if (cmd[1] === "new-session") {
+        created = true;
+        stdout = failure === "new-session id" ? "" : "%4";
+      }
+      if (cmd[1] === "send-keys" && cmd.includes("claude --model opus")) {
+        expect(cmd.at(-1)).toBe("Enter");
+        launches++;
+      }
+      if (cmd[1] === "display-message") {
+        expect(launches).toBe(1);
+        stdout = "claude";
+        if (failure === "foreground read") code = 1;
+      }
+      if (cmd.includes("@ib-system-coordinator-command") && failure === "record write") code = 1;
+      return { stdout: mockStream(stdout), stderr: mockStream(code ? failure : ""), exited: Promise.resolve(code) };
+    });
+
+    expect(await ensureSystemCoordinator()).toBe("ib-coordinator");
+    expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+    const warning = takeCoordinatorPaneWarning();
+    expect(warning).toContain("Remote coordinator capture disabled");
+    expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain(warning!);
+    expect(takeCoordinatorPaneWarning()).toBeNull();
+    expect(await ensureSystemCoordinator()).toBe("ib-coordinator");
+    expect(getLastCoordinatorSpawnMode()).toBe("existing");
+    expect(launches).toBe(1);
   });
 
   test("logs the resolved model and its source layer on spawn", async () => {

@@ -929,3 +929,26 @@ test("a settled reply write rejection leaves other requests on the same connecti
     expect(cancel).not.toHaveBeenCalled();
   } finally { a.close(0, "done"); await serving; }
 });
+
+test("a timed-out native read that drains during reply grace keeps the connection", async () => {
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock();
+  const stream = await a.openBi();
+  const server = await b.acceptBi();
+  // The native stop can settle before a pending read resumes with FIN.
+  server.stopReceiving = async () => {};
+  const accept = b.acceptBi.bind(b);
+  b.acceptBi = async () => { b.acceptBi = accept; return server; };
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    log() {}, setTimer: clock.setTimer });
+  try {
+    await stream.writeAll(Uint8Array.of(0));
+    await Bun.sleep(0);
+    clock.advance(60_000);
+    expect(JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096))).op).toBe("error");
+    await stream.finish();
+    await Bun.sleep(0);
+    clock.advance(5000);
+    expect(await requestAgents(a)).toMatchObject({ agents: [] });
+  } finally { a.close(0, "done"); await serving; }
+});

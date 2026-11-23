@@ -587,7 +587,7 @@ async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerRe
 
 /** The handler owns the reply and teardown. A settled stop or reset is stream-local. */
 async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerResponderDeps, bytes: Uint8Array,
-  stop?: Promise<void>, stalledRead = false) {
+  stop?: Promise<void>, stalledRead?: Promise<Uint8Array>) {
   const stopped = stop?.catch(() => {});
   const writeReply = async () => {
     await writeWithProgress(stream, bytes, deps.setTimer);
@@ -596,7 +596,10 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
   if (stalledRead) {
     // The native read is still pending. Bound the entire ACK attempt before
     // closing, with a delivery grace only if the reply actually settled.
-    if (await settledWithinGrace(writeReply(), deps) && await settledWithinGrace(conn.closed(), deps, 5000)) return false;
+    if (await settledWithinGrace(writeReply(), deps)) {
+      const drained = Promise.allSettled([stalledRead, stopped]);
+      if (await settledWithinGrace(Promise.race([drained, conn.closed()]), deps, 5000)) return false;
+    }
     closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
     return false;
   }
@@ -616,10 +619,10 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
 /** One request on its own stream. Every error stays here. */
 async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
-  let reading = false;
+  let reading: Promise<Uint8Array> | undefined;
   async function read(limit: number) {
-    reading = true;
-    try { return await stream.read(limit); } finally { reading = false; }
+    reading = stream.read(limit);
+    try { return await reading; } finally { reading = undefined; }
   }
   try {
     // Every valid sized header begins with zero (the cap is 256 KiB).
@@ -641,7 +644,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         if (!receivedFin) stopping ??= stream.stopReceiving().catch(() => {});
       };
       let reply: Uint8Array;
-      let stalledRead = false;
+      let stalledRead: Promise<Uint8Array> | undefined;
       try {
         const header = await decodeSendHeader(reader, options);
         if (!header.files.length) await requireSendFin(reader, options);
@@ -658,7 +661,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         if (header.files.length) stopUnreadBody();
         reply = encodeJson({ ok: true, id: header.id });
       } catch (err) {
-        stalledRead = reading && err instanceof TransferIdleError;
+        if (err instanceof TransferIdleError) stalledRead = reading;
         // STOP_SENDING is independent of the send half. The error ACK can
         // finish even if the native reader is still unwinding a stalled read.
         stopUnreadBody();

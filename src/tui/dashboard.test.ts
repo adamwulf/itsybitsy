@@ -9571,7 +9571,7 @@ describe("setup Peers tab", () => {
 
     service.setStage({ stage: "done", name: "Laptop B", alreadyPaired: false });
     expect(text(dashboard)).toContain(`Paired with "Laptop B" (${OTHER_SHORT}).`);
-    expect(text(dashboard)).toContain("Press any key to continue");
+    expect(text(dashboard)).toContain("Enter or Esc: return to Peers");
     dashboard.handleInput("x");
     expect(service.calls.at(-1)).toBe("dismiss");
     expect(peersTab(dashboard)).toBeTruthy();
@@ -9648,7 +9648,7 @@ describe("setup Peers tab", () => {
     for (const [stage, message] of cases) {
       service.setSession("initiator", stage);
       expect(text(dashboard)).toContain(message);
-      expect(text(dashboard)).toContain("Press any key to continue");
+      expect(text(dashboard)).toContain("Enter or Esc: return to Peers");
     }
   });
 

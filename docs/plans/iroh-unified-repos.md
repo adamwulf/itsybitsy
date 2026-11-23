@@ -311,7 +311,7 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
 2. **Pair.**
    - In `ib watch` on both laptops, press `h` and go to the Peers tab, or press `I` to open it directly.
    - Leave Peers visible on B. Copy B’s id and paste it into **Pair with id** on A, then press Enter.
-   - Type the 8-character code that B shows into A.
+   - Type the 8-character code that B shows into A, then press Enter.
    - Name each side.
    - Both Peers tabs should then show the other laptop as connected.
 3. **Merged repos.**

@@ -324,11 +324,11 @@ function buildPairingContent(d: PeersDialogState, view: PeerServiceView, innerWi
             : `Paired with ${JSON.stringify(stage.name)} (${peer}).`,
           GREEN,
         );
-        hint = "Press any key to continue";
+        hint = "Enter or Esc: return to Peers";
         break;
       case "failed":
         prose(describePairFailure(stage.failure, peer), RED);
-        hint = "Press any key to continue";
+        hint = "Enter or Esc: return to Peers";
         break;
     }
   }

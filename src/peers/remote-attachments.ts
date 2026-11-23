@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { constants as osConstants } from "node:os";
 import { constants } from "node:fs";
-import { copyFile, mkdir, open, realpath, rm, unlink, type FileHandle } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, realpath, rm, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileChunks, hashFile, type ManifestEntry } from "./attachment-manifest";
 import { hasFreeSpace } from "./attachment-space";
@@ -125,6 +125,22 @@ async function releaseBrokerFile(dir: FileHandle, index: number) {
   } finally { libc.close(); }
 }
 
+async function cloneOpened(handle: FileHandle, destination: string) {
+  if (process.platform !== "darwin") return cloneByPath(`/proc/self/fd/${handle.fd}`, destination);
+  const { dlopen, FFIType, ptr, read } = await import("bun:ffi");
+  const libc = dlopen("/usr/lib/libSystem.B.dylib", {
+    fclonefileat: { args: [FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+    __error: { args: [], returns: FFIType.ptr },
+  });
+  try {
+    const name = Buffer.from(destination + "\0");
+    if (libc.symbols.fclonefileat(handle.fd, -2 /* AT_FDCWD */, ptr(name), 0) === 0) return true;
+    const errno = read.i32(libc.symbols.__error()!);
+    if ([osConstants.errno.ENOTSUP, osConstants.errno.EXDEV, osConstants.errno.ENOSYS].includes(errno)) return false;
+    throw new Error(`Cannot clone staged attachment (errno ${errno})`);
+  } finally { libc.close(); }
+}
+
 export function brokerAttachmentStage(agentDir: string, id: string, files: SendHeader["files"], signal?: AbortSignal, progress?: () => void): StageRemoteFiles {
   return async dir => {
     await mkdir(dir, { mode: 0o700 });
@@ -135,16 +151,15 @@ export function brokerAttachmentStage(agentDir: string, id: string, files: SendH
         signal?.throwIfAborted();
         const handle = await openStagedFile(join(path, String(index)), file.size, noFollow);
         try {
-          const copy = await open(join(dir, String(index)), "wx", 0o600);
+          const destination = join(dir, String(index));
+          if (!await cloneOpened(handle, destination)) await copyOpened(handle, file.size, destination, signal, progress);
+          const copy = await openStagedFile(destination, file.size);
           try {
-            const digest = createHash("sha256");
-            for await (const chunk of fileChunks(handle, file.size)) {
-              signal?.throwIfAborted();
-              digest.update(chunk);
-              await copy.writeFile(chunk);
-              progress?.();
-            }
-            if (digest.digest("hex") !== file.sha256) throw new Error("Broker attachment hash mismatch");
+            const opened = await copy.stat({ bigint: true });
+            const named = await lstat(destination, { bigint: true });
+            if (opened.ino !== named.ino || opened.dev !== named.dev) throw new Error("Broker clone changed while opening");
+            await copy.chmod(0o600);
+            if (await hashFile({ handle: copy, size: file.size }, signal, progress) !== file.sha256) throw new Error("Broker attachment hash mismatch");
           } finally { await copy.close(); }
         } finally { await handle.close(); }
         await releaseBrokerFile(request, index);

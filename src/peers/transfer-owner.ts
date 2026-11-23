@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { lstat, mkdtemp, open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, open, opendir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
@@ -47,7 +47,7 @@ export async function makeOutgoingDirectory(root = "/tmp") {
 }
 
 export async function sweepOutgoingDirectories(root = "/tmp") {
-  for (const entry of await readdir(root, { withFileTypes: true })) {
+  for await (const entry of await opendir(root)) {
     const match = /^itsybitsy-outgoing-([1-9]\d*)-(\d+)-[a-zA-Z0-9]{6}$/.exec(entry.name);
     if (!entry.isDirectory() || !match) continue;
     const dir = join(root, entry.name);

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetUserHome, setUserHome } from "../home";
 import { waitFor } from "../test-utils";
-import { handoffRemoteMessage, textHeader, pollPeerOutbox } from "./peer-outbox";
+import { createPeerOutboxPoll, handoffRemoteMessage, textHeader, pollPeerOutbox } from "./peer-outbox";
 import { MAX_HEADER_BYTES } from "./transfer-limits";
 
 let home: string;
@@ -119,4 +119,15 @@ test("Ctrl-C during a successful claimed result read still reports unknown", asy
     await pollPeerOutbox(async () => header.id, () => {});
     expect(await result).toMatchObject({ exitCode: 130, stderr: "outcome unknown — check the recipient" });
   } finally { spy.mockRestore(); }
+});
+
+
+test("startup recovers an unpublished staging directory when its creator died before writing the owner", async () => {
+  const parent = join(base, ".staging");
+  const stranded = join(parent, crypto.randomUUID() + ".2147483647");
+  const active = join(parent, crypto.randomUUID() + "." + process.pid);
+  await mkdir(stranded, { recursive: true });
+  await mkdir(active);
+  await createPeerOutboxPoll()(async () => { throw new Error("unexpected send"); }, () => {}, () => false);
+  expect(await fs.readdir(parent)).toEqual([active.slice(parent.length + 1)]);
 });

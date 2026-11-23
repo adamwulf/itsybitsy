@@ -5,9 +5,9 @@ import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
 export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
-import { constants, existsSync, futimesSync, renameSync, writeFileSync } from "node:fs";
+import { constants, existsSync, renameSync, writeFileSync } from "node:fs";
 import { IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
@@ -77,7 +77,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     if (!live) return fail("remote sends need ib watch running on this machine");
     const base = peerOutboxDir();
     const dir = join(base, header.id);
-    const staging = join(base, ".staging", header.id);
+    const staging = join(base, ".staging", header.id + "." + process.pid);
     const claimed = join(base, ".claimed", header.id);
     await mkdir(join(base, ".staging"), { mode: 0o700, recursive: true });
     await mkdir(staging, { mode: 0o700 });
@@ -154,25 +154,31 @@ async function readRequest(path: string) {
   } finally { await file.close(); }
 }
 
-const retentionMs = 10 * 60_000;
-
 export function createPeerOutboxPoll(now = Date.now) {
   const active = new Set<string>();
   let nextSweep = 0;
   let lastBase: string | undefined;
   let workers = 0;
 
-  async function sweep(parent: string) {
+  async function sweep(parent: string, isStaging = false) {
     let entries;
     try { entries = await readdir(parent, { withFileTypes: true }); }
     catch (err) { if (missing(err)) return; throw err; }
     for (const entry of entries) {
       const path = join(parent, entry.name);
-      if (!entry.isDirectory() || !requestId.test(entry.name) || active.has(path)) continue;
+      const [id, pid, extra] = entry.name.split(".");
+      if (!entry.isDirectory() || !requestId.test(id!) || extra !== undefined || active.has(path)) continue;
+      if (isStaging ? !pid || !/^[1-9]\d*$/.test(pid) || !Number.isSafeInteger(Number(pid)) : pid !== undefined) continue;
       try {
-        const owner = await readTransferOwner(path);
-        if (owner && ownerIsDead(owner) && !active.has(path)) {
+        const recorded = await readTransferOwner(path);
+        // A crash immediately after mkdir still leaves the staging PID in its name.
+        const owner = recorded ?? (isStaging ? { pid: Number(pid), start: null } : undefined);
+        if (!owner) continue;
+        if (ownerIsDead(owner) && !active.has(path)) {
           await rm(path, { recursive: true, force: true });
+        } else if (isStaging && recorded?.start === null) {
+          const start = stagingOwnerStart(recorded.pid);
+          if (start !== null) await writeTransferOwner(path, { pid: recorded.pid, start });
         }
       } catch (err) { if (!missing(err)) throw err; }
     }
@@ -184,7 +190,7 @@ export function createPeerOutboxPoll(now = Date.now) {
     if (base !== lastBase || now() >= nextSweep) {
       lastBase = base;
       nextSweep = now() + 30_000;
-      await Promise.all([sweep(claimed), sweep(join(base, ".staging"))]);
+      await Promise.all([sweep(claimed), sweep(join(base, ".staging"), true)]);
     }
     if (!ownsEndpoint() || workers >= 4) return;
     let entries;
@@ -213,8 +219,7 @@ export function createPeerOutboxPoll(now = Date.now) {
               await rm(dir, { recursive: true, force: true });
               continue;
             }
-            const submitter = submittedBy;
-            const clientOwner = submitter && { pid: submitter.pid, start: submitter.start ?? stagingOwnerStart(submitter.pid) };
+            const clientOwner = submittedBy && { pid: submittedBy.pid, start: submittedBy.start ?? stagingOwnerStart(submittedBy.pid) };
             await writeTransferOwner(dir, { pid: process.pid, start: stagingOwnerStart(process.pid) });
             let result;
             try {

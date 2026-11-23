@@ -14,6 +14,7 @@ import { resetUserHome, setUserHome } from "../home";
 import { waitFor } from "../test-utils";
 import { loadOrCreateIdentity } from "./identity";
 import { loadIroh, type IrohEndpoint } from "./iroh";
+import { listeningOrThrow } from "./test-pair-transport";
 import { generatePairCode } from "./pair-code";
 import { PeerService, type ServiceEndpoint } from "./service";
 import { addPeer, readPeers, shortPeerId } from "./store";
@@ -84,7 +85,7 @@ test("two real loopback endpoints pair, and each peers.json ends up with the oth
   try {
     a.service.openDialog();
     b.service.openDialog();
-    await waitFor(() => a.service.view().status.kind === "listening" && b.service.view().status.kind === "listening", {
+    await waitFor(() => [a.service, b.service].map(listeningOrThrow).every(Boolean), {
       message: "both endpoints listening",
       timeoutMs: 10_000,
     });

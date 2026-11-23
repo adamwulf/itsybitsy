@@ -177,13 +177,10 @@ describe("endpoints over a relay-disabled loopback (real addon, no network)", ()
 
   test("close() resolves a pending acceptNext with null", async () => {
     const iroh = await loadIroh();
-    const ep = await iroh.Endpoint.bind({
-      secretKey: iroh.SecretKey.generate().toBytes(),
-      alpns: [ALPN],
-      preset: { kind: "local", bindAddr: "127.0.0.1:0" },
-    });
+    const ep = await bindLocal(iroh, [ALPN]);
     const pending = ep.acceptNext();
     await ep.close();
+    endpoints.splice(endpoints.indexOf(ep), 1);
     expect(await pending).toBeNull();
   });
 });

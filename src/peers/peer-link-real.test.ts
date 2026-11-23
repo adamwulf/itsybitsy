@@ -16,6 +16,7 @@ import { resetUserHome, setUserHome } from "../home";
 import { makeAgent, waitFor } from "../test-utils";
 import { loadOrCreateIdentity } from "./identity";
 import { loadIroh, type Iroh } from "./iroh";
+import { listeningOrThrow } from "./test-pair-transport";
 import { generatePairCode } from "./pair-code";
 import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer-link";
 import type { RemoteSpawnDeps } from "./new-agent";
@@ -132,6 +133,12 @@ async function pairBoth(a: Side, b: Side): Promise<void> {
   await inHome(b.home, () => addPeer({ id: a.id, name: "A" }));
 }
 
+async function bootPair(a: Side, b: Side): Promise<void> {
+  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  expect(listeningOrThrow(a.service)).toBe(true);
+  expect(listeningOrThrow(b.service)).toBe(true);
+}
+
 const link = (side: Side) => side.service.view().links[0];
 
 test("each side binds at boot and its poller fetches the other's snapshot, with exactly the allowed fields", async () => {
@@ -142,7 +149,7 @@ test("each side binds at boot and its poller fetches the other's snapshot, with 
   const b = await net.makeSide("b", bAgents);
   await pairBoth(a, b);
 
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   expect(a.service.view().status).toEqual({ kind: "listening" });
   expect(b.service.view().status).toEqual({ kind: "listening" });
   await waitFor(() => link(a)?.connected === true && link(b)?.connected === true, { message: "both polled", timeoutMs: 10_000 });
@@ -166,7 +173,7 @@ test("an id not in peers.json is closed on the peer ALPN before anything is read
   const b = await net.makeSide("b", [localAgent("agent-b1")]);
   // B lists nobody, so it binds when its dialog opens rather than at boot.
   b.service.openDialog();
-  await waitFor(() => b.service.view().status.kind === "listening", { message: "B listening", timeoutMs: 10_000 });
+  await waitFor(() => listeningOrThrow(b.service), { message: "B listening", timeoutMs: 10_000 });
 
   const stranger = await iroh.Endpoint.bind({
     secretKey: iroh.SecretKey.generate().toBytes(),
@@ -198,7 +205,7 @@ test("after the responder removes a peer, the next request on the existing conne
   const a = await net.makeSide("a", []);
   const b = await net.makeSide("b", [localAgent("agent-b1")]);
   await pairBoth(a, b);
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
   const list = link(a)!.agents;
   expect(b.logs).toContain(`peer link: ${shortPeerId(a.id)} connected`);
@@ -222,7 +229,7 @@ test("a trusted loopback new-agent stream starts the stubbed agent and returns i
   const a = await net.makeSide("a", []);
   const b = await net.makeSide("b", [], { listSpawnableTypes, listRepos: async () => [{ name: "App", path: "/b/app" }], newAgent, notice });
   await pairBoth(a, b);
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
   const prompt = "read this ".repeat(800);
   expect(await a.service.startRemoteAgent(b.id, { repo: "app", type, prompt })).toBe("worker-23");
@@ -237,7 +244,7 @@ test("reads the paired machine's system coordinator over a real loopback connect
   const a = await net.makeSide("a", []);
   const b = await net.makeSide("b", []);
   await pairBoth(a, b);
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
   expect(await a.service.fetchCoordinatorPane(b.id)).toEqual({ state: "running", text: "b coordinator" });
   expect(b.logs.some(line => line.includes("read the system coordinator pane"))).toBe(true);
@@ -256,7 +263,7 @@ test("agents send text in both directions over real paired endpoints", async () 
     await Bun.write(join(dir, "meta.transient.json"), JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now() }));
   }
   await pairBoth(a, b);
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   await waitFor(() => !!link(a)?.connected && !!link(b)?.connected, { message: "both connected", timeoutMs: 10_000 });
   for (const [sender, recipient, from, to] of [[a, b, "A/app/alice", "bob"], [b, a, "B/app/bob", "alice"]] as const) {
     const id = crypto.randomUUID();

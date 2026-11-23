@@ -13,7 +13,15 @@
  *     "closed"}` locally, `{byPeer: true, code, reason}` on the other side.
  */
 
+import type { PeerService } from "./service";
 import { PairProtocolError, type PairCloseInfo, type PairConnection, type PairStream } from "./pairing";
+
+/** A loopback fixture should surface a failed bind before any retry or test deadline. */
+export function listeningOrThrow(service: PeerService): boolean {
+  const status = service.view().status;
+  if (status.kind === "error") throw new Error(status.message);
+  return status.kind === "listening";
+}
 
 /** One direction of a bi stream. */
 class Pipe {

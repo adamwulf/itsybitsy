@@ -10768,7 +10768,7 @@ describe("Unified peer repos in the Agents tree", () => {
     service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
     dashboard.inputField.submit();
     await Bun.sleep(3100);
-    expect(dashboard.notice).toBe("sending…");
+    expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("sending to Laptop B/");
     const [peer, header] = service.sendRemoteMessage.mock.calls[1]!;
     expect(peer).toBe(PEER_B);
     expect(header).toMatchObject({ from: { kind: "user" }, message: "/compact", files: [],
@@ -10776,6 +10776,36 @@ describe("Unified peer repos in the Agents tree", () => {
     pending.resolve(header.id);
     await waitFor(() => dashboard.inputField.getText() === "");
     expect(dashboard.notice).toContain("Sent to Laptop B/");
+  });
+
+  test("incoming notices and overlapping completions leave each pending send visible", async () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.agentTree.selectSystemCoordinator();
+    dashboard.syncSelectedAgent();
+    const first = Promise.withResolvers<string>();
+    const second = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+    for (const key of [PEER_B + "/@system", WORKER_KEY]) {
+      dashboard.focusManager.setFocus("agent-tree");
+      selectByKey(dashboard, key);
+      dashboard.handleInput("s");
+      dashboard.handleInput("hello");
+      dashboard.inputField.submit();
+    }
+    const content = () => stripAnsi(dashboard.render(WIDTH).join("\n"));
+    dashboard.setNotice("Incoming peer message", "info");
+    expect(content()).toContain("Incoming peer message");
+    expect(content().match(/sending to Laptop B\//g)).toHaveLength(2);
+    first.resolve("first");
+    await Bun.sleep(0);
+    expect(content()).toContain("Sent to Laptop B/@system");
+    expect(content()).not.toContain("sending to Laptop B/@system");
+    expect(content()).toContain("sending to Laptop B/");
+    second.reject(new Error("disconnected"));
+    await Bun.sleep(0);
+    expect(content()).toContain("disconnected");
+    expect(content()).not.toContain("sending to Laptop B/");
   });
 
   test("the guard refuses action keys on a remote row with the notice, and none of their handlers run", () => {

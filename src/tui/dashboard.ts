@@ -884,6 +884,7 @@ export class DashboardComponent implements Component {
     const repoPath = this.agentTree.selectedRepoPath ?? (this.agentTree.selectedAgent?.repoPath ?? null);
     return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
   }
+  private pendingRemoteSends = new Map<string, string>();
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
   private usageTimer: ReturnType<typeof setInterval> | null = null;
@@ -1983,16 +1984,23 @@ export class DashboardComponent implements Component {
 
   private async submitRemoteMessage(peer: string, label: string, target: SendTarget, text: string): Promise<boolean> {
     const service = this.peerService;
+    const header = textHeader(target, text, { kind: "user" });
     try {
       if (!service) throw new Error("Remote messaging is unavailable");
       if (service.remoteStartDenial !== null) throw new Error(remoteSendDenial(service.remoteStartDenial));
-      this.setNotice("sending…", "info", true);
-      await service.sendRemoteMessage(peer, textHeader(target, text, { kind: "user" }));
+      this.pendingRemoteSends.set(header.id, label);
+      this.invalidate();
+      this.tui?.requestRender();
+      await service.sendRemoteMessage(peer, header);
       this.setNotice(`Sent to ${label}`, "info");
       return true;
     } catch (err) {
       this.setNotice(err instanceof Error ? err.message : String(err), "error");
       return false;
+    } finally {
+      this.pendingRemoteSends.delete(header.id);
+      this.invalidate();
+      this.tui?.requestRender();
     }
   }
 
@@ -2086,13 +2094,12 @@ export class DashboardComponent implements Component {
     }
   }
 
-  setNotice(text: string, kind: "info" | "error", persistent = false) {
+  setNotice(text: string, kind: "info" | "error") {
     const id = ++this.noticeCounter;
     this.lastSentNotice = text;
     this.lastSentNoticeKind = kind;
     this.invalidate();
     this.tui?.requestRender();
-    if (persistent) return;
     setTimeout(() => {
       if (this.noticeCounter === id) {
         this.lastSentNotice = null;
@@ -3742,7 +3749,10 @@ export class DashboardComponent implements Component {
     // Compute available height for the main content area.
     // Chrome lines: header(1) + main title separator(1) +
     //               bottom separator(1) + status bar(2) = 5.
-    const chromeLines = 5;
+    for (const label of this.pendingRemoteSends.values()) {
+      lines.push(truncateToWidth(`sending to ${label}…`, width, "…"));
+    }
+    const chromeLines = 5 + this.pendingRemoteSends.size;
     const availableHeight = Math.max(5, terminalRows - chromeLines);
 
     // Width math comes from the widths module — never inline.

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { sanitizeMachineName } from "../machine-name";
-import { isValidAgentId, isValidRepoName } from "../validation";
+import { isStoredRepoName } from "../registry";
+import { isRepoId } from "../repo-id";
+import { isValidAgentId } from "../validation";
 import { fileChunks, type ManifestEntry } from "./attachment-manifest";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 
@@ -45,8 +47,12 @@ function validFrom(value: unknown): value is SendHeader["from"] {
   if (value.kind === "user") return onlyKeys(value, "kind");
   if (value.kind !== "agent" || !nonempty(value.id) || !onlyKeys(value, "kind", "id")) return false;
   const [machine, repo, agent, extra] = value.id.split("/", 4);
-  return nonempty(machine) && sanitizeMachineName(machine) === machine &&
-    nonempty(repo) && isValidRepoName(repo) && nonempty(agent) && isValidAgentId(agent) && extra === undefined;
+  if (extra !== undefined || !nonempty(machine) || sanitizeMachineName(machine) !== machine ||
+      !nonempty(repo) || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(repo) || repo.trim() !== repo ||
+      !nonempty(agent) || agent === "." || agent === "..") return false;
+  if (!(repo.startsWith("~") ? isRepoId(repo.slice(1)) : isStoredRepoName(repo))) return false;
+  // A coordinator takes its checkout basename. Allow dots alongside the usual agent-id characters.
+  return isValidAgentId(agent.replaceAll(".", "_"));
 }
 function validTarget(value: unknown): value is SendTarget {
   if (!object(value)) return false;

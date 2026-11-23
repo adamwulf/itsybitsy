@@ -219,9 +219,14 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
 
      | Key | Default | Allowed range |
      |---|---|---|
-     | `peering.attachments.maxFileMB` | 1024 | integer, 1–65536 |
-     | `peering.attachments.maxMessageMB` | 2048 | integer, 1–131072, and at least `maxFileMB` |
-     | `peering.attachments.maxFiles` | 20 | integer, 1–100 |
+     | `peering.attachments.maxFileMB` | 1024 | integer, 0–65536 |
+     | `peering.attachments.maxMessageMB` | 2048 | integer, 0–131072, and at least `maxFileMB` |
+     | `peering.attachments.maxFiles` | 20 | integer, 0–100 |
+
+     - **Zero disables attachments (Adam, 2026-11-23).** If any of the three limits is 0, every attachment is rejected, including empty 0-byte files. A message with no attachments still goes through.
+       - The check is "limit is 0 → reject", made before any size comparison.
+       - The config UI says "0 = attachments disabled".
+       - The error names the limit, its value and the machine, for example: "attachments are disabled on laptop (peering.attachments.maxFileMB = 0)".
 
      - **Units.** MB means MiB.
      - **Bad values.** The config UI refuses an invalid value with a message. A bad value already in the file falls back to its default and logs a warning that names the key.

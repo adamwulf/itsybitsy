@@ -21,7 +21,28 @@ export async function openStagedFile(path: string, size: number, flags = constan
   }
 }
 
-export async function cloneAttachments(dir: string, entries: (ManifestEntry & { sha256: string })[], signal?: AbortSignal) {
+async function cloneByPath(source: string, destination: string) {
+  try {
+    await copyFile(source, destination, constants.COPYFILE_FICLONE_FORCE | constants.COPYFILE_EXCL);
+    return true;
+  } catch (err) {
+    if (["ENOTSUP", "EOPNOTSUPP", "EXDEV", "ENOSYS", "ENOTTY"].includes((err as NodeJS.ErrnoException).code ?? "")) return false;
+    throw err;
+  }
+}
+
+async function copyOpened(handle: FileHandle, size: number, destination: string, signal?: AbortSignal, progress?: () => void) {
+  const copy = await open(destination, "wx", 0o600);
+  try {
+    for await (const chunk of fileChunks(handle, size)) {
+      signal?.throwIfAborted();
+      await copy.writeFile(chunk);
+      progress?.();
+    }
+  } finally { await copy.close(); }
+}
+
+export async function cloneAttachments(dir: string, entries: (ManifestEntry & { sha256: string })[], signal?: AbortSignal, clone = cloneByPath) {
   await mkdir(dir, { mode: 0o700 });
   try {
     const total = entries.reduce((sum, entry) => sum + entry.size, 0);
@@ -30,7 +51,7 @@ export async function cloneAttachments(dir: string, entries: (ManifestEntry & { 
     for (const [index, entry] of entries.entries()) {
       signal?.throwIfAborted();
       const destination = join(dir, String(index));
-      await copyFile(entry.source, destination, constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL);
+      if (!await clone(entry.source, destination)) await copyOpened(entry.handle, entry.size, destination, signal);
       const handle = await openStagedFile(destination, entry.size);
       try {
         await handle.chmod(0o600);

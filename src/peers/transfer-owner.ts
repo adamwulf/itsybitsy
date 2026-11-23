@@ -176,12 +176,12 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
     const seed = await readOwnerFields(lease);
     if (!seed) return { state: "unverifiable", created };
     const observed = stagingOwnerStart(seed.pid);
-    const candidate = { pid: seed.pid, start: observed };
-    const firstSight = transferOwnerState({ pid: seed.pid, start: null }, leaseInfo.birthtimeMs, observed);
-    if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null) return { state: firstSight, created };
     try { stamp = await openBrokerLease(dir, id, "owner.json"); }
     catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      const candidate = { pid: seed.pid, start: observed };
+      const firstSight = transferOwnerState({ pid: seed.pid, start: null }, leaseInfo.birthtimeMs, observed);
+      if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null) return { state: firstSight, created };
       try {
         stamp = await openBrokerLease(dir, id, "owner.json", true);
         await stamp.writeFile(JSON.stringify(candidate));

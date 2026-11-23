@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import * as brokerFiles from "./remote-attachments";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,4 +97,26 @@ test("recovery reports errors only after every root finishes", async () => {
   held.resolve();
   expect(await outcome).toBeInstanceOf(AggregateError);
   expect(reported).toBe(true);
+});
+
+test("a watchdog reclaims a reused PID from its saved stamp even without a lease birth time", async () => {
+  const id = "b".repeat(32), dir = join(root, "send-attachments", id);
+  await mkdir(dir, { recursive: true });
+  await Bun.write(join(dir, "lease"), JSON.stringify({ pid: process.pid }));
+  await sweepStagingLease(root, id, Date.now());
+  expect(await Bun.file(join(dir, "owner.json")).json()).toEqual({ pid: process.pid, start: 10 });
+  const open = brokerFiles.openBrokerLease;
+  const spy = spyOn(brokerFiles, "openBrokerLease").mockImplementation(async (...args) => {
+    const handle = await open(...args);
+    if (args[2] === undefined) {
+      const info = await handle.stat(); info.birthtimeMs = 0;
+      handle.stat = (async () => info) as typeof handle.stat;
+    }
+    return handle;
+  });
+  try {
+    processStartEpochSecondsCtx.set(() => 11);
+    await sweepStagingLease(root, id, Date.now());
+    expect(await readdir(join(root, "send-attachments"))).toEqual([]);
+  } finally { spy.mockRestore(); }
 });

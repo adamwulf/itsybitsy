@@ -10,3 +10,19 @@ export async function hasFreeSpace(
   const { bavail, bsize } = await statfs(dir);
   return BigInt(bavail) * BigInt(bsize) >= BigInt(bytes) + BigInt(DISK_MARGIN_BYTES);
 }
+
+/** One ledger per staging volume. Each caller owns only its outstanding bytes. */
+export class VolumeReservations {
+  private reserved = 0;
+
+  transfer() {
+    let outstanding = 0;
+    return (unwritten: number) => {
+      this.reserved += unwritten - outstanding;
+      outstanding = unwritten;
+      return this.reserved;
+    };
+  }
+}
+
+export const watcherTmpReservations = new VolumeReservations();

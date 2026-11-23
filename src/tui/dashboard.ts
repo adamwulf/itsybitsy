@@ -1,3 +1,4 @@
+import { watcherTmpReservations } from "../peers/attachment-space";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { dashboardAttachmentPaths } from "../peers/dashboard-attachments";
@@ -2031,7 +2032,7 @@ export class DashboardComponent implements Component {
       if (paths.length) {
         staging = await mkdtemp("/tmp/itsybitsy-outgoing-");
         filesDir = join(staging, "files");
-        header.files = await remoteAttachmentStage(paths, { kind: "user" }, controller.signal)(filesDir);
+        header.files = await remoteAttachmentStage(paths, { kind: "user" }, controller.signal, undefined, watcherTmpReservations)(filesDir);
         pending.total = header.files.reduce((sum, file) => sum + file.size, 0);
       }
       await service.sendRemoteMessage(remote.peerId, header, "dashboard", {

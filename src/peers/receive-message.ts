@@ -5,7 +5,7 @@ import { readTransferLimits } from "../config";
 import { readMachineName } from "../machine-name";
 import { sanitizeAttachmentName } from "./attachment-name";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
-import { hasFreeSpace } from "./attachment-space";
+import { hasFreeSpace, VolumeReservations, watcherTmpReservations } from "./attachment-space";
 import { cleanRemoteText } from "./peer-link";
 import { checkIncomingFiles } from "./transfer-limits";
 import type { PairStream } from "./pairing";
@@ -80,13 +80,13 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
 
 /** Shared across this watcher's inbound connections. Concurrent replays await the first enqueue. */
 export function createMessageReceiver(log: (line: string) => void, notice: (line: string) => void, now = Date.now, capacity = 4096,
-  storage = { tempDir: "/tmp", hasFreeSpace },
+  storage: ReceiveStorage = { tempDir: "/tmp", hasFreeSpace },
+  reservations = storage.tempDir === "/tmp" ? watcherTmpReservations : new VolumeReservations(),
 ) {
   const accepted = new Map<string, number>();
   const pending = new Map<string, Promise<void>>();
   let waiters = 0;
   const receiving = new Set<string>();
-  let reserved = 0;
   return async (header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>,
     body?: Pick<PairStream, "read">, options: import("./peer-link").ReceiptOptions = {}) => {
     if (!header.message && !header.files.length) throw new Error("Message is empty");
@@ -111,12 +111,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
       const { files } = header;
       let staged: Awaited<ReturnType<typeof receiveAttachments>> | undefined;
       let bodyError: unknown;
-      let outstanding = 0;
-      const reserve = (bytes: number) => {
-        reserved += bytes - outstanding;
-        outstanding = bytes;
-        return reserved;
-      };
+      const reserve = reservations.transfer();
       const total = files.reduce((sum, file) => sum + file.size, 0);
       if (files.length) {
         if (receiving.has(peerId) || receiving.size >= 2) throw new Error("busy, try again");

@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readdir, realpath, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileChunks, hashFile, type ManifestEntry, type AttachmentArgument } from "./attachment-manifest";
-import { hasFreeSpace } from "./attachment-space";
+import { hasFreeSpace, type VolumeReservations } from "./attachment-space";
 import { withSenderManifest, type AttachmentSender } from "./local-attachments";
 import type { SendHeader } from "./send-frame";
 
@@ -31,20 +31,22 @@ async function cloneByPath(source: string, destination: string) {
   }
 }
 
-async function copyOpened(handle: FileHandle, size: number, destination: string, signal?: AbortSignal, progress?: () => void) {
+async function copyOpened(handle: FileHandle, size: number, destination: string, signal?: AbortSignal, progress?: () => void, written?: (bytes: number) => void) {
   const copy = await open(destination, "wx", 0o600);
   try {
     for await (const chunk of fileChunks(handle, size)) {
       signal?.throwIfAborted();
       await copy.writeFile(chunk);
+      written?.(chunk.length);
       progress?.();
     }
   } finally { await copy.close(); }
 }
 
 async function stageSnapshot(handle: FileHandle, file: { size: number; sha256: string }, destination: string,
-  signal: AbortSignal | undefined, progress: (() => void) | undefined, mismatch: string, clone = cloneOpened) {
-  if (!await clone(handle, destination)) await copyOpened(handle, file.size, destination, signal, progress);
+  signal: AbortSignal | undefined, progress: (() => void) | undefined, mismatch: string, clone = cloneOpened, written?: (bytes: number) => void) {
+  if (await clone(handle, destination)) written?.(file.size);
+  else await copyOpened(handle, file.size, destination, signal, progress, written);
   const copy = await openStagedFile(destination, file.size);
   try {
     const opened = await copy.stat({ bigint: true });
@@ -55,11 +57,13 @@ async function stageSnapshot(handle: FileHandle, file: { size: number; sha256: s
   } finally { await copy.close(); }
 }
 
-export async function cloneAttachments(dir: string, entries: (ManifestEntry & { sha256: string })[], signal?: AbortSignal, clone = cloneOpened, leasedDirectory = false) {
+export async function cloneAttachments(dir: string, entries: (ManifestEntry & { sha256: string })[], signal?: AbortSignal, clone = cloneOpened, leasedDirectory = false, reservations?: VolumeReservations) {
   if (!leasedDirectory) await mkdir(dir, { mode: 0o700 });
+  const reserve = reservations?.transfer();
   try {
     const total = entries.reduce((sum, entry) => sum + entry.size, 0);
-    if (!await hasFreeSpace(dir, total)) throw new Error("Insufficient space for staged attachments and the 1 GiB reserve");
+    let remaining = total;
+    if (!await hasFreeSpace(dir, reserve?.(total) ?? total)) throw new Error("Insufficient space for staged attachments and the 1 GiB reserve");
     const files: SendHeader["files"] = [];
     for (const [index, entry] of entries.entries()) {
       signal?.throwIfAborted();
@@ -68,7 +72,7 @@ export async function cloneAttachments(dir: string, entries: (ManifestEntry & { 
       const opened = await entry.handle.stat({ bigint: true });
       const mismatch = `Attachment changed after manifest: ${entry.source}`;
       if (!named.isFile() || named.dev !== opened.dev || named.ino !== opened.ino) throw new Error(mismatch);
-      await stageSnapshot(entry.handle, entry, destination, signal, undefined, mismatch, clone);
+      await stageSnapshot(entry.handle, entry, destination, signal, undefined, mismatch, clone, bytes => { remaining -= bytes; reserve?.(remaining); });
       const { name, size, sha256, spellings } = entry;
       files.push({ name, size, sha256, spellings });
     }
@@ -76,13 +80,13 @@ export async function cloneAttachments(dir: string, entries: (ManifestEntry & { 
   } catch (error) {
     await rm(dir, { recursive: true, force: true });
     throw error;
-  }
+  } finally { reserve?.(0); }
 }
 
 export function remoteAttachmentStage(paths: readonly AttachmentArgument[], sender: AttachmentSender, signal?: AbortSignal,
-  onStaged?: (files: SendHeader["files"]) => void): StageRemoteFiles {
+  onStaged?: (files: SendHeader["files"]) => void, reservations?: VolumeReservations): StageRemoteFiles {
   return (dir, leasedDirectory) => withSenderManifest(paths, sender, signal, async entries => {
-    const files = await cloneAttachments(dir, entries, signal, cloneOpened, leasedDirectory);
+    const files = await cloneAttachments(dir, entries, signal, cloneOpened, leasedDirectory, reservations);
     onStaged?.(files);
     return files;
   });

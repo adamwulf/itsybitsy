@@ -43,7 +43,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
     const name = await readPeerName();
     if (name === null) throw new Error("not a peer");
 
-    const key = peerId + ":" + header.id;
+    const key = peerId + ":" + header.id.toLowerCase();
     const time = now();
     for (const [id, expires] of accepted) if (expires <= time) accepted.delete(id);
     if (accepted.has(key)) return;

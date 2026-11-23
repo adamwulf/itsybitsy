@@ -104,6 +104,15 @@ test("wire ids ignore recycled nicknames and select the keyed queue of the named
   expect(await readOutbox(join(base, "other", "same"))).toHaveLength(1);
 });
 
+test("a differently cased UUID is still a replay after the recipient drained", async () => {
+  const original = header({ id: "aaaaaaaa-1234-1234-1234-123456789abc" });
+  expect(await exchange(original)).toMatchObject({ ok: true });
+  const dir = join(cli.home, ".itsybitsy", "agents", "worker");
+  await drainOutbox(makeAgent({ id: "worker", repoPath: repo }), dir);
+  expect(await exchange({ ...original, id: original.id.toUpperCase() })).toMatchObject({ ok: true });
+  expect(await readOutbox(dir)).toEqual([]);
+});
+
 test("unknown, stopped, unpaired and attachment sends are refused before queueing", async () => {
   expect(await exchange(header({ target: { kind: "agent", agent: "missing" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
   const files = [{ name: "a", size: 0, sha256: "0".repeat(64), spellings: ["a"] }];

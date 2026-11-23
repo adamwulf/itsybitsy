@@ -704,3 +704,26 @@ test.each(["writeAll", "finish"] as const)("new-agent reads a busy reply after %
     expect(a.closeInfo()).toBeNull();
   } finally { a.close(0, "done"); }
 });
+
+test("a flow-controlled write surfaces a finished refusal before cancellation", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { textHeader } = await import("./peer-outbox");
+  const { a, b } = createMemoryLink("client", "server");
+  const clock = createFakeClock();
+  const writing = Promise.withResolvers<void>();
+  const stream = await a.openBi();
+  a.openBi = async () => stream;
+  stream.write = async () => { writing.resolve(); await a.closed(); throw Error("closed"); };
+  const cancelled = spyOn(stream, "cancel");
+  try {
+    const result = requestSend(a, textHeader({ kind: "system" }, "hi", { kind: "user" }), clock.setTimer).catch(err => err);
+    const peer = await b.acceptBi();
+    await writing.promise;
+    await peer.writeAll(encode({ op: "error", reason: "busy, try again" }));
+    await peer.finish();
+    clock.advance(60_000);
+    expect((await result).message).toBe("busy, try again");
+    expect(cancelled).toHaveBeenCalledTimes(1);
+    expect(a.closeInfo()).toBeNull();
+  } finally { a.close(0, "done"); }
+});

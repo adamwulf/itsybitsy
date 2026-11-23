@@ -389,7 +389,7 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
 
-async function writeWithProgress(stream: PairStream, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal) {
+async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal) {
   let offset = 0;
   while (offset < bytes.length) {
     const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
@@ -424,20 +424,25 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   let recvDone = false;
   let attemptedFin = false;
   let writeError: unknown;
+  let writing = false;
+  async function wireWrite<V>(operation: () => Promise<V>) {
+    writing = true;
+    try { return await operation(); } finally { writing = false; }
+  }
   try {
     const active = await io(() => opening = conn.openBi());
     stream = active;
     let sent = 0;
     try {
       try {
-        if (files) { await writeWithProgress(active, bytes, setTimer, signal); options.onProgress?.(0); }
-        else await io(() => active.writeAll(bytes));
+        if (files) { await writeWithProgress({ write: chunk => wireWrite(() => active.write(chunk)) }, bytes, setTimer, signal); options.onProgress?.(0); }
+        else await io(() => wireWrite(() => active.writeAll(bytes)));
       } catch (err) { writeError = err; throw err; }
       for (const [index, file] of (files ?? []).entries()) {
         const handle = await openStagedFile(join(options.filesDir!, String(index)), file.size);
         try {
           await sendFileBody({ handle, size: file.size }, { async write(chunk) {
-            try { return await active.write(chunk); }
+            try { return await wireWrite(() => active.write(chunk)); }
             catch (err) { writeError = err; throw err; }
           } }, { setTimer, signal, onProgress: n => options.onProgress?.(sent + n) });
         } finally { await handle.close(); }
@@ -445,7 +450,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
       }
       signal.throwIfAborted();
       attemptedFin = true;
-      await io(() => active.finish());
+      await io(() => wireWrite(() => active.finish()));
       sendDone = true;
     } catch (err) {
       if ((!writeError && !attemptedFin) || err instanceof TransferIdleError || signal.aborted) throw err;
@@ -476,10 +481,24 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
       throw err;
     }
   } catch (err) {
+    let early: { value: T } | undefined;
     if (!(sendDone && recvDone)) {
-      const teardown = stream ? (sendDone ? stream.stopReceiving() : stream.cancel()) : opening?.then(s => s.cancel());
-      if (teardown && !await settledWithinGrace(teardown, { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+      const teardown = async () => {
+        if (stream && writing && !options.signal?.aborted) {
+          // Flow control can hold the write even after the peer finished its reply.
+          // Use part of the single teardown grace to collect that complete reply.
+          const reply = stream.readToEnd(PEER_MAX_REPLY_BYTES);
+          if (await settledWithinGrace(reply, { setTimer }, 150)) {
+            try { early = { value: decode(await reply) }; }
+            catch (reason) { if (reason instanceof PeerErrorReply) err = reason; }
+          }
+        }
+        if (stream) await (sendDone ? stream.stopReceiving() : stream.cancel());
+        else if (opening) await (await opening).cancel();
+      };
+      if (!await settledWithinGrace(teardown(), { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
     }
+    if (early) return early.value;
     if (files && attemptedFin && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN, { cause: err });
     throw err;
   } finally { clear?.(); }

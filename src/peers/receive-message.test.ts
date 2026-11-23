@@ -515,3 +515,14 @@ test.each(["shutdown", "cancel"])("%s cleans a tracked receipt after its first b
   expect(service.view().incoming ?? []).toEqual([]);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
+
+test("requestSend retains the machine, key and value of a long file limit error", async () => {
+  const { a, b } = createMemoryLink("sender", "local");
+  const timer = createFakeClock().setTimer;
+  const req = header();
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: timer,
+    receiveMessage: async () => { throw Error("File " + "x".repeat(900) + " exceeds the limit on laptop (peering.attachments.maxFileMB = 1)"); },
+  });
+  try { await expect(requestSend(a, req, timer)).rejects.toThrow("laptop (peering.attachments.maxFileMB = 1)"); }
+  finally { a.close(0, "done"); await serving; }
+});

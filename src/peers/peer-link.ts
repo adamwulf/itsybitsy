@@ -175,8 +175,19 @@ export class PeerErrorReply extends Error {
  * dropped, one line, capped.
  */
 export function cleanRemoteText(text: string): string {
-  const flat = text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
+  const flat = singleLine(text);
   return flat.length > MAX_REMOTE_TEXT ? `${flat.slice(0, MAX_REMOTE_TEXT - 1)}…` : flat;
+}
+
+function singleLine(text: string) {
+  return text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
+}
+
+function sendDiagnostic(text: string) {
+  const flat = singleLine(text);
+  // Limit refusals end with the machine and setting. Keep that suffix
+  // intact even when the peer supplied a very long filename.
+  return flat.length > 300 ? flat.slice(0, 99) + "…" + flat.slice(-200) : flat;
 }
 
 /**
@@ -476,7 +487,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
     if (!length && writeError) throw writeError;
     const reply = decodeObject(Buffer.concat(parts, length), "reply");
     if (reply.ok === true && reply.id === header.id) return header.id;
-    if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
+    if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(sendDiagnostic(reply.error));
     throw new PeerProtocolError("Malformed send acknowledgement");
   } catch (err) {
     if (stream) {
@@ -622,7 +633,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         // STOP_SENDING is independent of the send half. The error ACK can
         // finish even if the native reader is still unwinding a stalled read.
         void stream.stopReceiving().catch(() => {});
-        reply = { ok: false, error: errorDetail(err) };
+        reply = { ok: false, error: sendDiagnostic(errorDetail(err)) };
       }
       try {
         await writeWithProgress(stream, encodeJson(reply), deps.setTimer);

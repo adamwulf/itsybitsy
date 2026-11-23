@@ -121,10 +121,10 @@ describe("buildAgentAccessTable", () => {
 
   test.each(["claude:opus", "sonnet", "opus", "unknown", "codex:gpt-5.6-sol", "fugu:fugu", "agy:default", "bogus:model"])(
     "%s grants only its CLI runtime directories", async (model) => {
-      const prepared = await build({ agentType: "worker", model });
-      const worktreePath = join(tmp, "repo");
+      const { prepared, homeDir, worktreePath } = await buildDisjoint({ agentType: "worker", model });
       const expected = model.startsWith("claude:") || !model.includes(":") ? "allow" : "deny";
-      expect(resolvePreparedAccess(prepared, claudeProjectDirFor(worktreePath), "write")).toBe(expected);
+      expect(resolvePreparedAccess(prepared, claudeProjectDirFor(worktreePath, homeDir), "write")).toBe(expected);
+      expect(resolvePreparedAccess(prepared, claudeProjectDirFor(worktreePath), "write")).toBe("deny");
       expect(resolvePreparedAccess(prepared, claudeScratchpadDirFor(worktreePath, UID), "write")).toBe(expected);
     },
   );
@@ -140,7 +140,7 @@ describe("buildAgentAccessTable", () => {
     await mkdir(worktreePath, { recursive: true });
     await mkdir(homeDir, { recursive: true });
     return {
-      homeDir,
+      homeDir, worktreePath,
       prepared: await buildAgentAccessTable({
         meta,
         agentDir,

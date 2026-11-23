@@ -63,7 +63,7 @@ async function readAncestors(pid: number, readTable: NonNullable<DashboardCaller
   return null;
 }
 
-async function classifyCaller(signal: AbortSignal, input?: DashboardCaller): Promise<string | null> {
+async function classifyCaller(signal: AbortSignal, input: DashboardCaller | undefined, terminalOnly: boolean): Promise<string | null> {
   const unverified = "Cannot verify the dashboard caller’s agent metadata for remote starts";
   try {
     const { stdinTTY, stdoutTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable = readProcessTable } = input ?? {
@@ -78,6 +78,7 @@ async function classifyCaller(signal: AbortSignal, input?: DashboardCaller): Pro
       const agent = names.find(name => ["claude", "codex", "agy"].includes(name.toLowerCase()));
       if (agent) return `Remote starts are disabled under ${agent}`;
     }
+    if (terminalOnly) return null;
     // Verify shared-repo PID epochs against this same snapshot, without
     // running the ordinary caller resolver's synchronous ps probes.
     const caller = await resolveCaller(cwd, new Set(ancestors.keys()), {
@@ -104,7 +105,7 @@ const startupClock = {
 };
 
 /** One startup decision, including process and filesystem reads, under one deadline. */
-export async function remoteStartDenialAtStartup(input?: DashboardCaller, clock = startupClock): Promise<string | null> {
+async function callerDenial(input: DashboardCaller | undefined, clock: typeof startupClock, terminalOnly: boolean): Promise<string | null> {
   const timeout = "Remote starts are disabled because checking the dashboard caller timed out";
   const timeoutMs = 2_000;
   const deadline = clock.now() + timeoutMs;
@@ -115,11 +116,19 @@ export async function remoteStartDenialAtStartup(input?: DashboardCaller, clock 
     controller.abort();
   });
   try {
-    const result = await Promise.race([expired.promise, classifyCaller(controller.signal, input)]);
+    const result = await Promise.race([expired.promise, classifyCaller(controller.signal, input, terminalOnly)]);
     return clock.now() >= deadline ? timeout : result;
   } finally {
     cancelTimer();
   }
+}
+
+export function remoteStartDenialAtStartup(input?: DashboardCaller, clock = startupClock) {
+  return callerDenial(input, clock, false);
+}
+
+export async function isHumanSendTerminal(input?: DashboardCaller): Promise<boolean> {
+  return await callerDenial(input, startupClock, true) === null;
 }
 
 /** Use the same startup decision when the dashboard sends a message. */

@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "path";
 import { readdir, realpath } from "fs/promises";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
-import { isValidAgentId, isValidPeerSenderIdSegment, tmuxSessionTarget } from "./validation";
+import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
 import { userInfo } from "os";
 
 export interface NoWorktreeCaller {
@@ -13,8 +13,7 @@ export interface NoWorktreeCaller {
 }
 
 interface CallerDeps {
-  remoteSender?: boolean;
-  systemPanePid?: () => Promise<number | null>;
+  coordinatorId?: string;
   /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
   dashboardAncestry?: ReadonlySet<number>;
   registryHome?: string;
@@ -102,7 +101,7 @@ function isSkippableRepoError(error: unknown, strict: boolean): boolean {
   return code === "ENOENT" || (!strict && (code === "EPERM" || code === "EACCES"));
 }
 
-function ancestorPids(pid: number, parents: Map<number, number>, requireInit = false): Set<number> {
+function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
   const ancestors = new Set<number>();
   while (pid > 1) {
     if (ancestors.has(pid) || ancestors.size >= 128) {
@@ -115,7 +114,6 @@ function ancestorPids(pid: number, parents: Map<number, number>, requireInit = f
     }
     pid = parent;
   }
-  if (requireInit && pid !== 1) throw new Error("Cannot verify remote sender: incomplete process ancestry");
   return ancestors;
 }
 
@@ -125,7 +123,7 @@ function ancestorPids(pid: number, parents: Map<number, number>, requireInit = f
  * path: a directory that only resembles an agent worktree is not sufficient.
  * This uses filesystem reads only; Codex's native sandbox can prohibit ps.
  */
-async function isRegisteredAgentWorktree(cwd: string, roots: string[]): Promise<boolean> {
+export async function isRegisteredAgentWorktree(cwd: string, roots: string[]): Promise<boolean> {
   try {
     const canonicalCwd = await realpath(cwd);
     const match = runtimeNames.matchWorktreeCaller(canonicalCwd);
@@ -155,24 +153,6 @@ async function isRegisteredAgentWorktree(cwd: string, roots: string[]): Promise<
   }
 }
 
-/** System sessions have no agent metadata. Use the coordinator's registered
- * launch pane, while its recorded CLI is live, to identify its process tree. */
-async function systemPanePid(): Promise<number | null> {
-  const { IB_COORDINATOR_SESSION } = await import("./coordinator");
-  const { COORDINATOR_PANE_COMMAND, COORDINATOR_PANE_ID, runCoordinatorCommand } = await import("./tmux-poller");
-  const match = `#{==:#{pane_id}:#{pane_dead}:#{pane_current_command},#{${COORDINATOR_PANE_ID}}:0:#{${COORDINATOR_PANE_COMMAND}}}`;
-  const res = await runCoordinatorCommand(["tmux", "list-panes", "-s", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION),
-    "-F", `#{?${match},#{pane_pid},}`], 2000);
-  if (res.code !== 0) {
-    if (/can't find session|no server running|no such file or directory/i.test(res.error)) return null;
-    throw new Error("Cannot verify system coordinator process: " + res.error.trim());
-  }
-  const value = res.text.trim();
-  if (!value) throw new Error("Cannot verify system coordinator launch pane");
-  if (!/^[1-9][0-9]*$/.test(value)) throw new Error("Invalid system coordinator process");
-  return Number(value);
-}
-
 /**
  * Identify an agent that shares a repository cwd with human CLI callers.
  * A cwd or claimed environment/argument ID alone cannot distinguish them.
@@ -193,17 +173,9 @@ export async function resolveNoWorktreeCaller(
 ): Promise<NoWorktreeCaller | null> {
   const candidates: NoWorktreeCaller[] = [];
   // HOME is model-controlled. Resolve the operator home from the OS account.
-  const strict = deps.remoteSender === true || deps.dashboardAncestry !== undefined;
+  const strict = deps.coordinatorId !== undefined || deps.dashboardAncestry !== undefined;
   const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir, strict);
-  const callerPath = deps.remoteSender ? await realpath(cwd) : cwd;
-  if (!deps.dashboardAncestry && await isRegisteredAgentWorktree(callerPath, roots)) {
-    if (!deps.remoteSender) return null;
-    const [, repoPath, id] = runtimeNames.matchWorktreeCaller(callerPath)!;
-    return { repoPath: repoPath!, agentDir: runtimeNames.agentDir(repoPath!, id!), meta: { id } };
-  }
-  if (deps.remoteSender && (runtimeNames.matchWorktreeCaller(cwd) || runtimeNames.matchWorktreeCaller(callerPath))) {
-    throw new Error("Cannot verify remote sender: invalid registered worktree backlink");
-  }
+  if (!deps.dashboardAncestry && await isRegisteredAgentWorktree(cwd, roots)) return null;
   for (const repoPath of roots) {
     const agentsDir = runtimeNames.agentsDir(repoPath);
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
@@ -211,7 +183,8 @@ export async function resolveNoWorktreeCaller(
       throw error;
     });
     for (const entry of entries) {
-      const dottedCoordinator = deps.remoteSender && entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
+      if (deps.coordinatorId !== undefined && entry.name !== deps.coordinatorId) continue;
+      const dottedCoordinator = deps.coordinatorId && entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
       if (!entry.isDirectory() || (!isValidAgentId(entry.name) && !dottedCoordinator)) continue;
       const agentDir = join(agentsDir, entry.name);
       let meta: Record<string, unknown>;
@@ -225,10 +198,7 @@ export async function resolveNoWorktreeCaller(
         if (strict) throw new Error("Invalid agent metadata");
         continue;
       }
-      if ((!deps.remoteSender && meta.worktree !== false) || (dottedCoordinator && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
-      if (deps.remoteSender && meta.worktree === false && meta.claude_pid === "" && (callerPath === repoPath || callerPath.startsWith(repoPath + "/"))) {
-        throw new Error("Cannot verify remote sender: shared-checkout agent has no recorded process identity");
-      }
+      if (meta.worktree !== false || (deps.coordinatorId !== undefined && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
       if (strict && meta.claude_pid !== "") {
         const pid = Number(meta.claude_pid);
         if (typeof meta.claude_pid !== "string" || !/^\d+$/.test(meta.claude_pid) || !Number.isSafeInteger(pid) || pid <= 1) {
@@ -238,38 +208,27 @@ export async function resolveNoWorktreeCaller(
       candidates.push({ meta, agentDir, repoPath });
     }
   }
-  if (!deps.remoteSender && !candidates.length) return null;
+  if (!candidates.length) return null;
 
   const readParents = deps.readParents ?? readParentPids;
   const identityCurrent = deps.identityCurrent ?? processIdentityCurrent;
   const pid = deps.pid ?? process.pid;
-  const before = deps.dashboardAncestry ?? ancestorPids(pid, readParents(), deps.remoteSender);
+  const before = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
   const matches = candidates.filter(({ meta }) => {
     const rawPid = meta.claude_pid;
     if (typeof rawPid !== "string" || !/^\d+$/.test(rawPid)) return false;
     const cliPid = Number(rawPid);
     return cliPid > 1 && Number.isSafeInteger(cliPid) && before.has(cliPid);
   });
-  if (!matches.length) {
-    if (deps.remoteSender) {
-      const lookup = deps.systemPanePid ?? systemPanePid;
-      const pane = await lookup();
-      if (pane !== null && before.has(pane)) {
-        if (!ancestorPids(pid, readParents(), deps.remoteSender).has(pane) || await lookup() !== pane) throw new Error("System coordinator identity changed");
-        return { meta: { id: "@system" }, repoPath: "", agentDir: "" };
-      }
-    }
-    return null;
-  }
+  if (!matches.length) return null;
   if (matches.length !== 1) throw new Error("Cannot verify no-worktree caller: ambiguous agent records");
   const caller = matches[0]!;
   const cliPid = Number(caller.meta.claude_pid);
   const epoch = caller.meta.claude_pid_epoch;
   if (typeof epoch !== "number" || !Number.isFinite(epoch) || epoch <= 0 || !identityCurrent(cliPid, epoch)) {
-    if (deps.remoteSender) throw new Error("Cannot verify remote sender: shared-checkout agent process identity is stale");
     throw new Error("Cannot verify no-worktree caller process identity; resume the agent before spawning children");
   }
-  const after = deps.dashboardAncestry ?? ancestorPids(pid, readParents(), deps.remoteSender);
+  const after = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
   if (!after.has(cliPid) || !identityCurrent(cliPid, epoch)) {
     throw new Error("Cannot verify no-worktree caller: process identity changed");
   }

@@ -1,15 +1,20 @@
+import { realpath } from "node:fs/promises";
+import { findOwnRepo } from "../resolve-target";
+import { getCoordinatorAgentId } from "../coordinator";
+import { isRegisteredAgentWorktree } from "../no-worktree-caller";
+import { isHumanSendTerminal } from "./remote-start-caller";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { MAX_HEADER_BYTES } from "./transfer-limits";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { userHome } from "../home";
-import { resolveRemoteSharedCaller, type IbCommandResult } from "../ib-commands";
+import { resolveSenderId, resolveRemoteSharedCaller, type IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
 import { registeredQueueRepo } from "../outbox";
 import { readRepoId } from "../repo-id";
 import type { RepoEntry } from "../registry";
-import { runtimeDir } from "../runtime-names";
+import { matchWorktreeCaller, runtimeDir } from "../runtime-names";
 import { hasLivePeerWatcher } from "./endpoint-lock";
 import { SEND_UNKNOWN } from "./peer-link";
 import { targetLabel } from "./receive-message";
@@ -27,13 +32,31 @@ export async function qualifiedAgentSender(id: string, repoPath: string, repos: 
   return { kind: "agent", id: `${await readMachineName()}/${repo}/${id}` };
 }
 
+export const remoteCliCaller = { isHuman: isHumanSendTerminal };
+const unverifiable = "cannot verify the sender of a remote send; run it from a terminal or from the agent's worktree";
+
 export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd = process.cwd()): Promise<SendHeader["from"]> {
-  const shared = await resolveRemoteSharedCaller(cwd);
-  const id = shared ? String(shared.meta.id) : "";
+  let id = "";
+  let from: SendHeader["from"] = { kind: "user" };
+  if (!await remoteCliCaller.isHuman()) {
+    const path = await realpath(cwd);
+    id = resolveSenderId("", { cwd: path });
+    const worktree = matchWorktreeCaller(path);
+    if (worktree) {
+      if (!id || !await isRegisteredAgentWorktree(path, [worktree[1]!])) throw new Error(unverifiable);
+      from = await qualifiedAgentSender(id, worktree[1]!, repos);
+    } else if (id === "@system") {
+      from = { kind: "system" };
+    } else {
+      const repo = findOwnRepo(path, repos);
+      const caller = repo && await resolveRemoteSharedCaller(path, repo.path, getCoordinatorAgentId(repo.path)).catch(() => null);
+      if (!caller) throw new Error(unverifiable);
+      id = String(caller.meta.id);
+      from = await qualifiedAgentSender(id, caller.repoPath, repos);
+    }
+  }
   if (explicit !== undefined && explicit !== id) throw new Error("Remote --from must match the detected sender");
-  if (!shared) return { kind: "user" };
-  if (id === "@system") return { kind: "system" };
-  return qualifiedAgentSender(id, shared.repoPath, repos);
+  return from;
 }
 
 async function writeJson(dir: string, name: string, data: unknown) {

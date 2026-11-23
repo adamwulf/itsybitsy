@@ -40,7 +40,7 @@ describe("qualified agent addresses", () => {
     await cli.cleanup();
   });
 
-  const human = { pid: 300, parents: [[300, 1]] as [number, number][], identityCurrent: true };
+  const human = { terminal: "human" as const, pid: 300, parents: [[300, 1]] as [number, number][], identityCurrent: true };
   const retire = (address: string, cwd = cli.cwd) =>
     cli.run(["retire", address], { cwd, actions: { retireAgent: "record" } });
 
@@ -285,21 +285,23 @@ describe("qualified agent addresses", () => {
       if (header.message === "refuse") throw new Error("Recipient stopped");
       return header.id;
     }, line => { throw new Error(line); }); }, 25);
-    const send = (args: string[], cwd = cli.cwd) => cli.run(["send", "laptop-b/remote/remote-id", ...args], { cwd, ancestry: human });
+    const send = (args: string[], cwd = cli.cwd, terminal: "human" | "tmux" | "agent" | undefined = cwd === cli.cwd ? "human" : undefined) => cli.run(["send", "laptop-b/remote/remote-id", ...args], { cwd, ancestry: { ...human, terminal } });
     try {
       expect((await send(["hi"])).stdout.trim()).toBe("Sent to remote/remote-id");
       expect((await send(["refuse"])).stderr.trim()).toBe("Recipient stopped");
       expect((await send(["--from", "mgr", "hello"], worktree)).exitCode).toBe(0);
       expect((await send(["--from", "imposter", "hello"], worktree)).stderr).toContain("--from must match");
-      expect((await send(["system message"], join(cli.home, ".itsybitsy"))).exitCode).toBe(0);
-      expect((await cli.run(["send", "laptop-b/remote/remote-id", "coordinator message"], {
-        cwd: cli.cwd, ancestry: { ...human, parents: [[300, 200], [200, 1]], systemPanePid: 200 },
-      })).exitCode).toBe(0);
+      const system = join(cli.home, ".itsybitsy");
+      expect((await send(["human at home"], system, "human")).exitCode).toBe(0);
+      expect((await send(["system message"], system)).exitCode).toBe(0);
+      expect((await send(["plain tmux"], cli.cwd, "tmux")).stderr).toContain("cannot verify the sender");
+      expect((await send(["agent tmux"], worktree, "tmux")).exitCode).toBe(0);
+      expect((await send(["moved"], cli.cwd, "agent")).stderr).toContain("cannot verify the sender");
       const fake = join(app, ".itsybitsy", "agents", "fake", "repo");
       await mkdir(fake, { recursive: true });
-      expect((await send(["bad"], fake)).stderr).toContain("backlink");
+      expect((await send(["bad"], fake)).stderr).toContain("cannot verify the sender");
       expect(seen.map(h => h.from)).toEqual([{ kind: "user" }, { kind: "user" },
-        { kind: "agent", id: "laptop-a/App/mgr" }, { kind: "user" }, { kind: "system" }]);
+        { kind: "agent", id: "laptop-a/App/mgr" }, { kind: "user" }, { kind: "system" }, { kind: "agent", id: "laptop-a/App/mgr" }]);
       expect(seen.every(h => h.files.length === 0)).toBe(true);
     } finally { clearInterval(timer); }
   });
@@ -315,17 +317,18 @@ describe("qualified agent addresses", () => {
       senders.push(header.from);
       return header.id;
     }, () => {}); }, 25);
-    const send = (parents: [number, number][], identityCurrent: boolean) =>
+    const send = (parents: [number, number][], identityCurrent: boolean, terminal?: "human") =>
       cli.run(["send", "laptop-b/remote/remote-id", "hi"], { cwd: repo,
-        ancestry: { pid: 300, parents, identityCurrent } });
+        ancestry: { pid: 300, parents, identityCurrent, terminal } });
     try {
       expect((await send([[300, 200], [200, 1]], true)).exitCode).toBe(0);
-      expect((await send([[300, 1]], true)).exitCode).toBe(0);
-      expect((await send([[300, 200], [200, 1]], false)).stderr).toContain("Cannot verify");
-      expect((await send([], true)).stderr).toContain("incomplete process ancestry");
+      await cli.addAgent(repo, "launching", { worktree: false, claude_pid: "" });
+      expect((await send([[300, 1]], true, "human")).exitCode).toBe(0);
+      expect((await send([[300, 200], [200, 1]], false)).stderr).toContain("cannot verify the sender");
+      expect((await send([], true)).stderr).toContain("cannot verify the sender");
       await cli.addAgent(repo, "moving", { worktree: true, claude_pid: "400", claude_pid_epoch: 123 });
-      expect((await send([[300, 400], [400, 1]], true)).exitCode).toBe(0);
-      expect(senders).toEqual([{ kind: "agent", id: "laptop-a/project.com/project.com" }, { kind: "user" }, { kind: "agent", id: "laptop-a/project.com/moving" }]);
+      expect((await send([[300, 400], [400, 1]], true)).stderr).toContain("cannot verify the sender");
+      expect(senders).toEqual([{ kind: "agent", id: "laptop-a/project.com/project.com" }, { kind: "user" }]);
     } finally { clearInterval(timer); }
   });
 

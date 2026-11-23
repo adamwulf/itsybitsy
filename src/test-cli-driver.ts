@@ -35,7 +35,7 @@ export type CliActionName = keyof typeof cliActions;
 export type CliActionMode = "record" | "real";
 
 export interface CliAncestry {
-  systemPanePid?: number;
+  terminal?: "human" | "tmux" | "agent";
   /** The pid the caller check starts from. */
   pid: number;
   /** [pid, parent pid] pairs, as `ps` would report them. */
@@ -128,14 +128,28 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   const { setBoundNoWorktreeCallerResolver, setNoWorktreeRepoRootsLoader } = await import("./hooks/agent-context");
 
   const ancestry = (): CliAncestry => config.ancestry ?? block({ kind: "process-ancestry", detail: {} });
-  const resolver = (cwd: string, options?: { remoteSender?: boolean }) => resolveNoWorktreeCaller(cwd, {
+  const resolver = (cwd: string, options?: { coordinatorId?: string; roots?: string[] }) => resolveNoWorktreeCaller(cwd, {
     ...options,
     registryHome: config.home,
-    systemPanePid: async () => ancestry().systemPanePid ?? null,
     pid: config.ancestry?.pid,
     readParents: () => new Map(ancestry().parents),
     identityCurrent: () => ancestry().identityCurrent,
   });
+  const { remoteCliCaller } = await import("./peers/peer-outbox");
+  const { isHumanSendTerminal } = await import("./peers/remote-start-caller");
+  remoteCliCaller.isHuman = async () => {
+    const terminal = config.ancestry?.terminal;
+    return isHumanSendTerminal({
+      pid: 300, cwd: config.cwd, stdinTTY: terminal !== undefined, stdoutTTY: terminal !== undefined,
+      env: terminal === "tmux" ? { TMUX: "/tmp/test" } : {},
+      readProcessTable: async () => [
+        "PID PPID STARTED                  KERNEL COMMAND",
+        "300    1 Sat Nov 21 12:01:00 2026 " + (terminal === "agent" ? "codex  codex" : "bash   bash"),
+        "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
+      ].join("\n"),
+      resolveCaller: () => block({ kind: "process-ancestry", detail: {} }),
+    });
+  };
   setNewAgentNoWorktreeCallerResolver(resolver);
   setBoundNoWorktreeCallerResolver(resolver);
   setNoWorktreeRepoRootsLoader(async () => {

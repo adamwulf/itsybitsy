@@ -1,3 +1,4 @@
+import { createPeerOutboxPoll, handoffRemoteMessage, textHeader } from "./peer-outbox";
 import { remoteStartDenialAtStartup } from "./remote-start-caller";
 import { spyOn, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
@@ -1755,5 +1756,80 @@ describe("toPairConnection maps iroh's TooLong to PairProtocolError", () => {
 
     const passthrough = toPairConnection({ ...conn, openBi: async () => failingReads(await conn.openBi(), () => other) });
     await expect((await passthrough.openBi()).readToEnd(10)).rejects.toBe(other);
+  });
+});
+
+describe("endpoint owner peer-outbox polling", () => {
+  test("only the owner polls, overlapping ticks send each id once with four active, and endpoint loss stops claims", async () => {
+    const base = join(home, ".itsybitsy", "peer-outbox");
+    const owner = makeService({ pollOutbox: createPeerOutboxPoll() });
+    const secondPoll = mock(createPeerOutboxPoll());
+    const second = makeService({ acquireLock: () => acquireEndpointLock(OTHER), pollOutbox: secondPoll });
+    const gate = Promise.withResolvers<void>();
+    const send = spyOn(owner.service, "sendRemoteMessage").mockImplementation(async (_peer, header) => {
+      await gate.promise;
+      return header.id;
+    });
+    const headers = Array.from({ length: 6 }, () => textHeader({ kind: "system" }, "message", { kind: "user" }));
+    const abort = new AbortController();
+    let requests: ReturnType<typeof handoffRemoteMessage>[] = [];
+    try {
+      owner.service.openDialog();
+      await waitFor(() => owner.service.view().status.kind === "listening");
+      second.service.openDialog();
+      await waitFor(() => second.service.view().status.kind === "disabled");
+      requests = headers.map(header => handoffRemoteMessage(ID_REMOTE, header, abort.signal));
+      await waitFor(() => send.mock.calls.length === 4);
+      const id = send.mock.calls[0]![1].id;
+      const dir = join(base, ".claimed", id);
+      expect((await stat(dir)).mode & 0o777).toBe(0o700);
+      expect((await stat(join(dir, "request.json"))).mode & 0o777).toBe(0o600);
+      await Bun.sleep(300);
+      expect(send).toHaveBeenCalledTimes(4);
+      gate.resolve();
+      expect((await Promise.all(requests)).every(r => r.ok)).toBe(true);
+      expect(send.mock.calls.map(call => call[1].id).sort()).toEqual(headers.map(header => header.id).sort());
+      expect(send.mock.calls.every(call => call[2] === "handoff")).toBe(true);
+      owner.endpoint.failAccept(new Error("lost endpoint"));
+      await waitFor(() => owner.service.view().status.kind === "error");
+      const pending = textHeader({ kind: "system" }, "after loss", { kind: "user" });
+      const path = join(base, pending.id, "request.json");
+      await Bun.write(path, JSON.stringify({ peer: ID_REMOTE, header: pending }));
+      await Bun.sleep(350);
+      expect(await Bun.file(path).exists()).toBe(true);
+      expect(send).toHaveBeenCalledTimes(6);
+      expect(secondPoll).not.toHaveBeenCalled();
+    } finally {
+      abort.abort();
+      gate.resolve();
+      await Promise.all(requests);
+      await second.service.shutdown();
+      await owner.service.shutdown();
+    }
+  });
+
+  test("an owner never replays a crashed claim, and sweeps abandoned claims and unread results after ten minutes", async () => {
+    const base = join(home, ".itsybitsy", "peer-outbox", ".claimed");
+    const crashed = textHeader({ kind: "system" }, "old", { kind: "user" });
+    const done = textHeader({ kind: "system" }, "complete", { kind: "user" });
+    const abandoned = join(base, crashed.id, "request.json");
+    const unread = join(base, done.id, "result.json");
+    await Bun.write(abandoned, JSON.stringify({ peer: ID_REMOTE, header: crashed }));
+    await Bun.write(unread, JSON.stringify({ ok: true, id: done.id }));
+    let now = Date.now();
+    const poll = mock(createPeerOutboxPoll(() => now));
+    const { service } = makeService({ pollOutbox: poll });
+    const send = spyOn(service, "sendRemoteMessage");
+    try {
+      service.openDialog();
+      await waitFor(() => poll.mock.calls.length > 0);
+      now += 599_000;
+      await Bun.sleep(320);
+      expect(await Bun.file(abandoned).exists()).toBe(true);
+      expect(await Bun.file(unread).exists()).toBe(true);
+      now += 31_000;
+      await waitFor(async () => !await Bun.file(unread).exists() && !await Bun.file(abandoned).exists());
+      expect(send).not.toHaveBeenCalled();
+    } finally { await service.shutdown(); }
   });
 });

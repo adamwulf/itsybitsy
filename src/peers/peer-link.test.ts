@@ -637,12 +637,14 @@ test("a lost send acknowledgement reports uncertainty and never opens another st
   const { a, b } = createMemoryLink("sender", "receiver");
   const clock = createFakeClock();
   const header = { op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "system" }, files: [], message: "hi" } as const;
+  const opens = spyOn(a, "openBi");
   const sent = requestSend(a, { ...header, files: [] }, clock.setTimer);
   const incoming = await b.acceptBi();
   await incoming.readToEnd(4096);
   await Bun.sleep(0);
   clock.advance(60_000);
   await expect(sent).rejects.toThrow("outcome unknown — check the agent");
+  expect(opens).toHaveBeenCalledTimes(1);
   expect(clock.pending()).toBe(0);
   expect(a.closeInfo()).toBeNull();
   a.close(0, "done");

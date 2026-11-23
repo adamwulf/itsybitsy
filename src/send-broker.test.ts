@@ -696,9 +696,19 @@ describe("send broker", () => {
       expect(reads).toBe(1);
     });
 
-    test("remote sandbox sends reach peer-outbox under the sealed requester's qualified id", async () => {
+    test.each([false, true])("remote sandbox sends reach peer-outbox with verified attribution (native Codex=%s)", async native => {
       setSandboxedProcessOverride(() => true);
       const { deps } = server();
+      const context = caller();
+      if (native) {
+        context.meta = { ...context.meta, worktree: true, model: "codex:gpt-5", sandbox: { enabled: false } };
+        deps.readMeta = async () => ({ meta: senderMeta(context.meta) });
+        deps.verifySeal = async () => ({ ok: false, field: "(missing)" } as any);
+        const git = join(agentDir, "repo", ".git");
+        const admin = join(senderRepo, ".git", "worktrees", SENDER_ID);
+        await Bun.write(git, "gitdir: " + admin);
+        await Bun.write(join(admin, "gitdir"), git);
+      }
       const peerDir = join(home, ".itsybitsy", "peer");
       await Bun.write(join(peerDir, "endpoint.lock"), String(process.pid));
       await Bun.write(join(peerDir, "remote-agents.json"), JSON.stringify([{
@@ -713,7 +723,7 @@ describe("send broker", () => {
       }, () => {}); }, 25);
       try {
         const out = await routeSendThroughWatchdog(command({ target: "laptop/remote/worker" }), {
-          resolveCaller: async () => caller(), watchdogLive: async () => true,
+          resolveCaller: async () => context, watchdogLive: async () => true,
           sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
         });
         expect(out?.ok).toBe(true);

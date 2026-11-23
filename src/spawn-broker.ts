@@ -360,8 +360,14 @@ export async function routeNewAgentThroughWatchdog(
  * This only ROUTES. A caller that lies in its own meta.json to get the direct
  * path runs the command inside its real sandbox, where it fails as before.
  */
+export function isNativeCodexWorktree(meta: Record<string, unknown>): boolean {
+  return meta.worktree === true && typeof meta.model === "string" && meta.model.startsWith("codex:")
+    && (meta.sandbox as { enabled?: unknown } | undefined)?.enabled === false;
+}
+
 export async function resolveRoutedCaller(
   deps: Pick<SpawnClientDeps, "cwd" | "resolveCaller"> = {},
+  includeNativeCodex = false,
 ): Promise<ResolvedCallerContext | null> {
   if (!isSandboxedProcess()) return null;
   let caller: ResolvedCallerContext | null;
@@ -373,7 +379,7 @@ export async function resolveRoutedCaller(
   if (!caller || !caller.agentDir) return null;
   if (caller.meta.worktree === false) return null;
   const sandbox = caller.meta.sandbox as { enabled?: unknown } | undefined;
-  if (!resolveSandboxEnabled(sandbox?.enabled)) return null;
+  if (!resolveSandboxEnabled(sandbox?.enabled) && !(includeNativeCodex && isNativeCodexWorktree(caller.meta))) return null;
   return caller;
 }
 
@@ -562,7 +568,7 @@ export async function verifyBrokerRequester(
   agentDir: string,
   verb: string,
   deps: Pick<SpawnServerDeps, "readMeta" | "verifySeal">,
-): Promise<{ ok: true; meta: AgentMeta } | { ok: false; result: IbCommandResult }> {
+): Promise<{ ok: true; meta: AgentMeta; remoteSendOnly?: true } | { ok: false; result: IbCommandResult }> {
   const { meta } = await (deps.readMeta ?? readAgentMeta)(agentDir);
   if (!meta || meta.id !== agentId) {
     return { ok: false, result: brokerFail(`Error: cannot read the metadata of '${agentId}'; refusing to ${verb} on its behalf`) };
@@ -591,6 +597,13 @@ export async function verifyBrokerRequester(
     && meta.sandbox?.enabled === false
     && !verification.ok
     && verification.field === "(missing)";
+  if (!verification.ok && verification.field === "(missing)" && verb === "send"
+      && isNativeCodexWorktree(meta as unknown as Record<string, unknown>)) {
+    const { isRegisteredAgentWorktree } = await import("./no-worktree-caller");
+    if (await isRegisteredAgentWorktree(join(agentDir, "repo"), [await realpath(repoPath)])) {
+      return { ok: true, meta, remoteSendOnly: true };
+    }
+  }
   if (!verification.ok && !unsealedDisabledSpawn) {
     return {
       ok: false,

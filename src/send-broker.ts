@@ -66,7 +66,7 @@ import {
   SPAWN_MAX_PROMPT_BYTES,
   brokerFail,
   isSameDirectory,
-  resolveRoutedCaller,
+  resolveRoutedCaller, isNativeCodexWorktree,
   submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
@@ -264,8 +264,10 @@ export async function routeSendThroughWatchdog(
   command: SendCommand,
   deps: SpawnClientDeps = {},
 ): Promise<IbCommandResult | null> {
-  const caller = await resolveRoutedCaller(deps);
+  const caller = await resolveRoutedCaller(deps, true);
   if (!caller) return null;
+  const nativeCodex = isNativeCodexWorktree(caller.meta);
+  if (nativeCodex && !(await resolveSendTarget(command.target, command.repos, join(caller.agentDir, "repo"))).remote) return null;
   if (command.fromAgent !== undefined && command.fromAgent !== caller.meta.id) {
     return brokerFail(
       "Error: --from for another agent is not supported inside the sandbox: a sandboxed agent sends only as itself, through its watchdog.",
@@ -274,7 +276,9 @@ export async function routeSendThroughWatchdog(
   if (await targetIsCaller(command.target, caller, command.repos)) return null;
   const message = await command.readMessage();
   if (!message) return brokerFail(command.usage);
-  return requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller });
+  const result = await requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller });
+  if (!result && nativeCodex) return brokerFail("Remote sends from a sandboxed agent need its watchdog running");
+  return result;
 }
 
 // ── Server (runs in the unsandboxed watchdog) ────────────────────────────────
@@ -342,6 +346,7 @@ export async function handleSendRequest(
       const sender = await qualifiedAgentSender(ctx.agentId, ctx.repoPath, repos);
       return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender));
     }
+    if (requester.remoteSendOnly) return brokerFail("A native Codex worktree uses the send broker only for remote recipients");
     if (resolved.isSystemCoordinator) {
       return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { fromAgent, cwd: callerCwd });
     }

@@ -145,16 +145,16 @@ The receiver checks these limits against the header BEFORE it reads any file byt
 
 The sender must be able to read every attached file. The file is copied out BEFORE `ib watch` sends anything, so `ib watch` never reads a path on someone else's behalf.
 
-- **Human or unsandboxed agent: the CLI handoff.**
+- **Direct CLI handoff for humans, the system coordinator and verified unsandboxed shared-checkout repo coordinators.**
   - The CLI resolves each `--attach` path and requires a regular file. It also requires the file to be within the limits.
   - For an agent caller, the CLI checks each canonical path against that agent's access table with the same `resolvePreparedAccess` read check that the hooks use. This also enforces `paths.deny`, which closes the relative-path hook-scanner gap from `hook-gaps-from-iroh-review.md` for `--attach`.
   - It then copies each file, with its hash, into a request directory `~/.itsybitsy/peer-outbox/<uuid>/` (mode 0700). The request directory contains `request.json` and `files/<n>`.
   - The running `ib watch` polls that directory every 250 ms. Directory watches do not fire on macOS. It claims a request by renaming it, sends it, and writes `result.json`.
   - The CLI waits for the acknowledgement. It times out after 10 s plus the transfer time.
   - With no `ib watch` owning the endpoint, it fails with "remote sends need ib watch running on this machine".
-- **Sandboxed agent: through the watchdog broker.**
-  - The CLI runs inside its kernel sandbox, so the kernel enforces read access. It copies the files into its own `<agentDir>/send-attachments/<id>/`.
-  - The broker request names only that request id.
+- **Every worktree agent uses its own watchdog (§4C.9 of SPEC-SANDBOX).**
+  - The CLI enforces the sender’s read policy. A kernel sandbox also enforces read access when enabled. The CLI copies the files into its own `<agentDir>/send-attachments/<id>/`.
+  - The broker request carries its ID, target, original message and wire manifest. The watchdog derives numbered source paths from its own agent directory and the validated request ID.
   - The watchdog takes files only from that directory, then hands the request to `peer-outbox` the same way.
 - **Always refused, for every sender:** anything under `~/.itsybitsy/peer/` (the secret key and trusted peers) or `~/.itsybitsy/sealed/`.
 

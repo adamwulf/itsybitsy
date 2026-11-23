@@ -1819,23 +1819,28 @@ describe("endpoint owner peer-outbox polling", () => {
     await Bun.write(abandoned, JSON.stringify({ peer: ID_REMOTE, header: crashed }));
     await Bun.write(unread, JSON.stringify({ ok: true, id: done.id }));
     let now = Date.now();
-    const poll = mock(createPeerOutboxPoll(() => now));
+    const tick = createPeerOutboxPoll(() => now);
+    let finishedAt = -1;
+    const poll: typeof tick = async (...args) => {
+      const startedAt = now;
+      await tick(...args);
+      finishedAt = startedAt;
+    };
     const { service } = makeService({ pollOutbox: poll });
     const send = spyOn(service, "sendRemoteMessage");
     try {
       service.openDialog();
-      await waitFor(() => poll.mock.calls.length > 0);
+      await waitFor(() => finishedAt === now);
       now += 599_000;
-      await Bun.sleep(320);
+      await waitFor(() => finishedAt === now);
+      now += 29_999;
+      await waitFor(() => finishedAt === now);
       expect(await Bun.file(abandoned).exists()).toBe(true);
       expect(await Bun.file(unread).exists()).toBe(true);
-      now += 2_000; // expired, but the 30-second sweep interval has not elapsed
-      const ticks = poll.mock.calls.length;
-      await waitFor(() => poll.mock.calls.length > ticks);
-      expect(await Bun.file(abandoned).exists()).toBe(true);
-      expect(await Bun.file(unread).exists()).toBe(true);
-      now += 29_000;
-      await waitFor(async () => !await Bun.file(unread).exists() && !await Bun.file(abandoned).exists());
+      now++;
+      await waitFor(() => finishedAt === now);
+      expect(await Bun.file(abandoned).exists()).toBe(false);
+      expect(await Bun.file(unread).exists()).toBe(false);
       expect(send).not.toHaveBeenCalled();
     } finally { await service.shutdown(); }
   });

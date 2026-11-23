@@ -507,11 +507,11 @@ test.each(["shutdown", "cancel"])("%s cleans a tracked receipt after its first b
   const receipt = service.receiveTracked(header({ files: [manifestFile("abc")] }), "peer", paired, {
     read: () => { if (started) return new Promise(() => {}); started = true; return Promise.resolve(Buffer.from("a")); },
   });
-  const stopped = expect(receipt).rejects.toThrow();
+  const stopped = receipt.catch(err => err);
   await waitFor(() => service.view().incoming?.[0]?.bytes === 1);
   if (action === "shutdown") await service.shutdown();
   else service.cancelReceipt(service.view().incoming![0]!.id);
-  await stopped;
+  expect(await stopped).toBeInstanceOf(Error);
   expect(await readdir(dir)).toEqual([]);
   expect(service.view().incoming ?? []).toEqual([]);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);

@@ -88,6 +88,19 @@ test("rejects invalid UTF-8, JSON, truncated frames, and malformed header fields
   }
 });
 
+test("header bounds distinct spellings per file and across all files", async () => {
+  const files = Array.from({ length: 16 }, (_, n) => ({
+    ...file, spellings: Array.from({ length: 16 }, (_, i) => `./${n}/${i}`),
+  }));
+  const decode = (entries: SendHeader["files"]) =>
+    decodeSendHeader(new MemoryStream(encodeSendHeader({ ...header, files: entries })));
+  expect((await decode(files)).files).toEqual(files);
+  const first = files[0]!;
+  expect((await decode([{ ...first, spellings: [...first.spellings, first.spellings[0]!] }])).files).toEqual([first]);
+  await expect(decode([{ ...first, spellings: [...first.spellings, "./overflow"] }])).rejects.toThrow(/16 spellings/);
+  await expect(decode([...files, file])).rejects.toThrow(/256 attachment spellings/);
+});
+
 test("receives exactly one body in short reads, hashes all chunks, and leaves the next byte", async () => {
   const bytes = Buffer.alloc(2 * CHUNK_BYTES + 7, "abc");
   for (const size of [0, CHUNK_BYTES, bytes.length - 1]) {

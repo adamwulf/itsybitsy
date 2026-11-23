@@ -353,7 +353,14 @@ describe("qualified agent addresses", () => {
       expect(result.exitCode, result.stderr).toBe(0);
       expect(seen).toMatchObject([{ message: "read ./report", from: { kind: broker ? "agent" : "user" },
         files: [{ name: "report", size: 8, spellings: ["./report", await realpath(join(cwd, "report"))] }] }]);
-      if (broker) expect(await readdir(join(agentDir, "send-attachments"))).toEqual([]);
+      if (broker) {
+        // A short-lived CLI may exit after ACK while its cleanup is pending.
+        // The watchdog reclaims the lease on its next post-expiry pass.
+        clearInterval(watchdog);
+        await processing;
+        await processSpawnRequests("mgr", app, { transferJobs: new Map(), now: () => Date.now() + 61_000 });
+        expect(await readdir(join(agentDir, "send-attachments"))).toEqual([]);
+      }
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
@@ -389,12 +396,12 @@ describe("qualified agent addresses", () => {
         entered.resolve();
         return new Promise((_, reject) => transfer.signal!.addEventListener("abort", () => {
           reset = true;
-          reject(Error("cancelled"));
+          reject(transfer.signal!.reason);
         }));
       }, () => {});
       await entered.promise;
       controller.abort();
-      expect((await cliSend).exitCode).toBe(130);
+      expect(await cliSend).toMatchObject({ exitCode: 130, stderr: expect.stringContaining("cancelled, nothing sent") });
       await Promise.all([broker, watcher]);
       expect(reset).toBe(true);
       await expect(readdir(filesDir)).rejects.toMatchObject({ code: "ENOENT" });

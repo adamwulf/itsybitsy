@@ -3101,7 +3101,7 @@ export class DashboardComponent implements Component {
     if (this.pendingRemoteSends.size && matchesKey(data, Key.escape)) {
       const selected = this.remoteSelection;
       const target = remoteMessageTarget(selected);
-      if (selected && target) {
+      if (selected && selected.kind !== "remote-repo-header" && target) {
         const request = [...this.pendingRemoteSends.values()].reverse().find(send =>
           send.peerId === selected.peerId && JSON.stringify(send.target) === JSON.stringify(target));
         if (request) {

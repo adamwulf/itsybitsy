@@ -92,7 +92,7 @@ export async function captureMarkedCoordinatorPane(
     log(`[coordinator] Peer pane capture failed: ${detail instanceof Error ? detail.message : detail}`);
     return new Error("Coordinator capture failed");
   };
-  const run = (cmd: string[]) => readCoordinatorCommand(cmd, timeoutMs).catch(err => { throw failed(err); });
+  const run = (cmd: string[]) => runCoordinatorCommand(cmd, timeoutMs).catch(err => { throw failed(err); });
   const target = tmuxSessionTarget(session);
   const record = await run(["tmux", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID]);
   if (record.code !== 0) {
@@ -115,15 +115,16 @@ export async function captureMarkedCoordinatorPane(
   return capture.text;
 }
 
-async function readCoordinatorCommand(cmd: string[], timeoutMs: number) {
-  const proc = spawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe" });
+export async function runCoordinatorCommand(
+  cmd: string[], timeoutMs: number, spawn = spawnCtx.runner, timeoutMessage = "Coordinator capture timed out",
+) {
+  const proc = spawn(cmd, { stdout: "pipe", stderr: "pipe" });
   const stdout = proc.stdout?.getReader();
   const stderr = proc.stderr?.getReader();
   const read = Promise.all([readPipe(stdout), proc.exited, readPipe(stderr)])
     .then(([text, code, error]) => ({ text, code, error }));
-  // Remote lookup and capture each get 5 s, under the 15 s wire deadline together.
   const deadline = Promise.withResolvers<never>();
-  const timer = setTimeout(() => deadline.reject(new Error("Coordinator capture timed out")), timeoutMs);
+  const timer = setTimeout(() => deadline.reject(new Error(timeoutMessage)), timeoutMs);
   try {
     return await Promise.race([read, deadline.promise]);
   } catch (err) {

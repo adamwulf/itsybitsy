@@ -15,6 +15,7 @@ import {
   ensureSystemCoordinator,
   acquireSystemCoordinator,
   takeCoordinatorPaneWarning,
+  waitForCoordinatorPaneRegistration,
   releaseSystemCoordinator,
   restartSystemCoordinator,
   detectSystemCoordinatorState,
@@ -544,6 +545,7 @@ describe("ensureSystemCoordinator", () => {
 
     expect(await ensureSystemCoordinator()).toBe("ib-coordinator");
     expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+    await waitForCoordinatorPaneRegistration();
     const warning = takeCoordinatorPaneWarning();
     expect(warning).toContain("Remote coordinator capture disabled");
     expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain(warning!);
@@ -551,6 +553,45 @@ describe("ensureSystemCoordinator", () => {
     expect(await ensureSystemCoordinator()).toBe("ib-coordinator");
     expect(getLastCoordinatorSpawnMode()).toBe("existing");
     expect(launches).toBe(1);
+  });
+
+  test("local launch and the bounce notice complete while registration is stalled, then its child is killed and reaped", async () => {
+    const router = createCommandRouter({ "has-session": { exitCode: 1 }, "new-session": { stdout: "%4" } });
+    const exit = Promise.withResolvers<number>();
+    const started = Promise.withResolvers<void>();
+    const killed = Promise.withResolvers<void>();
+    const cancellations: string[] = [];
+    coordinatorSpawnCtx.set((cmd, opts) => {
+      if (cmd[1] !== "display-message") return router(cmd, opts);
+      started.resolve();
+      return {
+        stdout: new ReadableStream({ cancel() { cancellations.push("out"); } }),
+        stderr: new ReadableStream({ cancel() { cancellations.push("err"); } }),
+        exited: exit.promise,
+        kill(signal) { expect(signal).toBe("SIGKILL"); killed.resolve(); },
+      };
+    });
+    await Bun.write(join(tmpDir, "coordinator-bounce.json"), "{}");
+    let notice = "";
+    bounceNoticeCtx.set(async message => { notice = message; return { ok: true, stderr: "" }; });
+    try {
+      const launch = ensureSystemCoordinator();
+      await started.promise;
+      expect(await Promise.race([launch, killed.promise])).toBe("ib-coordinator");
+      expect(notice).toBe(BOUNCE_RESTART_NOTICE);
+      expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+      let registered = false;
+      const registration = waitForCoordinatorPaneRegistration().then(() => { registered = true; });
+      await killed.promise;
+      expect(registered).toBe(false);
+      exit.resolve(137);
+      await registration;
+      expect(cancellations.sort()).toEqual(["err", "out"]);
+      expect(takeCoordinatorPaneWarning()).toContain("registration timed out");
+    } finally {
+      exit.resolve(137);
+      bounceNoticeCtx.reset();
+    }
   });
 
   test("logs the resolved model and its source layer on spawn", async () => {
@@ -1267,6 +1308,7 @@ describe("ensureSystemCoordinator", () => {
     expect(events.indexOf("poll-1")).toBeGreaterThan(launchIdx);
     // Loop stops once the marker appears (4th poll).
     expect(capturePolls).toBe(4);
+    await waitForCoordinatorPaneRegistration();
     expect(events.slice(-3)).toEqual(["poll-4", "read foreground", "record"]);
   });
 

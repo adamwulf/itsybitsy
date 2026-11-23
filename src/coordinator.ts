@@ -9,7 +9,7 @@ import { join, basename, dirname } from "path";
 import { userHome } from "./home";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
-import { COORDINATOR_PANE_ID, COORDINATOR_PANE_COMMAND, captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
+import { COORDINATOR_PANE_ID, COORDINATOR_PANE_COMMAND, captureTmuxOutput, runCoordinatorCommand, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx, killPidCtx, isApiError, isApiSafeguard } from "./agents";
 import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog, getWatchLogPath } from "./watch-log";
@@ -846,24 +846,44 @@ export function takeCoordinatorPaneWarning(): string | null {
   return warning;
 }
 
+let paneRegistration: Promise<void> = Promise.resolve();
+export function waitForCoordinatorPaneRegistration(): Promise<void> {
+  return paneRegistration;
+}
+
+function startCoordinatorPaneRegistration(paneId: string | null): void {
+  const pending = recordCoordinatorPane(paneId).then(
+    () => null,
+    err => `Remote coordinator capture disabled: ${err instanceof Error ? err.message : String(err)}`,
+  ).then(warning => {
+    // A newer launch owns the dashboard warning if two restarts overlapped.
+    if (pending !== paneRegistration) return;
+    coordinatorPaneWarning = warning;
+    if (warning) logToWatchLog(`[coordinator] ${warning}`);
+  });
+  paneRegistration = pending;
+}
+
 async function recordCoordinatorPane(paneId: string | null): Promise<void> {
-  try {
-    if (!paneId) throw new Error("tmux did not report the launched pane id");
-    const foreground = await coordinatorSpawnCtx.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
-    if (foreground.exitCode !== 0) throw new Error(foreground.stderr || "could not read the foreground command");
-    // Readiness text can outlive Claude. Never record the launcher's bash as the CLI.
-    if (!foreground.stdout || foreground.stdout === "bash") throw new Error("coordinator CLI is not in the foreground");
-    // Publish the id last. A partial record in the new session cannot enable capture.
-    const record = await coordinatorSpawnCtx.run([
-      "tmux", "set-option", "-t", paneId, COORDINATOR_PANE_COMMAND, foreground.stdout,
-      ";", "set-option", "-t", paneId, COORDINATOR_PANE_ID, paneId,
-    ]);
-    if (record.exitCode !== 0) throw new Error(record.stderr || "tmux could not save the pane binding");
-    coordinatorPaneWarning = null;
-  } catch (err) {
-    coordinatorPaneWarning = `Remote coordinator capture disabled: ${err instanceof Error ? err.message : String(err)}`;
-    logToWatchLog(`[coordinator] ${coordinatorPaneWarning}`);
-  }
+  if (!paneId) throw new Error("tmux did not report the launched pane id");
+  const deadline = performance.now() + 5_000;
+  const run = (args: string[]) => {
+    const remaining = deadline - performance.now();
+    const timeout = "coordinator pane registration timed out";
+    if (remaining <= 0) throw new Error(timeout);
+    return runCoordinatorCommand(["tmux", ...args], remaining, coordinatorSpawnCtx.runner, timeout);
+  };
+  const foreground = await run(["display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
+  if (foreground.code !== 0) throw new Error(foreground.error.trim() || "could not read the foreground command");
+  const command = foreground.text.trim();
+  // Readiness text can outlive Claude. Never record the launcher's bash as the CLI.
+  if (!command || command === "bash") throw new Error("coordinator CLI is not in the foreground");
+  // Publish the id last. A partial record in the new session cannot enable capture.
+  const record = await run([
+    "set-option", "-t", paneId, COORDINATOR_PANE_COMMAND, command,
+    ";", "set-option", "-t", paneId, COORDINATOR_PANE_ID, paneId,
+  ]);
+  if (record.code !== 0) throw new Error(record.error.trim() || "tmux could not save the pane binding");
 }
 
 /**
@@ -1075,7 +1095,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const ready = await waitForCoordinatorReady();
   const readyMs = Date.now() - readyStart;
 
-  if (ready) await recordCoordinatorPane(paneId);
+  if (ready) startCoordinatorPaneRegistration(paneId);
 
   if (resumeId && !ready) {
     // Resume failed (likely a corrupt or version-mismatched transcript). Kill

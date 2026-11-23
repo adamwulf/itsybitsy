@@ -58,6 +58,17 @@ describe("setup dialog tab bar", () => {
     expect(stripped[0]).toContain("[Peers]");
   });
 
+  test.each([66, 67])("the toggle/edit hint fits one row at %i columns", width => {
+    for (const tab of [0, 1]) {
+      const content = buildSetupContent({
+        type: "setup", tab, items: makeSetupItems(), selectedIndex: 0,
+        onAction: () => {}, onTabChange: () => {},
+      }, width - 4);
+      expect(stripAnsi(content.contentLines[1]!)).toBe("(1/2/3/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close)");
+      expect(content.contentLines[2]).toBe("");
+    }
+  });
+
   test("title changes based on active tab", () => {
     const dialog: Extract<NonNullable<DialogState>, { type: "setup" }> = {
       type: "setup",

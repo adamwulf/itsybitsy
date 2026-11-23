@@ -1214,7 +1214,7 @@ export function buildSetupContent(
 ): DialogContent {
   const lines: string[] = [];
   lines.push(buildTabBar(dialog.tab, innerWidth));
-  const hint = dialog.tab === PEERS_TAB ? "Tab/Shift+Tab: switch tabs" : "1/2/3/Tab: tabs, j/k: move, Enter: edit, Esc: close";
+  const hint = dialog.tab === PEERS_TAB ? "Tab/Shift+Tab: switch tabs" : "1/2/3/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close";
   lines.push(...wordWrapLines(`(${hint})`, innerWidth).map(line => `${DIM}${line}${RESET}`));
   lines.push("");
 

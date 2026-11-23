@@ -225,7 +225,7 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
      | Key | Default | Allowed range |
      |---|---|---|
      | `peering.attachments.maxFileMB` | 1024 | integer, 0–65536 |
-     | `peering.attachments.maxMessageMB` | 2048 | integer, 0–131072, and at least `maxFileMB` |
+     | `peering.attachments.maxMessageMB` | 2048 | integer, 0–131072. Must be at least `maxFileMB` when both values are positive. |
      | `peering.attachments.maxFiles` | 20 | integer, 0–100 |
 
      - **Zero disables attachments (Adam, 2026-11-23).** If any of the three limits is 0, every attachment is rejected, including empty 0-byte files. A message with no attachments still goes through.

@@ -26,7 +26,7 @@
  *   every launch WITHOUT `done` and give up the role first (attaches start a
  *   successor that re-adopts); `stop` finishes every launch (`done`) first.
  */
-import { dlopen, FFIType } from "bun:ffi";
+import { flock, LOCK_SH, LOCK_EX, LOCK_NB } from "./file-lock";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync,
   readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -49,7 +49,7 @@ const PROTOCOL = 2;
  * loop. Every `ready` resets the count, so a long launch survives any number of
  * restarts that each worked. */
 const MAX_STARTS = 4;
-const LOCK_SH = 1, LOCK_EX = 2, LOCK_NB = 4;
+
 /** The daemon loop's one cadence: inbox, control files, owner and registrar
  * checks, readiness-marker re-emission and the heartbeat. A cadence, never a
  * decision made because time passed. Stream events never wait for it: the pump
@@ -82,15 +82,6 @@ function ensureCollectorDirs(paths: SandboxCollectorPaths): void {
   mkdirSync(paths.inbox, { recursive: true, mode: 0o700 });
   chmodSync(paths.root, 0o700);
   chmodSync(paths.inbox, 0o700);
-}
-
-let flockSymbol: ((fd: number, operation: number) => number) | undefined;
-function flock(fd: number, operation: number): number {
-  if (!flockSymbol) {
-    const lib = dlopen("/usr/lib/libSystem.B.dylib", { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
-    flockSymbol = (f, o) => lib.symbols.flock(f, o);
-  }
-  return flockSymbol(fd, operation);
 }
 
 const openLockFile = (path: string) => openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);

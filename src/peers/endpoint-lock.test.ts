@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -185,4 +186,30 @@ describe("releaseEndpointLock", () => {
     await releaseEndpointLock(ME);
     expect(await acquireEndpointLock(OTHER)).toEqual({ acquired: true });
   });
+});
+
+test("simultaneous standbys replace a dead lock exactly once", async () => {
+  otherRunning(); await writeLock("9999 123\n");
+  const results = await Promise.all([acquireEndpointLock(ME), acquireEndpointLock(OTHER)]);
+  expect(results.filter(r => r.acquired)).toHaveLength(1);
+  const winner = results[0]!.acquired ? ME : OTHER;
+  expect(await lockContents()).toBe(line(winner));
+  expect(results.find(r => !r.acquired)).toEqual({ acquired: false, ownerPid: winner.pid });
+});
+
+test("a suspended identity writer exposes no empty lock", async () => {
+  otherRunning();
+  const writing = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  const original = fs.writeFile;
+  const spy = spyOn(fs, "writeFile").mockImplementation(async (...args) => {
+    if (args[1] === line(ME)) { writing.resolve(); await resume.promise; }
+    await original(...args);
+  });
+  try {
+    const first = acquireEndpointLock(ME); await writing.promise;
+    expect(await lockContents()).toBeNull();
+    expect(await acquireEndpointLock(OTHER)).toEqual({ acquired: true });
+    resume.resolve(); expect(await first).toEqual({ acquired: false, ownerPid: OTHER.pid });
+    expect(await lockContents()).toBe(line(OTHER));
+  } finally { resume.resolve(); spy.mockRestore(); }
 });

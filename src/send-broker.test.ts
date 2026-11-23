@@ -1,9 +1,10 @@
+import { fixtureProcessStart } from "./test-cli-driver";
 import * as fs from "fs/promises";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, readdir, rename, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { resetListTmuxSessionsCache, type Agent, type AgentMeta } from "./agents";
+import { processStartEpochSecondsCtx, resetListTmuxSessionsCache, type Agent, type AgentMeta } from "./agents";
 import { resetUserHome, setUserHome } from "./home";
 import {
   resetMessageAttachmentStagerForTesting,
@@ -71,6 +72,7 @@ describe("send broker", () => {
   };
 
   beforeEach(async () => {
+    processStartEpochSecondsCtx.set(fixtureProcessStart);
     // The outbox (`~/.itsybitsy/agents/<machine>/<repo>/<agent>/`) and teams.json resolve under
     // this home, never the real one.
     home = await mkdtemp(join(tmpdir(), "ib-send-home-"));
@@ -94,6 +96,7 @@ describe("send broker", () => {
     resetListTmuxSessionsCache();
   });
   afterEach(async () => {
+    processStartEpochSecondsCtx.reset();
     setSandboxedProcessOverride(null);
     resetSendSpawnRunner();
     tmuxPollerSpawnCtx.reset();

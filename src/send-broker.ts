@@ -59,7 +59,7 @@ import { isSandboxedProcess } from "./sandbox-detect";
 import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
 import { join } from "path";
-import { isPidAliveCtx, processStartEpochSecondsCtx, selfProcessStartEpochSeconds, type Agent } from "./agents";
+import { isPidAliveCtx, processStartEpochSecondsCtx, type Agent } from "./agents";
 import {
   hasLiveWatchdog,
   resolveCallerAgentContext,
@@ -228,9 +228,16 @@ export async function requestSendViaWatchdog(
 
 const STAGING_LEASE_MS = 60_000;
 
+function stagingOwnerStart(pid: number): number | null {
+  const start = processStartEpochSecondsCtx.fn(pid);
+  return start !== null && Number.isSafeInteger(start) && start > 0 ? start : null;
+}
+
 // The empty queue marker supplies an id to the watchdog even if the CLI
 // dies before publication. Ownership evidence lives in protected staging.
 async function startStagingLease(dir: string, id: string) {
+  const start = stagingOwnerStart(process.pid);
+  if (start === null) throw new Error("Cannot verify the staging owner process start time");
   const queue = spawnRequestDir(dir);
   await mkdir(queue, { recursive: true, mode: 0o700 });
   const marker = join(queue, "." + id + ".staging");
@@ -239,7 +246,6 @@ async function startStagingLease(dir: string, id: string) {
   await mkdir(stage, { mode: 0o700 });
   const lease = await open(join(stage, "lease"), "wx", 0o600);
   try {
-    const start = selfProcessStartEpochSeconds() ?? Math.floor(Date.now() / 1000 - process.uptime());
     await lease.writeFile(JSON.stringify({ pid: process.pid, start }));
   } catch (err) { await lease.close(); throw err; }
   const heartbeat = setInterval(() => { const now = new Date(); void lease.utimes(now, now).catch(() => {}); }, STAGING_LEASE_MS / 4);
@@ -250,35 +256,45 @@ async function startStagingLease(dir: string, id: string) {
   };
 }
 
+/** Both sides read the same ps start stamp. Missing evidence cannot authorize
+ * dispatch or prove the owner dead. Expiry is independent of process identity. */
+async function stagingLeaseState(dir: string, id: string, now: number): Promise<"active" | "abandoned" | "unverified"> {
+  const lease = await openBrokerLease(dir, id);
+  try {
+    const info = await lease.stat();
+    if (now - info.mtimeMs >= STAGING_LEASE_MS) return "abandoned";
+    if (!info.isFile() || info.nlink !== 1 || info.size > 256) return "unverified";
+    const buffer = Buffer.alloc(257);
+    const { bytesRead } = await lease.read(buffer);
+    let owner;
+    try { owner = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return "unverified"; }
+    if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0 ||
+        !Number.isSafeInteger(owner.start) || owner.start <= 0) return "unverified";
+    if (!isPidAliveCtx.fn(owner.pid)) return "abandoned";
+    const start = stagingOwnerStart(owner.pid);
+    if (start === null) return "unverified";
+    return start === owner.start ? "active" : "abandoned";
+  } finally { await lease.close(); }
+}
+
+async function requireActiveStagingLease(dir: string, id: string) {
+  if (await stagingLeaseState(dir, id, Date.now()) !== "active") {
+    throw new Error("Cannot verify the staging lease owner");
+  }
+}
+
 export async function sweepStagingLease(dir: string, id: string, now: number) {
   if (!/^[0-9a-f]{32}$/.test(id)) return;
   const path = join(spawnRequestDir(dir), "." + id + ".staging");
-  let lease;
-  try { lease = await openBrokerLease(dir, id); }
-  catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    if (now - (await lstat(path)).mtimeMs < STAGING_LEASE_MS) return;
-    await removeAbandonedStaging(dir, id);
-    await rm(path, { force: true });
-    return;
-  }
   try {
-    const info = await lease.stat();
-    if (!info.isFile() || info.nlink !== 1 || info.size > 256) return;
-    if (now - info.mtimeMs < STAGING_LEASE_MS) {
-      const buffer = Buffer.alloc(257);
-      const { bytesRead } = await lease.read(buffer);
-      let owner;
-      try { owner = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return; }
-      if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0 || !Number.isSafeInteger(owner.start)) return;
-      if (isPidAliveCtx.fn(owner.pid)) {
-        const birth = processStartEpochSecondsCtx.fn(owner.pid);
-        if (birth === null || Math.abs(birth - owner.start) <= 2) return;
-      }
-    }
-    await removeAbandonedStaging(dir, id);
-    await rm(path, { force: true });
-  } finally { await lease.close(); }
+    if (await stagingLeaseState(dir, id, now) !== "abandoned") return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    // The CLI might be between creating its queue marker and writing the lease.
+    if (now - (await lstat(path)).mtimeMs < STAGING_LEASE_MS) return;
+  }
+  await removeAbandonedStaging(dir, id);
+  await rm(path, { force: true });
 }
 
 async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false, stage?: StageRemoteFiles) {
@@ -545,7 +561,10 @@ export async function handleSendRequest(
       if (!limits.ok) return brokerFail(limits.error);
       const controller = new AbortController();
       let marker: Awaited<ReturnType<typeof createBrokerProgress>> | undefined;
-      try { marker = parsed.request.files ? await createBrokerProgress(ctx.agentDir, ctx.id) : undefined; }
+      try {
+        await requireActiveStagingLease(ctx.agentDir, ctx.id);
+        marker = await createBrokerProgress(ctx.agentDir, ctx.id);
+      }
       catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return brokerFail(CANCELLED_BEFORE_FIN);
         throw err;

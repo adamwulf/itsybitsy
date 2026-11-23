@@ -31,6 +31,9 @@ import type { cliActions } from "./index";
 /** Read only by this file. Production code never looks at it (test-isolation test). */
 export const CLI_DRIVER_CONFIG_ENV = "IB_TEST_CLI_DRIVER_CONFIG";
 
+/** Process-table evidence shared by an isolated CLI and its fixture watchdog. */
+export const fixtureProcessStart = (pid: number) => 1_700_000_000 + pid;
+
 export type CliActionName = keyof typeof cliActions;
 export type CliActionMode = "record" | "real";
 
@@ -129,12 +132,10 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   const { setNewAgentNoWorktreeCallerResolver } = await import("./ib-commands");
   const { setBoundNoWorktreeCallerResolver, setNoWorktreeRepoRootsLoader } = await import("./hooks/agent-context");
 
-  // The isolated CLI owns a real staging lease; its own birth time is
-  // known locally without probing the host process table.
+  // Observe only the fixture process; all other host table probes stay guarded.
   const { processStartEpochSecondsCtx } = await import("./agents");
   const observeStart = processStartEpochSecondsCtx.fn;
-  const ownStart = Math.floor(Date.now() / 1000 - process.uptime());
-  processStartEpochSecondsCtx.set(pid => pid === process.pid ? ownStart : observeStart(pid));
+  processStartEpochSecondsCtx.set(pid => pid === process.pid ? fixtureProcessStart(pid) : observeStart(pid));
   const ancestry = (): CliAncestry => config.ancestry ?? block({ kind: "process-ancestry", detail: {} });
   const resolver = (cwd: string, options?: { coordinatorId?: string; roots?: string[] }) => resolveNoWorktreeCaller(cwd, {
     ...options,

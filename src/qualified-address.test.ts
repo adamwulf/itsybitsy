@@ -1,3 +1,5 @@
+import { processStartEpochSecondsCtx } from "./agents";
+import { fixtureProcessStart } from "./test-cli-driver";
 import { waitFor } from "./test-utils";
 import { processSpawnRequests, spawnRequestDir, spawnResultDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -26,6 +28,7 @@ describe("qualified agent addresses", () => {
   }
 
   beforeEach(async () => {
+    processStartEpochSecondsCtx.set(fixtureProcessStart);
     cli = await createCliFixture();
     setUserHome(cli.home);
     await Bun.write(join(cli.home, ".itsybitsy", "machine-name"), "laptop-a");
@@ -38,6 +41,7 @@ describe("qualified agent addresses", () => {
     await cli.addAgent(app, "foo", { manager: "mgr" });
   });
   afterEach(async () => {
+    processStartEpochSecondsCtx.reset();
     resetUserHome();
     await cli.cleanup();
   });
@@ -364,6 +368,26 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
+  test.each(["unavailable", "mismatched"])("watchdog refuses a remote send with %s owner evidence", async evidence => {
+    await peer();
+    const agentDir = dirname(worktree);
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
+    const controller = new AbortController();
+    const send = cli.run(["send", "laptop-b/remote-id", "read"], {
+      cwd: worktree, sandboxed: true, ancestry: human, interrupt: controller.signal,
+      allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+    });
+    try {
+      await waitFor(async () => (await readdir(spawnRequestDir(agentDir)).catch(() => [])).some(n => n.endsWith(".json")));
+      processStartEpochSecondsCtx.set(pid => evidence === "unavailable" ? null : fixtureProcessStart(pid) + 1);
+      await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }) });
+      expect(await send).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("Cannot verify the staging lease owner") });
+      expect(await readdir(join(cli.home, ".itsybitsy/peer-outbox")).catch(() => [])).toEqual([]);
+    } finally { controller.abort(); await send; }
+  });
+
   test("worktree Ctrl-C resets a claimed attachment transfer and releases both staging directories", async () => {
     await peer();
     const agentDir = dirname(worktree);
@@ -387,7 +411,10 @@ describe("qualified agent addresses", () => {
       await processSpawnRequests("mgr", app, deps);
       expect((await Bun.file(join(spawnResultDir(agentDir), extra + ".json")).json()).stderr).toContain("busy");
       const base = join(cli.home, ".itsybitsy/peer-outbox");
-      await waitFor(async () => (await readdir(base).catch(() => [])).some(n => !n.startsWith(".")));
+      await Promise.race([
+        waitFor(async () => (await readdir(base).catch(() => [])).some(n => !n.startsWith("."))),
+        cliSend.then(result => { throw new Error("CLI exited before peer-outbox publication: " + result.stderr); }),
+      ]);
       const entered = Promise.withResolvers<void>();
       let reset = false;
       let filesDir = "";

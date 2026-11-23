@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, open, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { processStartEpochSecondsCtx } from "../agents";
 import { hashFile } from "./attachment-manifest";
 import { brokerAttachmentStage, cloneAttachments } from "./remote-attachments";
 
@@ -56,10 +57,11 @@ test("watchdog takes only numbered, single-link files within its request and ver
 
 test("watchdog reclaims a dead CLI's staging before publication and leaves a live lease alone", async () => {
   const root = await mkdtemp("/tmp/ib-broker-lease-");
+  processStartEpochSecondsCtx.set(() => 128);
   try {
     const { sweepStagingLease } = await import("../send-broker");
     const { spawnRequestDir } = await import("../spawn-broker");
-    const { selfProcessStartEpochSeconds } = await import("../agents");
+
     const id = "c".repeat(32);
     const path = join(root, "send-attachments", id);
     await mkdir(path, { recursive: true });
@@ -67,14 +69,36 @@ test("watchdog reclaims a dead CLI's staging before publication and leaves a liv
     const marker = join(spawnRequestDir(root), "." + id + ".staging");
     await Bun.write(marker, "");
     const lease = join(path, "lease");
-    await Bun.write(lease, JSON.stringify({ pid: process.pid, start: selfProcessStartEpochSeconds() ?? Math.floor(Date.now()/1000 - process.uptime()) }));
+    await Bun.write(lease, JSON.stringify({ pid: process.pid, start: 128 }));
     await sweepStagingLease(root, id, Date.now());
     expect(await Bun.file(join(path, "0")).exists()).toBe(true);
     await Bun.write(lease, JSON.stringify({ pid: 2147483647, start: 1 }));
     await sweepStagingLease(root, id, Date.now());
     await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await Bun.file(lease).exists()).toBe(false);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { processStartEpochSecondsCtx.reset(); await rm(root, { recursive: true, force: true }); }
+});
+
+test.each([null, 129])("reclaim staging only after owner mismatch or expiry (observed start %s)", async observed => {
+  const { sweepStagingLease } = await import("../send-broker");
+  const { spawnRequestDir } = await import("../spawn-broker");
+  const root = await mkdtemp("/tmp/ib-lease-identity-");
+  const id = "d".repeat(32);
+  const dir = join(root, "send-attachments", id);
+  try {
+    await mkdir(dir, { recursive: true });
+    await Bun.write(join(spawnRequestDir(root), "." + id + ".staging"), "");
+    await Bun.write(join(dir, "lease"), JSON.stringify({ pid: process.pid, start: 128 }));
+    await Bun.write(join(dir, "0"), "staged");
+    processStartEpochSecondsCtx.set(() => observed);
+    await sweepStagingLease(root, id, Date.now());
+    expect(await Bun.file(join(dir, "0")).exists()).toBe(observed === null);
+    if (observed === null) await sweepStagingLease(root, id, Date.now() + 61_000);
+    await expect(stat(dir)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    processStartEpochSecondsCtx.reset();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("dashboard stages the canonical file selected through a project symlink and keeps its spelling", async () => {

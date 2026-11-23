@@ -45,11 +45,11 @@ async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnque
 
 type ReceiveStorage = { tempDir: string; hasFreeSpace: typeof hasFreeSpace };
 
-async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions) {
+async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions, reserve: (bytes: number) => number) {
   const limits = checkIncomingFiles(header.files, await readTransferLimits(), { machine: await readMachineName() });
   if (!limits.ok) throw new Error(limits.error);
   const total = header.files.reduce((sum, file) => sum + file.size, 0);
-  if (!await storage.hasFreeSpace(storage.tempDir, total)) throw new Error("Insufficient space for attachments and the 1 GiB reserve");
+  if (!await storage.hasFreeSpace(storage.tempDir, reserve(total))) throw new Error("Insufficient space for attachments and the 1 GiB reserve");
   const root = await mkdtemp(join(storage.tempDir, "itsybitsy-attachments-"));
   const cleanup = () => rm(root, { recursive: true, force: true });
   try {
@@ -84,6 +84,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
   const accepted = new Map<string, number>();
   const pending = new Map<string, Promise<void>>();
   const receiving = new Set<string>();
+  let reserved = 0;
   return async (header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>,
     body?: Pick<PairStream, "read">, options: FileBodyOptions = {}) => {
     if (!header.message && !header.files.length) throw new Error("Message is empty");
@@ -104,6 +105,12 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
       const { files } = header;
       let staged: Awaited<ReturnType<typeof receiveAttachments>> | undefined;
       let bodyError: unknown;
+      let outstanding = 0;
+      const reserve = (bytes: number) => {
+        reserved += bytes - outstanding;
+        outstanding = bytes;
+        return reserved;
+      };
       const total = files.reduce((sum, file) => sum + file.size, 0);
       if (files.length) {
         if (receiving.has(peerId) || receiving.size >= 2) throw new Error("busy, try again");
@@ -118,12 +125,13 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
             let nextNotice = 0;
             try {
               staged = await receiveAttachments(header, body, storage, { ...options, onProgress: bytes => {
+                reserve(total - bytes);
                 options.onProgress?.(bytes);
                 if (total > 5 * 1024 ** 2 && now() >= nextNotice) {
                   nextNotice = now() + 1000;
                   notice(`Receiving from ${name}: ${bytes} / ${total} bytes`);
                 }
-              } });
+              } }, reserve);
               return staged.message;
             } catch (err) { bodyError = err; throw err; }
           } : undefined,
@@ -135,7 +143,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
       } catch (error) {
         await staged?.cleanup();
         throw error;
-      } finally { if (files.length) receiving.delete(peerId); }
+      } finally { reserve(0); if (files.length) receiving.delete(peerId); }
       accepted.set(key, now() + 600_000);
       const summary = files.length ? ` (${files.length} files, ${(total / 1024 ** 2).toFixed(2)} MB)` : "";
       const line = `${name} sent a message${summary} to ${targetLabel(header.target)}`;

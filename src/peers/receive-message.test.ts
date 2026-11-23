@@ -427,3 +427,19 @@ test.each(["body", "ack"])("cancelling while the %s is pending resets the exchan
     await expect(received.writeAll(Buffer.from("late"))).rejects.toThrow();
   } finally { a.close(0, "done"); }
 });
+
+test("concurrent peers reserve outstanding bytes until write or failure", async () => {
+  const budgets: number[] = [];
+  const receive = createMessageReceiver(() => {}, () => {}, Date.now, 4096, {
+    tempDir: cli.root, hasFreeSpace: async (_dir, bytes) => { budgets.push(bytes); return bytes <= 4; },
+  });
+  const request = () => header({ files: [manifestFile("abc")] });
+  const held = Promise.withResolvers<Uint8Array>();
+  const first = receive(request(), "a", paired, { read: () => held.promise });
+  await waitFor(() => budgets.length === 1);
+  await expect(receive(request(), "b", paired, { read: async () => Buffer.alloc(0) })).rejects.toThrow("Insufficient space");
+  held.resolve(Buffer.alloc(0));
+  await expect(first).rejects.toThrow("Early EOF");
+  await expect(receive(request(), "b", paired, { read: async () => Buffer.alloc(0) })).rejects.toThrow("Early EOF");
+  expect(budgets).toEqual([3, 6, 3]);
+});

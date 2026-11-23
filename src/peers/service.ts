@@ -344,7 +344,7 @@ export class PeerService {
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
   private outboxTimer?: ReturnType<typeof setInterval>;
-  private readonly receipts = new Map<string, { row: IncomingTransfer; controller: AbortController }>();
+  private readonly receipts = new Map<string, { row: IncomingTransfer; controller: AbortController; done: Promise<void> }>();
   cancelReceipt(id: string) {
     this.receipts.get(id)?.controller.abort(new Error("Receive cancelled"));
   }
@@ -681,15 +681,17 @@ export class PeerService {
     return this.poller.fetchCoordinatorPane(peerId);
   }
 
-  private async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
+  async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
     const [header, peer, name, body, options] = args;
+    if (this.shuttingDown) throw new Error("Watcher shutting down");
     const receive = this.deps.receiveMessage!;
     if (!header.files.length) return receive(...args);
     const id = crypto.randomUUID();
     const controller = new AbortController();
     const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
     const row = { id, label: label + " → " + targetLabel(header.target), bytes: 0, total: header.files.reduce((sum, f) => sum + f.size, 0) };
-    this.receipts.set(id, { row, controller });
+    const done = Promise.withResolvers<void>();
+    this.receipts.set(id, { row, controller, done: done.promise });
     if (options?.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
     this.notify();
     try {
@@ -697,7 +699,7 @@ export class PeerService {
         row.bytes = bytes;
         this.notify();
       } });
-    } finally { this.receipts.delete(id); this.notify(); }
+    } finally { this.receipts.delete(id); done.resolve(); this.notify(); }
   }
 
   async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
@@ -764,11 +766,13 @@ export class PeerService {
    */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    const receipts = [...this.receipts.values()];
+    for (const receipt of receipts) receipt.controller.abort(new Error("Watcher shutting down"));
     this.cancelRetry();
     this.active?.session.cancel();
     this.active = null;
     if (this.binding !== null) await this.binding;
-    await this.closeEndpoint();
+    await Promise.all([this.closeEndpoint(), Promise.allSettled(receipts.map(entry => entry.done))]);
   }
 
   /**

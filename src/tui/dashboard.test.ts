@@ -10879,7 +10879,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toContain("Sent to Laptop B/");
   });
 
-  test("remote row detects submitted files, shows byte progress and cancels its own send on Esc", async () => {
+  test.each(["Esc", "shutdown"])("remote row detects files, shows progress and cleans staging on %s", async action => {
     const home = await mkdtemp(join(tmpdir(), "ib-dashboard-transfer-"));
     setUserHome(home);
     try {
@@ -10904,8 +10904,9 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.inputField.submit();
       await entered.promise;
       expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 8 bytes");
-      dashboard.handleInput("\x1b");
-      await waitFor(() => dashboard.notice === "Send cancelled");
+      if (action === "Esc") dashboard.handleInput("\x1b");
+      else await dashboard.stopRemoteSends();
+      await waitFor(() => dashboard.notice === (action === "Esc" ? "Send cancelled" : "Dashboard shutting down"));
       await waitFor(async () => !await Bun.file(staged!).exists());
       expect(dashboard.inputField.getText()).toContain(source);
     } finally { resetUserHome(); await rm(home, { recursive: true, force: true }); }

@@ -497,3 +497,21 @@ test("a stuck sender reset closes the connection and releases a partial receipt"
   expect(await readdir(dir)).toEqual([]);
   await receiver(header({ files: [manifestFile("")] }), "sender", paired, { read: async () => Buffer.alloc(0) });
 });
+
+test.each(["shutdown", "cancel"])("%s cleans a tracked receipt after its first byte", async action => {
+  const dir = await receiveFixture();
+  const { PeerService, defaultPeerServiceDeps } = await import("./service");
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null), receiveMessage: receiver });
+  let started = false;
+  const receipt = service.receiveTracked(header({ files: [manifestFile("abc")] }), "peer", paired, {
+    read: () => { if (started) return new Promise(() => {}); started = true; return Promise.resolve(Buffer.from("a")); },
+  });
+  const stopped = expect(receipt).rejects.toThrow();
+  await waitFor(() => service.view().incoming?.[0]?.bytes === 1);
+  if (action === "shutdown") await service.shutdown();
+  else service.cancelReceipt(service.view().incoming![0]!.id);
+  await stopped;
+  expect(await readdir(dir)).toEqual([]);
+  expect(service.view().incoming ?? []).toEqual([]);
+  expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
+});

@@ -889,7 +889,7 @@ export class DashboardComponent implements Component {
     return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
   }
   private selectedReceipt: string | undefined;
-  private pendingRemoteSends = new Map<string, { label: string; bytes: number; total?: number; controller: AbortController }>();
+  private pendingRemoteSends = new Map<string, { label: string; bytes: number; total?: number; controller: AbortController; done: Promise<void> }>();
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
   private usageTimer: ReturnType<typeof setInterval> | null = null;
@@ -1987,12 +1987,19 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
+  async stopRemoteSends() {
+    const sends = [...this.pendingRemoteSends.values()];
+    for (const { controller } of sends) controller.abort(new Error("Dashboard shutting down"));
+    await Promise.allSettled(sends.map(send => send.done));
+  }
+
   private async submitRemoteMessage(remote: Exclude<RemoteEntry, { kind: "remote-repo-header" }>, target: SendTarget, text: string): Promise<boolean> {
     const service = this.peerService;
     const header = textHeader(target, text, { kind: "user" });
     const label = remoteTitle(remote);
     const controller = new AbortController();
-    const pending = { label, controller, bytes: 0, total: undefined as number | undefined };
+    const done = Promise.withResolvers<void>();
+    const pending = { label, controller, done: done.promise, bytes: 0, total: undefined as number | undefined };
     let staging: string | undefined;
     try {
       if (!service) throw new Error("Remote messaging is unavailable");
@@ -2024,8 +2031,8 @@ export class DashboardComponent implements Component {
       this.setNotice(err instanceof Error ? err.message : String(err), "error");
       return false;
     } finally {
-      if (staging) await rm(staging, { recursive: true, force: true });
-      this.pendingRemoteSends.delete(header.id);
+      try { if (staging) await rm(staging, { recursive: true, force: true }); }
+      finally { this.pendingRemoteSends.delete(header.id); done.resolve(); }
       this.invalidate();
       this.tui?.requestRender();
     }
@@ -4561,7 +4568,7 @@ export async function launchDashboard(): Promise<void> {
     // under the n0 preset close() can take about a second, and a stuck one
     // must not hold up the exit.
     const stopPeers = Promise.race([
-      peerService.shutdown(),
+      Promise.allSettled([dashboard.stopRemoteSends(), peerService.shutdown()]),
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
     ]);
     // Flush layout save to disk before exiting, then release coordinator

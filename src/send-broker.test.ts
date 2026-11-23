@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readdir, rm } from "fs/promises";
+import { mkdtemp, mkdir, readdir, rename, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { resetListTmuxSessionsCache, type Agent, type AgentMeta } from "./agents";
@@ -587,6 +587,26 @@ describe("send broker", () => {
       expect(out?.stderr).toContain(`timed out after 30s waiting for the watchdog of '${SENDER_ID}' to send the message to '${TARGET_ID}'`);
       expect(out?.stderr).toContain("withdrawn");
       expect(await readdir(spawnRequestDir(agentDir))).toEqual([]);
+    });
+
+    test.each(["unpublished", "pending", "claimed"])("broker interrupt while %s", async state => {
+      const control = new AbortController();
+      if (state === "unpublished") control.abort();
+      const out = await requestSendViaWatchdog("laptop/@system", MESSAGE, clientDeps({
+        signal: control.signal,
+        sleep: async () => {
+          const dir = spawnRequestDir(agentDir);
+          if (state === "claimed") {
+            const [name] = await readdir(dir);
+            await rename(join(dir, name!), join(dir, name + ".claimed"));
+          }
+          control.abort();
+        },
+      }));
+      expect(out?.exitCode).toBe(130);
+      expect(out?.stdout).toBe("");
+      expect(out?.stderr).toContain(state === "claimed" ? "outcome unknown" : state === "pending" ? "withdrawn" : "before publication");
+      expect((await readdir(spawnRequestDir(agentDir)).catch(() => [])).filter(name => name.endsWith(".json"))).toEqual([]);
     });
 
     test.each([true, false])("remote recipient timeout races the watchdog claim (watchdog wins=%s)", async wins => {

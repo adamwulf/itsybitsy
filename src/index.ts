@@ -2020,36 +2020,34 @@ export async function main() {
       // sandbox. Null for every other caller, and when the watchdog cannot take
       // the request (not live, or older than the broker); those send directly
       // as before. See routeSendThroughWatchdog.
-      {
+      const controller = new AbortController();
+      const interrupt = () => controller.abort();
+      process.on("SIGINT", interrupt);
+      let resolved;
+      try {
         const { routeSendThroughWatchdog } = await import("./send-broker");
-        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: resolveMessageBody, usage, repos });
+        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: resolveMessageBody, usage, repos }, { signal: controller.signal });
         if (brokered) await printAndExit(brokered);
-      }
-
-      const { agent: resolvedAgent, isSystemCoordinator, team, remote } = await resolveTarget(target, repos);
-
-      if (remote) {
-        const { resolveRoutedCaller } = await import("./spawn-broker");
-        if (await resolveRoutedCaller({})) {
-          console.error("Remote sends from a sandboxed agent need its watchdog running");
-          process.exit(1);
+        resolved = await resolveTarget(target, repos);
+        const { interruptedSend, resolveRoutedCaller } = await import("./spawn-broker");
+        if (controller.signal.aborted) await printAndExit(interruptedSend("unpublished"));
+        if (resolved.remote) {
+          if (await resolveRoutedCaller({})) {
+            console.error("Remote sends from a sandboxed agent need its watchdog running");
+            process.exit(1);
+          }
+          const message = await resolveMessageBody();
+          if (!message) { console.error(usage); process.exit(1); }
+          const { cliRemoteSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
+          const sender = await cliRemoteSender(repos, fromAgent).catch(err => {
+            console.error(err instanceof Error ? err.message : String(err));
+            process.exit(1);
+          });
+          await printAndExit(await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal));
+          break;
         }
-        const message = await resolveMessageBody();
-        if (!message) { console.error(usage); process.exit(1); }
-        const { cliRemoteSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
-        const sender = await cliRemoteSender(repos, fromAgent).catch(err => {
-          console.error(err instanceof Error ? err.message : String(err));
-          process.exit(1);
-        });
-        const controller = new AbortController();
-        const interrupt = () => controller.abort();
-        process.on("SIGINT", interrupt);
-        let result;
-        try { result = await handoffRemoteMessage(remote.peer, textHeader(remote.target, message, sender), controller.signal); }
-        finally { process.off("SIGINT", interrupt); }
-        await printAndExit(controller.signal.aborted ? { ...result, exitCode: 130 } : result);
-        break;
-      }
+      } finally { process.off("SIGINT", interrupt); }
+      const { agent: resolvedAgent, isSystemCoordinator, team } = resolved;
 
       if (isSystemCoordinator) {
         const coordMessage = await resolveMessageBody();

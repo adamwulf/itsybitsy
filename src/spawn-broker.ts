@@ -116,15 +116,35 @@ export async function ensureSpawnBrokerDirs(agentDir: string): Promise<void> {
 }
 
 /** Write via a temp name in the same directory, then rename, so a reader never sees half a file. */
-async function writeJsonAtomic(dir: string, name: string, value: unknown): Promise<void> {
+async function writeJsonAtomic(dir: string, name: string, value: unknown, signal?: AbortSignal): Promise<void> {
   await mkdir(dir, { recursive: true });
   const tmp = join(dir, `.${name}.${randomBytes(4).toString("hex")}.tmp`);
-  await Bun.write(tmp, JSON.stringify(value));
-  await rename(tmp, join(dir, name));
+  try {
+    await Bun.write(tmp, JSON.stringify(value));
+    signal?.throwIfAborted();
+    await rename(tmp, join(dir, name));
+  } finally { await rm(tmp, { force: true }); }
 }
 
 export function brokerFail(stderr: string): IbCommandResult {
   return { ok: false, exitCode: 1, stdout: "", stderr };
+}
+
+/** Publication, claim and withdrawal all rename the same ready entry. */
+export async function withdrawPublishedRequest(ready: string, withdrawn: string): Promise<boolean> {
+  try { await rename(ready, withdrawn); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+  await rm(withdrawn, { recursive: true, force: true });
+  return true;
+}
+
+export function interruptedSend(state: "unpublished" | "withdrawn" | "claimed"): IbCommandResult {
+  const outcome = state === "claimed" ? "outcome unknown — check the agent" :
+    state === "withdrawn" ? "request withdrawn before it was claimed" : "before publication";
+  return { ok: false, exitCode: 130, stdout: "", stderr: "Send interrupted: " + outcome };
 }
 
 /**
@@ -163,21 +183,23 @@ export async function submitWatchdogRequest(
   request: { id: string },
   wording: WatchdogRequestWording,
   timeoutMs: number,
-  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now"> = {},
+  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal"> = {},
 ): Promise<IbCommandResult> {
   const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
   const now = deps.now ?? Date.now;
   const pollMs = deps.pollMs ?? SPAWN_RESULT_POLL_MS;
 
+  if (deps.signal?.aborted) return interruptedSend("unpublished");
   try {
-    await writeJsonAtomic(spawnRequestDir(agentDir), `${request.id}.json`, request);
+    await writeJsonAtomic(spawnRequestDir(agentDir), `${request.id}.json`, request, deps.signal);
   } catch (err) {
+    if (deps.signal?.aborted) return interruptedSend("unpublished");
     return brokerFail(`Error: could not write the ${wording.request} request: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const resultFile = join(spawnResultDir(agentDir), `${request.id}.json`);
   const deadline = now() + timeoutMs;
-  for (;;) {
+  while (!deps.signal?.aborted) {
     const file = Bun.file(resultFile);
     if (await file.exists()) {
       try {
@@ -204,15 +226,10 @@ export async function submitWatchdogRequest(
   // Timed out. Withdraw the request if the watchdog has not taken it yet; if it
   // already has, the command may still finish — say so.
   const requestFile = join(spawnRequestDir(agentDir), `${request.id}.json`);
-  let stillQueued = false;
-  const withdrawn = requestFile + ".withdrawn";
-  try {
-    await rename(requestFile, withdrawn);
-    stillQueued = true;
-    await rm(withdrawn, { force: true });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return brokerFail(`Could not withdraw request: ${err}`);
-  }
+  let stillQueued: boolean;
+  try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
+  catch (err) { return brokerFail(`Could not withdraw request: ${err}`); }
+  if (deps.signal?.aborted) return interruptedSend(stillQueued ? "withdrawn" : "claimed");
   return brokerFail(
     `Error: timed out after ${Math.round(timeoutMs / 1000)}s waiting for the watchdog of '${callerId}' to ${wording.action}. ` +
       (stillQueued
@@ -224,6 +241,7 @@ export async function submitWatchdogRequest(
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
 
 export interface SpawnClientDeps {
+  signal?: AbortSignal;
   cwd?: string;
   timeoutMs?: number;
   pollMs?: number;

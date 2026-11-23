@@ -1,3 +1,4 @@
+import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { realpath } from "node:fs/promises";
 import { findOwnRepo } from "../resolve-target";
 import { getCoordinatorAgentId } from "../coordinator";
@@ -72,6 +73,7 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 /** A claimed request might already have reached the other machine. Never re-submit it. */
 export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal): Promise<IbCommandResult> {
   try {
+    if (signal?.aborted) return interruptedSend("unpublished");
     if (!await hasLivePeerWatcher()) return fail("remote sends need ib watch running on this machine");
     encodeSendHeader(parseSendHeader(header));
     const base = root();
@@ -82,9 +84,11 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     await mkdir(staging, { mode: 0o700 });
     try {
       await writeJson(staging, "request.json", { peer, header });
+      signal?.throwIfAborted();
       await rename(staging, dir);
     } catch (err) {
       await rm(staging, { recursive: true, force: true });
+      if (signal?.aborted) return interruptedSend("unpublished");
       throw err;
     }
     const deadline = Date.now() + 10_000;
@@ -100,13 +104,9 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       }
       await Bun.sleep(50);
     }
-    const reason = signal?.aborted ? "Remote send interrupted" : "Remote send timed out";
-    try { await rename(dir, staging); } catch (err) {
-      if (missing(err)) return fail(reason + ": " + SEND_UNKNOWN);
-      throw err;
-    }
-    await rm(staging, { recursive: true, force: true });
-    return fail(reason + " before ib watch claimed the request");
+    const withdrawn = await withdrawPublishedRequest(dir, staging);
+    if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
+    return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
   } catch (err) { return fail(detail(err)); }
 }
 

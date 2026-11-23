@@ -42,7 +42,16 @@ test.each([false, true])("interrupt after publication (claimed=%s)", async claim
   if (claimed) await started.promise;
   control.abort();
   try {
-    expect((await result).stderr).toContain(claimed ? "outcome unknown" : "before ib watch claimed");
+    const outcome = await result;
+    expect(outcome.exitCode).toBe(130);
+    expect(outcome.stderr).toContain(claimed ? "outcome unknown" : "withdrawn");
     expect(await Bun.file(join(base, header.id, "request.json")).exists()).toBe(false);
   } finally { hold.resolve(header.id); await poll; }
+});
+
+test("an interrupted direct send never publishes an already-cancelled request", async () => {
+  const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
+  const outcome = await handoffRemoteMessage("peer", header, AbortSignal.abort());
+  expect(outcome).toMatchObject({ exitCode: 130, stderr: expect.stringContaining("before publication") });
+  expect(await Bun.file(join(base, header.id, "request.json")).exists()).toBe(false);
 });

@@ -19,13 +19,6 @@ export async function writeTransferOwner(dir: string, owner: TransferOwner) {
   } finally { await rm(temp, { force: true }); }
 }
 
-export async function readTransferOwner(dir: string): Promise<TransferOwner | undefined> {
-  let handle;
-  try { handle = await open(join(dir, "owner.json"), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW); }
-  catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
-  try { return await readOwnerFields(handle); } finally { await handle.close(); }
-}
-
 async function readOwnerFields(handle: FileHandle): Promise<TransferOwner | undefined> {
   const stat = await handle.stat();
   if (!stat.isFile() || stat.nlink !== 1 || stat.size > 256) return;
@@ -45,7 +38,7 @@ export const OWNER_EXPIRY_MS = 24 * 3600_000;
 export function transferOwnerState(owner: TransferOwner | undefined, createdMs: number, observed = owner && stagingOwnerStart(owner.pid)): OwnerState {
   if (!owner) return "unverifiable";
   if (!isPidAliveCtx.fn(owner.pid)) return "proven-dead";
-  if (observed == null) return "unverifiable";
+  if (observed == null || !(createdMs > 0)) return "unverifiable";
   if (observed * 1000 > createdMs || (owner.start !== null && observed !== owner.start)) return "proven-dead";
   return owner.start === null ? "unverifiable" : "verified-live";
 }
@@ -98,10 +91,16 @@ async function readBatch(parent: string, key: string, limit: number) {
 export async function inspectTransferDirectory(dir: string) {
   const info = await lstat(dir);
   if (!info.isDirectory()) throw new Error("Unsafe transfer directory: " + dir);
-  const owner = await readTransferOwner(dir).catch(() => undefined);
-  const record = await lstat(join(dir, "owner.json")).catch(() => undefined);
-  const created = (record ?? info).birthtimeMs;
-  return { owner, state: transferOwnerState(owner, created), created };
+  let file: FileHandle | undefined;
+  let created = info.birthtimeMs || info.ctimeMs;
+  try {
+    file = await open(join(dir, "owner.json"), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    const record = await file.stat();
+    created = record.birthtimeMs || record.ctimeMs;
+    const owner = await readOwnerFields(file);
+    return { owner, state: transferOwnerState(owner, record.birthtimeMs), created };
+  } catch { return { owner: undefined, state: "unverifiable" as const, created }; }
+  finally { await file?.close(); }
 }
 
 export async function sweepTransferDirectory(dir: string, now: number) {
@@ -133,17 +132,18 @@ export async function sweepOutgoingDirectories(root = "/tmp", now = Date.now()) 
  * start, after checking it predates the lease, and later verifies that stamp. */
 export async function inspectBrokerLease(dir: string, id: string): Promise<{ state: OwnerState; created: number }> {
   const info = await stagingDirectoryStat(dir, id);
-  let created = info.birthtimeMs;
+  let created = info.birthtimeMs || info.ctimeMs;
   let lease: FileHandle | undefined;
   let stamp: FileHandle | undefined;
   try {
     lease = await openBrokerLease(dir, id);
-    created = (await lease.stat()).birthtimeMs;
+    const leaseInfo = await lease.stat();
+    created = leaseInfo.birthtimeMs || leaseInfo.ctimeMs;
     const seed = await readOwnerFields(lease);
     if (!seed) return { state: "unverifiable", created };
     const observed = stagingOwnerStart(seed.pid);
     const candidate = { pid: seed.pid, start: observed };
-    const firstSight = transferOwnerState(candidate, created, observed);
+    const firstSight = transferOwnerState(candidate, leaseInfo.birthtimeMs, observed);
     if (firstSight !== "verified-live") return { state: firstSight, created };
     try { stamp = await openBrokerLease(dir, id, "owner.json"); }
     catch (err) {

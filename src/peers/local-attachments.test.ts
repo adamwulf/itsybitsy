@@ -314,3 +314,15 @@ test("--attach before the target combines with a file body and explicit attribut
   expect(record.message.split("\n")[0]).toBe("Read " + destination);
   expect(await Bun.file(destination).text()).toBe("snapshot");
 });
+
+test("failed attachment staging never falls back to sending the original text", async () => {
+  const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
+  await Bun.write(join(sender.sessionCwd, "first"), "ok");
+  const run = await fixture.run(["send", "reader", "--attach", "first", "--attach", "missing", "!read first missing"], {
+    cwd: sender.sessionCwd, sandboxed: true, actions: { sendMessage: "record" },
+  });
+  expect(run.exitCode).toBe(1);
+  expect(run.stderr).toContain("missing");
+  expect(run.actions).toEqual([]);
+  expect(await queue().exists()).toBe(false);
+});

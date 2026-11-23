@@ -510,6 +510,7 @@ class StatusBarComponent implements Component {
    */
   remoteSelected = false;
   remoteCoordinatorVisible = false;
+  peerResizeDisabled = false;
   remoteRepoSelected = false;
   hasResolvableWarnings = false;
 
@@ -535,7 +536,7 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.remoteSelected) {
-      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll    " : ""}p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll    " : ""}p/n: pane    1/2/3: tab${this.peerResizeDisabled ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -1486,6 +1487,16 @@ export class DashboardComponent implements Component {
    * stale for up to 1s. The always-on selected-agent `tmuxPoller` is untouched.
    */
   private updatePaneVisibility() {
+    const peerCoordinator = this.remoteSelection?.kind === "remote-coordinator";
+    const peerTree = peerCoordinator && this.rightPane.mode === "TREE";
+    if (peerTree && (!this.focusManager.peerCoordinatorTreeMode || this.focusManager.current() === "teams-tree")) {
+      this.focusManager.setFocus("agent-tree");
+    } else if (!peerTree && this.focusManager.peerCoordinatorTreeMode
+        && this.focusManager.current() === "agent-tree" && this.sidebarMode === "teams") {
+      this.focusManager.setFocus("teams-tree");
+    }
+    this.focusManager.peerCoordinatorTreeMode = peerTree;
+    this.statusBar.peerResizeDisabled = peerCoordinator;
     this.statusBar.remoteCoordinatorVisible = this.peerCoordinatorVisible;
     if (this.peerCoordinatorVisible) {
       this.focusManager.skipTargets.add("right-pane");
@@ -1959,6 +1970,10 @@ export class DashboardComponent implements Component {
    */
   refuseOnRemoteRow(key: string): boolean {
     const remote = this.remoteSelection;
+    if (remote?.kind === "remote-coordinator" && ["[", "]", "{", "}"].includes(key)) {
+      this.setNotice("resize from a local row", "info");
+      return true;
+    }
     if (remote === null || isRemoteAllowedKey(key)) return false;
     if (this.peerCoordinatorVisible && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
@@ -3284,7 +3299,7 @@ export class DashboardComponent implements Component {
     // QUESTIONS-mode j/k retains its agent-tree-only special case below and
     // does NOT touch activeSelectionSource (it's a right-pane question
     // selector, not a sidebar-tree navigation).
-    const navigatesTeams = this.sidebarMode === "teams";
+    const navigatesTeams = this.sidebarMode === "teams" && !this.focusManager.peerCoordinatorTreeMode;
     const navigatedSource: SelectionSource = navigatesTeams ? "teams" : "agents";
     if (data === "J") {
       if (navigatesTeams) {
@@ -3556,10 +3571,7 @@ export class DashboardComponent implements Component {
         // panes reflow to the new mainWidth at display time via WordWrapCache, so
         // resizing the sidebar never repaints a coordinator TUI at a new width.
         this.tui?.requestRender();
-      } else if (focus === "active-agent" && this.peerCoordinatorVisible) {
-        // The only divider borders the sidebar. Growing the capture shrinks the sidebar.
-        this.sidebarWidth = clampSidebarWidth(this.sidebarWidth - delta);
-        this.tui?.requestRender();
+
       } else if (focus === "right-pane") {
         // Right pane focused: ] grows right (shrinks middle) = negative delta to handleResizeLeft
         agentActions.handleResizeLeft(this, -delta);
@@ -4002,7 +4014,7 @@ export class DashboardComponent implements Component {
     const rightPad = 3;
     const currentFocus = this.focusManager.current();
     const leftFocused = currentFocus === "active-agent";
-    const rightFocused = currentFocus === "right-pane";
+    const rightFocused = this.focusManager.peerCoordinatorTreeMode ? currentFocus === "agent-tree" : currentFocus === "right-pane";
 
     // Dash color is always DIM_GRAY — never reverse (Bug 3)
     const leftDashColor = DIM_GRAY;

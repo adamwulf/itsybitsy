@@ -9994,17 +9994,12 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.activeSelectionSource).toBe("teams");
   });
 
-  test("Tab visits the full-width peer capture once and resizing moves its visible divider", () => {
+  test("Tab visits the full-width peer capture once", () => {
     const { dashboard } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
     dashboard.focusManager.setFocus("right-pane");
     selectByKey(dashboard, PEER_B + "/@system");
     expect(dashboard.focus).toBe("active-agent");
-    const initialSidebar = dashboard.sidebarWidth;
-    const initialSplit = dashboard.splitPane.getLeftWidth();
-    dashboard.handleInput("]");
-    expect(dashboard.sidebarWidth).toBe(initialSidebar - 5);
-    expect(dashboard.splitPane.getLeftWidth()).toBe(initialSplit);
     for (const stop of ["agent-tree", "info", "active-agent"] as const) {
       dashboard.handleInput("\t");
       expect(dashboard.focus).toBe(stop);
@@ -10015,6 +10010,45 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.handleInput("\x1b[Z");
       expect(dashboard.focus).toBe(stop);
     }
+  });
+
+  test.each(["1", "2"])("peer capture and TREE keep the local layout intact on sidebar %s", async tab => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.persistLayout();
+    await flushPendingSave();
+    const saved = await loadLayout();
+    expect(saved).not.toBeNull();
+    const persist = spyOn(dashboard, "persistLayout");
+    selectByKey(dashboard, PEER_B + "/@system");
+    dashboard.handleInput(tab);
+    dashboard.focusManager.setFocus("active-agent");
+    const tryResize = () => {
+      for (const key of ["[", "]", "{", "}"]) {
+        resetNotice(dashboard);
+        dashboard.handleInput(key);
+        expect(dashboard.notice).toBe("resize from a local row");
+        expect(dashboard.sidebarWidth).toBe(saved!.sidebarWidth);
+        expect(dashboard.splitPane.getLeftWidth()).toBe(saved!.splitPaneLeftWidth);
+        expect(dashboard.sidebar.heightOffsets).toEqual(saved!.heightOffsets);
+      }
+    };
+    tryResize();
+    dashboard.jumpToMode("TREE");
+    expect(dashboard.focus).toBe("agent-tree");
+    expect(dashboard.render(180).join("")).toContain(REVERSE + BOLD + " TREE ");
+    dashboard.handleInput("\t");
+    expect(dashboard.focus).toBe("info");
+    dashboard.handleInput("\x1b[Z");
+    expect(dashboard.focus).toBe("agent-tree");
+    tryResize();
+    dashboard.handleInput("k");
+    expect(dashboard.agentTree.isSystemCoordinatorSelected).toBe(true);
+    expect(dashboard.sidebarWidth).toBe(saved!.sidebarWidth);
+    expect(dashboard.splitPane.getLeftWidth()).toBe(saved!.splitPaneLeftWidth);
+    expect(persist).not.toHaveBeenCalled();
+    await flushPendingSave();
+    expect(await loadLayout()).toEqual(saved);
   });
 
   test.each(["?", "/", "@", "I"])("dialog %s pauses coordinator reads and resumes once", async key => {
@@ -10162,7 +10196,7 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    const permittedAscii = new Set([..."jkJK[]{}123pn@?/I;l", "\t", "\x03"]);
+    const permittedAscii = new Set([..."jkJK123pn@?/I;l", "\t", "\x03"]);
     const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
     for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
     const refused = new Set([
@@ -10180,7 +10214,7 @@ describe("Unified peer repos in the Agents tree", () => {
       for (const key of refused) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
-        expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+        expect(dashboard.notice).toBe(["[", "]", "{", "}"].includes(key) ? "resize from a local row" : REMOTE_READ_ONLY_NOTICE);
         expect(dashboard.dialog).toBeNull();
       }
       for (const handler of handlers) expect(handler).not.toHaveBeenCalled();

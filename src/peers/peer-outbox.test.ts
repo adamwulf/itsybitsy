@@ -189,8 +189,8 @@ test("a successful ACK prints before a failed result cleanup warning", async () 
 
 test("a live watcher stuck before wire I/O does not renew the client deadline", async () => {
   await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
-  let now = Date.now();
-  const time = spyOn(Date, "now").mockImplementation(() => now);
+  let now = performance.now();
+  const time = spyOn(performance, "now").mockImplementation(() => now);
   const h = textHeader({ kind: "system" }, "hi", { kind: "user" });
   const result = handoffRemoteMessage("peer", h);
   const entered = Promise.withResolvers<void>();
@@ -316,8 +316,8 @@ test("an ordinary timeout observes a result published during the last poll sleep
   const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
   const claimed = join(base, ".claimed", header.id);
   const sleep = Bun.sleep;
-  let now = Date.now();
-  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  let now = performance.now();
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
   const poll = spyOn(Bun, "sleep").mockImplementation(async delay => {
     if (delay !== 50) return sleep(delay);
     await mkdir(join(base, ".claimed"), { recursive: true });

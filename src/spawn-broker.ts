@@ -189,7 +189,7 @@ export async function submitWatchdogRequest(
   deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain" | "claimTimeoutMs" | "readProgress" | "cancelClaimed"> = {},
 ): Promise<IbCommandResult> {
   const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
-  const now = deps.now ?? Date.now;
+  const now = deps.now ?? (() => performance.now());
   const pollMs = deps.pollMs ?? SPAWN_RESULT_POLL_MS;
 
   if (deps.signal?.aborted) return interruptedSend("unpublished");

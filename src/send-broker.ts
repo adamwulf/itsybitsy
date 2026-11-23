@@ -553,9 +553,9 @@ export async function handleSendRequest(
       const checkClient = () => {
         if (files.length ? !fstatSync(marker!.fd).nlink : existsSync(cancelPath)) controller.abort(new Error("Send cancelled"));
       };
-      let updated = 0;
+      let updated = -Infinity;
       const progress = () => {
-        const now = Date.now();
+        const now = performance.now();
         if (marker && now - updated >= 250) {
           updated = now;
           // Each coalesced milestone appends one byte. A stat reads its sequence

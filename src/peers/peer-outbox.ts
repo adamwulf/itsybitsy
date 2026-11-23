@@ -102,7 +102,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       if (signal?.aborted) return interruptedSend("unpublished");
       throw err;
     }
-    let deadline = Date.now() + 10_000; // M2 claim window. Transfer progress uses the wire idle interval.
+    let deadline = performance.now() + 10_000; // M2 claim window. Transfer progress uses the wire idle interval.
     let claimedSeen = false;
     let lastSequence = 0;
     let warnedProgress = false;
@@ -124,14 +124,14 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       if (signal?.aborted) break;
       if (!claimedSeen && existsSync(claimed)) {
         claimedSeen = true;
-        deadline = Date.now() + IDLE_TIMEOUT_MS;
+        deadline = performance.now() + IDLE_TIMEOUT_MS;
       }
       try {
         const { sequence } = JSON.parse(await readFile(join(claimed, "progress"), "utf8"));
         if (Number.isSafeInteger(sequence) && sequence > lastSequence) {
           onProgress?.();
           lastSequence = sequence;
-          deadline = Date.now() + IDLE_TIMEOUT_MS;
+          deadline = performance.now() + IDLE_TIMEOUT_MS;
         }
       } catch (err) {
         if (!missing(err) && !warnedProgress) {
@@ -139,7 +139,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
           warnedProgress = true;
         }
       }
-      if (Date.now() >= deadline) break;
+      if (performance.now() >= deadline) break;
       await Bun.sleep(50);
     }
     const withdrawn = await withdrawPublishedRequest(dir, staging);

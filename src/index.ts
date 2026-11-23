@@ -549,7 +549,7 @@ const COMMAND_HELP: Record<string, string> = {
     "  Send a message to an agent, the system coordinator, a repo coordinator,\n" +
     "  or a team. If no inline message and no -f file is given, the message body\n" +
     "  is read from stdin.\n" +
-    "  --attach <file>  Copy a file for local recipients (repeatable)\n" +
+    "  --attach <file>  Copy a file for local or paired remote recipients (repeatable)\n" +
     "  --from <id>     Mark the sender for the recipient's notification\n" +
     "  -f, --file <p>  Read the message body from a file (wins over stdin)\n" +
     "\n" +
@@ -1996,7 +1996,7 @@ export async function main() {
         }
       }
 
-      const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [--attach <file>]... [message...]\n  -f, --file <path>  Read message body from a file\n  --attach <file>    Copy a file for local recipients (repeatable)";
+      const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [--attach <file>]... [message...]\n  -f, --file <path>  Read message body from a file\n  --attach <file>    Copy a file for local or paired remote recipients (repeatable)";
 
       if (!filteredSendArgs[0]) {
         console.error(usage);

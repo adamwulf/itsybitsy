@@ -296,7 +296,7 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 | `hooks.injectStatus` / `hooks.statusVisible` | `true` | Agents-status injection in the main session |
 | `channels.telegram.bot_token` | — | Telegram bridge |
 
-In `ib watch`, press `h`, then choose **Config** to edit the limits for explicit CLI attachments (`ib send --attach`). Dashboard drag-and-drop uses its own staging rules. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender and the receiving machine each enforce their own current settings. The receiver queues the message after verifying every file.
+In `ib watch`, press `h`, then choose **Config** to edit the limits for explicit CLI attachments (`ib send --attach`). These limits also apply to files sent from remote rows in the dashboard. Local dashboard drag-and-drop uses its existing staging rules. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender and the receiving machine each enforce their own current settings. The receiver queues the message after verifying every file.
 
 Per-agent-type permissions do **not** live here — they live in the agent-type `.md` files (old `permissions.*` config keys are deprecated and print migration hints).
 

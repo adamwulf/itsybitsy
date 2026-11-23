@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { setUserHome, resetUserHome } from "../home";
 import { drainOutbox, resetSendSpawnRunner, setSendSpawnRunner } from "../ib-commands";
 import { makeAgent, makeSpawnResult, waitFor } from "../test-utils";
 import { spawnCtx as paneProbe } from "../tmux-poller";
-import { readOutbox } from "../outbox";
+import { acquireOutboxLock, readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
 import { createFakeClock, createMemoryLink } from "./test-pair-transport";
 import { serveTrustedConnection } from "./peer-link";
@@ -203,7 +203,12 @@ test("repo and system coordinators use their own queues", async () => {
   await waitFor(async () => !(await readOutbox(dir)).length);
 });
 
-test("remote @system acknowledges enqueue while the local inline drainer is typing", async () => {
+test("remote @system acknowledges enqueue and the local inline drainer steals an abandoned lock", async () => {
+  const dir = join(cli.home, ".itsybitsy");
+  const abandoned = await acquireOutboxLock(dir);
+  if (!abandoned) throw new Error("fixture could not acquire coordinator lock");
+  const old = new Date(Date.now() - 31_000);
+  await utimes(abandoned.path, old, old);
   const release = Promise.withResolvers<number>();
   const entered = Promise.withResolvers<string[]>();
   setSendSpawnRunner(cmd => {
@@ -218,6 +223,8 @@ test("remote @system acknowledges enqueue while the local inline drainer is typi
     const typed = await entered.promise;
     expect(typed).toContain("=ib-coordinator:");
     expect(typed.at(-1)).toBe("/compact");
+    // No fixture release: delivery is paused under the replacement lock.
+    expect(await Bun.file(abandoned.path).text()).not.toContain(abandoned.token);
   } finally { release.resolve(0); }
   await waitFor(async () => !(await readOutbox(join(cli.home, ".itsybitsy"))).length);
 });

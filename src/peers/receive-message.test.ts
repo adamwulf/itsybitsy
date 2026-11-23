@@ -1019,3 +1019,48 @@ test("a refusal wins while a staged file read is pending", async () => {
     expect((await result).message).toBe("limit reached"); expect(a.closeInfo()).toBeNull();
   } finally { release.resolve(); spy.mockRestore(); a.close(0, "done"); }
 });
+
+test.each(["close stall", "close error", "removal stall"])("a destination %s fails before acceptance and releases transport", async kind => {
+  const clock = createFakeClock(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const opened = fs.open, remove = fs.rm;
+  const fileSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+    const file = await opened(...args);
+    if (String(args[0]).endsWith("/sink") && kind !== "removal stall") {
+      const close = file.close.bind(file);
+      file.close = async () => { await close(); entered.resolve(); if (kind === "close error") throw Error("close failed"); await release.promise; };
+    }
+    return file;
+  });
+  const rmSpy = spyOn(fs, "rm").mockImplementation(async (...args) => {
+    if (kind === "removal stall" && String(args[0]).endsWith(".partial")) { entered.resolve(); await release.promise; }
+    await remove(...args);
+  });
+  const incoming = join(cli.root, "staging/incoming");
+  try {
+    const result = receiver(header({ files: [manifestFile("x", "sink")] }), "peer", paired, { read: async () => Buffer.from(kind === "removal stall" ? "y" : "x") }, { setTimer: clock.setTimer }).catch(err => err);
+    await entered.promise; clock.advance(60_000);
+    expect(String(await result)).toContain(kind === "close error" ? "close failed" : kind === "removal stall" ? "hash mismatch" : "No progress");
+    expect(lines).toEqual([]); release.resolve();
+    await waitFor(async () => !(await readdir(incoming)).length);
+  } finally { release.resolve(); rmSpy.mockRestore(); fileSpy.mockRestore(); }
+});
+
+test.each(["stat", "close"] as const)("a stalled sender file %s times out without holding transport", async op => {
+  const clock = createFakeClock(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const path = join(cli.root, "0"); await Bun.write(path, "x");
+  const opened = fs.open;
+  const spy = spyOn(fs, "open").mockImplementation(async (...args) => {
+    const file = await opened(...args);
+    if (args[0] === path) {
+      if (op === "stat") { const stat = file.stat.bind(file); file.stat = (async () => { entered.resolve(); await release.promise; return stat(); }) as typeof file.stat; }
+      else { const close = file.close.bind(file); file.close = async () => { entered.resolve(); await release.promise; await close(); }; }
+    }
+    return file;
+  });
+  const { a, b } = createMemoryLink("sender", "receiver");
+  try {
+    const result = requestSend(a, header({ files: [manifestFile("x")] }), clock.setTimer, { filesDir: cli.root }).catch(err => err);
+    await b.acceptBi(); await entered.promise; clock.advance(60_000); await Bun.sleep(0); clock.advance(750);
+    expect(String(await result)).toContain("No progress"); expect(a.closeInfo()?.code).toBe(3);
+  } finally { release.resolve(); spy.mockRestore(); a.close(0, "done"); }
+});

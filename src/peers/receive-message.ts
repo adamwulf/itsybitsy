@@ -14,7 +14,7 @@ import type { PairStream } from "./pairing";
 import { sendMessage, type PeerEnqueueOptions } from "../ib-commands";
 import { listRepos } from "../registry";
 import { resolveAgentTarget } from "../resolve-target";
-import { streamFileBody, requireSendFin, type FileBodyOptions, type SendHeader, type SendTarget } from "./send-frame";
+import { waitForIO, streamFileBody, requireSendFin, type FileBodyOptions, type SendHeader, type SendTarget } from "./send-frame";
 
 export function targetLabel(target: SendTarget): string {
   if (target.kind === "system") return "@system";
@@ -49,57 +49,65 @@ async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnque
 type ReceiveStorage = { tempDir: string; stagingRoot?: string; hasFreeSpace: typeof hasFreeSpace };
 
 async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions, reserve: (bytes: number) => number, defer: (cleanup: Promise<void>) => void) {
-  const limits = checkIncomingFiles(header.files, await readTransferLimits(), { machine: await readMachineName() });
+  let pending: Promise<unknown> | undefined;
+  const io = <T>(operation: () => Promise<T>) => waitForIO(options, () => {
+    const running = operation().finally(() => { pending = undefined; });
+    pending = running;
+    return running;
+  });
+  const limits = checkIncomingFiles(header.files, await io(readTransferLimits), { machine: await io(readMachineName) });
   if (!limits.ok) throw new Error(limits.error);
   const total = header.files.reduce((sum, file) => sum + file.size, 0);
-  if (!await storage.hasFreeSpace(storage.tempDir, reserve(total))) throw new Error("Insufficient space for attachments and the 1 GiB reserve");
+  if (!await io(() => storage.hasFreeSpace(storage.tempDir, reserve(total)))) throw new Error("Insufficient space for attachments and the 1 GiB reserve");
   const id = crypto.randomUUID();
   const root = join(storage.tempDir, "itsybitsy-attachments-" + id);
   const staging = storage.stagingRoot ?? (storage.tempDir === "/tmp" ? transferStagingRoot() : join(storage.tempDir, "staging"));
-  let current = join(await stagingArea(staging, "incoming"), id + ".partial");
-  await mkdir(current, { mode: 0o700 });
-  const cleanup = () => rm(current, { recursive: true, force: true });
+  const partial = join(await io(() => stagingArea(staging, "incoming")), id + ".partial");
+  let current: string | undefined;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
-  let writing: Promise<void> | undefined;
+  const close = async () => { const file = handle; handle = undefined; await file?.close(); };
+  const cleanup = async () => {
+    const outstanding = pending;
+    const rollback = (async () => {
+      await outstanding?.catch(() => {});
+      try { await close(); } finally { if (current) await rm(current, { recursive: true, force: true }); }
+    })();
+    if (outstanding) defer(rollback);
+    else {
+      try { await waitForIO({ setTimer: options.setTimer }, () => rollback); }
+      catch { defer(rollback); }
+    }
+  };
   try {
-    await writeTransferOwner(current, { pid: process.pid, start: stagingOwnerStart(process.pid) });
+    await io(async () => { await mkdir(partial, { mode: 0o700 }); current = partial; });
+    await io(() => writeTransferOwner(partial, { pid: process.pid, start: stagingOwnerStart(process.pid) }));
     let received = 0;
     const mapping: AttachmentMapping[] = [];
     for (const [index, file] of header.files.entries()) {
-      const dir = join(current, String(index));
-      await mkdir(dir, { mode: 0o700 });
-      const destination = join(dir, sanitizeAttachmentName(file.name));
-      handle = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      const digest = await streamFileBody(body, file.size, chunk => {
-        writing = handle!.writeFile(chunk);
-        return writing.finally(() => { writing = undefined; });
-      }, { ...options, onProgress: bytes => options.onProgress?.(received + bytes) });
-      await handle.close();
-      handle = undefined;
+      const dir = join(partial, String(index));
+      await io(() => mkdir(dir, { mode: 0o700 }));
+      const name = sanitizeAttachmentName(file.name);
+      await io(async () => { handle = await open(join(dir, name), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); });
+      const digest = await streamFileBody(body, file.size, chunk => io(() => handle!.writeFile(chunk)), {
+        ...options, onProgress: bytes => options.onProgress?.(received + bytes),
+      });
+      await io(close);
       if (digest !== file.sha256.toLowerCase()) throw new Error("Attachment hash mismatch");
       received += file.size;
-      mapping.push({ destination: join(root, String(index), sanitizeAttachmentName(file.name)), spellings: file.spellings });
+      mapping.push({ destination: join(root, String(index), name), spellings: file.spellings });
     }
     await requireSendFin(body, options);
     return { message: rewriteAttachmentPaths(header.message, mapping, 1024 ** 2, 64 * 1024), cleanup,
       async commit() {
-        await rm(join(current, "owner.json"));
-        try { await rename(current, root); }
+        await io(() => rm(join(partial, "owner.json")));
+        try { await io(async () => { await rename(partial, root); current = root; }); }
         catch (err) {
           if ((err as NodeJS.ErrnoException).code === "EXDEV") throw Error("Incoming staging and committed attachments must be on the same filesystem", { cause: err });
           throw err;
         }
-        current = root;
       },
     };
-  } catch (error) {
-    const rollback = async () => {
-      try { await handle?.close(); } finally { await cleanup(); }
-    };
-    if (writing) defer(rollback());
-    else await rollback();
-    throw error;
-  }
+  } catch (error) { await cleanup(); throw error; }
 }
 
 /** Shared across this watcher's inbound connections. Concurrent replays await the first enqueue. */

@@ -456,10 +456,18 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     else await io(() => active.writeAll(bytes));
     for (const [index, file] of (files ?? []).entries()) {
       signal.throwIfAborted();
-      const handle = await openStagedFile(join(options.filesDir!, String(index)), file.size);
+      const opening = openStagedFile(join(options.filesDir!, String(index)), file.size);
+      let handle: Awaited<typeof opening>;
+      try { handle = await io(() => opening); }
+      catch (err) {
+        trackSendCleanup(opening.then(file => file.close(), () => {}), "Late staged attachment close failed");
+        throw err;
+      }
       try { await sendFileBody({ handle, size: file.size }, active, { setTimer, signal, onProgress: n => options.onProgress?.(sent + n) }); }
       catch (err) { trackSendCleanup(handle.close(), "Staged attachment close failed"); throw err; }
-      await handle.close();
+      const closing = handle.close();
+      try { await io(() => closing); }
+      catch (err) { trackSendCleanup(closing, "Staged attachment close failed"); throw err; }
       sent += file.size;
     }
     signal.throwIfAborted();

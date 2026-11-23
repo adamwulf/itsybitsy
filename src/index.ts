@@ -560,7 +560,8 @@ const COMMAND_HELP: Record<string, string> = {
     "  <agent-id>             Exact id or nickname, preferring the caller's repo\n" +
     "  <machine>/<agent>      Unique on the named machine\n" +
     "  <machine>/<repo>/<agent>  Exact registered repo on that machine\n" +
-    "  Sending to agents on other machines is not supported yet.",
+    "  <machine>/@system      System coordinator on that machine\n" +
+    "  <machine>/@<repo>      Repo coordinator on that machine",
   nickname:
     "Usage: ib nickname <agent-id> [<new-nickname> | --clear]\n" +
     "  Set, clear, or show an agent's nickname. With no third arg, prints the\n" +
@@ -1979,7 +1980,7 @@ export async function main() {
 
       if (!filteredSendArgs[0]) {
         console.error(usage);
-        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, @<team>, <agent-id>, <machine>/<agent>, or <machine>/<repo>/<agent>");
+        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, @<team>, <agent-id>, <machine>/<agent>, <machine>/<repo>/<agent>, <machine>/@system, or <machine>/@<repo>");
         process.exit(1);
       }
 

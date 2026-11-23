@@ -1897,3 +1897,13 @@ describe("CLI entry points", () => {
     },
   );
 });
+
+test("send help and missing-target usage list every remote address form", async () => {
+  for (const args of [["send", "--help"], ["send"]]) {
+    const { stdout, stderr } = await runIsolatedCli(args);
+    for (const form of ["<machine>/<agent>", "<machine>/<repo>/<agent>", "<machine>/@system", "<machine>/@<repo>"]) {
+      expect(stdout + stderr).toContain(form);
+    }
+    expect(stdout + stderr).not.toContain("not supported");
+  }
+});

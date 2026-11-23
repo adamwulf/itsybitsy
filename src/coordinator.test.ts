@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, readFile, readdir, mkdir } from "fs/promises";
+import { chmod, mkdtemp, rm, readFile, readdir, mkdir, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { rmSync } from "node:fs";
 import {
@@ -20,6 +20,7 @@ import {
   restartSystemCoordinator,
   detectSystemCoordinatorState,
   coordinatorSpawnCtx,
+  coordinatorSenderPanePid,
   setCoordinatorHome,
   resetCoordinatorHome,
   setCoordinatorSleepFn,
@@ -501,9 +502,76 @@ describe("ensureSystemCoordinator", () => {
     // The new-session command must pass `bash` as the pane command so the
     // launch line's POSIX `$(cat …)` substitution works regardless of the
     // user's default $SHELL (fish uses `(…)` and would silently misbehave).
-    const newSession = commands.find((c) => c[0] === "tmux" && c[1] === "new-session");
+    const newSession = commands.find((c) => c[1] === "new-session");
     expect(newSession).toBeDefined();
     expect(newSession![newSession!.length - 1]).toBe("bash");
+  });
+
+  test("only a successful registration publishes the launch provider and a failed relaunch removes it", async () => {
+    const path = join(tmpDir, "peer", "coordinator-tmux.json");
+    const exe = join(tmpDir, "tmux");
+    const socket = join(tmpDir, "launch socket");
+    await Bun.write(exe, "#!/bin/sh\nexit 1\n");
+    await chmod(exe, 0o700);
+    const oldPath = process.env.PATH!;
+    let registrationOK = true;
+    try {
+      process.env.PATH = tmpDir + ":" + oldPath;
+      coordinatorSpawnCtx.set(cmd => {
+        let out = "";
+        let code = 0;
+        if (cmd.includes("has-session")) code = 1;
+        if (cmd.includes("new-session")) {
+          expect(cmd[0]).toBe(exe);
+          expect(cmd).toContain("#{pane_id}\t#{socket_path}");
+          out = "%22\t" + socket;
+        }
+        if (cmd.includes("display-message")) out = "claude";
+        if (cmd.includes("@ib-system-coordinator-command")) {
+          expect(cmd.slice(0, 3)).toEqual([exe, "-S", socket]);
+          if (!registrationOK) code = 1;
+        }
+        return { stdout: mockStream(out), stderr: emptyStream(), exited: Promise.resolve(code) };
+      });
+      await ensureSystemCoordinator();
+      await waitForCoordinatorPaneRegistration();
+      expect(await Bun.file(path).json()).toEqual({ executable: exe, socket, paneId: "%22" });
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+      registrationOK = false;
+      await ensureSystemCoordinator();
+      await waitForCoordinatorPaneRegistration();
+      expect(await Bun.file(path).exists()).toBe(false);
+    } finally { process.env.PATH = oldPath; }
+  });
+
+  test("the caller cannot select a different coordinator tmux executable or server", async () => {
+    const { isSystemPaneCaller } = await import("./peers/remote-start-caller");
+    const record = { executable: "/launcher/bin/tmux", socket: "/launcher/socket", paneId: "%22" };
+    await Bun.write(join(tmpDir, "peer", "coordinator-tmux.json"), JSON.stringify(record));
+    const original = [process.env.PATH, process.env.TMUX, process.env.TMUX_TMPDIR];
+    Object.assign(process.env, { PATH: "/caller/bin", TMUX: "/caller/socket,10,1", TMUX_TMPDIR: "/caller" });
+    let calls = 0;
+    coordinatorSpawnCtx.set((cmd, opts) => {
+      calls++;
+      const pinned = cmd[0] === record.executable && cmd[1] === "-S" && cmd[2] === record.socket;
+      const env = opts?.env ?? process.env;
+      const selected = !pinned || !!(env.PATH || env.TMUX || env.TMUX_TMPDIR);
+      return { stdout: mockStream(selected ? "200" : "250"), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+    try {
+      const ancestors = async () => [
+        "PID PPID STARTED                  KERNEL COMMAND",
+        "300  200 Sat Nov 21 12:01:00 2026 bash   bash",
+        "200    1 Sat Nov 21 12:01:00 2026 bash   bash",
+        "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
+      ].join("\n");
+      expect(await isSystemPaneCaller(300, coordinatorSenderPanePid, ancestors)).toBe(false);
+      expect(calls).toBe(1);
+    } finally {
+      ["PATH", "TMUX", "TMUX_TMPDIR"].forEach((key, i) => {
+        if (original[i] === undefined) delete process.env[key]; else process.env[key] = original[i];
+      });
+    }
   });
 
   test("the visible launch line contains only Claude and preserves its exit status", async () => {

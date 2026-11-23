@@ -40,7 +40,7 @@ export type SpawnStdin = {
  */
 export type SpawnFn = (
   cmd: string[],
-  opts?: { stdout: "pipe"; stderr: "pipe"; stdin?: "ignore" | "inherit" | "pipe" | null },
+  opts?: { stdout: "pipe"; stderr: "pipe"; env?: NodeJS.ProcessEnv; stdin?: "ignore" | "inherit" | "pipe" | null },
 ) => SpawnResult;
 
 /** Injectable fetch function signature. */

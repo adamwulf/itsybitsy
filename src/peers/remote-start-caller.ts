@@ -2,8 +2,7 @@ import { execFile } from "node:child_process";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "../agents";
-import { IB_COORDINATOR_SESSION } from "../coordinator";
-import { tmuxSessionTarget } from "../validation";
+import { coordinatorSenderPanePid } from "../coordinator";
 import { resolveDashboardCaller } from "../no-worktree-caller";
 
 interface DashboardCaller {
@@ -131,16 +130,15 @@ export async function isHumanSendTerminal(input?: DashboardCaller): Promise<bool
 /** A cwd under the coordinator home identifies @system only inside its live pane's process tree. */
 export async function isSystemPaneCaller(
   pid = process.pid,
-  readPane = async (args: string[], signal: AbortSignal) =>
-    (await execFileAsync("tmux", args, { signal, killSignal: "SIGKILL", maxBuffer: 1024 })).stdout,
+  readPane = coordinatorSenderPanePid,
   readTable = readProcessTable,
 ): Promise<boolean> {
   const signal = AbortSignal.timeout(2000);
   try {
-    const pane = (await readPane(["display-message", "-p", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "#{pane_pid}"], signal)).trim();
-    if (!/^[1-9][0-9]*$/.test(pane) || Number(pane) <= 1) return false;
+    const pane = await readPane();
+    if (pane === null || signal.aborted) return false;
     const ancestors = await readAncestors(pid, readTable, signal);
-    return !signal.aborted && ancestors?.has(Number(pane)) === true;
+    return !signal.aborted && ancestors?.has(pane) === true;
   } catch { return false; }
 }
 

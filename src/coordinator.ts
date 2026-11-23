@@ -5,9 +5,9 @@ import * as runtimeNames from "./runtime-names";
  * See SPEC.md §12.1 (system) and §12.2 (per-repo) for the full specification.
  */
 
-import { join, basename, dirname } from "path";
+import { join, basename, dirname, isAbsolute } from "path";
 import { userHome } from "./home";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readConfig } from "./config";
 import { COORDINATOR_PANE_ID, COORDINATOR_PANE_COMMAND, captureTmuxOutput, runCoordinatorCommand, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx, killPidCtx, isApiError, isApiSafeguard } from "./agents";
@@ -855,8 +855,29 @@ export function waitForCoordinatorPaneRegistration(): Promise<void> {
   return paneRegistration;
 }
 
-function startCoordinatorPaneRegistration(paneId: string | null, generation: number): void {
-  paneRegistration = recordCoordinatorPane(paneId, generation).then(
+interface CoordinatorTmux {
+  executable: string;
+  socket: string;
+  paneId: string;
+}
+
+function coordinatorTmuxPath(): string {
+  return join(itsybitsyHome(), "peer", "coordinator-tmux.json");
+}
+
+export async function coordinatorSenderPanePid(): Promise<number | null> {
+  const binding: CoordinatorTmux = await Bun.file(coordinatorTmuxPath()).json();
+  if (!isAbsolute(binding.executable) || !isAbsolute(binding.socket) || !/^%\d+$/.test(binding.paneId)) return null;
+  const result = await runCoordinatorCommand([
+    binding.executable, "-S", binding.socket, "display-message", "-p", "-t",
+    tmuxSessionTarget(IB_COORDINATOR_SESSION), "#{pane_pid}",
+  ], 2000, cmd => coordinatorSpawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe", env: { LC_ALL: "C" } }));
+  const pid = result.text.trim();
+  return result.code === 0 && /^[1-9]\d*$/.test(pid) && Number(pid) > 1 ? Number(pid) : null;
+}
+
+function startCoordinatorPaneRegistration(paneId: string | null, generation: number, provider: CoordinatorTmux | null): void {
+  paneRegistration = recordCoordinatorPane(paneId, generation, provider).then(
     () => null,
     err => `Remote coordinator capture disabled: ${err instanceof Error ? err.message : String(err)}`,
   ).then(warning => {
@@ -867,14 +888,15 @@ function startCoordinatorPaneRegistration(paneId: string | null, generation: num
   });
 }
 
-async function recordCoordinatorPane(paneId: string | null, generation: number): Promise<void> {
+async function recordCoordinatorPane(paneId: string | null, generation: number, provider: CoordinatorTmux | null): Promise<void> {
   if (!paneId) throw new Error("tmux did not report the launched pane id");
   const deadline = performance.now() + 5_000;
   const run = (args: string[]) => {
     const remaining = deadline - performance.now();
     const timeout = "coordinator pane registration timed out";
     if (remaining <= 0) throw new Error(timeout);
-    return runCoordinatorCommand(["tmux", ...args], remaining, coordinatorSpawnCtx.runner, timeout);
+    const prefix = provider ? [provider.executable, "-S", provider.socket] : ["tmux"];
+    return runCoordinatorCommand([...prefix, ...args], remaining, coordinatorSpawnCtx.runner, timeout);
   };
   const foreground = await run(["display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
   if (generation !== launchGeneration) return;
@@ -888,6 +910,14 @@ async function recordCoordinatorPane(paneId: string | null, generation: number):
     ";", "set-option", "-t", paneId, COORDINATOR_PANE_ID, paneId,
   ]);
   if (record.code !== 0) throw new Error(record.error.trim() || "tmux could not save the pane binding");
+  if (!provider || generation !== launchGeneration) return;
+  const path = coordinatorTmuxPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = path + "." + crypto.randomUUID();
+  try {
+    writeFileSync(temp, JSON.stringify(provider), { flag: "wx", mode: 0o600 });
+    renameSync(temp, path);
+  } finally { rmSync(temp, { force: true }); }
 }
 
 /**
@@ -971,8 +1001,9 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // Per-repo coordinators force bash via the `#!/bin/bash` shebang in their start.sh; this
   // brings the system coordinator to true parity.
   const coordTmuxWidth = await getTmuxWidthForAgent(true);
-  const { exitCode, stdout: createdPane } = await coordinatorSpawnCtx.run([
-    "tmux", "new-session", "-P", "-F", "#{pane_id}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
+  const executable = Bun.which("tmux", { PATH: process.env.PATH });
+  const { exitCode, stdout: created } = await coordinatorSpawnCtx.run([
+    executable ?? "tmux", "new-session", "-P", "-F", "#{pane_id}\t#{socket_path}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
   ]);
 
   if (exitCode !== 0) {
@@ -985,6 +1016,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     throw new Error("Failed to create system coordinator tmux session");
   }
   const generation = ++launchGeneration;
+  rmSync(coordinatorTmuxPath(), { force: true });
   coordinatorPaneWarning = null;
   paneRegistration = Promise.resolve();
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "history-limit", "50000"]);
@@ -1088,7 +1120,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   logToWatchLog(
     `[coordinator] launch cmd (${resumeId ? "resume" : "fresh"}): ${claudeCmd}`,
   );
-  const paneId = /^%\d+$/.test(createdPane) ? createdPane : null;
+  const [createdPane, socket] = created.split("\t");
+  const paneId = createdPane && /^%\d+$/.test(createdPane) ? createdPane : null;
+  const provider = executable && isAbsolute(executable) && socket && isAbsolute(socket) && paneId
+    ? { executable, socket, paneId } : null;
   if (generation !== launchGeneration) return null;
   const launch = await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", paneId ?? tmuxSessionTarget(IB_COORDINATOR_SESSION), claudeCmd, "Enter",
@@ -1124,7 +1159,7 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // additionalContext on both fresh and resume — no special-case work here.
   lastSpawnMode = resumeId ? "resumed" : "fresh";
   if (ready) {
-    startCoordinatorPaneRegistration(paneId, generation);
+    startCoordinatorPaneRegistration(paneId, generation, provider);
     logToWatchLog(`[coordinator] ready mode=${lastSpawnMode} after ${readyMs}ms`);
   } else {
     coordinatorPaneWarning = "remote capture disabled: coordinator did not become ready";

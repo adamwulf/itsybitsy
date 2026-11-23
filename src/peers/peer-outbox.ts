@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { MAX_HEADER_BYTES } from "./transfer-limits";
+import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { userHome } from "../home";
 import { resolveRemoteSharedCaller, type IbCommandResult } from "../ib-commands";
@@ -82,6 +84,26 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader): Pr
 
 type Send = (peer: string, header: SendHeader) => Promise<string>;
 
+// A peer id (64 ASCII characters) and the JSON object wrapping the wire header.
+const MAX_ENVELOPE_BYTES = MAX_HEADER_BYTES + 128;
+async function readRequest(path: string) {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw new Error("Expected a regular peer request file");
+    if (info.size > MAX_ENVELOPE_BYTES) throw new Error("Peer request exceeds the envelope limit");
+    const bytes = Buffer.alloc(MAX_ENVELOPE_BYTES + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length);
+      if (!bytesRead) return JSON.parse(bytes.toString("utf8", 0, length));
+      length += bytesRead;
+    }
+    throw new Error("Peer request exceeds the envelope limit");
+  } finally { await file.close(); }
+}
+
+let activeWorkers = 0;
 /** Only the bound endpoint owner polls. The rename wins against CLI cancellation
  * and concurrent polls. A claimed request from a previous owner is never replayed. */
 export async function pollPeerOutbox(send: Send, log: (line: string) => void): Promise<void> {
@@ -91,8 +113,9 @@ export async function pollPeerOutbox(send: Send, log: (line: string) => void): P
     if (missing(err)) return;
     throw err;
   }
-  await Promise.all(entries.filter(e => e.isDirectory() && requestId.test(e.name)).map(async entry => {
-    const dir = join(base, entry.name);
+  const ids = entries.filter(e => e.isDirectory() && requestId.test(e.name)).map(e => e.name).values();
+  async function processOne(id: string) {
+    const dir = join(base, id);
     try {
       if (Date.now() - (await stat(dir)).mtimeMs >= 600_000) {
         await rm(dir, { recursive: true, force: true });
@@ -102,14 +125,21 @@ export async function pollPeerOutbox(send: Send, log: (line: string) => void): P
       await rename(join(dir, "request.json"), claimed);
       let result;
       try {
-        const { peer, header: raw } = JSON.parse(await readFile(claimed, "utf8"));
+        const { peer, header: raw } = await readRequest(claimed);
         const header = parseSendHeader(raw);
-        if (header.id !== entry.name || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
+        if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
         result = { ok: true, id: await send(peer, header) };
       } catch (err) { result = { ok: false, error: detail(err) }; }
       await writeJson(dir, "result.json", result);
     } catch (err) {
       if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
     }
-  }));
+  }
+  async function worker() {
+    activeWorkers++;
+    try { for (const id of ids) await processOne(id); }
+    finally { activeWorkers--; }
+  }
+  const count = Math.min(4 - activeWorkers, entries.length);
+  await Promise.all(Array.from({ length: count }, worker));
 }

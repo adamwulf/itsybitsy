@@ -9284,6 +9284,15 @@ describe("setup Peers tab", () => {
     expect(service.calls).toEqual(["open", "close", "open", "close", "open", "close"]);
   });
 
+  test("Kitty Tab and Shift+Tab cycle setup in both directions", () => {
+    const { dashboard, service } = open();
+    dashboard.handleInput("\x1b[9u");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+    dashboard.handleInput("\x1b[9;2u");
+    expect(peersTab(dashboard)).toBeDefined();
+    expect(service.calls).toEqual(["open", "close", "open"]);
+  });
+
   test("the numbered tab shortcuts type into every pairing field", () => {
     const { dashboard, service } = open();
     const typeDigits = () => { for (const digit of "123") dashboard.handleInput(digit); };

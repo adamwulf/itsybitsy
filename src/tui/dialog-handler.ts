@@ -749,8 +749,8 @@ function handleSetupDialog(
   if (d.peers && isPasteInProgress()) return handlePeersDialogInput(ctx, d.peers, data);
 
   const count = SETUP_TAB_NAMES.length;
-  if (data === "\t") { d.onTabChange((d.tab + 1) % count); return true; }
-  if (data === "\x1b[Z") { d.onTabChange((d.tab + count - 1) % count); return true; }
+  if (matchesKey(data, Key.tab)) { d.onTabChange((d.tab + 1) % count); return true; }
+  if (matchesKey(data, Key.shift("tab"))) { d.onTabChange((d.tab + count - 1) % count); return true; }
 
   const stage = d.peers?.service.view().session?.stage.stage;
   const editing = d.peers && (!stage || stage === "code-entry" || stage === "naming");

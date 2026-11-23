@@ -58,6 +58,26 @@ export function expandTabs(s: string): string {
   return s.includes("\t") ? s.replace(/\t/g, "   ") : s;
 }
 
+/** Capture logical lines with link targets for a dashboard pane. */
+export async function captureDisplayPane(session: string, lines = 200): Promise<string | null> {
+  // -J joins tmux's soft-wrapped continuation lines back into one logical
+  // line (it preserves program-emitted \n, only rejoining lines tmux itself
+  // wrapped). We reflow ourselves in the display path (wordWrapLines) so the
+  // whole scrollback renders at ONE width — capture-pane -p alone returns
+  // older lines hard-wrapped at the width the session had when they scrolled
+  // in, which mixes wrap widths within a single buffer after resizeTmuxWindow.
+  // -e is the only way to read a hyperlink's target: without it a Markdown
+  // link captures as just its label. keepAllowedLinks removes everything else
+  // -e adds.
+  const proc = spawnCtx.runner(
+    ["tmux", "capture-pane", "-t", tmuxSessionTarget(session), "-p", "-e", "-J", `-S`, `-${lines}`, "-E", "-"],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const raw = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+  return exitCode === 0 ? raw : null;
+}
+
 export class TmuxPoller {
   private tmuxSession: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -173,26 +193,12 @@ export class TmuxPoller {
     if (!targetSession) return;
 
     try {
-      // -J joins tmux's soft-wrapped continuation lines back into one logical
-      // line (it preserves program-emitted \n, only rejoining lines tmux itself
-      // wrapped). We reflow ourselves in the display path (wordWrapLines) so the
-      // whole scrollback renders at ONE width — capture-pane -p alone returns
-      // older lines hard-wrapped at the width the session had when they scrolled
-      // in, which mixes wrap widths within a single buffer after resizeTmuxWindow.
-      // -e is the only way to read a hyperlink's target: without it a Markdown
-      // link captures as just its label. keepAllowedLinks removes everything else
-      // -e adds.
-      const proc = spawnCtx.runner(
-        ["tmux", "capture-pane", "-t", tmuxSessionTarget(targetSession), "-p", "-e", "-J", `-S`, `-${this.lines}`, "-E", "-"],
-        { stdout: "pipe", stderr: "pipe" }
-      );
-      const raw = await new Response(proc.stdout).text();
-      const exitCode = await proc.exited;
+      const raw = await captureDisplayPane(targetSession, this.lines);
 
       // Discard result if the agent changed while we were awaiting
       if (this.tmuxSession !== targetSession) return;
 
-      if (exitCode !== 0) {
+      if (raw === null) {
         // tmux session doesn't exist. Delivered once, like any unchanged output.
         if (this.lastDelivered === "") return;
         this.lastDelivered = "";

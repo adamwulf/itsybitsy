@@ -37,6 +37,9 @@ import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { PairProtocolError, type PairCloseInfo, type PairConnection, type PairStream } from "./pairing";
 import { shortPeerId } from "./store";
+import { keepAllowedLinks, linkifyMessageUrls } from "../hyperlinks";
+import { expandTabs } from "../tmux-poller";
+import { stripAnsi } from "../parse-state";
 
 export const PEER_ALPN = "itsybitsy/peer/1";
 /** All requests except new-agent. */
@@ -94,6 +97,49 @@ export interface RemoteRepo {
 export interface PeerSnapshot {
   repos: RemoteRepo[];
   agents: RemoteAgent[];
+}
+
+export interface CoordinatorPane {
+  state: string;
+  text: string;
+}
+
+function sanitizePane(text: string): string {
+  return linkifyMessageUrls(keepAllowedLinks(expandTabs(text)));
+}
+
+/** Budget the encoded JSON (including escaped newlines, link escapes and UTF-8). */
+function encodeCoordinatorPane(pane: CoordinatorPane): Uint8Array {
+  const state = cleanRemoteText(pane.state);
+  const encode = (text: string) => encodeJson({ op: "coordinator-pane", state, text });
+  const text = sanitizePane(pane.text);
+  const reply = encode(text);
+  if (reply.length <= PEER_MAX_REPLY_BYTES) return reply;
+
+  let remaining = PEER_MAX_REPLY_BYTES - encode("").length;
+  const lines = text.split("\n");
+  let first = lines.length;
+  while (first > 0) {
+    const line = lines[first - 1]!;
+    const cost = encodeJson(line).length - 2 + (first < lines.length ? 2 : 0);
+    if (cost > remaining) break;
+    remaining -= cost;
+    first--;
+  }
+  const tail = lines.slice(first).join("\n");
+  if (tail || first === 0 || remaining < 2) return encode(tail);
+
+  // One oversized final line. Take its plain-text suffix on a code point
+  // boundary so trimming cannot split a hyperlink or a surrogate pair.
+  const chars = Array.from(stripAnsi(lines[first - 1]!));
+  if (first < lines.length) remaining -= 2;
+  let start = chars.length;
+  while (start > 0) {
+    remaining -= Buffer.byteLength(JSON.stringify(chars[start - 1])) - 2;
+    if (remaining < 0) break;
+    start--;
+  }
+  return encode(chars.slice(start).join("") + (first < lines.length ? "\n" : "") + tail);
 }
 
 export function peerSnapshot(repos: readonly RepoEntry[], agents: readonly Agent[]): PeerSnapshot {
@@ -289,17 +335,28 @@ function errorDetail(err: unknown): string {
  * {@link PeerProtocolError} for a malformed or oversized reply.
  */
 export async function requestAgents(conn: PairConnection): Promise<PeerSnapshot> {
+  return decodeAgentsReply(await requestRead(conn, "agents"));
+}
+
+async function requestRead(conn: PairConnection, op: string): Promise<Uint8Array> {
   const stream = await conn.openBi();
-  await stream.writeAll(encodePeerRequest("agents"));
+  await stream.writeAll(encodePeerRequest(op));
   await stream.finish();
-  let bytes: Uint8Array;
   try {
-    bytes = await stream.readToEnd(PEER_MAX_REPLY_BYTES);
+    return await stream.readToEnd(PEER_MAX_REPLY_BYTES);
   } catch (err) {
     if (err instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
     throw err;
   }
-  return decodeAgentsReply(bytes);
+}
+
+export async function requestCoordinatorPane(conn: PairConnection): Promise<CoordinatorPane> {
+  const reply = decodeObject(await requestRead(conn, "coordinator-pane"), "reply");
+  if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
+  if (reply.op !== "coordinator-pane" || typeof reply.state !== "string" || typeof reply.text !== "string") {
+    throw new PeerProtocolError("malformed coordinator-pane reply");
+  }
+  return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
 }
 
 /** Use a separate stream on the live trusted connection. Never retry a spawn. */
@@ -342,6 +399,9 @@ export interface PeerResponderDeps {
   peerName(id: string): Promise<string | null>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
+  captureCoordinator?(): Promise<CoordinatorPane | null>;
+  /** Shared by all connections served by this ib watch. */
+  paneReaders?: Set<string>;
   setTimer(ms: number, fn: () => void): () => void;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** watch.log in `ib watch`. */
@@ -432,6 +492,23 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     } catch (err) {
       deps.log(`peer link: could not build the agent list for ${from}: ${errorDetail(err)}`);
       reply = encodeErrorReply("internal error");
+    }
+  } else if (request.op === "coordinator-pane") {
+    try {
+      const pane = await deps.captureCoordinator?.();
+      if (!pane) throw new Error("No system coordinator");
+      reply = encodeCoordinatorPane(pane);
+      // A tmux capture is asynchronous. Pairing must still hold when it finishes.
+      if (await deps.peerName(conn.remoteId) === null) {
+        closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+        return;
+      }
+      if (deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
+        deps.paneReaders.add(conn.remoteId);
+        deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
+      }
+    } catch (err) {
+      reply = encodeJson({ ok: false, error: cleanRemoteText(errorDetail(err)) });
     }
   } else if (request.op === "new-agent") {
     try {

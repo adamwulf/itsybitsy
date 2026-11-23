@@ -86,7 +86,10 @@ import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { newAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
-import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
+import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type CoordinatorPane, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
+import { captureDisplayPane } from "../tmux-poller";
+import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator";
+import { stripAnsi } from "../parse-state";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
@@ -124,6 +127,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  captureCoordinator?(): Promise<CoordinatorPane | null>;
   remoteStartDenial: string | null | Promise<string | null>;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[]): void;
@@ -154,6 +158,10 @@ export interface PeerServiceDeps {
 export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
   return {
     remoteStartDenial,
+    captureCoordinator: async () => {
+      const text = await captureDisplayPane(IB_COORDINATOR_SESSION);
+      return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
+    },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
@@ -314,6 +322,7 @@ export class PeerService {
   private readonly listeners = new Set<() => void>();
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
+  private readonly paneReaders = new Set<string>();
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
 
@@ -858,6 +867,8 @@ export class PeerService {
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
           snapshot: this.deps.snapshot,
+          captureCoordinator: this.deps.captureCoordinator,
+          paneReaders: this.paneReaders,
           log: this.deps.log,
         });
         return;

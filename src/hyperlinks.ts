@@ -39,7 +39,7 @@ export function closeOsc8(line: string): string {
  * net: tmux doesn't write them, and nothing else should reach the terminal.
  */
 const CAPTURE_ESCAPES =
-  /\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -/]*[0-~]|[\x0e\x0f]/g;
+  /\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -/]*[0-~]|[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
 /**
  * Link targets kept from a pane. A Markdown link shows only its label, so the

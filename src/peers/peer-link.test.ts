@@ -20,6 +20,7 @@ import {
   PEER_MAX_REPLY_BYTES,
   NEW_AGENT_MAX_REQUEST_BYTES,
   requestNewAgent,
+  requestCoordinatorPane,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
   PeerProtocolError,
@@ -66,7 +67,7 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+function serve(options: { captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
   const link = createMemoryLink(ID_A, ID_B);
   const peers = options.peers ?? new Set([ID_A]);
   const logs: string[] = [];
@@ -76,6 +77,8 @@ function serve(options: { peers?: Set<string>; snapshot?: () => PeerSnapshot; st
   const done = serveTrustedConnection(link.b, {
     setTimer: clock.setTimer,
     startAgent: options.startAgent,
+    captureCoordinator: options.captureCoordinator,
+    paneReaders: options.paneReaders ?? new Set(),
     peerName: async (id) => {
       checks++;
       return peers.has(id) ? "Alice" : null;
@@ -510,4 +513,59 @@ describe("trusted new-agent responder", () => {
     expect(side.logs.filter(line => line === message)).toHaveLength(1);
     side.a.close(0, "done");
   });
+});
+
+describe("coordinator-pane", () => {
+  const text = "\x1b[31mred\x1b[0m\t\x1b]8;;file:/private\x07label\x1b]8;;\x07\x07\u009b\r\n\x1b]8;;https://example.com\x07site\x1b]8;;\x07";
+  const pane = { state: "running", text };
+  test("serves only its own sanitized capture and logs the first read across connections", async () => {
+    const captureCoordinator = mock(async () => pane);
+    const paneReaders = new Set<string>();
+    const sides = [serve({ captureCoordinator, paneReaders }), serve({ captureCoordinator, paneReaders })];
+    for (const side of sides) {
+      const reply = decodeText(await rawRequest(side.a, encode({ op: "coordinator-pane", session: "other" })));
+      expect(reply).toEqual({ op: "coordinator-pane", state: "running", text: "red   label\n\x1b]8;;https://example.com\x07site\x1b]8;;\x07" });
+      side.a.close(0, "done");
+    }
+    expect(sides.flatMap(side => side.logs).filter(line => line.includes("read the system coordinator pane"))).toHaveLength(1);
+    expect(captureCoordinator.mock.calls).toEqual([[], []]);
+  });
+
+  test("returns an error when there is no coordinator", async () => {
+    const side = serve({ captureCoordinator: async () => null });
+    await expect(requestCoordinatorPane(side.a)).rejects.toThrow("No system coordinator");
+    expect(side.logs.join(" ")).not.toContain("read the system coordinator pane");
+    side.a.close(0, "done");
+  });
+
+  test("refuses an unpaired reader and a reader removed during capture", async () => {
+    const pending = Promise.withResolvers<typeof pane>();
+    const captureCoordinator = mock(() => pending.promise);
+    const refused = serve({ peers: new Set(), captureCoordinator });
+    await expect(requestCoordinatorPane(refused.a)).rejects.toThrow();
+    expect(captureCoordinator).not.toHaveBeenCalled();
+    const side = serve({ captureCoordinator });
+    const read = requestCoordinatorPane(side.a);
+    await waitFor(() => captureCoordinator.mock.calls.length === 1);
+    side.peers.clear();
+    pending.resolve(pane);
+    await expect(read).rejects.toThrow();
+    expect(side.a.closeInfo()).toMatchObject({ code: PEER_CLOSE.notPeer });
+    expect(side.logs.join(" ")).not.toContain("read the system coordinator pane");
+  });
+
+  for (const separator of ["\n", ""]) {
+    test(`caps JSON bytes and keeps the newest text with separator ${JSON.stringify(separator)}`, async () => {
+      const text = "oldest" + ('🔥"\\' + separator).repeat(150_000) + "newest\n";
+      const side = serve({ captureCoordinator: async () => ({ state: "running", text }) });
+      const bytes = await rawRequest(side.a, encode({ op: "coordinator-pane" }));
+      expect(bytes).toBeInstanceOf(Uint8Array);
+      expect((bytes as Uint8Array).length).toBeLessThanOrEqual(PEER_MAX_REPLY_BYTES);
+      const reply = decodeText(bytes);
+      expect(reply.text.endsWith("newest\n")).toBe(true);
+      expect(reply.text).not.toContain("oldest");
+      expect(text.endsWith(reply.text)).toBe(true);
+      side.a.close(0, "done");
+    });
+  }
 });

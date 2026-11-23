@@ -121,7 +121,7 @@ interface Link {
 
 /** A failed dial or request, as one short line. */
 function describeFailure(err: unknown, conn: PairConnection | null): string {
-  // Checked first: the timeout closes the connection itself, so closeInfo is set.
+  // Preserve the request deadline diagnostic if its pending reply also forced a connection close.
   if (err instanceof PeerRequestTimeout) return err.message;
   const info = conn?.closeInfo() ?? null;
   if (info !== null) return describePeerClose(info);

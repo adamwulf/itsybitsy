@@ -63,11 +63,11 @@ export const PEER_MAX_REPLY_BYTES = 1_048_576;
 
 /** Connection close codes on the trusted ALPN. */
 export const PEER_CLOSE = {
-  /** A normal close: this side is shutting down, stopped polling the peer, or gave up on a request that timed out. */
+  /** A normal close: this side is shutting down or stopped polling the peer. */
   done: 0,
   /** The other side's id is not in this install's `peers.json`. */
   notPeer: 1,
-  /** A malformed request. The reason says which. */
+  /** A protocol error or stream teardown still pending at the grace deadline. */
   error: 3,
 } as const;
 

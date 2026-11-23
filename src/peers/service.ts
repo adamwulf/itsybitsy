@@ -108,6 +108,7 @@ import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
 
 export interface ServiceStream {
   write(bytes: Uint8Array): Promise<number>;
+  resetSending(): Promise<void>;
   stopReceiving(): Promise<void>;
   read(limit: number): Promise<Uint8Array>;
   writeAll(bytes: Uint8Array): Promise<void>;
@@ -290,6 +291,7 @@ export function toPairConnection(conn: ServiceConnection): PairConnection {
   const stream = (s: ServiceStream): PairStream => ({
     read: (limit) => s.read(limit),
     write: bytes => s.write(bytes),
+    resetSending: () => s.resetSending(),
     stopReceiving: () => s.stopReceiving(),
     writeAll: (bytes) => s.writeAll(bytes),
     finish: () => s.finish(),

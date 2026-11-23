@@ -376,9 +376,9 @@ test("a new-agent stream without a reply times out at 30 s", async () => {
   expect(decodeText(await stream.readToEnd(4096))).toEqual({ op: "new-agent", repo: "app", type: "worker", prompt: "hello" });
   clock.advance(29_999);
   expect(link.a.closeInfo()).toBeNull();
-  clock.advance(1);
+  clock.advance(1); await Bun.sleep(0); clock.advance(750);
   await expect(pending).rejects.toThrow("timed out after 30 s");
-  expect(link.b.closeInfo()).toBeNull();
+  expect(link.b.closeInfo()?.code).toBe(3);
   link.a.close(0, "done");
 });
 
@@ -661,11 +661,11 @@ test("a lost send acknowledgement reports uncertainty and never opens another st
   const incoming = await b.acceptBi();
   await incoming.readToEnd(4096);
   await Bun.sleep(0);
-  clock.advance(60_000);
+  clock.advance(60_000); await Bun.sleep(0); clock.advance(750);
   await expect(sent).rejects.toThrow("outcome unknown — check the agent");
   expect(opens).toHaveBeenCalledTimes(1);
   expect(clock.pending()).toBe(0);
-  expect(a.closeInfo()).toBeNull();
+  expect(a.closeInfo()?.code).toBe(3);
   a.close(0, "done");
 });
 
@@ -714,7 +714,7 @@ test("a flow-controlled write surfaces a finished refusal before cancellation", 
   const stream = await a.openBi();
   a.openBi = async () => stream;
   stream.write = async () => { writing.resolve(); await a.closed(); throw Error("closed"); };
-  const cancelled = spyOn(stream, "cancel");
+  const cancelled = spyOn(stream, "resetSending");
   try {
     const result = requestSend(a, textHeader({ kind: "system" }, "hi", { kind: "user" }), clock.setTimer).catch(err => err);
     const peer = await b.acceptBi();
@@ -726,4 +726,28 @@ test("a flow-controlled write surfaces a finished refusal before cancellation", 
     expect(cancelled).toHaveBeenCalledTimes(1);
     expect(a.closeInfo()).toBeNull();
   } finally { a.close(0, "done"); }
+});
+
+test.each([true, false])("the original read observes the whole writer grace (late refusal=%s)", async refused => {
+  const { a, b } = createMemoryLink("client", "server");
+  const clock = createFakeClock();
+  const stream = await a.openBi(); a.openBi = async () => stream;
+  const pending = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+  const reading = spyOn(stream, "readToEnd");
+  stream.writeAll = async () => { entered.resolve(); await pending.promise; };
+  const peer = await b.acceptBi();
+  try {
+    const outcome = requestNewAgent(a, { repo: "repo", type: "worker", prompt: "hi" }, clock.setTimer).catch(err => err);
+    await entered.promise;
+    clock.advance(30_000); await Bun.sleep(0);
+    clock.advance(400); pending.resolve();
+    if (refused) {
+      await peer.writeAll(encode({ op: "error", reason: "late refusal" })); await peer.finish();
+      expect((await outcome).message).toContain("late refusal"); expect(a.closeInfo()).toBeNull();
+    } else {
+      clock.advance(350); expect((await outcome).message).toContain("timed out");
+      expect(a.closeInfo()?.code).toBe(3);
+    }
+    expect(reading).toHaveBeenCalledTimes(1);
+  } finally { pending.resolve(); a.close(0, "done"); }
 });

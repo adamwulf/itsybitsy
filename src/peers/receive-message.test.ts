@@ -463,8 +463,8 @@ test.each(["body", "ack"])("cancelling while the %s is pending resets the exchan
       throw new Error("closed");
     };
   } else {
-    const read = stream.read.bind(stream);
-    stream.read = limit => { pending.resolve(); return read(limit); };
+    const finish = stream.finish.bind(stream);
+    stream.finish = async () => { await finish(); pending.resolve(); };
   }
   const controller = new AbortController();
   const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); };
@@ -538,7 +538,7 @@ test("a stuck sender reset closes the connection and releases a partial receipt"
     if (bytes.length === 2) { await a.closed(); throw Error("closed"); }
     return write(bytes);
   };
-  stream.cancel = () => new Promise(() => {});
+  stream.resetSending = () => new Promise(() => {});
   const controller = new AbortController();
   const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms === 5000 ? 5 : ms); return () => clearTimeout(t); };
   const handler = Promise.withResolvers<void>();
@@ -999,4 +999,23 @@ test("a stalled destination write and close retain their reservation but release
     expect(await next()).toMatchObject({ ok: true });
     expect(sizes).toEqual([3, 4, 1]);
   } finally { release.resolve(); spy.mockRestore(); a.close(0, "done"); await serving; }
+});
+
+test("a refusal wins while a staged file read is pending", async () => {
+  const staged = await fs.mkdtemp(join(cli.root, "source-"));
+  const path = join(staged, "0"); await Bun.write(path, "x");
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const opener = fs.open;
+  const spy = spyOn(fs, "open").mockImplementation(async (...args) => {
+    const handle = await opener(...args);
+    if (args[0] === path) handle.read = (async () => { entered.resolve(); await release.promise; throw Error("read stopped"); }) as typeof handle.read;
+    return handle;
+  });
+  const { a, b } = createMemoryLink("sender", "receiver");
+  try {
+    const result = requestSend(a, header({ files: [manifestFile("x")] }), createFakeClock().setTimer, { filesDir: staged }).catch(err => err);
+    const peer = await b.acceptBi(); await entered.promise;
+    await peer.writeAll(Buffer.from('{"op":"error","reason":"limit reached"}')); await peer.finish();
+    expect((await result).message).toBe("limit reached"); expect(a.closeInfo()).toBeNull();
+  } finally { release.resolve(); spy.mockRestore(); a.close(0, "done"); }
 });

@@ -148,12 +148,16 @@ export class IrohBiStream {
   private sentFin = false;
   constructor(private readonly raw: AddonBiStream) {}
 
+  async resetSending(): Promise<void> {
+    if (!this.sentFin) await this.raw.send.reset(0n).catch(() => {});
+  }
+
   async stopReceiving(): Promise<void> {
     if (!this.receivedFin) await this.raw.recv.stop(0n).catch(() => {});
   }
 
   async cancel(): Promise<void> {
-    await Promise.allSettled([this.stopReceiving(), this.sentFin ? undefined : this.raw.send.reset(0n)]);
+    await Promise.allSettled([this.stopReceiving(), this.resetSending()]);
   }
 
   async read(limit: number): Promise<Uint8Array> {

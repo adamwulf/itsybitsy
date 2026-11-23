@@ -30,7 +30,7 @@ import { trackSendCleanup } from "../send-cleanup";
  * throws {@link PairProtocolError} when the stream is over its limit.
  */
 
-import { CHUNK_BYTES } from "./transfer-limits";
+import { CHUNK_BYTES, IDLE_TIMEOUT_MS } from "./transfer-limits";
 import { join } from "node:path";
 import { openStagedFile } from "./remote-attachments";
 import { sendFileBody, type FileBodyOptions, encodeSendHeader, TransferIdleError, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
@@ -419,96 +419,82 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
   const clear = timeout && setTimer(timeout[0], () => deadline.abort(timeout[1]));
   const io = <V>(operation: () => Promise<V>) => waitForIO({ setTimer, signal }, operation);
-  let stream: PairStream | undefined;
   let opening: Promise<PairStream> | undefined;
-  let sendDone = false;
-  let recvDone = false;
-  let attemptedFin = false;
-  let writeError: unknown;
-  let writing = false;
-  async function wireWrite<V>(operation: () => Promise<V>) {
-    writing = true;
-    try { return await operation(); } finally { writing = false; }
-  }
-  try {
-    const active = await io(() => opening = conn.openBi());
-    stream = active;
-    let sent = 0;
-    try {
-      try {
-        if (files) { await writeWithProgress({ write: chunk => wireWrite(() => active.write(chunk)) }, bytes, setTimer, signal); options.onProgress?.(0); }
-        else await io(() => wireWrite(() => active.writeAll(bytes)));
-      } catch (err) { writeError = err; throw err; }
-      for (const [index, file] of (files ?? []).entries()) {
-        const handle = await openStagedFile(join(options.filesDir!, String(index)), file.size);
-        try {
-          await sendFileBody({ handle, size: file.size }, { async write(chunk) {
-            try { return await wireWrite(() => active.write(chunk)); }
-            catch (err) { writeError = err; throw err; }
-          } }, { setTimer, signal, onProgress: n => options.onProgress?.(sent + n) });
-        } catch (err) {
-          // FileHandle.close waits for an outstanding staged read. The open fd
-          // pins the snapshot and its allocated blocks while transport finishes.
-          trackSendCleanup(handle.close(), "Staged attachment close failed");
-          throw err;
-        }
-        await handle.close();
-        sent += file.size;
-      }
-      signal.throwIfAborted();
-      attemptedFin = true;
-      await io(() => wireWrite(() => active.finish()));
-      sendDone = true;
-    } catch (err) {
-      if ((!writeError && !attemptedFin) || err instanceof TransferIdleError || signal.aborted) throw err;
-      sendDone = true;
-      writeError = err;
-    }
-    try {
-      let payload: Uint8Array;
-      if (files) {
-        const parts: Uint8Array[] = [];
-        let length = 0;
-        while (true) {
-          const chunk = await io(() => active.read(Math.min(CHUNK_BYTES, PEER_MAX_REPLY_BYTES + 1 - length)));
-          if (!chunk.length) break;
-          options.onProgress?.(sent);
-          length += chunk.length;
-          if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
-          parts.push(chunk);
-        }
-        payload = Buffer.concat(parts, length);
-      } else payload = await io(() => active.readToEnd(PEER_MAX_REPLY_BYTES));
-      recvDone = true;
-      return decode(payload);
-    } catch (err) {
-      if (err instanceof PeerErrorReply) throw err;
-      if (writeError) throw writeError;
-      if (err instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
-      throw err;
-    }
-  } catch (err) {
-    let early: { value: T } | undefined;
-    if (!(sendDone && recvDone)) {
-      const teardown = async () => {
-        if (stream && writing && !options.signal?.aborted) {
-          // Flow control can hold the write even after the peer finished its reply.
-          // Use part of the single teardown grace to collect that complete reply.
-          const reply = stream.readToEnd(PEER_MAX_REPLY_BYTES);
-          if (await settledWithinGrace(reply, { setTimer }, 150)) {
-            try { early = { value: decode(await reply) }; }
-            catch (reason) { if (reason instanceof PeerErrorReply) err = reason; }
-          }
-        }
-        if (stream) await (sendDone ? stream.stopReceiving() : stream.cancel());
-        else if (opening) await (await opening).cancel();
-      };
-      if (!await settledWithinGrace(teardown(), { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
-    }
-    if (early) return early.value;
-    if (files && attemptedFin && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN, { cause: err });
+  let active: PairStream;
+  try { active = await io(() => opening = conn.openBi()); }
+  catch (err) {
+    clear?.();
+    if (opening && !await settledWithinGrace(opening.then(stream => stream.cancel()), { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
     throw err;
-  } finally { clear?.(); }
+  }
+
+  let sent = 0;
+  let attemptedFin = false;
+  let sendDone = false;
+  let cancelIdle: (() => void) | undefined;
+  const renewReplyIdle = () => {
+    if (!sendDone) return;
+    cancelIdle?.();
+    cancelIdle = setTimer(IDLE_TIMEOUT_MS, () => deadline.abort(new TransferIdleError(`No progress for ${IDLE_TIMEOUT_MS} ms`)));
+  };
+  async function readReply() {
+    if (!files) return decode(await active.readToEnd(PEER_MAX_REPLY_BYTES));
+    const parts: Uint8Array[] = [];
+    let length = 0;
+    for (;;) {
+      const chunk = await active.read(Math.min(CHUNK_BYTES, PEER_MAX_REPLY_BYTES + 1 - length));
+      if (!chunk.length) return decode(Buffer.concat(parts, length));
+      length += chunk.length;
+      if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
+      parts.push(chunk);
+      options.onProgress?.(sent);
+      renewReplyIdle();
+    }
+  }
+  async function writeRequest() {
+    if (files) { await writeWithProgress(active, bytes, setTimer, signal); options.onProgress?.(0); }
+    else await io(() => active.writeAll(bytes));
+    for (const [index, file] of (files ?? []).entries()) {
+      signal.throwIfAborted();
+      const handle = await openStagedFile(join(options.filesDir!, String(index)), file.size);
+      try { await sendFileBody({ handle, size: file.size }, active, { setTimer, signal, onProgress: n => options.onProgress?.(sent + n) }); }
+      catch (err) { trackSendCleanup(handle.close(), "Staged attachment close failed"); throw err; }
+      await handle.close();
+      sent += file.size;
+    }
+    signal.throwIfAborted();
+    attemptedFin = true;
+    await io(() => active.finish());
+    sendDone = true;
+    renewReplyIdle();
+  }
+
+  type Outcome = { ok: true; value: T } | { ok: false; error: unknown };
+  let received: Outcome | undefined;
+  const failure = (error: unknown): Outcome => ({ ok: false, error });
+  // This single reader owns the native receive mutex through FIN, including
+  // the teardown grace. It stays alive when the independent writer stops.
+  const reply = readReply().then((value): Outcome => ({ ok: true, value }), failure).then(result => received = result);
+  const stopped = Promise.withResolvers<Outcome>();
+  const abort = () => stopped.resolve(failure(signal.reason));
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  try {
+    const result = await Promise.race([reply, writeRequest().then(() => reply, failure), stopped.promise]);
+    if (!received || !sendDone) {
+      deadline.abort(new Error("Request writer stopped"));
+      const teardown = Promise.allSettled([reply, sendDone ? undefined : active.resetSending()]);
+      if (!await settledWithinGrace(teardown, { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+    }
+    if (received?.ok) return received.value;
+    if (received && received.error instanceof PeerErrorReply) throw received.error;
+    if (result.ok) return result.value;
+    if (files && attemptedFin) throw new Error(SEND_UNKNOWN, { cause: result.error });
+    if (result.error instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
+    throw result.error;
+  } finally {
+    clear?.(); cancelIdle?.(); signal.removeEventListener("abort", abort);
+  }
 }
 
 export async function requestSend(conn: PairConnection, header: SendHeader, setTimer: Timer, transfer: OutgoingTransfer = {}): Promise<string> {

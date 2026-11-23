@@ -232,7 +232,7 @@ describe("PeerPoller", () => {
     rig.poller.stop();
   });
 
-  test("a hung request is never doubled; after 15 s it times out, a settled stop keeps the connection, and a peer close permits redial", async () => {
+  test("a hung request is never doubled; after 15 s it times out, the reply grace expires and the next poll redials", async () => {
     const rig = makeRig([peer(P1, "B")]);
     // A connection whose far end never answers: no responder runs on it.
     const silent = createMemoryLink(SELF, P1);
@@ -269,10 +269,10 @@ describe("PeerPoller", () => {
     rig.setDial(rig.connect);
     expect(PEER_REQUEST_TIMEOUT_MS).toBe(15_000);
     rig.clock.advance(2_000); // t = 17 s: 15 s after the request started, between ticks
+    await Bun.sleep(0); rig.clock.advance(750);
     await waitFor(() => rig.state(P1)?.lastError === "request timed out", { message: "timed out" });
     expect(rig.state(P1)?.connected).toBe(false);
-    expect(silent.b.closeInfo()).toBeNull();
-    silent.b.close(0, "peer restarted");
+    expect(silent.b.closeInfo()?.code).toBe(3);
     expect(streams).toBe(1);
     expect(rig.dials).toEqual([P1]);
     expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): request timed out`);
@@ -304,9 +304,9 @@ describe("PeerPoller", () => {
     // fake clock runs them in, there is exactly one redial and no overlap.
     rig.remote(P1).stalled = false;
     rig.tick();
+    await Bun.sleep(0); rig.clock.advance(750);
     await waitFor(() => rig.state(P1)?.lastError === "request timed out" || rig.dials.length === 2, { message: "timed out" });
-    expect(rig.remote(P1).served[0]!.closeInfo()).toBeNull();
-    rig.remote(P1).served[0]!.close(0, "peer restarted");
+    expect(rig.remote(P1).served[0]!.closeInfo()?.code).toBe(3);
     rig.tick(); // 25 s
     await waitFor(() => rig.state(P1)?.connected === true, { message: "redialed" });
     expect(rig.dials).toEqual([P1, P1]);
@@ -574,7 +574,7 @@ describe("PeerPoller", () => {
   });
 });
 
-test("a coordinator timeout resets only its stream during a remote start on the same link", async () => {
+test("a coordinator reply during grace preserves a remote start on the same link", async () => {
   const rig = makeRig([peer(P1, "B")]);
   const { a, b } = createMemoryLink(SELF, P1);
   rig.setDial(async () => a);
@@ -597,8 +597,9 @@ test("a coordinator timeout resets only its stream during a remote start on the 
     const start = requestNewAgent(a, { repo: "app", type: "worker", prompt: "hello" }, rig.clock.setTimer);
     const spawn = await accept("new-agent");
     rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
-    await expect(pending).rejects.toThrow("request timed out");
-    await expect(pane.writeAll(new Uint8Array())).rejects.toThrow("stream cancelled");
+    await Bun.sleep(0);
+    await pane.writeAll(Buffer.from(JSON.stringify({ op: "coordinator-pane", state: "running", text: "late" }))); await pane.finish();
+    expect((await pending).text).toBe("late");
     await spawn.writeAll(new TextEncoder().encode(JSON.stringify({ ok: true, id: "worker-1" })));
     await spawn.finish();
     expect(await start).toBe("worker-1");
@@ -611,45 +612,21 @@ test("a coordinator timeout resets only its stream during a remote start on the 
   }
 });
 
-test.each([false, true])("pane cancellation releases its slot after a settled or stalled stop (stalled=%s)", async stalled => {
+test("a pane slot stays occupied until its pending reply exhausts grace", async () => {
   const rig = makeRig([peer(P1, "B")]);
   const { a, b } = createMemoryLink(SELF, P1);
-  const pendingStop = Promise.withResolvers<void>();
-  const entered = Promise.withResolvers<void>();
   const reading = Promise.withResolvers<void>();
-  const open = a.openBi.bind(a);
-  a.openBi = async () => {
-    const stream = await open();
-    const write = stream.writeAll.bind(stream);
-    stream.writeAll = async bytes => {
-      if (JSON.parse(new TextDecoder().decode(bytes)).op === "coordinator-pane") {
-        stream.readToEnd = async () => { reading.resolve(); await a.closed(); return new Uint8Array(); };
-        stream.stopReceiving = async () => { entered.resolve(); if (stalled) await pendingStop.promise; };
-      }
-      await write(bytes);
-    };
-    return stream;
-  };
   rig.setDial(async () => a);
   void serveTrustedConnection(b, { peerName: async () => "paired", snapshot: () => ({ agents: [], repos: [], coordinator: null }),
-    captureCoordinator: async () => ({ state: "running", text: "capture" }), log() {}, setTimer: rig.clock.setTimer });
+    captureCoordinator: async () => { reading.resolve(); await b.closed(); return null; }, log() {}, setTimer: rig.clock.setTimer });
   rig.poller.start();
   try {
     await waitFor(() => rig.state(P1)?.connected === true);
-    const pane = rig.poller.fetchCoordinatorPane(P1).catch((err: Error) => err);
-    await reading.promise;
-    rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
-    await entered.promise;
-    await Bun.sleep(0);
-    if (stalled) {
-      await expect(rig.poller.fetchCoordinatorPane(P1)).rejects.toThrow("still pending");
-      rig.clock.advance(749);
-      expect(a.closeInfo()).toBeNull();
-      rig.clock.advance(1);
-    }
-    expect(await pane).toBeInstanceOf(Error);
+    const pane = rig.poller.fetchCoordinatorPane(P1).catch(err => err);
+    await reading.promise; rig.clock.advance(PEER_REQUEST_TIMEOUT_MS); await Bun.sleep(0);
+    await expect(rig.poller.fetchCoordinatorPane(P1)).rejects.toThrow("still pending");
+    rig.clock.advance(749); expect(a.closeInfo()).toBeNull(); rig.clock.advance(1);
     expect(String(await pane)).toContain("request timed out");
-    expect(rig.poller["paneReads"].has(a)).toBe(false);
-    expect(a.closeInfo() !== null).toBe(stalled);
-  } finally { pendingStop.resolve(); rig.poller.stop(); }
+    expect(rig.poller["paneReads"].has(a)).toBe(false); expect(a.closeInfo()?.code).toBe(3);
+  } finally { rig.poller.stop(); }
 });

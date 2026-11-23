@@ -70,6 +70,7 @@ const MAX_REMOTE_TEXT = 80;
 /** One bi stream. */
 export interface PairStream {
   write(bytes: Uint8Array): Promise<number>;
+  resetSending(): Promise<void>;
   stopReceiving(): Promise<void>;
   read(limit: number): Promise<Uint8Array>;
   writeAll(bytes: Uint8Array): Promise<void>;

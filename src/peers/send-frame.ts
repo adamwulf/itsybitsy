@@ -1,6 +1,5 @@
-import type { FileHandle } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { fileChunks } from "./attachment-manifest";
+import { fileChunks, type ManifestEntry } from "./attachment-manifest";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 
 export type SendTarget =
@@ -137,9 +136,10 @@ export async function requireSendFin(stream: ReadStream, options: FileBodyOption
 
 /** Only the caller knows when the last file has been sent and may finish the stream. */
 export async function sendFileBody(
-  file: FileHandle, stream: { writeAll(bytes: number[]): Promise<void> }, options: FileBodyOptions = {},
+  { handle, size }: Pick<ManifestEntry, "handle" | "size">, stream: { writeAll(bytes: number[]): Promise<void> }, options: FileBodyOptions = {},
 ): Promise<void> {
-  const chunks = fileChunks(file);
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error("Invalid file body size");
+  const chunks = fileChunks(handle, size);
   let written = 0;
   for (;;) {
     const next = await waitForIO(options, () => chunks.next());

@@ -156,17 +156,24 @@ test("sends bounded chunks in order, reports cumulative bytes and can abort a st
     handle = await open(path, "r");
     const chunks: Buffer[] = [];
     const progress: number[] = [];
-    await sendFileBody(handle, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } }, {
+    await sendFileBody({ handle, size: data.length }, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } }, {
       onProgress: total => progress.push(total),
     });
     expect(chunks.map(chunk => chunk.length)).toEqual([CHUNK_BYTES, CHUNK_BYTES, 1]);
     expect(Buffer.concat(chunks)).toEqual(data);
     expect(progress).toEqual([CHUNK_BYTES, CHUNK_BYTES * 2, data.length]);
 
+    for (const size of [data.length + 1, data.length - 1, 0]) {
+      let sent = 0;
+      await expect(sendFileBody({ handle, size }, { writeAll: async bytes => { sent += bytes.length; } }))
+        .rejects.toThrow(size > data.length ? /short|EOF/i : /long|exceed/i);
+      expect(sent).toBe(Math.min(size, data.length));
+    }
+
     const controller = new AbortController();
     const started = Promise.withResolvers<void>();
     const stalled = Promise.withResolvers<void>();
-    const send = sendFileBody(handle, { writeAll: () => { started.resolve(); return stalled.promise; } }, { signal: controller.signal });
+    const send = sendFileBody({ handle, size: data.length }, { writeAll: () => { started.resolve(); return stalled.promise; } }, { signal: controller.signal });
     await started.promise;
     controller.abort(new Error("sender cancelled"));
     await expect(send).rejects.toThrow("sender cancelled");

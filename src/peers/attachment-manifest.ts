@@ -91,15 +91,20 @@ export async function buildAttachmentManifest(
 
 /** Positional reads let hashing and staging share the same validated handle.
  * Each iteration reuses the buffer, so consume the chunk before advancing. */
-export async function* fileChunks(file: FileHandle): AsyncGenerator<Buffer> {
+export async function* fileChunks(file: FileHandle, expectedSize?: number): AsyncGenerator<Buffer> {
   const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   let position = 0;
-  for (;;) {
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
-    if (!bytesRead) return;
+  while (expectedSize === undefined || position < expectedSize) {
+    const limit = expectedSize === undefined ? buffer.length : Math.min(buffer.length, expectedSize - position);
+    const { bytesRead } = await file.read(buffer, 0, limit, position);
+    if (!bytesRead) {
+      if (expectedSize !== undefined) throw new Error("Early EOF before declared file size");
+      return;
+    }
     position += bytesRead;
     yield buffer.subarray(0, bytesRead);
   }
+  if ((await file.read(buffer, 0, 1, position)).bytesRead) throw new Error("Source exceeds declared file size");
 }
 
 export async function hashFile(file: FileHandle): Promise<string> {

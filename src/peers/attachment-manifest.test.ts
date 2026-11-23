@@ -108,7 +108,7 @@ test("hash and body reads stay on the validated file after its name is replaced"
   const digest = createHash("sha256").update("original").digest("hex");
   expect(await hashFile(entry!.handle)).toBe(digest);
   const chunks: Buffer[] = [];
-  await sendFileBody(entry!.handle, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } });
+  await sendFileBody(entry!, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } });
   expect(Buffer.concat(chunks).toString()).toBe("original");
 });
 

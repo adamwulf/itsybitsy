@@ -239,7 +239,7 @@ export async function resolveAgentTarget(
   const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", inboundPeer ? [] : readConnectedPeers()]);
   if (typeof localMachine !== "string") return localMachine;
   const includesLocal = !machine || localMachine.toLowerCase() === machine;
-  const peers = connected.filter((p) => !machine || p.name.toLowerCase() === machine);
+  const peers = connected.filter((p) => !p.name.startsWith("@") && (!machine || p.name.toLowerCase() === machine));
   if (!includesLocal && !peers.length) {
     if (purpose === "send" && !await hasLivePeerWatcher()) return failure("remote sends need ib watch running on this machine");
     return failure(`Unknown machine: ${parts[0]}`);

@@ -344,6 +344,20 @@ describe("qualified agent addresses", () => {
     expect(await (await import("node:fs/promises")).readdir(join(cli.home, ".itsybitsy", "peer-outbox"))).toEqual([]);
   }, 16_000);
 
+  test("leading @ belongs to repo addressing", async () => {
+    const { sanitizeMachineName } = await import("./machine-name");
+    const { peerNameProblem } = await import("./peers/store");
+    expect(sanitizeMachineName(" @ @App ")).toBe("App");
+    expect(peerNameProblem("@App", "id", [], "here")).toContain("cannot start with @");
+    await peer();
+    const path = join(cli.home, ".itsybitsy", "peer", "remote-agents.json");
+    const cache = await Bun.file(path).json();
+    cache[0].name = "@App";
+    await Bun.write(path, JSON.stringify(cache));
+    expect((await resolveSendTarget("@App/foo", [{ path: app, name: "App" }], cli.cwd)).agent?.id).toBe("foo");
+    expect((await resolveSendTarget("remote-id", [], cli.cwd)).remote).toBeUndefined();
+  });
+
   test("ambiguous bare names show the shortest exact forms per machine", async () => {
     await peer();
     expect((await retire("foo")).stderr.trim()).toBe("'foo' exists on laptop-a and laptop-b; use laptop-a/foo or laptop-b/foo");

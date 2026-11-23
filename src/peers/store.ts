@@ -69,6 +69,7 @@ export function sanitizePeerName(name: string, id: string): string {
  */
 export function peerNameProblem(name: string, id: string, peers: readonly Peer[], machineName: string): string | null {
   const stored = sanitizePeerName(name, id);
+  if (stored.startsWith("@")) return "A machine name cannot start with @.";
   if (stored.includes("/")) return `A name cannot contain "/".`;
   const lower = stored.toLowerCase();
   if (lower === machineName.toLowerCase()) return `"${machineName}" is this machine's name.`;

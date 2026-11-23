@@ -42,13 +42,15 @@ function onlyKeys(value: Record<string, unknown>, ...keys: string[]) {
 function nonempty(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
+const UNSAFE_LINE_CHARACTERS = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
+
 function validFrom(value: unknown): value is SendHeader["from"] {
   if (!object(value)) return false;
   if (value.kind === "user") return onlyKeys(value, "kind");
   if (value.kind !== "agent" || !nonempty(value.id) || !onlyKeys(value, "kind", "id")) return false;
   const [machine, repo, agent, extra] = value.id.split("/", 4);
   if (extra !== undefined || !nonempty(machine) || sanitizeMachineName(machine) !== machine ||
-      !nonempty(repo) || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(repo) || repo.trim() !== repo ||
+      !nonempty(repo) || UNSAFE_LINE_CHARACTERS.test(repo) || repo.trim() !== repo ||
       !nonempty(agent) || agent === "." || agent === "..") return false;
   if (!(repo.startsWith("~") ? isRepoId(repo.slice(1)) : isStoredRepoName(repo))) return false;
   // A coordinator takes its checkout basename. Allow dots alongside the usual agent-id characters.
@@ -68,7 +70,7 @@ function validFile(value: unknown): value is SendHeader["files"][number] {
   return object(value) && nonempty(value.name) && typeof value.size === "number" &&
     Number.isSafeInteger(value.size) && value.size >= 0 && typeof value.sha256 === "string" &&
     /^[a-f0-9]{64}$/i.test(value.sha256) && Array.isArray(value.spellings) &&
-    value.spellings.length > 0 && value.spellings.every(s => nonempty(s) && !/[\p{Cc}\p{Cf}]/u.test(s)) && onlyKeys(value, "name", "size", "sha256", "spellings");
+    value.spellings.length > 0 && value.spellings.every(s => nonempty(s) && !UNSAFE_LINE_CHARACTERS.test(s)) && onlyKeys(value, "name", "size", "sha256", "spellings");
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 

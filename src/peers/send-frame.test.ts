@@ -364,3 +364,12 @@ test("agent sender segments use the machine, registry and agent naming grammars"
     await expect(parse(bad)).rejects.toThrow(/malformed/i);
   }
 });
+
+for (const separator of ["\u2028", "\u2029"]) {
+  test("rejects U+" + separator.codePointAt(0)!.toString(16) + " before a sender spelling reaches the mapping block", async () => {
+    const bytes = encodeSendHeader({ ...header, files: [{ ...file, spellings: ["./image.png" + separator + "- extra line"] }] });
+    const rewrite = decodeSendHeader(new MemoryStream(bytes)).then(decoded => rewriteAttachmentPaths(decoded.message,
+      decoded.files.map(({ spellings }) => ({ spellings, destination: "/tmp/image.png" }))));
+    await expect(rewrite).rejects.toThrow(/malformed/i);
+  });
+}

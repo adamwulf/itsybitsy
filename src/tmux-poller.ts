@@ -63,16 +63,28 @@ export async function captureDisplayPane(session: string, lines = 200): Promise<
   return captureDisplayTarget(tmuxSessionTarget(session), lines);
 }
 
+export const COORDINATOR_PANE_ID = "@ib-system-coordinator-pane-id";
 export const COORDINATOR_PANE_MARKER = "@ib-system-coordinator";
 
 /** Only the pane marked by the coordinator launch may leave this machine. */
 export async function captureMarkedCoordinatorPane(session: string, timeoutMs = 5_000): Promise<string | null> {
-  const listing = await readDisplayCommand(["tmux", "list-panes", "-s", "-t", tmuxSessionTarget(session),
-    "-F", `#{pane_id} #{${COORDINATOR_PANE_MARKER}}`], timeoutMs);
+  const target = tmuxSessionTarget(session);
+  const listing = await readDisplayCommand(["tmux", "list-panes", "-s", "-t", target,
+    "-F", `#{pane_id} #{${COORDINATOR_PANE_MARKER}}`,
+    ";", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID], timeoutMs);
   if (listing === null) return null;
-  const matches = listing.split("\n").filter(line => /^%\d+ 1$/.test(line));
-  if (matches.length !== 1) return null;
-  return captureDisplayTarget(matches[0]!.split(" ")[0]!, 200, timeoutMs);
+  // show-options reads the session's launch record at its own scope, even
+  // when a pane carries an inherited or copied marker.
+  const lines = listing.replace(/\n$/, "").split("\n");
+  const id = lines.pop()!;
+  const marked = lines.filter(line => /^%\d+ 1$/.test(line));
+  if (!/^%\d+$/.test(id) || marked.length !== 1 || marked[0] !== `${id} 1`) return null;
+  // Check again within the tmux command queue: the CLI may have exited
+  // between listing the panes and issuing this capture.
+  const text = await readDisplayCommand(["tmux", "if-shell", "-F", "-t", id,
+    `#{==:#{${COORDINATOR_PANE_MARKER}},1}`,
+    `capture-pane -t ${id} -p -e -J -S -200 -E -`], timeoutMs);
+  return text || null;
 }
 
 async function captureDisplayTarget(target: string, lines: number, timeoutMs?: number): Promise<string | null> {

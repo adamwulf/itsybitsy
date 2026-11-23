@@ -9,7 +9,7 @@ import { join, basename, dirname } from "path";
 import { userHome } from "./home";
 import { readFileSync, existsSync } from "node:fs";
 import { readConfig } from "./config";
-import { COORDINATOR_PANE_MARKER, captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
+import { COORDINATOR_PANE_ID, COORDINATOR_PANE_MARKER, captureTmuxOutput, spawnCtx as tmuxCaptureCtx } from "./tmux-poller";
 import { isCompacting, isRateLimited, isPidAliveCtx, killPidCtx, isApiError, isApiSafeguard } from "./agents";
 import { STARTUP_MARKERS } from "./parse-state";
 import { logToWatchLog, getWatchLogPath } from "./watch-log";
@@ -1034,9 +1034,11 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   const target = tmuxSessionTarget(IB_COORDINATOR_SESSION);
   // Install the marker before Enter so even a failed exec revokes it. Bash
   // must finish revocation (or exit) before it can display another prompt.
-  const revoke = `tmux set-option -pu -t "$TMUX_PANE" ${COORDINATOR_PANE_MARKER} || exit`;
+  const revoke = `tmux set-option -pu -t "$TMUX_PANE" ${COORDINATOR_PANE_MARKER}`
+    + ` && tmux set-option -u -t "$TMUX_PANE" ${COORDINATOR_PANE_ID} || exit`;
   await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", target, claudeCmd, `; ${revoke}`,
+    ";", "set-option", "-F", "-t", target, COORDINATOR_PANE_ID, "#{pane_id}",
     ";", "set-option", "-p", "-t", target, COORDINATOR_PANE_MARKER, "1",
     ";", "send-keys", "-t", target, "Enter",
   ]);

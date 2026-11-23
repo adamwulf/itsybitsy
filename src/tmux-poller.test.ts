@@ -1354,17 +1354,19 @@ describe("TmuxPoller tab handling at the boundary", () => {
 
 test("coordinator capture follows its marked pane after a different pane becomes active", async () => {
   // %8 is the active shell. The coordinator was launched in %4.
-  let listing = "%4 1\n%8 ";
+  let listing = "%4 1\n%8 \n%4\n";
   const targets: string[] = [];
   spawnCtx.set(cmd => {
     const target = cmd[cmd.indexOf("-t") + 1]!;
-    if (cmd[1] === "capture-pane") targets.push(target);
+    if (cmd[1] === "if-shell") targets.push(target);
     const text = cmd[1] === "list-panes" ? listing : target === "%4" ? "coordinator" : "other shell";
     return { stdout: streamOf(text), stderr: emptyStream(), exited: Promise.resolve(0) };
   });
   try {
     expect(await captureMarkedCoordinatorPane("ib-coordinator")).toBe("coordinator");
-    listing = "%8 ";
+    listing = "%8 \n%4\n";
+    expect(await captureMarkedCoordinatorPane("ib-coordinator")).toBeNull();
+    listing = "%8 1\n%4\n"; // the shell copied the marker and the original is gone
     expect(await captureMarkedCoordinatorPane("ib-coordinator")).toBeNull();
     expect(targets).toEqual(["%4"]);
   } finally {
@@ -1376,7 +1378,7 @@ test("stalled coordinator capture is killed and reaped before returning a bounde
   const exit = Promise.withResolvers<number>();
   const kills: (number | string | undefined)[] = [];
   spawnCtx.set(cmd => cmd[1] === "list-panes"
-    ? { stdout: streamOf("%4 1"), stderr: emptyStream(), exited: Promise.resolve(0) }
+    ? { stdout: streamOf("%4 1\n%4\n"), stderr: emptyStream(), exited: Promise.resolve(0) }
     : { stdout: new ReadableStream(), stderr: emptyStream(), exited: exit.promise, kill: signal => { kills.push(signal); } });
   try {
     let settled = false;

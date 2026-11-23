@@ -517,12 +517,12 @@ describe("ensureSystemCoordinator", () => {
     // Run the actual launch line in bash. The failed CLI returns to its parent
     // shell, which must see the marker cleared before it can run another command.
     const script = [
-      "marker=1", "TMUX_PANE=%4", "claude() { return 42; }",
-      'tmux() { if [[ "$*" == "set-option -pu -t %4 @ib-system-coordinator" ]]; then marker=0; else return 1; fi; }',
-      line, 'echo "shell alive, marker=$marker"',
+      "marker=1", "record=%4", "TMUX_PANE=%4", "claude() { return 42; }",
+      'tmux() { if [[ "$*" == "set-option -pu -t %4 @ib-system-coordinator" ]]; then marker=0; elif [[ "$*" == "set-option -u -t %4 @ib-system-coordinator-pane-id" ]]; then record=; else return 1; fi; }',
+      line, 'echo "shell alive, marker=$marker record=$record"',
     ].join("\n");
     const proc = Bun.spawn(["bash", "-c", script], { stdout: "pipe", stderr: "pipe" });
-    expect(await new Response(proc.stdout).text()).toBe("shell alive, marker=0\n");
+    expect(await new Response(proc.stdout).text()).toBe("shell alive, marker=0 record=\n");
     expect(await proc.exited).toBe(0);
   });
 
@@ -1200,6 +1200,10 @@ describe("ensureSystemCoordinator", () => {
       if (cmd.includes("send-keys")) {
         const launch = cmd.findIndex(arg => arg.startsWith("claude --model"));
         if (launch >= 0) {
+          expect(cmd.slice(cmd.indexOf("set-option"), -5)).toEqual([
+            "set-option", "-F", "-t", "=ib-coordinator:", "@ib-system-coordinator-pane-id", "#{pane_id}",
+            ";", "set-option", "-p", "-t", "=ib-coordinator:", "@ib-system-coordinator", "1",
+          ]);
           expect(cmd.slice(-5)).toEqual([";", "send-keys", "-t", "=ib-coordinator:", "Enter"]);
           events.push("launch-claude");
         }

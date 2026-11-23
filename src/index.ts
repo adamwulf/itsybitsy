@@ -316,7 +316,7 @@ export function buildSystemCoordinatorAgent(
  */
 export async function sendToSystemCoordinator(
   message: string,
-  opts?: { fromAgent?: string; cwd?: string; raw?: boolean },
+  opts?: { fromAgent?: string; cwd?: string; peerSend?: import("./ib-commands").PeerEnqueueOptions; raw?: boolean },
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   const { IB_COORDINATOR_SESSION } = await import("./coordinator");
   const running = await systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION);
@@ -341,9 +341,10 @@ export async function sendToSystemCoordinator(
   // serializes all writes to the `ib-coordinator` tmux session so they can't
   // interleave. There is no central dispatcher — the lock is keyed to the
   // single coordinator session, exactly mirroring the per-agent design.
-  const sendOpts: { fromAgent?: string; cwd?: string; raw?: boolean; outboxDir?: string } = {
+  const sendOpts: { fromAgent?: string; cwd?: string; peerSend?: import("./ib-commands").PeerEnqueueOptions; raw?: boolean; outboxDir?: string } = {
     cwd,
     outboxDir: getCoordinatorHome(),
+    ...(opts?.peerSend && { peerSend: opts.peerSend }),
   };
   if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
   if (opts?.raw) sendOpts.raw = true;

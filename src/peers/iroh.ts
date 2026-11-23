@@ -151,6 +151,10 @@ export class IrohBiStream {
     await Promise.allSettled([this.raw.recv.stop(0n), this.raw.send.reset(0n)]);
   }
 
+  async read(limit: number): Promise<Uint8Array> {
+    return toUint8(await callAsync("RecvStream.read", () => this.raw.recv.read(limit)));
+  }
+
   /** Write all of `bytes`. */
   writeAll(bytes: Uint8Array): Promise<void> {
     return callAsync("SendStream.writeAll", () => this.raw.send.writeAll(toArray(bytes)));

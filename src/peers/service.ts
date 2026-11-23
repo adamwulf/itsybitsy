@@ -61,6 +61,7 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
+import { createMessageReceiver } from "./receive-message";
 import { remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
@@ -101,6 +102,7 @@ import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
 // ---------------------------------------------------------------------------
 
 export interface ServiceStream {
+  read(limit: number): Promise<Uint8Array>;
   writeAll(bytes: Uint8Array): Promise<void>;
   finish(): Promise<void>;
   readToEnd(limit: number): Promise<Uint8Array>;
@@ -128,6 +130,7 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  receiveMessage?: ReturnType<typeof createMessageReceiver>;
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   remoteStartDenial: string | null | Promise<string | null>;
   remoteSpawn?: RemoteSpawnDeps;
@@ -158,6 +161,7 @@ export interface PeerServiceDeps {
  */
 export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
   return {
+    receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,
     captureCoordinator: async () => {
       const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log });
@@ -265,6 +269,7 @@ function plural(count: number, noun: string): string {
 /** Adapt a wrapper connection to the pair protocol's seam. */
 export function toPairConnection(conn: ServiceConnection): PairConnection {
   const stream = (s: ServiceStream): PairStream => ({
+    read: (limit) => s.read(limit),
     writeAll: (bytes) => s.writeAll(bytes),
     finish: () => s.finish(),
     cancel: () => s.cancel(),
@@ -875,6 +880,7 @@ export class PeerService {
           peerName: (id) => this.peerName(id),
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
+          receiveMessage: this.deps.receiveMessage,
           snapshot: this.deps.snapshot,
           captureCoordinator: this.deps.captureCoordinator,
           paneReaders: this.paneReaders,

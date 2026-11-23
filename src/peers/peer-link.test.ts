@@ -295,7 +295,7 @@ describe("serveTrustedConnection", () => {
     const request = { op: "new-agent", repo: "app", type: "worker", prompt: "é" };
     request.prompt += "x".repeat(size - encode(request).length);
     const reply = await rawRequest(side.a, encode(request));
-    expect(limits).toEqual([262144]);
+    expect(limits).toEqual([262144 - 1]); // One byte already read for framing.
     if (size === 262144) {
       expect(decodeText(reply)).toEqual({ ok: true, id: "agent-id" });
       expect(startAgent).toHaveBeenCalledTimes(1);

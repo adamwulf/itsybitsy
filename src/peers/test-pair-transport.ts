@@ -41,6 +41,19 @@ class Pipe {
     for (const waiter of this.waiters.splice(0)) waiter();
   }
 
+  async read(limit: number, isClosed: () => boolean): Promise<Uint8Array> {
+    for (;;) {
+      if (this.cancelled || isClosed()) throw new Error("stream closed");
+      const chunk = this.chunks.shift();
+      if (chunk?.length) {
+        if (chunk.length > limit) this.chunks.unshift(chunk.subarray(limit));
+        return chunk.subarray(0, limit);
+      }
+      if (this.finished) return new Uint8Array();
+      await new Promise<void>(resolve => this.waiters.push(resolve));
+    }
+  }
+
   async readToEnd(limit: number, isClosed: () => boolean): Promise<Uint8Array> {
     for (;;) {
       if (this.cancelled) throw new Error("stream cancelled");
@@ -80,6 +93,10 @@ class MemoryStream implements PairStream {
   async finish(): Promise<void> {
     if (this.conn.closeInfo()) throw new Error("connection lost");
     this.outgoing.finish();
+  }
+
+  read(limit: number): Promise<Uint8Array> {
+    return this.incoming.read(limit, () => this.conn.closeInfo() !== null);
   }
 
   readToEnd(limit: number): Promise<Uint8Array> {

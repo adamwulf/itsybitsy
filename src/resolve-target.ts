@@ -94,6 +94,7 @@ export async function resolveAgentTarget(
   repos: RepoEntry[],
   cwd: string = process.cwd(),
   purpose: "send" | "agent" | "rehire" = "agent",
+  localOnly = false,
 ): Promise<TargetResult> {
   const { readAgentsOfRepos } = await import("./agents");
   const { checkCoordinatorExists } = await import("./coordinator");
@@ -231,7 +232,7 @@ export async function resolveAgentTarget(
     ownErrors = errors;
     searched = repos.filter((r) => r !== ownRepo);
   }
-  const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", readConnectedPeers()]);
+  const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", localOnly ? [] : readConnectedPeers()]);
   if (typeof localMachine !== "string") return localMachine;
   const includesLocal = !machine || localMachine.toLowerCase() === machine;
   const peers = connected.filter((p) => !machine || p.name.toLowerCase() === machine);

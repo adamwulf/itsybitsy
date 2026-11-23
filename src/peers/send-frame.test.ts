@@ -43,6 +43,8 @@ test("header round-trips as length-prefixed UTF-8 without consuming a body", asy
     expect(await decodeSendHeader(stream)).toEqual(h);
     expect(stream.offset).toBe(encoded.length);
   }
+  const system = { ...header, from: { kind: "system" as const } };
+  expect(await decodeSendHeader(new MemoryStream(encodeSendHeader(system)))).toEqual(system);
   const h = { ...header, from: { kind: "agent" as const, id: "desk/repo/alice" } };
   expect(await decodeSendHeader(new MemoryStream(encodeSendHeader(h)))).toEqual(h);
 });
@@ -69,7 +71,7 @@ test("rejects invalid UTF-8, JSON, truncated frames, and malformed header fields
   for (const fields of [
     { extra: true }, ...["a", "a/b", "a//b", "/r/a", "m/r/", "m/r/a/extra"].map(id => ({ from: { kind: "agent", id } })),
     { op: "other" }, { id: "invalid" }, { from: null }, { from: { kind: "agent", id: 1 } },
-    { from: { kind: "agent" } }, { from: { kind: "user", id: "surprise" } },
+    { from: { kind: "agent" } }, { from: { kind: "user", id: "surprise" } }, { from: { kind: "system", id: "surprise" } },
     { target: { agent: "a" } }, { target: { kind: "unknown" } }, { target: { kind: "system", repo: "r" } },
     { target: { kind: "agent", agent: 42 } }, { target: { kind: "agent", agent: "a", repo: false } },
     { target: { kind: "repo-coordinator" } }, { target: { kind: "repo-coordinator", repo: "r", agent: "a" } },

@@ -14,7 +14,7 @@ export type SendTarget =
 export interface SendHeader {
   op: "send";
   id: string;
-  from: { kind: "user" } | { kind: "agent"; id: string };
+  from: { kind: "user" | "system" } | { kind: "agent"; id: string };
   target: SendTarget;
   message: string;
   files: { name: string; size: number; sha256: string; spellings: string[] }[];
@@ -46,7 +46,7 @@ const UNSAFE_LINE_CHARACTERS = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
 
 function validFrom(value: unknown): value is SendHeader["from"] {
   if (!object(value)) return false;
-  if (value.kind === "user") return onlyKeys(value, "kind");
+  if (value.kind === "user" || value.kind === "system") return onlyKeys(value, "kind");
   if (value.kind !== "agent" || !nonempty(value.id) || !onlyKeys(value, "kind", "id")) return false;
   const [machine, repo, agent, extra] = value.id.split("/", 4);
   if (extra !== undefined || !nonempty(machine) || sanitizeMachineName(machine) !== machine ||
@@ -122,7 +122,7 @@ function setIdleTimer(ms: number, callback: () => void) {
 
 /** One deadline per outstanding I/O. Its listener and timer are released at
  * each step, including on error. A stalled operation cannot start the next step. */
-async function waitForIO<T>(options: FileBodyOptions, operation: () => T | Promise<T>): Promise<T> {
+export async function waitForIO<T>(options: FileBodyOptions, operation: () => T | Promise<T>): Promise<T> {
   const { signal, setTimer = setIdleTimer } = options;
   signal?.throwIfAborted();
   const stopped = Promise.withResolvers<never>();

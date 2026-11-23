@@ -29,6 +29,7 @@
  * throws {@link PairProtocolError} when the stream is over its limit.
  */
 
+import { decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
 import type { Agent } from "../agents";
@@ -413,6 +414,7 @@ export interface PeerResponderDeps {
   peerName(id: string): Promise<string | null>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
+  receiveMessage?(header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>): Promise<void>;
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
@@ -477,7 +479,35 @@ async function startAgentWithDeadline(
 async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
   try {
-    request = decodePeerRequest(await stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES));
+    // Every valid sized header begins with zero (the cap is 256 KiB).
+    // Other ops begin with JSON. Peek one byte without waiting for FIN.
+    const options = { setTimer: deps.setTimer };
+    const first = await waitForIO(options, () => stream.read(1));
+    if (first[0] === 0) {
+      let prefix: Uint8Array | undefined = first;
+      const reader = { read: async (limit: number) => {
+        if (!prefix) return stream.read(limit);
+        const byte = prefix;
+        prefix = undefined;
+        return byte;
+      } };
+      let reply;
+      try {
+        const header = await decodeSendHeader(reader, options);
+        if (header.files.length) throw new Error("attachments are not supported yet");
+        await requireSendFin(stream, options);
+        if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
+        await deps.receiveMessage(header, conn.remoteId, () => deps.peerName(conn.remoteId));
+        reply = { ok: true, id: header.id };
+      } catch (err) {
+        reply = { ok: false, error: errorDetail(err) };
+      }
+      await stream.writeAll(encodeJson(reply));
+      await stream.finish();
+      return;
+    }
+    const rest = await stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES - first.length);
+    request = decodePeerRequest(Buffer.concat([first, rest]));
   } catch (err) {
     if (err instanceof PeerProtocolError || err instanceof PairProtocolError) {
       // PairProtocolError is the seam's readToEnd past its limit.
@@ -485,7 +515,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       deps.log(`peer link: ${reason}, from ${from}; closing`);
       closeQuietly(conn, PEER_CLOSE.error, reason);
     }
-    // Anything else: the stream or the connection is gone; there is no one to answer.
+    else { void stream.cancel().catch(() => {}); }
     return;
   }
 

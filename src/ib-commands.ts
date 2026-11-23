@@ -4086,22 +4086,7 @@ export async function cancelTmuxPaneModeIfActive(tmuxSession: string): Promise<b
   return (await cancel.exited) === 0;
 }
 
-/**
- * Deliver ONE queued message to an agent's tmux session — the single tmux
- * writer. This is the exact body the historical `sendMessage` ran for one
- * message: has-session check, view/copy-mode cancel (`cancelTmuxPaneModeIfActive`),
- * sender-prefix formatting (including the `user.name` config read), chunked
- * `send-keys -l`, inter-chunk sleep, length-scaled delay, `Enter`,
- * recipient/sender logging, `writeAgentState`.
- *
- * Callers (the watchdog drain and the inline fallback) hold the per-session
- * delivery lock for the whole batch, so two `send-keys`/`Enter` sequences to
- * the same session can never interleave.
- *
- * Returns an IbCommandResult so callers can propagate failures. On failure the
- * message is NOT removed from the outbox (no message loss).
- */
-export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promise<IbCommandResult> {
+async function checkSendSession(agent: Agent): Promise<IbCommandResult | null> {
   const tmuxSession = agent.meta.tmux_session;
   if (!tmuxSession) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Agent has no tmux session" };
@@ -4122,6 +4107,35 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   if (hasSessionExit !== 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running` };
   }
+
+  return null;
+}
+
+/** Inbound peer messages acknowledge enqueue, including for recipients without a watchdog. */
+export interface PeerEnqueueOptions {
+  beforeEnqueue(): Promise<void>;
+  log(line: string): void;
+}
+
+/**
+ * Deliver ONE queued message to an agent's tmux session — the single tmux
+ * writer. This is the exact body the historical `sendMessage` ran for one
+ * message: has-session check, view/copy-mode cancel (`cancelTmuxPaneModeIfActive`),
+ * sender-prefix formatting (including the `user.name` config read), chunked
+ * `send-keys -l`, inter-chunk sleep, length-scaled delay, `Enter`,
+ * recipient/sender logging, `writeAgentState`.
+ *
+ * Callers (the watchdog drain and the inline fallback) hold the per-session
+ * delivery lock for the whole batch, so two `send-keys`/`Enter` sequences to
+ * the same session can never interleave.
+ *
+ * Returns an IbCommandResult so callers can propagate failures. On failure the
+ * message is NOT removed from the outbox (no message loss).
+ */
+export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promise<IbCommandResult> {
+  const unavailable = await checkSendSession(agent);
+  if (unavailable) return unavailable;
+  const tmuxSession = agent.meta.tmux_session!;
 
   // Log/state writes target the per-worktree agent dir.
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
@@ -4194,7 +4208,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
         // In a team context the ` in @<team>` clause already establishes that
         // the sender is an agent in a room, so the literal "agent " word is
         // dropped (§16.4 delivery-prefix divergence). Outside a team it stays.
-        label = teamClause ? fromId : `agent ${fromId}`;
+        label = teamClause || fromId.endsWith("/@system") ? fromId : `agent ${fromId}`;
       }
       fullMessage = `[sent by ${label}${teamClause}]: ${message}`;
     } else {
@@ -4261,7 +4275,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   }
 
   // Log to sender's agent.log if applicable
-  if (fromId) {
+  if (fromId && !fromId.includes("/")) {
     const senderDir = runtimeNames.agentDir(agent.repoPath, fromId);
     const verb = raw ? "Sent raw message" : "Sent message";
     await logAgent(senderDir, `${verb} to ${agent.id}: ${message}`);
@@ -4397,6 +4411,7 @@ export async function sendMessage(
     cwd?: string;
     raw?: boolean;
     outboxDir?: string;
+    peerSend?: PeerEnqueueOptions;
     team?: string;
     /**
      * Dashboard-only: stage local file-path references at send time (see the
@@ -4429,7 +4444,7 @@ export async function sendMessage(
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
 
   // Resolve sender at ENQUEUE time (depends on the sender process's cwd).
-  const fromId = resolveSenderId(agent.repoPath, opts);
+  const fromId = opts?.peerSend ? opts.fromAgent ?? "" : resolveSenderId(agent.repoPath, opts);
   const raw = opts?.raw === true;
 
   // ---- Send-time attachment staging (dashboard opt-in only) ----------------
@@ -4489,6 +4504,11 @@ export async function sendMessage(
   try {
     queueDir = opts?.outboxDir ?? agentOutboxDir(agent);
     const reservedKey = opts?.outboxDir === undefined ? agent.meta.queue_key : undefined;
+    if (opts?.peerSend) {
+      const unavailable = await checkSendSession(agent);
+      if (unavailable) return unavailable;
+      await opts.peerSend.beforeEnqueue();
+    }
     await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough }, reservedKey);
   } catch (err) {
     // Enqueue failed — nothing is queued. Undo any staged copies so an
@@ -4498,6 +4518,16 @@ export async function sendMessage(
   }
 
   const stdout = fromId ? "" : `Sent to ${agent.id}`;
+
+  if (opts?.peerSend) {
+    const { log } = opts.peerSend;
+    void (async () => {
+      if (await hasLiveWatchdog(agentDir)) return;
+      const result = await drainOutbox(agent, queueDir, { steal: true });
+      if (!result.ok) log(result.stderr);
+    })().catch(err => log(`Delivery error after enqueue: ${err}`));
+    return { ok: true, exitCode: 0, stdout, stderr: "" };
+  }
 
   // After a successful enqueue the message is durably queued. For a staged send
   // NOTHING past this point may surface as failure: reporting failure would make

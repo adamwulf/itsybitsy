@@ -1,0 +1,94 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { join } from "node:path";
+import { createCliFixture, type CliFixture } from "../test-cli-runner";
+import { setUserHome, resetUserHome } from "../home";
+import { resetSendSpawnRunner, setSendSpawnRunner } from "../ib-commands";
+import { resetSystemCoordinatorHasSessionFn, setSystemCoordinatorHasSessionFn } from "../index";
+import { makeSpawnResult } from "../test-utils";
+import { readOutbox } from "../outbox";
+import { createMessageReceiver } from "./receive-message";
+import { createMemoryLink } from "./test-pair-transport";
+import { serveTrustedConnection } from "./peer-link";
+import { encodeSendHeader, type SendHeader } from "./send-frame";
+
+let cli: CliFixture;
+let repo: string;
+let receiver: ReturnType<typeof createMessageReceiver>;
+let lines: string[];
+const paired = async () => "desk";
+const header = (fields: Partial<SendHeader> = {}): SendHeader => ({
+  op: "send", id: crypto.randomUUID(), files: [], message: "/compact",
+  from: { kind: "user" }, target: { kind: "agent", agent: "worker" }, ...fields,
+});
+
+beforeEach(async () => {
+  cli = await createCliFixture();
+  setUserHome(cli.home);
+  repo = await cli.addRepo("photos");
+  for (const id of ["worker", "photos"]) {
+    const { agentDir } = await cli.addAgent(repo, id, {
+      tmux_session: "ib-" + id, ...(id === "photos" && { agentType: "repo-coordinator" }),
+    });
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now() }));
+  }
+  lines = [];
+  receiver = createMessageReceiver(() => {}, line => lines.push(line));
+  setSendSpawnRunner(() => makeSpawnResult());
+});
+afterEach(async () => {
+  resetSystemCoordinatorHasSessionFn();
+  resetSendSpawnRunner();
+  resetUserHome();
+  await cli.cleanup();
+});
+
+async function exchange(request: SendHeader, name: () => Promise<string | null> = paired) {
+  const { a, b } = createMemoryLink("authenticated", "destination");
+  const serving = serveTrustedConnection(b, {
+    peerName: name, receiveMessage: receiver, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    log() {}, setTimer(ms, fn) { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); },
+  });
+  try {
+    const stream = await a.openBi();
+    await stream.writeAll(encodeSendHeader(request));
+    await stream.finish();
+    return JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
+  } finally { a.close(0, "done"); await serving; }
+}
+
+test("concurrent and subsequent repeats acknowledge once, with sender attribution in the real queue", async () => {
+  for (const from of [{ kind: "user" }, { kind: "agent", id: "desk/tools/alice" }, { kind: "system" }] as const) {
+    const request = header({ from, message: from.kind + " hello" });
+    const replies = await Promise.all([exchange(request), exchange(request)]);
+    for (const reply of [...replies, await exchange(request)]) expect(reply).toEqual({ ok: true, id: request.id });
+  }
+  const queued = await readOutbox(join(cli.home, ".itsybitsy", "agents", "worker"));
+  expect(queued.map(item => item.fromAgent)).toEqual(["", "desk/tools/alice", "desk/@system"]);
+  expect(lines).toEqual(Array(3).fill("desk sent a message to worker"));
+});
+
+test("unknown, stopped, unpaired and attachment sends are refused before queueing", async () => {
+  expect(await exchange(header({ target: { kind: "agent", agent: "missing" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
+  const files = [{ name: "a", size: 0, sha256: "0".repeat(64), spellings: ["a"] }];
+  expect(await exchange(header({ files }))).toEqual({ ok: false, error: "attachments are not supported yet" });
+  let checks = 0;
+  expect(await exchange(header(), async () => ++checks < 4 ? "desk" : null)).toMatchObject({ ok: false, error: expect.stringContaining("not a peer") });
+  setSendSpawnRunner(() => makeSpawnResult(1));
+  expect(await exchange(header())).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
+  expect(lines).toEqual([]);
+  expect(await readOutbox(join(cli.home, ".itsybitsy", "agents", "worker"))).toEqual([]);
+});
+
+test("repo and system coordinators use their own queues", async () => {
+  const request = header({ target: { kind: "repo-coordinator", repo: "PHOTOS" } });
+  expect(await exchange(request)).toEqual({ ok: true, id: request.id });
+  expect(await readOutbox(join(cli.home, ".itsybitsy", "agents", "photos"))).toMatchObject([{ fromAgent: "", raw: false, message: "/compact" }]);
+  setSystemCoordinatorHasSessionFn(async () => false);
+  expect(await exchange(header({ target: { kind: "system" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
+  setSystemCoordinatorHasSessionFn(async () => true);
+  // Hold the normal coordinator queue lock until after inspecting the acceptance.
+  const dir = join(cli.home, ".itsybitsy");
+  await Bun.write(join(dir, ".outbox.lock"), String(process.pid));
+  expect(await exchange(header({ target: { kind: "system" } }))).toMatchObject({ ok: true });
+  expect(await readOutbox(dir)).toMatchObject([{ message: "/compact", raw: false }]);
+});

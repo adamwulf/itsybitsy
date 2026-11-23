@@ -104,6 +104,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     let deadline = Date.now() + 10_000; // M2 claim window. Transfer progress uses the wire idle interval.
     let claimedSeen = false;
     let lastSequence = 0;
+    let warnedProgress = false;
 
     const readResult = async (): Promise<IbCommandResult | undefined> => {
       try {
@@ -131,7 +132,12 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
           lastSequence = sequence;
           deadline = Date.now() + IDLE_TIMEOUT_MS;
         }
-      } catch (err) { if (!missing(err)) throw err; }
+      } catch (err) {
+        if (!missing(err) && !warnedProgress) {
+          warnSendCleanup(`Remote send progress read failed: ${detail(err)}`);
+          warnedProgress = true;
+        }
+      }
       await Bun.sleep(50);
     }
     const withdrawn = await withdrawPublishedRequest(dir, staging);
@@ -284,9 +290,9 @@ export function createPeerOutboxPoll(now = Date.now) {
               try {
                 if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
                 if (sequence === recorded) return;
-                recorded = sequence;
                 writeFileSync(join(dir, "progress.tmp"), JSON.stringify({ bytes, sequence }), { mode: 0o600 });
                 renameSync(join(dir, "progress.tmp"), join(dir, "progress"));
+                recorded = sequence;
               } catch (err) {
                 if (!warned) warnSendCleanup(`Remote send progress update failed: ${detail(err)}`);
                 warned = true;

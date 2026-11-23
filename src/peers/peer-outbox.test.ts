@@ -327,3 +327,21 @@ test("an ordinary timeout observes a result published during the last poll sleep
   try { expect(await handoffRemoteMessage("peer", header)).toMatchObject({ ok: true }); }
   finally { clock.mockRestore(); poll.mockRestore(); }
 });
+
+test("malformed progress warns once and keeps polling for the delivery result", async () => {
+  await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
+  const claimed = join(base, ".claimed", header.id);
+  const logs: string[] = [];
+  const warning = spyOn(console, "error").mockImplementation(message => { logs.push(String(message)); });
+  try {
+    const result = handoffRemoteMessage("peer", header);
+    await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
+    await mkdir(join(base, ".claimed")); await fs.rename(join(base, header.id), claimed);
+    await Bun.write(join(claimed, "progress"), "broken");
+    await waitFor(() => logs.length === 1); await Bun.sleep(70);
+    await Bun.write(join(claimed, "result.json"), JSON.stringify({ ok: true, id: header.id }));
+    expect(await result).toMatchObject({ ok: true });
+    expect(logs).toEqual([expect.stringContaining("progress read failed")]);
+  } finally { warning.mockRestore(); }
+});

@@ -1,7 +1,8 @@
 /** One watcher owns the endpoint and its transfer recovery task. */
 import { randomUUID } from "node:crypto";
 import { flock, LOCK_EX, LOCK_NB } from "../file-lock";
-import { open, readFile, link, rename, rm, stat, writeFile, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { opendir, open, readFile, link, rename, rm, stat, writeFile, unlink } from "node:fs/promises";
 import { stagingOwnerStart, transferOwnerState } from "./transfer-owner";
 import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
 import { peerEndpointLockFile } from "../runtime-names";
@@ -108,9 +109,14 @@ export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpo
   const path = peerEndpointLockFile();
   const generation = randomUUID();
   const temp = path + "." + generation;
-  try {
-    await writeFile(temp, formatOwner(self) + generation + "\n", { mode: 0o600, flag: "wx" });
-    return await withLockGuard(path, async (): Promise<EndpointLockResult> => {
+  return withLockGuard(path, async (): Promise<EndpointLockResult> => {
+    const directory = dirname(path);
+    const artifacts = /^endpoint\.lock\.(?:dead\.)?[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+    for await (const entry of await opendir(directory)) {
+      if (entry.isFile() && artifacts.test(entry.name)) await unlink(join(directory, entry.name));
+    }
+    try {
+      await writeFile(temp, formatOwner(self) + generation + "\n", { mode: 0o600, flag: "wx" });
       const contents = await readLock(path);
       if (contents === null) { await link(temp, path); return { acquired: true, generation }; }
       const owner = parseOwner(contents);
@@ -136,8 +142,8 @@ export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpo
         await link(temp, path);
         return { acquired: true, generation, takenFromPid: owner.pid };
       } finally { await rm(tombstone, { force: true }); }
-    });
-  } finally { await rm(temp, { force: true }); }
+    } finally { await rm(temp, { force: true }); }
+  });
 }
 
 export async function releaseEndpointLock(self: EndpointLockOwner = currentEndpointLockOwner()): Promise<boolean> {

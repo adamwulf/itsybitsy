@@ -199,9 +199,11 @@ test("a suspended identity writer exposes no empty lock", async () => {
   try {
     const first = acquireEndpointLock(ME); await writing.promise;
     expect(await lockContents()).toBeNull();
-    expect(await acquireEndpointLock(OTHER)).toMatchObject({ acquired: true });
-    resume.resolve(); expect(await first).toEqual({ acquired: false, ownerPid: OTHER.pid });
-    expect(await lockContents()).toBe(line(OTHER));
+    const standby = acquireEndpointLock(OTHER);
+    resume.resolve();
+    expect(await first).toMatchObject({ acquired: true });
+    expect(await standby).toEqual({ acquired: false, ownerPid: ME.pid });
+    expect(await lockContents()).toBe(line(ME));
   } finally { resume.resolve(); spy.mockRestore(); }
 });
 
@@ -218,4 +220,15 @@ test("snapshot visibility follows each acquisition generation through a clock ro
   const replacement = await acquireEndpointLock(ME);
   expect(replacement.acquired && replacement.generation).not.toBe(lock.generation);
   expect(await readConnectedPeers()).toEqual([]);
+});
+
+test("the lock guard reclaims abandoned publication and takeover records", async () => {
+  await writeLock(line(ME));
+  const path = peerEndpointLockFile();
+  const stale = [path + "." + crypto.randomUUID(), path + ".dead." + crypto.randomUUID()];
+  const unrelated = path + ".dead.notes";
+  for (const name of [...stale, unrelated]) await writeFile(name, "retained");
+  await acquireEndpointLock(ME);
+  for (const name of stale) expect(await Bun.file(name).exists()).toBe(false);
+  expect(await readFile(unrelated, "utf8")).toBe("retained");
 });

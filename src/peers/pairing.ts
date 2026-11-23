@@ -205,7 +205,7 @@ export function describePairFailure(failure: PairFailure, peer: string): string 
     case "refused":
       return failure.reason === "busy"
         ? `Pairing refused: ${peer} is busy with another pairing.`
-        : `Pairing refused: ${peer} does not have its Peers dialog open.`;
+        : `Pairing refused: ${peer} does not have its Peers tab open.`;
     case "wrong-code":
       return "Wrong code. Pairing failed; start again from the install that dials.";
     case "expired":

@@ -901,7 +901,7 @@ function recordTimers(clock: FakeClock) {
 
 describe("PeerService self-heal", () => {
   const SOCKET_GONE = "Endpoint.acceptNext: socket gone";
-  const NOT_NEEDED = "peering: not retrying the bind: no paired peers and the Peers dialog is closed";
+  const NOT_NEEDED = "peering: not retrying the bind: no paired peers and the Peers tab is hidden";
   const OWN_LOCK = `${process.pid} ${ME_START}\n`;
   const AT_CAP = "retrying every 60 s, not logging this error again until it changes";
   /** watch.log lines about retrying; each failure has exactly one, so there is no separate "retrying" line. */
@@ -1286,7 +1286,7 @@ describe("PeerService self-heal", () => {
     service.closeDialog(); // the endpoint stays bound, but nothing needs it any more
 
     first.failAccept(new Error(SOCKET_GONE));
-    const gaveUp = `peering: accept loop stopped: ${SOCKET_GONE}; not retrying: no paired peers and the Peers dialog is closed`;
+    const gaveUp = `peering: accept loop stopped: ${SOCKET_GONE}; not retrying: no paired peers and the Peers tab is hidden`;
     await waitFor(() => logs.includes(gaveUp), { message: "not retrying" });
     expect(service.view().status).toEqual({ kind: "error", message: `accept loop stopped: ${SOCKET_GONE}`, retryAt: null });
     expect(await lockContents()).toBeNull();

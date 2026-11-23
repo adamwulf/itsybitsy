@@ -7,7 +7,7 @@
  * The lock file holds `<pid> <startEpoch>` and a newline: the owner's pid and
  * its REAL process start time in epoch seconds (selfProcessStartEpochSeconds),
  * the same stamp the lifecycle locks in src/agents.ts use. Not the time of the
- * write: the Peers dialog can take the lock hours after `ib watch` started.
+ * write: the Peers tab can take the lock hours after `ib watch` started.
  * The lock survives a reboot, so a pid alone is not enough: after an unclean
  * exit, an unrelated process can get the same pid. The owner counts as alive
  * only when isPidAliveSinceUncached accepts its pid AND start time. When a
@@ -15,7 +15,7 @@
  * alone, and such a lock counts as alive while the pid is.
  *
  * src/peers/service.ts takes it before binding (at boot when peers.json lists
- * a peer, or when the Peers dialog first opens) and releases it when `ib watch`
+ * a peer, or when the Peers tab first opens) and releases it when `ib watch`
  * exits.
  *
  * Taking over a dead owner's lock follows the outbox lock's steal: remove the

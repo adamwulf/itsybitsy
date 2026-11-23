@@ -1,5 +1,5 @@
 /**
- * The Peers dialog (`I` in `ib watch`; SPEC.md §20.1): this install's id, the
+ * The Peers tab of setup (`h`, or `I` to open it directly; SPEC.md §20.1): this install's id, the
  * paired peers with each one's connection state, a "Pair with id" input, and
  * the pairing stages on either side. The protocol, the endpoint and the
  * poller live in src/peers/ (pairing.ts, service.ts, poller.ts); this module
@@ -18,7 +18,7 @@ import type { RemoteNewAgentRequest } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
 import { peerNameProblem, shortPeerId } from "../peers/store";
-import { cancelPaste, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
+import { cancelPaste, isPasteInProgress, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
 import { BOLD, DIM, GREEN, RED, RESET, YELLOW } from "./colors";
 import type { DialogCtx } from "./dialog-handler";
 import { deleteWord } from "./text-buffer";
@@ -41,7 +41,6 @@ export interface PeersDialogService {
 }
 
 export type PeersDialogState = {
-  type: "peers";
   service: PeersDialogService;
   /** The "Pair with id" input. */
   idValue: string;
@@ -56,14 +55,13 @@ export type PeersDialogState = {
   error: string | null;
   /** This machine's name (src/machine-name.ts): the name prompt refuses it. */
   machineName: string;
-  width?: number;
 };
 
 /** Most peers listed; the rest are counted. */
 const MAX_LISTED_PEERS = 10;
 
 export function newPeersDialog(service: PeersDialogService, machineName: string): PeersDialogState {
-  return { type: "peers", service, idValue: "", sessionValue: "", inputKey: null, error: null, machineName };
+  return { service, idValue: "", sessionValue: "", inputKey: null, error: null, machineName };
 }
 
 /** Start each session stage's input empty. Called on every service change and before every key. */
@@ -97,14 +95,14 @@ function editLine(ctx: DialogCtx, d: PeersDialogState, field: "idValue" | "sessi
     d[field] += sanitizePasteForSingleLine(pasted);
     return true;
   }
-  if (data.length === 1 && data >= " ") {
+  if (!isPasteInProgress() && data.length === 1 && data >= " ") {
     d[field] += data;
     return true;
   }
   return false;
 }
 
-/** Keys while the Peers dialog is open. Consumes every key. */
+/** Handle a key in the Peers tab after setup navigation. */
 export function handlePeersDialogInput(ctx: DialogCtx, d: PeersDialogState, data: string): boolean {
   syncPeersDialog(d);
   const session = d.service.view().session;
@@ -177,7 +175,7 @@ function statusLines(status: EndpointStatus, now: number): Array<{ text: string;
     case "starting":
       return [{ text: `${YELLOW}●${RESET} starting…` }];
     case "listening":
-      return [{ text: `${GREEN}●${RESET} accepting pairing requests while this dialog is open` }];
+      return [{ text: `${GREEN}●${RESET} accepting pairing requests while this tab is visible` }];
     case "disabled":
       return [{ text: `${YELLOW}●${RESET} peering disabled: ib watch pid ${status.ownerPid} owns the endpoint` }];
     case "error":
@@ -228,7 +226,7 @@ function inputLine(value: string, innerWidth: number): string {
   return `…${tail.join("")}`;
 }
 
-export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number): { title: string; contentLines: string[] } {
+export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number): string[] {
   const view = d.service.view();
   const lines: string[] = [];
   const prose = (text: string, color = "") => {
@@ -335,5 +333,5 @@ export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number)
   }
   lines.push("");
   prose(hint, DIM);
-  return { title: "Peers", contentLines: lines };
+  return lines;
 }

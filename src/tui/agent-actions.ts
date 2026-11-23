@@ -36,14 +36,14 @@ import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { cleanRemoteText } from "../peers/peer-link";
-import type { PeersDialogService } from "./peers-dialog";
+import { newPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import type { ConfigResult } from "../config";
-import { syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
+import { PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { fullyQualifiedAgentId } from "./row-keys";
 import type { PaneMode, TailLogMode } from "./pane-manager";
@@ -2381,8 +2381,8 @@ export function handleHelp(ctx: ActionCtx) {
       "",
       header("App"),
       row("?", "help"),
-      row("h", "setup"),
-      row("I", "peers: this install's id, pairing"),
+      row("h", "setup (Hooks, Config, Peers)"),
+      row("I", "setup: Peers tab (id and pairing)"),
       row("Ctrl-C", "quit"),
       "",
       `${DIM}Press any key to dismiss${RESET}`,
@@ -2390,14 +2390,52 @@ export function handleHelp(ctx: ActionCtx) {
   });
 }
 
-export function handleSetup(ctx: ActionCtx) {
-  loadSetupDialog(ctx).catch((err) => ctx.setNotice(`Setup error: ${err}`, "error"));
+export function handleSetup(ctx: ActionCtx, initialTab = 0) {
+  const repoPath = ctx.repos[0]?.path ?? "";
+  let settings: ReturnType<typeof loadSetupSettings> | undefined;
+
+  const showSetupDialogForTab = (tab: number) => {
+    const dialog: Extract<DialogState, { type: "setup" }> = {
+      type: "setup",
+      tab,
+      items: [],
+      selectedIndex: 0,
+      onAction: handleSetupItemAction(ctx, repoPath),
+      onTabChange: showSetupDialogForTab,
+    };
+    if (tab === PEERS_TAB) {
+      if (!ctx.peerService) {
+        ctx.setNotice("Peering is not available here", "error");
+        return;
+      }
+      dialog.peers = newPeersDialog(ctx.peerService, ctx.agentTree.machineName);
+    }
+    ctx.showDialog(dialog);
+    if (tab === PEERS_TAB) return;
+
+    // Show the requested tab immediately, including when leaving a pairing.
+    // Only Hooks and Config need data from disk.
+    settings ??= loadSetupSettings(repoPath);
+    settings.then(({ items, config }) => {
+      if (ctx.dialog !== dialog) return;
+      dialog.items = items;
+      if (tab === 1) {
+        dialog.configItems = CONFIG_KEYS.map(def => ({ ...def, ...config[def.key]! }));
+        dialog.configSelectedIndex = 0;
+        dialog.onConfigAction = handleConfigItemAction(ctx, tab, config, () => {
+          if (ctx.dialog === dialog) showSetupDialogForTab(tab);
+        });
+      }
+      ctx.tui?.requestRender();
+    }).catch(err => {
+      settings = undefined;
+      if (ctx.dialog === dialog) ctx.setNotice(`Setup error: ${err}`, "error");
+    });
+  };
+  showSetupDialogForTab(initialTab);
 }
 
-async function loadSetupDialog(ctx: ActionCtx, initialTab = 0) {
-  // Use any available repo path for hook operations (they modify ~/.claude/settings.json but reference repo paths)
-  const repoPath = ctx.repos[0]?.path ?? "";
-
+async function loadSetupSettings(repoPath: string) {
   // Fetch hook statuses in parallel
   const [safetyResult, interceptResult] = await Promise.all([
     repoPath ? hooksStatus(repoPath) : Promise.resolve({ ok: false, stdout: "", stderr: "" }),
@@ -2428,40 +2466,7 @@ async function loadSetupDialog(ctx: ActionCtx, initialTab = 0) {
     },
   ];
 
-  // Load config for setup dialog
-  const config = await readConfig();
-
-  const buildConfigItems = (): ConfigDialogItem[] => {
-    return CONFIG_KEYS.map((def) => {
-      const entry = config[def.key]!;
-      return {
-        key: def.key,
-        type: def.type,
-        value: entry.value,
-        source: entry.source,
-        default: def.default,
-        sensitive: def.sensitive,
-      };
-    });
-  };
-
-  const showSetupDialogForTab = (tab: number) => {
-    ctx.showDialog({
-      type: "setup",
-      tab,
-      items,
-      selectedIndex: 0,
-      configItems: tab > 0 ? buildConfigItems() : undefined,
-      configSelectedIndex: tab > 0 ? 0 : undefined,
-      onAction: handleSetupItemAction(ctx, repoPath),
-      onTabChange: (newTab: number) => {
-        showSetupDialogForTab(newTab);
-      },
-      onConfigAction: tab > 0 ? handleConfigItemAction(ctx, tab, config, showSetupDialogForTab) : undefined,
-    });
-  };
-
-  showSetupDialogForTab(initialTab);
+  return { items, config: await readConfig() };
 }
 
 /** Toggle a hook install/uninstall and update the setup item in-place */
@@ -2568,7 +2573,7 @@ function handleConfigItemAction(
             config[allowKey] = { value: newAllow, source: "user" };
             config[denyKey] = { value: newDeny, source: "user" };
             ctx.setNotice(`${roleKey} permissions updated`, "info");
-            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`, "error"));
+            handleSetup(ctx, tab);
           }).catch((err) => {
             ctx.setNotice(`Failed to save: ${err}`, "error");
           });
@@ -2591,7 +2596,7 @@ function handleConfigItemAction(
         onSubmit: (value: string) => {
           ctx.closeDialog();
           if (item.sensitive && value === "") {
-            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`, "error"));
+            handleSetup(ctx, tab);
             return;
           }
           let parsed: unknown;
@@ -2614,7 +2619,7 @@ function handleConfigItemAction(
             }
             ctx.setNotice(`${item.key} updated`, "info");
             // Re-open setup dialog on the same tab
-            loadSetupDialog(ctx, tab).catch((err) => ctx.setNotice(`Setup error: ${err}`, "error"));
+            handleSetup(ctx, tab);
           }).catch((err) => {
             ctx.setNotice(`Failed to save: ${err}`, "error");
           });

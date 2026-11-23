@@ -68,7 +68,7 @@ import type { DialogState } from "./dialog-handler";
 import {
   wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH,
   handleDialogInput, syncNewAgentMachine, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
-  buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
+  PEERS_TAB, buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
 import {
   RightPaneComponent, colorizeDiff, colorizeLog,
@@ -105,7 +105,7 @@ import {
   type RemoteControlFiles, type RemoteControlFilesOptions, type RemoteControlStatus,
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
-import { buildPeersDialogContent, newPeersDialog, syncPeersDialog, type PeersDialogService } from "./peers-dialog";
+import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { PeerService, defaultPeerServiceDeps } from "../peers/service";
 import type { PeerLinkState } from "../peers/poller";
 import { remoteDisplayName } from "./peer-repos";
@@ -529,7 +529,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       row1Left = `${DIM}j/k: select    J/K: repo    p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -733,9 +733,6 @@ class DialogOverlayComponent implements Component {
       case "permissions-editor": {
         return buildPermissionsEditorContent(dialog, innerWidth);
       }
-      case "peers": {
-        return buildPeersDialogContent(dialog, innerWidth);
-      }
     }
   }
 }
@@ -835,7 +832,7 @@ export class DashboardComponent implements Component {
   private overlayHandle: OverlayHandle | null = null;
   private dialogOverlay: DialogOverlayComponent;
   /**
-   * The iroh endpoint service behind the Peers dialog (`I`). launchDashboard
+   * The iroh endpoint service behind the Peers tab (`I`). launchDashboard
    * sets the real one (src/peers/service.ts); a dashboard built in a test has
    * none unless the test sets a fake, so no test can bind a real endpoint.
    */
@@ -1865,14 +1862,14 @@ export class DashboardComponent implements Component {
     void this.watcher?.refresh();
   }
 
-  /** Poll updates can affect the unified tree, a remote selection, and the Peers dialog. */
+  /** Poll updates can affect the unified tree, a remote selection, and the Peers tab. */
   setPeerService(service: PeersDialogService): void {
     this.peerService = service;
     service.onChange(() => {
       const changed = this.refreshPeerRepos();
       const dialog = this._dialog;
-      if (dialog?.type === "peers") {
-        syncPeersDialog(dialog);
+      if (dialog?.type === "setup" && dialog.peers) {
+        syncPeersDialog(dialog.peers);
         this.tui?.requestRender();
       } else if (changed || dialog?.type === "new-agent-form") {
         if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
@@ -1926,17 +1923,6 @@ export class DashboardComponent implements Component {
     return true;
   }
 
-  /** `I`: open the Peers dialog. Opening it binds the endpoint if boot has not already. */
-  openPeersDialog(): void {
-    const service = this.peerService;
-    if (!service) {
-      this.setNotice("Peering is not available here", "error");
-      return;
-    }
-    this.showDialog(newPeersDialog(service, this.agentTree.machineName));
-    service.openDialog();
-  }
-
   showDialog(dialog: NonNullable<DialogState>) {
     if (dialog.type === "cleanup-warnings" && (this._dialog || this.pendingCleanupWarnings.length > 0)) {
       this.pendingCleanupWarnings.push(dialog);
@@ -1946,8 +1932,7 @@ export class DashboardComponent implements Component {
   }
 
   private openDialog(dialog: NonNullable<DialogState>) {
-    // Replacing the Peers dialog closes it: pairing is accepted only while it is open.
-    if (this._dialog?.type === "peers" && dialog !== this._dialog) this._dialog.service.closeDialog();
+    const previous = this._dialog;
     this._dialog = dialog;
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
@@ -1964,11 +1949,24 @@ export class DashboardComponent implements Component {
       });
     }
     this.tui?.requestRender();
+    this.updatePeersTabVisibility(previous);
+  }
+
+  private updatePeersTabVisibility(previous: DialogState): void {
+    const before = previous?.type === "setup" ? previous.peers?.service : undefined;
+    const after = this._dialog?.type === "setup" ? this._dialog.peers?.service : undefined;
+    if (before === after) return;
+    if (before) {
+      cancelPaste();
+      before.closeDialog();
+    }
+    after?.openDialog();
   }
 
   closeDialog() {
-    if (this._dialog?.type === "peers") this._dialog.service.closeDialog();
+    const previous = this._dialog;
     this._dialog = null;
+    this.updatePeersTabVisibility(previous);
     this.overlayHandle?.hide();
     this.overlayHandle = null;
     this.tui?.requestRender();
@@ -2105,8 +2103,8 @@ export class DashboardComponent implements Component {
       { label: "add repo — A", key: "A", action: () => agentActions.handleAddRepo(this) },
       { label: "remove repo — D", key: "D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
       { label: "help — ?", key: "?", action: () => agentActions.handleHelp(this) },
-      { label: "setup — h", key: "h", action: () => agentActions.handleSetup(this) },
-      { label: "peers — I", key: "I", action: () => this.openPeersDialog() },
+      { label: "setup (Hooks, Config, Peers) — h", key: "h", action: () => agentActions.handleSetup(this) },
+      { label: "setup: Peers tab — I", key: "I", action: () => agentActions.handleSetup(this, PEERS_TAB) },
       { label: "scroll up — ;", key: ";", action: () => agentActions.handleScrollUp(this) },
       { label: "scroll down — l", key: "l", action: () => agentActions.handleScrollDown(this) },
     ];
@@ -3437,8 +3435,8 @@ export class DashboardComponent implements Component {
     else if (data === "O") { agentActions.handleOpenDiffToolVsManager(this); }
     // Help dialog
     else if (data === "?") { agentActions.handleHelp(this); }
-    // Peers dialog: this install's id, paired peers, pairing
-    else if (data === "I") { this.openPeersDialog(); }
+    // Peers tab: this install's id, paired peers, pairing
+    else if (data === "I") { agentActions.handleSetup(this, PEERS_TAB); }
     // Setup dialog
     else if (data === "h") { agentActions.handleSetup(this); }
     // Re-check repo health
@@ -4192,7 +4190,7 @@ export async function launchDashboard(): Promise<void> {
   // Peering (src/peers/service.ts): nothing is loaded or bound here. The
   // endpoint binds at boot when peers.json lists a peer (bootIfPaired, started
   // at the end of this function once the watcher's first scan is done), or
-  // else the first time the Peers dialog (`I`) opens, and stays up until
+  // else the first time the Peers tab (`I`) opens, and stays up until
   // quitDashboard shuts it down; after a failed bind or accept loop the
   // service rebinds on its own with backoff (SPEC §20.3). Logs go to watch.log. That first bind stalls
   // the UI once, for about a third of a second: the dynamic import in

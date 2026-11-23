@@ -5,7 +5,7 @@
  *
  * - The endpoint binds at boot when `peers.json` lists at least one peer
  *   (`bootIfPaired`, which `ib watch` starts in the background once the
- *   watcher's first scan is done), or when the Peers dialog opens
+ *   watcher's first scan is done), or when the Peers tab opens
  *   (`openDialog`) with nothing bound yet, and again through the automatic
  *   rebind after a failure (below); one bind runs at a time, and a bound
  *   endpoint is never bound again. An install with no peers that never
@@ -20,7 +20,7 @@
  *   whose endpoint stays up for 60 s resets that, while one whose accept
  *   loop dies sooner is one more failure, so a flapping endpoint backs off
  *   too. It retries only while something needs the endpoint:
- *   `peers.json` lists a peer, or the Peers dialog is open. It stops for good
+ *   `peers.json` lists a peer, or the Peers tab is open. It stops for good
  *   when another live `ib watch` holds the lock ("disabled"; the lock is never
  *   polled), and on shutdown. Opening the dialog while a retry is pending
  *   binds at once, in place of the retry. `binding` is held from the start of
@@ -178,7 +178,7 @@ export function defaultPeerServiceDeps(log: (line: string) => void, snapshot: ()
 export const PEER_RETRY_INITIAL_MS = 5_000;
 /** The longest wait between automatic rebinds. */
 export const PEER_RETRY_MAX_MS = 60_000;
-/** While the open Peers dialog shows a pending retry, the service notifies this often, so its countdown moves. */
+/** While the open Peers tab shows a pending retry, the service notifies this often, so its countdown moves. */
 export const PEER_RETRY_COUNTDOWN_MS = 1_000;
 /**
  * A rebind counts as recovered, and the backoff resets, only once its
@@ -407,7 +407,7 @@ export class PeerService {
   }
 
   /**
-   * The Peers dialog opened: accept pairing requests, and bind if not bound
+   * The Peers tab opened: accept pairing requests, and bind if not bound
    * yet. A pending retry is replaced by this bind, which starts at once.
    */
   openDialog(): void {
@@ -475,7 +475,7 @@ export class PeerService {
     this.notify();
     if (this.dialogOpen) return null;
     if (readError !== null) return `could not read peers.json: ${readError}`;
-    return this.peers.length === 0 ? "no paired peers and the Peers dialog is closed" : null;
+    return this.peers.length === 0 ? "no paired peers and the Peers tab is hidden" : null;
   }
 
   /**
@@ -492,7 +492,7 @@ export class PeerService {
     }
     this.failures++;
     if (!this.dialogOpen && this.peers.length === 0) {
-      this.deps.log(`peering: ${failure}; not retrying: no paired peers and the Peers dialog is closed`);
+      this.deps.log(`peering: ${failure}; not retrying: no paired peers and the Peers tab is hidden`);
       this.resetRetries();
       return;
     }
@@ -602,7 +602,7 @@ export class PeerService {
   }
 
   /**
-   * The Peers dialog closed: stop accepting, and cancel a pairing still in
+   * The Peers tab closed: stop accepting, and cancel a pairing still in
    * progress. A pending retry stays; when it fires it binds only if
    * `peers.json` lists a peer.
    */

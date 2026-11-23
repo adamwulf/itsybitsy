@@ -9146,7 +9146,7 @@ const PEERS_OTHER = "0a".repeat(32);
 
 /**
  * A scripted stand-in for the peer service (src/peers/service.ts), for the
- * Peers dialog and the tree's remote rows. `set` changes its view and
+ * Peers tab and the tree's remote rows. `set` changes its view and
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
@@ -9212,10 +9212,10 @@ class FakePeerService implements PeersDialogService {
   }
 }
 
-// The Peers dialog (`I`, src/tui/peers-dialog.ts). The dashboard gets a
+// The Peers tab (`I`, src/tui/peers-dialog.ts). The dashboard gets a
 // scripted fake service, never the real one, so no test here binds an endpoint
 // or loads the iroh addon.
-describe("Peers dialog", () => {
+describe("setup Peers tab", () => {
   const SELF = PEERS_SELF;
   const OTHER = PEERS_OTHER;
   const OTHER_SHORT = OTHER.slice(0, 10);
@@ -9228,25 +9228,78 @@ describe("Peers dialog", () => {
     return { dashboard, service };
   }
 
+  function peersTab(dashboard: DashboardComponent) {
+    const dialog = assertDialog(dashboard.dialog, "setup");
+    expect(dialog.tab).toBe(2);
+    expect(dialog.peers).toBeDefined();
+    return dialog.peers!;
+  }
+
   function rendered(dashboard: DashboardComponent): string[] {
     return (dashboard as any).dialogOverlay.render(DIALOG_WIDTH) as string[];
   }
 
   const text = (dashboard: DashboardComponent) => stripAnsi(rendered(dashboard).join("\n"));
 
-  test("I opens the dialog and asks the service to start (bind once)", () => {
+  test("I opens setup on Peers and asks the service to start once", () => {
     const { dashboard, service } = open();
-    expect(assertDialog(dashboard.dialog, "peers").idValue).toBe("");
+    expect(peersTab(dashboard).idValue).toBe("");
     expect(service.calls).toEqual(["open"]);
     const out = text(dashboard);
     expect(out).toContain("┌─ Peers ─");
+    expect(out).toContain("[Hooks]  [Config]  [Peers]");
     expect(out).toContain("This install's id");
     expect(out).toContain(SELF);
-    expect(out).toContain("accepting pairing requests while this dialog is open");
+    expect(out).toContain("accepting pairing requests while this tab is visible");
     expect(out).toContain("Paired peers");
     expect(out).toContain("none yet");
     expect(out).toContain("Pair with id");
     expect(out).toContain("Enter: pair    Esc: close");
+  });
+
+  test("only the visible Peers tab opens the service, including after re-entry", () => {
+    const dashboard = makeDashboard();
+    const service = new FakePeerService();
+    dashboard.setPeerService(service);
+    dashboard.handleInput("h");
+    const tab = () => assertDialog(dashboard.dialog, "setup").tab;
+    expect(tab()).toBe(0);
+    dashboard.handleInput("\t");
+    expect(tab()).toBe(1);
+    expect(service.calls).toEqual([]);
+    dashboard.handleInput("3");
+    expect(tab()).toBe(2);
+    expect(service.calls).toEqual(["open"]);
+    dashboard.handleInput("\x1b[Z");
+    expect(tab()).toBe(1);
+    expect(service.calls).toEqual(["open", "close"]);
+    dashboard.handleInput("\t");
+    expect(tab()).toBe(2);
+    dashboard.handleInput("\t");
+    expect(tab()).toBe(0);
+    dashboard.handleInput("\x1b[Z");
+    expect(tab()).toBe(2);
+    dashboard.handleInput("\x1b");
+    expect(dashboard.dialog).toBeNull();
+    expect(service.calls).toEqual(["open", "close", "open", "close", "open", "close"]);
+  });
+
+  test("the numbered tab shortcuts type into every pairing field", () => {
+    const { dashboard, service } = open();
+    const typeDigits = () => { for (const digit of "123") dashboard.handleInput(digit); };
+    typeDigits();
+    expect(peersTab(dashboard).idValue).toBe("123");
+    service.setSession("initiator", { stage: "code-entry" });
+    typeDigits();
+    expect(peersTab(dashboard).sessionValue).toBe("123");
+    service.setStage({ stage: "naming", savedName: OTHER_SHORT });
+    typeDigits();
+    expect(peersTab(dashboard).sessionValue).toBe("123");
+    expect(service.calls).toEqual(["open"]);
+    service.setStage({ stage: "verifying" });
+    dashboard.handleInput("1");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+    expect(service.calls).toEqual(["open", "close"]);
   });
 
   test("without a peer service, I shows a notice and opens nothing", () => {
@@ -9259,10 +9312,10 @@ describe("Peers dialog", () => {
     const dashboard = makeDashboard();
     dashboard.handleInput("?");
     const lines = assertDialog(dashboard.dialog, "help").lines.map(stripAnsi);
-    expect(lines).toContain(`  ${"I".padEnd(18)}peers: this install's id, pairing`);
+    expect(lines).toContain(`  ${"I".padEnd(18)}setup: Peers tab (id and pairing)`);
     // The help dialog is 72 wide (68 inside), so the row is drawn uncut.
     const drawn = stripAnsi(((dashboard as any).dialogOverlay.render(72) as string[]).join("\n"));
-    expect(drawn).toMatch(/│ {4}I {17}peers: this install's id, pairing +│/);
+    expect(drawn).toMatch(/│ {4}I {17}setup: Peers tab \(id and pairing\) +│/);
   });
 
   test("the / command palette has a peers entry that opens the dialog", () => {
@@ -9271,10 +9324,10 @@ describe("Peers dialog", () => {
     dashboard.setPeerService(service);
     dashboard.handleInput("/");
     const palette = assertDialog(dashboard.dialog, "fuzzy");
-    const index = palette.allItems.indexOf("peers — I");
+    const index = palette.allItems.indexOf("setup: Peers tab — I");
     expect(index).toBeGreaterThanOrEqual(0);
     palette.onSelect(index);
-    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    expect(peersTab(dashboard)).toBeTruthy();
     expect(service.calls).toEqual(["open"]);
   });
 
@@ -9345,7 +9398,7 @@ describe("Peers dialog", () => {
     expect(out).toContain("not a peer");
   });
 
-  test("with no peer section on screen, a service change renders only while the Peers dialog is open", () => {
+  test("with no peer section on screen, a service change renders only while the Peers tab is open", () => {
     const dashboard = makeDashboard();
     // Counts renders, and stands in for the overlay the dialog opens.
     let renders = 0;
@@ -9375,7 +9428,15 @@ describe("Peers dialog", () => {
     service.set({ status: { kind: "starting" } });
     expect(counter.renders()).toBe(opened + 2);
 
-    dashboard.handleInput("\x1b"); // close it
+    dashboard.handleInput("\x1b[Z"); // Config is visible.
+    const hidden = counter.renders();
+    service.set({ status: { kind: "listening" } });
+    expect(counter.renders()).toBe(hidden);
+    dashboard.handleInput("3");
+    const reopened = counter.renders();
+    service.set({ status: { kind: "starting" } });
+    expect(counter.renders()).toBe(reopened + 1);
+    dashboard.handleInput("\x1b");
     const closed = counter.renders();
     service.set({ links: [{ ...link, connected: false }] });
     expect(counter.renders()).toBe(closed);
@@ -9405,7 +9466,7 @@ describe("Peers dialog", () => {
     test(`a pasted 64-character id (${label}) fills the input, and Enter pairs with it`, () => {
       const { dashboard, service } = open();
       for (const chunk of paste(`  ${OTHER.toUpperCase()}`)) dashboard.handleInput(chunk);
-      const dialog = assertDialog(dashboard.dialog, "peers");
+      const dialog = peersTab(dashboard);
       const typed = dialog.idValue;
       expect(typed.trim()).toBe(OTHER.toUpperCase());
       expect(text(dashboard)).toContain(OTHER.toUpperCase());
@@ -9417,6 +9478,13 @@ describe("Peers dialog", () => {
     });
   }
 
+  test("tab switches and digits inside a chunked paste stay in the input", () => {
+    const { dashboard, service } = open();
+    for (const chunk of ["\x1b[200~id", "\t", "3", "\x1b[201~"]) dashboard.handleInput(chunk);
+    expect(peersTab(dashboard).idValue).toBe("id 3");
+    expect(service.calls).toEqual(["open"]);
+  });
+
   test("an invalid id shows the error inline; typing clears it", () => {
     const { dashboard } = open();
     for (const ch of "abc123") dashboard.handleInput(ch);
@@ -9424,9 +9492,9 @@ describe("Peers dialog", () => {
     expect(text(dashboard)).toContain("Not an id: an id is 64 hex characters.");
     dashboard.handleInput("\x7f");
     expect(text(dashboard)).not.toContain("Not an id");
-    expect(assertDialog(dashboard.dialog, "peers").idValue).toBe("abc12");
+    expect(peersTab(dashboard).idValue).toBe("abc12");
     // This install's own id is refused too.
-    assertDialog(dashboard.dialog, "peers").idValue = SELF;
+    peersTab(dashboard).idValue = SELF;
     dashboard.handleInput("\r");
     expect(text(dashboard)).toContain("That is this install's own id.");
   });
@@ -9469,7 +9537,7 @@ describe("Peers dialog", () => {
     expect(text(dashboard)).toContain("Press any key to continue");
     dashboard.handleInput("x");
     expect(service.calls.at(-1)).toBe("dismiss");
-    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    expect(peersTab(dashboard)).toBeTruthy();
   });
 
   test("responder: the request with its code, exactly as specified, then naming", () => {
@@ -9502,7 +9570,7 @@ describe("Peers dialog", () => {
     service.setSession("initiator", { stage: "naming", savedName: OTHER_SHORT });
     service.calls = [];
     const submit = (name: string) => {
-      const dialog = assertDialog(dashboard.dialog, "peers");
+      const dialog = peersTab(dashboard);
       dialog.sessionValue = "";
       for (const ch of name) dashboard.handleInput(ch);
       dashboard.handleInput("\r");
@@ -9517,7 +9585,7 @@ describe("Peers dialog", () => {
 
     // Typing clears the error; the peer's own saved name and a new name are fine.
     dashboard.handleInput("x");
-    expect(assertDialog(dashboard.dialog, "peers").error).toBeNull();
+    expect(peersTab(dashboard).error).toBeNull();
     submit(OTHER_SHORT.toUpperCase());
     expect(service.calls).toEqual([`name:${OTHER_SHORT.toUpperCase()}`]);
     submit("Desk");
@@ -9532,7 +9600,7 @@ describe("Peers dialog", () => {
   test("every failure renders its message", () => {
     const { dashboard, service } = open();
     const cases: Array<[PairStage, string]> = [
-      [{ stage: "failed", failure: { kind: "refused", reason: "not-accepting" } }, `Pairing refused: ${OTHER_SHORT} does not have its Peers dialog open.`],
+      [{ stage: "failed", failure: { kind: "refused", reason: "not-accepting" } }, `Pairing refused: ${OTHER_SHORT} does not have its Peers tab open.`],
       [{ stage: "failed", failure: { kind: "refused", reason: "busy" } }, `Pairing refused: ${OTHER_SHORT} is busy with another pairing.`],
       [{ stage: "failed", failure: { kind: "wrong-code" } }, "Wrong code."],
       [{ stage: "failed", failure: { kind: "expired" } }, "The code expired."],
@@ -9560,7 +9628,7 @@ describe("Peers dialog", () => {
       service.calls = [];
       dashboard.handleInput("\x1b");
       expect(service.calls).toEqual(["cancel"]);
-      expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+      expect(peersTab(dashboard)).toBeTruthy();
     }
     service.setSession("responder", { stage: "naming", savedName: OTHER_SHORT });
     service.calls = [];
@@ -9584,7 +9652,7 @@ describe("Peers dialog", () => {
     service.calls = [];
     for (const key of ["x", "?", "a", "\r", "j"]) dashboard.handleInput(key);
     expect(service.calls).toEqual([]);
-    expect(assertDialog(dashboard.dialog, "peers")).toBeTruthy();
+    expect(peersTab(dashboard)).toBeTruthy();
   });
 
   test("a new session starts with an empty input and no stale error", () => {
@@ -9592,7 +9660,7 @@ describe("Peers dialog", () => {
     service.setSession("initiator", { stage: "code-entry" });
     for (const ch of "zz") dashboard.handleInput(ch);
     dashboard.handleInput("\r");
-    const dialog = assertDialog(dashboard.dialog, "peers");
+    const dialog = peersTab(dashboard);
     expect(dialog.sessionValue).toBe("zz");
     expect(dialog.error).not.toBeNull();
     service.setSession("responder", { stage: "naming", savedName: OTHER_SHORT });
@@ -9619,7 +9687,7 @@ describe("Peers dialog", () => {
       { stage: "naming", savedName: "N".repeat(32) },
       { stage: "failed", failure: { kind: "error", detail: "x".repeat(120) } },
     ];
-    assertDialog(dashboard.dialog, "peers").idValue = "y".repeat(200);
+    peersTab(dashboard).idValue = "y".repeat(200);
     for (const width of [DIALOG_WIDTH, 40]) {
       service.set({ session: null });
       const idle = (dashboard as any).dialogOverlay.render(width) as string[];
@@ -10460,7 +10528,7 @@ describe("Unified peer repos in the Agents tree", () => {
 
     selectByKey(dashboard, WORKER_KEY);
     const text = footer();
-    const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers"];
+    const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
     for (const hint of ["s: send", "m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
@@ -10559,7 +10627,7 @@ describe("Unified peer repos in the Agents tree", () => {
     // ? / / / I open their dialogs; Ctrl+C (handled before the dashboard) is never refused.
     d = onRemote();
     d.setPeerService(new FakePeerService());
-    for (const [key, type] of [["?", "help"], ["/", "fuzzy"], ["I", "peers"]] as const) {
+    for (const [key, type] of [["?", "help"], ["/", "fuzzy"], ["I", "setup"]] as const) {
       d.handleInput(key);
       expect(d.dialog?.type).toBe(type);
       d.closeDialog();
@@ -10586,8 +10654,8 @@ describe("Unified peer repos in the Agents tree", () => {
       pick("DIFF — run ib diff");
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
       expect(dashboard.currentMode).not.toBe("DIFF");
-      pick("peers — I");
-      expect(dashboard.dialog?.type).toBe("peers");
+      pick("setup: Peers tab — I");
+      expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
       expect(service.calls).toContain("open");
     } finally {
       retire.mockRestore();

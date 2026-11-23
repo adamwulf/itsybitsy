@@ -93,7 +93,7 @@ test("the ordinary drainer applies passthrough and peer labels to the queued tex
 
 test("wire ids ignore recycled nicknames and select the keyed queue of the named repo", async () => {
   await cli.addAgent(repo, "replacement", { nickname: "old-id" });
-  expect(await exchange(header({ target: { kind: "agent", repo: "photos", agent: "old-id" } }))).toMatchObject({ ok: false });
+  expect(await exchange(header({ target: { kind: "agent", repo: "photos", agent: "old-id" } }))).toMatchObject({ op: "error" });
   const other = await cli.addRepo("other");
   for (const [path, name] of [[repo, "photos"], [other, "other"]] as const) {
     const key = "home/" + name + "/same";
@@ -146,7 +146,8 @@ test.each(["header", "FIN"])("stalled %s stops the receive half and returns the 
   const finish = response.finish.bind(response);
   response.finish = async () => { await finish(); finished.resolve(); };
   // QUIC can acknowledge every reply byte while the client has yet to read.
-  Object.assign(response, { stopped: async () => null });
+  response.stopReceiving = async () => { await b.closed(); };
+  const close = spyOn(b, "close");
   const accept = b.acceptBi.bind(b);
   b.acceptBi = async () => { b.acceptBi = accept; return response; };
   const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
@@ -161,11 +162,12 @@ test.each(["header", "FIN"])("stalled %s stops the receive half and returns the 
     expect(a.closeInfo()).toBeNull();
     if (stage === "header") {
       const reply = JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
-      expect(reply).toMatchObject({ ok: false, error: expect.stringContaining("No progress") });
+      expect(reply).toMatchObject({ op: "error", reason: expect.stringContaining("No progress") });
       a.close(0, "read the error");
     } else {
-      clock.advance(1); // This client never reads.
+      clock.advance(1); // The ACK finished before the single teardown owner closed.
       expect(await a.closed()).toMatchObject({ byPeer: true, code: 3, reason: "send read stalled" });
+      expect(close).toHaveBeenCalledTimes(1);
     }
     await serving;
     await expect(stream.writeAll(Uint8Array.of(1))).rejects.toThrow();
@@ -173,9 +175,9 @@ test.each(["header", "FIN"])("stalled %s stops the receive half and returns the 
 });
 
 test("unknown, stopped, unpaired and attachment sends are refused before queueing", async () => {
-  expect(await exchange(header({ target: { kind: "agent", agent: "missing" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not found") });
+  expect(await exchange(header({ target: { kind: "agent", agent: "missing" } }))).toMatchObject({ op: "error", reason: expect.stringContaining("not found") });
   const files = [{ name: "a", size: 0, sha256: "0".repeat(64), spellings: ["a"] }];
-  expect(await exchange(header({ files }))).toEqual({ ok: false, error: "Attachment hash mismatch" });
+  expect(await exchange(header({ files }))).toEqual({ op: "error", reason: "Attachment hash mismatch" });
   let checks = 0;
   await expect(exchange(header(), async () => ++checks < 4 ? "desk" : null, true)).rejects.toThrow();
   paneProbe.set(cmd => {
@@ -183,9 +185,9 @@ test("unknown, stopped, unpaired and attachment sends are refused before queuein
     expect(cmd).toEqual(["tmux", "display-message", "-p", "-t", "=ib-worker:", "#{pane_dead}"]);
     return makeSpawnResult(0, "1"); // dead delivery pane
   });
-  expect(await exchange(header())).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
+  expect(await exchange(header())).toMatchObject({ op: "error", reason: expect.stringContaining("not running") });
   paneProbe.set(() => makeSpawnResult(1, "", "no such session"));
-  expect(await exchange(header())).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
+  expect(await exchange(header())).toMatchObject({ op: "error", reason: expect.stringContaining("not running") });
   expect(lines).toEqual([]);
   expect(await readOutbox(join(cli.home, ".itsybitsy", "agents", "worker"))).toEqual([]);
 });
@@ -195,7 +197,7 @@ test("repo and system coordinators use their own queues", async () => {
   expect(await exchange(request)).toEqual({ ok: true, id: request.id });
   expect(await readOutbox(join(cli.home, ".itsybitsy", "agents", "photos"))).toMatchObject([{ fromAgent: "", raw: false, message: "/compact" }]);
   paneProbe.set(() => makeSpawnResult(0, "1"));
-  expect(await exchange(header({ target: { kind: "system" } }))).toMatchObject({ ok: false, error: expect.stringContaining("not running") });
+  expect(await exchange(header({ target: { kind: "system" } }))).toMatchObject({ op: "error", reason: expect.stringContaining("not running") });
   paneProbe.set(() => makeSpawnResult(0, "0"));
   // Hold the normal coordinator queue lock until after inspecting the acceptance.
   const dir = join(cli.home, ".itsybitsy");
@@ -326,7 +328,7 @@ test.each(["hash", "short", "trailing", "disk", "revoked", "stall", "malformed"]
   } else {
     const data = { hash: "abd", short: "ab", trailing: "abcd", disk: "", malformed: "" }[kind]!;
     const error = { hash: "hash mismatch", short: "Early EOF", trailing: "Trailing data", disk: "1 GiB", malformed: "Malformed" }[kind]!;
-    expect(await exchange(req, paired, false, Buffer.from(data))).toMatchObject({ ok: false, error: expect.stringContaining(error) });
+    expect(await exchange(req, paired, false, Buffer.from(data))).toMatchObject({ op: "error", reason: expect.stringContaining(error) });
   }
   expect(await readdir(dir)).toEqual([]);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
@@ -341,7 +343,7 @@ test.each([
   expect(await exchange(first)).toMatchObject({ ok: true });
   await Bun.write(join(cli.home, ".itsybitsy/config.json"), JSON.stringify({ peering: { attachments: { maxFileMB: 1, [key]: value } } }));
   const req = header({ files: sizes.map((size, i) => ({ ...manifestFile("", "a", String(i)), size })) });
-  expect(await exchange(req)).toMatchObject({ ok: false, error: expect.stringContaining(`laptop (peering.attachments.${key} = ${value})`) });
+  expect(await exchange(req)).toMatchObject({ op: "error", reason: expect.stringContaining(`laptop (peering.attachments.${key} = ${value})`) });
   expect(await exchange(header())).toMatchObject({ ok: true });
 });
 
@@ -590,7 +592,7 @@ test("exclusive destination creation preserves existing bytes and cleans the fai
     return openFile(path, ...args);
   });
   try {
-    expect(await exchange(header({ files: [manifestFile("replacement")] }), paired, false, Buffer.from("replacement"))).toMatchObject({ ok: false });
+    expect(await exchange(header({ files: [manifestFile("replacement")] }), paired, false, Buffer.from("replacement"))).toMatchObject({ op: "error" });
     expect(await Bun.file(existing).text()).toBe("original");
     expect(await readdir(dir)).toEqual([]);
     expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
@@ -606,7 +608,7 @@ test.each(["second hash", "target stopped"])("%s after writing the first file ro
   }
   const bytes = Buffer.from(kind === "second hash" ? "onebad" : "onetwo");
   expect(await exchange(header({ files }), paired, false, bytes)).toMatchObject({
-    ok: false, error: expect.stringContaining(kind === "second hash" ? "hash mismatch" : "not running"),
+    op: "error", reason: expect.stringContaining(kind === "second hash" ? "hash mismatch" : "not running"),
   });
   expect(await readdir(dir)).toEqual([]);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);

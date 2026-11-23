@@ -425,7 +425,7 @@ describe("trusted new-agent responder", () => {
   ] as const)("refuses %s before spawning", async (_, overrides, reason) => {
     const { side, spawn, notice } = receiver();
     const reply = decodeText(await rawRequest(side.a, encode({ ...request, ...overrides })));
-    expect(reply).toEqual({ ok: false, error: expect.stringContaining(reason) });
+    expect(reply).toEqual({ op: "error", reason: expect.stringContaining(reason) });
     expect(spawn).not.toHaveBeenCalled();
     expect(notice).not.toHaveBeenCalled();
     side.a.close(0, "done");
@@ -456,7 +456,7 @@ describe("trusted new-agent responder", () => {
     await Bun.write(join(home, ".itsybitsy", "agent-types", "system-coordinator.md"), "---\nspawnable: true\n---\n");
     const { side, spawn } = receiver();
     const reply = decodeText(await rawRequest(side.a, encode({ ...request, type: SYSTEM_COORDINATOR_TYPE })));
-    expect(reply).toEqual({ ok: false, error: "Cannot start a system-coordinator remotely" });
+    expect(reply).toEqual({ op: "error", reason: "Cannot start a system-coordinator remotely" });
     expect(spawn).not.toHaveBeenCalled();
     side.a.close(0, "done");
   });
@@ -469,7 +469,7 @@ describe("trusted new-agent responder", () => {
     await waitFor(() => lookup.mock.calls.length === 1);
     side.peers.clear();
     registry.resolve([{ name: "app", path: "/app" }]);
-    expect(decodeText(await reply)).toEqual({ ok: false, error: "Machine is no longer paired" });
+    expect(decodeText(await reply)).toEqual({ op: "error", reason: "Machine is no longer paired" });
     expect(spawn).not.toHaveBeenCalled();
     side.a.close(0, "done");
   });
@@ -488,7 +488,7 @@ describe("trusted new-agent responder", () => {
     await waitFor(() => spawn.mock.calls.length === 1);
     expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.clock.advance(25_000);
-    expect(decodeText(await pending)).toEqual({ ok: false, error: expect.stringContaining("outcome unknown") });
+    expect(decodeText(await pending)).toEqual({ op: "error", reason: expect.stringContaining("outcome unknown") });
     expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.a.close(0, "done");
   });
@@ -496,7 +496,7 @@ describe("trusted new-agent responder", () => {
   test("a throwing spawn gets an error reply and leaves the connection usable", async () => {
     const { side, spawn } = receiver();
     spawn.mockRejectedValue(new Error("spawn failed"));
-    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "spawn failed" });
+    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ op: "error", reason: "spawn failed" });
     expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.a.close(0, "done");
   });
@@ -512,7 +512,7 @@ describe("trusted new-agent responder", () => {
 
   test("returns spawn failures with one log entry and no success notice", async () => {
     const { side, notice } = receiver(false);
-    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "Worktree is dirty" });
+    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ op: "error", reason: "Worktree is dirty" });
     expect(side.logs.filter(line => line.includes("Worktree is dirty"))).toHaveLength(1);
     expect(notice).not.toHaveBeenCalled();
     side.a.close(0, "done");

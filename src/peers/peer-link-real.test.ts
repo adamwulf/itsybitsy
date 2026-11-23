@@ -299,3 +299,34 @@ test("agents send text and two files in both directions over real paired endpoin
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
+
+test("a refusal preserves the shared connection for the next exchange", async () => {
+  const net = makeNetwork(await loadIroh());
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", []);
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  const connection = a.service["poller"].connectedConnection(b.id)!;
+  await expect(a.service.sendRemoteMessage(b.id, { op: "send", id: crypto.randomUUID(), from: { kind: "user" },
+    target: { kind: "agent", agent: "missing" }, message: "hello", files: [] }, "handoff")).rejects.toThrow("not found");
+  expect(await a.service.fetchCoordinatorPane(b.id)).toMatchObject({ text: "b coordinator" });
+  expect(a.service["poller"].connectedConnection(b.id)).toBe(connection);
+});
+
+test("an agents poll during header saturation receives busy and stays connected", async () => {
+  const net = makeNetwork(await loadIroh());
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", []);
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  const connection = a.service["poller"].connectedConnection(b.id)!;
+  const streams = await Promise.all(Array.from({ length: 8 }, () => connection.openBi()));
+  try {
+    for (const stream of streams) await stream.writeAll(Uint8Array.of(0));
+    await waitFor(() => link(a)?.lastError === "busy, try again");
+    expect(link(a)?.connected).toBe(true);
+    expect(a.service["poller"].connectedConnection(b.id)).toBe(connection);
+  } finally { await Promise.all(streams.map(s => s.cancel())); }
+});

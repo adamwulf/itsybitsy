@@ -139,29 +139,27 @@ export class IrohSecretKey {
   }
 }
 
-function ignoreTerminalStreamError(err: unknown) {
-  const reason = shortIrohMessage(err).split(":").at(-1)!.trim();
-  if (!/^(?:ClosedStream|closed stream|stream (?:is |was )?(?:already )?(?:closed|finished|stopped|reset))\.?$/i.test(reason)) throw err;
-}
-
 /**
  * One bidirectional QUIC stream: the send half (`writeAll`, `finish`) and the
  * receive half (`readToEnd`) together.
  */
 export class IrohBiStream {
+  private receivedFin = false;
+  private sentFin = false;
   constructor(private readonly raw: AddonBiStream) {}
 
   async stopReceiving(): Promise<void> {
-    await this.raw.recv.stop(0n).catch(ignoreTerminalStreamError);
+    if (!this.receivedFin) await this.raw.recv.stop(0n).catch(() => {});
   }
 
-  /** Abort only this request, even if the send half was already finished. */
   async cancel(): Promise<void> {
-    await Promise.all([this.stopReceiving(), this.raw.send.reset(0n).catch(ignoreTerminalStreamError)]);
+    await Promise.allSettled([this.stopReceiving(), this.sentFin ? undefined : this.raw.send.reset(0n)]);
   }
 
   async read(limit: number): Promise<Uint8Array> {
-    return toUint8(await callAsync("RecvStream.read", () => this.raw.recv.read(limit)));
+    const chunk = toUint8(await callAsync("RecvStream.read", () => this.raw.recv.read(limit)));
+    if (!chunk.length) this.receivedFin = true;
+    return chunk;
   }
 
   write(bytes: Uint8Array): Promise<number> {
@@ -174,8 +172,9 @@ export class IrohBiStream {
   }
 
   /** Finish the send half: the other side's `readToEnd` then completes. */
-  finish(): Promise<void> {
-    return callAsync("SendStream.finish", () => this.raw.send.finish());
+  async finish(): Promise<void> {
+    try { await callAsync("SendStream.finish", () => this.raw.send.finish()); }
+    finally { this.sentFin = true; }
   }
 
   /**
@@ -183,7 +182,9 @@ export class IrohBiStream {
    * {@link isIrohTooLong} accepts when the stream is longer than `limit` bytes.
    */
   async readToEnd(limit: number): Promise<Uint8Array> {
-    return toUint8(await callAsync("RecvStream.readToEnd", () => this.raw.recv.readToEnd(limit)));
+    const bytes = toUint8(await callAsync("RecvStream.readToEnd", () => this.raw.recv.readToEnd(limit)));
+    this.receivedFin = true;
+    return bytes;
   }
 }
 

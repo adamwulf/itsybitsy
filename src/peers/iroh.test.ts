@@ -256,7 +256,7 @@ test("only src/peers/iroh.ts references @number0/iroh, and only through a dynami
   }
 });
 
-test("native stream cancellation preserves unexpected failures and waits for both terminal halves", async () => {
+test("native cancellation waits for both halves even when stop and reset reject", async () => {
   const { IrohBiStream } = await import("./iroh");
   const reset = Promise.withResolvers<void>();
   const stream = new IrohBiStream({ recv: { stop: async () => { throw Error("closed stream"); } },
@@ -266,5 +266,6 @@ test("native stream cancellation preserves unexpected failures and waits for bot
   await Bun.sleep(0);
   expect(finished).toBe(false);
   reset.reject(Error("stream reset failed"));
-  await expect(cancelled).rejects.toThrow("stream reset failed");
+  await cancelled;
+  expect(finished).toBe(true);
 });

@@ -35,7 +35,7 @@
 
 import {
   PEER_CLOSE,
-  PeerErrorReply,
+  PeerErrorReply, PeerBusyReply,
   PeerProtocolError,
   closeQuietly,
   cleanRemoteText,
@@ -343,7 +343,10 @@ export class PeerPoller {
       this.succeeded(link, snapshot);
     } catch (err) {
       if (!this.isCurrent(link, generation)) return;
-      this.failed(link, describeFailure(err, conn));
+      if (err instanceof PeerBusyReply && link.conn === conn && conn && !this.recordObservedClose(link, conn)) {
+        link.connected = true;
+        if (link.lastError !== err.message) { link.lastError = err.message; this.notify(); }
+      } else this.failed(link, describeFailure(err, conn));
     } finally {
       this.inFlight.delete(link.id);
     }

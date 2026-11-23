@@ -33,11 +33,11 @@ interface ManifestOptions {
   cwd: string;
   home: string;
   limits?: TransferLimits;
-  machine?: string;
+  machine: string;
 }
 
 export async function buildAttachmentManifest(
-  paths: readonly string[], { cwd, home, limits = DEFAULT_TRANSFER_LIMITS, machine = "this machine" }: ManifestOptions,
+  paths: readonly string[], { cwd, home, limits = DEFAULT_TRANSFER_LIMITS, machine }: ManifestOptions,
 ): Promise<ManifestEntry[]> {
   if (!paths.length) return [];
   const enabled = checkAttachmentsEnabled(limits, machine);

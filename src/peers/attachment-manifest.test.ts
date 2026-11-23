@@ -32,7 +32,7 @@ test("resolves relative, home, absolute and symlink spellings into one manifest 
   await writeFile(original, "hello");
   await symlink(original, alias);
   const paths = ["file", "~/work/file", "./link", original, "./link"];
-  const entries = await manifest(paths, { cwd, home, limits: { ...DEFAULT_TRANSFER_LIMITS, maxFiles: 1 } });
+  const entries = await manifest(paths, { cwd, home, machine: "desk", limits: { ...DEFAULT_TRANSFER_LIMITS, maxFiles: 1 } });
   expect(entries).toHaveLength(1);
   const source = await realpath(original);
   expect(entries[0]).toMatchObject({ argument: "file", name: "file", size: 5, source });
@@ -45,7 +45,7 @@ test("refuses missing paths, directories, fifos and sockets before opening them"
   await new Promise<void>((resolve, reject) => server.once("error", reject).listen(join(cwd, "socket"), resolve));
   try {
     for (const argument of ["~/unused", "./", "./fifo", "./socket"]) {
-      await expect(buildAttachmentManifest([argument], { cwd, home })).rejects.toThrow(argument);
+      await expect(buildAttachmentManifest([argument], { cwd, home, machine: "desk" })).rejects.toThrow(argument);
     }
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -61,12 +61,12 @@ test("refuses both protected roots by canonical path, including symlinked direct
     await writeFile(join(dir, "data"), "test fixture");
     await symlink(join(dir, "data"), join(cwd, name));
     for (const argument of ["./" + name, "~/.itsybitsy/" + name + "/data", "~/" + name + "/data"]) {
-      await expect(buildAttachmentManifest([argument], { cwd, home })).rejects.toThrow(/protected/i);
+      await expect(buildAttachmentManifest([argument], { cwd, home, machine: "desk" })).rejects.toThrow(/protected/i);
     }
   }
   await mkdir(join(home, ".itsybitsy", "peer-outbox"));
   await writeFile(join(home, ".itsybitsy", "peer-outbox", "ok"), "");
-  expect(await manifest(["~/.itsybitsy/peer-outbox/ok"], { cwd, home })).toHaveLength(1);
+  expect(await manifest(["~/.itsybitsy/peer-outbox/ok"], { cwd, home, machine: "desk" })).toHaveLength(1);
 });
 
 test("enforces supplied limits and names the sending machine", async () => {
@@ -92,7 +92,7 @@ test("hashes across chunk boundaries and handles an empty file", async () => {
 test("hash and body reads stay on the validated file after its name is replaced", async () => {
   const path = join(cwd, "report");
   await writeFile(path, "original");
-  const [entry] = await manifest([path], { cwd, home });
+  const [entry] = await manifest([path], { cwd, home, machine: "desk" });
   await rename(path, path + ".old");
   await writeFile(path, "different");
   const digest = createHash("sha256").update("original").digest("hex");
@@ -108,7 +108,7 @@ test("resolves symlinks before parent components for both cwd and home arguments
   await writeFile(join(home, "remote", "x"), "intended");
   await writeFile(join(cwd, "x"), "lexical");
   const args = ["dirlink/../x", "~/work/dirlink/../x"];
-  const [entry] = await manifest(args, { cwd, home });
+  const [entry] = await manifest(args, { cwd, home, machine: "desk" });
   expect(entry!.source).toBe(await realpath(join(home, "remote", "x")));
   expect(entry!.spellings).toEqual(expect.arrayContaining(args));
   expect(entry!.spellings).not.toContain(join(cwd, "x"));

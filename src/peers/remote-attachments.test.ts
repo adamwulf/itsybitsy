@@ -69,7 +69,7 @@ test("watchdog reclaims a dead CLI's staging before publication and leaves a liv
     const marker = join(spawnRequestDir(root), "." + id + ".staging");
     await Bun.write(marker, "");
     const lease = join(path, "lease");
-    await Bun.write(lease, JSON.stringify({ pid: process.pid, start: 128 }));
+    await Bun.write(lease, JSON.stringify({ pid: process.pid }));
     await sweepStagingLease(root, id, Date.now() + 25 * 3600_000);
     expect(await Bun.file(join(path, "0")).exists()).toBe(true);
     await Bun.write(lease, JSON.stringify({ pid: 2147483647, start: 1 }));
@@ -96,8 +96,11 @@ test.each([null, 129])("reclaim staging only after owner mismatch or expiry (obs
   try {
     await mkdir(dir, { recursive: true });
     await Bun.write(join(spawnRequestDir(root), "." + id + ".staging"), "");
-    await Bun.write(join(dir, "lease"), JSON.stringify({ pid: process.pid, start: 128 }));
+    await Bun.write(join(dir, "lease"), JSON.stringify({ pid: process.pid }));
     await Bun.write(join(dir, "0"), "staged");
+    processStartEpochSecondsCtx.set(() => 128);
+    await sweepStagingLease(root, id, Date.now());
+    expect(await Bun.file(join(dir, "owner.json")).json()).toEqual({ pid: process.pid, start: 128 });
     processStartEpochSecondsCtx.set(() => observed);
     await sweepStagingLease(root, id, Date.now());
     expect(await Bun.file(join(dir, "0")).exists()).toBe(observed === null);

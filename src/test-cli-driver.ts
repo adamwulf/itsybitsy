@@ -132,10 +132,6 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   const { setNewAgentNoWorktreeCallerResolver } = await import("./ib-commands");
   const { setBoundNoWorktreeCallerResolver, setNoWorktreeRepoRootsLoader } = await import("./hooks/agent-context");
 
-  // Observe only the fixture process; all other host table probes stay guarded.
-  const { processStartEpochSecondsCtx } = await import("./agents");
-  const observeStart = processStartEpochSecondsCtx.fn;
-  processStartEpochSecondsCtx.set(pid => pid === process.pid ? fixtureProcessStart(pid) : observeStart(pid));
   const ancestry = (): CliAncestry => config.ancestry ?? block({ kind: "process-ancestry", detail: {} });
   const resolver = (cwd: string, options?: { coordinatorId?: string; roots?: string[] }) => resolveNoWorktreeCaller(cwd, {
     ...options,

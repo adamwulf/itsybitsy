@@ -49,7 +49,7 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
-import { fstatSync, futimesSync } from "node:fs";
+import { existsSync, fstatSync, futimesSync } from "node:fs";
 import { mkdir, open, rm, stat } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
@@ -77,7 +77,7 @@ import {
   brokerFail,
   isSameDirectory,
   resolveRoutedCaller, interruptedSend,
-  submitWatchdogRequest,
+  spawnResultDir, submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
   type SpawnServerDeps,
@@ -235,11 +235,9 @@ function stagingOwnerStart(pid: number): number | null {
 }
 
 async function startStagingLease(stage: string) {
-  const start = stagingOwnerStart(process.pid);
-  if (start === null) throw new Error("Cannot verify the staging owner process start time");
   await mkdir(stage, { mode: 0o700 });
   const lease = await open(join(stage, "lease"), "wx", 0o600);
-  try { await lease.writeFile(JSON.stringify({ pid: process.pid, start })); }
+  try { await lease.writeFile(JSON.stringify({ pid: process.pid })); }
   finally { await lease.close(); }
 }
 
@@ -255,12 +253,30 @@ async function stagingLeaseState(dir: string, id: string, now: number): Promise<
     const { bytesRead } = await lease.read(buffer);
     let owner;
     try { owner = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return unknown; }
-    if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0 ||
-        !Number.isSafeInteger(owner.start) || owner.start <= 0) return unknown;
+    if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0) return unknown;
     if (!isPidAliveCtx.fn(owner.pid)) return "abandoned";
     const start = stagingOwnerStart(owner.pid);
     if (start === null) return unknown;
-    return start === owner.start ? "active" : "abandoned";
+    let stamp;
+    try { stamp = await openBrokerLease(dir, id, "owner.json"); }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      try {
+        const first = await openBrokerLease(dir, id, "owner.json", true);
+        try { await first.writeFile(JSON.stringify({ pid: owner.pid, start })); } finally { await first.close(); }
+        return "active";
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      stamp = await openBrokerLease(dir, id, "owner.json");
+    }
+    try {
+      const meta = await stamp.stat();
+      if (!meta.isFile() || meta.nlink !== 1 || meta.size > 256) return unknown;
+      const { bytesRead } = await stamp.read(buffer);
+      let saved;
+      try { saved = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return unknown; }
+      if (saved?.pid !== owner.pid || !Number.isSafeInteger(saved.start)) return unknown;
+      return start === saved.start ? "active" : "abandoned";
+    } finally { await stamp.close(); }
   } finally { await lease.close(); }
 }
 
@@ -307,11 +323,11 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   const staged = join(parent, request.id);
   let ownsStage = false;
   try {
-    if (remote) {
+    if (stage) {
       await mkdir(parent, { recursive: true, mode: 0o700 });
       await startStagingLease(staged);
       ownsStage = true;
-      request.files = stage ? await stage(staged, true) : [];
+      request.files = await stage(staged, true);
     }
     const result = await submitWatchdogRequest(
       dir,
@@ -324,7 +340,10 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
           "The watchdog had already taken the message, so it may still be delivered; check with the recipient before sending it again.",
       },
       deps.timeoutMs ?? (remote ? IDLE_TIMEOUT_MS : SPAWN_CLIENT_TIMEOUT_MS),
-      remote ? { ...deps, cancelClaimed: () => rm(staged, { recursive: true, force: true }), readProgress: async () => (await stat(join(staged, "progress")).catch(() => null))?.mtimeMs ?? 0 } : deps,
+      remote ? { ...deps, cancelClaimed: async () => {
+        if (ownsStage) await rm(staged, { recursive: true, force: true });
+        else await (await open(join(spawnResultDir(dir), request.id + ".cancel"), "wx", 0o600)).close();
+      }, readProgress: async () => (await stat(join(staged, "progress")).catch(() => null))?.mtimeMs ?? 0 } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
@@ -552,16 +571,19 @@ export async function handleSendRequest(
       const controller = new AbortController();
       let marker: Awaited<ReturnType<typeof createBrokerProgress>> | undefined;
       try {
-        await requireActiveStagingLease(ctx.agentDir, ctx.id);
-        marker = await createBrokerProgress(ctx.agentDir, ctx.id);
+        if (files.length) {
+          await requireActiveStagingLease(ctx.agentDir, ctx.id);
+          marker = await createBrokerProgress(ctx.agentDir, ctx.id);
+        }
       }
       catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return interruptedSend("claimed");
         throw err;
       }
       const signal = deps.transferSignal ? AbortSignal.any([controller.signal, deps.transferSignal]) : controller.signal;
+      const cancelPath = join(spawnResultDir(ctx.agentDir), ctx.id + ".cancel");
       const checkClient = () => {
-        if (marker && !fstatSync(marker.fd).nlink) controller.abort(new Error("Send cancelled"));
+        if (marker ? !fstatSync(marker.fd).nlink : existsSync(cancelPath)) controller.abort(new Error("Send cancelled"));
       };
       let updated = 0;
       const progress = () => {
@@ -571,6 +593,7 @@ export async function handleSendRequest(
           futimesSync(marker.fd, now / 1000, now / 1000);
         }
       };
+      checkClient();
       const timer = setInterval(checkClient, 250);
       try {
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, signal, progress) : undefined;

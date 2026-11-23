@@ -380,12 +380,18 @@ describe("qualified agent addresses", () => {
       watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
     }));
     const controller = new AbortController();
-    const send = cli.run(["send", "laptop-b/remote-id", "read"], {
+    await Bun.write(join(worktree, "report"), "body");
+    const send = cli.run(["send", "laptop-b/remote-id", "--attach", "report", "read"], {
       cwd: worktree, sandboxed: true, ancestry: human, interrupt: controller.signal,
       allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
     });
     try {
       await waitFor(async () => (await readdir(spawnRequestDir(agentDir)).catch(() => [])).some(n => n.endsWith(".json")));
+      const [id] = await readdir(join(agentDir, "send-attachments"));
+      const { sweepStagingLease } = await import("./send-broker");
+      await sweepStagingLease(agentDir, id!, Date.now());
+      const stamp = await Bun.file(join(agentDir, "send-attachments", id!, "owner.json")).json();
+      expect(stamp.start).toBe(fixtureProcessStart(stamp.pid));
       processStartEpochSecondsCtx.set(pid => evidence === "unavailable" ? null : fixtureProcessStart(pid) + 1);
       await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }) });
       expect(await send).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("Cannot verify the staging lease owner") });
@@ -471,6 +477,7 @@ describe("qualified agent addresses", () => {
       const result = await remote;
       expect(result.exitCode, result.stderr).toBe(0);
       expect(messages).toMatchObject([{ message: "hello", from: { id: "laptop-a/App/private-git" } }]);
+      await expect(readdir(join(agent.agentDir, "send-attachments"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally { await chmod(git, mode); clearInterval(timer); }
   });
 

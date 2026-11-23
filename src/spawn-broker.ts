@@ -509,7 +509,7 @@ async function pruneStaleResults(agentDir: string, nowMs: number): Promise<void>
     return;
   }
   for (const name of names) {
-    if (!REQUEST_FILE.test(name)) continue;
+    if (!REQUEST_FILE.test(name) && !/^[a-f0-9]{32}\.cancel$/.test(name)) continue;
     const path = join(spawnResultDir(agentDir), name);
     try {
       if (nowMs - (await stat(path)).mtimeMs > SPAWN_STALE_RESULT_MS) await rm(path, { force: true });

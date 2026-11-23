@@ -190,9 +190,9 @@ export function stagingDirectoryStat(agentDir: string, id: string) {
   return withBrokerDirectory(agentDir, id, dir => dir.stat());
 }
 
-export function openBrokerLease(agentDir: string, id: string) {
+export function openBrokerLease(agentDir: string, id: string, name: "lease" | "owner.json" = "lease", create = false) {
   return withBrokerDirectory(agentDir, id, (_dir, path, noFollow) =>
-    open(join(path, "lease"), constants.O_RDONLY | constants.O_NONBLOCK | noFollow));
+    open(join(path, name), (create ? constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL : constants.O_RDONLY) | constants.O_NONBLOCK | noFollow, 0o600));
 }
 
 // Reclaim only protocol-owned entries through pinned directory handles. A
@@ -202,6 +202,7 @@ export async function removeAbandonedStaging(agentDir: string, id: string) {
     await withBrokerDirectory(agentDir, id, async dir => {
       await removeBrokerMember(dir, "progress");
       await removeBrokerMember(dir, "lease");
+      await removeBrokerMember(dir, "owner.json");
       for (let n = 0; n < 100; n++) await removeBrokerMember(dir, String(n));
     });
     await withBrokerDirectory(agentDir, undefined, parent => removeBrokerMember(parent, id, true));

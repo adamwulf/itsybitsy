@@ -1844,3 +1844,27 @@ describe("endpoint owner peer-outbox polling", () => {
     } finally { await service.shutdown(); }
   });
 });
+
+test("watcher shutdown aborts an outbox worker and waits for its cleanup", async () => {
+  const started = Promise.withResolvers<void>();
+  const cleanup = Promise.withResolvers<void>();
+  const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  let signal: AbortSignal | undefined;
+  const { service } = makeService({ pollOutbox: async send => {
+    try { await send(ID_REMOTE, header, {}); } finally { await cleanup.promise; }
+  } });
+  spyOn(service, "sendRemoteMessage").mockImplementation(async (_id, _header, _src, transfer) => {
+    signal = transfer!.signal;
+    started.resolve();
+    return new Promise(resolve => signal!.addEventListener("abort", () => resolve(header.id), { once: true }));
+  });
+  await service.openDialog();
+  await started.promise;
+  let done = false;
+  const stop = service.shutdown().then(() => { done = true; });
+  await Bun.sleep(10);
+  expect(signal?.aborted).toBe(true);
+  expect(done).toBe(false);
+  cleanup.resolve();
+  await stop;
+});

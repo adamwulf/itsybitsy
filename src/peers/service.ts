@@ -343,6 +343,8 @@ export class PeerService {
   private readonly listeners = new Set<() => void>();
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
+  private readonly outboxPolls = new Set<Promise<void>>();
+  private outboxOwner?: AbortController;
   private outboxTimer?: ReturnType<typeof setInterval>;
   private readonly receipts = new Map<string, { row: IncomingTransfer; controller?: AbortController; done: Promise<void> }>();
   cancelReceipt(id: string) {
@@ -788,8 +790,15 @@ export class PeerService {
     this.cancelRetry();
     this.active?.session.cancel();
     this.active = null;
-    if (this.binding !== null) await this.binding;
-    await Promise.all([this.closeEndpoint(), Promise.allSettled(receipts.map(entry => entry.done))]);
+    this.outboxOwner?.abort(new Error("Watcher shutting down"));
+    const drain = async () => {
+      if (this.binding !== null) await this.binding;
+      await Promise.all([this.closeEndpoint(), Promise.allSettled(receipts.map(entry => entry.done)), Promise.allSettled(this.outboxPolls)]);
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([drain(), new Promise<void>(resolve => { timer = setTimeout(resolve, 2000); })]);
+    } finally { clearTimeout(timer); }
   }
 
   /**
@@ -801,6 +810,7 @@ export class PeerService {
   private async closeEndpoint(logClosed = true): Promise<void> {
     this.cancelStable();
     clearInterval(this.outboxTimer);
+    this.outboxOwner?.abort(new Error("Endpoint stopped"));
     this.poller.stop();
     const ep = this.endpoint;
     this.endpoint = null;
@@ -901,10 +911,18 @@ export class PeerService {
     this.acceptLoopDone = this.acceptLoop(ep);
     this.poller.start();
     const poll = this.deps.pollOutbox;
-    if (poll) this.outboxTimer = setInterval(() => {
-      void poll((peer, header, transfer) => this.sendRemoteMessage(peer, header, "handoff", transfer), this.deps.log, () => this.endpoint === ep && !this.shuttingDown)
-        .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`));
-    }, 250);
+    if (poll) {
+      const owner = this.outboxOwner = new AbortController();
+      this.outboxTimer = setInterval(() => {
+        if (owner.signal.aborted || this.outboxPolls.size >= 4) return;
+        const work = poll((peer, header, transfer) => this.sendRemoteMessage(peer, header, "handoff", {
+          ...transfer, signal: transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal,
+        }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown)
+          .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`))
+          .finally(() => this.outboxPolls.delete(work));
+        this.outboxPolls.add(work);
+      }, 250);
+    }
     return { kind: "bound" };
   }
 

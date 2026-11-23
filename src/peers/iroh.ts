@@ -139,6 +139,11 @@ export class IrohSecretKey {
   }
 }
 
+function ignoreTerminalStreamError(err: unknown) {
+  const reason = shortIrohMessage(err).split(":").at(-1)!.trim();
+  if (!/^(?:ClosedStream|closed stream|stream (?:is |was )?(?:already )?(?:closed|finished|stopped|reset))\.?$/i.test(reason)) throw err;
+}
+
 /**
  * One bidirectional QUIC stream: the send half (`writeAll`, `finish`) and the
  * receive half (`readToEnd`) together.
@@ -147,16 +152,12 @@ export class IrohBiStream {
   constructor(private readonly raw: AddonBiStream) {}
 
   async stopReceiving(): Promise<void> {
-    await this.raw.recv.stop(0n);
+    await this.raw.recv.stop(0n).catch(ignoreTerminalStreamError);
   }
 
   /** Abort only this request, even if the send half was already finished. */
   async cancel(): Promise<void> {
-    const terminal = (err: unknown) => {
-      const reason = shortIrohMessage(err).split(":").at(-1)!.trim();
-      if (!/^(?:ClosedStream|closed stream|stream (?:is |was )?(?:already )?(?:closed|finished|stopped|reset))\.?$/i.test(reason)) throw err;
-    };
-    await Promise.all([this.raw.recv.stop(0n).catch(terminal), this.raw.send.reset(0n).catch(terminal)]);
+    await Promise.all([this.stopReceiving(), this.raw.send.reset(0n).catch(ignoreTerminalStreamError)]);
   }
 
   async read(limit: number): Promise<Uint8Array> {

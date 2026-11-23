@@ -553,7 +553,7 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
       return;
     }
     if (headerReaders.size >= 8) {
-      void stream.stopReceiving().catch(() => {});
+      void stopReceivingOrClose(conn, stream, deps);
       try {
         await writeWithProgress(stream, encodeJson({ ok: false, error: "busy, try again" }), deps.setTimer);
         await waitForIO(deps, () => stream.finish());
@@ -595,6 +595,10 @@ async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerRe
   } finally { cancel(); }
 }
 
+async function stopReceivingOrClose(conn: PairConnection, stream: PairStream, deps: PeerResponderDeps) {
+  if (!await settledWithinGrace(stream.stopReceiving(), deps)) closeQuietly(conn, PEER_CLOSE.error, "receive stop failed or stalled");
+}
+
 /** One request on its own stream. Every error stays here. */
 async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
@@ -628,13 +632,13 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
         } });
         // A replay can acknowledge a previously queued attachment without
         // consuming its duplicate body.
-        if (header.files.length) void stream.stopReceiving().catch(() => {});
+        if (header.files.length) void stopReceivingOrClose(conn, stream, deps);
         reply = { ok: true, id: header.id };
       } catch (err) {
         stalledRead = err instanceof TransferIdleError;
         // STOP_SENDING is independent of the send half. The error ACK can
         // finish even if the native reader is still unwinding a stalled read.
-        void stream.stopReceiving().catch(() => {});
+        void stopReceivingOrClose(conn, stream, deps);
         reply = { ok: false, error: sendDiagnostic(errorDetail(err)) };
       }
       try {

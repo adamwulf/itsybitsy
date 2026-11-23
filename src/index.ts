@@ -1064,11 +1064,9 @@ export async function main() {
   // subcommands (hooks / team / config / peer) are checked at both layers — e.g.
   // `ib team add --help` resolves to the "team add" entry, while `ib team
   // --help` resolves to the "team" entry.
-  if (command && hasHelpFlag(args)) {
-    if (command === "send" && args.some((arg, i) => arg === "--attach" && (args[i + 1] === "-h" || args[i + 1] === "--help"))) {
-      console.error("Error: --attach requires a path");
-      process.exit(1);
-    }
+  const wantsHelp = hasHelpFlag(args);
+  // The send parser checks --attach operands before returning its help text.
+  if (command && command !== "send" && wantsHelp) {
     // Try the deepest match first: "<command> <sub>" if a sub is present.
     // Only do this for the known sub-grouped commands; everywhere else, the
     // top-level command key is the only valid lookup.
@@ -1941,7 +1939,7 @@ export async function main() {
       break;
     }
     case "send": {
-      // Parse known flags (--from, -f/--file) at any position. Unknown short
+      // Parse known flags (--attach, --from, -f/--file) at any position. Unknown short
       // flags (e.g. `-x`) and unknown long flags (e.g. `--bogus`) are rejected
       // BEFORE the target is seen so typos surface immediately. AFTER the
       // target, raw tokens — including ones that start with `-` — are joined
@@ -1958,13 +1956,13 @@ export async function main() {
         // Existing scripts pass `ib send <id> -f <path>` and that must keep
         // working.
         if (tok === "--from") {
-          if (!sendArgs[i + 1]) { console.error("Error: --from requires a value"); process.exit(1); }
+          if (!sendArgs[i + 1] && !wantsHelp) { console.error("Error: --from requires a value"); process.exit(1); }
           fromAgent = sendArgs[++i];
           continue;
         }
         if (tok === "--attach") {
           const path = sendArgs[i + 1];
-          if (!path || ["-f", "--file", "--from", "--attach"].includes(path)) {
+          if (!path || ["-f", "--file", "--from", "--attach", "--help", "-h"].includes(path)) {
             console.error("Error: --attach requires a path");
             process.exit(1);
           }
@@ -1973,10 +1971,11 @@ export async function main() {
           continue;
         }
         if (tok === "-f" || tok === "--file") {
-          if (!sendArgs[i + 1]) { console.error(`Error: ${tok} requires a path`); process.exit(1); }
+          if (!sendArgs[i + 1] && !wantsHelp) { console.error(`Error: ${tok} requires a path`); process.exit(1); }
           filePath = sendArgs[++i];
           continue;
         }
+        if (wantsHelp) continue;
         if (!seenTarget) {
           // Before the target: anything starting with `-` is an unknown flag.
           if (tok.startsWith("-")) {
@@ -1990,6 +1989,11 @@ export async function main() {
           // After the target: tokens are message body, no flag parsing.
           filteredSendArgs.push(tok);
         }
+      }
+
+      if (wantsHelp) {
+        printCommandHelp("send");
+        return;
       }
 
       const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [--attach <file>]... [message...]\n  -f, --file <path>  Read message body from a file\n  --attach <file>    Copy a file for local recipients (repeatable)";

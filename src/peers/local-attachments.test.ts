@@ -302,6 +302,18 @@ test.each(["-f", "--file", "--from", "--attach", "--help", "-h", ""])("--attach 
   expect(await queue().exists()).toBe(false);
 });
 
+test.each(["--help", "-h"])("%s before an incomplete --attach still reports the missing path", async help => {
+  for (const operand of [[], ["-f", "body"], ["--file", "body"], ["--from", "writer"], ["--attach", "file"]]) {
+    const result = await fixture.run(["send", "reader", help, "--attach", ...operand]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--attach requires a path");
+    expect(result.actions).toEqual([]);
+  }
+  const valid = await fixture.run(["send", help, "--attach", "file", "reader"]);
+  expect(valid.exitCode).toBe(0);
+  expect(valid.stdout).toContain("--attach <file>");
+});
+
 test.each(["--help", "-h"])("send %s lists attachment usage", async flag => {
   const run = await fixture.run(["send", flag]);
   expect(run.exitCode).toBe(0);

@@ -104,7 +104,12 @@ test.each([null, 129])("reclaim staging only after owner mismatch or expiry (obs
     processStartEpochSecondsCtx.set(() => observed);
     await sweepStagingLease(root, id, Date.now());
     expect(await Bun.file(join(dir, "0")).exists()).toBe(observed === null);
-    if (observed === null) await sweepStagingLease(root, id, Date.now() + 25 * 3600_000);
+    if (observed === null) {
+      const expires = (await stat(join(dir, "lease"))).mtimeMs + 24 * 3600_000;
+      await sweepStagingLease(root, id, expires - 1);
+      expect(await Bun.file(join(dir, "0")).text()).toBe("staged");
+      await sweepStagingLease(root, id, expires);
+    }
     await expect(stat(dir)).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     processStartEpochSecondsCtx.reset();

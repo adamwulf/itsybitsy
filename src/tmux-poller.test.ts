@@ -1377,9 +1377,12 @@ test("coordinator capture follows its marked pane after a different pane becomes
 test("stalled coordinator capture is killed and reaped before returning a bounded error", async () => {
   const exit = Promise.withResolvers<number>();
   const kills: (number | string | undefined)[] = [];
+  const cancelled: string[] = [];
+  const stdout = new ReadableStream<Uint8Array>({ cancel() { cancelled.push("stdout"); } });
+  const stderr = new ReadableStream<Uint8Array>({ cancel() { cancelled.push("stderr"); } });
   spawnCtx.set(cmd => cmd[1] === "list-panes"
     ? { stdout: streamOf("%4 1\n%4\n"), stderr: emptyStream(), exited: Promise.resolve(0) }
-    : { stdout: new ReadableStream(), stderr: emptyStream(), exited: exit.promise, kill: signal => { kills.push(signal); } });
+    : { stdout, stderr, exited: exit.promise, kill: signal => { kills.push(signal); } });
   try {
     let settled = false;
     const read = captureMarkedCoordinatorPane("ib-coordinator", 5).catch(err => { settled = true; return err.message; });
@@ -1388,6 +1391,9 @@ test("stalled coordinator capture is killed and reaped before returning a bounde
     expect(settled).toBe(false);
     exit.resolve(137);
     expect(await read).toBe("Coordinator capture timed out");
+    expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
+    expect(stdout.locked).toBe(false);
+    expect(stderr.locked).toBe(false);
   } finally {
     spawnCtx.reset();
   }

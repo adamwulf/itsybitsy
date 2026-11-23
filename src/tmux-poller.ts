@@ -104,9 +104,14 @@ async function captureDisplayTarget(target: string, lines: number, timeoutMs?: n
 
 async function readDisplayCommand(cmd: string[], timeoutMs?: number): Promise<string | null> {
   const proc = spawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe" });
-  const read = Promise.all([new Response(proc.stdout).text(), proc.exited, new Response(proc.stderr).text()])
+  if (timeoutMs === undefined) {
+    const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited, new Response(proc.stderr).text()]);
+    return code === 0 ? text : null;
+  }
+  const stdout = proc.stdout?.getReader();
+  const stderr = proc.stderr?.getReader();
+  const read = Promise.all([readPipe(stdout), proc.exited, readPipe(stderr)])
     .then(([text, code]) => code === 0 ? text : null);
-  if (timeoutMs === undefined) return read;
   // Remote lookup and capture each get 5 s, under the 15 s wire deadline together.
   const deadline = Promise.withResolvers<never>();
   const timer = setTimeout(() => deadline.reject(new Error("Coordinator capture timed out")), timeoutMs);
@@ -114,10 +119,25 @@ async function readDisplayCommand(cmd: string[], timeoutMs?: number): Promise<st
     return await Promise.race([read, deadline.promise]);
   } catch (err) {
     proc.kill?.("SIGKILL");
-    await proc.exited;
+    await Promise.allSettled([stdout?.cancel(), stderr?.cancel(), proc.exited]);
     throw err;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function readPipe(reader?: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return text + decoder.decode();
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
   }
 }
 

@@ -1,3 +1,4 @@
+import { localAttachmentVolume } from "./peers/local-attachments";
 /**
  * Phase 3 (SPEC-ANTIGRAVITY-CLI.md D10 / §5.4) — runPerAgentWatchdog behaviour
  * for `agy` agents:
@@ -85,6 +86,9 @@ function recordingRunner(sink: string[][]) {
     return { stdout: new ReadableStream(), stderr: new ReadableStream(), exited: Promise.resolve(0) } as any;
   };
 }
+
+beforeEach(() => localAttachmentVolume.set(join(tmpdir(), "ib-watch-recovery-" + crypto.randomUUID())));
+afterEach(() => localAttachmentVolume.reset());
 
 describe("Phase 3 — agy watchdog fallback keystrokes", () => {
   let sentKeys: string[][];

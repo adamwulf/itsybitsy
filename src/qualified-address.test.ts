@@ -447,7 +447,8 @@ describe("qualified agent addresses", () => {
         expect(await Bun.file(path).text()).toBe("original");
         expect(await readdir(join(cli.cwd, dir!))).toEqual(["0"]);
       }
-      expect(await readdir(join(cli.cwd, "staging", "incoming"))).toEqual([]);
+      const { localSnapshotNamespace } = await import("./peers/transfer-owner");
+      expect(await readdir(join(cli.cwd, "staging", localSnapshotNamespace(agentDir)))).toEqual([]);
     } finally { controller.abort(); await send; }
   });
 

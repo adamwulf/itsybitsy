@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
-import { finishRecovery, inspectBrokerLease, reclaimTransfer, sweepEntries, sweepOutgoingDirectories, transferDirectoryBatch, transferOwnerState, writeTransferOwner } from "./transfer-owner";
+import { recoverLocalSnapshots, localSnapshotNamespace, stagingArea, finishRecovery, inspectBrokerLease, reclaimTransfer, sweepEntries, sweepOutgoingDirectories, transferDirectoryBatch, transferOwnerState, writeTransferOwner } from "./transfer-owner";
 import { sweepStagingLease } from "../send-broker";
 
 let root: string;
@@ -172,4 +172,18 @@ test("a forward calendar step leaves an unverified partial in its retention wind
   const clock = spyOn(Date, "now").mockReturnValue(future);
   try { await sweepOutgoingDirectories(root); expect((await stat(dir)).isDirectory()).toBe(true); }
   finally { clock.mockRestore(); }
+});
+
+test("a watchdog recovers only its own abandoned local partials and sidecars without a peer service", async () => {
+  let sibling = "";
+  for (const agent of ["repo-a/agent", "repo-b/agent"]) {
+    const area = await stagingArea(join(root, "staging"), localSnapshotNamespace(agent));
+    const id = crypto.randomUUID();
+    await mkdir(join(area, id + ".partial"));
+    await writeTransferOwner(area, { pid: 42, start: 10 }, id + ".owner");
+    if (agent.startsWith("repo-b")) sibling = area;
+  }
+  await recoverLocalSnapshots("repo-a/agent", root);
+  expect(await readdir(join(root, "staging", localSnapshotNamespace("repo-a/agent")))).toEqual([]);
+  expect(await readdir(sibling)).toHaveLength(2);
 });

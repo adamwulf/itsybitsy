@@ -1637,11 +1637,17 @@ export function resetPerAgentDrain(): void {
  * the per-agent watchdog tests never touch the filesystem.
  */
 export interface SpawnBrokerHooks {
+  recoverLocal?: (agentDir: string) => Promise<void>;
   setup: (agentDir: string) => Promise<string | null>;
   process: (agentId: string, repoPath: string, jobs: Map<string, Promise<void>>, signal: AbortSignal) => Promise<void>;
 }
 
 const defaultSpawnBrokerHooks: SpawnBrokerHooks = {
+  recoverLocal: async agentDir => {
+    const { recoverLocalSnapshots } = await import("./peers/transfer-owner");
+    const { localAttachmentVolume } = await import("./peers/local-attachments");
+    await recoverLocalSnapshots(agentDir, localAttachmentVolume.fn);
+  },
   setup: async (agentDir) => {
     const { ensureSpawnBrokerDirs, spawnRequestDir } = await import("./spawn-broker");
     await ensureSpawnBrokerDirs(agentDir);
@@ -1942,9 +1948,16 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   const lifetime = new AbortController();
   const stop = () => lifetime.abort(new Error("Watchdog stopped"));
   let brokerPoll: Promise<void> | undefined;
+  let nextLocalSweep = -Infinity;
   const spawnNow = (): void => {
     if (brokerPoll || lifetime.signal.aborted) return;
-    brokerPoll = spawnBrokerHooks.process(agentId, repoPath, jobs, lifetime.signal)
+    const now = performance.now();
+    let recovery: Promise<void> | undefined;
+    if (now >= nextLocalSweep) {
+      nextLocalSweep = now + 30_000;
+      recovery = spawnBrokerHooks.recoverLocal?.(agentDir).catch(err => logAgent(agentDir, `Local attachment recovery failed: ${err}`));
+    }
+    brokerPoll = Promise.allSettled([recovery, spawnBrokerHooks.process(agentId, repoPath, jobs, lifetime.signal)]).then(() => {})
       .catch(() => { /* never crash the watchdog on a spawn-request error */ })
       .finally(() => { brokerPoll = undefined; });
   };

@@ -239,16 +239,16 @@ export async function removeAbandonedStaging(agentDir: string, id: string) {
 }
 
 /** Publish only verified broker inputs. The watch recovery sweep owns abandoned
- * partials and their sidecars under the same incoming root as peer receipts. */
+ * peer receipts; each agent watchdog reclaims its own local partials. */
 export async function prepareLocalBrokerAttachments(
-  message: string, stage: StageRemoteFiles,
+  agentDir: string, message: string, stage: StageRemoteFiles,
   signal: AbortSignal, tempDir = "/tmp",
 ) {
-  const { stagingArea, writeTransferOwner, stagingOwnerStart } = await import("./transfer-owner");
+  const { stagingArea, writeTransferOwner, stagingOwnerStart, localSnapshotNamespace } = await import("./transfer-owner");
   const { transferStagingRoot } = await import("../runtime-names");
   const { rewriteAttachmentPaths } = await import("./attachment-paths");
   const { sanitizeAttachmentName } = await import("./attachment-name");
-  const area = await stagingArea(tempDir === "/tmp" ? transferStagingRoot() : join(tempDir, "staging"), "incoming");
+  const area = await stagingArea(tempDir === "/tmp" ? transferStagingRoot() : join(tempDir, "staging"), localSnapshotNamespace(agentDir));
   const id = crypto.randomUUID();
   const partial = join(area, id + ".partial");
   const sidecar = id + ".owner";

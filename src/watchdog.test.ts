@@ -1,3 +1,4 @@
+import { localAttachmentVolume } from "./peers/local-attachments";
 import { test, expect, describe, beforeEach, afterEach, beforeAll, afterAll, mock, spyOn, setDefaultTimeout } from "bun:test";
 import { join } from "path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
@@ -199,6 +200,9 @@ function agent(id: string, state: AgentState, manager: string | null = null): Ag
     },
   });
 }
+
+beforeEach(() => localAttachmentVolume.set(join(tmpdir(), "ib-watch-recovery-" + crypto.randomUUID())));
+afterEach(() => localAttachmentVolume.reset());
 
 describe("watchdog", () => {
   let spawnMock: ReturnType<typeof mockSpawnRunner>;

@@ -655,7 +655,7 @@ export async function handleSendRequest(
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, signal, progress) : undefined;
         const checkLease = async () => { await requireActiveStagingLease(ctx.agentDir, ctx.id, origin, clientIdentity); };
         if (localFiles) {
-          const snapshot = await prepareLocalBrokerAttachments(message, stage!, signal, seams.attachmentTempDir);
+          const snapshot = await prepareLocalBrokerAttachments(ctx.agentDir, message, stage!, signal, seams.attachmentTempDir);
           try {
             message = snapshot.message;
             await checkLease();

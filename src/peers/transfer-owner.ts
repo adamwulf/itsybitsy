@@ -3,7 +3,7 @@ import { openBrokerLease, publishBrokerRecord, stagingDirectoryStat } from "./re
 import { constants, type Dir } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, opendir, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
 
 export type TransferOwner = { pid: number; start: number | null };
@@ -128,7 +128,7 @@ export async function sweepTransferDirectory(dir: string, now: number) {
   } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
 }
 
-export async function stagingArea(root: string, area: "incoming" | "outgoing") {
+export async function stagingArea(root: string, area: "incoming" | "outgoing" | `local-${string}`) {
   await safeTransferParent(dirname(root));
   for (const dir of [root, join(root, area)]) {
     await mkdir(dir, { mode: 0o700 }).catch(err => { if (err.code !== "EEXIST") throw err; });
@@ -159,32 +159,47 @@ export async function finishRecovery(operations: Promise<void>[]) {
   if (failures.length) throw new AggregateError(failures, failures.map(String).join("\n"));
 }
 
+/** A stable protected namespace per agent, including when IDs repeat across repos. */
+export function localSnapshotNamespace(agentDir: string): `local-${string}` {
+  return `local-${createHash("sha256").update(resolve(agentDir)).digest("hex")}`;
+}
+
+export async function recoverLocalSnapshots(agentDir: string, tempDir: string) {
+  const root = tempDir === "/tmp" ? transferStagingRoot() : join(tempDir, "staging");
+  const namespace = localSnapshotNamespace(agentDir);
+  try { await safeTransferParent(join(root, namespace)); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
+  await sweepPartialSnapshots(await stagingArea(root, namespace));
+}
+
+export function sweepPartialSnapshots(area: string, now = performance.now()) {
+  return sweepEntries(area, async entry => {
+    const match = /^([a-f0-9-]{36})\.(?:partial|owner(?:\.tmp)?)$/.exec(entry);
+    if (!match) return;
+    const prefix = join(area, match[1]!);
+    const info = await lstat(join(area, entry));
+    let file: FileHandle | undefined;
+    let owner: TransferOwner | undefined;
+    try {
+      file = await open(prefix + ".owner", constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+      owner = await readOwnerFields(file);
+    } catch { /* Missing or incomplete records use monotonic retention. */ }
+    finally { await file?.close(); }
+    if (reclaimTransfer(transferOwnerState(owner, 0), `${info.dev}:${info.ino}:${info.birthtimeMs}`, now)) {
+      await rm(prefix + ".partial", { recursive: true, force: true });
+      await rm(prefix + ".owner.tmp", { force: true });
+      await rm(prefix + ".owner", { force: true });
+    }
+  }, "incoming");
+}
+
 export async function sweepOutgoingDirectories(root = transferStagingRoot(), now = performance.now()) {
-  await finishRecovery((["incoming", "outgoing"] as const).map(async name => {
-    const area = await stagingArea(root, name);
-    await sweepEntries(area, async entry => {
-      if (name === "outgoing") {
-        if (/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) await sweepTransferDirectory(join(area, entry), now);
-        return;
-      }
-      const match = /^([a-f0-9-]{36})\.(?:partial|owner(?:\.tmp)?)$/.exec(entry);
-      if (!match) return;
-      const prefix = join(area, match[1]!);
-      const info = await lstat(join(area, entry));
-      let file: FileHandle | undefined;
-      let owner: TransferOwner | undefined;
-      try {
-        file = await open(prefix + ".owner", constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
-        owner = await readOwnerFields(file);
-      } catch { /* Missing or incomplete records use monotonic retention. */ }
-      finally { await file?.close(); }
-      if (reclaimTransfer(transferOwnerState(owner, 0), `${info.dev}:${info.ino}:${info.birthtimeMs}`, now)) {
-        await rm(prefix + ".partial", { recursive: true, force: true });
-        await rm(prefix + ".owner.tmp", { force: true });
-        await rm(prefix + ".owner", { force: true });
-      }
-    }, name);
-  }));
+  await finishRecovery([
+    stagingArea(root, "incoming").then(area => sweepPartialSnapshots(area, now)),
+    stagingArea(root, "outgoing").then(area => sweepEntries(area, async entry => {
+      if (/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) await sweepTransferDirectory(join(area, entry), now);
+    })),
+  ]);
 }
 
 /** A sandbox writes its PID alone. Only the watchdog observes and records its

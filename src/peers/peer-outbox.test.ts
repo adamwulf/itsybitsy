@@ -183,3 +183,23 @@ test("a successful ACK prints before a failed result cleanup warning", async () 
     expect(output).toEqual(["Sent to @system", expect.stringContaining("cleanup unavailable")]);
   } finally { fail.mockRestore(); printer.mockRestore(); await finishSendCleanup(); }
 });
+
+test("a live watcher stuck before wire I/O does not renew the client deadline", async () => {
+  await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+  let now = Date.now();
+  const time = spyOn(Date, "now").mockImplementation(() => now);
+  const h = textHeader({ kind: "system" }, "hi", { kind: "user" });
+  const result = handoffRemoteMessage("peer", h);
+  const entered = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<string>();
+  try {
+    await waitFor(() => Bun.file(join(base, h.id, "request.json")).exists());
+    const run = createPeerOutboxPoll(() => now)(async () => { entered.resolve(); return finish.promise; }, () => {});
+    await entered.promise;
+    await Bun.sleep(100); // the client observes the real worker claim
+    for (let i = 0; i < 3; i++) { now += 21_000; await Bun.sleep(300); }
+    expect((await result).stderr).toContain("timed out");
+    finish.resolve(h.id);
+    await run;
+  } finally { time.mockRestore(); finish.resolve(h.id); }
+});

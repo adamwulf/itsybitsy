@@ -120,7 +120,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       try {
         const progress = await readFile(join(claimed, "progress"), "utf8");
         if (progress !== lastProgress) {
-          onProgress?.();
+          if (JSON.parse(progress).sequence > 0) onProgress?.();
           lastProgress = progress;
           deadline = Date.now() + IDLE_TIMEOUT_MS;
         }
@@ -218,18 +218,15 @@ export function createPeerOutboxPoll(now = Date.now) {
               if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
               const controller = new AbortController();
               let bytes = 0;
+              let sequence = 0;
               let recorded = -1;
-              let updated = 0;
-              // Publish bytes at most four times a second. The heartbeat
-              // distinguishes a live worker (including its ACK wait) from a
-              // crashed watcher. Wire I/O enforces its own progress deadline.
+              // Publish the initial claim once and then only actual wire progress.
               const tick = () => {
                 try {
                   if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
-                  if (bytes === recorded && now() - updated < 5000) return;
-                  updated = now();
-                  recorded = bytes;
-                  writeFileSync(join(dir, "progress.tmp"), JSON.stringify({ bytes, updated }), { mode: 0o600 });
+                  if (sequence === recorded) return;
+                  recorded = sequence;
+                  writeFileSync(join(dir, "progress.tmp"), JSON.stringify({ bytes, sequence }), { mode: 0o600 });
                   renameSync(join(dir, "progress.tmp"), join(dir, "progress"));
                 } catch (err) { controller.abort(err); }
               };
@@ -237,7 +234,7 @@ export function createPeerOutboxPoll(now = Date.now) {
               const timer = setInterval(tick, 250);
               try {
                 result = { ok: true, id: await send(peer, header, {
-                  filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; },
+                  filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; sequence++; },
                 }) };
                 tick();
               } finally { clearInterval(timer); }

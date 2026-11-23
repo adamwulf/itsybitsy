@@ -430,7 +430,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     let sent = 0;
     try {
       try {
-        if (files) await writeWithProgress(active, bytes, setTimer, signal);
+        if (files) { await writeWithProgress(active, bytes, setTimer, signal); options.onProgress?.(0); }
         else await io(() => active.writeAll(bytes));
       } catch (err) { writeError = err; throw err; }
       for (const [index, file] of (files ?? []).entries()) {
@@ -460,6 +460,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
         while (true) {
           const chunk = await io(() => active.read(Math.min(CHUNK_BYTES, PEER_MAX_REPLY_BYTES + 1 - length)));
           if (!chunk.length) break;
+          options.onProgress?.(sent);
           length += chunk.length;
           if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
           parts.push(chunk);

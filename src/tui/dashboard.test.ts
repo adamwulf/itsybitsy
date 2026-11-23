@@ -9396,7 +9396,17 @@ describe("setup Peers tab", () => {
         expect(dashboard.dialog).toBe(file);
         expect(await Bun.file(path).exists()).toBe(false);
       }
-      file.onSubmit("25");
+      dashboard.handleInput("\x1b");
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      (await edit("maxMessageMB")).onSubmit("0");
+      const disabled = await edit("maxMessageMB");
+      expect(disabled.value).toBe("0");
+      expect((await settings.readTransferLimits()).maxMessageBytes).toBe(0);
+      disabled.onSubmit("2048");
+      const restored = await edit("maxFileMB");
+      expect((await settings.readTransferLimits()).maxMessageBytes).toBe(2048 * 1024 ** 2);
+      restored.onSubmit("25");
       const message = await edit("maxMessageMB");
       message.onSubmit("24");
       await waitFor(() => dashboard.notice?.includes("at least maxFileMB") === true);

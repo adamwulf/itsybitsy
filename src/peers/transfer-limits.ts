@@ -21,13 +21,13 @@ export function validateAttachmentSetting(key: Setting, value: unknown, raw: Par
   const [min, max] = TRANSFER_SETTING_BOUNDS[key];
   if (typeof value !== "number" || !Number.isInteger(value)) return `${key} must be an integer`;
   if (value < min || value > max) return `${key} must be between ${min} and ${max}`;
-  if (key !== "maxFiles") {
+  if (value > 0 && key !== "maxFiles") {
     const other = key === "maxFileMB" ? "maxMessageMB" : "maxFileMB";
     const stored = raw[other];
     const [lo, hi] = TRANSFER_SETTING_BOUNDS[other];
     const limit = typeof stored === "number" && Number.isInteger(stored) && stored >= lo && stored <= hi
       ? stored : DEFAULT_ATTACHMENT_SETTINGS[other];
-    if (key === "maxFileMB" ? value > limit : value < limit) return "maxMessageMB must be at least maxFileMB";
+    if (limit > 0 && (key === "maxFileMB" ? value > limit : value < limit)) return "maxMessageMB must be at least maxFileMB";
   }
 }
 

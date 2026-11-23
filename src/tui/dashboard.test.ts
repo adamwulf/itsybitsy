@@ -10755,6 +10755,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const pending = Promise.withResolvers<string>();
     service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
     dashboard.inputField.submit();
+    await Bun.sleep(3100);
     expect(dashboard.notice).toBe("sending…");
     const [peer, header] = service.sendRemoteMessage.mock.calls[1]!;
     expect(peer).toBe(PEER_B);

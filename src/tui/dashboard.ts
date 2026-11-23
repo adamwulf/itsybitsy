@@ -1985,7 +1985,7 @@ export class DashboardComponent implements Component {
     try {
       if (!service) throw new Error("Remote messaging is unavailable");
       if (service.remoteStartDenial !== null) throw new Error(service.remoteStartDenial);
-      this.setNotice("sending…", "info");
+      this.setNotice("sending…", "info", true);
       await service.sendRemoteMessage(peer, textHeader(target, text, { kind: "user" }));
       this.setNotice(`Sent to ${label}`, "info");
       return true;
@@ -2085,12 +2085,13 @@ export class DashboardComponent implements Component {
     }
   }
 
-  setNotice(text: string, kind: "info" | "error") {
+  setNotice(text: string, kind: "info" | "error", persistent = false) {
     const id = ++this.noticeCounter;
     this.lastSentNotice = text;
     this.lastSentNoticeKind = kind;
     this.invalidate();
     this.tui?.requestRender();
+    if (persistent) return;
     setTimeout(() => {
       if (this.noticeCounter === id) {
         this.lastSentNotice = null;

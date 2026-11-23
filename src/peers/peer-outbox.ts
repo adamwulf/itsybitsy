@@ -227,7 +227,7 @@ export function createPeerOutboxPoll(now = Date.now) {
       await rm(dir, { recursive: true, force: true });
       return;
     }
-    if (client.state !== "verified-live" || existsSync(join(dir, "result.json"))) return;
+    if (existsSync(join(dir, "result.json"))) return;
     const worker = await inspectTransferDirectory(dir, "worker.json");
     if (reclaimTransfer(worker.state, worker.created, now())) {
       // A claim can survive a crash on either side of FIN. Never re-dispatch it.

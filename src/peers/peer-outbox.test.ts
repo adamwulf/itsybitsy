@@ -220,7 +220,7 @@ async function readyRequest() {
   return { client, header, ready, claimed };
 }
 
-test.each(["waiting", "cancelled", "dead"])('interrupted claim recovery for a %s submitter never resends', async state => {
+test.each(["waiting", "unverifiable", "cancelled", "dead"])('interrupted claim recovery for a %s submitter never resends', async state => {
   const { client, ready, claimed } = await readyRequest();
   const rename = fs.rename;
   const interrupted = spyOn(fs, "rename").mockImplementation(async (source, dest) => {
@@ -235,13 +235,13 @@ test.each(["waiting", "cancelled", "dead"])('interrupted claim recovery for a %s
   const send = async () => { sends++; return ""; };
   try { await createPeerOutboxPoll()(send, () => {}); } finally { interrupted.mockRestore(); }
   expect(await Bun.file(join(claimed, "owner.json")).json()).toEqual(client);
-  processStartEpochSecondsCtx.set(pid => pid === process.pid ? 201 : client.start);
+  processStartEpochSecondsCtx.set(pid => pid === process.pid ? 201 : state === "unverifiable" ? null : client.start);
   if (state === "cancelled") await Bun.write(join(claimed, "cancel"), "");
   if (state === "dead") isPidAliveCtx.set(pid => pid !== client.pid);
   const replacement = createPeerOutboxPoll();
   await replacement.recover();
   await replacement(send, () => {});
-  if (state === "waiting") expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: false, error: "outcome unknown — check the recipient" });
+  if (state === "waiting" || state === "unverifiable") expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: false, error: "outcome unknown — check the recipient" });
   else await expect(fs.stat(claimed)).rejects.toMatchObject({ code: "ENOENT" });
   expect(sends).toBe(0);
 });

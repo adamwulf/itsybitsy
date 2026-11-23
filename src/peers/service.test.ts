@@ -606,7 +606,8 @@ describe("PeerService at boot", () => {
       },
     };
     const decision = await remoteStartDenialAtStartup(input);
-    expect(await isHumanSendTerminal(input)).toBe(decision === null);
+    // Redirected input is valid for a CLI send with a terminal on stdout.
+    expect(await isHumanSendTerminal(input)).toBe(kind === "human" || kind === "non-TTY input");
     const { service } = makeService({ remoteStartDenial: decision });
     if (reason === null) expect(decision).toBeNull();
     else expect(decision).toContain(reason);

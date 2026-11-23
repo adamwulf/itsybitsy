@@ -304,12 +304,41 @@ describe("send broker", () => {
       const realWrite = fs.writeFile;
       const spy = spyOn(fs, "writeFile").mockImplementation(async (path, data, options) => {
         await realWrite(path, data, options);
-        if (String(path).startsWith(spawnResultDir(agentDir))) controller.abort(new Error("watchdog stopped"));
+        if (String(path).includes(ID_A + ".json.") && String(path).endsWith(".tmp")) controller.abort(new Error("watchdog stopped"));
       });
       try {
         await expect(processSpawnRequests(SENDER_ID, senderRepo, deps)).rejects.toThrow("watchdog stopped");
         expect(await readdir(spawnResultDir(agentDir))).toEqual([]);
       } finally { spy.mockRestore(); }
+    });
+
+    test("an expired bare-name lookup releases the job before the next qualified request", async () => {
+      await linkWorktree();
+      const jobs = new Map<string, Promise<void>>();
+      const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+      let expired!: () => void;
+      const seen: string[] = [];
+      const { deps } = server({ transferJobs: jobs, send: {
+        listRepos: async () => repos,
+        setTimer: (_ms, fn) => { expired = fn; return () => {}; },
+        resolveTarget: async name => {
+          seen.push(name);
+          if (name === "bare") { entered.resolve(); await release.promise; }
+          return { agent: null, isSystemCoordinator: false, remote: { peer: "peer", target: { kind: "system" } } };
+        },
+      } });
+      for (const [id, name] of [[ID_A, "bare"], ["b".repeat(32), "peer/@system"]] as const) {
+        await queue(id, sendRequest(id, { op: "remote-send", clientPid: process.pid, target: name }));
+        await processSpawnRequests(SENDER_ID, senderRepo, deps);
+        const job = jobs.get(agentDir);
+        if (name === "bare") { await entered.promise; expired(); }
+        await job;
+        expect((await result(id)).stderr).toContain(name === "bare" ? "No progress" : "need ib watch");
+      }
+      release.resolve();
+      await Bun.sleep(0);
+      expect((await result(ID_A)).stderr).toContain("No progress");
+      expect(seen).toEqual(["bare", "peer/@system"]);
     });
 
     test("finishing a remote job cannot recreate a retired agent directory", async () => {

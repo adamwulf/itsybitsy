@@ -50,7 +50,7 @@ import * as runtimeNames from "./runtime-names";
  * any file the watchdog can read).
  */
 
-import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
+import { waitForIO, type FileBodyOptions, encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
 import { mkdir, open, rm, stat, rename } from "node:fs/promises";
 import { readTransferLimits } from "./config";
@@ -465,6 +465,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
 
 /** Seams for the `ib send` request handled here. */
 export interface SendServerDeps {
+  setTimer?: FileBodyOptions["setTimer"];
   listRepos?: () => Promise<RepoEntry[]>;
   resolveTarget?: (
     target: string,
@@ -517,9 +518,11 @@ export async function handleSendRequest(
   // id; the watchdog's own cwd says nothing about the requester.
   const callerCwd = join(ctx.agentDir, "repo");
   try {
-    const repos = await (seams.listRepos ?? listRepos)();
-    const sender = remote ? await (await import("./peers/peer-outbox")).qualifiedAgentSender(ctx.agentId, ctx.repoPath, repos) : null;
-    const resolved = await (seams.resolveTarget ?? resolveSendTarget)(target, repos, callerCwd);
+    const lookup = <T>(read: () => Promise<T>) => remote
+      ? waitForIO({ signal: deps.transferSignal, setTimer: seams.setTimer }, read) : read();
+    const repos = await lookup(seams.listRepos ?? listRepos);
+    const sender = remote ? await lookup(async () => (await import("./peers/peer-outbox")).qualifiedAgentSender(ctx.agentId, ctx.repoPath, repos)) : null;
+    const resolved = await lookup(() => (seams.resolveTarget ?? resolveSendTarget)(target, repos, callerCwd));
     if (resolved.error) return brokerFail(resolved.error);
     // The ordinary commands, as the watchdog's own agent. `fromAgent` is
     // always passed: these functions otherwise detect the sender from the

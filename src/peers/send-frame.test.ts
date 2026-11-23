@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, open, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeSendHeader, encodeSendHeader, requireSendFin, sendFileBody, streamFileBody, type SendHeader } from "./send-frame";
+import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
 import { rewriteAttachmentPaths } from "./attachment-paths";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 
@@ -74,6 +75,9 @@ test("rejects invalid UTF-8, JSON, truncated frames, and malformed header fields
     { target: { kind: "repo-coordinator" } }, { target: { kind: "repo-coordinator", repo: "r", agent: "a" } },
     { files: [{ ...file, spellings: null }] }, { files: [{ ...file, spellings: [] }] },
     { files: [{ ...file, spellings: [2] }] }, { files: [{ ...file, spellings: [""] }] },
+    { files: [{ ...file, spellings: ["./line\nbreak"] }] },
+    { files: [{ ...file, spellings: ["./bi\u202edi"] }] },
+    { files: [file, { ...file, name: "different" }] },
     { message: null }, { files: {} }, { files: [{ ...file, name: 2 }] }, { files: [{ ...file, size: -1 }] },
     { files: [{ ...file, size: 1.1 }] }, { files: [{ ...file, sha256: "z".repeat(64) }] },
   ]) {
@@ -179,14 +183,31 @@ test("sends bounded chunks in order, reports cumulative bytes and can abort a st
   }
 });
 
-test("header spellings preserve two identical basenames and repeated references during rewriting", async () => {
-  const input = { ...header, message: "./a/image.png ./b/image.png ~/a/image.png", files: [
-    { ...file, name: "image.png", spellings: ["./a/image.png", "~/a/image.png"] },
-    { ...file, name: "image.png", spellings: ["./b/image.png"] },
-  ] };
-  const decoded = await decodeSendHeader(new MemoryStream(encodeSendHeader(input)));
-  const mapping = decoded.files.map(({ name, spellings }, index) => ({ spellings, destination: "/tmp/" + index + "/" + name }));
-  expect(rewriteAttachmentPaths(decoded.message, mapping)).toBe("/tmp/0/image.png /tmp/1/image.png /tmp/0/image.png");
+test("manifest to header to message preserves the spellings of two image.png files", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "ib-frame-manifest-"));
+  try {
+    for (const folder of ["a", "b"]) {
+      await mkdir(join(cwd, folder));
+      await writeFile(join(cwd, folder, "image.png"), folder);
+    }
+    const entries = await buildAttachmentManifest(["./a/image.png", "./b/image.png"], { cwd, home: cwd, machine: "desk" });
+    try {
+      const files = await Promise.all(entries.map(async entry => ({
+        name: entry.name, spellings: entry.spellings, size: entry.size, sha256: await hashFile(entry.handle),
+      })));
+      const message = "./a/image.png ./b/image.png ./a/image.png";
+      const decoded = await decodeSendHeader(new MemoryStream(encodeSendHeader({ ...header, files, message })));
+      const mapping = decoded.files.map(({ name, spellings }, index) => ({ spellings, destination: "/tmp/" + index + "/" + name }));
+      expect(rewriteAttachmentPaths(decoded.message, mapping)).toBe(
+        "/tmp/0/image.png /tmp/1/image.png /tmp/0/image.png\n\nAttachments copied to this machine:" +
+        "\n- ./a/image.png → /tmp/0/image.png\n- ./b/image.png → /tmp/1/image.png",
+      );
+    } finally {
+      await Promise.all(entries.map(entry => entry.handle.close()));
+    }
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("requires clean FIN after zero or more file bodies using a one-byte read", async () => {

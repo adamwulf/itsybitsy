@@ -1,52 +1,41 @@
 import { expect, test } from "bun:test";
 import { rewriteAttachmentPaths } from "./attachment-paths";
 
-const photo = { spellings: ["./old", "~/photo.jpg"], destination: "/tmp/new photo.jpg" };
+const photo = { spellings: ["./old", "~/photo"], destination: "/tmp/new photo" };
+const list = "\n\nAttachments copied to this machine:\n- ./old → /tmp/new\\ photo";
 
-test("rewrites exact references and every alias, preserving quotes and other text", () => {
-  const message = `See ./old  './old'\n"~/photo.jpg" ./old-copy /other/old ./old`;
-  expect(rewriteAttachmentPaths(message, [photo])).toBe(`See /tmp/new\\ photo.jpg  '/tmp/new photo.jpg'\n"/tmp/new photo.jpg" ./old-copy /other/old /tmp/new\\ photo.jpg`);
+test("replaces literal, escaped, single- and double-quoted paths at whitespace boundaries", () => {
+  const mapping = [{ spellings: ["a b.png", "./a b.png"], destination: "/tmp/new name" }];
+  const message = `a b.png\t"./a b.png" './a b.png' ./a\\ b.png\na b.png`;
+  expect(rewriteAttachmentPaths(message, mapping)).toBe(
+    `/tmp/new\\ name\t"/tmp/new name" '/tmp/new name' /tmp/new\\ name\n/tmp/new\\ name` +
+    "\n\nAttachments copied to this machine:\n- a b.png → /tmp/new\\ name",
+  );
 });
 
-test("leaves inline code and fenced blocks intact", () => {
-  const code = "`./old`\n```\n./old\n```";
-  expect(rewriteAttachmentPaths(code + "\n./old", [photo])).toBe(code + "\n/tmp/new\\ photo.jpg");
+test("matches exact transferred spellings regardless of surrounding Markdown", () => {
+  expect(rewriteAttachmentPaths("sample: ` ./old ` or ~/photo", [photo]))
+    .toBe("sample: ` /tmp/new\\ photo ` or /tmp/new\\ photo" + list);
 });
 
-test("appends only unreferenced destinations in file order using terminal spelling", () => {
-  const mappings = [photo, { spellings: ["./seen"], destination: "/tmp/seen" }, { spellings: ["./x"], destination: "/tmp/x#" }];
-  expect(rewriteAttachmentPaths("./seen `./old`", mappings)).toBe("/tmp/seen `./old`\n\nAttachments: /tmp/new\\ photo.jpg /tmp/x\\#");
+test("leaves punctuation, quoted filename suffixes, URLs and other paths intact", () => {
+  const text = 'See ./old, ./old) "./a b.png".bak https://example.com/./old ./old.txt';
+  expect(rewriteAttachmentPaths(text, [photo, { spellings: ["./a b.png"], destination: "/tmp/b" }]))
+    .toBe(text + list + "\n- ./a b.png → /tmp/b");
 });
 
-test("text-only messages pass through verbatim, including unmatched quotes", () => {
-  const text = "Read '/tmp/example";
-  expect(rewriteAttachmentPaths(text, [])).toBe(text);
+test("lists all files in manifest order even if every file or no file was rewritten", () => {
+  const second = { spellings: ["report", "./report"], destination: "/tmp/report" };
+  const block = list + "\n- report → /tmp/report";
+  expect(rewriteAttachmentPaths("", [photo, second])).toBe(block);
+  expect(rewriteAttachmentPaths("./report ./old", [photo, second])).toBe("/tmp/report /tmp/new\\ photo" + block);
 });
 
-test("punctuation matches exactly first and Markdown link delimiters stay in place", () => {
-  const plain = { spellings: ["./file.png"], destination: "/tmp/plain" };
-  const literal = { spellings: ["./file.png,"], destination: "/tmp/comma" };
-  expect(rewriteAttachmentPaths("[x](./file.png), ./file.png,", [plain, literal])).toBe("[x](/tmp/plain), /tmp/comma");
-  expect(rewriteAttachmentPaths("./file.png,", [plain])).toBe("/tmp/plain,");
+test("rewrites only the original text and prefers a longer exact spelling at the same position", () => {
+  const files = [{ spellings: ["a"], destination: "b" }, { spellings: ["a b"], destination: "a" }];
+  expect(rewriteAttachmentPaths("a b a", files)).toBe("a b\n\nAttachments copied to this machine:\n- a → b\n- a b → a");
 });
 
-test("repeated space-containing paths match only at a complete token boundary", () => {
-  const mapping = [{ spellings: ["./a b.png"], destination: "/tmp/new name" }];
-  const input = `"./a b.png".bak "./a b.png" './a b.png' ./a\\ b.png ./a\\ b.png`;
-  expect(rewriteAttachmentPaths(input, mapping)).toBe(`"./a b.png".bak "/tmp/new name" '/tmp/new name' /tmp/new\\ name /tmp/new\\ name`);
-});
-
-test("code fences require a closing line and inline backtick runs match by width", () => {
-  const example = "```js\nconst ticks = '```'; ./old\n```not a close\n./old\n````\n`` example ``` ./old ``";
-  expect(rewriteAttachmentPaths(example + " ./old", [photo])).toBe(example + " /tmp/new\\ photo.jpg");
-});
-
-test("malformed unrelated references are preserved and valid references still match", () => {
-  const text = "\"./unfinished\ninspect ./old ./bad\\";
-  expect(rewriteAttachmentPaths(text, [photo])).toBe("\"./unfinished\ninspect /tmp/new\\ photo.jpg ./bad\\");
-});
-
-test("bare filenames in prose stay literal and their attachments are appended", () => {
-  expect(rewriteAttachmentPaths("inspect file.png", [{ spellings: ["file.png"], destination: "/tmp/one" }]))
-    .toBe("inspect file.png\n\nAttachments: /tmp/one");
+test("no attachments leave even malformed text untouched", () => {
+  expect(rewriteAttachmentPaths("inspect '/tmp/unfinished", [])).toBe("inspect '/tmp/unfinished");
 });

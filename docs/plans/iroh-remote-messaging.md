@@ -50,9 +50,14 @@ These came from Adam through @system.
 
 The receiver rewrites the message after every file has been verified.
 
-- **Text references.** Each reference in the message that exactly matches an attached file is replaced with B's path, quoted with `spellPath`. A reference matches when it is the same `--attach` spelling, or the same path after resolving `~` and the cwd, as found by `references()` outside code spans.
-- **Unreferenced attachments.** An attached file the text never mentions is appended as `\n\nAttachments: <path> <path>`, so the agent always learns where it is. Bare names such as `file.png` stay literal in prose. With `--attach file.png`, the destination is appended unless the text also contains a matching path reference.
-- **Nothing else changes.** Other text, other paths and code spans are left untouched. A path that was not transferred is never rewritten.
+Each file carries its original `--attach` arguments and its canonical absolute path. A spelling belongs to one file. The receiver replaces literal spellings and their unquoted, single-quoted, or double-quoted `spellPath` forms when whitespace or a text edge bounds both ends. It formats the destination with the same quoting style. This rule applies to the whole message, including code samples.
+
+For any message with attachments, the receiver appends a blank line and a mapping in transfer order, even when every file appeared in the text:
+
+```
+Attachments copied to this machine:
+- ./image.png → /tmp/itsybitsy-attachments-example/0/image.png
+```
 
 ### 3. Wire protocol
 

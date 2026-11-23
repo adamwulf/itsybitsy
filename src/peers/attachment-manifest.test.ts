@@ -37,7 +37,7 @@ test("resolves relative, home, absolute and symlink spellings into one manifest 
   expect(entries).toHaveLength(1);
   const source = await realpath(original);
   expect(entries[0]).toMatchObject({ argument: "file", name: "file", size: 5, source });
-  expect(new Set(entries[0]!.spellings)).toEqual(new Set([...paths, source, alias]));
+  expect(new Set(entries[0]!.spellings)).toEqual(new Set([...paths, source]));
 });
 
 test("refuses missing paths, directories, fifos and sockets before opening them", async () => {

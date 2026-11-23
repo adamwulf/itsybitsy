@@ -1,36 +1,53 @@
-import { references, spellPath, TRAILING_PATH_PUNCTUATION } from "../message-attachments";
+import { spellPath } from "../message-attachments";
 
 export interface AttachmentMapping {
   spellings: readonly string[];
   destination: string;
 }
 
-/** Bare filenames are prose. Only path-prefixed references are rewritten;
- * a bare --attach argument still gets a destination on the Attachments line. */
+type Replacement = { form: string; replacement: string };
+
+/** Match literal filesystem spellings and their three terminal forms between
+ * whitespace boundaries. Walk the original text so replacements cannot cascade. */
 export function rewriteAttachmentPaths(message: string, mapping: readonly AttachmentMapping[]): string {
   if (!mapping.length) return message;
-  const bySpelling = new Map<string, AttachmentMapping>();
-  for (const file of mapping) {
-    for (const spelling of file.spellings) bySpelling.set(spelling, file);
-  }
-  const seen = new Set<AttachmentMapping>();
-  let cursor = 0;
-  let result = "";
-  for (const ref of references(message, { tolerateMalformed: true })) {
-    let { path, end } = ref;
-    let file = bySpelling.get(path);
-    while (!file && !ref.quote && TRAILING_PATH_PUNCTUATION.test(path)) {
-      path = path.slice(0, -1);
-      end--;
-      file = bySpelling.get(path);
+  const byFirstWord = new Map<string, Replacement[]>();
+  const lines = ["Attachments copied to this machine:"];
+  for (const { spellings, destination } of mapping) {
+    lines.push(`- ${spellings[0]} → ${spellPath(destination)}`);
+    for (const spelling of spellings) {
+      for (const quote of [undefined, "'", '"']) {
+        const forms = new Set([spellPath(spelling, quote)]);
+        if (!quote) forms.add(spelling);
+        for (const form of forms) {
+          if (!form) continue;
+          const first = /^\S*/.exec(form)![0];
+          const bucket = byFirstWord.get(first) ?? [];
+          bucket.push({ form, replacement: spellPath(destination, quote) });
+          byFirstWord.set(first, bucket);
+        }
+      }
     }
-    if (!file) continue;
-    seen.add(file);
-    result += message.slice(cursor, ref.start) + spellPath(file.destination, ref.quote);
-    cursor = end;
   }
-  result += message.slice(cursor);
-  const missing = mapping.filter(file => !seen.has(file)).map(file => spellPath(file.destination));
-  if (missing.length) result += "\n\nAttachments: " + missing.join(" ");
-  return result;
+  for (const bucket of byFirstWord.values()) bucket.sort((a, b) => b.form.length - a.form.length);
+
+  let result = "";
+  let cursor = 0;
+  for (let pos = 0; pos < message.length;) {
+    if (pos > 0 && !/\s/.test(message[pos - 1]!)) { pos++; continue; }
+    let end = pos;
+    while (end < message.length && !/\s/.test(message[end]!)) end++;
+    const match = byFirstWord.get(message.slice(pos, end))?.find(({ form }) => {
+      const after = pos + form.length;
+      return message.startsWith(form, pos) && (after === message.length || /\s/.test(message[after]!));
+    });
+    if (match) {
+      result += message.slice(cursor, pos) + match.replacement;
+      pos += match.form.length;
+      cursor = pos;
+    } else {
+      pos = Math.max(end, pos + 1);
+    }
+  }
+  return result + message.slice(cursor) + "\n\n" + lines.join("\n");
 }

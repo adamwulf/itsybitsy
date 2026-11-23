@@ -59,7 +59,7 @@ function validFile(value: unknown): value is SendHeader["files"][number] {
   return object(value) && nonempty(value.name) && typeof value.size === "number" &&
     Number.isSafeInteger(value.size) && value.size >= 0 && typeof value.sha256 === "string" &&
     /^[a-f0-9]{64}$/i.test(value.sha256) && Array.isArray(value.spellings) &&
-    value.spellings.length > 0 && value.spellings.every(nonempty) && onlyKeys(value, "name", "size", "sha256", "spellings");
+    value.spellings.length > 0 && value.spellings.every(s => nonempty(s) && !/[\p{Cc}\p{Cf}]/u.test(s)) && onlyKeys(value, "name", "size", "sha256", "spellings");
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
@@ -87,6 +87,13 @@ export async function decodeSendHeader(stream: ReadStream, options: FileBodyOpti
       value.op !== "send" || typeof value.id !== "string" || !UUID.test(value.id) ||
       !validFrom(value.from) || !validTarget(value.target) || typeof value.message !== "string" ||
       !Array.isArray(value.files) || !value.files.every(validFile)) throw new Error("Malformed send header");
+  const claimed = new Set<string>();
+  for (const file of value.files) {
+    for (const spelling of new Set(file.spellings)) {
+      if (claimed.has(spelling)) throw new Error("Multiple files claim the same attachment spelling");
+      claimed.add(spelling);
+    }
+  }
   return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files: value.files };
 }
 

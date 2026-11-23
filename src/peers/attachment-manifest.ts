@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, realpath, stat, type FileHandle } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { sanitizeAttachmentName } from "./attachment-name";
 import { CHUNK_BYTES, checkAttachmentsEnabled, checkManifestLimits, DEFAULT_TRANSFER_LIMITS, type TransferLimits } from "./transfer-limits";
@@ -74,8 +74,7 @@ export async function buildAttachmentManifest(
             throw error;
           }
         }
-        const spellingPath = absolute.split(sep).includes("..") ? absolute : normalize(absolute);
-        for (const spelling of [argument, spellingPath, source]) {
+        for (const spelling of [argument, source]) {
           if (!entry.spellings.includes(spelling)) entry.spellings.push(spelling);
         }
       } catch (error) {

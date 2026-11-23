@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "fs/promises";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, mkdir, readdir, rename, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -610,23 +611,50 @@ describe("send broker", () => {
     });
 
     test.each([true, false])("remote recipient timeout races the watchdog claim (watchdog wins=%s)", async wins => {
-      const { deps } = server();
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
-      const verify = deps.verifySeal!;
-      deps.verifySeal = async (...args) => { entered.resolve(); await release.promise; return verify(...args); };
+      let dispatched = 0;
+      const { deps } = server({ send: { resolveTarget: async () => {
+        dispatched++;
+        return { agent: null, isSystemCoordinator: false, remote: { peer: "laptop", target: { kind: "system" } } };
+      } } });
+      // Stop after listing but before claiming, or after reading the bytes
+      // but before unlinking them. The latter was the old duplicate-send window.
+      const renameFile = fs.rename;
+      const renameSpy = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+        if (!wins && String(to).endsWith(".claimed")) { entered.resolve(); await release.promise; }
+        return renameFile(from, to);
+      });
+      const file = Bun.file.bind(Bun);
+      const readSpy = spyOn(Bun, "file").mockImplementation((...args: Parameters<typeof Bun.file>) => {
+        const handle = file(...args);
+        if (wins && String(args[0]).startsWith(spawnRequestDir(agentDir) + "/")) {
+          const read = handle.text.bind(handle);
+          handle.text = async () => { const text = await read(); entered.resolve(); await release.promise; return text; };
+        }
+        return handle;
+      });
       let work: Promise<number> | undefined;
-      let clock = 0;
-      const out = await requestSendViaWatchdog("laptop/@system", MESSAGE, clientDeps({
-        now: () => clock,
-        sleep: async () => {
-          if (wins) { work = processSpawnRequests(SENDER_ID, senderRepo, deps); await entered.promise; }
-          clock = SPAWN_CLIENT_TIMEOUT_MS;
-        },
-      }));
-      release.resolve();
-      expect(out?.stderr).toContain(wins ? "may still be delivered" : "withdrawn");
-      expect(await (work ?? processSpawnRequests(SENDER_ID, senderRepo, deps))).toBe(wins ? 1 : 0);
+      try {
+        let clock = 0;
+        const out = await requestSendViaWatchdog("laptop/@system", MESSAGE, clientDeps({
+          now: () => clock,
+          sleep: async () => {
+            work = processSpawnRequests(SENDER_ID, senderRepo, deps);
+            await entered.promise;
+            clock = SPAWN_CLIENT_TIMEOUT_MS;
+          },
+        }));
+        release.resolve();
+        expect(out?.stderr).toContain(wins ? "may still be delivered" : "withdrawn");
+        expect(await work).toBe(wins ? 1 : 0);
+        expect(dispatched).toBe(wins ? 1 : 0);
+      } finally {
+        release.resolve();
+        await work;
+        renameSpy.mockRestore();
+        readSpy.mockRestore();
+      }
     });
 
     test("a timeout after the watchdog took the request says it may still be delivered (no direct send)", async () => {

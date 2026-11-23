@@ -1827,7 +1827,12 @@ describe("endpoint owner peer-outbox polling", () => {
       await Bun.sleep(320);
       expect(await Bun.file(abandoned).exists()).toBe(true);
       expect(await Bun.file(unread).exists()).toBe(true);
-      now += 31_000;
+      now += 2_000; // expired, but the 30-second sweep interval has not elapsed
+      const ticks = poll.mock.calls.length;
+      await waitFor(() => poll.mock.calls.length > ticks);
+      expect(await Bun.file(abandoned).exists()).toBe(true);
+      expect(await Bun.file(unread).exists()).toBe(true);
+      now += 29_000;
       await waitFor(async () => !await Bun.file(unread).exists() && !await Bun.file(abandoned).exists());
       expect(send).not.toHaveBeenCalled();
     } finally { await service.shutdown(); }

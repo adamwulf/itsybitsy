@@ -21,8 +21,14 @@ test.each(["oversize", "symlink", "FIFO"])("refuses a %s peer request without se
   const dir = join(base, id);
   await mkdir(dir, { recursive: true });
   const path = join(dir, "request.json");
-  if (kind === "oversize") await Bun.write(path, Buffer.alloc(MAX_HEADER_BYTES + 129));
-  if (kind === "symlink") await symlink(join(home, "missing"), path);
+  const header = { ...textHeader({ kind: "system" }, "hi", { kind: "user" }), id };
+  const envelope = JSON.stringify({ peer: "peer", header });
+  if (kind === "oversize") await Bun.write(path, envelope + " ".repeat(MAX_HEADER_BYTES + 129));
+  if (kind === "symlink") {
+    const valid = join(home, "valid-request.json");
+    await Bun.write(valid, envelope);
+    await symlink(valid, path);
+  }
   if (kind === "FIFO") expect(await Bun.spawn(["mkfifo", path]).exited).toBe(0);
   let sends = 0;
   await pollPeerOutbox(async () => { sends++; return ""; }, () => {});

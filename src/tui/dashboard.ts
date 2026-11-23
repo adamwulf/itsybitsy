@@ -2010,6 +2010,16 @@ export class DashboardComponent implements Component {
     await Promise.allSettled(sends.map(send => send.done));
   }
 
+  async shutdownPeerTransfers(service: Pick<PeerService, "shutdown">) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([this.stopRemoteSends(), service.shutdown()]),
+        new Promise<void>(resolve => { timer = setTimeout(resolve, 2000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+
   private async submitRemoteMessage(remote: Exclude<RemoteEntry, { kind: "remote-repo-header" }>, target: SendTarget, text: string): Promise<boolean> {
     const service = this.peerService;
     const header = textHeader(target, text, { kind: "user" });
@@ -4588,10 +4598,7 @@ export async function launchDashboard(): Promise<void> {
     // dialog bound it) and release the endpoint lock. Raced like Telegram:
     // under the n0 preset close() can take about a second, and a stuck one
     // must not hold up the exit.
-    const stopPeers = Promise.race([
-      Promise.allSettled([dashboard.stopRemoteSends(), peerService.shutdown()]),
-      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-    ]);
+    const stopPeers = dashboard.shutdownPeerTransfers(peerService);
     // Flush layout save to disk before exiting, then release coordinator
     Promise.all([
       flushPendingSave().catch(() => { /* ignore write errors on exit */ }),

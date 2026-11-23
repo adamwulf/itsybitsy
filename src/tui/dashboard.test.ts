@@ -10998,6 +10998,62 @@ describe("Unified peer repos in the Agents tree", () => {
     } finally { release.resolve(); spy.mockRestore(); resetUserHome(); await cli.cleanup(); }
   });
 
+  test("dashboard quit closes a held reset before exit and startup reclaims stranded staging", async () => {
+    const { PeerService, defaultPeerServiceDeps } = await import("../peers/service");
+    const { requestSend } = await import("../peers/peer-link");
+    const { createMemoryLink } = await import("../peers/test-pair-transport");
+    const owners = await import("../peers/transfer-owner");
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    const fs = await import("node:fs/promises");
+    const root = await mkdtemp(join(tmpdir(), "ib-quit-recovery-"));
+    setUserHome(root);
+    processStartEpochSecondsCtx.set(() => 123);
+    const create = owners.makeOutgoingDirectory;
+    let staged = "";
+    const make = spyOn(owners, "makeOutgoingDirectory").mockImplementation(async () => staged = await create(root));
+    const remove = fs.rm;
+    const failCleanup = spyOn(fs, "rm").mockImplementation(async (path, options) => {
+      if (staged && path === staged) throw Error("storage temporarily unavailable");
+      return remove(path, options);
+    });
+    const { a, b } = createMemoryLink("sender", "peer");
+    const started = Promise.withResolvers<void>();
+    const open = a.openBi.bind(a);
+    a.openBi = async () => {
+      const stream = await open();
+      stream.write = async () => { started.resolve(); return new Promise(() => {}); };
+      stream.cancel = () => new Promise(() => {});
+      return stream;
+    };
+    const deps = { ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null),
+      readPeers: async () => [], recoverTransfers: () => owners.sweepOutgoingDirectories(root) };
+    const next = new PeerService(deps);
+    try {
+      const source = join(root, "report");
+      await Bun.write(source, "file");
+      await Bun.write(join(root, ".itsybitsy/machine-name"), "sender");
+      const { dashboard, service } = setup();
+      service.sendRemoteMessage.mockImplementation((_peer, header, _source, transfer) =>
+        requestSend(a, header, (ms, fn) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); }, transfer));
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(source);
+      dashboard.inputField.submit();
+      await started.promise;
+      await dashboard.shutdownPeerTransfers(new PeerService(deps));
+      expect(b.closeInfo()?.reason).toBe("send reset stalled");
+      expect(await Bun.file(join(staged, "owner.json")).json()).toEqual({ pid: process.pid, start: 123 });
+      failCleanup.mockRestore();
+      processStartEpochSecondsCtx.set(() => 124);
+      await next.bootIfPaired();
+      expect(await Bun.file(join(staged, "owner.json")).exists()).toBe(false);
+    } finally {
+      await next.shutdown(); a.close(0, "done");
+      failCleanup.mockRestore(); make.mockRestore(); processStartEpochSecondsCtx.reset();
+      resetUserHome(); await remove(root, { recursive: true, force: true });
+    }
+  });
+
   test("a local selection renders receipt admission, one coalesced progress burst, and removal", async () => {
     const { PeerService, defaultPeerServiceDeps } = await import("../peers/service");
     const { textHeader } = await import("../peers/peer-outbox");

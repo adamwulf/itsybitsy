@@ -685,9 +685,9 @@ describe("send broker", () => {
       const control = new AbortController();
       const path = join(spawnResultDir(agentDir), ID_A + ".json");
       const file = Bun.file.bind(Bun);
-      const spy = spyOn(Bun, "file").mockImplementation((...args: Parameters<typeof Bun.file>) => {
-        const handle = file(...args);
-        if (args[0] === path) {
+      const spy = spyOn(Bun, "file").mockImplementation((location: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number, options?: Parameters<typeof Bun.file>[1]) => {
+        const handle: Bun.BunFile = Reflect.apply(file, Bun, [location, options]);
+        if (location === path) {
           const read = handle.json.bind(handle);
           handle.json = async () => { const value = await read(); control.abort(); return value; };
         }

@@ -108,11 +108,11 @@ test("Ctrl-C during a successful claimed result read still reports unknown", asy
   const controller = new AbortController();
   const read = fs.readFile;
   const resultPath = join(base, ".claimed", header.id, "result.json");
-  const spy = spyOn(fs, "readFile").mockImplementation(async (...args: Parameters<typeof read>) => {
+  const spy = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof read>) => {
     const contents = await read(...args);
     if (args[0] === resultPath) controller.abort();
     return contents;
-  });
+  }) as typeof read);
   try {
     const result = handoffRemoteMessage("peer", header, controller.signal);
     await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());

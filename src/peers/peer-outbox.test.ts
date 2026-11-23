@@ -512,3 +512,27 @@ test("a stalled result read releases the interrupted CLI with one lookup outstan
     expect(attempts).toBe(1);
   } finally { release.resolve(); held.mockRestore(); }
 });
+
+test("a published ACK stays readable when the client reaches its deadline during finalization", async () => {
+  await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  const dir = join(base, ".claimed", header.id + `@${process.pid}-100`);
+  const entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  const rename = fs.rename;
+  const pause = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    await rename(from, to);
+    if (to === join(dir, "result.json")) { entered.resolve(); await resume.promise; }
+  });
+  let now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  try {
+    const client = handoffRemoteMessage("peer", header);
+    await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
+    const worker = createPeerOutboxPoll()(async () => header.id, () => {});
+    await entered.promise;
+    await Bun.write(join(dir, "timeout"), "");
+    now += 70_000;
+    resume.resolve(); await worker;
+    expect(await client).toMatchObject({ ok: true });
+  } finally { resume.resolve(); pause.mockRestore(); clock.mockRestore(); }
+});

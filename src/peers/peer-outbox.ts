@@ -184,7 +184,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
         const result = await readResult(150, signal?.aborted ? undefined : signal);
         if (result && !signal?.aborted) return consume(result);
       }
-      if (claimed) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
+      if (claimed) await writeFile(join(claimed, signal?.aborted ? "cancel" : "timeout"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
       if (!signal?.aborted) {
         const last = await readResult(150, signal);
@@ -233,10 +233,10 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
 
   async function finalize(dir: string, result: DeliveryResult, log: (line: string) => void, delay = 250): Promise<void> {
     try {
-      if (!existsSync(join(dir, "cancel"))) {
-        await writeJson(dir, "result.json", result);
+      if (!existsSync(join(dir, "result.json"))) {
+        if (existsSync(join(dir, "cancel"))) await rm(dir, { recursive: true, force: true });
+        else await writeJson(dir, "result.json", result);
       }
-      if (existsSync(join(dir, "cancel"))) await rm(dir, { recursive: true, force: true });
     } catch (err) {
       if (!missing(err) || existsSync(dir)) {
         log(`peer-outbox: retrying claim finalization: ${detail(err)}`);
@@ -262,11 +262,12 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
     if (!claim || active.has(dir)) return;
     await safeTransferParent(dir);
     const client = await inspectTransferDirectory(dir);
-    if (existsSync(join(dir, "cancel")) || reclaimTransfer(client.state, client.inode, now())) {
+    const published = existsSync(join(dir, "result.json"));
+    if ((!published && existsSync(join(dir, "cancel"))) || reclaimTransfer(client.state, client.inode, now())) {
       await rm(dir, { recursive: true, force: true });
       return;
     }
-    if (existsSync(join(dir, "result.json"))) {
+    if (published) {
       await rm(join(dir, "files"), { recursive: true, force: true });
       return;
     }
@@ -334,7 +335,7 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
             let writing: Promise<void> | undefined;
             let warned = false;
             const tick = () => {
-              if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
+              if (existsSync(join(dir, "cancel")) || existsSync(join(dir, "timeout")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
               if (writing || sequence === recorded) return;
               const next = sequence;
               writing = writeJson(dir, "progress", { bytes, sequence: next }).then(() => { recorded = next; }, err => {

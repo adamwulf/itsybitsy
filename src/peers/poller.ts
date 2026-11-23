@@ -11,7 +11,8 @@
  * - Periodic agents polls for a peer never overlap, including their dials. A dial can take
  *   up to 30 s to fail, so ticks that come while one is pending skip that
  *   peer. A failure is retried on the next tick.
- * - Each agents poll is bounded by {@link PEER_REQUEST_TIMEOUT_MS}. A peer can keep
+ * - Once connected, the agents request has a {@link PEER_REQUEST_TIMEOUT_MS} deadline.
+ *   Dialing has its own deadline. A peer can keep
  *   its QUIC connection alive and still never answer (its `ib watch` event
  *   loop wedged while the Rust side runs on), which would otherwise leave the
  *   peer skipped forever. On timeout the connection is closed, `lastError` is

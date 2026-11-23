@@ -498,6 +498,7 @@ export interface PeerResponderDeps {
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
+  headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** watch.log in `ib watch`. */
@@ -511,6 +512,7 @@ export interface PeerResponderDeps {
  * task with its own error handling. Never throws.
  */
 export async function serveTrustedConnection(conn: PairConnection, deps: PeerResponderDeps): Promise<void> {
+  const headerReaders = deps.headerReaders ??= new Set();
   const from = shortPeerId(conn.remoteId);
   if ((await deps.peerName(conn.remoteId)) === null) {
     deps.log(`peer link: closed a connection from ${from}: not a peer`);
@@ -530,6 +532,15 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
       closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
       return;
     }
+    if (headerReaders.size >= 8) {
+      void stream.stopReceiving().catch(() => {});
+      try {
+        await writeWithProgress(stream, encodeJson({ ok: false, error: "busy, try again" }), deps.setTimer);
+        await waitForIO(deps, () => stream.finish());
+      } catch { closeQuietly(conn, PEER_CLOSE.error, "busy reply stalled"); }
+      continue;
+    }
+    headerReaders.add(stream);
     void serveRequest(conn, stream, from, deps);
   }
 }
@@ -585,6 +596,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       try {
         const header = await decodeSendHeader(reader, options);
         if (!header.files.length) await requireSendFin(stream, options);
+        deps.headerReaders?.delete(stream);
         if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
         await deps.receiveMessage(header, conn.remoteId, async () => {
           const name = await deps.peerName(conn.remoteId);
@@ -627,7 +639,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     else if (err instanceof TransferIdleError) closeQuietly(conn, PEER_CLOSE.error, "request read stalled");
     else { void stream.cancel().catch(() => {}); }
     return;
-  }
+  } finally { deps.headerReaders?.delete(stream); }
 
   // Again now, right before answering: the stream was accepted on its first
   // frame, and a client can hold it open across `ib peer remove` before it

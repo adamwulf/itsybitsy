@@ -83,6 +83,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
 ) {
   const accepted = new Map<string, number>();
   const pending = new Map<string, Promise<void>>();
+  let waiters = 0;
   const receiving = new Set<string>();
   let reserved = 0;
   return async (header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>,
@@ -99,7 +100,11 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
     }
     if (accepted.has(key)) return;
     const earlier = pending.get(key);
-    if (earlier) return earlier;
+    if (earlier) {
+      if (waiters >= 8) throw new Error("busy, try again");
+      waiters++;
+      try { return await earlier; } finally { waiters--; }
+    }
     if (accepted.size + pending.size >= capacity) throw new Error("busy, try again");
     const work = async () => {
       const { files } = header;

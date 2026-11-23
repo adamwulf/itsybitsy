@@ -443,3 +443,23 @@ test("concurrent peers reserve outstanding bytes until write or failure", async 
   await expect(receive(request(), "b", paired, { read: async () => Buffer.alloc(0) })).rejects.toThrow("Early EOF");
   expect(budgets).toEqual([3, 6, 3]);
 });
+
+test("pending replay and framed header readers have independent watcher-wide ceilings", async () => {
+  const req = header({ files: [manifestFile("x")] });
+  const body = Promise.withResolvers<Uint8Array>();
+  const requests = Array.from({ length: 9 }, () => receiver(req, "a", paired, { read: () => body.promise }));
+  const done = Promise.allSettled(requests);
+  await expect(receiver(req, "a", paired)).rejects.toThrow("busy");
+  body.resolve(Buffer.alloc(0));
+  expect((await done).every(r => r.status === "rejected")).toBe(true);
+  const deps = { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    headerReaders: new Set<import("./pairing").PairStream>(), setTimer: createFakeClock().setTimer, log() {} };
+  const links = [createMemoryLink("a", "local"), createMemoryLink("b", "local")];
+  const serving = links.map(link => serveTrustedConnection(link.b, deps));
+  try {
+    for (let i = 0; i < 8; i++) await (await links[i % 2]!.a.openBi()).writeAll(Uint8Array.of(0));
+    await waitFor(() => deps.headerReaders.size === 8);
+    const excess = await links[0]!.a.openBi();
+    expect(JSON.parse(new TextDecoder().decode(await excess.readToEnd(1024))).error).toContain("busy");
+  } finally { links.forEach(link => link.a.close(0, "done")); await Promise.all(serving); }
+});

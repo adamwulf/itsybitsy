@@ -341,6 +341,7 @@ export class PeerService {
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
   private outboxTimer?: ReturnType<typeof setInterval>;
+  private readonly headerReaders = new Set<import("./pairing").PairStream>();
   private readonly paneReaders = new Set<string>();
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
@@ -917,7 +918,7 @@ export class PeerService {
           receiveMessage: this.deps.receiveMessage,
           snapshot: this.deps.snapshot,
           captureCoordinator: this.deps.captureCoordinator,
-          paneReaders: this.paneReaders,
+          paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           log: this.deps.log,
         });
         return;

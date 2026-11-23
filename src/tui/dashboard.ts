@@ -1,3 +1,4 @@
+import { remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
  * Composes AgentTree, TmuxPane, RightPane, StatusBar, and dialog system.
@@ -429,9 +430,9 @@ export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 export function remoteCenterText(entry: RemoteEntry): string {
   switch (entry.kind) {
     case "remote-coordinator":
-      return `System coordinator on ${entry.peerName} (read-only)`;
+      return `System coordinator on ${entry.peerName} (output pane is read-only)`;
     case "remote-agent":
-      return `Remote agent on ${entry.peerName} (read-only)`;
+      return `Remote agent on ${entry.peerName} (output pane is read-only)`;
     case "remote-repo-header":
       return `Remote repo on ${entry.peerName} (read-only)`;
   }
@@ -1984,7 +1985,7 @@ export class DashboardComponent implements Component {
     const service = this.peerService;
     try {
       if (!service) throw new Error("Remote messaging is unavailable");
-      if (service.remoteStartDenial !== null) throw new Error(service.remoteStartDenial);
+      if (service.remoteStartDenial !== null) throw new Error(remoteSendDenial(service.remoteStartDenial));
       this.setNotice("sending…", "info", true);
       await service.sendRemoteMessage(peer, textHeader(target, text, { kind: "user" }));
       this.setNotice(`Sent to ${label}`, "info");

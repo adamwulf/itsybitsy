@@ -121,3 +121,9 @@ export async function remoteStartDenialAtStartup(input?: DashboardCaller, clock 
     cancelTimer();
   }
 }
+
+/** Use the same startup decision when the dashboard sends a message. */
+export function remoteSendDenial(reason: string): string {
+  return reason.replace(/remote starts/gi, match => match === "Remote starts" ? "Remote sends" : "remote sends")
+    .replace("start an agent on another machine", "send to another machine");
+}

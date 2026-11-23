@@ -10644,7 +10644,7 @@ describe("Unified peer repos in the Agents tree", () => {
     for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
       dashboard.jumpToMode(mode);
       const lines = dashboard.render(WIDTH);
-      expect(paneText(lines, 2)).toBe("Remote agent on Laptop B (read-only)");
+      expect(paneText(lines, 2)).toBe("Remote agent on Laptop B (output pane is read-only)");
       // The right pane is narrow at this width: the placeholder wraps rather than being cut.
       expect(paneText(lines, 1)).toBe(REMOTE_RIGHT_PANE_TEXT);
       expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
@@ -10738,10 +10738,14 @@ describe("Unified peer repos in the Agents tree", () => {
     selectByKey(dashboard, WORKER_KEY);
     dashboard.handleInput("s");
     dashboard.handleInput("/compact");
-    service.remoteStartDenial = "Dashboard is inside tmux";
+    service.remoteStartDenial = "Remote starts are disabled inside tmux";
     dashboard.inputField.submit();
     await Bun.sleep(0);
-    expect(dashboard.notice).toBe("Dashboard is inside tmux");
+    expect(dashboard.notice).toBe("Remote sends are disabled inside tmux");
+    service.remoteStartDenial = "Only a human can start an agent on another machine";
+    dashboard.inputField.submit();
+    await Bun.sleep(0);
+    expect(dashboard.notice).toBe("Only a human can send to another machine");
     expect(service.sendRemoteMessage).not.toHaveBeenCalled();
     expect(dashboard.inputField.getText()).toBe("/compact");
 

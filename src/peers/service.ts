@@ -65,7 +65,7 @@ import { pollPeerOutbox } from "./peer-outbox";
 import type { SendHeader } from "./send-frame";
 import { requestSend } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
-import { remoteStartDenialAtStartup } from "./remote-start-caller";
+import { remoteSendDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
@@ -673,7 +673,7 @@ export class PeerService {
 
   async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard"): Promise<string> {
     if (source === "dashboard") {
-      if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
+      if (this.remoteStartDenial !== null) throw new Error(remoteSendDenial(this.remoteStartDenial));
       if (header.from.kind !== "user") throw new Error("Dashboard sends require a user sender");
     }
     const peer = await this.peerName(peerId);

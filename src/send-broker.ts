@@ -1,4 +1,4 @@
-import { stagingOwnerStart } from "./peers/transfer-owner";
+import { inspectBrokerLease, reclaimTransfer, transferDirectoryBatch } from "./peers/transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -54,14 +54,14 @@ import { existsSync, fstatSync, futimesSync } from "node:fs";
 import { mkdir, open, rm, stat } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
-import { brokerAttachmentStage, createBrokerProgress, listStagingRequests, stagingDirectoryStat, openBrokerLease, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
+import { brokerAttachmentStage, createBrokerProgress, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
 import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
 import { join } from "path";
-import { isPidAliveCtx, type Agent } from "./agents";
+import { type Agent } from "./agents";
 import {
   hasLiveWatchdog,
   resolveCallerAgentContext,
@@ -228,7 +228,6 @@ export async function requestSendViaWatchdog(
   return submitSendRequest("send", caller.agentDir, caller.meta.id, target, message, deps, noPassthrough);
 }
 
-const UNVERIFIED_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 async function startStagingLease(stage: string) {
   await mkdir(stage, { mode: 0o700 });
@@ -242,47 +241,8 @@ async function startStagingLease(stage: string) {
   }
 }
 
-/** Both sides read the same ps start stamp. Missing evidence cannot authorize
- * dispatch or prove the owner dead. Expiry is independent of process identity. */
-async function stagingLeaseState(dir: string, id: string, now: number): Promise<"active" | "abandoned" | "unverified"> {
-  const lease = await openBrokerLease(dir, id);
-  try {
-    const info = await lease.stat();
-    const unknown = now - info.mtimeMs >= UNVERIFIED_RETENTION_MS ? "abandoned" : "unverified";
-    if (!info.isFile() || info.nlink !== 1 || info.size > 256) return unknown;
-    const buffer = Buffer.alloc(257);
-    const { bytesRead } = await lease.read(buffer);
-    let owner;
-    try { owner = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return unknown; }
-    if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0) return unknown;
-    if (!isPidAliveCtx.fn(owner.pid)) return "abandoned";
-    const start = stagingOwnerStart(owner.pid);
-    if (start === null) return unknown;
-    let stamp;
-    try { stamp = await openBrokerLease(dir, id, "owner.json"); }
-    catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-      try {
-        const first = await openBrokerLease(dir, id, "owner.json", true);
-        try { await first.writeFile(JSON.stringify({ pid: owner.pid, start })); } finally { await first.close(); }
-        return "active";
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-      stamp = await openBrokerLease(dir, id, "owner.json");
-    }
-    try {
-      const meta = await stamp.stat();
-      if (!meta.isFile() || meta.nlink !== 1 || meta.size > 256) return unknown;
-      const { bytesRead } = await stamp.read(buffer);
-      let saved;
-      try { saved = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return unknown; }
-      if (saved?.pid !== owner.pid || !Number.isSafeInteger(saved.start)) return unknown;
-      return start === saved.start ? "active" : "abandoned";
-    } finally { await stamp.close(); }
-  } finally { await lease.close(); }
-}
-
 async function requireActiveStagingLease(dir: string, id: string) {
-  if (await stagingLeaseState(dir, id, Date.now()) !== "active") {
+  if ((await inspectBrokerLease(dir, id)).state !== "verified-live") {
     throw new Error("Cannot verify the staging lease owner");
   }
 }
@@ -290,18 +250,14 @@ async function requireActiveStagingLease(dir: string, id: string) {
 export async function sweepStagingLease(dir: string, id: string, now: number) {
   if (!/^[0-9a-f]{32}$/.test(id)) return;
 
-  try {
-    if (await stagingLeaseState(dir, id, now) !== "abandoned") return;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    if (now - (await stagingDirectoryStat(dir, id)).mtimeMs < UNVERIFIED_RETENTION_MS) return;
-  }
+  const { state, created } = await inspectBrokerLease(dir, id);
+  if (!reclaimTransfer(state, created, now)) return;
   await removeAbandonedStaging(dir, id);
 }
 
 export async function sweepStagingRequests(dir: string, now: number) {
   let ids;
-  try { ids = await listStagingRequests(dir); }
+  try { ids = await transferDirectoryBatch(join(dir, "send-attachments")); }
   catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
   for (const id of ids) {
     try { await sweepStagingLease(dir, id, now); }

@@ -273,17 +273,18 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
     if (!ownsEndpoint()) return;
-    if (workers >= 4 || active.size >= 4) return;
+    if (workers >= 4) return;
     const ready = (await transferDirectoryBatch(base, "dispatch")).filter(name => requestId.test(name));
     if (!ready.length) return;
     await mkdir(claimed, { recursive: true, mode: 0o700 });
     await safeTransferParent(claimed);
     const ids = ready.values();
+    const publications: Promise<void>[] = [];
     async function worker() {
       workers++;
       try {
         for (const id of ids) {
-          if (!ownsEndpoint() || active.size >= 4) return;
+          if (!ownsEndpoint()) return;
           const start = stagingOwnerStart(process.pid);
           if (start === null) { log("Cannot verify the peer-outbox worker"); continue; }
           const owner = { pid: process.pid, start };
@@ -332,12 +333,12 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
             } finally { clearInterval(timer); }
           } catch (err) { result = { ok: false, error: detail(err) }; }
           void releaseBodies(dir, log);
-          await finalize(dir, result, log);
-          if (active.has(dir)) return;
+          publications.push(finalize(dir, result, log));
         }
       } finally { workers--; }
     }
     await Promise.all(Array.from({ length: Math.max(0, Math.min(4 - workers, ready.length)) }, worker));
+    await Promise.all(publications);
   }
   return Object.assign(poll, { recover });
 }

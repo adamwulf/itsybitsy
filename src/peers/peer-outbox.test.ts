@@ -442,3 +442,23 @@ test("two watchers racing a paused claim use only the identity of the winner", a
     expect(sends).toBe(1);
   } finally { held.resolve(); pause.mockRestore(); }
 });
+
+test("four retained results leave a network slot for a fifth request", async () => {
+  const batch = await Promise.all(Array.from({ length: 4 }, () => readyRequest()));
+  const paths = new Set(batch.map(item => join(item.claimed, "result.json")));
+  const rename = fs.rename;
+  const full = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    if (paths.has(String(to))) throw Error("storage unavailable");
+    return rename(from, to);
+  });
+  const poll = createPeerOutboxPoll();
+  const sends: string[] = [];
+  const send = async (_peer: string, header: { id: string }) => { sends.push(header.id); return header.id; };
+  try {
+    await poll(send, () => {});
+    const fifth = await readyRequest();
+    await poll(send, () => {});
+    expect(sends.sort()).toEqual([...batch, fifth].map(item => item.header.id).sort());
+    expect(await Bun.file(join(fifth.claimed, "result.json")).json()).toMatchObject({ ok: true });
+  } finally { full.mockRestore(); }
+});

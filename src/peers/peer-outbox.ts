@@ -1,4 +1,4 @@
-import { finishRecovery, inspectTransferDirectory, reclaimTransfer, safeTransferParent, sweepEntries, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
+import { transferOwnerState, type TransferOwner, finishRecovery, inspectTransferDirectory, reclaimTransfer, safeTransferParent, sweepEntries, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
@@ -69,7 +69,7 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 }
 
 /** A claimed request might already have reached the other machine. Never re-submit it. */
-export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles, onProgress?: () => void, beforePublish?: () => Promise<void>): Promise<IbCommandResult> {
+export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles, onProgress?: () => void, beforePublish?: () => Promise<void>, origin?: TransferOwner): Promise<IbCommandResult> {
   let published = false;
   try {
     if (signal?.aborted) return interruptedSend("unpublished");
@@ -92,7 +92,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
         header = { ...header, files: await stage(join(staging, "files")) };
         encodeSendHeader(parseSendHeader(header));
       }
-      await writeJson(staging, "request.json", { peer, header });
+      await writeJson(staging, "request.json", { peer, header, origin });
       await beforePublish?.();
       signal?.throwIfAborted();
       await rename(staging, dir);
@@ -169,7 +169,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
 type Send = (peer: string, header: SendHeader, transfer: OutgoingTransfer) => Promise<string>;
 
 // A peer id (64 ASCII characters) and the JSON object wrapping the wire header.
-const MAX_ENVELOPE_BYTES = MAX_HEADER_BYTES + 128;
+const MAX_ENVELOPE_BYTES = MAX_HEADER_BYTES + 192;
 async function readRequest(path: string) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -275,11 +275,12 @@ export function createPeerOutboxPoll(now = Date.now) {
           let result: DeliveryResult;
           try {
             if ((await inspectTransferDirectory(dir)).state !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
-            const { peer, header: raw } = await readRequest(join(dir, "request.json"));
+            const { peer, header: raw, origin } = await readRequest(join(dir, "request.json"));
             const header = parseSendHeader(raw);
             if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
             const worker = await inspectTransferDirectory(dir, "worker.json");
             if (worker.owner?.pid !== process.pid || worker.state !== "verified-live") throw new Error("Cannot verify the peer-outbox worker");
+            if (origin !== undefined && transferOwnerState(origin, 0) !== "verified-live") throw new Error("Cannot verify the originating CLI");
             const controller = new AbortController();
             let bytes = 0;
             let sequence = 0;

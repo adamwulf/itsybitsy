@@ -1,4 +1,4 @@
-import { inspectBrokerLease, reclaimTransfer, transferDirectoryBatch } from "./peers/transfer-owner";
+import { inspectBrokerLease, stagingOwnerStart, transferOwnerState, type TransferOwner, reclaimTransfer, transferDirectoryBatch } from "./peers/transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -92,7 +92,7 @@ export const SEND_MAX_TARGET_CHARS = 256;
 
 const LOCAL_TARGET_EXIT = 66; // Private broker result: no remote handoff was attempted.
 const LOCAL_REMOTE_TARGET = "The target resolves locally. Use @<repo>/<agent> for a local send or <machine>/<repo>/<agent> for a remote send.";
-const REQUEST_FIELDS = new Set(["v", "id", "op", "target", "message", "noPassthrough", "files"]);
+const REQUEST_FIELDS = new Set(["v", "id", "op", "target", "message", "noPassthrough", "files", "clientPid"]);
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 
 /**
@@ -115,6 +115,7 @@ export interface SendRequest {
   message: string;
   noPassthrough?: true;
   files?: SendHeader["files"];
+  clientPid?: number;
 }
 
 type ParsedSendRequest = { ok: true; request: SendRequest } | { ok: false; error: string };
@@ -170,6 +171,10 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
   if (obj.v !== 1) return { ok: false, error: "unsupported send request version" };
   if (obj.id !== expectedId) return { ok: false, error: "send request id does not match its file name" };
   if (obj.op !== SEND_OP && obj.op !== "remote-send") return { ok: false, error: "send request has an unsupported op" };
+  const pid = obj.clientPid;
+  if (obj.op === "remote-send" ? typeof pid !== "number" || !Number.isSafeInteger(pid) || pid < 1 : pid !== undefined) {
+    return { ok: false, error: "invalid remote send client PID" };
+  }
   if (obj.noPassthrough !== undefined && (obj.noPassthrough !== true || obj.op !== SEND_OP)) {
     return { ok: false, error: "invalid noPassthrough for send request" };
   }
@@ -192,7 +197,7 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
       files = header.files;
     } catch (err) { return { ok: false, error: String(err) }; }
   }
-  return { ok: true, request: { v: 1, id: expectedId, op: obj.op, target: obj.target, message: obj.message, ...(files && { files }), ...(obj.noPassthrough === true && { noPassthrough: true }) } };
+  return { ok: true, request: { v: 1, id: expectedId, op: obj.op, target: obj.target, message: obj.message, ...(typeof pid === "number" && { clientPid: pid }), ...(files && { files }), ...(obj.noPassthrough === true && { noPassthrough: true }) } };
 }
 
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
@@ -240,9 +245,9 @@ async function startStagingLease(dir: string, id: string) {
   }
 }
 
-async function requireActiveStagingLease(dir: string, id: string, expected?: string) {
-  const { state, identity } = await inspectBrokerLease(dir, id);
-  if (state !== "verified-live" || !identity || expected !== undefined && expected !== identity) {
+async function requireActiveStagingLease(dir: string, id: string, origin: TransferOwner, expected?: string) {
+  const { state, identity, owner } = await inspectBrokerLease(dir, id);
+  if (state !== "verified-live" || owner?.pid !== origin.pid || owner.start !== origin.start || !identity || expected !== undefined && expected !== identity) {
     throw new Error("Cannot verify the staging lease owner");
   }
   return identity;
@@ -276,7 +281,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   catch (err) { return deps.signal?.aborted ? interruptedSend("unpublished") : brokerFail(String(err)); }
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!live) return remote ? brokerFail("Remote sends from a worktree agent need its watchdog running") : null;
-  const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(noPassthrough && { noPassthrough: true }) };
+  const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(remote && { clientPid: process.pid }), ...(noPassthrough && { noPassthrough: true }) };
   const parent = join(dir, "send-attachments");
   const staged = join(parent, request.id);
   let ownsStage = false;
@@ -490,7 +495,7 @@ async function sendToSystemCoordinatorDefault(
  * broker's queue handler, which has already consumed the request file.
  */
 export async function handleSendRequest(
-  ctx: { agentId: string; repoPath: string; agentDir: string; id: string; text: string },
+  ctx: { agentId: string; repoPath: string; agentDir: string; id: string; text: string; createdMs?: number },
   deps: SpawnServerDeps,
 ): Promise<IbCommandResult> {
   const parsed = parseSendRequest(ctx.text, ctx.id);
@@ -530,11 +535,16 @@ export async function handleSendRequest(
       if (!limits.ok) return brokerFail(limits.error);
       const controller = new AbortController();
       const textProgress = join(spawnResultDir(ctx.agentDir), ctx.id + ".progress");
+      const pid = parsed.request.clientPid!;
+      const origin: TransferOwner = { pid, start: stagingOwnerStart(pid) };
+      if (transferOwnerState(origin, 0) !== "verified-live" || (!files.length && (!ctx.createdMs || origin.start! * 1000 > ctx.createdMs))) {
+        return brokerFail("Cannot verify the remote send client");
+      }
       let clientIdentity: string | undefined;
       let marker: Awaited<ReturnType<typeof createBrokerProgress>> | undefined;
       try {
         if (files.length) {
-          clientIdentity = await requireActiveStagingLease(ctx.agentDir, ctx.id);
+          clientIdentity = await requireActiveStagingLease(ctx.agentDir, ctx.id, origin);
           marker = await createBrokerProgress(ctx.agentDir, ctx.id);
         } else {
           deps.transferSignal?.throwIfAborted();
@@ -578,7 +588,7 @@ export async function handleSendRequest(
       try {
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, signal, progress) : undefined;
         const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), signal, stage, progress,
-          files.length ? async () => { await requireActiveStagingLease(ctx.agentDir, ctx.id, clientIdentity); } : undefined);
+          files.length ? async () => { await requireActiveStagingLease(ctx.agentDir, ctx.id, origin, clientIdentity); } : undefined, origin);
         if (signal.aborted) return interruptedSend("claimed");
         return result;
       } finally {

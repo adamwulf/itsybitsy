@@ -299,7 +299,7 @@ describe("send broker", () => {
       const jobs = new Map([[agentDir, Promise.resolve()]]);
       const controller = new AbortController();
       const { deps } = server({ transferJobs: jobs, transferSignal: controller.signal });
-      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
       const realWrite = fs.writeFile;
       const spy = spyOn(fs, "writeFile").mockImplementation(async (path, data, options) => {
         await realWrite(path, data, options);
@@ -315,7 +315,7 @@ describe("send broker", () => {
       const release = Promise.withResolvers<void>();
       const jobs = new Map<string, Promise<void>>();
       const { deps } = server({ transferJobs: jobs, readMeta: async () => { await release.promise; return { meta: null }; } });
-      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
       await processSpawnRequests(SENDER_ID, senderRepo, deps);
       const job = jobs.get(agentDir);
       expect(job).toBeDefined();
@@ -328,13 +328,13 @@ describe("send broker", () => {
     test.each([true, undefined])("a sealed repo coordinator with worktree=%s cannot publish through the worktree broker", async worktree => {
       await linkWorktree();
       const { deps } = server({ readMeta: async () => ({ meta: senderMeta({ agentType: "repo-coordinator", worktree }) }) });
-      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
       await processSpawnRequests(SENDER_ID, senderRepo, deps);
       expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("require a worktree agent") });
     });
 
     test("a sealed requester without its own physical worktree cannot send remotely", async () => {
-      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
       await processSpawnRequests(SENDER_ID, senderRepo, server().deps);
       expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("verified Git backlink") });
     });
@@ -345,7 +345,7 @@ describe("send broker", () => {
       await rm(git);
       expect(Bun.spawnSync(["mkfifo", git]).exitCode).toBe(0);
       const second = "b".repeat(32);
-      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
       await queue(second, sendRequest(second));
       expect(await processSpawnRequests(SENDER_ID, senderRepo, server().deps)).toBe(2);
       expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("verified Git backlink") });

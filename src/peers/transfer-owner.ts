@@ -162,7 +162,7 @@ export async function sweepOutgoingDirectories(root = transferStagingRoot(), now
 
 /** A sandbox writes its PID alone. Only the watchdog observes and records its
  * start, after checking it predates the lease, and later verifies that stamp. */
-export async function inspectBrokerLease(dir: string, id: string): Promise<{ state: OwnerState; created: number; identity?: string }> {
+export async function inspectBrokerLease(dir: string, id: string): Promise<{ state: OwnerState; created: number; identity?: string; owner?: TransferOwner }> {
   const info = await stagingDirectoryStat(dir, id);
   let created = info.birthtimeMs || info.ctimeMs;
   let lease: FileHandle | undefined;
@@ -183,14 +183,14 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
       if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null || observed * 1000 > leaseInfo.birthtimeMs) return { state: firstSight, created };
       try {
         await publishBrokerRecord(dir, id, "owner.json", candidate);
-        return { state: "verified-live", created, identity };
+        return { state: "verified-live", created, identity, owner: candidate };
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
       stamp = await openBrokerLease(dir, id, "owner.json");
     }
     const saved = await readOwnerFields(stamp);
     // Even without a usable saved stamp, a missing lease PID proves death.
     const owner = saved?.pid === seed.pid ? saved : { pid: seed.pid, start: null };
-    return { state: transferOwnerState(owner, leaseInfo.birthtimeMs, observed), created, identity };
+    return { state: transferOwnerState(owner, leaseInfo.birthtimeMs, observed), created, identity, owner };
   } catch { return { state: "unverifiable", created }; }
   finally { await stamp?.close(); await lease?.close(); }
 }

@@ -576,8 +576,10 @@ export async function processSpawnRequests(
       throw err;
     }
     let text: string;
+    let createdMs: number;
     try {
-      const size = (await stat(claimed)).size;
+      const { size, birthtimeMs } = await stat(claimed);
+      createdMs = birthtimeMs;
       if (size > SPAWN_MAX_PROMPT_BYTES * 2) {
         await writeResult(agentDir, id, brokerFail("Error: spawn request is too large"), deps.transferSignal);
         handled++;
@@ -593,7 +595,7 @@ export async function processSpawnRequests(
 
     async function dispatch() {
       let result: IbCommandResult;
-      try { result = await handleOneRequest(agentId, repoPath, agentDir, id, text, deps); }
+      try { result = await handleOneRequest(agentId, repoPath, agentDir, id, text, deps, createdMs); }
       catch (err) { result = brokerFail(`Error: spawn failed: ${err instanceof Error ? err.message : String(err)}`); }
       try { await writeResult(agentDir, id, result, deps.transferSignal); }
       catch { /* The client deadline handles an unavailable result channel. */ }
@@ -698,6 +700,7 @@ async function handleOneRequest(
   id: string,
   text: string,
   deps: SpawnServerDeps,
+  createdMs: number,
 ): Promise<IbCommandResult> {
   const named = requestOp(text);
   if (named.present) {
@@ -708,7 +711,7 @@ async function handleOneRequest(
     }
     if (named.op === "send" || named.op === "remote-send") {
       const { handleSendRequest } = await import("./send-broker");
-      return handleSendRequest({ agentId, repoPath, agentDir, id, text }, deps);
+      return handleSendRequest({ agentId, repoPath, agentDir, id, text, createdMs }, deps);
     }
     const { handleLifecycleRequest } = await import("./lifecycle-broker");
     return handleLifecycleRequest({ agentId, repoPath, agentDir, id, text }, deps);

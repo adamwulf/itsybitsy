@@ -28,7 +28,7 @@ test.each(["oversize", "symlink", "FIFO"])("refuses a %s peer request without se
   const path = join(dir, "request.json");
   const header = { ...textHeader({ kind: "system" }, "hi", { kind: "user" }), id };
   const envelope = JSON.stringify({ peer: "peer", header });
-  if (kind === "oversize") await Bun.write(path, envelope + " ".repeat(MAX_HEADER_BYTES + 129));
+  if (kind === "oversize") await Bun.write(path, envelope + " ".repeat(MAX_HEADER_BYTES + 193));
   if (kind === "symlink") {
     const valid = join(home, "valid-request.json");
     await Bun.write(valid, envelope);
@@ -385,4 +385,19 @@ test("a failed progress rename retries the same sequence on the next tick", asyn
     }, () => {});
     expect(failed).toBe(true);
   } finally { spy.mockRestore(); }
+});
+
+test("claim refuses a brokered send whose originating CLI died after publication", async () => {
+  await Bun.write(join(home, ".itsybitsy/peer/endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "hi", { kind: "agent", id: "laptop/repo/worker" });
+  const origin = { pid: 42, start: 100 };
+  isPidAliveCtx.set(() => true);
+  const result = handoffRemoteMessage("peer", header, undefined, undefined, undefined, undefined, origin);
+  await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
+  expect((await Bun.file(join(base, header.id, "request.json")).json()).origin).toEqual(origin);
+  isPidAliveCtx.set(pid => pid !== origin.pid);
+  let sends = 0;
+  await createPeerOutboxPoll()(async () => { sends++; return header.id; }, () => {});
+  expect(await result).toMatchObject({ ok: false, stderr: "Cannot verify the originating CLI" });
+  expect(sends).toBe(0);
 });

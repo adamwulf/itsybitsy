@@ -1,3 +1,4 @@
+import { openBrokerResults, pinnedPath } from "./pinned-directory";
 import { cancellationPoll, cancellationMarkerExists } from "./send-cleanup";
 import { inspectBrokerLease, stagingOwnerStart, transferOwnerState, type TransferOwner, reclaimTransfer, transferDirectoryBatch } from "./peers/transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
@@ -534,7 +535,6 @@ export async function handleSendRequest(
       const limits = checkIncomingFiles(files, await readTransferLimits(), { machine: await readMachineName() });
       if (!limits.ok) return brokerFail(limits.error);
       const controller = new AbortController();
-      const textProgress = join(spawnResultDir(ctx.agentDir), ctx.id + ".progress");
       const pid = parsed.request.clientPid!;
       const origin: TransferOwner = { pid, start: stagingOwnerStart(pid) };
       if (!files.length && (transferOwnerState(origin, 0) !== "verified-live" || !ctx.createdMs || origin.start! * 1000 > ctx.createdMs)) {
@@ -542,22 +542,24 @@ export async function handleSendRequest(
       }
       let clientIdentity: string | undefined;
       let marker: Awaited<ReturnType<typeof createBrokerProgress>> | undefined;
+      const results = await openBrokerResults(ctx.agentDir, true);
+      const resultPath = await pinnedPath(results).catch(async err => { await results.close(); throw err; });
+      const textProgress = join(resultPath, ctx.id + ".progress");
       try {
         if (files.length) {
           clientIdentity = await requireActiveStagingLease(ctx.agentDir, ctx.id, origin);
           marker = await createBrokerProgress(ctx.agentDir, ctx.id);
         } else {
           deps.transferSignal?.throwIfAborted();
-          await mkdir(spawnResultDir(ctx.agentDir), { mode: 0o700 }).catch(err => { if (err.code !== "EEXIST") throw err; });
-
         }
       }
       catch (err) {
+        await results.close();
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return interruptedSend("claimed");
         throw err;
       }
       const signal = deps.transferSignal ? AbortSignal.any([controller.signal, deps.transferSignal]) : controller.signal;
-      const cancelPath = join(spawnResultDir(ctx.agentDir), ctx.id + ".cancel");
+      const cancelPath = join(resultPath, ctx.id + ".cancel");
       const checkClient = cancellationPoll(async () => files.length
         ? (await marker!.stat()).nlink === 0 : cancellationMarkerExists(cancelPath), controller);
       const ownerStart = stagingOwnerStart(process.pid);
@@ -597,7 +599,7 @@ export async function handleSendRequest(
       } finally {
         clearInterval(timer);
         if (marker) trackSendCleanup(marker.close(), "Broker progress close failed");
-        trackSendCleanup(Promise.resolve(publication).then(() => rm(textProgress, { force: true })), "Broker progress cleanup failed");
+        trackSendCleanup(Promise.resolve(publication).then(() => rm(textProgress, { force: true })).finally(() => results.close()), "Broker progress cleanup failed");
       }
     }
     if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");

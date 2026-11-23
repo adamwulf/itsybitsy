@@ -1,3 +1,4 @@
+import { openBrokerResults, pinnedPath } from "./pinned-directory";
 import { requestLookup } from "./request-lookup";
 import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
 import { isCoordinatorType } from "./coordinator-type-names";
@@ -49,7 +50,7 @@ import * as runtimeNames from "./runtime-names";
  */
 
 import { randomBytes } from "crypto";
-import { mkdir, readdir, realpath, rename, rm, stat, writeFile } from "fs/promises";
+import { lstat, mkdir, readdir, realpath, rename, rm, stat, writeFile } from "fs/promises";
 import { join } from "path";
 import { readAgentMeta, type AgentMeta } from "./agents";
 import {
@@ -122,10 +123,9 @@ export async function ensureSpawnBrokerDirs(agentDir: string): Promise<void> {
 async function writeJsonAtomic(dir: string, name: string, value: unknown, signal?: AbortSignal, createParent = true): Promise<void> {
   signal?.throwIfAborted();
   if (createParent) await mkdir(dir, { recursive: true });
-  else await mkdir(dir).catch(err => { if (err.code !== "EEXIST") throw err; });
   const tmp = join(dir, `.${name}.${randomBytes(4).toString("hex")}.tmp`);
   try {
-    await writeFile(tmp, JSON.stringify(value));
+    await writeFile(tmp, JSON.stringify(value), { flag: "wx", mode: 0o600 });
     signal?.throwIfAborted();
     await rename(tmp, join(dir, name));
   } finally { await rm(tmp, { force: true }); }
@@ -515,15 +515,16 @@ async function writeResult(agentDir: string, id: string, result: IbCommandResult
     stdout: clip(result.stdout),
     stderr: clip(result.stderr),
   };
-  await writeJsonAtomic(spawnResultDir(agentDir), `${id}.json`, payload, signal, false);
+  signal?.throwIfAborted();
+  const dir = await openBrokerResults(agentDir, true);
+  try { await writeJsonAtomic(await pinnedPath(dir), `${id}.json`, payload, signal, false); }
+  finally { await dir.close(); }
 }
 
 /** Completed markers carry the watchdog identity in their first 16 bytes.
  * Unpublished temps carry it in the name, even if their write never began. */
-async function pruneBrokerProgress(agentDir: string, name: string) {
-  const { withAgentSubdirectory, removeBrokerMember } = await import("./peers/remote-attachments");
+async function pruneBrokerProgress(path: string, name: string) {
   const { transferOwnerState } = await import("./peers/transfer-owner");
-  await withAgentSubdirectory(agentDir, [SPAWN_RESULT_DIRNAME], async (dir, path, flags) => {
     const temp = /\.progress\.(\d+)-(\d+)-/.exec(name);
     let pid: number, start: number;
     if (temp) {
@@ -531,7 +532,7 @@ async function pruneBrokerProgress(agentDir: string, name: string) {
     } else {
       const { open } = await import("node:fs/promises");
       const { constants } = await import("node:fs");
-      const file = await open(join(path, name), constants.O_RDONLY | constants.O_NONBLOCK | flags);
+      const file = await open(join(path, name), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
       try {
         if (!(await file.stat()).isFile()) return;
         const bytes = Buffer.alloc(16);
@@ -540,31 +541,30 @@ async function pruneBrokerProgress(agentDir: string, name: string) {
       } finally { await file.close(); }
     }
     if (Number.isSafeInteger(pid) && pid > 0 && Number.isSafeInteger(start) && start >= 0 &&
-        transferOwnerState({ pid, start: start || null }, 0) === "proven-dead") await removeBrokerMember(dir, name);
-  });
+        transferOwnerState({ pid, start: start || null }, 0) === "proven-dead") await rm(join(path, name), { force: true });
 }
 
 /** Remove results a client never collected. */
 async function pruneStaleResults(agentDir: string, nowMs: number): Promise<void> {
-  let names: string[];
+  const dir = await openBrokerResults(agentDir, false).catch(() => undefined);
+  if (!dir) return;
   try {
-    names = await readdir(spawnResultDir(agentDir));
-  } catch {
-    return;
-  }
+    const parent = await pinnedPath(dir);
+    const names = await readdir(parent);
   for (const name of names) {
     if (/^[a-f0-9]{32}\.progress(?:\.([1-9]\d*)-(\d+)-[a-f0-9]{16}\.tmp)?$/.test(name)) {
-      await pruneBrokerProgress(agentDir, name).catch(err => {
+      await pruneBrokerProgress(parent, name).catch(err => {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") warnSendCleanup(`Cannot recover broker progress: ${err}`);
       });
       continue;
     }
     if (!REQUEST_FILE.test(name) && !/^[a-f0-9]{32}\.cancel$/.test(name)) continue;
-    const path = join(spawnResultDir(agentDir), name);
+    const path = join(parent, name);
     try {
-      if (nowMs - (await stat(path)).mtimeMs > SPAWN_STALE_RESULT_MS) await rm(path, { force: true });
+      if (nowMs - (await lstat(path)).mtimeMs > SPAWN_STALE_RESULT_MS) await rm(path, { force: true });
     } catch { /* raced with the client's own delete */ }
   }
+  } finally { await dir.close(); }
 }
 
 /**

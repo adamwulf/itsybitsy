@@ -308,6 +308,17 @@ describe("spawn broker", () => {
       } finally { isPidAliveCtx.reset(); processStartEpochSecondsCtx.reset(); }
     });
 
+    test("a linked result directory cannot redirect publication or stale cleanup", async () => {
+      const { symlink } = await import("node:fs/promises");
+      const protectedDir = join(repo, "protected");
+      await mkdir(protectedDir);
+      await mkdir(agentDir, { recursive: true });
+      await symlink(protectedDir, spawnResultDir(agentDir));
+      await queue(ID_A, validRequest(ID_A));
+      await processSpawnRequests(AGENT_ID, repo, server().deps);
+      expect(await readdir(protectedDir)).toEqual([]);
+    });
+
     test("prunes results the client never collected, and only old ones", async () => {
       await mkdir(spawnResultDir(agentDir), { recursive: true });
       const stale = join(spawnResultDir(agentDir), `${ID_A}.json`);

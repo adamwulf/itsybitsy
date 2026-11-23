@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir } from "node:fs/promises";
+import { mkdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { setUserHome, resetUserHome } from "../home";
@@ -172,6 +172,8 @@ test("repo and system coordinators use their own queues", async () => {
   await Bun.write(join(dir, ".outbox.lock"), String(process.pid));
   expect(await exchange(header({ target: { kind: "system" } }))).toMatchObject({ ok: true });
   expect(await readOutbox(dir)).toMatchObject([{ message: "/compact", raw: false }]);
+  await unlink(join(dir, ".outbox.lock"));
+  await waitFor(async () => !(await readOutbox(dir)).length);
 });
 
 test("system recipient drains an acknowledged append after a long delivery holds its queue lock", async () => {
@@ -181,7 +183,7 @@ test("system recipient drains an acknowledged append after a long delivery holds
   const typed: string[] = [];
   setSendSpawnRunner(cmd => {
     const result = makeSpawnResult();
-    if (cmd.includes("-l")) {
+    if (cmd.includes("-l") && cmd.includes("=ib-coordinator:")) {
       typed.push(cmd.at(-1)!);
       if (typed.length === 1) { entered.resolve(); return { ...result, exited: release.promise }; }
     }
@@ -193,7 +195,7 @@ test("system recipient drains an acknowledged append after a long delivery holds
     await entered.promise;
     expect(await send("second")).toMatchObject({ ok: true });
     await Bun.sleep(5500);
-    expect(typed).toHaveLength(1);
+    expect(typed).toEqual(["[sent by user]: first"]);
   } finally { release.resolve(0); }
   await waitFor(async () => typed.length === 2 && !(await readOutbox(join(cli.home, ".itsybitsy"))).length);
 }, 12_000);

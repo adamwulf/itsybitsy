@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import type { SendStream } from "@number0/iroh";
 import { fileChunks } from "./attachment-manifest";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 
@@ -128,7 +127,9 @@ export async function streamFileBody(
 }
 
 /** Only the caller knows when the last file has been sent and may finish the stream. */
-export async function sendFileBody(path: string, stream: Pick<SendStream, "writeAll">, options: FileBodyOptions = {}): Promise<void> {
+export async function sendFileBody(
+  path: string, stream: { writeAll(bytes: number[]): Promise<void> }, options: FileBodyOptions = {},
+): Promise<void> {
   const chunks = fileChunks(path);
   let written = 0;
   try {

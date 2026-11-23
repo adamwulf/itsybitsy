@@ -46,8 +46,18 @@ export function transferOwnerState(owner: TransferOwner | undefined, _createdMs:
   return "unverifiable";
 }
 
-export function reclaimTransfer(state: OwnerState, createdMs: number, now: number) {
-  return state === "proven-dead" || (state === "unverifiable" && now - createdMs >= OWNER_EXPIRY_MS);
+// Eviction or process restart gives an unverified directory a fresh window.
+const firstObservations = new Map<string, number>();
+export function reclaimTransfer(state: OwnerState, inode: string, now: number) {
+  if (state !== "unverifiable") {
+    firstObservations.delete(inode);
+    return state === "proven-dead";
+  }
+  const first = firstObservations.get(inode);
+  if (first !== undefined) return now - first >= OWNER_EXPIRY_MS;
+  if (firstObservations.size >= 65_536) firstObservations.delete(firstObservations.keys().next().value!);
+  firstObservations.set(inode, now);
+  return false;
 }
 
 // Darwin's system /tmp and /var are aliases. Start at their physical roots
@@ -100,22 +110,21 @@ export async function inspectTransferDirectory(dir: string) {
   const info = await lstat(dir);
   if (!info.isDirectory()) throw new Error("Unsafe transfer directory: " + dir);
   let file: FileHandle | undefined;
-  let created = info.birthtimeMs || info.ctimeMs;
+  const inode = `${info.dev}:${info.ino}:${info.birthtimeMs}`;
   try {
     file = await open(join(dir, "owner.json"), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
     const record = await file.stat();
-    created = record.birthtimeMs || record.ctimeMs;
     const owner = await readOwnerFields(file);
-    return { owner, state: transferOwnerState(owner, record.birthtimeMs), created };
-  } catch { return { owner: undefined, state: "unverifiable" as const, created }; }
+    return { owner, state: transferOwnerState(owner, record.birthtimeMs), inode };
+  } catch { return { owner: undefined, state: "unverifiable" as const, inode }; }
   finally { await file?.close(); }
 }
 
 export async function sweepTransferDirectory(dir: string, now: number) {
   try {
     const safe = await safeTransferParent(dir);
-    const { state, created } = await inspectTransferDirectory(safe);
-    if (reclaimTransfer(state, created, now)) await rm(safe, { recursive: true, force: true });
+    const { state, inode } = await inspectTransferDirectory(safe);
+    if (reclaimTransfer(state, inode, now)) await rm(safe, { recursive: true, force: true });
   } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
 }
 
@@ -150,7 +159,7 @@ export async function finishRecovery(operations: Promise<void>[]) {
   if (failures.length) throw new AggregateError(failures, failures.map(String).join("\n"));
 }
 
-export async function sweepOutgoingDirectories(root = transferStagingRoot(), now = Date.now()) {
+export async function sweepOutgoingDirectories(root = transferStagingRoot(), now = performance.now()) {
   await finishRecovery((["incoming", "outgoing"] as const).map(async name => {
     const area = await stagingArea(root, name);
     await sweepEntries(area, async entry => {
@@ -162,17 +171,16 @@ export async function sweepOutgoingDirectories(root = transferStagingRoot(), now
 
 /** A sandbox writes its PID alone. Only the watchdog observes and records its
  * start, after checking it predates the lease, and later verifies that stamp. */
-export async function inspectBrokerLease(dir: string, id: string): Promise<{ state: OwnerState; created: number; identity?: string; owner?: TransferOwner }> {
+export async function inspectBrokerLease(dir: string, id: string): Promise<{ state: OwnerState; inode: string; identity?: string; owner?: TransferOwner }> {
   const info = await stagingDirectoryStat(dir, id);
-  let created = info.birthtimeMs || info.ctimeMs;
+  const inode = `${info.dev}:${info.ino}:${info.birthtimeMs}`;
   let lease: FileHandle | undefined;
   let stamp: FileHandle | undefined;
   try {
     lease = await openBrokerLease(dir, id);
     const leaseInfo = await lease.stat();
-    created = leaseInfo.birthtimeMs || leaseInfo.ctimeMs;
     const seed = await readOwnerFields(lease);
-    if (!seed) return { state: "unverifiable", created };
+    if (!seed) return { state: "unverifiable", inode };
     const observed = stagingOwnerStart(seed.pid);
     const identity = `${leaseInfo.dev}:${leaseInfo.ino}:${seed.pid}:${observed}`;
     try { stamp = await openBrokerLease(dir, id, "owner.json"); }
@@ -180,17 +188,17 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       const candidate = { pid: seed.pid, start: observed };
       const firstSight = transferOwnerState({ pid: seed.pid, start: null }, leaseInfo.birthtimeMs, observed);
-      if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null || observed * 1000 > leaseInfo.birthtimeMs) return { state: firstSight, created };
+      if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null || observed * 1000 > leaseInfo.birthtimeMs) return { state: firstSight, inode };
       try {
         await publishBrokerRecord(dir, id, "owner.json", candidate);
-        return { state: "verified-live", created, identity, owner: candidate };
+        return { state: "verified-live", inode, identity, owner: candidate };
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
       stamp = await openBrokerLease(dir, id, "owner.json");
     }
     const saved = await readOwnerFields(stamp);
     // Even without a usable saved stamp, a missing lease PID proves death.
     const owner = saved?.pid === seed.pid ? saved : { pid: seed.pid, start: null };
-    return { state: transferOwnerState(owner, leaseInfo.birthtimeMs, observed), created, identity, owner };
-  } catch { return { state: "unverifiable", created }; }
+    return { state: transferOwnerState(owner, leaseInfo.birthtimeMs, observed), inode, identity, owner };
+  } catch { return { state: "unverifiable", inode }; }
   finally { await stamp?.close(); await lease?.close(); }
 }

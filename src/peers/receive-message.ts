@@ -112,7 +112,7 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
 }
 
 /** Shared across this watcher's inbound connections. Concurrent replays await the first enqueue. */
-export function createMessageReceiver(log: (line: string) => void, notice: (line: string) => void, now = Date.now, capacity = 4096,
+export function createMessageReceiver(log: (line: string) => void, notice: (line: string) => void, now = () => performance.now(), capacity = 4096,
   storage: ReceiveStorage = { tempDir: "/tmp", hasFreeSpace },
   reservations = storage.tempDir === "/tmp" ? watcherTmpReservations : new VolumeReservations(),
 ) {

@@ -207,7 +207,7 @@ async function readRequest(path: string) {
   } finally { await file.close(); }
 }
 
-export function createPeerOutboxPoll(now = Date.now) {
+export function createPeerOutboxPoll(now = () => performance.now()) {
   const active = new Set<string>();
   type DeliveryResult = { ok: true; id: string } | { ok: false; error: string };
   let workers = 0;
@@ -251,7 +251,7 @@ export function createPeerOutboxPoll(now = Date.now) {
     if (!claim || active.has(dir)) return;
     await safeTransferParent(dir);
     const client = await inspectTransferDirectory(dir);
-    if (existsSync(join(dir, "cancel")) || reclaimTransfer(client.state, client.created, now())) {
+    if (existsSync(join(dir, "cancel")) || reclaimTransfer(client.state, client.inode, now())) {
       await rm(dir, { recursive: true, force: true });
       return;
     }

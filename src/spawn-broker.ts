@@ -551,7 +551,7 @@ export async function processSpawnRequests(
 
   if (deps.transferJobs) {
     const { sweepStagingRequests } = await import("./send-broker");
-    await sweepStagingRequests(agentDir, nowMs).catch(err => warnSendCleanup(`Staging cleanup failed: ${err}`));
+    await sweepStagingRequests(agentDir, performance.now()).catch(err => warnSendCleanup(`Staging cleanup failed: ${err}`));
   }
 
   let names: string[];

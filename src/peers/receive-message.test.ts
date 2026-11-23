@@ -1077,3 +1077,12 @@ test("failed rollback removal retries the same partial until it is gone", async 
     expect(paths).toHaveLength(2); expect(paths[0]).toBe(paths[1]); expect(lines).toEqual([]);
   } finally { spy.mockRestore(); }
 });
+
+test("a forward calendar step preserves a recently accepted replay", async () => {
+  const receive = createMessageReceiver(() => {}, line => lines.push(line));
+  const request = header();
+  await receive(request, "peer", paired);
+  const clock = spyOn(Date, "now").mockReturnValue(Date.now() + 86_400_000);
+  try { await receive(request, "peer", paired); expect(lines).toHaveLength(1); }
+  finally { clock.mockRestore(); }
+});

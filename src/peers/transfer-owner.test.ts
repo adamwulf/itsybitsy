@@ -34,9 +34,10 @@ test("live, dead, recycled and unverifiable transfer owners share one expiry rul
   expect(transferOwnerState(undefined, 10_000)).toBe("unverifiable");
   processStartEpochSecondsCtx.set(() => null);
   expect(transferOwnerState(owner, 10_000)).toBe("unverifiable");
-  expect(reclaimTransfer("unverifiable", 10_000, 86_409_999)).toBe(false);
-  expect(reclaimTransfer("unverifiable", 10_000, 86_410_000)).toBe(true);
-  expect(reclaimTransfer("verified-live", 10_000, 86_410_001)).toBe(false);
+  expect(reclaimTransfer("unverifiable", "fixture-inode", 10_000)).toBe(false);
+  expect(reclaimTransfer("unverifiable", "fixture-inode", 86_409_999)).toBe(false);
+  expect(reclaimTransfer("unverifiable", "fixture-inode", 86_410_000)).toBe(true);
+  expect(reclaimTransfer("verified-live", "fixture-inode", 86_410_001)).toBe(false);
 });
 
 test("a clock rollback at first sight refuses dispatch and retains the live CLI staging", async () => {
@@ -160,4 +161,14 @@ test("a published watchdog stamp remains authoritative across a crash before tem
   processStartEpochSecondsCtx.set(() => 11);
   await sweepStagingLease(root, id, Date.now());
   expect(await readdir(join(root, "send-attachments"))).toEqual([]);
+});
+
+test("a forward calendar step leaves an unverified partial in its retention window", async () => {
+  const dir = join(root, "incoming", crypto.randomUUID() + ".partial");
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await sweepOutgoingDirectories(root);
+  const future = Date.now() + 2 * 86_400_000;
+  const clock = spyOn(Date, "now").mockReturnValue(future);
+  try { await sweepOutgoingDirectories(root); expect((await stat(dir)).isDirectory()).toBe(true); }
+  finally { clock.mockRestore(); }
 });

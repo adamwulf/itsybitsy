@@ -253,11 +253,11 @@ async function requireActiveStagingLease(dir: string, id: string, origin: Transf
   return identity;
 }
 
-export async function sweepStagingLease(dir: string, id: string, now: number) {
+export async function sweepStagingLease(dir: string, id: string, now = performance.now()) {
   if (!/^[0-9a-f]{32}$/.test(id)) return;
 
-  const { state, created } = await inspectBrokerLease(dir, id);
-  if (!reclaimTransfer(state, created, now)) return;
+  const { state, inode } = await inspectBrokerLease(dir, id);
+  if (!reclaimTransfer(state, inode, now)) return;
   await removeAbandonedStaging(dir, id);
 }
 

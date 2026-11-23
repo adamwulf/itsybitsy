@@ -611,7 +611,7 @@ export async function verifyBrokerRequester(
     const expected = join(runtimeNames.agentDir(root, agentId), "repo");
     const gitFile = join(expected, ".git");
     if (isCoordinatorType(meta.agentType) || await realpath(gitFile).catch(() => null) !== gitFile
-        || !await isRegisteredAgentWorktree(expected, [root])) {
+        || !await isRegisteredAgentWorktree(expected, [root], true)) {
       return { ok: false, result: brokerFail("Remote sends through a watchdog require a worktree agent with a verified Git backlink") };
     }
   }

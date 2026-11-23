@@ -762,6 +762,14 @@ describe("send broker", () => {
       deps.readMeta = async () => ({ meta: senderMeta(meta) });
       if (disabled) deps.verifySeal = async () => ({ ok: false, field: "(missing)" } as any);
       const cwd = await linkWorktree();
+      if (cli === "codex") {
+        // Model a registered submodule whose real Git admin directory lives in its superproject.
+        const superGit = join(home, "super", ".git", "modules", "sub");
+        await mkdir(join(home, "super", ".git", "modules"), { recursive: true });
+        await rename(join(senderRepo, ".git"), superGit);
+        await Bun.write(join(senderRepo, ".git"), "gitdir: " + superGit);
+        await Bun.write(join(cwd, ".git"), "gitdir: " + join(superGit, "worktrees", SENDER_ID));
+      }
       const peerDir = join(home, ".itsybitsy", "peer");
       await Bun.write(join(peerDir, "endpoint.lock"), String(process.pid));
       await Bun.write(join(peerDir, "remote-agents.json"), JSON.stringify([{

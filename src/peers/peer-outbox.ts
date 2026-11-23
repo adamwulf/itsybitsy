@@ -2,7 +2,6 @@ import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { realpath } from "node:fs/promises";
 import { findOwnRepo } from "../resolve-target";
 import { checkCoordinatorExists } from "../coordinator";
-import { isRegisteredAgentWorktree } from "../no-worktree-caller";
 import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
@@ -46,7 +45,7 @@ export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd
     id = resolveSenderId("", { cwd: path });
     const worktree = matchWorktreeCaller(path);
     if (worktree) {
-      if (id !== worktree[2] || !await isRegisteredAgentWorktree(path, [worktree[1]!])) throw new Error(unverifiable);
+      if (id !== worktree[2]) throw new Error(unverifiable);
       sender = { kind: "worktree", id, agentDir: agentDir(worktree[1]!, id) };
     } else if (id === "@system") {
       if (!await remoteCliCaller.isSystem()) throw new Error(unverifiable);

@@ -1,6 +1,6 @@
 import * as runtimeNames from "./runtime-names";
 import { dirname, isAbsolute, join, resolve } from "path";
-import { readdir, realpath } from "fs/promises";
+import { readdir, realpath, stat } from "fs/promises";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
@@ -123,7 +123,7 @@ function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
  * path: a directory that only resembles an agent worktree is not sufficient.
  * This uses filesystem reads only; Codex's native sandbox can prohibit ps.
  */
-export async function isRegisteredAgentWorktree(cwd: string, roots: string[]): Promise<boolean> {
+export async function isRegisteredAgentWorktree(cwd: string, roots: string[], allowParentGitFile = false): Promise<boolean> {
   try {
     const canonicalCwd = await realpath(cwd);
     const match = runtimeNames.matchWorktreeCaller(canonicalCwd);
@@ -141,7 +141,15 @@ export async function isRegisteredAgentWorktree(cwd: string, roots: string[]): P
     const gitDir = await realpath(resolve(worktreePath, pointer[1]!));
     // Git's worktree administration directory must belong to this registered
     // repo, and its backlink must name this exact worktree's .git file.
-    const worktreesDir = await realpath(join(repoPath, ".git", "worktrees"));
+    let repoGitDir = join(repoPath, ".git");
+    if (allowParentGitFile && (await stat(repoGitDir)).isFile()) {
+      // A registered submodule's .git file points into the superproject's
+      // administration directory. Resolve a relative pointer from the module.
+      const parent = (await Bun.file(repoGitDir).text()).trim().match(/^gitdir: (.+)$/);
+      if (!parent) return false;
+      repoGitDir = resolve(repoPath, parent[1]!);
+    }
+    const worktreesDir = await realpath(join(repoGitDir, "worktrees"));
     if (dirname(gitDir) !== worktreesDir) return false;
     const backlink = (await Bun.file(join(gitDir, "gitdir")).text()).trim();
     if (!backlink) return false;

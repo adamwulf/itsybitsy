@@ -289,3 +289,23 @@ test("a failed result publication is retried without sending the request again",
   expect(sends).toBe(1);
   expect(await Bun.file(resultPath).json()).toEqual({ ok: true, id: header.id });
 });
+
+test("a failed worker progress marker leaves the known ACK intact", async () => {
+  const { ready, claimed, header } = await readyRequest();
+  await mkdir(join(ready, "progress.tmp")); // The progress write will receive EISDIR.
+  const { collectSendCleanupDiagnostics, finishSendCleanup } = await import("../send-cleanup");
+  const output: string[] = [];
+  const printer = spyOn(console, "error").mockImplementation(line => { output.push(String(line)); });
+  collectSendCleanupDiagnostics();
+  try {
+    await createPeerOutboxPoll()(async (_peer, _header, transfer) => {
+      transfer.signal!.throwIfAborted();
+      transfer.onProgress!(0);
+      return header.id;
+    }, () => {});
+    expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: true, id: header.id });
+    expect(output).toEqual([]);
+    await finishSendCleanup();
+    expect(output).toEqual([expect.stringContaining("progress update failed")]);
+  } finally { printer.mockRestore(); }
+});

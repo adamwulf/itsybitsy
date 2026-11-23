@@ -269,6 +269,7 @@ export function createPeerOutboxPoll(now = Date.now) {
             let bytes = 0;
             let sequence = 0;
             let recorded = -1;
+            let warned = false;
             // Publish the initial claim once and then only actual wire progress.
             const tick = () => {
               try {
@@ -277,7 +278,10 @@ export function createPeerOutboxPoll(now = Date.now) {
                 recorded = sequence;
                 writeFileSync(join(dir, "progress.tmp"), JSON.stringify({ bytes, sequence }), { mode: 0o600 });
                 renameSync(join(dir, "progress.tmp"), join(dir, "progress"));
-              } catch (err) { controller.abort(err); }
+              } catch (err) {
+                if (!warned) warnSendCleanup(`Remote send progress update failed: ${detail(err)}`);
+                warned = true;
+              }
             };
             tick();
             const timer = setInterval(tick, 250);

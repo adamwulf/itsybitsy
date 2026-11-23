@@ -559,6 +559,7 @@ export async function handleSendRequest(
         if ((err as NodeJS.ErrnoException).code === "ENOENT") return interruptedSend("claimed");
         throw err;
       }
+      const signal = deps.transferSignal ? AbortSignal.any([controller.signal, deps.transferSignal]) : controller.signal;
       const checkClient = () => {
         if (marker && !fstatSync(marker.fd).nlink) controller.abort(new Error("Send cancelled"));
       };
@@ -572,9 +573,9 @@ export async function handleSendRequest(
       };
       const timer = setInterval(checkClient, 250);
       try {
-        const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, controller.signal, progress) : undefined;
-        const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal, stage, progress);
-        if (controller.signal.aborted) return interruptedSend("claimed");
+        const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, signal, progress) : undefined;
+        const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), signal, stage, progress);
+        if (signal.aborted) return interruptedSend("claimed");
         return result;
       } finally { clearInterval(timer); await marker?.close(); }
     }

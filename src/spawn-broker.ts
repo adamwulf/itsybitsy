@@ -47,7 +47,7 @@ import * as runtimeNames from "./runtime-names";
  */
 
 import { randomBytes } from "crypto";
-import { mkdir, readdir, realpath, rename, rm, stat } from "fs/promises";
+import { mkdir, readdir, realpath, rename, rm, stat, writeFile } from "fs/promises";
 import { join } from "path";
 import { readAgentMeta, type AgentMeta } from "./agents";
 import {
@@ -117,11 +117,13 @@ export async function ensureSpawnBrokerDirs(agentDir: string): Promise<void> {
 }
 
 /** Write via a temp name in the same directory, then rename, so a reader never sees half a file. */
-async function writeJsonAtomic(dir: string, name: string, value: unknown, signal?: AbortSignal): Promise<void> {
-  await mkdir(dir, { recursive: true });
+async function writeJsonAtomic(dir: string, name: string, value: unknown, signal?: AbortSignal, createParent = true): Promise<void> {
+  signal?.throwIfAborted();
+  if (createParent) await mkdir(dir, { recursive: true });
+  else await mkdir(dir).catch(err => { if (err.code !== "EEXIST") throw err; });
   const tmp = join(dir, `.${name}.${randomBytes(4).toString("hex")}.tmp`);
   try {
-    await Bun.write(tmp, JSON.stringify(value));
+    await writeFile(tmp, JSON.stringify(value));
     signal?.throwIfAborted();
     await rename(tmp, join(dir, name));
   } finally { await rm(tmp, { force: true }); }
@@ -404,6 +406,7 @@ export async function resolveRoutedCaller(
 
 export interface SpawnServerDeps {
   /** In-flight transfer jobs owned by this watchdog, keyed by agent directory. */
+  transferSignal?: AbortSignal;
   transferJobs?: Map<string, Promise<void>>;
   newAgent?: (repoPath: string, prompt: string, opts: NewAgentOptions) => Promise<IbCommandResult>;
   verifySeal?: (
@@ -483,7 +486,7 @@ function clip(text: string): string {
   return text.length > SPAWN_MAX_OUTPUT_CHARS ? `${text.slice(0, SPAWN_MAX_OUTPUT_CHARS)}\n…(truncated)` : text;
 }
 
-async function writeResult(agentDir: string, id: string, result: IbCommandResult): Promise<void> {
+async function writeResult(agentDir: string, id: string, result: IbCommandResult, signal?: AbortSignal): Promise<void> {
   const payload: SpawnResult = {
     v: 1,
     id,
@@ -492,7 +495,7 @@ async function writeResult(agentDir: string, id: string, result: IbCommandResult
     stdout: clip(result.stdout),
     stderr: clip(result.stderr),
   };
-  await writeJsonAtomic(spawnResultDir(agentDir), `${id}.json`, payload);
+  await writeJsonAtomic(spawnResultDir(agentDir), `${id}.json`, payload, signal, false);
 }
 
 /** Remove results a client never collected. */
@@ -541,6 +544,7 @@ export async function processSpawnRequests(
   let handled = 0;
   for (const name of names) {
     // File names are agent-controlled: only a plain 32-hex id is ever used as a path.
+    if (deps.transferSignal?.aborted) break;
     const match = REQUEST_FILE.exec(name);
     if (!match) continue;
     const id = match[1]!;
@@ -571,11 +575,12 @@ export async function processSpawnRequests(
       let result: IbCommandResult;
       try { result = await handleOneRequest(agentId, repoPath, agentDir, id, text, deps); }
       catch (err) { result = brokerFail(`Error: spawn failed: ${err instanceof Error ? err.message : String(err)}`); }
-      try { await writeResult(agentDir, id, result); }
+      try { await writeResult(agentDir, id, result, deps.transferSignal); }
       catch { /* The client deadline handles an unavailable result channel. */ }
     }
     const jobs = deps.transferJobs;
     const named = jobs && requestOp(text);
+    if (deps.transferSignal?.aborted) break;
     if (jobs && named?.present && named.op === "remote-send") {
       if (jobs.has(agentDir)) await writeResult(agentDir, id, brokerFail("busy, try again"));
       else jobs.set(agentDir, dispatch().finally(() => jobs.delete(agentDir)));

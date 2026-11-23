@@ -1638,10 +1638,8 @@ export function resetPerAgentDrain(): void {
  */
 export interface SpawnBrokerHooks {
   setup: (agentDir: string) => Promise<string | null>;
-  process: (agentId: string, repoPath: string) => Promise<void>;
+  process: (agentId: string, repoPath: string, jobs: Map<string, Promise<void>>, signal: AbortSignal) => Promise<void>;
 }
-
-const remoteTransferJobs = new Map<string, Promise<void>>();
 
 const defaultSpawnBrokerHooks: SpawnBrokerHooks = {
   setup: async (agentDir) => {
@@ -1649,9 +1647,9 @@ const defaultSpawnBrokerHooks: SpawnBrokerHooks = {
     await ensureSpawnBrokerDirs(agentDir);
     return spawnRequestDir(agentDir);
   },
-  process: async (agentId, repoPath) => {
+  process: async (agentId, repoPath, transferJobs, transferSignal) => {
     const { processSpawnRequests } = await import("./spawn-broker");
-    await processSpawnRequests(agentId, repoPath, { transferJobs: remoteTransferJobs });
+    await processSpawnRequests(agentId, repoPath, { transferJobs, transferSignal });
   },
 };
 
@@ -1940,11 +1938,14 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   // detection or the outbox drain. The guard keeps at most one
   // handler running; a request that arrives meanwhile is picked up by the next
   // tick/watch event.
+  const jobs = new Map<string, Promise<void>>();
+  const lifetime = new AbortController();
+  const stop = () => lifetime.abort(new Error("Watchdog stopped"));
   let spawnBusy = false;
   const spawnNow = (): void => {
-    if (spawnBusy) return;
+    if (spawnBusy || lifetime.signal.aborted) return;
     spawnBusy = true;
-    void spawnBrokerHooks.process(agentId, repoPath)
+    void spawnBrokerHooks.process(agentId, repoPath, jobs, lifetime.signal)
       .catch(() => { /* never crash the watchdog on a spawn-request error */ })
       .finally(() => { spawnBusy = false; });
   };
@@ -1969,11 +1970,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     if (spawnWatcher) { try { spawnWatcher.close(); } catch { /* ignore */ } spawnWatcher = null; }
   };
 
-  // Poll loop
-  while (true) {
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
+  try {
+  while (!lifetime.signal.aborted) {
     // Exit condition (a): worktree directory removed (retire/merge/nuke)
     if (!existsSyncFn(worktreeDir)) {
-      stopWatching();
       break;
     }
 
@@ -2083,7 +2085,6 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       } else if (nowFn() - tmuxGoneSince >= TMUX_GONE_GRACE_MS) {
         // Exit condition (b): tmux gone for >10s
         await logAgent(agentDir, "[watchdog] tmux session gone for >10s — exiting watchdog");
-        stopWatching();
         break;
       }
     } else {
@@ -2279,6 +2280,13 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 
     // Sleep before next poll
     await sleepFn(POLL_INTERVAL_MS);
+  }
+  } finally {
+    stop();
+    stopWatching();
+    process.off("SIGTERM", stop);
+    process.off("SIGINT", stop);
+    await Promise.allSettled(jobs.values());
   }
 }
 

@@ -557,13 +557,13 @@ describe("coordinator-pane", () => {
 
   for (const separator of ["\n", ""]) {
     test(`caps JSON bytes and keeps the newest text with separator ${JSON.stringify(separator)}`, async () => {
-      const text = "oldest" + ('🔥"\\' + separator).repeat(150_000) + "newest\n";
+      const text = "oldest" + ('🔥"\\' + separator).repeat(150_000) + "newest\n\n";
       const side = serve({ captureCoordinator: async () => ({ state: "running", text }) });
       const bytes = await rawRequest(side.a, encode({ op: "coordinator-pane" }));
       expect(bytes).toBeInstanceOf(Uint8Array);
       expect((bytes as Uint8Array).length).toBeLessThanOrEqual(PEER_MAX_REPLY_BYTES);
       const reply = decodeText(bytes);
-      expect(reply.text.endsWith("newest\n")).toBe(true);
+      expect(reply.text.endsWith("newest\n\n")).toBe(true);
       expect(reply.text).not.toContain("oldest");
       expect(text.endsWith(reply.text)).toBe(true);
       side.a.close(0, "done");

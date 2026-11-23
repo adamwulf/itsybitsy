@@ -128,7 +128,7 @@ function encodeCoordinatorPane(pane: CoordinatorPane): Uint8Array {
     first--;
   }
   const tail = lines.slice(first).join("\n");
-  if (tail || first === 0 || remaining < 2) return encode(tail);
+  if (tail.trim() || first === 0 || remaining < 2) return encode(tail);
 
   // One oversized final line. Take its plain-text suffix on a code point
   // boundary so trimming cannot split a hyperlink or a surrogate pair.
@@ -494,6 +494,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   }
 
   let reply: Uint8Array;
+  let capturedPane = false;
   if (request.op === "agents") {
     try {
       reply = encodeAgentsReply(deps.snapshot());
@@ -506,17 +507,15 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       const pane = await deps.captureCoordinator?.();
       if (!pane) throw new Error("No system coordinator");
       reply = encodeCoordinatorPane(pane);
-      // A tmux capture is asynchronous. Pairing must still hold when it finishes.
-      if (await deps.peerName(conn.remoteId) === null) {
-        closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
-        return;
-      }
-      if (deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
-        deps.paneReaders.add(conn.remoteId);
-        deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
-      }
+      capturedPane = true;
     } catch (err) {
       reply = encodeJson({ ok: false, error: cleanRemoteText(errorDetail(err)) });
+    }
+    // A tmux capture is asynchronous. Pairing must still hold before sending
+    // either the capture or the reason it failed.
+    if (await deps.peerName(conn.remoteId) === null) {
+      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+      return;
     }
   } else if (request.op === "new-agent") {
     try {
@@ -533,6 +532,10 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   try {
     await stream.writeAll(reply);
     await stream.finish();
+    if (capturedPane && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
+      deps.paneReaders.add(conn.remoteId);
+      deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
+    }
   } catch {
     // The dialer went away; its poller reports that on its side.
   }

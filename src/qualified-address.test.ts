@@ -362,7 +362,7 @@ describe("qualified agent addresses", () => {
         // The watchdog reclaims the lease on its next post-expiry pass.
         clearInterval(watchdog);
         await processing;
-        await processSpawnRequests("mgr", app, { transferJobs: new Map(), now: () => Date.now() + 61_000 });
+        await processSpawnRequests("mgr", app, { transferJobs: new Map(), now: () => Date.now() + 25 * 3600_000 });
         expect(await readdir(join(agentDir, "send-attachments"))).toEqual([]);
       }
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }

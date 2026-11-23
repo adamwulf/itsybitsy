@@ -70,10 +70,18 @@ test("watchdog reclaims a dead CLI's staging before publication and leaves a liv
     await Bun.write(marker, "");
     const lease = join(path, "lease");
     await Bun.write(lease, JSON.stringify({ pid: process.pid, start: 128 }));
-    await sweepStagingLease(root, id, Date.now());
+    await sweepStagingLease(root, id, Date.now() + 25 * 3600_000);
     expect(await Bun.file(join(path, "0")).exists()).toBe(true);
     await Bun.write(lease, JSON.stringify({ pid: 2147483647, start: 1 }));
-    await sweepStagingLease(root, id, Date.now());
+    await rm(marker);
+    await rm(spawnRequestDir(root), { recursive: true });
+    const elsewhere = join(root, "elsewhere");
+    await mkdir(elsewhere);
+    await Bun.write(join(elsewhere, "." + id + ".staging"), "untouched");
+    await symlink(elsewhere, spawnRequestDir(root));
+    const { sweepStagingRequests } = await import("../send-broker");
+    await sweepStagingRequests(root, Date.now());
+    expect(await Bun.file(join(elsewhere, "." + id + ".staging")).text()).toBe("untouched");
     await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await Bun.file(lease).exists()).toBe(false);
   } finally { processStartEpochSecondsCtx.reset(); await rm(root, { recursive: true, force: true }); }
@@ -93,7 +101,7 @@ test.each([null, 129])("reclaim staging only after owner mismatch or expiry (obs
     processStartEpochSecondsCtx.set(() => observed);
     await sweepStagingLease(root, id, Date.now());
     expect(await Bun.file(join(dir, "0")).exists()).toBe(observed === null);
-    if (observed === null) await sweepStagingLease(root, id, Date.now() + 61_000);
+    if (observed === null) await sweepStagingLease(root, id, Date.now() + 25 * 3600_000);
     await expect(stat(dir)).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     processStartEpochSecondsCtx.reset();

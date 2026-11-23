@@ -526,6 +526,11 @@ export async function processSpawnRequests(
   const nowMs = (deps.now ?? Date.now)();
   await pruneStaleResults(agentDir, nowMs);
 
+  if (deps.transferJobs) {
+    const { sweepStagingRequests } = await import("./send-broker");
+    await sweepStagingRequests(agentDir, nowMs).catch(err => console.error("Staging cleanup failed:", err));
+  }
+
   let names: string[];
   try {
     names = (await readdir(spawnRequestDir(agentDir))).sort();
@@ -536,12 +541,6 @@ export async function processSpawnRequests(
   let handled = 0;
   for (const name of names) {
     // File names are agent-controlled: only a plain 32-hex id is ever used as a path.
-    const lease = /^\.([0-9a-f]{32})\.staging$/.exec(name);
-    if (lease && deps.transferJobs) {
-      const { sweepStagingLease } = await import("./send-broker");
-      await sweepStagingLease(agentDir, lease[1]!, nowMs).catch(() => {});
-      continue;
-    }
     const match = REQUEST_FILE.exec(name);
     if (!match) continue;
     const id = match[1]!;

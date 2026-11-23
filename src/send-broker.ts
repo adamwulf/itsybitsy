@@ -49,10 +49,10 @@ import * as runtimeNames from "./runtime-names";
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
 import { fstatSync, futimesSync } from "node:fs";
-import { mkdir, lstat, open, rm, stat } from "node:fs/promises";
+import { mkdir, open, rm, stat } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
-import { brokerAttachmentStage, createBrokerProgress, openBrokerLease, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
+import { brokerAttachmentStage, createBrokerProgress, listStagingRequests, stagingDirectoryStat, openBrokerLease, removeAbandonedStaging, remoteAttachmentStage, type StageRemoteFiles } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
@@ -226,34 +226,20 @@ export async function requestSendViaWatchdog(
   return submitSendRequest("send", caller.agentDir, caller.meta.id, target, message, deps, noPassthrough);
 }
 
-const STAGING_LEASE_MS = 60_000;
+const UNVERIFIED_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 function stagingOwnerStart(pid: number): number | null {
   const start = processStartEpochSecondsCtx.fn(pid);
   return start !== null && Number.isSafeInteger(start) && start > 0 ? start : null;
 }
 
-// The empty queue marker supplies an id to the watchdog even if the CLI
-// dies before publication. Ownership evidence lives in protected staging.
-async function startStagingLease(dir: string, id: string) {
+async function startStagingLease(stage: string) {
   const start = stagingOwnerStart(process.pid);
   if (start === null) throw new Error("Cannot verify the staging owner process start time");
-  const queue = spawnRequestDir(dir);
-  await mkdir(queue, { recursive: true, mode: 0o700 });
-  const marker = join(queue, "." + id + ".staging");
-  await (await open(marker, "wx", 0o600)).close();
-  const stage = join(dir, "send-attachments", id);
   await mkdir(stage, { mode: 0o700 });
   const lease = await open(join(stage, "lease"), "wx", 0o600);
-  try {
-    await lease.writeFile(JSON.stringify({ pid: process.pid, start }));
-  } catch (err) { await lease.close(); throw err; }
-  const heartbeat = setInterval(() => { const now = new Date(); void lease.utimes(now, now).catch(() => {}); }, STAGING_LEASE_MS / 4);
-  return async (removed: boolean) => {
-    clearInterval(heartbeat);
-    await lease.close();
-    if (removed) await rm(marker, { force: true });
-  };
+  try { await lease.writeFile(JSON.stringify({ pid: process.pid, start })); }
+  finally { await lease.close(); }
 }
 
 /** Both sides read the same ps start stamp. Missing evidence cannot authorize
@@ -262,17 +248,17 @@ async function stagingLeaseState(dir: string, id: string, now: number): Promise<
   const lease = await openBrokerLease(dir, id);
   try {
     const info = await lease.stat();
-    if (now - info.mtimeMs >= STAGING_LEASE_MS) return "abandoned";
-    if (!info.isFile() || info.nlink !== 1 || info.size > 256) return "unverified";
+    const unknown = now - info.mtimeMs >= UNVERIFIED_RETENTION_MS ? "abandoned" : "unverified";
+    if (!info.isFile() || info.nlink !== 1 || info.size > 256) return unknown;
     const buffer = Buffer.alloc(257);
     const { bytesRead } = await lease.read(buffer);
     let owner;
-    try { owner = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return "unverified"; }
+    try { owner = JSON.parse(buffer.toString("utf8", 0, bytesRead)); } catch { return unknown; }
     if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0 ||
-        !Number.isSafeInteger(owner.start) || owner.start <= 0) return "unverified";
+        !Number.isSafeInteger(owner.start) || owner.start <= 0) return unknown;
     if (!isPidAliveCtx.fn(owner.pid)) return "abandoned";
     const start = stagingOwnerStart(owner.pid);
-    if (start === null) return "unverified";
+    if (start === null) return unknown;
     return start === owner.start ? "active" : "abandoned";
   } finally { await lease.close(); }
 }
@@ -285,16 +271,24 @@ async function requireActiveStagingLease(dir: string, id: string) {
 
 export async function sweepStagingLease(dir: string, id: string, now: number) {
   if (!/^[0-9a-f]{32}$/.test(id)) return;
-  const path = join(spawnRequestDir(dir), "." + id + ".staging");
+
   try {
     if (await stagingLeaseState(dir, id, now) !== "abandoned") return;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    // The CLI might be between creating its queue marker and writing the lease.
-    if (now - (await lstat(path)).mtimeMs < STAGING_LEASE_MS) return;
+    if (now - (await stagingDirectoryStat(dir, id)).mtimeMs < UNVERIFIED_RETENTION_MS) return;
   }
   await removeAbandonedStaging(dir, id);
-  await rm(path, { force: true });
+}
+
+export async function sweepStagingRequests(dir: string, now: number) {
+  let ids;
+  try { ids = await listStagingRequests(dir); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
+  for (const id of ids) {
+    try { await sweepStagingLease(dir, id, now); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") console.error("Staging cleanup failed:", err); }
+  }
 }
 
 async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false, stage?: StageRemoteFiles) {
@@ -310,11 +304,12 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(noPassthrough && { noPassthrough: true }) };
   const parent = join(dir, "send-attachments");
   const staged = join(parent, request.id);
-  let releaseLease: ((removed: boolean) => Promise<void>) | undefined;
+  let ownsStage = false;
   try {
     if (remote) {
       await mkdir(parent, { recursive: true, mode: 0o700 });
-      releaseLease = await startStagingLease(dir, request.id);
+      await startStagingLease(staged);
+      ownsStage = true;
       request.files = stage ? await stage(staged, true) : [];
     }
     const result = await submitWatchdogRequest(
@@ -333,13 +328,8 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
   } finally {
-    if (releaseLease) {
-      const close = releaseLease;
-      void rm(staged, { recursive: true, force: true }).then(() => close(true), async err => {
-        await close(false);
-        throw err;
-      }).catch(err => console.error(`Remote staging cleanup failed: ${err}`));
-    }
+    if (ownsStage) void rm(staged, { recursive: true, force: true })
+      .catch(err => console.error(`Remote staging cleanup failed: ${err}`));
   }
 }
 

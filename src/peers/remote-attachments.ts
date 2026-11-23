@@ -1,6 +1,6 @@
 import { constants as osConstants } from "node:os";
 import { constants } from "node:fs";
-import { copyFile, lstat, mkdir, open, realpath, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, readdir, realpath, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileChunks, hashFile, type ManifestEntry, type AttachmentArgument } from "./attachment-manifest";
 import { hasFreeSpace } from "./attachment-space";
@@ -173,6 +173,15 @@ export function brokerAttachmentStage(agentDir: string, id: string, files: SendH
     });
     return files;
   };
+}
+
+export function listStagingRequests(agentDir: string) {
+  return withBrokerDirectory(agentDir, undefined, async (_dir, path) =>
+    (await readdir(path, { withFileTypes: true })).filter(e => e.isDirectory() && /^[0-9a-f]{32}$/.test(e.name)).map(e => e.name));
+}
+
+export function stagingDirectoryStat(agentDir: string, id: string) {
+  return withBrokerDirectory(agentDir, id, dir => dir.stat());
 }
 
 export function openBrokerLease(agentDir: string, id: string) {

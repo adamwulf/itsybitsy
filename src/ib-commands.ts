@@ -4113,6 +4113,7 @@ async function checkSendSession(agent: Agent): Promise<IbCommandResult | null> {
 
 /** Inbound peer messages acknowledge enqueue, including for recipients without a watchdog. */
 export interface PeerEnqueueOptions {
+  signal?: AbortSignal;
   senderKind?: OutboxMessage["peerSender"];
   prepareMessage?(): Promise<string>;
   beforeEnqueue(): Promise<void>;
@@ -4521,7 +4522,7 @@ export async function sendMessage(
     }
     await enqueueOutbox(queueDir, {
       message: outgoing, fromAgent: fromId, peerSender: opts?.peerSend?.senderKind, raw, team: opts?.team, noPassthrough,
-    }, reservedKey);
+    }, reservedKey, opts?.peerSend?.signal);
   } catch (err) {
     // Enqueue failed — nothing is queued. Undo any staged copies so an
     // abandoned attempt leaves no unused attachment behind (no partial copy).

@@ -353,9 +353,10 @@ export class PeerService {
   private recoveryTimer?: ReturnType<typeof setInterval>;
   private outboxOwner?: AbortController;
   private outboxTimer?: ReturnType<typeof setInterval>;
-  private readonly receipts = new Map<string, { row: IncomingTransfer; controller?: AbortController; done: Promise<void> }>();
+  private readonly receipts = new Map<string, { row?: IncomingTransfer; controller: AbortController; done: Promise<void> }>();
   cancelReceipt(id: string) {
-    this.receipts.get(id)?.controller?.abort(new Error("Receive cancelled"));
+    const receipt = this.receipts.get(id);
+    if (receipt?.row) receipt.controller.abort(new Error("Receive cancelled"));
   }
 
   private readonly headerReaders = new Set<import("./pairing").PairStream>();
@@ -424,7 +425,7 @@ export class PeerService {
         ? null
         : { id: active.id, role: active.session.role, peerId: active.session.peerId, stage: active.session.stage },
       links: this.poller.states(),
-      ...(this.receipts.size && { incoming: Array.from(this.receipts.values()).filter(entry => entry.controller).map(entry => ({ ...entry.row })) }),
+      ...(this.receipts.size && { incoming: Array.from(this.receipts.values()).flatMap(entry => entry.row ? [{ ...entry.row }] : []) }),
     };
   }
 
@@ -700,7 +701,6 @@ export class PeerService {
     const [header, peer, name, body, options] = args;
     if (this.shuttingDown) throw new Error("Watcher shutting down");
     const receive = this.deps.receiveMessage!;
-    if (!header.files.length) return receive(...args);
     const id = crypto.randomUUID();
     const controller = new AbortController();
     const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
@@ -710,15 +710,15 @@ export class PeerService {
     try {
       await receive(header, peer, name, body, { ...options, signal: controller.signal, admitted: ownsBody => {
         if (this.shuttingDown) throw new Error("Watcher shutting down");
+        this.receipts.set(id, { row: ownsBody ? row : undefined, controller, done: done.promise });
         if (ownsBody) {
-          this.receipts.set(id, { row, controller, done: done.promise });
           if (options?.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
           this.notify();
         }
         options?.admitted?.(ownsBody);
       }, committing: () => {
         const receipt = this.receipts.get(id);
-        if (receipt) { receipt.controller = undefined; this.notify(); }
+        if (receipt?.row) { receipt.row = undefined; this.notify(); }
         options?.committing?.();
       }, onProgress: bytes => {
         row.bytes = bytes;
@@ -729,7 +729,9 @@ export class PeerService {
       } });
     } finally {
       clearTimeout(progressTimer);
-      if (this.receipts.delete(id)) this.notify();
+      const visible = this.receipts.get(id)?.row;
+      this.receipts.delete(id);
+      if (visible) this.notify();
       done.resolve();
     }
   }
@@ -800,7 +802,7 @@ export class PeerService {
     this.shuttingDown = true;
     clearInterval(this.recoveryTimer);
     const receipts = [...this.receipts.values()];
-    for (const receipt of receipts) receipt.controller?.abort(new Error("Watcher shutting down"));
+    for (const receipt of receipts) receipt.controller.abort(new Error("Watcher shutting down"));
     this.cancelRetry();
     this.active?.session.cancel();
     this.active = null;

@@ -679,3 +679,26 @@ test("a stalled non-framed request releases the watcher header slot", async () =
     expect(readers.size).toBe(0);
   } finally { a.close(0, "done"); }
 });
+
+test("shutdown waits for an admitted text-only receipt and prevents its queue append", async () => {
+  const { PeerService, defaultPeerServiceDeps } = await import("./service");
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null), receiveMessage: receiver });
+  const checking = Promise.withResolvers<void>();
+  const allow = Promise.withResolvers<string>();
+  let reads = 0;
+  const receipt = service.receiveTracked(header(), "peer", async () => {
+    if (++reads === 1) return "peer";
+    checking.resolve();
+    return allow.promise;
+  }).catch(err => err);
+  await checking.promise;
+  expect(service.view().incoming ?? []).toEqual([]);
+  let stopped = false;
+  const quit = service.shutdown().then(() => { stopped = true; });
+  await Bun.sleep(5);
+  expect(stopped).toBe(false);
+  allow.resolve("peer");
+  await quit;
+  expect(await receipt).toBeInstanceOf(Error);
+  expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
+});

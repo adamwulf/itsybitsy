@@ -162,6 +162,7 @@ export async function enqueueOutbox(
   dir: string,
   msg: Omit<OutboxMessage, "id" | "enqueuedAtMs"> & { id?: string; enqueuedAtMs?: number },
   reservedKey?: string,
+  signal?: AbortSignal,
 ): Promise<OutboxMessage> {
   // Best-effort dedupe: if an identical pending message from the same sender is
   // already queued, return it instead of appending a second copy. Matches on
@@ -198,6 +199,7 @@ export async function enqueueOutbox(
   if (reservedKey === undefined) await mkdir(dir, { recursive: true });
   // Append one newline-terminated record so a torn write can be skipped.
   try {
+    signal?.throwIfAborted();
     await appendFile(outboxPath(dir), JSON.stringify(record) + "\n");
   } catch (err) {
     if (reservedKey !== undefined && (err as NodeJS.ErrnoException).code === "ENOENT") {

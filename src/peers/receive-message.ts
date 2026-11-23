@@ -121,6 +121,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
         options.admitted?.(files.length > 0);
         const result = await enqueue(header, name, {
           log,
+          signal: options.signal,
           senderKind: header.from.kind === "user" ? undefined : header.from.kind,
           prepareMessage: files.length ? async () => {
             if (!body) throw new Error("Missing attachment stream");

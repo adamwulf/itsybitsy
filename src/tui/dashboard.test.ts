@@ -29,7 +29,7 @@ import { newRepoPrompt } from "./agent-actions";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
-import { formatSince, type PeersDialogService } from "./peers-dialog";
+import type { PeersDialogService } from "./peers-dialog";
 import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent } from "../peers/peer-link";
@@ -37,7 +37,7 @@ import type { PeerLinkState } from "../peers/poller";
 import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
-import { DIM, ITALIC, RED } from "./colors";
+import { DIM, GREEN, ITALIC, RED, RESET, YELLOW } from "./colors";
 import { getStateColors } from "./color-scheme";
 import * as agentActions from "./agent-actions";
 import * as ghostty from "../ghostty";
@@ -9360,7 +9360,7 @@ describe("setup Peers tab", () => {
     expect(out).toContain("peers.json: not valid JSON");
   });
 
-  test("each paired peer shows its connection state: connected, last seen N ago with the error, or not connected yet", () => {
+  test("paired peers show a colored link status and the last error under an offline peer", () => {
     const { dashboard, service } = open();
     const C = "1b".repeat(32);
     const D = "2c".repeat(32);
@@ -9372,30 +9372,26 @@ describe("setup Peers tab", () => {
         { id: D, name: "D", pairedAt: "x" },
         { id: E, name: "E", pairedAt: "x" },
       ],
-      // E has no link state yet: the poller has not reached it.
       links: [
         { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), lastError: null, repos: [], agents: [] },
-        { id: C, name: "C", connected: false, lastOkAt: Date.now() - 125_000, lastError: "closed by the other side", repos: [], agents: [] },
+        { id: C, name: "C", connected: false, lastOkAt: Date.now(), lastError: "closed by the other side", repos: [], agents: [] },
         { id: D, name: "D", connected: false, lastOkAt: null, lastError: "timed out", repos: null, agents: null },
       ],
     });
-    const rows = rendered(dashboard).map(stripAnsi);
-    const row = (prefix: string) => rows.find((r) => r.includes(prefix)) ?? "";
-    expect(row(`Laptop B  ${OTHER_SHORT}`)).toContain(`Laptop B  ${OTHER_SHORT}  ● connected`);
-    expect(row(`C         ${"1b".repeat(5)}`)).toContain(`C         ${"1b".repeat(5)}  ● last seen 2m ago`);
-    expect(row(`D         ${"2c".repeat(5)}`)).toContain(`D         ${"2c".repeat(5)}  ● not connected yet`);
-    expect(row(`E         ${"3d".repeat(5)}`)).not.toContain("●");
-    // The last error sits on the line under its peer.
-    expect(rows[rows.findIndex((r) => r.includes("last seen 2m ago")) + 1]).toContain("    closed by the other side");
-    expect(rows[rows.findIndex((r) => r.includes("not connected yet")) + 1]).toContain("    timed out");
-    // A connected peer shows no error line.
-    expect(rows[rows.findIndex((r) => r.includes("● connected")) + 1]).toContain(`C         ${"1b".repeat(5)}`);
-
-    // A change from the service redraws the state.
-    service.set({ links: [{ id: OTHER, name: "Laptop B", connected: false, lastOkAt: Date.now() - 3_000, lastError: "not a peer", repos: [], agents: [] }] });
-    const out = text(dashboard);
-    expect(out).toContain(`Laptop B  ${OTHER_SHORT}  ● last seen 3s ago`);
-    expect(out).toContain("not a peer");
+    function expectRow(id: string, word: string, color: string, error?: string) {
+      const rows = rendered(dashboard);
+      const short = id.slice(0, 10);
+      const index = rows.findIndex(row => row.includes(short));
+      expect(stripAnsi(rows[index]!)).toContain(`${short}  ${word}`);
+      expect(rows[index]).toContain(`${color}${word}${RESET}`);
+      if (error) expect(stripAnsi(rows[index + 1]!)).toContain(`    ${error}`);
+    }
+    expectRow(OTHER, "connected", GREEN);
+    expectRow(C, "offline", RED, "closed by the other side");
+    expectRow(D, "offline", RED, "timed out");
+    expectRow(E, "connecting", YELLOW); // newly paired, before the poller lists it
+    service.set({ links: [{ id: E, name: "E", connected: false, lastOkAt: null, lastError: null, repos: null, agents: null }] });
+    expectRow(E, "connecting", YELLOW); // first dial in progress
   });
 
   test("with no peer section on screen, a service change renders only while the Peers tab is open", () => {
@@ -9440,16 +9436,6 @@ describe("setup Peers tab", () => {
     const closed = counter.renders();
     service.set({ links: [{ ...link, connected: false }] });
     expect(counter.renders()).toBe(closed);
-  });
-
-  test("formatSince picks the largest whole unit", () => {
-    expect(formatSince(0)).toBe("0s");
-    expect(formatSince(59_999)).toBe("59s");
-    expect(formatSince(60_000)).toBe("1m");
-    expect(formatSince(3_599_000)).toBe("59m");
-    expect(formatSince(7_200_000)).toBe("2h");
-    expect(formatSince(3 * 86_400_000)).toBe("3d");
-    expect(formatSince(-5)).toBe("0s");
   });
 
   test("a narrow dialog wraps the full id instead of cutting it", () => {
@@ -9743,7 +9729,7 @@ describe("Unified peer repos in the Agents tree", () => {
     return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
   }
 
-  /** Laptop B connected; Laptop C unreachable, last seen 2m ago; Laptop D never answered. */
+  /** Laptop B connected; Laptop C unreachable, offline; Laptop D never answered. */
   function links(): PeerLinkState[] {
     const now = Date.now();
     return [
@@ -10013,16 +9999,18 @@ describe("Unified peer repos in the Agents tree", () => {
       selectByKey(dashboard, `${name}/app/worker`);
       assertStyle(false, true);
       dashboard.infoPanel.displayHeight = 20;
-      const machine = () => dashboard.infoPanel.render(width).map(stripAnsi).find((row) => row.startsWith("Machine:"))!.trimEnd();
+      const machine = () => dashboard.infoPanel.render(width).find(row => stripAnsi(row).startsWith("Machine:"))!;
       const expectedLine = (connection: string) => {
         const available = width - visibleWidth(`Machine:  · ${connection}`);
         const label = available >= name.length ? name : name.slice(0, available - 1) + "…";
         return `Machine: ${label} · ${connection}`;
       };
-      expect(machine()).toBe(expectedLine("connected"));
+      expect(stripAnsi(machine()).trimEnd()).toBe(expectedLine("connected"));
+      expect(machine()).toContain(`${GREEN}connected${RESET}`);
       service.set({ links: [{ ...peer, connected: false, lastOkAt: Date.now() - 125_000 }] });
       assertStyle(true, true);
-      expect(machine()).toBe(expectedLine("last seen 2m ago"));
+      expect(stripAnsi(machine()).trimEnd()).toBe(expectedLine("offline"));
+      expect(machine()).toContain(`${RED}offline${RESET}`);
       dashboard.handleInput("k");
       assertStyle(true, false);
     });
@@ -10082,7 +10070,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(index()).toBe(originalIndex);
     checkSelection("connected");
     service.set({ links: [b, { ...c, connected: false, lastOkAt: Date.now() - 125_000 }] });
-    checkSelection("last seen 2m ago");
+    checkSelection("offline");
   });
 
   test("the @ jump lists only local rows", () => {
@@ -10135,7 +10123,7 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.infoPanel.displayHeight = 20;
     expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Agents: 2");
     selectByKey(dashboard, agentKey(PEER_C, "app", "agent-1"));
-    expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Machine: Laptop C · last seen 2m ago");
+    expect(dashboard.infoPanel.render(60).map(stripAnsi).join("\n")).toContain("Machine: Laptop C · offline");
   });
 
   test("on a remote row no local path runs: no tmux setAgent, no git probe, no right-pane loader", async () => {
@@ -10710,7 +10698,7 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.setSidebarMode("teams");
     service.set({ links: [{ ...service.state.links[0]!, connected: false }, ...service.state.links.slice(1)] });
     expect(counter.renders()).toBe(renders);
-    expect(dashboard.agentTree.visibleList.find((r) => r.kind === "remote-agent" && r.peerId === PEER_B)).toMatchObject({ stale: true });
+    expect(dashboard.agentTree.visibleList.find((r) => r.kind === "remote-agent" && r.peerId === PEER_B)).toMatchObject({ linkStatus: "offline" });
     // TREE mode draws the Agents tree in the main area, whatever the tab.
     dashboard.jumpToMode("TREE");
     renders = counter.renders();

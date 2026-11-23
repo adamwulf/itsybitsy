@@ -15,7 +15,7 @@ import { matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi
 import { describePairFailure } from "../peers/pairing";
 import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peers/pair-code";
 import type { RemoteNewAgentRequest } from "../peers/peer-link";
-import type { PeerLinkState } from "../peers/poller";
+import { peerLinkStatus, type PeerLinkStatus } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
 import { peerNameProblem, shortPeerId } from "../peers/store";
 import { cancelPaste, isPasteInProgress, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
@@ -192,29 +192,11 @@ function retrySeconds(retryAt: number, now: number): number {
   return Math.max(1, Math.ceil((retryAt - now) / 1000));
 }
 
-/** A duration as its largest whole unit: `42s`, `5m`, `3h`, `2d`. */
-export function formatSince(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
+const linkColors: Record<PeerLinkStatus, string> = { connected: GREEN, connecting: YELLOW, offline: RED };
 
-/**
- * A peer's connection state as plain text: `connected`, `last seen N ago`, or
- * `not connected yet`. The dialog and the remote agent info panel both show it.
- */
-export function peerLinkStateText(link: Pick<PeerLinkState, "connected" | "lastOkAt">, now: number): string {
-  if (link.connected) return "connected";
-  if (link.lastOkAt !== null) return `last seen ${formatSince(now - link.lastOkAt)} ago`;
-  return "not connected yet";
-}
-
-/** A peer's connection state, after its name and short id. */
-function linkStateText(link: PeerLinkState, now: number): string {
-  const text = peerLinkStateText(link, now);
-  return link.connected ? `${GREEN}● ${text}${RESET}` : `${YELLOW}●${RESET} ${text}`;
+/** The same colored word appears in the Peers tab and the remote agent's Machine line. */
+export function peerLinkStateText(status: PeerLinkStatus): string {
+  return `${linkColors[status]}${status}${RESET}`;
 }
 
 /** The input line: the end of the value stays visible. */
@@ -257,12 +239,11 @@ export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number)
     const nameWidth = Math.max(...listed.map((p) => visibleWidth(p.name)));
     // The poller's state, once the endpoint has bound; until then, none.
     const links = new Map(view.links.map((link) => [link.id, link]));
-    const now = Date.now();
     for (const peer of listed) {
       const pad = " ".repeat(Math.max(0, nameWidth - visibleWidth(peer.name)));
       const link = links.get(peer.id);
-      const state = link === undefined ? "" : `  ${linkStateText(link, now)}`;
-      lines.push(truncateToWidth(`  ${peer.name}${pad}  ${DIM}${shortPeerId(peer.id)}${RESET}${state}`, innerWidth, ""));
+      const state = peerLinkStateText(peerLinkStatus(link));
+      lines.push(truncateToWidth(`  ${peer.name}${pad}  ${DIM}${shortPeerId(peer.id)}${RESET}  ${state}`, innerWidth, ""));
       if (link !== undefined && !link.connected && link.lastError !== null) {
         for (const line of wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4))) lines.push(`    ${RED}${line}${RESET}`);
       }

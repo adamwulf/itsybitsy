@@ -254,7 +254,7 @@ export function formatRemoteAgentRow(
   const fullState = displayState(entry.remote.state);
   const state = truncatePeerField(fullState, stateColWidth);
   const statePad = " ".repeat(Math.max(0, stateColWidth - visibleWidth(state)));
-  const line = entry.stale
+  const line = entry.linkStatus !== "connected"
     ? `${ITALIC}${DIM}${prefix}${name}${namePad}  ${state}${statePad}${RESET}`
     : `${ITALIC}${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${statePad}${RESET}`;
   return highlightRow(truncateToWidth(line, width, ""), selected, width);

@@ -19,7 +19,7 @@
  *   what ends the timed-out request, so it cannot overlap the next one.
  * - The poller tracks per-peer state: connected or not, `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
- *   keeps disconnected agents dimmed and shows last contact in their info panel.
+ *   keeps disconnected agents dimmed and shows the peer’s link status in their info panel.
  * - {@link PeerPoller.onChange} fires when what a reader can see changes:
  *   connected, the error, the agent list, the name, or the set of peers. A
  *   successful poll that changes nothing but `lastOkAt` does not fire it.
@@ -74,6 +74,15 @@ export interface PeerLinkState {
   /** The last agent list received, kept after the peer drops; null until one arrives. */
   repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
+}
+
+export type PeerLinkStatus = "connected" | "connecting" | "offline";
+
+/** A new peer is connecting until its first outcome. Retrying keeps the previous outcome. */
+export function peerLinkStatus(link: PeerLinkState | undefined): PeerLinkStatus {
+  if (!link) return "connecting";
+  if (link.connected) return "connected";
+  return link.lastError === null && link.lastOkAt === null ? "connecting" : "offline";
 }
 
 export interface PeerPollerDeps {

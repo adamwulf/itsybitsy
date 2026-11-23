@@ -107,7 +107,7 @@ import {
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { PeerService, defaultPeerServiceDeps } from "../peers/service";
-import type { PeerLinkState } from "../peers/poller";
+import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { remoteDisplayName } from "./peer-repos";
 
 // Re-export for test compatibility
@@ -1885,7 +1885,7 @@ export class DashboardComponent implements Component {
     if (links.length === this.peerLinks.length && links.every((link, i) => {
       const old = this.peerLinks[i]!;
       return link.id === old.id && link.name === old.name && link.repos === old.repos && link.agents === old.agents
-        && link.connected === old.connected && (link.connected || link.lastOkAt === old.lastOkAt);
+        && peerLinkStatus(link) === peerLinkStatus(old);
     })) return false;
     this.peerLinks = links;
     const treeVisible = this.sidebarMode !== "teams" || this.rightPane.mode === "TREE";
@@ -1896,7 +1896,7 @@ export class DashboardComponent implements Component {
     const selected = this.remoteSelection;
     // The connector can change when another root appears. Only the tree displays it.
     const details = (entry: RemoteEntry | null) => entry?.kind === "remote-agent"
-      ? [entry.peerName, entry.remote, entry.stale, entry.lastOkAt] : entry;
+      ? [entry.peerName, entry.remote, entry.linkStatus] : entry;
     const selectionChanged = JSON.stringify(details(previous)) !== JSON.stringify(details(selected));
     if (selectionChanged) this.syncSelectedAgent();
     if (selectionChanged || !treeVisible) return selectionChanged;

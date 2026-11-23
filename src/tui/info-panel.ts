@@ -260,11 +260,11 @@ export class InfoPanelComponent implements Component {
       case "remote-agent": {
         const agent = entry.remote;
         const state = displayState(agent.state);
-        const stateText = entry.stale
+        const stateText = entry.linkStatus !== "connected"
           ? `${DIM}${state}${RESET} ${notConnected}`
           : `${remoteStateColor(state)}${state}${RESET}`;
         title("Remote agent");
-        const connection = peerLinkStateText({ connected: !entry.stale, lastOkAt: entry.lastOkAt }, Date.now());
+        const connection = peerLinkStateText(entry.linkStatus);
         const nameWidth = width - visibleWidth(`Machine:  · ${connection}`);
         field("Machine", `${truncatePeerField(entry.peerName, nameWidth)} · ${connection}`);
         field("Id", agent.id);

@@ -10,7 +10,7 @@ import { waitFor } from "../test-utils";
 import { IrohError, irohAddonLoaderCtx } from "./iroh";
 import { PEER_CLOSE, serveTrustedConnection, type RemoteAgent } from "./peer-link";
 import type { PairConnection } from "./pairing";
-import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS, PeerPoller } from "./poller";
+import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS, PeerPoller, peerLinkStatus } from "./poller";
 import type { Peer } from "./store";
 import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test-pair-transport";
 
@@ -306,6 +306,33 @@ describe("PeerPoller", () => {
     expect(rig.remote(P1).overlaps).toBe(0);
     expect(rig.state(P1)).toMatchObject({ connected: true, lastError: null, agents: list });
     expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): request timed out`);
+    rig.poller.stop();
+  });
+
+  test("a failed peer stays offline throughout retries until a poll succeeds", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const status = () => peerLinkStatus(rig.state(P1));
+    const changes: string[] = [];
+    rig.poller.onChange(() => changes.push(status()));
+    const first = deferredDial();
+    const retry = deferredDial();
+    rig.setDial(() => first.promise);
+    rig.poller.start();
+    await waitFor(() => rig.dials.length === 1, { message: "first dial pending" });
+    expect(status()).toBe("connecting");
+    first.reject(new Error("unreachable"));
+    await waitFor(() => status() === "offline", { message: "first dial failed" });
+
+    rig.setDial(() => retry.promise);
+    rig.tick();
+    await waitFor(() => rig.dials.length === 2, { message: "retry pending" });
+    expect(status()).toBe("offline");
+    retry.reject(new Error("still unreachable"));
+    await waitFor(() => rig.state(P1)?.lastError === "still unreachable", { message: "retry failed" });
+    rig.setDial(rig.connect);
+    rig.tick();
+    await waitFor(() => status() === "connected", { message: "poll succeeded" });
+    expect(changes).toEqual(["connecting", "offline", "offline", "connected"]);
     rig.poller.stop();
   });
 

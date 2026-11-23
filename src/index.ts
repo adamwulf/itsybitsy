@@ -2039,17 +2039,21 @@ export async function main() {
         let sender: ReturnType<typeof import("./peers/local-attachments").resolveAttachmentSender> | undefined;
         const attachmentSender = attachments.length ? () =>
           sender ??= import("./peers/local-attachments").then(module => module.resolveAttachmentSender()) : undefined;
-        const readMessage = async () => {
-          if (staged) return staged.message;
+        const readRawMessage = async () => {
           const body = await Promise.race([readBody(), interruptedInput.promise.then(() => "")]);
           controller.signal.throwIfAborted();
+          return body;
+        };
+        const readMessage = async () => {
+          if (staged) return staged.message;
+          const body = await readRawMessage();
           if (!attachmentSender) return body;
           const { stageLocalAttachments } = await import("./peers/local-attachments");
           staged = await stageLocalAttachments(body, attachments, await attachmentSender(), controller.signal);
           return staged.message;
         };
         const { routeCliSend } = await import("./send-broker");
-        const route = await routeCliSend({ target, fromAgent, readMessage, usage, repos, attachmentSender }, {
+        const route = await routeCliSend({ target, fromAgent, readMessage, usage, repos, attachmentSender, attachments, readRawMessage }, {
           signal: controller.signal, onUncertain: () => { retain = true; },
         });
         if ("result" in route) {

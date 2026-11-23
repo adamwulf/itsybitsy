@@ -1,3 +1,4 @@
+import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
 export { remoteCliCaller } from "./send-caller";
@@ -64,7 +65,7 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 }
 
 /** A claimed request might already have reached the other machine. Never re-submit it. */
-export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal): Promise<IbCommandResult> {
+export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles): Promise<IbCommandResult> {
   let published = false;
   try {
     if (signal?.aborted) return interruptedSend("unpublished");
@@ -79,6 +80,10 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     await mkdir(join(base, ".staging"), { mode: 0o700, recursive: true });
     await mkdir(staging, { mode: 0o700 });
     try {
+      if (stage) {
+        header = { ...header, files: await stage(join(staging, "files")) };
+        encodeSendHeader(parseSendHeader(header));
+      }
       await writeJson(staging, "request.json", { peer, header });
       signal?.throwIfAborted();
       await rename(staging, dir);

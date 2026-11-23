@@ -47,6 +47,7 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
+import { remoteAttachmentStage } from "./peers/remote-attachments";
 import type { AttachmentSender } from "./peers/local-attachments";
 import { metaKernelSandboxed } from "./sandbox";
 import { isSandboxedProcess } from "./sandbox-detect";
@@ -239,6 +240,8 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
 
 /** What `ib send` hands the broker. */
 export interface SendCommand {
+  attachments?: readonly string[];
+  readRawMessage?: () => Promise<string>;
   attachmentSender?: () => Promise<AttachmentSender>;
   target: string;
   /** `--from`, when given. */
@@ -323,10 +326,9 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     if (machine) {
       const localName = await readMachineName().catch(() => "");
       localMachine = machine.toLowerCase() === localName.toLowerCase();
-      if (!localMachine && command.attachmentSender) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
       deferred = !localMachine && (!!worktree || isSandboxedProcess());
       if (!localMachine) {
-        message = await command.readMessage();
+        message = await (command.readRawMessage ?? command.readMessage)();
         if (deps.signal?.aborted) return cancelled();
         checkRemoteSize(message, minimumTarget, { kind: "user" });
       }
@@ -337,7 +339,6 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       deferred = !!worktree && !!resolved.incompleteVisibility;
     }
     if (deps.signal?.aborted) return cancelled();
-    if (command.attachmentSender && resolved?.remote) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
     if (command.attachmentSender && deferred) {
       // Only the watchdog can disambiguate a bare address across hidden repos.
       const local = await routeSendThroughWatchdog(command, deps);
@@ -347,7 +348,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       const { cliRemoteSender, handoffRemoteMessage, qualifiedAgentSender, textHeader } = await import("./peers/peer-outbox");
       const sender = await cliRemoteSender(repos, command.fromAgent, cwd);
       if (deps.signal?.aborted) return cancelled();
-      message ??= await command.readMessage();
+      message ??= await (command.readRawMessage ?? command.readMessage)();
       if (deps.signal?.aborted) return cancelled();
       if (!message) return { result: brokerFail(command.usage) };
       if (sender.kind === "worktree") {
@@ -362,7 +363,8 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       resolved ??= await resolveAddress(target, repos, cwd);
       if (deps.signal?.aborted) return cancelled();
       if (resolved.remote) {
-        return { result: await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender.from), deps.signal) };
+        const stage = command.attachmentSender && remoteAttachmentStage(command.attachments!, await command.attachmentSender(), deps.signal);
+        return { result: await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender.from), deps.signal, stage) };
       }
     }
     if (resolved?.error) return { result: brokerFail(resolved.error) };

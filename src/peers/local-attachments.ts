@@ -76,7 +76,10 @@ async function senderAttachmentAccess(sender: AttachmentSender) {
   };
 }
 
-export async function stageLocalAttachments(message: string, paths: readonly string[], sender: AttachmentSender, signal?: AbortSignal) {
+export async function withSenderManifest<T>(
+  paths: readonly string[], sender: AttachmentSender, signal: AbortSignal | undefined,
+  use: (entries: (ManifestEntry & { sha256: string })[], machine: string) => Promise<T>,
+) {
   const cwd = process.cwd();
   const machine = await readMachineName();
   const entries = await buildAttachmentManifest(paths, {
@@ -88,7 +91,15 @@ export async function stageLocalAttachments(message: string, paths: readonly str
       signal?.throwIfAborted();
       verified.push({ ...entry, sha256: await hashFile(entry, signal) });
     }
-    const staged = await copyLocalAttachments(message, verified, signal);
+    return await use(verified, machine);
+  } finally {
+    await Promise.allSettled(entries.map(entry => entry.handle.close()));
+  }
+}
+
+export async function stageLocalAttachments(message: string, paths: readonly string[], sender: AttachmentSender, signal?: AbortSignal) {
+  return withSenderManifest(paths, sender, signal, async (entries, machine) => {
+    const staged = await copyLocalAttachments(message, entries, signal);
     try {
       // A large copy can outlive a settings edit. Check the receiving
       // machine's current limits before handing the snapshots to its queue.
@@ -99,7 +110,5 @@ export async function stageLocalAttachments(message: string, paths: readonly str
       await staged.cleanup();
       throw error;
     }
-  } finally {
-    await Promise.allSettled(entries.map(entry => entry.handle.close()));
-  }
+  });
 }

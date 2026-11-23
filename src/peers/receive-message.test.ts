@@ -909,3 +909,23 @@ test("commit renames the owned partial at FIN and recovery leaves the published 
     expect(await Bun.file(join(dest, "0/a.txt")).text()).toBe("abc");
   } finally { finish.resolve(new Uint8Array()); await receipt; }
 });
+
+test("a settled reply write rejection leaves other requests on the same connection usable", async () => {
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const client = await a.openBi();
+  const server = await b.acceptBi();
+  const attempted = Promise.withResolvers<void>();
+  server.write = async () => { attempted.resolve(); throw Error("closed stream"); };
+  const cancel = spyOn(server, "cancel");
+  const accept = b.acceptBi.bind(b);
+  b.acceptBi = async () => { b.acceptBi = accept; return server; };
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    log() {}, setTimer: createFakeClock().setTimer });
+  try {
+    await client.writeAll(Buffer.from('{"op":"agents"}'));
+    await client.finish();
+    await attempted.promise;
+    expect(await requestAgents(a)).toMatchObject({ agents: [] });
+    expect(cancel).not.toHaveBeenCalled();
+  } finally { a.close(0, "done"); await serving; }
+});

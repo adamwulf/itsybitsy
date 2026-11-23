@@ -602,9 +602,9 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
   }
   let delivered = true;
   try { await writeReply(); }
-  catch {
+  catch (err) {
     delivered = false;
-    if (!await settledWithinGrace(stream.cancel(), deps)) {
+    if (err instanceof TransferIdleError && !await settledWithinGrace(stream.cancel(), deps)) {
       closeQuietly(conn, PEER_CLOSE.error, "send reply stalled");
       return false;
     }

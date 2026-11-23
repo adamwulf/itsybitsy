@@ -1917,14 +1917,18 @@ export class DashboardComponent implements Component {
   /** Poll updates can affect the unified tree, a remote selection, and the Peers tab. */
   setPeerService(service: PeersDialogService): void {
     this.peerService = service;
+    let receipts = JSON.stringify(service.view().incoming ?? []);
     service.onChange(() => {
+      const next = JSON.stringify(service.view().incoming ?? []);
+      const receiptsChanged = next !== receipts;
+      receipts = next;
       const changed = this.refreshPeerRepos();
       this.syncRemotePane();
       const dialog = this._dialog;
       if (dialog?.type === "setup" && dialog.peers) {
         syncPeersDialog(dialog.peers);
         this.tui?.requestRender();
-      } else if (changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form") {
+      } else if (receiptsChanged || changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form") {
         if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
         this.tui?.requestRender();
       }

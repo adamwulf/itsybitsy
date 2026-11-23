@@ -691,6 +691,7 @@ export class PeerService {
     const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
     const row = { id, label: cleanRemoteText(label + " → " + targetLabel(header.target)), bytes: 0, total: header.files.reduce((sum, f) => sum + f.size, 0) };
     const done = Promise.withResolvers<void>();
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       await receive(header, peer, name, body, { ...options, signal: controller.signal, admitted: ownsBody => {
         if (this.shuttingDown) throw new Error("Watcher shutting down");
@@ -706,9 +707,13 @@ export class PeerService {
         options?.committing?.();
       }, onProgress: bytes => {
         row.bytes = bytes;
-        this.notify();
+        progressTimer ??= setTimeout(() => {
+          progressTimer = undefined;
+          this.notify();
+        }, 100);
       } });
     } finally {
+      clearTimeout(progressTimer);
       if (this.receipts.delete(id)) this.notify();
       done.resolve();
     }

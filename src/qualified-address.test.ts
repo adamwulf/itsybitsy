@@ -383,7 +383,7 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
-  test.each(["local recipient", "self", "changed bytes", "dead before append", "dead before self append"])("sandboxed local --attach through the worktree watchdog: %s", async mode => {
+  test.each(["local recipient", "self", "changed bytes", "dead before append", "dead before self append", "retired during staging"])("sandboxed local --attach through the worktree watchdog: %s", async mode => {
     const agentDir = dirname(worktree);
     const recipient = mode.includes("self") ? "mgr" : "foo";
     const live = JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false,
@@ -404,6 +404,13 @@ describe("qualified agent addresses", () => {
       const death = mode.startsWith("dead before");
       const open = fsPromises.open;
       const { pid } = await Bun.file(join(agentDir, "send-attachments", id!, "lease")).json();
+      const move = fsPromises.rename;
+      const retire = spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
+        if (mode === "retired during staging" && String(from).endsWith("/bodies/0")) {
+          await move(join(app, ".itsybitsy", "agents", recipient), join(cli.root, "retired"));
+        }
+        return move(from, to);
+      });
       const held = spyOn(fsPromises, "open").mockImplementation(async (...args) => {
         const file = await open(...args);
         if (death && String(args[0]).endsWith("/outbox.jsonl")) {
@@ -412,10 +419,13 @@ describe("qualified agent addresses", () => {
         return file;
       });
       try { await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: cli.cwd } }); }
-      finally { held.mockRestore(); }
+      finally { held.mockRestore(); retire.mockRestore(); }
       const result = await send;
       const queue = Bun.file(join(cli.home, ".itsybitsy", "agents", recipient, "outbox.jsonl"));
-      if (death) {
+      if (mode === "retired during staging") {
+        expect(result.stderr).toContain("Cannot verify the local attachment recipient directory");
+        expect(await Bun.file(join(cli.home, ".itsybitsy/agents/mgr/outbox.jsonl")).exists()).toBe(false);
+      } else if (death) {
         expect(result.stderr).toContain("Cannot verify the staging lease owner");
         expect(await queue.text()).toBe("");
       } else if (mode === "changed bytes") {

@@ -156,6 +156,15 @@ async function isAgentAt(agent: Agent, self: AgentLocation): Promise<boolean> {
   return isSameDirectory(agent.storageDir ?? runtimeNames.agentDir(agent.repoPath, agent.id), self.agentDir);
 }
 
+async function verifiedSelfRecipient(agent: Agent, self: AgentLocation): Promise<boolean> {
+  const path = agent.storageDir ?? runtimeNames.agentDir(agent.repoPath, agent.id);
+  try {
+    const [target, caller] = await Promise.all([stat(path, { bigint: true }), stat(self.agentDir, { bigint: true })]);
+    if (target.isDirectory() && caller.isDirectory()) return target.dev === caller.dev && target.ino === caller.ino;
+  } catch (error) { throw Error("Cannot verify the local attachment recipient directory", { cause: error }); }
+  throw Error("Cannot verify the local attachment recipient directory");
+}
+
 /** Strictly parse an untrusted request; only the allowlisted fields survive. */
 export function parseSendRequest(text: string, expectedId: string): ParsedSendRequest {
   let raw: unknown;
@@ -547,7 +556,7 @@ export async function handleSendRequest(
       }
       // Never deliver to the requester itself (see isAgentAt). A team drops it
       // like the sender; a single target is refused.
-      const excludeRecipient = (agent: Agent): Promise<boolean> => isAgentAt(agent, self);
+      const excludeRecipient = (agent: Agent) => localFiles ? verifiedSelfRecipient(agent, self) : isAgentAt(agent, self);
       if (resolved.team) {
         return await (seams.teamSend ?? teamSend)(
           resolved.team.name,

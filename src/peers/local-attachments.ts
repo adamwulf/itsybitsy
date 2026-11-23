@@ -93,16 +93,16 @@ async function senderAttachmentAccess(sender: AttachmentSender) {
   let access: PreparedAccessTable;
   if (sender.kind === "agent") {
     const { caller } = sender;
-    if (metaKernelSandboxed(caller.meta)) return { sandboxed: true };
     access = await buildAgentAccessTable({
       meta: caller.meta, rootRepo: caller.repoPath, agentDir: caller.agentDir, agentsDir: dirname(caller.agentDir),
       worktreePath: caller.meta.worktree === false ? caller.repoPath : join(caller.agentDir, "repo"),
-      kernelSandboxed: false, home: accountHome(),
+      kernelSandboxed: metaKernelSandboxed(caller.meta), home: accountHome(),
     });
   } else {
     access = (await buildSystemHookPolicy(accountHome())).access;
   }
   return {
+    sandboxed: access.kernelSandboxed === true,
     checkRead(source: string) {
       if (resolvePreparedAccess(access, source, "read") === "deny") throw new Error(pathDenialReason(access, source, "read", true));
     },

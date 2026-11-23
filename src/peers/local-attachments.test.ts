@@ -114,11 +114,11 @@ test("a same-size mutation after validation removes the entire partial snapshot"
   }
 });
 
-test("an unsandboxed agent's own deny rule covers a relative --attach even with --from", async () => {
+test.each([false, true])("an unwrapped caller respects its worktree deny rule with sandbox.enabled=%s", async enabled => {
   const path = join(recipient.repoPath, ".itsybitsy/agents/sender/repo/private");
-  const sender = await fixture.addAgent(recipient.repoPath, "sender", { paths: { deny: [path] }, sandbox: { enabled: false } });
+  const sender = await fixture.addAgent(recipient.repoPath, "sender", { paths: { deny: [await realpath(recipient.repoPath) + "/.itsybitsy/agents/sender/repo/private"] }, sandbox: { enabled } });
   await Bun.write(path, "fixture");
-  const run = await fixture.run(["send", "reader", "--from", "@system", "--attach", "./private", "read"], {
+  const run = await fixture.run(["send", "reader", ...(enabled ? [] : ["--from", "@system"]), "--attach", "./private", "read"], {
     cwd: sender.sessionCwd, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
   });
   expect(run.exitCode).toBe(1);
@@ -323,7 +323,7 @@ test("failed attachment staging never falls back to sending the original text", 
   const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
   await Bun.write(join(sender.sessionCwd, "first"), "ok");
   const run = await fixture.run(["send", "reader", "--attach", "first", "--attach", "missing", "!read first missing"], {
-    cwd: sender.sessionCwd, sandboxed: true, actions: { sendMessage: "record" },
+    cwd: sender.sessionCwd, sandboxed: true, actions: { sendMessage: "record" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
   });
   expect(run.exitCode).toBe(1);
   expect(run.stderr).toContain("missing");

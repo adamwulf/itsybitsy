@@ -1,3 +1,4 @@
+import { useAttachmentTemp } from "../test-attachment-temp";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, mock, spyOn } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, readdir, realpath, symlink, writeFile } from "fs/promises";
@@ -6224,6 +6225,7 @@ describe("input field integration", () => {
       return { ok: true, exitCode: 0, stdout: "", stderr: "" };
     });
 
+    const restoreTemp = useAttachmentTemp(testDir);
     try {
       const dashboard = makeDashboard();
       const agent = makeAgent("agent-a", testDir);
@@ -6255,10 +6257,11 @@ describe("input field integration", () => {
       await dashboard.flushPendingActions();
 
       expect(sends).toHaveLength(1);
-      expect(sends[0]).toContain("/tmp/itsybitsy-attachments-");
+      expect(sends[0]).toContain(testDir + "/itsybitsy-attachments-");
       expect(sends[0]).not.toContain(file);
       expect(dashboard.inputField.getText()).toBe("");
     } finally {
+      restoreTemp();
       resetStagedSenderForTests();
       await rm(testDir, { recursive: true, force: true });
     }

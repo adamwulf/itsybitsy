@@ -1,3 +1,4 @@
+import { useAttachmentTemp } from "./test-attachment-temp";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { resolveNoWorktreeCaller } from "./no-worktree-caller";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
@@ -1106,6 +1107,7 @@ describe("sendMessage outbox integration", () => {
 // sandbox. Legacy sends (no stageAttachments) must be entirely unaffected.
 // ---------------------------------------------------------------------------
 describe("sendMessage send-time attachment staging", () => {
+  let restoreTemp: () => void;
   let spawnCalls: string[][];
   let tempDir: string;
   let agentDir: string;
@@ -1123,6 +1125,7 @@ describe("sendMessage send-time attachment staging", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-stage-"));
+    restoreTemp = useAttachmentTemp(tempDir);
     await useFixtureRepo(tempDir);
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
@@ -1139,6 +1142,7 @@ describe("sendMessage send-time attachment staging", () => {
   });
 
   afterEach(async () => {
+    restoreTemp();
     resetUserHome();
     resetSendSpawnRunner();
     resetUserConfigPath();

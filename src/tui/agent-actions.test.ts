@@ -1,3 +1,4 @@
+import { useAttachmentTemp } from "../test-attachment-temp";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { chmod, mkdtemp, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
@@ -3814,6 +3815,7 @@ describe("handleSend — attachment staging + acceptance-gated draft", () => {
     await Bun.write(file1, "content 1");
     await Bun.write(file2, "content 2");
 
+    const restoreTemp = useAttachmentTemp(testDir);
     try {
       const sentMessages: string[] = [];
       setStagedSenderForTests(async (_agent, message) => {
@@ -3839,11 +3841,12 @@ describe("handleSend — attachment staging + acceptance-gated draft", () => {
 
       expect(sentMessages).toHaveLength(1);
       const sent = sentMessages[0]!;
-      expect(sent).toContain("/tmp/itsybitsy-attachments-");
+      expect(sent).toContain(testDir + "/itsybitsy-attachments-");
       expect(sent).not.toContain(file1);
       expect(sent).toContain(file2);
       expect(notices).toContain("Sent to agent-1");
     } finally {
+      restoreTemp();
       await rm(testDir, { recursive: true, force: true });
     }
   });

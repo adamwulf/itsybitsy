@@ -200,6 +200,7 @@ async function runDriver(): Promise<void> {
     throw new Error(`test-cli-driver blocked ${violation.kind}: ${JSON.stringify(violation.detail)}`);
   };
   installExternalGuards(config, block);
+  (await import("./peers/local-attachments")).localAttachmentVolume.set(config.home);
   const { setUserHome } = await import("./home");
   setUserHome(config.home, config.accountHome);
 

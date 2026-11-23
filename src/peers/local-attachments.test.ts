@@ -11,13 +11,14 @@ import { resetUserHome, setUserHome } from "../home";
 import { createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
 import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
 import * as config from "../config";
-import { copyLocalAttachments, resolveAttachmentSender, stageLocalAttachments } from "./local-attachments";
+import { localAttachmentVolume, copyLocalAttachments, resolveAttachmentSender, stageLocalAttachments } from "./local-attachments";
 
 let fixture: CliFixture;
 let recipient: FixtureAgent;
 const snapshots: string[] = [];
 beforeEach(async () => {
   fixture = await createCliFixture();
+  localAttachmentVolume.set(fixture.home);
   recipient = await fixture.addAgent(await fixture.addRepo("project"), "reader");
   await Bun.write(join(fixture.home, ".itsybitsy/machine-name"), "desk");
   await writeAgentTransient(recipient.agentDir, {
@@ -27,6 +28,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   for (const root of snapshots.splice(0)) await rm(root, { recursive: true, force: true });
+  localAttachmentVolume.reset();
   resetUserHome();
   await fixture.cleanup();
 });
@@ -54,7 +56,8 @@ test.each([1, 2])("queues %i verified private snapshots, rewriting all spellings
   expect(heading).toBe("Attachments copied to this machine:");
   expect(lines).toHaveLength(count);
   const path = lines[0].split(" → ")[1];
-  expect(path).toMatch(/^\/tmp\/itsybitsy-attachments-[^/]+\/0\/one$/);
+  expect(path).toStartWith(fixture.home + "/itsybitsy-attachments-");
+  expect(path).toEndWith("/0/one");
   const root = dirname(dirname(path));
   snapshots.push(root);
   expect(body).toBe(`!read ${path} ${path} ${path}`);

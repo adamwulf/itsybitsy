@@ -1,3 +1,4 @@
+import { InjectionContext } from "../types";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
@@ -13,9 +14,11 @@ import { readMachineName } from "../machine-name";
 import { buildAttachmentManifest, fileChunks, hashFile, type ManifestEntry, type AttachmentArgument } from "./attachment-manifest";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
 
+export const localAttachmentVolume = new InjectionContext("/tmp");
+
 export async function copyLocalAttachments(
   message: string, entries: readonly (ManifestEntry & { sha256: string })[], signal?: AbortSignal,
-  tempDir = "/tmp",
+  tempDir = localAttachmentVolume.fn,
 ) {
   const bytes = entries.reduce((total, entry) => total + entry.size, 0);
   if (!await hasFreeSpace(tempDir, bytes)) throw new Error(`Insufficient space in ${tempDir} for ${bytes} attachment bytes plus the 1 GiB reserve`);

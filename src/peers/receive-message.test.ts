@@ -1086,3 +1086,19 @@ test("a forward calendar step preserves a recently accepted replay", async () =>
   try { await receive(request, "peer", paired); expect(lines).toHaveLength(1); }
   finally { clock.mockRestore(); }
 });
+
+test("a stalled final allowlist read releases the admission and enqueues nothing", async () => {
+  const clock = createFakeClock(), entered = Promise.withResolvers<void>();
+  let calls = 0;
+  const request = header();
+  const check = async () => {
+    if (++calls === 1) return "paired";
+    entered.resolve(); return new Promise<string>(() => {});
+  };
+  const result = receiver(request, "peer", check, undefined, { setTimer: clock.setTimer }).catch(err => err);
+  await entered.promise;
+  clock.advance(60_000);
+  expect(String(await result)).toContain("No progress");
+  expect(await readOutbox(join(cli.home, ".itsybitsy", "agents", "worker"))).toEqual([]);
+  await receiver(request, "peer", paired);
+});

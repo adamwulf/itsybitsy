@@ -548,13 +548,18 @@ export interface PeerResponderDeps {
 export async function serveTrustedConnection(conn: PairConnection, deps: PeerResponderDeps): Promise<void> {
   const headerReaders = deps.headerReaders ??= new Set();
   const from = shortPeerId(conn.remoteId);
+  const lifetime = new AbortController();
+  void conn.closed().then(() => lifetime.abort(new Error("Peer connection closed")), err => lifetime.abort(err));
+  const peerName = deps.peerName.bind(deps);
+  deps = { ...deps, peerName: async id => {
+    try { return await waitForIO({ setTimer: deps.setTimer, signal: lifetime.signal }, () => peerName(id)); }
+    catch (err) { deps.log(`peer link: pairing lookup failed: ${errorDetail(err)}`); return null; }
+  } };
   if ((await deps.peerName(conn.remoteId)) === null) {
     deps.log(`peer link: closed a connection from ${from}: not a peer`);
     closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
     return;
   }
-  const lifetime = new AbortController();
-  void conn.closed().then(() => lifetime.abort(new Error("Peer connection closed")), err => lifetime.abort(err));
   deps.log(`peer link: ${from} connected`);
   for (;;) {
     let stream: PairStream;

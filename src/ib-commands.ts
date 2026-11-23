@@ -1,3 +1,4 @@
+import { waitForIO, type FileBodyOptions } from "./peers/send-frame";
 import { fullyQualifiedAgentId } from "./tui/row-keys";
 import { initializeMachineName } from "./machine-name";
 import { getRepoId, readRepoId } from "./repo-id";
@@ -4113,6 +4114,7 @@ async function checkSendSession(agent: Agent): Promise<IbCommandResult | null> {
 
 /** Inbound peer messages acknowledge enqueue, including for recipients without a watchdog. */
 export interface PeerEnqueueOptions {
+  setTimer?: FileBodyOptions["setTimer"];
   signal?: AbortSignal;
   senderKind?: OutboxMessage["peerSender"];
   prepareMessage?(): Promise<string>;
@@ -4512,10 +4514,11 @@ export async function sendMessage(
     const reservedKey = opts?.outboxDir === undefined ? agent.meta.queue_key : undefined;
     if (opts?.peerSend) {
       const { isDeliveryPaneLive } = await import("./tmux-poller");
-      let live = await isDeliveryPaneLive(tmuxSession);
+      const probe = () => waitForIO(opts.peerSend!, () => isDeliveryPaneLive(tmuxSession));
+      let live = await probe();
       if (live && opts.peerSend.prepareMessage) {
         outgoing = await opts.peerSend.prepareMessage();
-        live = await isDeliveryPaneLive(tmuxSession);
+        live = await probe();
       }
       if (!live) return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running` };
       await opts.peerSend.beforeEnqueue();

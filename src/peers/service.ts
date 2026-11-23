@@ -1,3 +1,4 @@
+import { waitForIO } from "./send-frame";
 import { transferStagingRoot } from "../runtime-names";
 import { finishRecovery, sweepOutgoingDirectories } from "./transfer-owner";
 /**
@@ -749,7 +750,7 @@ export class PeerService {
       if (this.remoteStartDenial !== null) throw new Error(remoteSendDenial(this.remoteStartDenial));
       if (header.from.kind !== "user") throw new Error("Dashboard sends require a user sender");
     }
-    const peer = await this.peerName(peerId);
+    const peer = await waitForIO({ setTimer: this.deps.setTimer, signal: transfer?.signal }, () => this.peerName(peerId));
     if (peer === null) throw new Error("Machine is no longer paired");
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");

@@ -213,9 +213,9 @@ function proseLines(text: string, width: number, color = ""): string[] {
   return wordWrapSingleLine(text, width).map(line => color ? `${color}${line}${RESET}` : line);
 }
 
-function peerListLines(view: PeerServiceView, innerWidth: number, maxLines: number): string[] {
-  if (view.peersError !== null) return proseLines(view.peersError, innerWidth, RED).slice(0, maxLines);
-  if (view.peers.length === 0) return [`${DIM}  none yet${RESET}`].slice(0, maxLines);
+function peerListLines(view: PeerServiceView, innerWidth: number, available: number, maxLines: number): string[] {
+  if (view.peersError !== null) return proseLines(view.peersError, innerWidth, RED).slice(0, available);
+  if (view.peers.length === 0) return [`${DIM}  none yet${RESET}`].slice(0, available);
   const listed = view.peers.slice(0, MAX_LISTED_PEERS);
   // Reserve the indent, both gaps, the short id and the longest status word.
   const availableNameWidth = innerWidth - 6 - SHORT_ID_LENGTH - "connecting".length;
@@ -233,19 +233,31 @@ function peerListLines(view: PeerServiceView, innerWidth: number, maxLines: numb
     } else {
       lines.push(truncatePeerField(peer.name, innerWidth), ...wordWrapSingleLine(`${id}  ${state}`, innerWidth));
     }
-    if (link !== undefined && !link.connected && link.lastError !== null) {
-      for (const line of wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4))) lines.push(`    ${RED}${line}${RESET}`);
-    }
-    return lines;
+    const error = link && !link.connected && link.lastError !== null
+      ? wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4)).map(line => `    ${RED}${line}${RESET}`)
+      : [];
+    return { lines, error };
   });
-  // Keep each peer with its error, and reserve room for the count of hidden peers.
-  for (;;) {
-    const lines = groups.flat();
-    const hidden = view.peers.length - groups.length;
-    if (hidden > 0) lines.push(...proseLines(`  …and ${hidden} more (ib peer list shows all)`, innerWidth, DIM));
-    if (lines.length <= maxLines || groups.length === 0) return lines.slice(0, maxLines);
-    groups.pop();
+
+  // Reclaim header space if needed for the first peer, its first error line and the count.
+  const first = groups[0]!;
+  const firstMinimum = first.lines.length + Math.min(1, first.error.length);
+  const budget = Math.min(maxLines, Math.max(available, firstMinimum + (view.peers.length > 1 ? 1 : 0)));
+  const overflow = (hidden: number) => {
+    if (hidden === 0) return [];
+    const count = `…and ${hidden} more`;
+    const full = proseLines(`  ${count} (ib peer list shows all)`, innerWidth, DIM);
+    return first.lines.length + first.error.length + full.length <= budget ? full : [`${DIM}  ${count}${RESET}`];
+  };
+  const result: string[] = [];
+  let shown = 0;
+  for (const group of groups) {
+    const room = budget - result.length - overflow(view.peers.length - shown - 1).length;
+    if (group.lines.length + Math.min(1, group.error.length) > room) break;
+    result.push(...group.lines, ...group.error.slice(0, room - group.lines.length));
+    shown++;
   }
+  return [...result, ...overflow(view.peers.length - shown)].slice(0, budget);
 }
 
 export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number, maxLines: number): string[] {
@@ -264,8 +276,9 @@ export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number,
   const pairing = buildPairingContent(d, view, innerWidth);
   // Leave the active input, error and key hint together at the bottom of the overlay.
   const room = Math.max(0, maxLines - pairing.length - 2); // Paired peers heading and separator
-  const top = header.slice(0, Math.max(0, room - 1));
-  return [...top, `${BOLD}Paired peers${RESET}`, ...peerListLines(view, innerWidth, room - top.length), "", ...pairing];
+  const peers = peerListLines(view, innerWidth, Math.max(1, room - header.length), room);
+  const top = header.slice(0, Math.max(0, room - peers.length));
+  return [...top, `${BOLD}Paired peers${RESET}`, ...peers, "", ...pairing];
 }
 
 function buildPairingContent(d: PeersDialogState, view: PeerServiceView, innerWidth: number): string[] {

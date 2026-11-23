@@ -9740,6 +9740,44 @@ describe("setup Peers tab", () => {
     }
   });
 
+  test.each(["code-entry", "naming"] as const)("40x24 keeps the first peer visible alongside a %s error", stage => {
+    const originalRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: 24, writable: true, configurable: true });
+    try {
+      const dashboard = makeDashboard();
+      const { tui, composite } = overlayTui(40, 24);
+      dashboard.setTui(tui);
+      const service = new FakePeerService();
+      const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+        lastError: "connection refused while trying to reach the other endpoint during the most recent polling attempt", repos: null, agents: null })) });
+      dashboard.setPeerService(service);
+      dashboard.handleInput("I");
+      service.setSession("initiator", stage === "code-entry" ? { stage } : { stage, savedName: OTHER_SHORT });
+      const value = stage === "code-entry" ? "12" : "peer-0";
+      dashboard.handleInput(value);
+      dashboard.handleInput("\r");
+      const screen = composite(dashboard.render(40)).slice(-24).map(stripAnsi);
+      const lines = screen.map(line => line.slice(1, -1).trim());
+      const content = lines.join(" ");
+      expect(content).toContain("0000000000  offline");
+      expect(content).toContain("connection refused");
+      expect(lines).toContain("…and 10 more");
+      expect(content).toContain(`> ${value}█`);
+      if (stage === "code-entry") {
+        expect(content).toContain("Code  (your id:");
+        expect(content).toContain("A code is 8 characters, like ABCD-1234.");
+        expect(content).toContain("Enter: send code    Esc: cancel");
+      } else {
+        expect(content).toContain(`Name for ${OTHER_SHORT}:`);
+        expect(content).toContain('Another peer is already named "peer-0".');
+        expect(content).toContain(`Enter: save    Esc: keep "${OTHER_SHORT}"`);
+      }
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
+    }
+  });
+
   test.each([70, 40])("the %i-column Peers overlay shows status, count, field, hint and borders", width => {
     const height = 24;
     const originalRows = process.stdout.rows;

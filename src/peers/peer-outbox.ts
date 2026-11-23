@@ -1,4 +1,4 @@
-import { finishRecovery, inspectTransferDirectory, safeTransferParent, sweepEntries, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
+import { finishRecovery, inspectTransferDirectory, reclaimTransfer, safeTransferParent, sweepEntries, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
@@ -57,9 +57,11 @@ export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd
 }
 
 async function writeJson(dir: string, name: string, data: unknown) {
-  const temp = join(dir, name + ".tmp");
-  await writeFile(temp, JSON.stringify(data), { flag: "wx", mode: 0o600 });
-  await rename(temp, join(dir, name));
+  const temp = join(dir, `${name}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temp, JSON.stringify(data), { flag: "wx", mode: 0o600 });
+    await rename(temp, join(dir, name));
+  } finally { await rm(temp, { force: true }); }
 }
 
 export function textHeader(target: SendTarget, message: string, from: SendHeader["from"]): SendHeader {
@@ -173,9 +175,27 @@ export function createPeerOutboxPoll(now = Date.now) {
     });
   }
 
+  async function recoverClaim(parent: string, id: string) {
+    const dir = join(parent, id);
+    if (!requestId.test(id) || active.has(dir)) return;
+    await safeTransferParent(dir);
+    const client = await inspectTransferDirectory(dir);
+    if (existsSync(join(dir, "cancel")) || reclaimTransfer(client.state, client.created, now())) {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    }
+    if (client.state !== "verified-live" || existsSync(join(dir, "result.json"))) return;
+    const worker = await inspectTransferDirectory(dir, "worker.json");
+    if (reclaimTransfer(worker.state, worker.created, now())) {
+      // A claim can survive a crash on either side of FIN. Never re-dispatch it.
+      await writeJson(dir, "result.json", { ok: false, error: "outcome unknown — check the recipient" });
+    }
+  }
+
   async function recover() {
     const base = peerOutboxDir();
-    await finishRecovery([sweep(base), sweep(join(base, ".claimed")), sweep(join(base, ".staging"), true)]);
+    const claimed = join(base, ".claimed");
+    await finishRecovery([sweep(base), sweepEntries(claimed, id => recoverClaim(claimed, id)), sweep(join(base, ".staging"), true)]);
   }
 
   async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {
@@ -193,22 +213,24 @@ export function createPeerOutboxPoll(now = Date.now) {
         for (const id of ids) {
           if (!ownsEndpoint()) return;
           const dir = join(claimed, id);
+          if (active.has(dir)) continue;
+          active.add(dir);
           try {
-            if ((await inspectTransferDirectory(join(base, id))).state !== "verified-live") continue;
-            await rename(join(base, id), dir);
+            const readyDir = join(base, id);
+            if ((await inspectTransferDirectory(readyDir)).state !== "verified-live") { active.delete(dir); continue; }
+            const start = stagingOwnerStart(process.pid);
+            if (start === null) throw new Error("Cannot verify the peer-outbox worker");
+            await writeTransferOwner(readyDir, { pid: process.pid, start }, "worker.json");
+            await rename(readyDir, dir);
           } catch (err) {
+            active.delete(dir);
             if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
             continue;
           }
-          active.add(dir);
           try {
-            const { owner: clientOwner, state } = await inspectTransferDirectory(dir);
-            if (state !== "verified-live" || !clientOwner) continue;
-            const start = stagingOwnerStart(process.pid);
-            if (start === null) throw new Error("Cannot verify the peer-outbox worker");
-            await writeTransferOwner(dir, { pid: process.pid, start });
             let result;
             try {
+              if ((await inspectTransferDirectory(dir)).state !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
               const { peer, header: raw } = await readRequest(join(dir, "request.json"));
               const header = parseSendHeader(raw);
               if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
@@ -239,7 +261,6 @@ export function createPeerOutboxPoll(now = Date.now) {
               await rm(dir, { recursive: true, force: true });
               continue;
             }
-            await writeTransferOwner(dir, clientOwner);
             await writeJson(dir, "result.json", result);
             await rm(join(dir, "files"), { recursive: true, force: true })
               .catch(err => log(`peer-outbox: could not remove sent files: ${detail(err)}`));

@@ -1,4 +1,4 @@
-import { processStartEpochSecondsCtx } from "../agents";
+import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
 import { writeTransferOwner } from "./transfer-owner";
 import * as fs from "node:fs/promises";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
@@ -18,7 +18,7 @@ beforeEach(async () => {
   processStartEpochSecondsCtx.set(() => 100);
   base = join(home, ".itsybitsy", "peer-outbox");
 });
-afterEach(async () => { processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); });
+afterEach(async () => { isPidAliveCtx.reset(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); });
 
 test.each(["oversize", "symlink", "FIFO"])("refuses a %s peer request without sending", async kind => {
   const id = crypto.randomUUID();
@@ -205,4 +205,52 @@ test("a live watcher stuck before wire I/O does not renew the client deadline", 
     finish.resolve(h.id);
     await run;
   } finally { time.mockRestore(); finish.resolve(h.id); }
+});
+
+async function readyRequest() {
+  const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  const ready = join(base, header.id);
+  const claimed = join(base, ".claimed", header.id);
+  const client = { pid: 10101, start: 100 };
+  isPidAliveCtx.set(() => true);
+  processStartEpochSecondsCtx.set(pid => pid === client.pid ? client.start : 200);
+  await mkdir(ready, { recursive: true });
+  await writeTransferOwner(ready, client);
+  await Bun.write(join(ready, "request.json"), JSON.stringify({ peer: "peer", header }));
+  return { client, header, ready, claimed };
+}
+
+test.each(["waiting", "cancelled", "dead"])('interrupted claim recovery for a %s submitter never resends', async state => {
+  const { client, ready, claimed } = await readyRequest();
+  const rename = fs.rename;
+  const interrupted = spyOn(fs, "rename").mockImplementation(async (source, dest) => {
+    if (source === ready) {
+      expect(await Bun.file(join(ready, "worker.json")).json()).toEqual({ pid: process.pid, start: 200 });
+      await rename(source, dest);
+      throw Error("stopped immediately after claim");
+    }
+    await rename(source, dest);
+  });
+  let sends = 0;
+  const send = async () => { sends++; return ""; };
+  try { await createPeerOutboxPoll()(send, () => {}); } finally { interrupted.mockRestore(); }
+  expect(await Bun.file(join(claimed, "owner.json")).json()).toEqual(client);
+  processStartEpochSecondsCtx.set(pid => pid === process.pid ? 201 : client.start);
+  if (state === "cancelled") await Bun.write(join(claimed, "cancel"), "");
+  if (state === "dead") isPidAliveCtx.set(pid => pid !== client.pid);
+  const replacement = createPeerOutboxPoll();
+  await replacement.recover();
+  await replacement(send, () => {});
+  if (state === "waiting") expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: false, error: "outcome unknown — check the recipient" });
+  else await expect(fs.stat(claimed)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(sends).toBe(0);
+});
+
+test("a worker that died before the rename leaves the request ready", async () => {
+  const { ready, header, claimed } = await readyRequest();
+  await writeTransferOwner(ready, { pid: process.pid, start: 99 }, "worker.json");
+  const worker = createPeerOutboxPoll();
+  await worker.recover();
+  await worker(async () => header.id, () => {});
+  expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: true, id: header.id });
 });

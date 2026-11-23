@@ -12,11 +12,13 @@ export function stagingOwnerStart(pid: number): number | null {
   return start !== null && Number.isSafeInteger(start) && start > 0 ? start : null;
 }
 
-export async function writeTransferOwner(dir: string, owner: TransferOwner) {
+type OwnerRecord = "owner.json" | "worker.json";
+
+export async function writeTransferOwner(dir: string, owner: TransferOwner, record: OwnerRecord = "owner.json") {
   const temp = join(dir, ".owner-" + randomUUID());
   try {
     await writeFile(temp, JSON.stringify(owner), { flag: "wx", mode: 0o600 });
-    await rename(temp, join(dir, "owner.json"));
+    await rename(temp, join(dir, record));
   } finally { await rm(temp, { force: true }); }
 }
 
@@ -96,13 +98,13 @@ async function readBatch(parent: string, key: string, limit: number) {
   return entries;
 }
 
-export async function inspectTransferDirectory(dir: string) {
+export async function inspectTransferDirectory(dir: string, name: OwnerRecord = "owner.json") {
   const info = await lstat(dir);
   if (!info.isDirectory()) throw new Error("Unsafe transfer directory: " + dir);
   let file: FileHandle | undefined;
   let created = info.birthtimeMs || info.ctimeMs;
   try {
-    file = await open(join(dir, "owner.json"), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    file = await open(join(dir, name), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
     const record = await file.stat();
     created = record.birthtimeMs || record.ctimeMs;
     const owner = await readOwnerFields(file);

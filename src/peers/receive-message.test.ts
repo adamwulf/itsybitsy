@@ -287,6 +287,15 @@ async function receiveFixture(space = true) {
   return dir;
 }
 
+async function expectRolledBack(committed: string) {
+  const incoming = join(cli.root, "staging/incoming");
+  await waitFor(async () => {
+    try { return (await readdir(incoming)).length === 0; }
+    catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return true; throw err; }
+  });
+  expect(await readdir(committed)).toEqual([]);
+}
+
 test("verified files are private, sanitized, mapped once, and retained across a replay", async () => {
   const dir = await receiveFixture();
   const files = [manifestFile("one", "../unsafe/a.txt"), manifestFile("two", "../other/a.txt", "./another")];
@@ -330,7 +339,7 @@ test.each(["hash", "short", "trailing", "disk", "revoked", "stall", "malformed"]
     const error = { hash: "hash mismatch", short: "Early EOF", trailing: "Trailing data", disk: "1 GiB", malformed: "Malformed" }[kind]!;
     expect(await exchange(req, paired, false, Buffer.from(data))).toMatchObject({ op: "error", reason: expect.stringContaining(error) });
   }
-  expect(await readdir(dir)).toEqual([]);
+  await expectRolledBack(dir);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
 
@@ -546,7 +555,7 @@ test("a stuck sender reset closes the connection and releases a partial receipt"
   controller.abort(Error("cancelled"));
   await expect(sending).rejects.toThrow("cancelled");
   await Promise.all([serving, handler.promise]);
-  expect(await readdir(dir)).toEqual([]);
+  await expectRolledBack(dir);
   await receiver(header({ files: [manifestFile("")] }), "sender", paired, { read: async () => Buffer.alloc(0) });
 });
 
@@ -563,7 +572,7 @@ test.each(["shutdown", "cancel"])("%s cleans a tracked receipt after its first b
   if (action === "shutdown") await service.shutdown();
   else service.cancelReceipt(service.view().incoming![0]!.id);
   expect(await stopped).toBeInstanceOf(Error);
-  expect(await readdir(dir)).toEqual([]);
+  await expectRolledBack(dir);
   expect(service.view().incoming ?? []).toEqual([]);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
@@ -595,7 +604,7 @@ test("exclusive destination creation preserves existing bytes and cleans the fai
   try {
     expect(await exchange(header({ files: [manifestFile("replacement")] }), paired, false, Buffer.from("replacement"))).toMatchObject({ op: "error" });
     expect(await Bun.file(existing).text()).toBe("original");
-    expect(await readdir(dir)).toEqual([]);
+    await expectRolledBack(dir);
     expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
   } finally { collision.mockRestore(); }
 });
@@ -611,7 +620,7 @@ test.each(["second hash", "target stopped"])("%s after writing the first file ro
   expect(await exchange(header({ files }), paired, false, bytes)).toMatchObject({
     op: "error", reason: expect.stringContaining(kind === "second hash" ? "hash mismatch" : "not running"),
   });
-  expect(await readdir(dir)).toEqual([]);
+  await expectRolledBack(dir);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
 
@@ -620,7 +629,7 @@ test("a near-limit spelling header with an empty message cannot allocate an over
   const file = { ...manifestFile(""), spellings: ["x".repeat(250_000)] };
   await expect(receiver(header({ message: "", files: [file] }), "peer", paired, { read: async () => Buffer.alloc(0) }))
     .rejects.toThrow("spelling index exceeds");
-  expect(await readdir(dir)).toEqual([]);
+  await expectRolledBack(dir);
 });
 
 test("a committing receipt no longer accepts dashboard cancellation", async () => {

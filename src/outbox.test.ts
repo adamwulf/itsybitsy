@@ -67,10 +67,20 @@ describe("outbox queue", () => {
     try {
       const drain = rewriteOutboxRemoving(dir, new Set(["one"]));
       await entered.promise;
-      const append = enqueueOutbox(dir, { id: "three", message: "three", fromAgent: "", raw: false });
-      await Bun.sleep(25);
+      const append = Bun.spawn([process.execPath, "-e", `
+        import { open } from "node:fs/promises";
+        import { flock, LOCK_EX, LOCK_NB } from "./src/file-lock";
+        import { enqueueOutbox } from "./src/outbox";
+        const dir = process.argv[1];
+        const fd = await open(dir, "r");
+        console.log(flock(fd.fd, LOCK_EX | LOCK_NB) === 0 ? "unlocked" : "locked");
+        await fd.close();
+        await enqueueOutbox(dir, { id: "three", message: "three", fromAgent: "", raw: false });
+      `, dir], { stdout: "pipe", stderr: "inherit" });
+      const { value } = await append.stdout.getReader().read();
+      expect(new TextDecoder().decode(value).trim()).toBe("locked");
       expect((await readOutbox(dir)).map(m => m.id)).toEqual(["one", "two"]);
-      release.resolve(); await Promise.all([append, drain]);
+      release.resolve(); await drain; expect(await append.exited).toBe(0);
       expect((await readOutbox(dir)).map(m => m.id)).toEqual(["two", "three"]);
     } finally { release.resolve(); spy.mockRestore(); }
   });

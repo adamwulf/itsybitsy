@@ -24,7 +24,7 @@ test("live, dead, recycled and unverifiable transfer owners share one expiry rul
   expect(transferOwnerState(owner, 10_000)).toBe("verified-live");
   expect(transferOwnerState(owner, 0, 11)).toBe("proven-dead");
   expect(transferOwnerState(owner, 0, 10)).toBe("verified-live");
-  expect(transferOwnerState({ ...owner, start: null }, 9_999)).toBe("proven-dead");
+  expect(transferOwnerState({ ...owner, start: null }, 9_999)).toBe("unverifiable");
   expect(transferOwnerState({ pid: 42, start: null }, 0, null)).toBe("proven-dead");
   // A wall-clock rollback can place the record before the process start.
   expect(transferOwnerState(owner, 9_999)).toBe("verified-live");
@@ -39,16 +39,16 @@ test("live, dead, recycled and unverifiable transfer owners share one expiry rul
   expect(reclaimTransfer("verified-live", 10_000, 86_410_001)).toBe(false);
 });
 
-test("a pid born after the staging lease is reclaimed on first sight", async () => {
+test("a clock rollback at first sight refuses dispatch and retains the live CLI staging", async () => {
   const id = "a".repeat(32);
   const path = join(root, "send-attachments", id);
   await mkdir(path, { recursive: true });
   await Bun.write(join(path, "lease"), JSON.stringify({ pid: process.pid }));
   processStartEpochSecondsCtx.set(() => Math.ceil(Date.now() / 1000) + 1);
-  expect((await inspectBrokerLease(root, id)).state).toBe("proven-dead");
+  expect((await inspectBrokerLease(root, id)).state).toBe("unverifiable");
   expect(await Bun.file(join(path, "owner.json")).exists()).toBe(false);
   await sweepStagingLease(root, id, Date.now());
-  expect(await readdir(join(root, "send-attachments"))).toEqual([]);
+  expect(await readdir(join(root, "send-attachments"))).toEqual([id]);
 });
 
 test("recovery ignores committed snapshots and refuses a symlink above a sweep root", async () => {
@@ -137,4 +137,14 @@ test("an interrupted watchdog stamp write leaves no visible stamp and can be ret
     expect(await readdir(path)).toEqual(["lease"]);
   } finally { spy.mockRestore(); }
   expect((await inspectBrokerLease(root, id)).state).toBe("verified-live");
+});
+
+test("a dead lease PID proves death even with an unreadable stamp", async () => {
+  const id = "d".repeat(32), dir = join(root, "send-attachments", id);
+  await mkdir(dir, { recursive: true });
+  await Bun.write(join(dir, "lease"), JSON.stringify({ pid: 42 }));
+  await Bun.write(join(dir, "owner.json"), "{");
+  expect((await inspectBrokerLease(root, id)).state).toBe("proven-dead");
+  await sweepStagingLease(root, id, Date.now());
+  expect(await readdir(join(root, "send-attachments"))).toEqual([]);
 });

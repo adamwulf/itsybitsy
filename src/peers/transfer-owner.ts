@@ -38,13 +38,11 @@ async function readOwnerFields(handle: FileHandle): Promise<TransferOwner | unde
 export type OwnerState = "verified-live" | "proven-dead" | "unverifiable";
 export const OWNER_EXPIRY_MS = 24 * 3600_000;
 
-export function transferOwnerState(owner: TransferOwner | undefined, createdMs: number, observed = owner && stagingOwnerStart(owner.pid)): OwnerState {
+export function transferOwnerState(owner: TransferOwner | undefined, _createdMs: number, observed = owner && stagingOwnerStart(owner.pid)): OwnerState {
   if (!owner) return "unverifiable";
   if (!isPidAliveCtx.fn(owner.pid)) return "proven-dead";
   if (observed == null) return "unverifiable";
   if (owner.start !== null) return observed === owner.start ? "verified-live" : "proven-dead";
-  if (!(createdMs > 0)) return "unverifiable";
-  if (observed * 1000 > createdMs) return "proven-dead";
   return "unverifiable";
 }
 
@@ -182,7 +180,7 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       const candidate = { pid: seed.pid, start: observed };
       const firstSight = transferOwnerState({ pid: seed.pid, start: null }, leaseInfo.birthtimeMs, observed);
-      if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null) return { state: firstSight, created };
+      if (firstSight === "proven-dead" || !leaseInfo.birthtimeMs || observed === null || observed * 1000 > leaseInfo.birthtimeMs) return { state: firstSight, created };
       try {
         await publishBrokerRecord(dir, id, "owner.json", candidate);
         return { state: "verified-live", created, identity };

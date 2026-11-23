@@ -20,16 +20,14 @@ import * as runtimeNames from "./runtime-names";
  *        (client, this file)                          (server, this file)
  *                                 ◀──result.json───   resolves the target, sends
  *
- * Who uses it: the same callers as the ask and lifecycle brokers — only a
- * WORKTREE agent whose itsybitsy sandbox is enabled (`resolveRoutedCaller`).
- * Every other caller sends directly, as before.
- *
- * Fallback: a routed caller can still send directly to an agent of its own
- * repo, so `ib send` must not work less well than before the broker. When the
- * watchdog is not live, or predates this broker (it refuses the request before
- * it does anything), the CLI sends directly. When a current watchdog has taken
- * the request, it does not: the message may already be queued, and a second
- * send would deliver it twice.
+ * Local sends retain the existing sandboxed worktree broker and direct paths.
+ * A remote user or @system sends directly through peer-outbox. A verified
+ * shared-checkout repo coordinator sends directly only outside the sandbox.
+ * On every CLI and sandbox configuration a worktree agent submits a
+ * remote-send request to its watchdog. The watchdog checks the requester
+ * and its repo registration, resolves the raw address with full visibility,
+ * and publishes only a remote match. Explicitly disabled worktrees have no
+ * seal and require a genuine missing seal plus the Git worktree backlink.
  *
  * Trust model: the request is untrusted DATA and carries only the target and
  * the message text — never a sender, an agent id of the caller, a repo or a
@@ -47,9 +45,11 @@ import * as runtimeNames from "./runtime-names";
  * any file the watchdog can read).
  */
 
+import { readMachineName } from "./machine-name";
+import { isSandboxedProcess } from "./sandbox-detect";
 import { sameRepoPath } from "./repo-identity";
 import { randomBytes } from "crypto";
-import { join, resolve } from "path";
+import { join } from "path";
 import type { Agent } from "./agents";
 import {
   hasLiveWatchdog,
@@ -66,7 +66,7 @@ import {
   SPAWN_MAX_PROMPT_BYTES,
   brokerFail,
   isSameDirectory,
-  resolveRoutedCaller, isNativeCodexWorktree, interruptedSend,
+  resolveRoutedCaller, interruptedSend,
   submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
@@ -97,7 +97,7 @@ const OLD_WATCHDOG_ANSWERS = new Set([
 export interface SendRequest {
   v: 1;
   id: string;
-  op: typeof SEND_OP;
+  op: typeof SEND_OP | "remote-send";
   target: string;
   message: string;
 }
@@ -154,7 +154,7 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
   }
   if (obj.v !== 1) return { ok: false, error: "unsupported send request version" };
   if (obj.id !== expectedId) return { ok: false, error: "send request id does not match its file name" };
-  if (obj.op !== SEND_OP) return { ok: false, error: "send request has an unsupported op" };
+  if (obj.op !== SEND_OP && obj.op !== "remote-send") return { ok: false, error: "send request has an unsupported op" };
   if (!isBrokerableTarget(obj.target)) {
     return { ok: false, error: "send request has an invalid target" };
   }
@@ -165,7 +165,7 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
   if (Buffer.byteLength(obj.message, "utf8") > SPAWN_MAX_PROMPT_BYTES) {
     return { ok: false, error: "send request message is too large" };
   }
-  return { ok: true, request: { v: 1, id: expectedId, op: SEND_OP, target: obj.target, message: obj.message } };
+  return { ok: true, request: { v: 1, id: expectedId, op: obj.op, target: obj.target, message: obj.message } };
 }
 
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
@@ -187,31 +187,32 @@ export async function requestSendViaWatchdog(
   try {
     caller = await (deps.resolveCaller ?? resolveCallerAgentContext)(deps.cwd ?? process.cwd());
   } catch (err) {
+    if (deps.signal?.aborted) return interruptedSend("unpublished");
     return brokerFail(`Error: ${err instanceof Error ? err.message : String(err)}`);
   }
+  if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!caller || !caller.agentDir || typeof caller.meta.id !== "string") {
     return brokerFail(
       "Error: cannot run 'ib send' through the watchdog: this shell is not inside a registered agent, " +
         "so there is no agent watchdog to ask. Run `ib send` from an agent's own worktree.",
     );
   }
-  const callerId = caller.meta.id;
+  return submitSendRequest("send", caller.agentDir, caller.meta.id, target, message, deps);
+}
 
-  // The request cannot carry these. The direct path has no such limits, and
-  // reaches what it reached before (the caller's own repo).
-  if (!isBrokerableTarget(target) || Buffer.byteLength(message, "utf8") > SPAWN_MAX_PROMPT_BYTES) {
-    return null;
-  }
-
-  // No watchdog to take the request: send directly, as before.
-  const live = await (deps.watchdogLive ?? hasLiveWatchdog)(caller.agentDir);
-  if (!live) return null;
-
-  // Field order matters for one case: a watchdog that predates this broker
-  // names the first field it does not know (see OLD_WATCHDOG_ANSWERS).
-  const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op: SEND_OP, target, message };
+async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps) {
+  const remote = op === "remote-send";
+  if (deps.signal?.aborted) return interruptedSend("unpublished");
+  if (!isBrokerableTarget(target)) return remote ? brokerFail("send request has an invalid target") : null;
+  if (Buffer.byteLength(message, "utf8") > SPAWN_MAX_PROMPT_BYTES) return remote ? brokerFail("send request message is too large") : null;
+  let live;
+  try { live = await (deps.watchdogLive ?? hasLiveWatchdog)(dir); }
+  catch (err) { return deps.signal?.aborted ? interruptedSend("unpublished") : brokerFail(String(err)); }
+  if (deps.signal?.aborted) return interruptedSend("unpublished");
+  if (!live) return remote ? brokerFail("Remote sends from a worktree agent need its watchdog running") : null;
+  const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message };
   const result = await submitWatchdogRequest(
-    caller.agentDir,
+    dir,
     callerId,
     request,
     {
@@ -223,7 +224,7 @@ export async function requestSendViaWatchdog(
     deps.timeoutMs ?? SPAWN_CLIENT_TIMEOUT_MS,
     deps,
   );
-  if (!result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
+  if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
   return result;
 }
 
@@ -264,10 +265,9 @@ export async function routeSendThroughWatchdog(
   command: SendCommand,
   deps: SpawnClientDeps = {},
 ): Promise<IbCommandResult | null> {
-  const caller = await resolveRoutedCaller(deps, true);
+  const caller = await resolveRoutedCaller(deps);
+  if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!caller) return null;
-  const nativeCodex = isNativeCodexWorktree(caller.meta);
-  if (nativeCodex && !(await resolveSendTarget(command.target, command.repos, join(caller.agentDir, "repo"))).remote) return null;
   if (command.fromAgent !== undefined && command.fromAgent !== caller.meta.id) {
     return brokerFail(
       "Error: --from for another agent is not supported inside the sandbox: a sandboxed agent sends only as itself, through its watchdog.",
@@ -277,9 +277,64 @@ export async function routeSendThroughWatchdog(
   const message = await command.readMessage();
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!message) return brokerFail(command.usage);
-  const result = await requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller });
-  if (!result && nativeCodex) return brokerFail("Remote sends from a sandboxed agent need its watchdog running");
-  return result;
+  return requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller });
+}
+
+type CliSendRoute = { result: IbCommandResult } | { local: ResolvedSendTarget };
+
+/** Route machine-qualified worktree sends from their address alone. A bare
+ * name uses the usual same-repo-first resolver. An inconclusive sandbox
+ * lookup delegates the raw address, never a guessed remote id. */
+export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps & { resolveTarget?: typeof resolveSendTarget } = {}): Promise<CliSendRoute> {
+  const cwd = deps.cwd ?? process.cwd();
+  const resolveAddress = deps.resolveTarget ?? resolveSendTarget;
+  const { target, repos } = command;
+  const worktree = runtimeNames.matchWorktreeCaller(cwd);
+  const localSyntax = target.startsWith("@");
+  const machine = !localSyntax && target.includes("/") ? target.split("/")[0] : undefined;
+  const cancelled = () => ({ result: interruptedSend("unpublished") });
+  try {
+    let deferred = false;
+    let localMachine = false;
+    if (machine) {
+      const localName = await readMachineName().catch(() => "");
+      localMachine = machine.toLowerCase() === localName.toLowerCase();
+      deferred = !localMachine && (!!worktree || isSandboxedProcess());
+    }
+    let resolved;
+    if (!localSyntax && !localMachine && !deferred) {
+      const sandboxedWorktree = !!worktree && isSandboxedProcess();
+      resolved = await resolveAddress(target, repos, cwd, sandboxedWorktree);
+      deferred = sandboxedWorktree && !!resolved.incompleteVisibility;
+    }
+    if (deps.signal?.aborted) return cancelled();
+    if (deferred || resolved?.remote) {
+      const { cliRemoteSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
+      const sender = await cliRemoteSender(repos, command.fromAgent, cwd);
+      if (deps.signal?.aborted) return cancelled();
+      const message = await command.readMessage();
+      if (deps.signal?.aborted) return cancelled();
+      if (!message) return { result: brokerFail(command.usage) };
+      if (sender.kind === "worktree") {
+        const result = await submitSendRequest("remote-send", sender.agentDir, sender.id, target, message, deps);
+        // A remote submission always selects a result, even without a watcher.
+        return { result: result! };
+      }
+      resolved ??= await resolveAddress(target, repos, cwd);
+      if (deps.signal?.aborted) return cancelled();
+      if (resolved.remote) {
+        return { result: await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender.from), deps.signal) };
+      }
+    }
+    if (resolved?.error) return { result: brokerFail(resolved.error) };
+    const brokered = await routeSendThroughWatchdog(command, deps);
+    if (brokered) return { result: brokered };
+    resolved ??= await resolveAddress(target, repos, cwd);
+    if (deps.signal?.aborted) return cancelled();
+    return resolved.error ? { result: brokerFail(resolved.error) } : { local: resolved };
+  } catch (err) {
+    return deps.signal?.aborted ? cancelled() : { result: brokerFail(err instanceof Error ? err.message : String(err)) };
+  }
 }
 
 // ── Server (runs in the unsandboxed watchdog) ────────────────────────────────
@@ -322,11 +377,15 @@ export async function handleSendRequest(
 ): Promise<IbCommandResult> {
   const parsed = parseSendRequest(ctx.text, ctx.id);
   if (!parsed.ok) return brokerFail(`Error: ${parsed.error}`);
-  const { target, message } = parsed.request;
+  const { target, message, op } = parsed.request;
+  const remote = op === "remote-send";
 
   // Identity comes from the agent's own sealed record, never from the request.
-  const requester = await verifyBrokerRequester(ctx.agentId, ctx.repoPath, ctx.agentDir, "send", deps);
+  const requester = await verifyBrokerRequester(ctx.agentId, ctx.repoPath, ctx.agentDir, remote ? "send remotely" : "send", deps);
   if (!requester.ok) return requester.result;
+  if (remote && requester.meta.worktree === false) {
+    return brokerFail("Remote sends through a watchdog require a worktree agent");
+  }
 
   const seams = deps.send ?? {};
   const fromAgent = ctx.agentId;
@@ -337,17 +396,18 @@ export async function handleSendRequest(
   const callerCwd = join(ctx.agentDir, "repo");
   try {
     const repos = await (seams.listRepos ?? listRepos)();
+    const sender = remote ? await (await import("./peers/peer-outbox")).qualifiedAgentSender(ctx.agentId, ctx.repoPath, repos) : null;
     const resolved = await (seams.resolveTarget ?? resolveSendTarget)(target, repos, callerCwd);
     if (resolved.error) return brokerFail(resolved.error);
     // The ordinary commands, as the watchdog's own agent. `fromAgent` is
     // always passed: these functions otherwise detect the sender from the
     // cwd, which here is the watchdog's. `stageAttachments` is never set.
-    if (resolved.remote) {
-      const { qualifiedAgentSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
-      const sender = await qualifiedAgentSender(ctx.agentId, ctx.repoPath, repos);
+    if (sender) {
+      if (!resolved.remote) return brokerFail("The target resolves locally. Use @<repo>/<agent> for a local send or <machine>/<repo>/<agent> for a remote send.");
+      const { handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
       return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender));
     }
-    if (requester.remoteSendOnly) return brokerFail("A native Codex worktree uses the send broker only for remote recipients");
+    if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
     if (resolved.isSystemCoordinator) {
       return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { fromAgent, cwd: callerCwd });
     }

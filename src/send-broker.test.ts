@@ -22,6 +22,7 @@ import {
   parseSendRequest,
   requestSendViaWatchdog,
   routeSendThroughWatchdog,
+  routeCliSend,
   type SendCommand,
 } from "./send-broker";
 import {
@@ -136,6 +137,15 @@ describe("send broker", () => {
       }),
     );
     return dir;
+  }
+
+  async function linkWorktree() {
+    const cwd = join(agentDir, "repo");
+    const git = join(cwd, ".git");
+    const admin = join(senderRepo, ".git", "worktrees", SENDER_ID);
+    await Bun.write(git, "gitdir: " + admin);
+    await Bun.write(join(admin, "gitdir"), git);
+    return cwd;
   }
 
   /** The messages queued for an agent (`~/.itsybitsy/agents/<machine>/<repo>/<agent>/outbox.jsonl`). */
@@ -280,6 +290,13 @@ describe("send broker", () => {
       expect(asked).toEqual([]);
       expect(tmuxCalls).toEqual([]);
       expect(tmuxListCalls).toEqual([]);
+    });
+
+    test("a shared-checkout agent cannot publish through the worktree remote-send broker", async () => {
+      const { deps } = server({ readMeta: async () => ({ meta: senderMeta({ worktree: false }) }) });
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await processSpawnRequests(SENDER_ID, senderRepo, deps);
+      expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("require a worktree agent") });
     });
 
     test("the sender is the verified agent: --from cannot be smuggled in the request", async () => {
@@ -606,11 +623,12 @@ describe("send broker", () => {
       }));
       expect(out?.exitCode).toBe(130);
       expect(out?.stdout).toBe("");
-      expect(out?.stderr).toContain(state === "claimed" ? "outcome unknown" : state === "pending" ? "withdrawn" : "before publication");
+      expect(out?.stderr).toContain(state === "claimed" ? "outcome unknown" : state === "pending" ? "withdrawn" : "cancelled before sending");
       expect((await readdir(spawnRequestDir(agentDir)).catch(() => [])).filter(name => name.endsWith(".json"))).toEqual([]);
     });
 
     test.each([true, false])("remote recipient timeout races the watchdog claim (watchdog wins=%s)", async wins => {
+      const cwd = await linkWorktree();
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       let dispatched = 0;
@@ -637,14 +655,18 @@ describe("send broker", () => {
       let work: Promise<number> | undefined;
       try {
         let clock = 0;
-        const out = await requestSendViaWatchdog("laptop/@system", MESSAGE, clientDeps({
-          now: () => clock,
+        const route = await routeCliSend({
+          target: "laptop/@system", readMessage: async () => MESSAGE, usage: "usage", repos,
+        }, {
+          cwd, watchdogLive: async () => true, now: () => clock,
           sleep: async () => {
             work = processSpawnRequests(SENDER_ID, senderRepo, deps);
             await entered.promise;
             clock = SPAWN_CLIENT_TIMEOUT_MS;
           },
-        }));
+        });
+        if (!("result" in route)) throw new Error("expected remote broker route");
+        const out = route.result;
         release.resolve();
         expect(out?.stderr).toContain(wins ? "may still be delivered" : "withdrawn");
         expect(await work).toBe(wins ? 1 : 0);
@@ -724,19 +746,15 @@ describe("send broker", () => {
       expect(reads).toBe(1);
     });
 
-    test.each([false, true])("remote sandbox sends reach peer-outbox with verified attribution (native Codex=%s)", async native => {
-      setSandboxedProcessOverride(() => true);
+    test.each(["claude", "codex", "fugu", "agy"])("%s worktree routes raw remote addresses through its own watchdog", async cli => {
+      const disabled = cli === "fugu" || cli === "claude";
+      setSandboxedProcessOverride(() => !disabled);
       const { deps } = server();
-      const context = caller();
-      if (native) {
-        context.meta = { ...context.meta, worktree: true, model: "codex:gpt-5", sandbox: { enabled: false } };
-        deps.readMeta = async () => ({ meta: senderMeta(context.meta) });
-        deps.verifySeal = async () => ({ ok: false, field: "(missing)" } as any);
-        const git = join(agentDir, "repo", ".git");
-        const admin = join(senderRepo, ".git", "worktrees", SENDER_ID);
-        await Bun.write(git, "gitdir: " + admin);
-        await Bun.write(join(admin, "gitdir"), git);
-      }
+      const meta = { worktree: true, model: cli + ":test", sandbox: { enabled: !disabled } };
+      await writeAgent(senderRepo, SENDER_ID, meta);
+      deps.readMeta = async () => ({ meta: senderMeta(meta) });
+      if (disabled) deps.verifySeal = async () => ({ ok: false, field: "(missing)" } as any);
+      const cwd = await linkWorktree();
       const peerDir = join(home, ".itsybitsy", "peer");
       await Bun.write(join(peerDir, "endpoint.lock"), String(process.pid));
       await Bun.write(join(peerDir, "remote-agents.json"), JSON.stringify([{
@@ -750,16 +768,57 @@ describe("send broker", () => {
         return header.id;
       }, () => {}); }, 25);
       try {
-        const out = await routeSendThroughWatchdog(command({ target: "laptop/remote/worker" }), {
-          resolveCaller: async () => context, watchdogLive: async () => true,
-          sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
-        });
-        expect(out?.ok).toBe(true);
+        const route = async (target: string, hidden = false, text = MESSAGE) => {
+          const answer = await routeCliSend(command({ target, readMessage: async () => text }), {
+            cwd, watchdogLive: async () => true,
+            resolveTarget: async (...args) => {
+              if (target.includes("/")) throw new Error("qualified remote lookup in CLI");
+              if (hidden) return { agent: null, isSystemCoordinator: false, error: "Cannot resolve the target with the peer cache hidden", incompleteVisibility: { unreadableDirs: [peerDir] } };
+              return (await import("./resolve-target")).resolveSendTarget(...args);
+            },
+            sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
+          });
+          if (!("result" in answer)) throw new Error("unexpected direct local send");
+          return answer.result;
+        };
+        expect(await route("laptop/remote/worker")).toMatchObject({ ok: true });
         expect(seen).toMatchObject([{ peer: "peer-b", header: {
           from: { kind: "agent", id: `studio/hunch/${SENDER_ID}` },
           target: { kind: "agent", repo: "remote", agent: "worker" }, files: [], message: MESSAGE,
         } }]);
+        expect((await route("worker")).ok).toBe(true);
+        if (!disabled) {
+          expect((await route(TARGET_ID, true)).stderr).toContain("@<repo>/<agent> for a local send");
+          await writeAgent(targetRepo, "worker", {});
+          const ambiguity = await route("worker", true);
+          expect(ambiguity.stderr).toContain("laptop/worker");
+          expect(ambiguity.stderr).toContain("studio/worker");
+        }
+        expect((await route("laptop/remote/worker", false, "x".repeat(SPAWN_MAX_PROMPT_BYTES + 1))).stderr).toContain("message is too large");
+        deps.send!.listRepos = async () => repos.filter(repo => repo.path !== senderRepo);
+        expect((await route("laptop/remote/worker")).stderr).toContain("repo to be registered");
+        expect(seen).toHaveLength(2);
       } finally { clearInterval(timer); }
+    });
+
+    test.each(["classification", "liveness"])("SIGINT wins when a pending %s check subsequently fails", async check => {
+      const cwd = await linkWorktree();
+      const control = new AbortController();
+      const entered = Promise.withResolvers<void>();
+      const verdict = Promise.withResolvers<boolean>();
+      const failing = () => { entered.resolve(); return verdict.promise; };
+      const { remoteCliCaller } = await import("./peers/peer-outbox");
+      const callerCheck = spyOn(remoteCliCaller, "isHuman").mockImplementation(check === "classification" ? failing : async () => false);
+      try {
+        const pending = routeCliSend(command({ target: "laptop/@system" }), {
+          cwd, signal: control.signal, watchdogLive: failing,
+        });
+        await entered.promise;
+        control.abort();
+        verdict.reject(new Error("check failed"));
+        expect(await pending).toMatchObject({ result: { exitCode: 130, stdout: "", stderr: "cancelled before sending" } });
+        expect(await readdir(spawnRequestDir(agentDir)).catch(() => [])).toEqual([]);
+      } finally { callerCheck.mockRestore(); }
     });
 
     test("--from for the caller itself is accepted", async () => {

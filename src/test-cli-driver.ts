@@ -123,7 +123,7 @@ function installExternalGuards(config: CliDriverConfig, block: (violation: CliVi
 }
 
 async function installFixtureCallerEvidence(config: CliDriverConfig, block: (violation: CliViolation) => never): Promise<void> {
-  const { resolveNoWorktreeCaller } = await import("./no-worktree-caller");
+  const { resolveDashboardCaller, resolveNoWorktreeCaller } = await import("./no-worktree-caller");
   const { setNewAgentNoWorktreeCallerResolver } = await import("./ib-commands");
   const { setBoundNoWorktreeCallerResolver, setNoWorktreeRepoRootsLoader } = await import("./hooks/agent-context");
 
@@ -147,7 +147,7 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
         "300    1 Sat Nov 21 12:01:00 2026 " + (terminal === "agent" ? "codex  codex" : "bash   bash"),
         "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
       ].join("\n"),
-      resolveCaller: () => block({ kind: "process-ancestry", detail: {} }),
+      resolveCaller: (cwd, ancestors, options) => resolveDashboardCaller(cwd, ancestors, { ...options, registryHome: config.home }),
     });
   };
   setNewAgentNoWorktreeCallerResolver(resolver);

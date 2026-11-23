@@ -2014,12 +2014,8 @@ export async function main() {
       // once: the broker below may read it before the direct path does.
       const resolveMessageBody = messageBodyReader(inlineMessage, fileContent);
 
-      // A sandboxed WORKTREE agent cannot list other repos' agents, so it asks
-      // its own — unsandboxed — watchdog to resolve the target and send. The
-      // message travels as text: the file and stdin are read here, inside the
-      // sandbox. Null for every other caller, and when the watchdog cannot take
-      // the request (not live, or older than the broker); those send directly
-      // as before. See routeSendThroughWatchdog.
+      // Install cancellation before caller classification, target resolution
+      // and either handoff. The selected route owns the result and exit status.
       const controller = new AbortController();
       const interruptedInput = Promise.withResolvers<string>();
       const interrupt = () => { controller.abort(); interruptedInput.resolve(""); };
@@ -2027,28 +2023,10 @@ export async function main() {
       process.on("SIGINT", interrupt);
       let resolved;
       try {
-        const { routeSendThroughWatchdog } = await import("./send-broker");
-        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: readBeforePublication, usage, repos }, { signal: controller.signal });
-        if (brokered) await printAndExit(brokered);
-        resolved = await resolveTarget(target, repos);
-        const { interruptedSend, resolveRoutedCaller } = await import("./spawn-broker");
-        if (controller.signal.aborted) await printAndExit(interruptedSend("unpublished"));
-        if (resolved.remote) {
-          if (await resolveRoutedCaller({})) {
-            console.error("Remote sends from a sandboxed agent need its watchdog running");
-            process.exit(1);
-          }
-          const message = await readBeforePublication();
-          if (controller.signal.aborted) await printAndExit(interruptedSend("unpublished"));
-          if (!message) { console.error(usage); process.exit(1); }
-          const { cliRemoteSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
-          const sender = await cliRemoteSender(repos, fromAgent).catch(err => {
-            console.error(err instanceof Error ? err.message : String(err));
-            process.exit(1);
-          });
-          await printAndExit(await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal));
-          break;
-        }
+        const { routeCliSend } = await import("./send-broker");
+        const route = await routeCliSend({ target, fromAgent, readMessage: readBeforePublication, usage, repos }, { signal: controller.signal });
+        if ("result" in route) { await printAndExit(route.result); break; }
+        resolved = route.local;
       } finally { process.off("SIGINT", interrupt); }
       const { agent: resolvedAgent, isSystemCoordinator, team } = resolved;
 

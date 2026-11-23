@@ -1,5 +1,5 @@
 import { waitFor } from "./test-utils";
-import { spawnRequestDir } from "./spawn-broker";
+import { processSpawnRequests, SPAWN_MAX_PROMPT_BYTES, spawnRequestDir } from "./spawn-broker";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, readdir, rename, symlink, rm, utimes } from "node:fs/promises";
 import { join } from "node:path";
@@ -280,6 +280,15 @@ describe("qualified agent addresses", () => {
 
   test("remote CLI hands the verified sender to the watcher and prints the acknowledgement", async () => {
     await peer();
+    const agentDir = join(app, ".itsybitsy", "agents", "mgr");
+    await Bun.write(join(agentDir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
+    let processing: Promise<void> | undefined;
+    const watchdog = setInterval(() => {
+      processing ??= processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }) })
+        .then(() => {}).finally(() => { processing = undefined; });
+    }, 25);
     const seen: SendHeader[] = [];
     const timer = setInterval(() => { void pollPeerOutbox(async (id, header) => {
       expect(id).toBe("peer-id");
@@ -306,11 +315,20 @@ describe("qualified agent addresses", () => {
         { kind: "agent", id: "laptop-a/App/mgr" }, { kind: "user" }, { kind: "system" }, { kind: "agent", id: "laptop-a/App/mgr" }]);
       const registry = join(cli.home, ".itsybitsy", "repos.json");
       await Bun.write(registry, JSON.stringify({ repos: [] }));
-      expect((await send(["unregistered agent"], worktree)).stderr).toContain("cannot verify the sender");
-      expect((await send(["unregistered human"], worktree, "human")).exitCode).toBe(0);
+      expect((await send(["unregistered agent"], worktree)).stderr).toContain("repo to be registered");
+      expect((await send(["terminal in unregistered worktree"], worktree, "human")).stderr).toContain("repo to be registered");
+      expect((await send(["unregistered human"], cli.cwd, "human")).exitCode).toBe(0);
       expect(seen.at(-1)?.from).toEqual({ kind: "user" });
       expect(seen.every(h => h.files.length === 0)).toBe(true);
-    } finally { clearInterval(timer); }
+    } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
+  });
+
+  test("a worktree without a live watchdog reports validation errors before liveness", async () => {
+    const file = join(worktree, "large-message");
+    await Bun.write(file, "x".repeat(SPAWN_MAX_PROMPT_BYTES + 1));
+    const send = (args: string[]) => cli.run(["send", "laptop-b/remote-id", ...args], { cwd: worktree, ancestry: human });
+    expect((await send(["-f", file])).stderr).toContain("message is too large");
+    expect((await send(["hi"])).stderr).toContain("need its watchdog running");
   });
 
   test("a shared checkout distinguishes its dotted coordinator, a human, and unverifiable ancestry", async () => {
@@ -318,17 +336,25 @@ describe("qualified agent addresses", () => {
     await cli.addAgent(repo, "project.com", {
       agentType: "repo-coordinator", worktree: false, claude_pid: "200", claude_pid_epoch: 100,
     });
+    const alias = join(cli.cwd, "registered-alias");
+    await symlink(repo, alias);
+    const registryFile = Bun.file(join(cli.home, ".itsybitsy", "repos.json"));
+    const registry = await registryFile.json();
+    registry.repos.find((entry: { name: string }) => entry.name === "project.com").path = alias;
+    await Bun.write(registryFile, JSON.stringify(registry));
     await peer();
     const senders: SendHeader["from"][] = [];
     const timer = setInterval(() => { void pollPeerOutbox(async (_id, header) => {
       senders.push(header.from);
       return header.id;
     }, () => {}); }, 25);
-    const send = (parents: [number, number][], identityCurrent: boolean, terminal?: "human") =>
-      cli.run(["send", "laptop-b/remote/remote-id", "hi"], { cwd: repo,
+    const send = (parents: [number, number][], identityCurrent: boolean, terminal?: "human", sandboxed = false) =>
+      cli.run(["send", "laptop-b/remote/remote-id", "hi"], { cwd: repo, sandboxed,
         ancestry: { pid: 300, parents, identityCurrent, terminal } });
     try {
       expect((await send([[300, 200], [200, 1]], true)).exitCode).toBe(0);
+      expect((await send([[300, 200], [200, 1]], true, undefined, true)).stderr)
+        .toContain("remote sends from a sandboxed repo coordinator are not supported yet");
       await cli.addAgent(repo, "launching", { worktree: false, claude_pid: "" });
       expect((await send([[300, 1]], true, "human")).exitCode).toBe(0);
       expect((await send([[300, 200], [200, 1]], false)).stderr).toContain("cannot verify the sender");

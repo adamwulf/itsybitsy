@@ -58,6 +58,6 @@ test.each([false, true])("interrupt after publication (claimed=%s)", async claim
 test("an interrupted direct send never publishes an already-cancelled request", async () => {
   const header = textHeader({ kind: "system" }, "hi", { kind: "user" });
   const outcome = await handoffRemoteMessage("peer", header, AbortSignal.abort());
-  expect(outcome).toMatchObject({ exitCode: 130, stderr: expect.stringContaining("before publication") });
+  expect(outcome).toMatchObject({ exitCode: 130, stderr: expect.stringContaining("cancelled before sending") });
   expect(await Bun.file(join(base, header.id, "request.json")).exists()).toBe(false);
 });

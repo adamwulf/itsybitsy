@@ -98,6 +98,7 @@ export async function resolveAgentTarget(
   cwd: string = process.cwd(),
   purpose: "send" | "agent" | "rehire" = "agent",
   inboundPeer = false,
+  requirePeerVisibility = false,
 ): Promise<TargetResult> {
   const { readAgentsOfRepos } = await import("./agents");
   const { checkCoordinatorExists } = await import("./coordinator");
@@ -236,8 +237,9 @@ export async function resolveAgentTarget(
     ownErrors = errors;
     searched = repos.filter((r) => r !== ownRepo);
   }
-  const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", inboundPeer ? [] : readConnectedPeers()]);
+  const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", inboundPeer ? [] : readConnectedPeers(requirePeerVisibility).catch(() => null)]);
   if (typeof localMachine !== "string") return localMachine;
+  if (connected === null) return failure("Cannot resolve the target with the peer cache hidden", [runtimeNames.peerDir()]);
   const includesLocal = !machine || localMachine.toLowerCase() === machine;
   const peers = connected.filter((p) => !p.name.startsWith("@") && (!machine || p.name.toLowerCase() === machine));
   if (!includesLocal && !peers.length) {
@@ -310,8 +312,8 @@ export async function resolveAgentTarget(
   return failure("remote agents are read-only");
 }
 
-export function resolveSendTarget(target: string, repos: RepoEntry[], cwd = process.cwd()): Promise<TargetResult> {
-  return resolveAgentTarget(target, repos, cwd, "send");
+export function resolveSendTarget(target: string, repos: RepoEntry[], cwd = process.cwd(), requirePeerVisibility = false): Promise<TargetResult> {
+  return resolveAgentTarget(target, repos, cwd, "send", false, requirePeerVisibility);
 }
 
 /**

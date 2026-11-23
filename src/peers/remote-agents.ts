@@ -40,7 +40,7 @@ export function writeRemoteAgents(states: PeerLinkState[]): void {
   }
 }
 
-export async function readConnectedPeers(): Promise<CachedPeer[]> {
+export async function readConnectedPeers(requireVisibility = false): Promise<CachedPeer[]> {
   try {
     const file = await open(cachePath(), "r");
     let peers;
@@ -52,7 +52,8 @@ export async function readConnectedPeers(): Promise<CachedPeer[]> {
     return peers.filter((p) => p?.connected === true && typeof p.name === "string" &&
       Array.isArray(p.agents) && p.agents.every((a: CachedAgent) =>
         typeof a?.id === "string" && typeof a.repo === "string"));
-  } catch {
+  } catch (err) {
+    if (requireVisibility && ["EPERM", "EACCES"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
     return [];
   }
 }

@@ -142,8 +142,9 @@ export async function withdrawPublishedRequest(ready: string, withdrawn: string)
 }
 
 export function interruptedSend(state: "unpublished" | "withdrawn" | "claimed"): IbCommandResult {
+  if (state === "unpublished") return { ok: false, exitCode: 130, stdout: "", stderr: "cancelled before sending" };
   const outcome = state === "claimed" ? "outcome unknown — check the agent" :
-    state === "withdrawn" ? "request withdrawn before it was claimed" : "before publication";
+    "request withdrawn before it was claimed";
   return { ok: false, exitCode: 130, stdout: "", stderr: "Send interrupted: " + outcome };
 }
 
@@ -341,11 +342,6 @@ export async function routeNewAgentThroughWatchdog(
   return requestSpawnViaWatchdog(prompt, opts, deps);
 }
 
-export function isNativeCodexWorktree(meta: Record<string, unknown>): boolean {
-  return meta.worktree === true && typeof meta.model === "string" && meta.model.startsWith("codex:")
-    && (meta.sandbox as { enabled?: unknown } | undefined)?.enabled === false;
-}
-
 /**
  * The routing rule for the commands that keep a direct path (the lifecycle
  * commands, `ib ask` and `ib send`). Returns the caller to route to its watchdog, or null
@@ -362,13 +358,11 @@ export function isNativeCodexWorktree(meta: Record<string, unknown>): boolean {
  *   - an agent whose itsybitsy sandbox is disabled. `isSandboxedProcess()` is
  *     still true for a codex agent there (codex's own sandbox), which grants
  *     what these commands need; and such an agent has no seal to verify.
- * A remote send also routes a Codex worktree with only its native sandbox.
  * This only ROUTES. A caller that lies in its own meta.json to get the direct
  * path runs the command inside its real sandbox, where it fails as before.
  */
 export async function resolveRoutedCaller(
   deps: Pick<SpawnClientDeps, "cwd" | "resolveCaller"> = {},
-  includeNativeCodex = false,
 ): Promise<ResolvedCallerContext | null> {
   if (!isSandboxedProcess()) return null;
   let caller: ResolvedCallerContext | null;
@@ -380,7 +374,7 @@ export async function resolveRoutedCaller(
   if (!caller || !caller.agentDir) return null;
   if (caller.meta.worktree === false) return null;
   const sandbox = caller.meta.sandbox as { enabled?: unknown } | undefined;
-  if (!resolveSandboxEnabled(sandbox?.enabled) && !(includeNativeCodex && isNativeCodexWorktree(caller.meta))) return null;
+  if (!resolveSandboxEnabled(sandbox?.enabled)) return null;
   return caller;
 }
 
@@ -569,7 +563,7 @@ export async function verifyBrokerRequester(
   agentDir: string,
   verb: string,
   deps: Pick<SpawnServerDeps, "readMeta" | "verifySeal">,
-): Promise<{ ok: true; meta: AgentMeta; remoteSendOnly?: true } | { ok: false; result: IbCommandResult }> {
+): Promise<{ ok: true; meta: AgentMeta } | { ok: false; result: IbCommandResult }> {
   const { meta } = await (deps.readMeta ?? readAgentMeta)(agentDir);
   if (!meta || meta.id !== agentId) {
     return { ok: false, result: brokerFail(`Error: cannot read the metadata of '${agentId}'; refusing to ${verb} on its behalf`) };
@@ -598,11 +592,11 @@ export async function verifyBrokerRequester(
     && meta.sandbox?.enabled === false
     && !verification.ok
     && verification.field === "(missing)";
-  if (!verification.ok && verification.field === "(missing)" && verb === "send"
-      && isNativeCodexWorktree(meta as unknown as Record<string, unknown>)) {
+  if (!verification.ok && verification.field === "(missing)" && verb === "send remotely"
+      && meta.worktree === true && meta.sandbox?.enabled === false) {
     const { isRegisteredAgentWorktree } = await import("./no-worktree-caller");
     if (await isRegisteredAgentWorktree(join(agentDir, "repo"), [await realpath(repoPath)])) {
-      return { ok: true, meta, remoteSendOnly: true };
+      return { ok: true, meta };
     }
   }
   if (!verification.ok && !unsealedDisabledSpawn) {
@@ -649,7 +643,7 @@ async function handleOneRequest(
       const { handleAskRequest } = await import("./ask-broker");
       return handleAskRequest({ agentId, repoPath, agentDir, id, text }, deps);
     }
-    if (named.op === "send") {
+    if (named.op === "send" || named.op === "remote-send") {
       const { handleSendRequest } = await import("./send-broker");
       return handleSendRequest({ agentId, repoPath, agentDir, id, text }, deps);
     }

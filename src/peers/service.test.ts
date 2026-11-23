@@ -1,5 +1,5 @@
 import { createPeerOutboxPoll, handoffRemoteMessage, textHeader } from "./peer-outbox";
-import { remoteStartDenialAtStartup } from "./remote-start-caller";
+import { isHumanSendTerminal, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { spyOn, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -606,6 +606,7 @@ describe("PeerService at boot", () => {
       },
     };
     const decision = await remoteStartDenialAtStartup(input);
+    expect(await isHumanSendTerminal(input)).toBe(decision === null);
     const { service } = makeService({ remoteStartDenial: decision });
     if (reason === null) expect(decision).toBeNull();
     else expect(decision).toContain(reason);

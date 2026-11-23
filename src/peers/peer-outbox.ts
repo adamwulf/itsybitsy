@@ -1,7 +1,7 @@
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { realpath } from "node:fs/promises";
 import { findOwnRepo } from "../resolve-target";
-import { getCoordinatorAgentId } from "../coordinator";
+import { checkCoordinatorExists } from "../coordinator";
 import { isRegisteredAgentWorktree } from "../no-worktree-caller";
 import { isHumanSendTerminal } from "./remote-start-caller";
 import { randomUUID } from "node:crypto";
@@ -12,9 +12,9 @@ import { join } from "node:path";
 import { resolveSenderId, resolveRemoteSharedCaller, type IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
 import { registeredQueueRepo } from "../outbox";
-import { readRepoId } from "../repo-id";
+import { isSandboxedProcess } from "../sandbox-detect";
 import type { RepoEntry } from "../registry";
-import { matchWorktreeCaller, peerOutboxDir } from "../runtime-names";
+import { agentDir, matchWorktreeCaller, peerOutboxDir } from "../runtime-names";
 import { hasLivePeerWatcher } from "./endpoint-lock";
 import { SEND_UNKNOWN } from "./peer-link";
 import { targetLabel } from "./receive-message";
@@ -26,36 +26,43 @@ const fail = (stderr: string): IbCommandResult => ({ ok: false, exitCode: 1, std
 const requestId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 
 export async function qualifiedAgentSender(id: string, repoPath: string, repos: RepoEntry[]): Promise<SendHeader["from"]> {
-  const registered = await registeredQueueRepo(repoPath, repos);
-  const repo = registered ?? "~" + await readRepoId(repoPath);
+  const repo = await registeredQueueRepo(repoPath, repos);
+  if (!repo) throw new Error("Remote sends require the requester's repo to be registered");
   return { kind: "agent", id: `${await readMachineName()}/${repo}/${id}` };
 }
 
 export const remoteCliCaller = { isHuman: isHumanSendTerminal };
 const unverifiable = "cannot verify the sender of a remote send; run it from a terminal or from the agent's worktree";
 
-export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd = process.cwd()): Promise<SendHeader["from"]> {
+type RemoteSender =
+  | { kind: "direct"; from: SendHeader["from"] }
+  | { kind: "worktree"; id: string; agentDir: string };
+
+export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd = process.cwd()): Promise<RemoteSender> {
   let id = "";
-  let from: SendHeader["from"] = { kind: "user" };
+  let sender: RemoteSender = { kind: "direct", from: { kind: "user" } };
   if (!await remoteCliCaller.isHuman()) {
     const path = await realpath(cwd);
     id = resolveSenderId("", { cwd: path });
     const worktree = matchWorktreeCaller(path);
     if (worktree) {
-      if (!id || !await registeredQueueRepo(worktree[1]!, repos) || !await isRegisteredAgentWorktree(path, [worktree[1]!])) throw new Error(unverifiable);
-      from = await qualifiedAgentSender(id, worktree[1]!, repos);
+      if (id !== worktree[2] || !await isRegisteredAgentWorktree(path, [worktree[1]!])) throw new Error(unverifiable);
+      sender = { kind: "worktree", id, agentDir: agentDir(worktree[1]!, id) };
     } else if (id === "@system") {
-      from = { kind: "system" };
+      sender = { kind: "direct", from: { kind: "system" } };
     } else {
       const repo = findOwnRepo(path, repos);
-      const caller = repo && await resolveRemoteSharedCaller(path, repo.path, getCoordinatorAgentId(repo.path)).catch(() => null);
+      const record = repo && await checkCoordinatorExists(repo.path);
+      if (!repo || !record?.exists || !record.isCoordinator) throw new Error(unverifiable);
+      if (isSandboxedProcess()) throw new Error("remote sends from a sandboxed repo coordinator are not supported yet");
+      const caller = await resolveRemoteSharedCaller(path, repo.path, record.agentId).catch(() => null);
       if (!caller) throw new Error(unverifiable);
       id = String(caller.meta.id);
-      from = await qualifiedAgentSender(id, caller.repoPath, repos);
+      sender = { kind: "direct", from: await qualifiedAgentSender(id, caller.repoPath, repos) };
     }
   }
   if (explicit !== undefined && explicit !== id) throw new Error("Remote --from must match the detected sender");
-  return from;
+  return sender;
 }
 
 async function writeJson(dir: string, name: string, data: unknown) {
@@ -70,9 +77,12 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 
 /** A claimed request might already have reached the other machine. Never re-submit it. */
 export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal): Promise<IbCommandResult> {
+  let published = false;
   try {
     if (signal?.aborted) return interruptedSend("unpublished");
-    if (!await hasLivePeerWatcher()) return fail("remote sends need ib watch running on this machine");
+    const live = await hasLivePeerWatcher();
+    if (signal?.aborted) return interruptedSend("unpublished");
+    if (!live) return fail("remote sends need ib watch running on this machine");
     encodeSendHeader(parseSendHeader(header));
     const base = peerOutboxDir();
     const dir = join(base, header.id);
@@ -84,6 +94,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       await writeJson(staging, "request.json", { peer, header });
       signal?.throwIfAborted();
       await rename(staging, dir);
+      published = true;
     } catch (err) {
       await rm(staging, { recursive: true, force: true });
       if (signal?.aborted) return interruptedSend("unpublished");
@@ -105,7 +116,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     const withdrawn = await withdrawPublishedRequest(dir, staging);
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
-  } catch (err) { return fail(detail(err)); }
+  } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(detail(err)); }
 }
 
 type Send = (peer: string, header: SendHeader) => Promise<string>;

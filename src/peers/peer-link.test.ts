@@ -67,9 +67,10 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
-  const link = createMemoryLink(ID_A, ID_B);
-  const peers = options.peers ?? new Set([ID_A]);
+function serve(options: { readerId?: string; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+  const readerId = options.readerId ?? ID_A;
+  const link = createMemoryLink(readerId, ID_B);
+  const peers = options.peers ?? new Set([readerId]);
   const logs: string[] = [];
   let snapshots = 0;
   let checks = 0;
@@ -532,6 +533,41 @@ describe("coordinator-pane", () => {
     expect(captureCoordinator.mock.calls).toEqual([[], []]);
   });
 
+  test("audits each peer once after a successful finish, including a failed first delivery", async () => {
+    const paneReaders = new Set<string>();
+    const options = { paneReaders, captureCoordinator: async () => pane };
+    const failed = serve(options);
+    const accept = failed.b.acceptBi.bind(failed.b);
+    const finishing = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    spyOn(failed.b, "acceptBi").mockImplementationOnce(async () => {
+      const stream = await accept();
+      stream.finish = async () => {
+        finishing.resolve();
+        await release.promise;
+        failed.b.close(0, "delivery failed");
+        throw new Error("finish failed");
+      };
+      return stream;
+    });
+    const read = requestCoordinatorPane(failed.a);
+    await finishing.promise;
+    expect(paneReaders.size).toBe(0);
+    release.resolve();
+    await expect(read).rejects.toThrow();
+    expect(failed.logs.filter(line => line.includes("read the system coordinator pane"))).toBeEmpty();
+    const deliveries = [];
+    for (const readerId of [ID_A, "cd".repeat(32), ID_A, "cd".repeat(32)]) {
+      const side = serve({ ...options, readerId });
+      await requestCoordinatorPane(side.a);
+      side.a.close(0, "done");
+      await side.done;
+      deliveries.push(...side.logs.filter(line => line.includes("read the system coordinator pane")));
+    }
+    expect(deliveries).toEqual([ID_A, "cd".repeat(32)].map(id =>
+      `peer link: Alice (${id.slice(0, 10)}) read the system coordinator pane`));
+  });
+
   test("returns an error when there is no coordinator", async () => {
     const side = serve({ captureCoordinator: async () => null });
     await expect(requestCoordinatorPane(side.a)).rejects.toThrow("No system coordinator");
@@ -539,7 +575,7 @@ describe("coordinator-pane", () => {
     side.a.close(0, "done");
   });
 
-  test("refuses an unpaired reader and a reader removed during capture", async () => {
+  test.each(["resolve", "reject"])("refuses a removed reader when its pending capture will %s", async outcome => {
     const pending = Promise.withResolvers<typeof pane>();
     const captureCoordinator = mock(() => pending.promise);
     const refused = serve({ peers: new Set(), captureCoordinator });
@@ -549,7 +585,8 @@ describe("coordinator-pane", () => {
     const read = requestCoordinatorPane(side.a);
     await waitFor(() => captureCoordinator.mock.calls.length === 1);
     side.peers.clear();
-    pending.resolve(pane);
+    if (outcome === "resolve") pending.resolve(pane);
+    else pending.reject(new Error("capture failed"));
     await expect(read).rejects.toThrow();
     expect(side.a.closeInfo()).toMatchObject({ code: PEER_CLOSE.notPeer });
     expect(side.logs.join(" ")).not.toContain("read the system coordinator pane");

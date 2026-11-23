@@ -223,7 +223,9 @@ export async function submitWatchdogRequest(
     if (await file.exists()) {
       try {
         const result = (await file.json()) as Partial<SpawnResult>;
-        await rm(resultFile, { force: true });
+        const cleanup = rm(resultFile, { force: true });
+        if (deps.cancelClaimed) void cleanup.catch(err => console.error(`Remote broker result cleanup failed: ${err}`));
+        else await cleanup;
         if (result.id !== request.id || typeof result.exitCode !== "number") {
           deps.onUncertain?.();
           return brokerFail(`Error: the watchdog returned a malformed ${wording.request} result`);

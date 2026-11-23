@@ -240,7 +240,11 @@ async function startStagingLease(dir: string, id: string) {
     await lease.writeFile(JSON.stringify({ pid: process.pid, start }));
   } catch (err) { await lease.close(); await rm(path, { force: true }); throw err; }
   const heartbeat = setInterval(() => { const now = new Date(); void lease.utimes(now, now).catch(() => {}); }, STAGING_LEASE_MS / 4);
-  return async () => { clearInterval(heartbeat); await lease.close(); await rm(path, { force: true }); };
+  return async (removed: boolean) => {
+    clearInterval(heartbeat);
+    await lease.close();
+    if (removed) await rm(path, { force: true });
+  };
 }
 
 export async function sweepStagingLease(dir: string, id: string, now: number) {
@@ -279,7 +283,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(noPassthrough && { noPassthrough: true }) };
   const parent = join(dir, "send-attachments");
   const staged = join(parent, request.id);
-  let releaseLease: (() => Promise<void>) | undefined;
+  let releaseLease: ((removed: boolean) => Promise<void>) | undefined;
   try {
     if (remote) {
       releaseLease = await startStagingLease(dir, request.id);
@@ -303,8 +307,13 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
   } finally {
-    if (remote) await rm(staged, { recursive: true, force: true });
-    await releaseLease?.();
+    if (releaseLease) {
+      const close = releaseLease;
+      void rm(staged, { recursive: true, force: true }).then(() => close(true), async err => {
+        await close(false);
+        throw err;
+      }).catch(err => console.error(`Remote staging cleanup failed: ${err}`));
+    }
   }
 }
 

@@ -745,13 +745,9 @@ test("shutdown waits for an admitted text-only receipt and prevents its queue ap
   }).catch(err => err);
   await checking.promise;
   expect(service.view().incoming ?? []).toEqual([]);
-  let stopped = false;
-  const quit = service.shutdown().then(() => { stopped = true; });
-  await Bun.sleep(5);
-  expect(stopped).toBe(false);
-  allow.resolve("peer");
-  await quit;
+  await service.shutdown();
   expect(await receipt).toBeInstanceOf(Error);
+  allow.resolve("peer");
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
 

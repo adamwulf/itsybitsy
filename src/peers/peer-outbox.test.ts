@@ -523,16 +523,32 @@ test("a published ACK stays readable when the client reaches its deadline during
     await rename(from, to);
     if (to === join(dir, "result.json")) { entered.resolve(); await resume.promise; }
   });
+  const read = fs.readFile, write = fs.writeFile;
+  let worker: Promise<void> | undefined, marked = false;
+  const claimObserved = Promise.withResolvers<void>();
+  const hide = spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof read>) => {
+    if (!marked && args[0] === join(dir, "result.json")) {
+      throw Object.assign(Error("not yet visible"), { code: "ENOENT" });
+    }
+    if (args[0] === join(dir, "progress")) claimObserved.resolve();
+    return read(...args);
+  }) as typeof read);
+  const marker = spyOn(fs, "writeFile").mockImplementation(async (...args) => {
+    await write(...args);
+    if (args[0] === join(dir, "timeout") || args[0] === join(dir, "cancel")) {
+      marked = true; resume.resolve(); await worker;
+    }
+  });
   let now = 0;
   const clock = spyOn(performance, "now").mockImplementation(() => now);
   try {
     const client = handoffRemoteMessage("peer", header);
     await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
-    const worker = createPeerOutboxPoll()(async () => header.id, () => {});
+    worker = createPeerOutboxPoll()(async () => header.id, () => {});
     await entered.promise;
-    await Bun.write(join(dir, "timeout"), "");
+    await claimObserved.promise;
     now += 70_000;
-    resume.resolve(); await worker;
     expect(await client).toMatchObject({ ok: true });
-  } finally { resume.resolve(); pause.mockRestore(); clock.mockRestore(); }
+    expect(marked).toBe(true);
+  } finally { resume.resolve(); await worker; pause.mockRestore(); hide.mockRestore(); marker.mockRestore(); clock.mockRestore(); }
 });

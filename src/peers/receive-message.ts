@@ -100,12 +100,12 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
     await requireSendFin(body, options);
     return { message: rewriteAttachmentPaths(header.message, mapping, 1024 ** 2, 64 * 1024), cleanup,
       async commit() {
-        await io(() => rm(join(partial, "owner.json")));
         try { await io(async () => { await rename(partial, root); current = root; }); }
         catch (err) {
           if ((err as NodeJS.ErrnoException).code === "EXDEV") throw Error("Incoming staging and committed attachments must be on the same filesystem", { cause: err });
           throw err;
         }
+        await io(() => rm(join(root, "owner.json")));
       },
     };
   } catch (error) { await cleanup(); throw error; }

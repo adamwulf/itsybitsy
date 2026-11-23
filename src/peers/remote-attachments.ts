@@ -224,9 +224,9 @@ export async function removeAbandonedStaging(agentDir: string, id: string) {
         if (/^\.record-[a-f0-9-]{36}$/.test(name)) await removeBrokerMember(dir, name);
       }
       await removeBrokerMember(dir, "progress");
-      await removeBrokerMember(dir, "lease");
-      await removeBrokerMember(dir, "owner.json");
       for (let n = 0; n < 100; n++) await removeBrokerMember(dir, String(n));
+      await removeBrokerMember(dir, "owner.json");
+      await removeBrokerMember(dir, "lease");
     });
     await withBrokerDirectory(agentDir, undefined, parent => removeBrokerMember(parent, id, true));
   } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }

@@ -15,7 +15,7 @@ A human or an agent on machine A can send a message, with file attachments, to a
 These came from Adam through @system.
 
 - **Remote `ib send` mirrors local `ib send` exactly.**
-  - A user send follows user rules, including `/` and `!` passthrough.
+  - A text-only user send supports leading `/` and `!` passthrough. A message with staged attachments sets `noPassthrough`.
   - An agent send arrives as `[sent by agent <machine>/<repo>/<id>]`.
   - The receiver trusts the sender's user-or-agent label.
 - **Acknowledge on queue.** The receiver validates the message, queues it, and acknowledges. The sender returns on that acknowledgement and never waits for delivery. A validation error comes back in the acknowledgement.

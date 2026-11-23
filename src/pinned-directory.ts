@@ -15,7 +15,7 @@ export async function pinnedPath(handle: FileHandle) {
 async function openDirectory(path: string, create: boolean): Promise<FileHandle> {
   if (path === "/") return open(path, directoryFlags);
   if (process.platform === "darwin") {
-    try { return await open(path, directoryFlags | 0x20000000 /* O_NOFOLLOW_ANY */); }
+    try { return await open(path, constants.O_DIRECTORY | 0x20000000 /* O_NOFOLLOW_ANY */); }
     catch (err) { if (!create || (err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
   }
   const parent = await openDirectory(dirname(path), create);

@@ -10,7 +10,7 @@ import { spawnCtx as paneProbe } from "../tmux-poller";
 import { acquireOutboxLock, outboxPath, readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
 import { createFakeClock, createMemoryLink } from "./test-pair-transport";
-import { requestSend, serveTrustedConnection } from "./peer-link";
+import { requestAgents, requestSend, serveTrustedConnection } from "./peer-link";
 import { encodeSendHeader, type SendHeader } from "./send-frame";
 
 let cli: CliFixture;
@@ -718,9 +718,9 @@ test("a stalled non-framed request releases the watcher header slot", async () =
     clock.advance(IDLE_TIMEOUT_MS);
     await Bun.sleep(0);
     clock.advance(5000);
-    await serving;
-    expect(readers.size).toBe(0);
-  } finally { a.close(0, "done"); }
+    await waitFor(() => readers.size === 0);
+    expect(await requestAgents(a)).toMatchObject({ agents: [] });
+  } finally { a.close(0, "done"); await serving; }
 });
 
 test("shutdown waits for an admitted text-only receipt and prevents its queue append", async () => {
@@ -825,7 +825,6 @@ test("shutdown during the dedupe read prevents the queue append", async () => {
 });
 
 test("a replay of another stream's idle failure keeps its connection for the next exchange", async () => {
-  const { requestAgents } = await import("./peer-link");
   await receiveFixture();
   const clock = createFakeClock();
   const read = Promise.withResolvers<void>();

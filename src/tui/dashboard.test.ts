@@ -9204,6 +9204,7 @@ const PEERS_OTHER = "0a".repeat(32);
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
+  cancelReceipt = mock((_id: string) => {});
   sendRemoteMessage = mock<PeersDialogService["sendRemoteMessage"]>(async (_id, header) => header.id);
   fetchCoordinatorPane = mock(async (_peerId: string) => ({ state: "running", text: "peer capture" }));
   remoteStartDenial: string | null = null;
@@ -10908,6 +10909,15 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(async () => !await Bun.file(staged!).exists());
       expect(dashboard.inputField.getText()).toContain(source);
     } finally { resetUserHome(); await rm(home, { recursive: true, force: true }); }
+  });
+
+  test("selecting an inbound progress row and pressing Esc aborts that receipt", () => {
+    const { dashboard, service } = setup();
+    service.set({ incoming: [{ id: "first", label: "Laptop → worker", bytes: 3, total: 12 }] });
+    expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 12 bytes");
+    dashboard.handleInput("\x14");
+    dashboard.handleInput("\x1b");
+    expect(service.cancelReceipt.mock.calls).toEqual([["first"]]);
   });
 
   test("incoming notices and overlapping completions leave each pending send visible", async () => {

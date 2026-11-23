@@ -888,6 +888,7 @@ export class DashboardComponent implements Component {
     const repoPath = this.agentTree.selectedRepoPath ?? (this.agentTree.selectedAgent?.repoPath ?? null);
     return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
   }
+  private selectedReceipt: string | undefined;
   private pendingRemoteSends = new Map<string, { label: string; bytes: number; total?: number; controller: AbortController }>();
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
@@ -3073,6 +3074,19 @@ export class DashboardComponent implements Component {
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;
 
+    const incoming = this.peerService?.view().incoming ?? [];
+    if (incoming.length && matchesKey(data, Key.ctrl("t"))) {
+      const index = incoming.findIndex(row => row.id === this.selectedReceipt);
+      this.selectedReceipt = incoming[(index + 1) % incoming.length]!.id;
+      this.invalidate();
+      this.tui?.requestRender();
+      return;
+    }
+    if (incoming.some(row => row.id === this.selectedReceipt) && matchesKey(data, Key.escape)) {
+      this.peerService?.cancelReceipt?.(this.selectedReceipt!);
+      this.selectedReceipt = undefined;
+      return;
+    }
     if (this.pendingRemoteSends.size && (data === "\x1b" || matchesKey(data, Key.escape))) {
       const selected = this.remoteSelection;
       const sends = [...this.pendingRemoteSends.values()].reverse();
@@ -3787,7 +3801,12 @@ export class DashboardComponent implements Component {
       const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
       lines.push(truncateToWidth(`sending to ${send.label}…${progress}  Esc: cancel`, width, "…"));
     }
-    const chromeLines = 5 + this.pendingRemoteSends.size;
+    const incoming = this.peerService?.view().incoming ?? [];
+    for (const row of incoming) {
+      const selected = row.id === this.selectedReceipt;
+      lines.push(truncateToWidth(`${selected ? "›" : " "} receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${selected ? "Esc: cancel" : "Ctrl-T: select"}`, width, "…"));
+    }
+    const chromeLines = 5 + this.pendingRemoteSends.size + incoming.length;
     const availableHeight = Math.max(5, terminalRows - chromeLines);
 
     // Width math comes from the widths module — never inline.

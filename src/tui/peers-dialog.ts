@@ -29,6 +29,7 @@ import { wordWrapSingleLine, wrapSingleLine } from "./wrap";
 export interface PeersDialogService {
   readonly remoteStartDenial: string | null;
   view(): PeerServiceView;
+  cancelReceipt?(id: string): void;
   sendRemoteMessage: import("../peers/service").PeerService["sendRemoteMessage"];
   fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane>;
   startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;

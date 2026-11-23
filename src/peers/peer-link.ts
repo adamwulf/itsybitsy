@@ -493,12 +493,14 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
 // Responder
 // ---------------------------------------------------------------------------
 
+export interface ReceiptOptions extends FileBodyOptions { cancelStream?: () => void }
+
 export interface PeerResponderDeps {
   /** Paired name for this id, re-read on every call. A failed read returns null. */
   peerName(id: string): Promise<string | null>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
-  receiveMessage?(header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>, body?: Pick<PairStream, "read">, options?: FileBodyOptions): Promise<void>;
+  receiveMessage?(header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>, body?: Pick<PairStream, "read">, options?: ReceiptOptions): Promise<void>;
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
@@ -606,7 +608,11 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
           const name = await deps.peerName(conn.remoteId);
           if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
           return name;
-        }, stream, options);
+        }, stream, { ...options, cancelStream: () => {
+          void settledWithinGrace(stream.cancel(), deps).then(ok => {
+            if (!ok) closeQuietly(conn, PEER_CLOSE.error, "receive reset stalled");
+          });
+        } });
         // A replay can acknowledge a previously queued attachment without
         // consuming its duplicate body.
         if (header.files.length) void stream.stopReceiving().catch(() => {});

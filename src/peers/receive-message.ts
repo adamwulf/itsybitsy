@@ -87,7 +87,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
   const receiving = new Set<string>();
   let reserved = 0;
   return async (header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>,
-    body?: Pick<PairStream, "read">, options: FileBodyOptions = {}) => {
+    body?: Pick<PairStream, "read">, options: import("./peer-link").ReceiptOptions = {}) => {
     if (!header.message && !header.files.length) throw new Error("Message is empty");
     const name = await readPeerName();
     if (name === null) throw new Error("not a peer");
@@ -142,6 +142,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
           } : undefined,
           async beforeEnqueue() {
             if (await readPeerName() === null) throw new Error("not a peer");
+            options.signal?.throwIfAborted();
           },
         });
         if (!result.ok) throw bodyError ?? new Error(result.stderr);

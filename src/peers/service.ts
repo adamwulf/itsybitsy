@@ -251,7 +251,10 @@ export interface PeerSessionView {
   stage: PairStage;
 }
 
+export interface IncomingTransfer { id: string; label: string; bytes: number; total: number }
+
 export interface PeerServiceView {
+  incoming?: IncomingTransfer[];
   status: EndpointStatus;
   /** This install's id, once loaded. */
   selfId: string | null;
@@ -341,6 +344,11 @@ export class PeerService {
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
   private outboxTimer?: ReturnType<typeof setInterval>;
+  private readonly receipts = new Map<string, { row: IncomingTransfer; controller: AbortController }>();
+  cancelReceipt(id: string) {
+    this.receipts.get(id)?.controller.abort(new Error("Receive cancelled"));
+  }
+
   private readonly headerReaders = new Set<import("./pairing").PairStream>();
   private readonly paneReaders = new Set<string>();
   /** The accept loop's promise, for tests. */
@@ -407,6 +415,7 @@ export class PeerService {
         ? null
         : { id: active.id, role: active.session.role, peerId: active.session.peerId, stage: active.session.stage },
       links: this.poller.states(),
+      ...(this.receipts.size && { incoming: Array.from(this.receipts.values(), entry => ({ ...entry.row })) }),
     };
   }
 
@@ -672,6 +681,25 @@ export class PeerService {
     return this.poller.fetchCoordinatorPane(peerId);
   }
 
+  private async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
+    const [header, peer, name, body, options] = args;
+    const receive = this.deps.receiveMessage!;
+    if (!header.files.length) return receive(...args);
+    const id = crypto.randomUUID();
+    const controller = new AbortController();
+    const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
+    const row = { id, label: label + " → " + targetLabel(header.target), bytes: 0, total: header.files.reduce((sum, f) => sum + f.size, 0) };
+    this.receipts.set(id, { row, controller });
+    if (options?.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
+    this.notify();
+    try {
+      await receive(header, peer, name, body, { ...options, signal: controller.signal, onProgress: bytes => {
+        row.bytes = bytes;
+        this.notify();
+      } });
+    } finally { this.receipts.delete(id); this.notify(); }
+  }
+
   async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
     if (source === "dashboard") {
       if (this.remoteStartDenial !== null) throw new Error(remoteSendDenial(this.remoteStartDenial));
@@ -915,7 +943,7 @@ export class PeerService {
           peerName: (id) => this.peerName(id),
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
-          receiveMessage: this.deps.receiveMessage,
+          receiveMessage: this.deps.receiveMessage && ((...args) => this.receiveTracked(...args)),
           snapshot: this.deps.snapshot,
           captureCoordinator: this.deps.captureCoordinator,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,

@@ -13,7 +13,22 @@ const whitespace = /\s/;
 /** A reverse Aho-Corasick index. Mark each right word boundary explicitly
  * so a suffix match always ends at whitespace or the text edge. Scanning
  * backwards finds the longest complete match at each eligible start. */
-function indexMappings(mapping: readonly AttachmentMapping[]) {
+function indexMappings(mapping: readonly AttachmentMapping[], byteLimit: number) {
+  const forms = new Map<string, string>();
+  let bytes = 0;
+  for (const { spellings, destination } of mapping) {
+    for (const spelling of new Set(spellings)) {
+      if (!spelling) continue;
+      const addForm = (form: string, replacement: string) => {
+        if (forms.has(form)) return;
+        bytes += Buffer.byteLength(form);
+        if (bytes > byteLimit) throw new Error(`Attachment spelling index exceeds ${byteLimit} bytes`);
+        forms.set(form, replacement);
+      };
+      addForm(spelling, spellPath(destination));
+      for (const quote of [undefined, "'", '"']) addForm(spellPath(spelling, quote), spellPath(destination, quote));
+    }
+  }
   const states: State[] = [{ next: new Map(), fallback: 0 }];
   function insert(form: string, replacement: string) {
     let state = 0;
@@ -33,13 +48,7 @@ function indexMappings(mapping: readonly AttachmentMapping[]) {
     }
     states[state]!.match ??= { length: form.length, replacement };
   }
-  for (const { spellings, destination } of mapping) {
-    for (const spelling of new Set(spellings)) {
-      if (!spelling) continue;
-      insert(spelling, spellPath(destination));
-      for (const quote of [undefined, "'", '"']) insert(spellPath(spelling, quote), spellPath(destination, quote));
-    }
-  }
+  for (const [form, replacement] of forms) insert(form, replacement);
   function advance(state: number, symbol: number) {
     while (state && !states[state]!.next.has(symbol)) state = states[state]!.fallback;
     return states[state]!.next.get(symbol) ?? 0;
@@ -57,9 +66,9 @@ function indexMappings(mapping: readonly AttachmentMapping[]) {
   return { states, advance };
 }
 
-export function rewriteAttachmentPaths(message: string, mapping: readonly AttachmentMapping[], maxBytes = Infinity): string {
+export function rewriteAttachmentPaths(message: string, mapping: readonly AttachmentMapping[], maxBytes = Infinity, indexBytes = Infinity): string {
   if (!mapping.length) return message;
-  const { states, advance } = indexMappings(mapping);
+  const { states, advance } = indexMappings(mapping, indexBytes);
   const matches = new Map<number, Match>();
   let state = 0;
   for (let i = message.length - 1; i >= 0; i--) {

@@ -569,3 +569,11 @@ test.each(["second hash", "target stopped"])("%s after writing the first file ro
   expect(await readdir(dir)).toEqual([]);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
+
+test("a near-limit spelling header with an empty message cannot allocate an oversized rewrite index", async () => {
+  const dir = await receiveFixture();
+  const file = { ...manifestFile(""), spellings: ["x".repeat(250_000)] };
+  await expect(receiver(header({ message: "", files: [file] }), "peer", paired, { read: async () => Buffer.alloc(0) }))
+    .rejects.toThrow("spelling index exceeds");
+  expect(await readdir(dir)).toEqual([]);
+});

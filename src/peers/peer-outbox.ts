@@ -102,7 +102,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       throw err;
     }
     let deadline = Date.now() + 10_000; // M2 claim window. Transfer progress uses the wire idle interval.
-    let lastProgress = "";
+    let claimedSeen = false;
+    let lastSequence = 0;
 
     const readResult = async (): Promise<IbCommandResult | undefined> => {
       try {
@@ -119,11 +120,15 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       const result = await readResult();
       if (result && !signal?.aborted) return result;
       if (signal?.aborted) break;
+      if (!claimedSeen && existsSync(claimed)) {
+        claimedSeen = true;
+        deadline = Date.now() + IDLE_TIMEOUT_MS;
+      }
       try {
-        const progress = await readFile(join(claimed, "progress"), "utf8");
-        if (progress !== lastProgress) {
-          if (JSON.parse(progress).sequence > 0) onProgress?.();
-          lastProgress = progress;
+        const { sequence } = JSON.parse(await readFile(join(claimed, "progress"), "utf8"));
+        if (Number.isSafeInteger(sequence) && sequence > lastSequence) {
+          onProgress?.();
+          lastSequence = sequence;
           deadline = Date.now() + IDLE_TIMEOUT_MS;
         }
       } catch (err) { if (!missing(err)) throw err; }

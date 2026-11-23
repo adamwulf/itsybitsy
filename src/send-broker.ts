@@ -50,7 +50,7 @@ import * as runtimeNames from "./runtime-names";
 
 import { encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
 import { readMachineName } from "./machine-name";
-import { existsSync, fstatSync, futimesSync } from "node:fs";
+import { existsSync, fstatSync, writeSync } from "node:fs";
 import { mkdir, open, rm, stat } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
@@ -297,10 +297,13 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
           "The watchdog had already taken the message, so it may still be delivered; check with the recipient before sending it again.",
       },
       deps.timeoutMs ?? (remote ? IDLE_TIMEOUT_MS : SPAWN_CLIENT_TIMEOUT_MS),
-      remote ? { ...deps, cancelClaimed: async () => {
+      remote ? { ...deps, claimTimeoutMs: Math.min(10_000, deps.timeoutMs ?? Infinity), cancelClaimed: async () => {
         if (ownsStage) await rm(staged, { recursive: true, force: true });
         else await (await open(join(spawnResultDir(dir), request.id + ".cancel"), "wx", 0o600)).close();
-      }, readProgress: async () => (await stat(ownsStage ? join(staged, "progress") : join(spawnResultDir(dir), request.id + ".progress")).catch(() => null))?.mtimeMs ?? 0 } : deps,
+      }, readProgress: async () => {
+        const marker = await stat(ownsStage ? join(staged, "progress") : join(spawnResultDir(dir), request.id + ".progress")).catch(() => null);
+        return marker?.size ? marker.mtimeMs : 0;
+      } } : deps,
     );
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
@@ -552,7 +555,7 @@ export async function handleSendRequest(
         const now = Date.now();
         if (marker && now - updated >= 250) {
           updated = now;
-          try { futimesSync(marker.fd, now / 1000, now / 1000); }
+          try { writeSync(marker.fd, Buffer.from([1]), 0, 1, 0); }
           catch (err) { warnSendCleanup(`Remote send progress update failed: ${err}`); }
         }
       };

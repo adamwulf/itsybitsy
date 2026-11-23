@@ -680,6 +680,24 @@ describe("send broker", () => {
       expect((await readdir(spawnRequestDir(agentDir)).catch(() => [])).filter(name => name.endsWith(".json"))).toEqual([]);
     });
 
+    test("a delayed worktree claim gets one transfer window and an empty progress marker cannot renew it", async () => {
+      const cwd = await linkWorktree();
+      let now = 0, id = "";
+      const answer = await routeCliSend({ target: "laptop/@system", readMessage: async () => MESSAGE, usage: "usage", repos }, {
+        cwd, watchdogLive: async () => true, now: () => now, sleep: async () => {
+          now += 3000;
+          if (now === 9000) {
+            const [name] = await readdir(spawnRequestDir(agentDir));
+            id = name!.replace(/\.json$/, "");
+            await rm(join(spawnRequestDir(agentDir), name!));
+          }
+          if (now === 57_000) await Bun.write(join(spawnResultDir(agentDir), id + ".progress"), "");
+        },
+      });
+      expect(answer).toMatchObject({ result: { ok: false, stderr: expect.stringContaining("timed out") } });
+      expect(now).toBe(69_000);
+    });
+
     test("text-only progress in the result directory extends the CLI deadline", async () => {
       const cwd = await linkWorktree();
       let now = 0;
@@ -694,7 +712,7 @@ describe("send broker", () => {
             await rm(join(spawnRequestDir(agentDir), name!));
           }
           const path = join(spawnResultDir(agentDir), id + ".progress");
-          await Bun.write(path, "");
+          await Bun.write(path, "1");
           await fs.utimes(path, now / 1000, now / 1000);
           if (now >= 120_000) await Bun.write(join(spawnResultDir(agentDir), id + ".json"), JSON.stringify({ id, ok: true, exitCode: 0 }));
         },

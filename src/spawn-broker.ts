@@ -186,7 +186,7 @@ export async function submitWatchdogRequest(
   request: { id: string },
   wording: WatchdogRequestWording,
   timeoutMs: number,
-  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain" | "readProgress" | "cancelClaimed"> = {},
+  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain" | "claimTimeoutMs" | "readProgress" | "cancelClaimed"> = {},
 ): Promise<IbCommandResult> {
   const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
   const now = deps.now ?? Date.now;
@@ -201,7 +201,9 @@ export async function submitWatchdogRequest(
   }
 
   const resultFile = join(spawnResultDir(agentDir), `${request.id}.json`);
-  let deadline = now() + timeoutMs;
+  const requestFile = join(spawnRequestDir(agentDir), `${request.id}.json`);
+  let awaitingClaim = deps.claimTimeoutMs !== undefined;
+  let deadline = now() + (deps.claimTimeoutMs ?? timeoutMs);
   let lastProgress = 0;
   const readResult = async (): Promise<IbCommandResult | undefined> => {
     const file = Bun.file(resultFile);
@@ -231,7 +233,11 @@ export async function submitWatchdogRequest(
     const result = await readResult();
     if (result && !deps.signal?.aborted) return result;
     if (deps.signal?.aborted) break;
-    if (deps.readProgress) {
+    if (awaitingClaim && !await Bun.file(requestFile).exists()) {
+      awaitingClaim = false;
+      deadline = now() + timeoutMs;
+    }
+    if (!awaitingClaim && deps.readProgress) {
       const progress = await deps.readProgress();
       if (progress > lastProgress) {
         lastProgress = progress;
@@ -244,7 +250,6 @@ export async function submitWatchdogRequest(
 
   // Timed out. Withdraw the request if the watchdog has not taken it yet; if it
   // already has, the command may still finish — say so.
-  const requestFile = join(spawnRequestDir(agentDir), `${request.id}.json`);
   let stillQueued: boolean;
   try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
   catch (err) { deps.onUncertain?.(); return brokerFail(`Could not withdraw request: ${err}`); }
@@ -254,7 +259,7 @@ export async function submitWatchdogRequest(
   if (!stillQueued) deps.onUncertain?.();
   if (deps.signal?.aborted) return interruptedSend(stillQueued ? "withdrawn" : "claimed");
   return brokerFail(
-    `Error: timed out after ${Math.round(timeoutMs / 1000)}s waiting for the watchdog of '${callerId}' to ${wording.action}. ` +
+    `Error: timed out after ${Math.round((awaitingClaim ? deps.claimTimeoutMs! : timeoutMs) / 1000)}s waiting for the watchdog of '${callerId}' to ${wording.action}. ` +
       (stillQueued
         ? "The request was withdrawn; check that the agent's watchdog is healthy and retry."
         : wording.alreadyStarted),
@@ -266,6 +271,7 @@ export async function submitWatchdogRequest(
 export interface SpawnClientDeps {
   cancelClaimed?: () => Promise<void>;
   readProgress?: () => Promise<number>;
+  claimTimeoutMs?: number;
   /** A claimed request may have enqueued its snapshots before the reply was lost. */
   onUncertain?: () => void;
   signal?: AbortSignal;

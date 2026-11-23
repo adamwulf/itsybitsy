@@ -10,6 +10,24 @@ interface State { next: Map<number, number>; fallback: number; match?: Match }
 const boundary = -1;
 const whitespace = /\s/;
 
+function* spellingForms(spelling: string): Generator<[string, string | undefined]> {
+  yield [spelling, undefined];
+  for (const quote of [undefined, "'", '"']) yield [spellPath(spelling, quote), quote];
+}
+
+export function verifyAttachmentSpellings(files: readonly { spellings: readonly string[] }[]) {
+  const owners = new Map<string, number>();
+  for (const [index, file] of files.entries()) {
+    for (const spelling of file.spellings) {
+      for (const [form] of spellingForms(spelling)) {
+        const owner = owners.get(form);
+        if (owner !== undefined && owner !== index) throw new Error("Multiple files claim the same attachment spelling");
+        owners.set(form, index);
+      }
+    }
+  }
+}
+
 /** A reverse Aho-Corasick index. Mark each right word boundary explicitly
  * so a suffix match always ends at whitespace or the text edge. Scanning
  * backwards finds the longest complete match at each eligible start. */
@@ -25,8 +43,7 @@ function indexMappings(mapping: readonly AttachmentMapping[], byteLimit: number)
         if (bytes > byteLimit) throw new Error(`Attachment spelling index exceeds ${byteLimit} bytes`);
         forms.set(form, replacement);
       };
-      addForm(spelling, spellPath(destination));
-      for (const quote of [undefined, "'", '"']) addForm(spellPath(spelling, quote), spellPath(destination, quote));
+      for (const [form, quote] of spellingForms(spelling)) addForm(form, spellPath(destination, quote));
     }
   }
   const states: State[] = [{ next: new Map(), fallback: 0 }];
@@ -68,6 +85,7 @@ function indexMappings(mapping: readonly AttachmentMapping[], byteLimit: number)
 
 export function rewriteAttachmentPaths(message: string, mapping: readonly AttachmentMapping[], maxBytes = Infinity, indexBytes = Infinity): string {
   if (!mapping.length) return message;
+  verifyAttachmentSpellings(mapping);
   const { states, advance } = indexMappings(mapping, indexBytes);
   const matches = new Map<number, Match>();
   let state = 0;

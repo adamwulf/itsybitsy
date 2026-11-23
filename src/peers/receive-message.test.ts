@@ -1098,3 +1098,11 @@ test("a stalled final allowlist read releases the admission and enqueues nothing
   expect(await readOutbox(join(cli.home, ".itsybitsy", "agents", "worker"))).toEqual([]);
   await receiver(request, "peer", paired);
 });
+
+test.each([false, true])("literal and escaped attachment spellings cannot name different files, reversed=%s", async reverse => {
+  const files = [manifestFile("a", "Q1 report.pdf"), manifestFile("b", "Q1\\ report.pdf")];
+  if (reverse) files.reverse();
+  const result = await exchange(header({ files }));
+  expect(result).toMatchObject({ op: "error", reason: expect.stringContaining("same attachment spelling") });
+  expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
+});

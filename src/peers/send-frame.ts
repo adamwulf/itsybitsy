@@ -1,3 +1,4 @@
+import { verifyAttachmentSpellings } from "./attachment-paths";
 import { createHash } from "node:crypto";
 import { sanitizeMachineName } from "../machine-name";
 import { isStoredRepoName } from "../registry";
@@ -106,16 +107,14 @@ export function parseSendHeader(value: unknown): SendHeader {
       value.op !== "send" || typeof value.id !== "string" || !UUID.test(value.id) ||
       !validFrom(value.from) || !validTarget(value.target) || typeof value.message !== "string" ||
       (value.noPassthrough !== undefined && value.noPassthrough !== true) || !Array.isArray(value.files) || !value.files.every(validFile)) throw new Error("Malformed send header");
-  const claimed = new Set<string>();
+  let spellings = 0;
   const files = value.files.map(file => ({ ...file, spellings: [...new Set(file.spellings)] }));
   for (const file of files) {
     if (file.spellings.length > 16) throw new Error("More than 16 spellings for one attachment");
-    for (const spelling of file.spellings) {
-      if (claimed.has(spelling)) throw new Error("Multiple files claim the same attachment spelling");
-      claimed.add(spelling);
-      if (claimed.size > 256) throw new Error("More than 256 attachment spellings");
-    }
+    spellings += file.spellings.length;
+    if (spellings > 256) throw new Error("More than 256 attachment spellings");
   }
+  verifyAttachmentSpellings(files);
   return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files, ...(value.noPassthrough === true && { noPassthrough: true }) };
 }
 

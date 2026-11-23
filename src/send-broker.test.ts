@@ -793,9 +793,9 @@ describe("send broker", () => {
         }, {
           cwd, watchdogLive: async () => true, now: () => clock,
           sleep: async () => {
-            work = processSpawnRequests(SENDER_ID, senderRepo, deps);
+            work ??= processSpawnRequests(SENDER_ID, senderRepo, deps);
             await entered.promise;
-            clock = 60_000;
+            clock += 60_000;
           },
         });
         if (!("result" in route)) throw new Error("expected remote broker route");

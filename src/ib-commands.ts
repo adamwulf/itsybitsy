@@ -4530,13 +4530,15 @@ export async function sendMessage(
     const { log } = opts.peerSend;
     void (async () => {
       if (await hasLiveWatchdog(agentDir)) return;
+      let backoffMs = 100;
       do {
-        const result = await drainOutbox(agent, queueDir, { steal: true });
+        const result = await drainOutbox(agent, queueDir, { steal: false, timeoutMs: 0 });
         if (!result.ok) { log(result.stderr); return; }
         // @system has no watchdog to revisit an append made while another
         // process held the lock and delivered its previously captured batch.
         if (!opts.outboxDir || !(await readOutbox(queueDir)).length) return;
-        await Bun.sleep(250);
+        await Bun.sleep(backoffMs);
+        backoffMs = Math.min(2000, backoffMs * 2);
       } while (true);
     })().catch(err => log(`Delivery error after enqueue: ${err}`));
     return { ok: true, exitCode: 0, stdout, stderr: "" };

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir, unlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { setUserHome, resetUserHome } from "../home";
@@ -201,8 +201,11 @@ test("system recipient drains an acknowledged append after a long delivery holds
   try {
     expect(await send("first")).toMatchObject({ ok: true });
     await entered.promise;
+    // The first drainer is still typing, past the local stale-steal age.
+    const old = new Date(Date.now() - 31_000);
+    await utimes(join(cli.home, ".itsybitsy", ".outbox.lock"), old, old);
     expect(await send("second")).toMatchObject({ ok: true });
-    await Bun.sleep(5500);
+    await Bun.sleep(350);
     expect(typed).toEqual(["[sent by user]: first"]);
   } finally { release.resolve(0); }
   await waitFor(async () => typed.length === 2 && !(await readOutbox(join(cli.home, ".itsybitsy"))).length);

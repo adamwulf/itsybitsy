@@ -284,7 +284,7 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
     await finishRecovery([sweep(base), sweepEntries(claimed, id => recoverClaim(claimed, id)), sweep(join(base, ".staging"), true)]);
   }
 
-  async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {
+  async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true, dispatchFinished?: () => void): Promise<void> {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
     if (!ownsEndpoint()) return;
@@ -361,10 +361,11 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
       } finally { workers--; }
     }
     await Promise.all(Array.from({ length: Math.max(0, Math.min(4 - workers, ready.length)) }, worker));
+    dispatchFinished?.();
     await Promise.all(publications);
   }
   return Object.assign(poll, { recover });
 }
 
-export type PeerOutboxPoll = (send: Send, log: (line: string) => void, ownsEndpoint?: () => boolean) => Promise<void>;
+export type PeerOutboxPoll = (send: Send, log: (line: string) => void, ownsEndpoint?: () => boolean, dispatchFinished?: () => void) => Promise<void>;
 export const pollPeerOutbox: PeerOutboxPoll = createPeerOutboxPoll();

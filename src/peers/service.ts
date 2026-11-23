@@ -955,13 +955,17 @@ export class PeerService {
     const poll = this.deps.pollOutbox;
     if (poll) {
       const owner = this.outboxOwner = new AbortController();
+      const dispatches = new Set<symbol>();
       this.outboxTimer = setInterval(() => {
-        if (owner.signal.aborted || this.outboxPolls.size >= 4) return;
+        if (owner.signal.aborted || dispatches.size >= 4) return;
+        const dispatch = Symbol();
+        dispatches.add(dispatch);
+        const dispatchFinished = () => { dispatches.delete(dispatch); };
         const work = poll((peer, header, transfer) => this.sendRemoteMessage(peer, header, "handoff", {
           ...transfer, signal: transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal,
-        }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown)
+        }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown, dispatchFinished)
           .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`))
-          .finally(() => this.outboxPolls.delete(work));
+          .finally(() => { dispatchFinished(); this.outboxPolls.delete(work); });
         this.outboxPolls.add(work);
       }, 250);
     }

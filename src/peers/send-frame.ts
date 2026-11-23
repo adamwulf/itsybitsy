@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { sanitizeMachineName } from "../machine-name";
+import { isValidAgentId, isValidRepoName } from "../validation";
 import { fileChunks, type ManifestEntry } from "./attachment-manifest";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 
@@ -42,8 +44,9 @@ function validFrom(value: unknown): value is SendHeader["from"] {
   if (!object(value)) return false;
   if (value.kind === "user") return onlyKeys(value, "kind");
   if (value.kind !== "agent" || !nonempty(value.id) || !onlyKeys(value, "kind", "id")) return false;
-  const segments = value.id.split("/");
-  return segments.length === 3 && segments.every(nonempty);
+  const [machine, repo, agent, extra] = value.id.split("/", 4);
+  return nonempty(machine) && sanitizeMachineName(machine) === machine &&
+    nonempty(repo) && isValidRepoName(repo) && nonempty(agent) && isValidAgentId(agent) && extra === undefined;
 }
 function validTarget(value: unknown): value is SendTarget {
   if (!object(value)) return false;

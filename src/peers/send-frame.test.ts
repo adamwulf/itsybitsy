@@ -351,3 +351,14 @@ test("abort from the final receive progress callback rejects the body", async ()
   });
   await expect(receive).rejects.toThrow("cancel after last byte");
 });
+
+test("agent sender segments use the machine, registry and agent naming grammars", async () => {
+  const parse = (id: string) => decodeSendHeader(new MemoryStream(encodeSendHeader({ ...header, from: { kind: "agent", id } })));
+  const id = "Adam’s Mac/Project_2/helper-1";
+  expect((await parse(id)).from).toEqual({ kind: "agent", id });
+  for (const bad of [" /repo/a", "desk/ /a", "desk/repo/ ", " desk/repo/a", "desk /repo/a", "../r/a",
+    "x".repeat(33) + "/r/a", "desk/" + "r".repeat(65) + "/a", "de\nsk/r/a", "de\u202esk/r/a",
+    "desk/re\tpo/a", "desk/repo/a\n", "desk/repo.name/a", "desk/r/@nick", "desk/r/nick name"]) {
+    await expect(parse(bad)).rejects.toThrow(/malformed/i);
+  }
+});

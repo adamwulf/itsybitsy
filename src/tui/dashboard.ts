@@ -1988,6 +1988,16 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
+  private escapeSend() {
+    if (!this.pendingRemoteSends.size || this._dialog) return;
+    if (this.selectedReceipt && this.peerService?.view().incoming?.some(row => row.id === this.selectedReceipt)) return;
+    const selected = this.remoteSelection;
+    const target = remoteMessageTarget(selected);
+    if (!selected || selected.kind === "remote-repo-header" || !target) return;
+    return [...this.pendingRemoteSends.values()].reverse().find(send =>
+      send.peerId === selected.peerId && JSON.stringify(send.target) === JSON.stringify(target));
+  }
+
   async stopRemoteSends() {
     const sends = [...this.pendingRemoteSends.values()];
     for (const { controller } of sends) controller.abort(new Error("Dashboard shutting down"));
@@ -3098,16 +3108,11 @@ export class DashboardComponent implements Component {
       return;
     }
     this.selectedReceipt = undefined;
-    if (this.pendingRemoteSends.size && matchesKey(data, Key.escape)) {
-      const selected = this.remoteSelection;
-      const target = remoteMessageTarget(selected);
-      if (selected && selected.kind !== "remote-repo-header" && target) {
-        const request = [...this.pendingRemoteSends.values()].reverse().find(send =>
-          send.peerId === selected.peerId && JSON.stringify(send.target) === JSON.stringify(target));
-        if (request) {
-          this.pendingRemoteSends.get(request.id)?.controller.abort(new Error("Send cancelled"));
-          return;
-        }
+    if (matchesKey(data, Key.escape)) {
+      const send = this.escapeSend();
+      if (send) {
+        send.controller.abort(new Error("Send cancelled"));
+        return;
       }
     }
 
@@ -3813,9 +3818,10 @@ export class DashboardComponent implements Component {
     // Compute available height for the main content area.
     // Chrome lines: header(1) + main title separator(1) +
     //               bottom separator(1) + status bar(2) = 5.
+    const cancellableSend = this.escapeSend();
     for (const send of this.pendingRemoteSends.values()) {
       const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
-      lines.push(truncateToWidth(`sending to ${send.label}…${progress}  Esc: cancel`, width, "…"));
+      lines.push(truncateToWidth(`sending to ${send.label}…${progress}${send === cancellableSend ? "  Esc: cancel" : ""}`, width, "…"));
     }
     const incoming = this.peerService?.view().incoming ?? [];
     for (const row of incoming) {

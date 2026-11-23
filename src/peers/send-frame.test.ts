@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeSendHeader, encodeSendHeader, sendFileBody, streamFileBody, type SendHeader } from "./send-frame";
@@ -145,13 +145,15 @@ test("a stalled sink hits the idle timeout and does not report progress", async 
 
 test("sends bounded chunks in order, reports cumulative bytes and can abort a stalled write", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ib-frame-"));
+  let handle: FileHandle | undefined;
   try {
     const path = join(dir, "file");
     const data = Buffer.alloc(CHUNK_BYTES * 2 + 1, "abc");
     await writeFile(path, data);
+    handle = await open(path, "r");
     const chunks: Buffer[] = [];
     const progress: number[] = [];
-    await sendFileBody(path, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } }, {
+    await sendFileBody(handle, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } }, {
       onProgress: total => progress.push(total),
     });
     expect(chunks.map(chunk => chunk.length)).toEqual([CHUNK_BYTES, CHUNK_BYTES, 1]);
@@ -161,12 +163,13 @@ test("sends bounded chunks in order, reports cumulative bytes and can abort a st
     const controller = new AbortController();
     const started = Promise.withResolvers<void>();
     const stalled = Promise.withResolvers<void>();
-    const send = sendFileBody(path, { writeAll: () => { started.resolve(); return stalled.promise; } }, { signal: controller.signal });
+    const send = sendFileBody(handle, { writeAll: () => { started.resolve(); return stalled.promise; } }, { signal: controller.signal });
     await started.promise;
     controller.abort(new Error("sender cancelled"));
     await expect(send).rejects.toThrow("sender cancelled");
     stalled.resolve();
   } finally {
+    await handle?.close();
     await rm(dir, { recursive: true, force: true });
   }
 });

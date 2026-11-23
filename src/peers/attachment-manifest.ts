@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { open, realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { sanitizeAttachmentName } from "./attachment-name";
@@ -11,6 +12,8 @@ export interface ManifestEntry {
   name: string;
   size: number;
   spellings: string[];
+  /** Owned by the caller. Hash and stage from this handle, then close it. */
+  handle: FileHandle;
 }
 
 interface ManifestOptions {
@@ -26,51 +29,64 @@ export async function buildAttachmentManifest(
   if (!paths.length) return [];
   const protectedDirs = ["peer", "sealed"].map(name => canonicalizeSandboxPath(join(home, ".itsybitsy", name)));
   const entries = new Map<string, ManifestEntry>();
-  for (const argument of paths) {
-    const expanded = argument === "~" ? home : argument.startsWith("~/") ? join(home, argument.slice(2)) : argument;
-    const absolute = resolve(cwd, expanded);
-    try {
-      const source = await realpath(absolute);
-      if (protectedDirs.some(dir => source === dir || source.startsWith(dir + sep))) {
-        throw new Error("protected attachment path");
-      }
-      let entry = entries.get(source);
-      if (!entry) {
-        const info = await stat(source);
-        if (!info.isFile()) throw new Error("not a regular file");
-        entry = { argument, source, size: info.size, name: sanitizeAttachmentName(basename(absolute)), spellings: [] };
-        entries.set(source, entry);
-      }
-      for (const spelling of [argument, absolute, source]) {
-        if (!entry.spellings.includes(spelling)) entry.spellings.push(spelling);
-      }
-    } catch (error) {
-      throw new Error(`Cannot attach ${JSON.stringify(argument)}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-    }
-  }
-  const files = Array.from(entries.values());
-  const result = checkManifestLimits(files, limits, { machine });
-  if (!result.ok) throw new Error(result.error);
-  return files;
-}
-
-/** The buffer is reused on the next read. Consume each chunk before advancing. */
-export async function* fileChunks(path: string): AsyncGenerator<Buffer> {
-  const file = await open(path, "r");
   try {
-    const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
-    for (;;) {
-      const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
-      if (!bytesRead) return;
-      yield buffer.subarray(0, bytesRead);
+    for (const argument of paths) {
+      const expanded = argument === "~" ? home : argument.startsWith("~/") ? join(home, argument.slice(2)) : argument;
+      const absolute = resolve(cwd, expanded);
+      try {
+        const source = await realpath(absolute);
+        if (protectedDirs.some(dir => source === dir || source.startsWith(dir + sep))) {
+          throw new Error("protected attachment path");
+        }
+        let entry = entries.get(source);
+        if (!entry) {
+          const before = await stat(source, { bigint: true });
+          if (!before.isFile()) throw new Error("not a regular file");
+          // NONBLOCK prevents a racing FIFO from hanging open. NOFOLLOW
+          // refuses a symlink substituted in the final component.
+          const handle = await open(source, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+          try {
+            const opened = await handle.stat({ bigint: true });
+            if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
+                await realpath(source) !== source) throw new Error("file changed while opening");
+            entry = { argument, source, handle, size: Number(opened.size), name: sanitizeAttachmentName(basename(absolute)), spellings: [] };
+            const result = checkManifestLimits([...entries.values(), entry], limits, { machine });
+            if (!result.ok) throw new Error(result.error);
+            entries.set(source, entry);
+          } catch (error) {
+            await handle.close();
+            throw error;
+          }
+        }
+        for (const spelling of [argument, absolute, source]) {
+          if (!entry.spellings.includes(spelling)) entry.spellings.push(spelling);
+        }
+      } catch (error) {
+        throw new Error(`Cannot attach ${JSON.stringify(argument)}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
     }
-  } finally {
-    await file.close();
+    return Array.from(entries.values());
+  } catch (error) {
+    await Promise.allSettled(Array.from(entries.values(), entry => entry.handle.close()));
+    throw error;
   }
 }
 
-export async function hashFile(path: string): Promise<string> {
+/** Positional reads let hashing and staging share the same validated handle.
+ * Each iteration reuses the buffer, so consume the chunk before advancing. */
+export async function* fileChunks(file: FileHandle): AsyncGenerator<Buffer> {
+  const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
+  let position = 0;
+  for (;;) {
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+    if (!bytesRead) return;
+    position += bytesRead;
+    yield buffer.subarray(0, bytesRead);
+  }
+}
+
+export async function hashFile(file: FileHandle): Promise<string> {
   const hash = createHash("sha256");
-  for await (const chunk of fileChunks(path)) hash.update(chunk);
+  for await (const chunk of fileChunks(file)) hash.update(chunk);
   return hash.digest("hex");
 }

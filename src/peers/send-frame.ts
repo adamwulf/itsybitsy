@@ -1,3 +1,4 @@
+import type { FileHandle } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { fileChunks } from "./attachment-manifest";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
@@ -128,23 +129,16 @@ export async function streamFileBody(
 
 /** Only the caller knows when the last file has been sent and may finish the stream. */
 export async function sendFileBody(
-  path: string, stream: { writeAll(bytes: number[]): Promise<void> }, options: FileBodyOptions = {},
+  file: FileHandle, stream: { writeAll(bytes: number[]): Promise<void> }, options: FileBodyOptions = {},
 ): Promise<void> {
-  const chunks = fileChunks(path);
+  const chunks = fileChunks(file);
   let written = 0;
-  try {
-    for (;;) {
-      const next = await waitForIO(options, () => chunks.next());
-      if (next.done) return;
-      const chunk = next.value;
-      await waitForIO(options, () => stream.writeAll(Array.from(chunk)));
-      written += chunk.length;
-      options.onProgress?.(written);
-    }
-  } catch (error) {
-    // return() closes the file, queued behind any in-flight disk read. The
-    // caller can cancel the transport immediately even when that read stalls.
-    void chunks.return(undefined).catch(() => {});
-    throw error;
+  for (;;) {
+    const next = await waitForIO(options, () => chunks.next());
+    if (next.done) return;
+    const chunk = next.value;
+    await waitForIO(options, () => stream.writeAll(Array.from(chunk)));
+    written += chunk.length;
+    options.onProgress?.(written);
   }
 }

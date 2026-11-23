@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, mkdir, symlink, rm, realpath, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, open, rename, symlink, rm, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { createHash } from "node:crypto";
-import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
+import { buildAttachmentManifest, hashFile, type ManifestEntry } from "./attachment-manifest";
+import { sendFileBody } from "./send-frame";
 import { CHUNK_BYTES, DEFAULT_TRANSFER_LIMITS } from "./transfer-limits";
 
 let home: string;
@@ -14,7 +15,16 @@ beforeEach(async () => {
   cwd = join(home, "work");
   await mkdir(cwd);
 });
-afterEach(() => rm(home, { force: true, recursive: true }));
+const owned: ManifestEntry[] = [];
+async function manifest(...args: Parameters<typeof buildAttachmentManifest>) {
+  const entries = await buildAttachmentManifest(...args);
+  owned.push(...entries);
+  return entries;
+}
+afterEach(async () => {
+  await Promise.all(owned.splice(0).map(entry => entry.handle.close()));
+  await rm(home, { force: true, recursive: true });
+});
 
 test("resolves relative, home, absolute and symlink spellings into one manifest entry", async () => {
   const original = join(cwd, "file");
@@ -22,11 +32,11 @@ test("resolves relative, home, absolute and symlink spellings into one manifest 
   await writeFile(original, "hello");
   await symlink(original, alias);
   const paths = ["file", "~/work/file", "./link", original, "./link"];
-  const manifest = await buildAttachmentManifest(paths, { cwd, home, limits: { ...DEFAULT_TRANSFER_LIMITS, maxFiles: 1 } });
-  expect(manifest).toHaveLength(1);
+  const entries = await manifest(paths, { cwd, home, limits: { ...DEFAULT_TRANSFER_LIMITS, maxFiles: 1 } });
+  expect(entries).toHaveLength(1);
   const source = await realpath(original);
-  expect(manifest[0]).toMatchObject({ argument: "file", name: "file", size: 5, source });
-  expect(new Set(manifest[0]!.spellings)).toEqual(new Set([...paths, source, alias]));
+  expect(entries[0]).toMatchObject({ argument: "file", name: "file", size: 5, source });
+  expect(new Set(entries[0]!.spellings)).toEqual(new Set([...paths, source, alias]));
 });
 
 test("refuses missing paths, directories, fifos and sockets before opening them", async () => {
@@ -56,7 +66,7 @@ test("refuses both protected roots by canonical path, including symlinked direct
   }
   await mkdir(join(home, ".itsybitsy", "peer-outbox"));
   await writeFile(join(home, ".itsybitsy", "peer-outbox", "ok"), "");
-  expect(await buildAttachmentManifest(["~/.itsybitsy/peer-outbox/ok"], { cwd, home })).toHaveLength(1);
+  expect(await manifest(["~/.itsybitsy/peer-outbox/ok"], { cwd, home })).toHaveLength(1);
 });
 
 test("enforces supplied limits and names the sending machine", async () => {
@@ -70,6 +80,24 @@ test("hashes across chunk boundaries and handles an empty file", async () => {
   for (const length of [0, CHUNK_BYTES, CHUNK_BYTES * 3 + 11]) {
     const bytes = Buffer.alloc(length, "abcdefg");
     await writeFile(path, bytes);
-    expect(await hashFile(path)).toBe(createHash("sha256").update(bytes).digest("hex"));
+    const handle = await open(path, "r");
+    try {
+      expect(await hashFile(handle)).toBe(createHash("sha256").update(bytes).digest("hex"));
+    } finally {
+      await handle.close();
+    }
   }
+});
+
+test("hash and body reads stay on the validated file after its name is replaced", async () => {
+  const path = join(cwd, "report");
+  await writeFile(path, "original");
+  const [entry] = await manifest([path], { cwd, home });
+  await rename(path, path + ".old");
+  await writeFile(path, "different");
+  const digest = createHash("sha256").update("original").digest("hex");
+  expect(await hashFile(entry!.handle)).toBe(digest);
+  const chunks: Buffer[] = [];
+  await sendFileBody(entry!.handle, { writeAll: async bytes => { chunks.push(Buffer.from(bytes)); } });
+  expect(Buffer.concat(chunks).toString()).toBe("original");
 });

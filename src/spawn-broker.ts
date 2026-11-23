@@ -253,6 +253,10 @@ export async function submitWatchdogRequest(
   let stillQueued: boolean;
   try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
   catch (err) { deps.onUncertain?.(); return brokerFail(`Could not withdraw request: ${err}`); }
+  if (!stillQueued && !deps.signal?.aborted) {
+    const result = await readResult();
+    if (result && !deps.signal?.aborted) return result;
+  }
   if (!stillQueued && deps.signal?.aborted && deps.cancelClaimed) {
     await deps.cancelClaimed().catch(err => warnSendCleanup(`Could not signal claimed send cancellation: ${err}`));
   }

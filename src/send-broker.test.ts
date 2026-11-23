@@ -722,6 +722,26 @@ describe("send broker", () => {
       await expect(fs.stat(join(agentDir, "send-attachments"))).rejects.toMatchObject({ code: "ENOENT" });
     });
 
+    test.each(["progress", "withdrawal"])("a watchdog result published during the final %s is consumed", async when => {
+      const { submitWatchdogRequest } = await import("./spawn-broker");
+      let now = 0;
+      const ready = join(spawnRequestDir(agentDir), ID_A + ".json");
+      const publish = () => Bun.write(join(spawnResultDir(agentDir), ID_A + ".json"), JSON.stringify({ id: ID_A, ok: true, exitCode: 0 }));
+      const rename = fs.rename;
+      const spy = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+        if (from === ready && when === "withdrawal") await publish();
+        return rename(from, to);
+      });
+      try {
+        const result = await submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
+          { request: "send", action: "send", alreadyStarted: "claimed" }, 100, { now: () => now,
+            sleep: async () => { await rm(ready, { force: true }); now += 100; },
+            readProgress: async () => { if (now && when === "progress") await publish(); return 0; },
+          });
+        expect(result.ok).toBe(true);
+      } finally { spy.mockRestore(); }
+    });
+
     test("Ctrl-C inside a successful claimed broker result read reports unknown", async () => {
       const { submitWatchdogRequest } = await import("./spawn-broker");
       const control = new AbortController();

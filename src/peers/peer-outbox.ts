@@ -150,9 +150,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       }
       await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
-      if (existsSync(join(claimed, "result.json"))) {
-        trackSendCleanup(rm(claimed, { recursive: true, force: true }), "Cancelled peer result cleanup failed");
-      }
+      const last = await readResult();
+      if (last && !signal?.aborted) return last;
     }
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);

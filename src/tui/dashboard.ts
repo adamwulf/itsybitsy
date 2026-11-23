@@ -508,7 +508,7 @@ class StatusBarComponent implements Component {
    * would refuse.
    */
   remoteSelected = false;
-  remoteCoordinatorSelected = false;
+  remoteCoordinatorVisible = false;
   remoteRepoSelected = false;
   hasResolvableWarnings = false;
 
@@ -534,7 +534,7 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.remoteSelected) {
-      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorSelected ? ";/l: scroll    " : ""}p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll    " : ""}p/n: pane    1/2/3: tab    [ ] { }: resize${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -1485,6 +1485,7 @@ export class DashboardComponent implements Component {
    * stale for up to 1s. The always-on selected-agent `tmuxPoller` is untouched.
    */
   private updatePaneVisibility() {
+    this.statusBar.remoteCoordinatorVisible = this.peerCoordinatorVisible;
     if (this.peerCoordinatorVisible) {
       this.focusManager.skipTargets.add("right-pane");
       const focus = this.focusManager.current();
@@ -1958,14 +1959,14 @@ export class DashboardComponent implements Component {
   refuseOnRemoteRow(key: string): boolean {
     const remote = this.remoteSelection;
     if (remote === null || isRemoteAllowedKey(key)) return false;
-    if (remote.kind === "remote-coordinator" && (key === ";" || key === "l")) return false;
+    if (this.peerCoordinatorVisible && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
 
   private scrollOutput(up: boolean): void {
-    if (this.remoteSelection?.kind === "remote-coordinator") {
+    if (this.peerCoordinatorVisible) {
       this.remotePane.scroll(up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP);
     } else if (up) agentActions.handleScrollUp(this);
     else agentActions.handleScrollDown(this);
@@ -2370,7 +2371,6 @@ export class DashboardComponent implements Component {
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
     this.statusBar.remoteSelected = remote !== null;
-    this.statusBar.remoteCoordinatorSelected = remote?.kind === "remote-coordinator";
     this.statusBar.remoteRepoSelected = remote?.kind === "remote-repo-header";
 
     // Wire info panel

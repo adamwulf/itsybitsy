@@ -10072,6 +10072,27 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("TREE hides the scroll hint and refuses scrolling until the peer capture is visible again", () => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    selectByKey(dashboard, PEER_B + "/@system");
+    const scroll = spyOn((dashboard as any).remotePane, "scroll");
+    const screen = () => stripAnsi(dashboard.render(180).join("\n"));
+    expect(screen()).toContain(";/l: scroll");
+    dashboard.jumpToMode("TREE");
+    expect(screen()).not.toContain(";/l: scroll");
+    for (const key of [";", "l"]) {
+      resetNotice(dashboard);
+      dashboard.handleInput(key);
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+    }
+    expect(scroll).not.toHaveBeenCalled();
+    dashboard.handleInput("p");
+    expect(screen()).toContain(";/l: scroll");
+    dashboard.handleInput(";");
+    expect(scroll).toHaveBeenCalledTimes(1);
+  });
+
   test("a highlighted coordinator shows the startup denial, then the remote capture when permitted", async () => {
     const { dashboard, service } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);

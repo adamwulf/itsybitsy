@@ -683,13 +683,15 @@ function logCoordinatorPaneConditions(output: string): void {
  * logo marker often renders in the SAME frame as the prompt, and returning
  * "ready" while that modal is still up would leave the coordinator wedged.
  */
-export async function waitForCoordinatorReady(): Promise<boolean> {
+export async function waitForCoordinatorReady(generation = launchGeneration): Promise<boolean> {
   const POLL_INTERVAL_MS = 500;
   const maxAttempts = 30;
   let lastOutput: string | null = null;
   for (let i = 0; i < maxAttempts; i++) {
     await sleepFn(POLL_INTERVAL_MS);
+    if (generation !== launchGeneration) return false;
     const output = await captureTmuxOutput(IB_COORDINATOR_SESSION, 200);
+    if (generation !== launchGeneration) return false;
     lastOutput = output;
     if (output === null) continue;
     if (STARTUP_MARKERS.some((m) => output.includes(m))) {
@@ -700,13 +702,14 @@ export async function waitForCoordinatorReady(): Promise<boolean> {
         logToWatchLog("[coordinator] ready marker found WITH a co-present permission prompt ('Enter to confirm') in the same pane");
         await autoAcceptCoordinatorPrompt(output);
       }
-      return true;
+      return generation === launchGeneration;
     }
     // A prompt that appears BEFORE the ready marker — dismiss it so launch can
     // proceed to the marker instead of wedging behind an unanswered modal.
     await autoAcceptCoordinatorPrompt(output);
   }
 
+  if (generation !== launchGeneration) return false;
   // Poll exhausted — record one diagnostic line so the failure leaves a trace.
   // Append the last 5 non-empty lines of the final capture: that tail is the
   // signal that tells us whether STARTUP_MARKERS is still too narrow.
@@ -846,25 +849,25 @@ export function takeCoordinatorPaneWarning(): string | null {
   return warning;
 }
 
+let launchGeneration = 0;
 let paneRegistration: Promise<void> = Promise.resolve();
 export function waitForCoordinatorPaneRegistration(): Promise<void> {
   return paneRegistration;
 }
 
-function startCoordinatorPaneRegistration(paneId: string | null): void {
-  const pending = recordCoordinatorPane(paneId).then(
+function startCoordinatorPaneRegistration(paneId: string | null, generation: number): void {
+  paneRegistration = recordCoordinatorPane(paneId, generation).then(
     () => null,
     err => `Remote coordinator capture disabled: ${err instanceof Error ? err.message : String(err)}`,
   ).then(warning => {
     // A newer launch owns the dashboard warning if two restarts overlapped.
-    if (pending !== paneRegistration) return;
+    if (generation !== launchGeneration) return;
     coordinatorPaneWarning = warning;
     if (warning) logToWatchLog(`[coordinator] ${warning}`);
   });
-  paneRegistration = pending;
 }
 
-async function recordCoordinatorPane(paneId: string | null): Promise<void> {
+async function recordCoordinatorPane(paneId: string | null, generation: number): Promise<void> {
   if (!paneId) throw new Error("tmux did not report the launched pane id");
   const deadline = performance.now() + 5_000;
   const run = (args: string[]) => {
@@ -874,6 +877,7 @@ async function recordCoordinatorPane(paneId: string | null): Promise<void> {
     return runCoordinatorCommand(["tmux", ...args], remaining, coordinatorSpawnCtx.runner, timeout);
   };
   const foreground = await run(["display-message", "-p", "-t", paneId, "#{pane_current_command}"]);
+  if (generation !== launchGeneration) return;
   if (foreground.code !== 0) throw new Error(foreground.error.trim() || "could not read the foreground command");
   const command = foreground.text.trim();
   // Readiness text can outlive Claude. Never record the launcher's bash as the CLI.
@@ -907,20 +911,21 @@ async function recordCoordinatorPane(paneId: string | null): Promise<void> {
 export async function ensureSystemCoordinator(): Promise<string> {
   // Read before the launch: the launched session's SessionStart hook deletes it.
   const bounced = existsSync(bounceMarkerPath());
-  const session = await ensureSystemCoordinatorImpl(false);
-  if (bounced && lastSpawnMode !== "existing") {
+  const generation = await ensureSystemCoordinatorImpl(false);
+  if (bounced && generation === launchGeneration) {
     const result = await bounceNoticeCtx.fn(BOUNCE_RESTART_NOTICE);
     if (!result.ok) logToWatchLog(`[coordinator] bounce restart notice not sent: ${result.stderr}`);
   }
-  return session;
+  return IB_COORDINATOR_SESSION;
 }
 
-async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Promise<string> {
+/** The generation this call launched, or null for an existing or superseded launch. */
+async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Promise<number | null> {
   const startedAt = Date.now();
   if (await tmuxSessionExists()) {
     lastSpawnMode = "existing";
     logToWatchLog(`[coordinator] ready mode=existing after ${Date.now() - startedAt}ms`);
-    return IB_COORDINATOR_SESSION;
+    return null;
   }
 
   const home = itsybitsyHome();
@@ -975,10 +980,13 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     if (await tmuxSessionExists()) {
       lastSpawnMode = "existing";
       logToWatchLog(`[coordinator] ready mode=existing after ${Date.now() - startedAt}ms`);
-      return IB_COORDINATOR_SESSION;
+      return null;
     }
     throw new Error("Failed to create system coordinator tmux session");
   }
+  const generation = ++launchGeneration;
+  coordinatorPaneWarning = null;
+  paneRegistration = Promise.resolve();
   await coordinatorSpawnCtx.run(["tmux", "set-option", "-w", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION), "history-limit", "50000"]);
   // window-size manual prevents tmux from auto-resizing the window to the
   // latest attached client's terminal size. The dashboard sizes the session
@@ -1081,9 +1089,11 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
     `[coordinator] launch cmd (${resumeId ? "resume" : "fresh"}): ${claudeCmd}`,
   );
   const paneId = /^%\d+$/.test(createdPane) ? createdPane : null;
+  if (generation !== launchGeneration) return null;
   const launch = await coordinatorSpawnCtx.run([
     "tmux", "send-keys", "-t", paneId ?? tmuxSessionTarget(IB_COORDINATOR_SESSION), claudeCmd, "Enter",
   ]);
+  if (generation !== launchGeneration) return null;
   if (launch.exitCode !== 0) throw new Error(`Failed to launch system coordinator: ${launch.stderr}`);
 
   // Wait for Claude's UI to be ready so the resume-failure fallback below
@@ -1092,7 +1102,8 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // launch. The prompt body itself is delivered by the SessionStart hook
   // on both fresh and resume; this poll only watches for the UI marker.
   const readyStart = Date.now();
-  const ready = await waitForCoordinatorReady();
+  const ready = await waitForCoordinatorReady(generation);
+  if (generation !== launchGeneration) return null;
   const readyMs = Date.now() - readyStart;
 
   if (resumeId && !ready) {
@@ -1103,7 +1114,9 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
       `[coordinator] resume of ${resumeId} not ready after ${readyMs}ms — killing session, clearing prior transcripts`,
     );
     await coordinatorSpawnCtx.run(["tmux", "kill-session", "-t", tmuxSessionTarget(IB_COORDINATOR_SESSION)]);
+    if (generation !== launchGeneration) return null;
     await writeClearedMarker();
+    if (generation !== launchGeneration) return null;
     return await ensureSystemCoordinatorImpl(true);
   }
 
@@ -1111,15 +1124,14 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // additionalContext on both fresh and resume — no special-case work here.
   lastSpawnMode = resumeId ? "resumed" : "fresh";
   if (ready) {
-    startCoordinatorPaneRegistration(paneId);
+    startCoordinatorPaneRegistration(paneId, generation);
     logToWatchLog(`[coordinator] ready mode=${lastSpawnMode} after ${readyMs}ms`);
   } else {
-    paneRegistration = Promise.resolve();
     coordinatorPaneWarning = "remote capture disabled: coordinator did not become ready";
     logToWatchLog(`[coordinator] readiness timed out mode=fresh after ${readyMs}ms — ${coordinatorPaneWarning}`);
   }
 
-  return IB_COORDINATOR_SESSION;
+  return generation;
 }
 
 /**

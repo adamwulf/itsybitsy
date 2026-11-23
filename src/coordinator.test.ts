@@ -594,6 +594,97 @@ describe("ensureSystemCoordinator", () => {
     }
   });
 
+  test.each(["Claude Code v1.0.0", "old pane closed"])("only the replacement publishes readiness when the older poll returns %s", async oldOutput => {
+    // Leave an earlier launch failure pending for the dashboard.
+    coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 1 } }));
+    await ensureSystemCoordinator();
+    await waitForCoordinatorPaneRegistration();
+    expect(await readFile(join(tmpDir, "watch.log"), "utf8")).toContain("tmux did not report the launched pane id");
+
+    const projectDir = join(typesHome, ".claude", "projects", encodeClaudeProjectPath(tmpDir));
+    await mkdir(projectDir, { recursive: true });
+    const transcript = join(projectDir, "44444444-4444-4444-4444-444444444444.jsonl");
+    await Bun.write(transcript, "{}\n");
+    const olderPoll = Promise.withResolvers<number>();
+    const started = Promise.withResolvers<void>();
+    const records: string[] = [];
+    let panes = 0;
+    let kills = 0;
+    coordinatorSpawnCtx.set(cmd => {
+      let text = "";
+      if (cmd[1] === "new-session") text = `%${++panes}`;
+      if (cmd[1] === "kill-session") kills++;
+      if (cmd[1] === "display-message") text = "claude";
+      if (cmd.includes("@ib-system-coordinator-command")) records.push(cmd[3]!);
+      return { stdout: mockStream(text), stderr: emptyStream(), exited: Promise.resolve(cmd[1] === "has-session" ? 1 : 0) };
+    });
+    tmuxSpawnCtx.set(() => {
+      if (panes === 1) {
+        started.resolve();
+        return { stdout: mockStream(oldOutput), stderr: emptyStream(), exited: olderPoll.promise };
+      }
+      return { stdout: mockStream("Claude Code v1.0.0"), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+    const older = restartSystemCoordinator();
+    try {
+      await started.promise;
+      expect(takeCoordinatorPaneWarning()).toBeNull(); // cleared as soon as this pane was created
+      await rm(transcript); // the replacement launches fresh, the older launch attempted resume
+      await restartSystemCoordinator();
+      await waitForCoordinatorPaneRegistration();
+      const replacementRegistration = waitForCoordinatorPaneRegistration();
+      olderPoll.resolve(0);
+      await older;
+      expect(waitForCoordinatorPaneRegistration()).toBe(replacementRegistration);
+      expect(getLastCoordinatorSpawnMode()).toBe("fresh");
+      expect(records).toEqual(["%2"]);
+      expect(kills).toBe(2); // no stale resume-failure kill/retry
+      expect(takeCoordinatorPaneWarning()).toBeNull();
+      const log = await readFile(join(tmpDir, "watch.log"), "utf8");
+      expect(log).not.toContain("ready mode=resumed");
+      expect(log).not.toContain("ready-poll exhausted");
+    } finally {
+      olderPoll.resolve(0);
+      await older;
+    }
+  });
+
+  test("an older registration failure cannot publish while the replacement is waiting for readiness", async () => {
+    const oldWrite = Promise.withResolvers<number>();
+    const writing = Promise.withResolvers<void>();
+    const newPoll = Promise.withResolvers<number>();
+    const polling = Promise.withResolvers<void>();
+    let panes = 0;
+    coordinatorSpawnCtx.set(cmd => {
+      if (cmd.includes("@ib-system-coordinator-command") && panes === 1) {
+        writing.resolve();
+        return { stdout: emptyStream(), stderr: mockStream("stale write"), exited: oldWrite.promise };
+      }
+      const text = cmd[1] === "new-session" ? `%${++panes}` : cmd[1] === "display-message" ? "claude" : "";
+      return { stdout: mockStream(text), stderr: emptyStream(), exited: Promise.resolve(cmd[1] === "has-session" ? 1 : 0) };
+    });
+    tmuxSpawnCtx.set(() => {
+      if (panes === 2) polling.resolve();
+      return { stdout: mockStream("Claude Code v1.0.0"), stderr: emptyStream(), exited: panes === 2 ? newPoll.promise : Promise.resolve(0) };
+    });
+    await restartSystemCoordinator();
+    await writing.promise;
+    const olderRegistration = waitForCoordinatorPaneRegistration();
+    const replacement = restartSystemCoordinator();
+    try {
+      await polling.promise;
+      oldWrite.resolve(1);
+      await olderRegistration;
+      expect(takeCoordinatorPaneWarning()).toBeNull();
+      expect(await readFile(join(tmpDir, "watch.log"), "utf8")).not.toContain("stale write");
+    } finally {
+      oldWrite.resolve(1);
+      newPoll.resolve(0);
+      await replacement;
+      await waitForCoordinatorPaneRegistration();
+    }
+  });
+
   test("logs the resolved model and its source layer on spawn", async () => {
     coordinatorSpawnCtx.set(createCommandRouter({ "has-session": { exitCode: 1 } }));
     await ensureSystemCoordinator();

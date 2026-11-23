@@ -1522,7 +1522,7 @@ broker's. `src/send-broker.ts` adds:
   sandbox that would let an agent copy any file the watchdog can read (a
   `.env`, say) to where it can read it. A path in a brokered message is sent
   as text.
-- **Remote text targets.** For a remote match the watchdog submits the message to the local endpoint owner via `peer-outbox` (SPEC §20.4). It qualifies the verified requester with this machine’s name and the repo’s registry name or `~<repoId>`. The broker returns the watcher’s queue acknowledgement or error. The sandboxed client still supplies only the target and text. It needs its watchdog to submit a remote request.
+- **Remote text targets.** For a remote match the watchdog submits the message to the local endpoint owner via `peer-outbox` (SPEC §20.4). It qualifies the verified requester with this machine’s name and the repo’s registry name or `~<repoId>`. The broker returns the watcher’s queue acknowledgement or error. The sandboxed client still supplies only the target and text. It needs its watchdog to submit a remote request. A Codex worktree using its native sandbox with the itsybitsy sandbox disabled also uses this route. Its watchdog verifies the worktree backlink and requester id and checks that the seal is genuinely absent. This exception applies only to remote sends.
 
 - **Never to the requester itself.** `sendMessage` takes the recipient's tmux
   session from its `meta.json` and decides an inline drain from its
@@ -1597,9 +1597,12 @@ agent profile.
    broker for about 1 ms.
 2. Requests are handled one at a time per agent (§4C.8 limitation 4). A send
    queued behind a long brokered merge can time out on the client while it is
-   still queued; it is then withdrawn and the agent can send again. The
-   withdrawal is check-then-remove, as for every brokered command: a watchdog
-   that reads the request in that instant still sends it.
+   still queued. The watchdog renames the ready request to a claimed name before
+   reading it. On timeout or Ctrl-C the client renames the same ready request
+   to a withdrawn name. Only one rename can succeed. A send cancelled before
+   publication or successfully withdrawn is safe to retry. If the watchdog
+   won the claim, the message may already be queued. Check the recipient before
+   retrying. A completed acknowledgement reports the selected result and status.
 3. When the target has no live watchdog, `sendMessage` delivers inline, in the
    watchdog, with the length-scaled delays of SPEC.md §4.1. A very long message
    (some hundreds of KB) can take more than the client's 30 s; the client then

@@ -281,6 +281,19 @@ describe("serveTrustedConnection", () => {
     await side.done;
   });
 
+  test("non-framed reads renew their idle deadline on each fragment", async () => {
+    const side = serve({ snapshot });
+    const accept = side.b.acceptBi.bind(side.b);
+    spyOn(side.b, "acceptBi").mockImplementationOnce(async () => {
+      const stream = await accept();
+      const read = stream.read.bind(stream);
+      spyOn(stream, "read").mockImplementation(limit => { side.clock.advance(35_000); return read(Math.min(2, limit)); });
+      return stream;
+    });
+    try { expect(await requestAgents(side.a)).toEqual(snapshot()); }
+    finally { side.a.close(0, "done"); await side.done; }
+  });
+
   test.each([262144, 262145])("reads at most 262144 bytes for a %i-byte encoded new-agent request", async size => {
     const startAgent = mock(async () => "agent-id");
     const side = serve({ startAgent });
@@ -288,14 +301,15 @@ describe("serveTrustedConnection", () => {
     const limits: number[] = [];
     spyOn(side.b, "acceptBi").mockImplementationOnce(async () => {
       const stream = await accept();
-      const read = stream.readToEnd.bind(stream);
-      spyOn(stream, "readToEnd").mockImplementation(limit => { limits.push(limit); return read(limit); });
+      const read = stream.read.bind(stream);
+      spyOn(stream, "read").mockImplementation(limit => { limits.push(limit); return read(limit); });
       return stream;
     });
     const request = { op: "new-agent", repo: "app", type: "worker", prompt: "é" };
     request.prompt += "x".repeat(size - encode(request).length);
     const reply = await rawRequest(side.a, encode(request));
-    expect(limits).toEqual([262144 - 1]); // One byte already read for framing.
+    expect(limits[0]).toBe(1);
+    expect(Math.max(...limits)).toBeLessThanOrEqual(64 * 1024);
     if (size === 262144) {
       expect(decodeText(reply)).toEqual({ ok: true, id: "agent-id" });
       expect(startAgent).toHaveBeenCalledTimes(1);

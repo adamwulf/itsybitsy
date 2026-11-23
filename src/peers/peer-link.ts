@@ -650,8 +650,23 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       if (stalledRead) closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
       return;
     }
-    const rest = await waitForIO(options, () => stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES - first.length));
-    request = decodePeerRequest(Buffer.concat([first, rest]));
+    let payload = Buffer.alloc(1024);
+    payload.set(first);
+    let length = first.length;
+    while (true) {
+      const limit = Math.min(CHUNK_BYTES, NEW_AGENT_MAX_REQUEST_BYTES - length + 1);
+      const part = await waitForIO(options, () => stream.read(limit));
+      if (!part.length) break;
+      if (part.length > limit || length + part.length > NEW_AGENT_MAX_REQUEST_BYTES) throw new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
+      if (length + part.length > payload.length) {
+        const next = Buffer.allocUnsafe(Math.min(NEW_AGENT_MAX_REQUEST_BYTES, Math.max(2 * payload.length, length + part.length)));
+        payload.copy(next, 0, 0, length);
+        payload = next;
+      }
+      payload.set(part, length);
+      length += part.length;
+    }
+    request = decodePeerRequest(payload.subarray(0, length));
   } catch (err) {
     if (err instanceof PeerProtocolError || err instanceof PairProtocolError) {
       // PairProtocolError is the seam's readToEnd past its limit.

@@ -664,8 +664,8 @@ test("a stalled non-framed request releases the watcher header slot", async () =
   const accept = b.acceptBi.bind(b);
   b.acceptBi = async () => {
     const stream = await accept();
-    const read = stream.readToEnd.bind(stream);
-    stream.readToEnd = n => { reading.resolve(); return read(n); };
+    const read = stream.read.bind(stream);
+    stream.read = n => { if (n > 1) reading.resolve(); return read(n); };
     return stream;
   };
   const serving = serveTrustedConnection(b, { peerName: paired, headerReaders: readers,

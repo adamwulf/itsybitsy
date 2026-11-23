@@ -16,7 +16,8 @@ Both features run on the existing trusted ALPN `itsybitsy/peer/1` and reuse its 
   - When the peer is unreachable, the row is dimmed and shows how long ago it was last seen.
   - The row has its own key in the tree, so selection and navigation work as they do for other rows.
   - Per-repo coordinators stay hidden.
-- **Log.** While the row is highlighted, `ib watch` sends `{"op":"coordinator-pane"}` about every 2 s. No request is sent while the row is not highlighted.
+- **Log.** While the row is highlighted, `ib watch` sends `{"op":"coordinator-pane"}` about every 2 s. Polling pauses while a dialog is open, resumes when it closes, and stops when selection moves away.
+  - Pane reads use the same startup human-caller decision as remote starts. If it denies access, the row still shows its coordinator state and the pane displays the reason. The dashboard opens no pane stream.
   - The reply is the coordinator pane's capture: the same text the local pane shows, with ANSI escapes limited to the existing allowlist.
   - The reply is capped. A request that fails keeps the last capture and shows the error.
 - **Responder.**
@@ -25,7 +26,7 @@ Both features run on the existing trusted ALPN `itsybitsy/peer/1` and reuse its 
   - It does not run any command on behalf of the requester.
 - **Guard.**
   - The row stays read-only. It has no input box, and retire, resume and every other action are refused with a notice.
-  - This changes if Adam answers B.1 to include the coordinator.
+  - Remote sends belong to Feature B. Its revised scope and sender rules are recorded in decision B.0.
 
 ## B. Remote sends
 

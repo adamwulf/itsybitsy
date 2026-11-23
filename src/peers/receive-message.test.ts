@@ -1064,3 +1064,16 @@ test.each(["stat", "close"] as const)("a stalled sender file %s times out withou
     expect(String(await result)).toContain("No progress"); expect(a.closeInfo()?.code).toBe(3);
   } finally { release.resolve(); spy.mockRestore(); a.close(0, "done"); }
 });
+
+test("failed rollback removal retries the same partial until it is gone", async () => {
+  const remove = fs.rm, paths: string[] = [];
+  const spy = spyOn(fs, "rm").mockImplementation(async (...args) => {
+    if (String(args[0]).endsWith(".partial")) { paths.push(String(args[0])); if (paths.length === 1) throw Error("disk busy"); }
+    await remove(...args);
+  });
+  try {
+    await expect(receiver(header({ files: [manifestFile("x")] }), "p", paired, { read: async () => Buffer.from("y") })).rejects.toThrow("hash mismatch");
+    await waitFor(async () => !(await readdir(join(cli.root, "staging/incoming"))).length);
+    expect(paths).toHaveLength(2); expect(paths[0]).toBe(paths[1]); expect(lines).toEqual([]);
+  } finally { spy.mockRestore(); }
+});

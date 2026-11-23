@@ -48,7 +48,7 @@ async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnque
 
 type ReceiveStorage = { tempDir: string; stagingRoot?: string; hasFreeSpace: typeof hasFreeSpace };
 
-async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions, reserve: (bytes: number) => number, defer: (cleanup: Promise<void>) => void) {
+async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions, reserve: (bytes: number) => number, defer: (cleanup: Promise<void>, retry: () => Promise<void>) => void) {
   let pending: Promise<unknown> | undefined;
   const io = <T>(operation: () => Promise<T>) => waitForIO(options, () => {
     const running = operation().finally(() => { pending = undefined; });
@@ -68,14 +68,15 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
   const close = async () => { const file = handle; handle = undefined; await file?.close(); };
   const cleanup = async () => {
     const outstanding = pending;
+    const remove = async () => { if (current) await rm(current, { recursive: true, force: true }); };
     const rollback = (async () => {
       await outstanding?.catch(() => {});
-      try { await close(); } finally { if (current) await rm(current, { recursive: true, force: true }); }
+      try { await close(); } finally { await remove(); }
     })();
-    if (outstanding) defer(rollback);
+    if (outstanding) defer(rollback, remove);
     else {
       try { await waitForIO({ setTimer: options.setTimer }, () => rollback); }
-      catch { defer(rollback); }
+      catch { defer(rollback, remove); }
     }
   };
   try {
@@ -187,9 +188,15 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
                   nextNotice = now() + 1000;
                   notice(`Receiving from ${name}: ${bytes} / ${total} bytes`);
                 }
-              } }, reserve, cleanup => {
+              } }, reserve, (cleanup, retry) => {
                 cleanupOwnsReservation = true;
-                void cleanup.catch(err => log(`Attachment cleanup failed: ${err}`)).finally(() => reserve(0));
+                const finish = (operation: Promise<void>, delay: number) => {
+                  void operation.then(() => reserve(0), err => {
+                    log(`Retrying attachment cleanup: ${err}`);
+                    setTimeout(() => finish(retry(), Math.min(delay * 2, 30_000)), delay).unref();
+                  });
+                };
+                finish(cleanup, 250);
               });
               return staged.message;
             } catch (err) { bodyError = err; throw err; }

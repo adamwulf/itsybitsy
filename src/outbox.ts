@@ -286,7 +286,10 @@ export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<strin
       const remaining = current.filter(m => !deliveredIds.has(m.id));
       const path = outboxPath(parent);
       if (!remaining.length) { await unlink(path); return; }
-      const temp = path + "." + crypto.randomUUID() + ".tmp";
+      const temp = path + ".tmp";
+      // The directory flock excludes other rewriters. Unlink the old entry
+      // before exclusive creation so a leftover link is never followed.
+      await rm(temp, { force: true });
       try {
         await writeFile(temp, remaining.map(m => JSON.stringify(m)).join("\n") + "\n", { flag: "wx", mode: 0o600 });
         await rename(temp, path);

@@ -112,7 +112,9 @@ describe("outbox queue", () => {
     await enqueueOutbox(dir, { message: "b", fromAgent: "", raw: false, id: "b" });
     await enqueueOutbox(dir, { message: "c", fromAgent: "", raw: false, id: "c" });
 
+    await writeFile(outboxPath(dir) + ".tmp", "interrupted rewrite");
     await rewriteOutboxRemoving(dir, new Set(["a"]));
+    expect(await Bun.file(outboxPath(dir) + ".tmp").exists()).toBe(false);
     let msgs = await readOutbox(dir);
     expect(msgs.map((m) => m.id)).toEqual(["b", "c"]);
 

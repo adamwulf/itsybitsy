@@ -680,6 +680,30 @@ describe("send broker", () => {
       expect((await readdir(spawnRequestDir(agentDir)).catch(() => [])).filter(name => name.endsWith(".json"))).toEqual([]);
     });
 
+    test("text-only progress in the result directory extends the CLI deadline", async () => {
+      const cwd = await linkWorktree();
+      let now = 0;
+      let id = "";
+      const answer = await routeCliSend({ target: "laptop/@system", readMessage: async () => MESSAGE, usage: "usage", repos }, {
+        cwd, watchdogLive: async () => true, now: () => now,
+        sleep: async () => {
+          now += 40_000;
+          if (!id) {
+            const [name] = await readdir(spawnRequestDir(agentDir));
+            id = name!.replace(/\.json$/, "");
+            await rm(join(spawnRequestDir(agentDir), name!));
+          }
+          const path = join(spawnResultDir(agentDir), id + ".progress");
+          await Bun.write(path, "");
+          await fs.utimes(path, now / 1000, now / 1000);
+          if (now >= 120_000) await Bun.write(join(spawnResultDir(agentDir), id + ".json"), JSON.stringify({ id, ok: true, exitCode: 0 }));
+        },
+      });
+      expect(answer).toMatchObject({ result: { ok: true } });
+      expect(now).toBe(120_000);
+      await expect(fs.stat(join(agentDir, "send-attachments"))).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
     test("Ctrl-C inside a successful claimed broker result read reports unknown", async () => {
       const { submitWatchdogRequest } = await import("./spawn-broker");
       const control = new AbortController();

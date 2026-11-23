@@ -142,7 +142,9 @@ export async function* fileChunks(file: FileHandle, expectedSize: number): Async
     position += bytesRead;
     yield buffer.subarray(0, bytesRead);
   }
-  if ((await file.read(buffer, 0, 1, position)).bytesRead) throw new Error("Source exceeds declared file size");
+  const { size } = await file.stat();
+  if (size > expectedSize) throw new Error("Source exceeds declared file size");
+  if (size < expectedSize) throw new Error("Source shorter than declared file size");
 }
 
 export async function hashFile({ handle, size }: Pick<ManifestEntry, "handle" | "size">): Promise<string> {

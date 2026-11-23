@@ -87,12 +87,16 @@ test("hashes across chunk boundaries and handles an empty file", async () => {
       // Select the positional overload used by fileChunks for the spy.
       const reader: { read(buffer: Buffer, offset: number, length: number, position: number): Promise<unknown> } = handle;
       const reads = spyOn(reader, "read");
+      const stats = spyOn(handle, "stat");
       expect(await hashFile({ handle, size: length })).toBe(createHash("sha256").update(bytes).digest("hex"));
-      expect(reads.mock.calls.length).toBe(Math.ceil(length / CHUNK_BYTES) + 1);
-      for (const [buffer, , limit] of reads.mock.calls) {
+      expect(stats).toHaveBeenCalledTimes(1);
+      expect(reads.mock.calls.length).toBe(Math.ceil(length / CHUNK_BYTES));
+      for (const [buffer, , limit, position] of reads.mock.calls) {
         expect(buffer).toBe(reads.mock.calls[0]![0]);
         expect(limit).toBeGreaterThan(0);
         expect(limit).toBeLessThanOrEqual(CHUNK_BYTES);
+        expect(position).toBeGreaterThanOrEqual(0);
+        expect(position + limit).toBeLessThanOrEqual(length);
       }
     } finally {
       await handle.close();

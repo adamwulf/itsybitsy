@@ -6,12 +6,10 @@ import fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as space from "./attachment-space";
 import { remoteCliCaller } from "./peer-outbox";
-import { userInfo } from "node:os";
-import { accountHome, resetUserHome, setUserHome } from "../home";
+import { resetUserHome, setUserHome } from "../home";
 import { createCliFixture, type CliFixture, type FixtureAgent } from "../test-cli-runner";
 import { buildAttachmentManifest, hashFile } from "./attachment-manifest";
 import * as config from "../config";
-import { readTransferLimits } from "../config";
 import { copyLocalAttachments, resolveAttachmentSender, stageLocalAttachments } from "./local-attachments";
 
 let fixture: CliFixture;
@@ -243,21 +241,6 @@ test("attachments refuse an unidentified caller", async () => {
   expect(await queue().exists()).toBe(false);
 });
 
-test("account policy is independent of the process HOME", async () => {
-  const original = process.env.HOME;
-  try {
-    process.env.HOME = fixture.cwd;
-    expect(accountHome()).toBe(userInfo().homedir);
-  } finally {
-    if (original === undefined) delete process.env.HOME;
-    else process.env.HOME = original;
-  }
-  setUserHome(fixture.home);
-  expect(accountHome()).not.toBe(process.env.HOME);
-  await Bun.write(join(fixture.home, ".itsybitsy/config.json"), '{"peering":{"attachments":{"maxFiles":0}}}');
-  expect((await readTransferLimits()).maxFiles).toBe(0);
-});
-
 test("sandbox caller lookup opens its agent directory and no unrelated repo root", async () => {
   setUserHome(fixture.home);
   const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
@@ -419,6 +402,14 @@ test("tilde arguments use the sender's HOME while protected trees belong to the 
   const run = (file: string) => fixture.run(["send", "reader", "--attach", file, "read"], {
     accountHome: account, ancestry: human, actions: { sendMessage: "real" },
   });
+  const accountConfig = join(account, ".itsybitsy/config.json");
+  const senderConfig = join(fixture.home, ".itsybitsy/config.json");
+  const disabled = JSON.stringify({ peering: { attachments: { maxFiles: 0 } } });
+  await Bun.write(accountConfig, disabled);
+  expect((await run("~/x")).stderr).toContain("peering.attachments.maxFiles = 0");
+  expect(await queue().exists()).toBe(false);
+  await Bun.write(accountConfig, "{}");
+  await Bun.write(senderConfig, disabled);
   expect((await run(protectedFile)).stderr).toContain("protected attachment path");
   expect(await queue().exists()).toBe(false);
   const sent = await run("~/x");

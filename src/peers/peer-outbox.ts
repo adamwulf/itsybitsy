@@ -165,7 +165,34 @@ async function readRequest(path: string) {
 
 export function createPeerOutboxPoll(now = Date.now) {
   const active = new Set<string>();
+  type DeliveryResult = { ok: true; id: string } | { ok: false; error: string };
+  type Finalization = { result: DeliveryResult; log: (line: string) => void; flight?: Promise<void> };
+  const pending = new Map<string, Finalization>();
   let workers = 0;
+
+  function finalize(dir: string, entry: Finalization) {
+    return entry.flight ??= (async () => {
+      try {
+        if (!existsSync(join(dir, "cancel"))) {
+          await writeJson(dir, "result.json", entry.result);
+          await rm(join(dir, "files"), { recursive: true, force: true })
+            .catch(err => entry.log(`peer-outbox: could not remove sent files: ${detail(err)}`));
+        }
+        if (existsSync(join(dir, "cancel"))) await rm(dir, { recursive: true, force: true });
+      } catch (err) {
+        if (!missing(err) || existsSync(dir)) {
+          entry.log(`peer-outbox: retrying claim finalization: ${detail(err)}`);
+          return;
+        }
+      }
+      pending.delete(dir);
+      active.delete(dir);
+    })().finally(() => { entry.flight = undefined; });
+  }
+
+  async function retryFinalizations() {
+    await Promise.all(Array.from(pending, ([dir, entry]) => finalize(dir, entry)));
+  }
 
   async function sweep(parent: string, staging = false) {
     await sweepEntries(parent, async name => {
@@ -195,13 +222,16 @@ export function createPeerOutboxPoll(now = Date.now) {
   async function recover() {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
+    await retryFinalizations();
     await finishRecovery([sweep(base), sweepEntries(claimed, id => recoverClaim(claimed, id)), sweep(join(base, ".staging"), true)]);
   }
 
   async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
-    if (!ownsEndpoint() || workers >= 4) return;
+    if (!ownsEndpoint()) return;
+    await retryFinalizations();
+    if (workers + pending.size >= 4) return;
     const ready = (await transferDirectoryBatch(base, "dispatch")).filter(name => requestId.test(name));
     if (!ready.length) return;
     await mkdir(claimed, { recursive: true, mode: 0o700 });
@@ -227,56 +257,45 @@ export function createPeerOutboxPoll(now = Date.now) {
             if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
             continue;
           }
+          let result: DeliveryResult;
           try {
-            let result;
-            try {
-              if ((await inspectTransferDirectory(dir)).state !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
-              const { peer, header: raw } = await readRequest(join(dir, "request.json"));
-              const header = parseSendHeader(raw);
-              if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
-              const worker = await inspectTransferDirectory(dir, "worker.json");
-              if (worker.owner?.pid !== process.pid || worker.state !== "verified-live") throw new Error("Cannot verify the peer-outbox worker");
-              const controller = new AbortController();
-              let bytes = 0;
-              let sequence = 0;
-              let recorded = -1;
-              // Publish the initial claim once and then only actual wire progress.
-              const tick = () => {
-                try {
-                  if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
-                  if (sequence === recorded) return;
-                  recorded = sequence;
-                  writeFileSync(join(dir, "progress.tmp"), JSON.stringify({ bytes, sequence }), { mode: 0o600 });
-                  renameSync(join(dir, "progress.tmp"), join(dir, "progress"));
-                } catch (err) { controller.abort(err); }
-              };
-              tick();
-              const timer = setInterval(tick, 250);
+            if ((await inspectTransferDirectory(dir)).state !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
+            const { peer, header: raw } = await readRequest(join(dir, "request.json"));
+            const header = parseSendHeader(raw);
+            if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
+            const worker = await inspectTransferDirectory(dir, "worker.json");
+            if (worker.owner?.pid !== process.pid || worker.state !== "verified-live") throw new Error("Cannot verify the peer-outbox worker");
+            const controller = new AbortController();
+            let bytes = 0;
+            let sequence = 0;
+            let recorded = -1;
+            // Publish the initial claim once and then only actual wire progress.
+            const tick = () => {
               try {
-                result = { ok: true, id: await send(peer, header, {
-                  filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; sequence++; },
-                }) };
-                tick();
-              } finally { clearInterval(timer); }
-            } catch (err) { result = { ok: false, error: detail(err) }; }
-            if (existsSync(join(dir, "cancel"))) {
-              await rm(dir, { recursive: true, force: true });
-              continue;
-            }
-            await writeJson(dir, "result.json", result);
-            await rm(join(dir, "files"), { recursive: true, force: true })
-              .catch(err => log(`peer-outbox: could not remove sent files: ${detail(err)}`));
-          } catch (err) {
-            if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
-          } finally {
-            if (existsSync(join(dir, "cancel"))) await rm(dir, { recursive: true, force: true })
-              .catch(err => log(`peer-outbox: cancelled claim cleanup failed: ${detail(err)}`));
-            active.delete(dir);
-          }
+                if (existsSync(join(dir, "cancel")) || !ownsEndpoint()) controller.abort(new Error("Send cancelled"));
+                if (sequence === recorded) return;
+                recorded = sequence;
+                writeFileSync(join(dir, "progress.tmp"), JSON.stringify({ bytes, sequence }), { mode: 0o600 });
+                renameSync(join(dir, "progress.tmp"), join(dir, "progress"));
+              } catch (err) { controller.abort(err); }
+            };
+            tick();
+            const timer = setInterval(tick, 250);
+            try {
+              result = { ok: true, id: await send(peer, header, {
+                filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; sequence++; },
+              }) };
+              tick();
+            } finally { clearInterval(timer); }
+          } catch (err) { result = { ok: false, error: detail(err) }; }
+          const entry = { result, log };
+          pending.set(dir, entry);
+          await finalize(dir, entry);
+          if (pending.has(dir)) return;
         }
       } finally { workers--; }
     }
-    await Promise.all(Array.from({ length: Math.min(4 - workers, ready.length) }, worker));
+    await Promise.all(Array.from({ length: Math.max(0, Math.min(4 - workers - pending.size, ready.length)) }, worker));
   }
   return Object.assign(poll, { recover });
 }

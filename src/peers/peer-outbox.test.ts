@@ -268,3 +268,24 @@ test.each([null, 201])("a worker whose observed start changes to %s after claimi
   expect(sent).toBe(false);
   expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: false, error: "Cannot verify the peer-outbox worker" });
 });
+
+test("a failed result publication is retried without sending the request again", async () => {
+  const { claimed, header } = await readyRequest();
+  const poll = createPeerOutboxPoll();
+  const rename = fs.rename;
+  const resultPath = join(claimed, "result.json");
+  const temporary = spyOn(fs, "rename").mockImplementation(async (source, dest) => {
+    if (dest === resultPath) throw Error("storage unavailable");
+    await rename(source, dest);
+  });
+  let sends = 0;
+  const send = async () => { sends++; return header.id; };
+  const messages: string[] = [];
+  try { await poll(send, line => messages.push(line)); }
+  finally { temporary.mockRestore(); }
+  expect(await Bun.file(resultPath).exists()).toBe(false);
+  expect(messages.join(" ")).toContain("retrying claim finalization");
+  await poll(send, () => {});
+  expect(sends).toBe(1);
+  expect(await Bun.file(resultPath).json()).toEqual({ ok: true, id: header.id });
+});

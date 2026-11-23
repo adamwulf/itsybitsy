@@ -435,8 +435,8 @@ describe("sandbox profile emission", () => {
     );
     const denies = profile.trimEnd().split("\n").filter((line) => line.startsWith("(deny"));
     // default, 2 read-only write denies (/tmp/read-only, REPOID), 2 raw, 2 per
-    // config deny, 2 peer handoff denies, 2 seal-helper denies.
-    expect(denies.length).toBe(13);
+    // config deny, 4 peer and handoff denies, 2 seal-helper denies.
+    expect(denies.length).toBe(15);
     for (const line of denies) expect(line.endsWith(` (with message "${TAG}"))`)).toBe(true);
     // A string that merely contains "(deny" is not a second rule.
     expect(profile).toContain(tagged('(deny file-read* (literal "/x (deny y)"))'));
@@ -2529,6 +2529,8 @@ describe("anchorRelativePaths", () => {
 test("an old broad type and raw grants cannot reopen the peer handoff for writes", () => {
   const broad = "(allow file-write*)";
   const profile = generateProfile(config({ rawAllow: [broad] }), paths({ allowWrite: ["/"] }), PARAMS);
-  const deny = tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`);
-  expect(profile.indexOf(deny)).toBeGreaterThan(profile.indexOf(broad));
+  for (const dir of [peerOutboxDir(PARAMS.HOME), peerDir(PARAMS.HOME)]) {
+    const deny = tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(dir)}"))`);
+    expect(profile.indexOf(deny)).toBeGreaterThan(profile.indexOf(broad));
+  }
 });

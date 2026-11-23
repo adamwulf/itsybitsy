@@ -4469,11 +4469,17 @@ test("agent file tools and shell redirects cannot write CLI attachment staging",
 });
 
 test("broad tmp grants cannot change trusted staging through either spelling", async () => {
-  const { transferStagingPaths } = await import("../runtime-names");
-  const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/tmp", "/private/tmp"] }) });
-  for (const root of transferStagingPaths()) {
-    for (const path of [root, join(root, "incoming/x.partial/owner.json")]) {
-      expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: path } }), ctx).decision).toBe("deny");
+  const names = await import("../runtime-names");
+  const fs = await import("node:fs/promises");
+  const root = await fs.realpath(await fs.mkdtemp(join((await import("node:os")).tmpdir(), "ib-stage-guard-")));
+  const paths = [join(root, "physical"), join(root, "alias")];
+  const spy = (await import("bun:test")).spyOn(names, "transferStagingPaths").mockReturnValue(paths);
+  try {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: [root] }) });
+    for (const alias of paths) {
+      for (const path of [alias, join(alias, "incoming/x.partial/owner.json")]) {
+        expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: path } }), ctx).decision).toBe("deny");
+      }
     }
-  }
+  } finally { spy.mockRestore(); await fs.rm(root, { recursive: true, force: true }); }
 });

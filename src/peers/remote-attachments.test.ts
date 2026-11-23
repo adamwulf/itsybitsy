@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, open, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,7 +7,7 @@ import { hashFile } from "./attachment-manifest";
 import { brokerAttachmentStage, cloneAttachments } from "./remote-attachments";
 
 test("remote staging verifies the clone against the manifest and removes changed copies", async () => {
-  const root = await mkdtemp("/tmp/ib-remote-stage-");
+  const root = await mkdtemp(join(tmpdir(), "ib-remote-stage-"));
   const source = join(root, "original");
   await writeFile(source, "known");
   const handle = await open(source, "r");
@@ -30,7 +31,7 @@ test("remote staging verifies the clone against the manifest and removes changed
 });
 
 test("watchdog takes only numbered, single-link files within its request and verifies their bytes", async () => {
-  const root = await mkdtemp("/tmp/ib-broker-stage-");
+  const root = await mkdtemp(join(tmpdir(), "ib-broker-stage-"));
   try {
     const parent = join(root, "send-attachments");
     const id = "a".repeat(32);
@@ -56,7 +57,7 @@ test("watchdog takes only numbered, single-link files within its request and ver
 });
 
 test("watchdog reclaims a dead CLI's staging before publication and leaves a live lease alone", async () => {
-  const root = await mkdtemp("/tmp/ib-broker-lease-");
+  const root = await mkdtemp(join(tmpdir(), "ib-broker-lease-"));
   processStartEpochSecondsCtx.set(() => 128);
   try {
     const { sweepStagingLease } = await import("../send-broker");
@@ -90,7 +91,7 @@ test("watchdog reclaims a dead CLI's staging before publication and leaves a liv
 test.each([null, 129])("reclaim staging only after owner mismatch or expiry (observed start %s)", async observed => {
   const { sweepStagingLease } = await import("../send-broker");
   const { spawnRequestDir } = await import("../spawn-broker");
-  const root = await mkdtemp("/tmp/ib-lease-identity-");
+  const root = await mkdtemp(join(tmpdir(), "ib-lease-identity-"));
   const id = "d".repeat(32);
   const dir = join(root, "send-attachments", id);
   try {
@@ -120,7 +121,7 @@ test.each([null, 129])("reclaim staging only after owner mismatch or expiry (obs
 test("dashboard stages the canonical file selected through a project symlink and keeps its spelling", async () => {
   const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
   const { buildAttachmentManifest } = await import("./attachment-manifest");
-  const root = await mkdtemp("/tmp/ib-dashboard-select-");
+  const root = await mkdtemp(join(tmpdir(), "ib-dashboard-select-"));
   try {
     const project = join(root, "project");
     const alias = join(project, "alias");
@@ -144,7 +145,7 @@ test("dashboard stages the canonical file selected through a project symlink and
 
 test("a successful clone skips source reads and the fallback stops within one cancelled chunk", async () => {
   const { CHUNK_BYTES } = await import("./transfer-limits");
-  const root = await mkdtemp("/tmp/ib-copy-branches-");
+  const root = await mkdtemp(join(tmpdir(), "ib-copy-branches-"));
   const source = join(root, "source");
   const size = 4 * CHUNK_BYTES;
   await Bun.write(source, Buffer.alloc(size, 55));
@@ -173,7 +174,7 @@ test("a successful clone skips source reads and the fallback stops within one ca
 
 test("a missing suffix after a symlink and parent step uses the physical parent", async () => {
   const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
-  const root = await mkdtemp("/tmp/ib-missing-reference-");
+  const root = await mkdtemp(join(tmpdir(), "ib-missing-reference-"));
   try {
     const project = join(root, "project");
     const outside = join(root, "external/nested");
@@ -187,7 +188,7 @@ test("a missing suffix after a symlink and parent step uses the physical parent"
 
 test("a dangling project symlink refuses absolute, relative and nested references", async () => {
   const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
-  const project = await mkdtemp("/tmp/ib-dangling-");
+  const project = await mkdtemp(join(tmpdir(), "ib-dangling-"));
   try {
     await symlink(join(project, "missing"), join(project, "link"));
     for (const reference of [join(project, "link"), "./link", "see ./link.", join(project, "link/file")]) {

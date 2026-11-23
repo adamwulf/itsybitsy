@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fsPromises from "node:fs/promises";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
@@ -11,9 +12,9 @@ describe("send-time message attachments", () => {
   const allocate = fsPromises.mkdtemp;
   let restore: () => void;
   beforeEach(async () => {
-    dir = await realpath(await mkdtemp("/tmp/attachment-test-"));
+    dir = await realpath(await mkdtemp(join(tmpdir(), "attachment-test-")));
     attempts = [];
-    staging = await allocate("/tmp/ib-staging-test-");
+    staging = await allocate(join(tmpdir(), "ib-staging-test-"));
     const spy = spyOn(fsPromises, "mkdtemp").mockImplementation(((prefix: string) => {
       expect(prefix).toBe("/tmp/itsybitsy-attachments-");
       return allocate(join(staging, "itsybitsy-attachments-"));
@@ -33,8 +34,8 @@ describe("send-time message attachments", () => {
   }
   function dropped(path: string) { return path.replaceAll(" ", "\\ "); }
   function stagedPaths(message: string): string[] {
-    return [...message.matchAll(/\/tmp\/ib-staging-test-[^/]+\/itsybitsy-attachments-[^/]+\/\d+\/[^\s"']+/g)]
-      .map((match) => match[0]);
+    return [...message.replaceAll(staging, "").matchAll(/\/itsybitsy-attachments-[^/]+\/\d+\/[^\s"']+/g)]
+      .map((match) => staging + match[0]);
   }
 
   test("copies final escaped screenshot spelling and preserves prose and extension", async () => {
@@ -100,7 +101,7 @@ describe("send-time message attachments", () => {
     await writeFile(join(dir, "image.png"), "image");
     const result = await stage("Do not use `rm; inspect ./image.png instead.");
     expect(result.staged).toBe(true);
-    expect(result.message).toMatch(/^Do not use `rm; inspect \/tmp\/ib-staging-test-[^/]+\/itsybitsy-attachments-.* instead\.$/);
+    expect(result.message.replace(staging, "")).toMatch(/^Do not use `rm; inspect \/itsybitsy-attachments-.* instead\.$/);
     const fenced = "Example:\n```sh\ncat ./image.png";
     expect((await stage(fenced)).message).toBe(fenced);
   });
@@ -161,7 +162,7 @@ describe("send-time message attachments", () => {
   test("replaces only a Markdown path and preserves trailing punctuation", async () => {
     await writeFile(join(dir, "image.png"), "image");
     const result = await stage("See [image](./image.png), thanks.");
-    expect(result.message).toMatch(/^See \[image\]\(\/tmp\/ib-staging-test-[^/]+\/itsybitsy-attachments-[^/]+\/0\/image.png\), thanks\.$/);
+    expect(result.message.replace(staging, "")).toMatch(/^See \[image\]\(\/itsybitsy-attachments-[^/]+\/0\/image.png\), thanks\.$/);
   });
 
   test("missing files, incomplete quoting and directories fail without staging any files", async () => {

@@ -104,6 +104,7 @@ export interface ServiceStream {
   writeAll(bytes: Uint8Array): Promise<void>;
   finish(): Promise<void>;
   readToEnd(limit: number): Promise<Uint8Array>;
+  cancel(): Promise<void>;
 }
 
 export interface ServiceConnection {
@@ -266,6 +267,7 @@ export function toPairConnection(conn: ServiceConnection): PairConnection {
   const stream = (s: ServiceStream): PairStream => ({
     writeAll: (bytes) => s.writeAll(bytes),
     finish: () => s.finish(),
+    cancel: () => s.cancel(),
     readToEnd: async (limit) => {
       try {
         return await s.readToEnd(limit);

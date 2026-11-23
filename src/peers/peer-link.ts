@@ -346,20 +346,28 @@ export async function requestAgents(conn: PairConnection): Promise<PeerSnapshot>
   return decodeAgentsReply(await requestRead(conn, "agents"));
 }
 
-async function requestRead(conn: PairConnection, op: string): Promise<Uint8Array> {
+async function requestRead(conn: PairConnection, op: string, signal?: AbortSignal): Promise<Uint8Array> {
   const stream = await conn.openBi();
-  await stream.writeAll(encodePeerRequest(op));
-  await stream.finish();
+  const cancel = () => { void stream.cancel().catch(() => {}); };
+  if (signal?.aborted) {
+    cancel();
+    throw signal.reason;
+  }
+  signal?.addEventListener("abort", cancel, { once: true });
   try {
+    await stream.writeAll(encodePeerRequest(op));
+    await stream.finish();
     return await stream.readToEnd(PEER_MAX_REPLY_BYTES);
   } catch (err) {
     if (err instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
     throw err;
+  } finally {
+    signal?.removeEventListener("abort", cancel);
   }
 }
 
-export async function requestCoordinatorPane(conn: PairConnection): Promise<CoordinatorPane> {
-  const reply = decodeObject(await requestRead(conn, "coordinator-pane"), "reply");
+export async function requestCoordinatorPane(conn: PairConnection, signal?: AbortSignal): Promise<CoordinatorPane> {
+  const reply = decodeObject(await requestRead(conn, "coordinator-pane", signal), "reply");
   if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
   if (reply.op !== "coordinator-pane" || typeof reply.state !== "string" || typeof reply.text !== "string") {
     throw new PeerProtocolError("malformed coordinator-pane reply");

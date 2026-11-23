@@ -74,6 +74,7 @@ export interface PairStream {
   finish(): Promise<void>;
   /** Read until the other side finishes. Throws {@link PairProtocolError} past `limit` bytes. */
   readToEnd(limit: number): Promise<Uint8Array>;
+  cancel(): Promise<void>;
 }
 
 /** Why a connection closed. */

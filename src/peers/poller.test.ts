@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { waitFor } from "../test-utils";
 import { IrohError, irohAddonLoaderCtx } from "./iroh";
-import { encodeAgentsReply, PEER_CLOSE, PEER_MAX_REQUEST_BYTES, serveTrustedConnection, type RemoteAgent } from "./peer-link";
+import { requestNewAgent, encodeAgentsReply, PEER_CLOSE, PEER_MAX_REQUEST_BYTES, serveTrustedConnection, type RemoteAgent } from "./peer-link";
 import type { PairConnection } from "./pairing";
 import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS, PeerPoller, peerLinkStatus } from "./poller";
 import type { Peer } from "./store";
@@ -318,7 +318,7 @@ describe("PeerPoller", () => {
     rig.poller.start();
     const stream = await b.acceptBi();
     await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
-    await stream.writeAll(encodeAgentsReply({ repos: [], agents: [] }));
+    await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [] }));
     await stream.finish();
     b.close(PEER_CLOSE.done, "shutting down");
 
@@ -350,7 +350,7 @@ describe("PeerPoller", () => {
     async function reply(closeAfterReply: boolean) {
       const stream = await b.acceptBi();
       await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
-      await stream.writeAll(encodeAgentsReply({ repos: [], agents: [] }));
+      await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [] }));
       await stream.finish();
       if (closeAfterReply) b.close(PEER_CLOSE.done, "shutting down");
     }
@@ -563,4 +563,41 @@ describe("PeerPoller", () => {
     await waitFor(() => rig.state(P1)?.connected === true && rig.state(P2)?.connected === true, { message: "resumed" });
     rig.poller.stop();
   });
+});
+
+test("a coordinator timeout resets only its stream during a remote start on the same link", async () => {
+  const rig = makeRig([peer(P1, "B")]);
+  const { a, b } = createMemoryLink(SELF, P1);
+  rig.setDial(async () => a);
+  const accept = async (op: string) => {
+    const stream = await b.acceptBi();
+    expect(JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096))).op).toBe(op);
+    return stream;
+  };
+  const answerAgents = async () => {
+    const stream = await accept("agents");
+    await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [] }));
+    await stream.finish();
+  };
+  rig.poller.start();
+  try {
+    await answerAgents();
+    await waitFor(() => rig.state(P1)?.connected === true);
+    const pending = rig.poller.fetchCoordinatorPane(P1);
+    const pane = await accept("coordinator-pane");
+    const start = requestNewAgent(a, { repo: "app", type: "worker", prompt: "hello" }, rig.clock.setTimer);
+    const spawn = await accept("new-agent");
+    rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
+    await expect(pending).rejects.toThrow("request timed out");
+    await expect(pane.writeAll(new Uint8Array())).rejects.toThrow("stream cancelled");
+    await spawn.writeAll(new TextEncoder().encode(JSON.stringify({ ok: true, id: "worker-1" })));
+    await spawn.finish();
+    expect(await start).toBe("worker-1");
+    await answerAgents();
+    await waitFor(() => rig.state(P1)?.lastOkAt === rig.clock.now());
+    expect(rig.dials).toEqual([P1]);
+    expect(a.closeInfo()).toBeNull();
+  } finally {
+    rig.poller.stop();
+  }
 });

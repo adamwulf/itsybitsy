@@ -19,9 +19,13 @@ import { PairProtocolError, type PairCloseInfo, type PairConnection, type PairSt
 class Pipe {
   private chunks: Uint8Array[] = [];
   private finished = false;
+  private cancelled = false;
+
+  cancel(): void { this.cancelled = true; this.wake(); }
   private waiters: Array<() => void> = [];
 
   write(bytes: Uint8Array): void {
+    if (this.cancelled) throw new Error("stream cancelled");
     if (this.finished) throw new Error("write after finish");
     this.chunks.push(Uint8Array.from(bytes));
     this.wake();
@@ -39,6 +43,7 @@ class Pipe {
 
   async readToEnd(limit: number, isClosed: () => boolean): Promise<Uint8Array> {
     for (;;) {
+      if (this.cancelled) throw new Error("stream cancelled");
       if (isClosed()) throw new Error("connection lost");
       if (this.finished) break;
       await new Promise<void>((resolve) => this.waiters.push(resolve));
@@ -61,6 +66,11 @@ class MemoryStream implements PairStream {
     private readonly incoming: Pipe,
     private readonly conn: MemoryConnection,
   ) {}
+
+  async cancel(): Promise<void> {
+    this.incoming.cancel();
+    this.outgoing.cancel();
+  }
 
   async writeAll(bytes: Uint8Array): Promise<void> {
     if (this.conn.closeInfo()) throw new Error("connection lost");

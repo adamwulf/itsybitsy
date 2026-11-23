@@ -179,7 +179,18 @@ export class PeerPoller {
   async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
     const conn = this.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
-    return this.requestWithTimeout(conn, requestCoordinatorPane);
+    const abort = new AbortController();
+    const deadline = Promise.withResolvers<never>();
+    const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
+      const error = new PeerRequestTimeout();
+      abort.abort(error);
+      deadline.reject(error);
+    });
+    try {
+      return await Promise.race([requestCoordinatorPane(conn, abort.signal), deadline.promise]);
+    } finally {
+      cancel();
+    }
   }
 
   /** Poll now, then every {@link PEER_POLL_INTERVAL_MS}. */
@@ -308,7 +319,7 @@ export class PeerPoller {
         link.conn = dialed;
         this.watchClose(link, dialed, generation);
       }
-      const snapshot = await this.requestWithTimeout(conn, requestAgents);
+      const snapshot = await this.requestWithTimeout(link, conn);
       // A final reply can arrive alongside the close notification. Only a live link recovers.
       if (!this.isCurrent(link, generation) || link.conn !== conn || this.recordObservedClose(link, conn)) return;
       this.succeeded(link, snapshot);
@@ -320,17 +331,23 @@ export class PeerPoller {
     }
   }
 
-  /** Bound each read on the live link. Closing it on timeout ends outstanding streams. */
-  private requestWithTimeout<T>(conn: PairConnection, request: (conn: PairConnection) => Promise<T>): Promise<T> {
+  /**
+   * {@link requestAgents} bounded by {@link PEER_REQUEST_TIMEOUT_MS}. On
+   * timeout it detaches `conn` from `link` (so the close is not reported as the
+   * other side's), closes it, which fails the pending request, and rejects
+   * with {@link PeerRequestTimeout}.
+   */
+  private requestWithTimeout(link: Link, conn: PairConnection): Promise<PeerSnapshot> {
     return new Promise((resolve, reject) => {
       let settled = false;
       const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
         if (settled) return;
         settled = true;
+        if (link.conn === conn) link.conn = null;
         closeQuietly(conn, PEER_CLOSE.done, "request timed out");
         reject(new PeerRequestTimeout());
       });
-      request(conn).then(
+      requestAgents(conn).then(
         (snapshot) => {
           if (settled) return;
           settled = true;

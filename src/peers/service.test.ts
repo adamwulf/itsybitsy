@@ -1655,6 +1655,7 @@ const irohTooLong = () => new IrohError("RecvStream.readToEnd", "TooLong");
 function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
   return {
     writeAll: (bytes) => stream.writeAll(bytes),
+    cancel: () => stream.cancel(),
     finish: () => stream.finish(),
     readToEnd: async () => {
       throw fail();

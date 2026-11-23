@@ -1,3 +1,4 @@
+import { trackSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
 import { verifiedSendCaller } from "./send-caller";
@@ -109,8 +110,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     const readResult = async (): Promise<IbCommandResult | undefined> => {
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
-        void rm(claimed, { recursive: true, force: true })
-          .catch(err => console.error(`Peer send result cleanup failed: ${detail(err)}`));
+        trackSendCleanup(rm(claimed, { recursive: true, force: true }), "Peer send result cleanup failed");
         return result.ok === true && result.id === header.id
           ? { ok: true, exitCode: 0, stdout: `Sent to ${targetLabel(header.target)}`, stderr: "" }
           : fail(result.error ?? SEND_UNKNOWN);

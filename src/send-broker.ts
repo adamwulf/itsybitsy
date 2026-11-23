@@ -1,3 +1,4 @@
+import { trackSendCleanup } from "./send-cleanup";
 import * as runtimeNames from "./runtime-names";
 /**
  * Watchdog send broker — how a SANDBOXED agent sends to an agent in another repo.
@@ -328,8 +329,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
     if (!remote && !result.ok && OLD_WATCHDOG_ANSWERS.has(result.stderr)) return null;
     return result;
   } finally {
-    if (ownsStage) void rm(staged, { recursive: true, force: true })
-      .catch(err => console.error(`Remote staging cleanup failed: ${err}`));
+    if (ownsStage) trackSendCleanup(rm(staged, { recursive: true, force: true }), "Remote staging cleanup failed");
   }
 }
 

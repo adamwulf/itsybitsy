@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { finishSendCleanup } from "./send-cleanup";
 import { sameRepoPath } from "./repo-identity";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -193,6 +194,7 @@ export async function resolveLauncherAgentDir(
 export async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
   if (result.stdout) console.log(result.stdout);
   if (result.stderr) console.error(result.stderr);
+  await finishSendCleanup();
   process.exit(result.exitCode);
 }
 

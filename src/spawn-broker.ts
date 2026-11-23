@@ -1,3 +1,4 @@
+import { trackSendCleanup } from "./send-cleanup";
 import { isCoordinatorType } from "./coordinator-type-names";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -208,7 +209,7 @@ export async function submitWatchdogRequest(
       try {
         const result = (await file.json()) as Partial<SpawnResult>;
         const cleanup = rm(resultFile, { force: true });
-        if (deps.cancelClaimed) void cleanup.catch(err => console.error(`Remote broker result cleanup failed: ${err}`));
+        if (deps.cancelClaimed) trackSendCleanup(cleanup, "Remote broker result cleanup failed");
         else await cleanup;
         if (result.id !== request.id || typeof result.exitCode !== "number") {
           deps.onUncertain?.();

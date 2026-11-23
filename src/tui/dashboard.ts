@@ -2034,7 +2034,7 @@ export class DashboardComponent implements Component {
       return false;
     } finally {
       try { if (staging) await rm(staging, { recursive: true, force: true }); }
-      catch (err) { this.setNotice(`Outgoing attachment cleanup failed: ${err}`, "error"); }
+      catch (err) { this.addError(`Outgoing attachment cleanup failed: ${err}`); }
       finally { this.pendingRemoteSends.delete(header.id); done.resolve(); }
       this.invalidate();
       this.tui?.requestRender();

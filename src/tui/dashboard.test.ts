@@ -9740,6 +9740,43 @@ describe("setup Peers tab", () => {
     }
   });
 
+  test.each([70, 40])("the %i-column Peers overlay shows status, count, field, hint and borders", width => {
+    const height = 24;
+    const originalRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { value: height, writable: true, configurable: true });
+    try {
+      const dashboard = makeDashboard();
+      const { tui, composite } = overlayTui(width, height);
+      dashboard.setTui(tui);
+      const service = new FakePeerService();
+      const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: "N".repeat(32), pairedAt: "x" }));
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+        lastError: "connection refused", repos: null, agents: null })) });
+      dashboard.setPeerService(service);
+      dashboard.handleInput("I");
+      dashboard.handleInput("abc");
+      const screen = composite(dashboard.render(width)).slice(-height).map(stripAnsi);
+      const start = screen.findIndex(line => line.startsWith("┌─ Peers "));
+      const end = screen.indexOf("└" + "─".repeat(width - 2) + "┘");
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(end).toBeGreaterThan(start);
+      const body = screen.slice(start + 1, end);
+      for (const line of body) {
+        expect(line).toStartWith("│");
+        expect(line).toEndWith("│");
+        expect(visibleWidth(line)).toBe(width);
+      }
+      const shown = body.filter(line => /\d{10}  offline/.test(line)).length;
+      expect(shown).toBeGreaterThan(0);
+      const content = body.map(line => line.slice(1, -1).trim()).join(" ");
+      expect(content).toContain(`…and ${11 - shown} more (ib peer list shows all)`);
+      expect(content).toContain("Pair with id > abc█");
+      expect(content).toContain("Enter: pair    Esc: close");
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
+    }
+  });
+
   test("every row fits the dialog in every stage", () => {
     const { dashboard, service } = open();
     service.set({
@@ -9754,7 +9791,7 @@ describe("setup Peers tab", () => {
       { stage: "failed", failure: { kind: "error", detail: "x".repeat(120) } },
     ];
     peersTab(dashboard).idValue = "y".repeat(200);
-    for (const width of [DIALOG_WIDTH, 40]) {
+    for (const width of [70, 40]) {
       service.set({ session: null });
       const idle = (dashboard as any).dialogOverlay.render(width) as string[];
       expect(idle.filter((row) => visibleWidth(row) !== width)).toEqual([]);

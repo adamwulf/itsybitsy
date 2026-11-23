@@ -45,6 +45,14 @@ import {
   type SandboxProfileParams,
 } from "../sandbox";
 
+function claudeProjectPath(worktreePath: string, home: string): string {
+  return resolve(home, ".claude", "projects", encodeClaudeProjectPath(worktreePath));
+}
+
+function claudeScratchpadPath(worktreePath: string, uid: number): string {
+  return join("/private/tmp", `claude-${uid}`, encodeClaudeProjectPath(worktreePath));
+}
+
 /**
  * Compute the fully-resolved absolute path to an agent's Claude project
  * directory (`~/.claude/projects/<encoded-worktree>`). The directory may not
@@ -55,8 +63,7 @@ import {
  * cycle with agent-path.ts; agent-path.ts re-exports it for existing callers.
  */
 export function claudeProjectDirFor(worktreePath: string, home = userHome()): string {
-  const encoded = encodeClaudeProjectPath(worktreePath);
-  let projectDir = resolve(join(home, ".claude", "projects", encoded));
+  let projectDir = claudeProjectPath(worktreePath, home);
   try {
     projectDir = realpathSync(projectDir);
   } catch {
@@ -75,8 +82,7 @@ export function claudeProjectDirFor(worktreePath: string, home = userHome()): st
  * scratchpad — see SPEC-PATH-ALLOWLIST.md §6.10 answer (a).
  */
 export function claudeScratchpadDirFor(worktreePath: string, uid: number): string {
-  const encoded = encodeClaudeProjectPath(worktreePath);
-  return canonicalizeSandboxPath(`/private/tmp/claude-${uid}/${encoded}`);
+  return canonicalizeSandboxPath(claudeScratchpadPath(worktreePath, uid));
 }
 
 /**
@@ -152,11 +158,13 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
     canSpawnChildren: p.canSpawnChildren,
     HOME: p.home,
   };
+  // Pass raw roots to the table builder. Only the stored-table builder knows
+  // which prefixes its provisional policy permits realpath to open.
   if (p.cli === undefined || p.cli === "claude") {
-    params.PROJECTDIR = claudeProjectDirFor(p.worktreePath, p.home);
-    params.SCRATCHPAD = claudeScratchpadDirFor(p.worktreePath, process.getuid?.() ?? 0);
+    params.PROJECTDIR = claudeProjectPath(p.worktreePath, p.home ?? userHome());
+    params.SCRATCHPAD = claudeScratchpadPath(p.worktreePath, process.getuid?.() ?? 0);
   } else if (p.cli === "agy") {
-    params.AGYSTATEDIR = agyStateDirFor(p.home ?? userHome());
+    params.AGYSTATEDIR = join(p.home ?? userHome(), ".gemini");
   }
   return p.storedPaths
     ? storedPathAccessTable(p.paths, params)
@@ -166,7 +174,7 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
 /**
  * Resolve the git common dir the way the kernel profile does (SPEC §8): run
  * `git rev-parse --git-common-dir` in the worktree and resolve a relative
- * answer against the worktree, canonicalized (longest-existing-prefix). Falls
+ * answer against the worktree. The table builder canonicalizes it. Falls
  * back to `<rootRepo>/.git` (or `<worktree>/.git` when rootRepo is unknown) when
  * git fails, so the git dir is always a concrete deny-agnostic write root.
  */
@@ -180,12 +188,11 @@ async function resolveGitCommonDir(worktreePath: string, rootRepo: string): Prom
     if ((await proc.exited) === 0) {
       const trimmed = out.trim().split(/\r?\n/)[0]?.trim() ?? "";
       if (trimmed) {
-        const abs = trimmed.startsWith("/") ? trimmed : resolve(worktreePath, trimmed);
-        return canonicalizeSandboxPath(abs);
+        return resolve(worktreePath, trimmed);
       }
     }
   } catch { /* fall through to the fallback */ }
-  return canonicalizeSandboxPath(join(rootRepo || worktreePath, ".git"));
+  return join(rootRepo || worktreePath, ".git");
 }
 
 /**

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { chmod, link, mkdir, readdir, realpath, rm, stat, truncate } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { encodeClaudeProjectPath } from "../auto-compact";
 import { writeAgentTransient } from "../agents";
 import fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
@@ -241,21 +242,32 @@ test("attachments refuse an unidentified caller", async () => {
   expect(await queue().exists()).toBe(false);
 });
 
-test("sandbox caller lookup verifies its own worktree and no unrelated repo root", async () => {
-  setUserHome(fixture.home);
-  const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: true } });
-  const cwd = await realpath(sender.sessionCwd);
+test.each(["claude", "agy"])("sandboxed %s sender builds its table without opening denied runtime roots", async cli => {
+  const home = await realpath(fixture.home);
+  setUserHome(home);
+  const repo = await realpath(recipient.repoPath);
+  const cwd = join(repo, ".itsybitsy/agents/sender/repo");
+  const encoded = encodeClaudeProjectPath(cwd);
+  const roots = [join(repo, ".git"), join(home, ".claude/projects", encoded),
+    join("/private/tmp", `claude-${process.getuid?.() ?? 0}`, encoded), join(home, ".gemini")];
+  await fixture.addAgent(repo, "sender", { model: cli + ":test", paths: { deny: roots }, sandbox: { enabled: true } });
+  const path = join(cwd, "report");
+  await Bun.write(path, "snapshot");
   const other = await realpath(await fixture.addRepo("unrelated"));
   const human = spyOn(remoteCliCaller, "isHuman").mockResolvedValue(false);
   const files = spyOn(Bun, "file");
   const sync = spyOn(fs, "realpathSync");
   const asyncRead = spyOn(fsPromises, "realpath");
   try {
-    expect((await resolveAttachmentSender(cwd)).kind).toBe("agent");
+    const sender = await resolveAttachmentSender(cwd);
+    expect(sender.kind).toBe("agent");
+    const staged = await stageLocalAttachments("read", [path], sender);
+    await staged.cleanup();
     const opened = [...sync.mock.calls, ...asyncRead.mock.calls].map(([path]) => String(path));
     expect(files.mock.calls.map(([path]) => String(path)).filter(path => path.endsWith("/meta.json"))).toEqual([join(dirname(cwd), "meta.json")]);
     expect(opened).toContain(cwd);
     expect(opened.filter(path => path === other || path.startsWith(other + "/"))).toEqual([]);
+    expect(opened.filter(path => roots.includes(path))).toEqual([]);
   } finally {
     files.mockRestore();
     asyncRead.mockRestore();

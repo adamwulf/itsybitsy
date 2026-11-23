@@ -428,7 +428,7 @@ describe("qualified agent addresses", () => {
       }, () => {});
       await entered.promise;
       controller.abort();
-      expect(await cliSend).toMatchObject({ exitCode: 130, stderr: expect.stringContaining("cancelled, nothing sent") });
+      expect(await cliSend).toMatchObject({ exitCode: 130, stderr: expect.stringContaining("outcome unknown — check the recipient") });
       await Promise.all([broker, watcher]);
       expect(reset).toBe(true);
       await expect(readdir(filesDir)).rejects.toMatchObject({ code: "ENOENT" });
@@ -580,7 +580,7 @@ describe("qualified agent addresses", () => {
         const result = await send;
         expect(result.exitCode).toBe(130);
         expect(result.stdout).toBe("");
-        expect(result.stderr).toContain(claimed ? "outcome unknown" : "withdrawn");
+        expect(result.stderr).toContain(claimed ? "outcome unknown" : "cancelled before sending");
         expect(await readdir(queue)).not.toContain(ready.slice(queue.length + 1));
       } finally { interrupt.abort(); await send; }
     });

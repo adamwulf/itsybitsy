@@ -646,8 +646,20 @@ describe("send broker", () => {
       }));
       expect(out?.exitCode).toBe(130);
       expect(out?.stdout).toBe("");
-      expect(out?.stderr).toContain(state === "claimed" ? "outcome unknown" : state === "pending" ? "withdrawn" : "cancelled before sending");
+      expect(out?.stderr).toContain(state === "claimed" ? "outcome unknown" : "cancelled before sending");
       expect((await readdir(spawnRequestDir(agentDir)).catch(() => [])).filter(name => name.endsWith(".json"))).toEqual([]);
+    });
+
+    test("an error signalling the claimed broker job leaves the outcome unknown", async () => {
+      const { submitWatchdogRequest } = await import("./spawn-broker");
+      const control = new AbortController();
+      const result = await submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
+        { request: "send", action: "send", alreadyStarted: "claimed" }, 5000, {
+          signal: control.signal,
+          sleep: async () => { await rm(join(spawnRequestDir(agentDir), ID_A + ".json")); control.abort(); },
+          cancelClaimed: async () => { throw new Error("signal unavailable"); },
+        });
+      expect(result.stderr).toBe("outcome unknown — check the recipient");
     });
 
     test.each([true, false])("remote recipient timeout races the watchdog claim (watchdog wins=%s)", async wins => {

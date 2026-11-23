@@ -76,7 +76,7 @@ import {
   brokerFail,
   isSameDirectory,
   resolveRoutedCaller, interruptedSend,
-  CANCELLED_BEFORE_FIN, spawnRequestDir, submitWatchdogRequest,
+  spawnRequestDir, submitWatchdogRequest,
   verifyBrokerRequester,
   type SpawnClientDeps,
   type SpawnServerDeps,
@@ -566,11 +566,11 @@ export async function handleSendRequest(
         marker = await createBrokerProgress(ctx.agentDir, ctx.id);
       }
       catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return brokerFail(CANCELLED_BEFORE_FIN);
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return interruptedSend("claimed");
         throw err;
       }
       const checkClient = () => {
-        if (marker && !fstatSync(marker.fd).nlink) controller.abort(new Error(CANCELLED_BEFORE_FIN));
+        if (marker && !fstatSync(marker.fd).nlink) controller.abort(new Error("Send cancelled"));
       };
       let updated = 0;
       const progress = () => {
@@ -584,7 +584,7 @@ export async function handleSendRequest(
       try {
         const stage = files.length ? brokerAttachmentStage(ctx.agentDir, ctx.id, files, controller.signal, progress) : undefined;
         const result = await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender), controller.signal, stage, progress);
-        if (controller.signal.aborted && result.exitCode === 130 && !result.stderr.includes("outcome unknown")) return brokerFail(CANCELLED_BEFORE_FIN);
+        if (controller.signal.aborted) return interruptedSend("claimed");
         return result;
       } finally { clearInterval(timer); await marker?.close(); }
     }

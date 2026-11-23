@@ -50,7 +50,7 @@ test.each([false, true])("interrupt after publication (claimed=%s)", async claim
   try {
     const outcome = await result;
     expect(outcome.exitCode).toBe(130);
-    expect(outcome.stderr).toContain(claimed ? "outcome unknown" : "withdrawn");
+    expect(outcome.stderr).toContain(claimed ? "outcome unknown" : "cancelled before sending");
     expect(await Bun.file(join(base, header.id, "request.json")).exists()).toBe(false);
   } finally { hold.resolve(header.id); await poll; }
 });
@@ -81,6 +81,22 @@ test("claimed request publishes byte progress and propagates CLI interruption to
   const claimed = join(base, ".claimed", header.id);
   await waitFor(async () => (await Bun.file(join(claimed, "progress")).json().catch(() => null))?.bytes === 192);
   controller.abort();
-  expect(await result).toMatchObject({ exitCode: 130, stderr: "cancelled, nothing sent" });
+  expect(await result).toMatchObject({ exitCode: 130, stderr: "outcome unknown — check the recipient" });
   await poll;
+});
+
+test("a claimed cancellation with a failed signal still has an unknown outcome", async () => {
+  await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+  const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  const control = new AbortController();
+  const result = handoffRemoteMessage("peer", header, control.signal);
+  await waitFor(() => Bun.file(join(base, header.id, "request.json")).exists());
+  const finish = Promise.withResolvers<string>();
+  const watcher = pollPeerOutbox(async () => {
+    await mkdir(join(base, ".claimed", header.id, "cancel")); // writeFile will receive EISDIR
+    control.abort();
+    return finish.promise;
+  }, () => {});
+  try { expect((await result).stderr).toBe("outcome unknown — check the recipient"); }
+  finally { finish.resolve(header.id); await watcher; }
 });

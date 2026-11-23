@@ -142,27 +142,9 @@ export async function withdrawPublishedRequest(ready: string, withdrawn: string)
   return true;
 }
 
-export const CANCELLED_BEFORE_FIN = "cancelled, nothing sent";
-
-export async function waitForClaimedSend(read: () => Promise<IbCommandResult | undefined>) {
-  const deadline = Date.now() + 3000;
-  do {
-    const result = await read();
-    if (result) {
-      if (result.ok) return result;
-      if (result.stderr === CANCELLED_BEFORE_FIN) return { ...result, exitCode: 130 };
-      break;
-    }
-    await Bun.sleep(50);
-  } while (Date.now() < deadline);
-  return interruptedSend("claimed");
-}
-
 export function interruptedSend(state: "unpublished" | "withdrawn" | "claimed"): IbCommandResult {
-  if (state === "unpublished") return { ok: false, exitCode: 130, stdout: "", stderr: "cancelled before sending" };
-  const outcome = state === "claimed" ? "outcome unknown — check the agent" :
-    "request withdrawn before it was claimed";
-  return { ok: false, exitCode: 130, stdout: "", stderr: "Send interrupted: " + outcome };
+  const stderr = state === "claimed" ? "outcome unknown — check the recipient" : "cancelled before sending";
+  return { ok: false, exitCode: 130, stdout: "", stderr };
 }
 
 /**
@@ -263,8 +245,7 @@ export async function submitWatchdogRequest(
   try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
   catch (err) { deps.onUncertain?.(); return brokerFail(`Could not withdraw request: ${err}`); }
   if (!stillQueued && deps.signal?.aborted && deps.cancelClaimed) {
-    await deps.cancelClaimed();
-    return waitForClaimedSend(readResult);
+    await deps.cancelClaimed().catch(err => console.error("Could not signal claimed send cancellation:", err));
   }
   if (!stillQueued) deps.onUncertain?.();
   if (deps.signal?.aborted) return interruptedSend(stillQueued ? "withdrawn" : "claimed");

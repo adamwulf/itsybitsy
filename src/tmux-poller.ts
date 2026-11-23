@@ -513,11 +513,6 @@ export async function probeTmuxSession(tmuxSession: string): Promise<TmuxSession
   }
 }
 
-/**
- * Ask tmux for authoritative pane-dead metadata. Pane contents are not safe
- * lifecycle evidence because an agent can quote tmux's "Pane is dead" banner
- * while inspecting source or tests.
- */
 /** Probe the current pane addressed by local send-keys. */
 export async function isDeliveryPaneLive(session: string, timeoutMs = 2_000): Promise<boolean> {
   const result = await runCoordinatorCommand(
@@ -527,6 +522,11 @@ export async function isDeliveryPaneLive(session: string, timeoutMs = 2_000): Pr
   return result.code === 0 && result.text.trim() === "0";
 }
 
+/**
+ * Ask tmux for authoritative pane-dead metadata. Pane contents are not safe
+ * lifecycle evidence because an agent can quote tmux's "Pane is dead" banner
+ * while inspecting source or tests.
+ */
 export async function probeTmuxPane(tmuxSession: string): Promise<TmuxPaneProbeResult> {
   try {
     const proc = spawnCtx.runner(

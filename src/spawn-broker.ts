@@ -341,6 +341,11 @@ export async function routeNewAgentThroughWatchdog(
   return requestSpawnViaWatchdog(prompt, opts, deps);
 }
 
+export function isNativeCodexWorktree(meta: Record<string, unknown>): boolean {
+  return meta.worktree === true && typeof meta.model === "string" && meta.model.startsWith("codex:")
+    && (meta.sandbox as { enabled?: unknown } | undefined)?.enabled === false;
+}
+
 /**
  * The routing rule for the commands that keep a direct path (the lifecycle
  * commands, `ib ask` and `ib send`). Returns the caller to route to its watchdog, or null
@@ -357,14 +362,10 @@ export async function routeNewAgentThroughWatchdog(
  *   - an agent whose itsybitsy sandbox is disabled. `isSandboxedProcess()` is
  *     still true for a codex agent there (codex's own sandbox), which grants
  *     what these commands need; and such an agent has no seal to verify.
+ * A remote send also routes a Codex worktree with only its native sandbox.
  * This only ROUTES. A caller that lies in its own meta.json to get the direct
  * path runs the command inside its real sandbox, where it fails as before.
  */
-export function isNativeCodexWorktree(meta: Record<string, unknown>): boolean {
-  return meta.worktree === true && typeof meta.model === "string" && meta.model.startsWith("codex:")
-    && (meta.sandbox as { enabled?: unknown } | undefined)?.enabled === false;
-}
-
 export async function resolveRoutedCaller(
   deps: Pick<SpawnClientDeps, "cwd" | "resolveCaller"> = {},
   includeNativeCodex = false,

@@ -7,7 +7,7 @@
  *   Input ids are trimmed and lowercased first.
  * - A name is a local label, and the first segment of the peer's row keys in
  *   `ib watch`. The pairing name prompt refuses a name another peer or this
- *   machine has (peerNameProblem); the store itself does not check.
+ *   machine has (peerNameProblem). The store reserves leading @ for local addresses.
  * - `pairedAt` is an ISO 8601 timestamp.
  * - Every write replaces the whole file atomically (temp file + rename), so a
  *   reader sees the old or the new array, never a torn one.

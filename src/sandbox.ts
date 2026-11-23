@@ -1500,13 +1500,15 @@ export function generateProfile(
     lines.push(denyRule(`network-outbound (remote unix-socket (subpath (param "${root.parameterName}")))`, tag));
   });
 
+  // Upgraded installs may still have a type file with a broad home write grant.
+  const peerOutbox = canonicalizeSandboxPath(peerOutboxDir(sandboxHome(params.HOME)));
+  const handoff = `(subpath "${escapeSbplString(peerOutbox)}")`;
+  lines.push(denyRule(`file-write* ${handoff}`, tag), denyRule(`file-link ${handoff}`, tag));
+
   // The ordinary /private/tmp floor lets the parent read the helper's
   // atomically-published status/output, but it must never be able to forge or
   // remove them. Keep this write-only deny last so even rawAllow and a broad
   // authored /private/tmp allow cannot reopen mutation access.
-  const peerOutbox = canonicalizeSandboxPath(peerOutboxDir(sandboxHome(params.HOME)));
-  const handoff = `(subpath "${escapeSbplString(peerOutbox)}")`;
-  lines.push(denyRule(`file-write* ${handoff}`, tag), denyRule(`file-link ${handoff}`, tag));
   lines.push(denyRule(`file-write* ${SEAL_HELPER_RESULT_MATCHER}`, tag));
   // Seatbelt treats hard/symbolic-link creation as a distinct operation from
   // file-write*. Deny it explicitly so a protected inode cannot be aliased

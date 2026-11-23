@@ -106,7 +106,11 @@ export function defaultUserConfigPath(): string {
 
 /** Read this machine's current policy for each attachment request. */
 export async function readTransferLimits() {
-  const data = await readJsonFile(defaultUserConfigPath());
+  const path = defaultUserConfigPath();
+  const data = await Bun.file(path).json().catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return {};
+    throw new Error(`Cannot read attachment limits from ${path}: ${error.message}`, { cause: error });
+  });
   const { limits, warnings } = resolveTransferLimits(rawAttachmentSettings(data));
   for (const warning of warnings) console.warn(warning);
   return limits;

@@ -314,10 +314,12 @@ export function pathDenialReason(
   prepared: PreparedAccessTable,
   absolutePath: string,
   op: PathOperation,
+  includeRule = false,
 ): string {
   const canonical = canonicalizeAccessPath(prepared, absolutePath);
-  if (prepared.deny.some((entry) => orderedEntryMatches(entry, canonical))) {
-    return `Access denied: ${op} ${canonical} matches a paths.deny entry`;
+  const deny = prepared.deny.find(entry => orderedEntryMatches(entry, canonical));
+  if (deny) {
+    return `Access denied: ${op} ${canonical} matches a paths.deny entry${includeRule ? " " + JSON.stringify(deny.canonical) : ""}`;
   }
   return `Access denied: ${op} ${canonical} is not in paths.allowRead/allowWrite`;
 }

@@ -962,7 +962,7 @@ function printUsage(): void {
   console.log("  info <id>           Show agent's metadata");
   console.log("");
   console.log("Communication:");
-  console.log("  send <id> <msg>     Send a message to an agent or @<team> (--from <id>, stdin)");
+  console.log("  send <id> <msg>     Send to an agent or @<team> (--from <id>, stdin, --attach <file>)");
   console.log("  ask <question>      Ask user a question (--id <agent-id>)");
   console.log("  questions, q        Show pending agent questions (--all)");
   console.log("  acknowledge <qid>   Acknowledge a pending question");

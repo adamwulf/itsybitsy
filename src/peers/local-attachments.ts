@@ -63,7 +63,7 @@ async function senderAttachmentAccess(cwd: string, signal?: AbortSignal) {
   });
   return {
     checkRead(source: string) {
-      if (resolvePreparedAccess(access, source, "read") === "deny") throw new Error(pathDenialReason(access, source, "read"));
+      if (resolvePreparedAccess(access, source, "read") === "deny") throw new Error(pathDenialReason(access, source, "read", true));
     },
     checkWithWatchdog: sandboxed
       ? (ids: string[]) => checkAttachmentIdentitiesViaWatchdog(caller, ids, signal)

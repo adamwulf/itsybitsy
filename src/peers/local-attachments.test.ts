@@ -162,3 +162,47 @@ test.skipIf(process.getuid?.() === 0)("sandbox-routed CLI reports a kernel read 
   expect(result.stderr).toMatch(/EACCES|permission denied/i);
   expect(await queue().exists()).toBe(false);
 });
+
+test.each(["@system", "@project"])("sends an attachment to %s through the coordinator's ordinary handler", async target => {
+  await fixture.addAgent(recipient.repoPath, "project", { agentType: "repo-coordinator", worktree: false });
+  await Bun.write(join(fixture.cwd, "figure"), "fixture");
+  const result = await fixture.run(["send", target, "--attach", "figure"], {
+    stdin: "Read figure", ancestry: { pid: 300, parents: [[300, 1]], identityCurrent: false }, actions: { sendToSystemCoordinator: "record", sendMessage: "record" },
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const action = result.actions[0]!;
+  const system = target === "@system";
+  expect(action.name).toBe(system ? "sendToSystemCoordinator" : "sendMessage");
+  const body = action.args[system ? 0 : 1] as string;
+  const destination = body.split(" → ")[1]!;
+  snapshots.push(dirname(dirname(destination)));
+  expect(body).toStartWith("Read " + destination);
+  expect(action.args[system ? 1 : 2]).toEqual({ noPassthrough: true });
+});
+
+test("team members receive the same verified snapshot", async () => {
+  const second = await fixture.addAgent(recipient.repoPath, "editor");
+  await Bun.write(join(second.agentDir, "meta.transient.json"), Bun.file(join(recipient.agentDir, "meta.transient.json")));
+  await Bun.write(join(fixture.home, ".itsybitsy/teams.json"), JSON.stringify({
+    teams: { review: { created_epoch: 1, created_by: "", members: ["reader", "editor"] } },
+  }));
+  await Bun.write(join(fixture.cwd, "figure"), "fixture");
+  const result = await fixture.run(["send", "@review", "--attach", "figure", "Read figure"], { actions: { teamSend: "real" } });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const reader = JSON.parse(await queue().text());
+  const destination = reader.message.split(" → ")[1];
+  snapshots.push(dirname(dirname(destination)));
+  const editor = JSON.parse(await Bun.file(join(fixture.home, ".itsybitsy/agents/editor/outbox.jsonl")).text());
+  expect(reader).toMatchObject({ noPassthrough: true, team: "review" });
+  expect(editor).toMatchObject({ noPassthrough: true, team: "review", message: reader.message });
+  expect(await Bun.file(destination).text()).toBe("fixture");
+});
+
+test("an unreadable transfer policy refuses the send", async () => {
+  await mkdir(join(fixture.home, ".itsybitsy/config.json"));
+  await Bun.write(join(fixture.cwd, "file"), "fixture");
+  const result = await send("--attach", "file", "read");
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("Cannot read attachment limits");
+  expect(await queue().exists()).toBe(false);
+});

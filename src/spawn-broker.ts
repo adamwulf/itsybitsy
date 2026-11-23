@@ -185,7 +185,7 @@ export async function submitWatchdogRequest(
   request: { id: string },
   wording: WatchdogRequestWording,
   timeoutMs: number,
-  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal"> = {},
+  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain"> = {},
 ): Promise<IbCommandResult> {
   const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
   const now = deps.now ?? Date.now;
@@ -208,6 +208,7 @@ export async function submitWatchdogRequest(
         const result = (await file.json()) as Partial<SpawnResult>;
         await rm(resultFile, { force: true });
         if (result.id !== request.id || typeof result.exitCode !== "number") {
+          deps.onUncertain?.();
           return brokerFail(`Error: the watchdog returned a malformed ${wording.request} result`);
         }
         return {
@@ -230,7 +231,8 @@ export async function submitWatchdogRequest(
   const requestFile = join(spawnRequestDir(agentDir), `${request.id}.json`);
   let stillQueued: boolean;
   try { stillQueued = await withdrawPublishedRequest(requestFile, requestFile + ".withdrawn"); }
-  catch (err) { return brokerFail(`Could not withdraw request: ${err}`); }
+  catch (err) { deps.onUncertain?.(); return brokerFail(`Could not withdraw request: ${err}`); }
+  if (!stillQueued) deps.onUncertain?.();
   if (deps.signal?.aborted) return interruptedSend(stillQueued ? "withdrawn" : "claimed");
   return brokerFail(
     `Error: timed out after ${Math.round(timeoutMs / 1000)}s waiting for the watchdog of '${callerId}' to ${wording.action}. ` +
@@ -243,6 +245,8 @@ export async function submitWatchdogRequest(
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
 
 export interface SpawnClientDeps {
+  /** A claimed request may have enqueued its snapshots before the reply was lost. */
+  onUncertain?: () => void;
   signal?: AbortSignal;
   cwd?: string;
   timeoutMs?: number;

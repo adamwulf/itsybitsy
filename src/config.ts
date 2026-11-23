@@ -1,7 +1,7 @@
 import { join } from "path";
 import { userHome } from "./home";
 import { chmod, stat } from "fs/promises";
-import { DEFAULT_ATTACHMENT_SETTINGS } from "./peers/transfer-limits";
+import { DEFAULT_ATTACHMENT_SETTINGS, resolveTransferLimits } from "./peers/transfer-limits";
 
 export type ConfigSource = "user" | "default";
 export type ConfigType = "number" | "boolean" | "string" | "string[]";
@@ -102,6 +102,15 @@ export function resetUserConfigPath(): void {
 
 export function defaultUserConfigPath(): string {
   return overrideUserConfigPath ?? join(userHome(), ".itsybitsy", "config.json");
+}
+
+/** Read this machine's current policy for each attachment request. */
+export async function readTransferLimits() {
+  const data = await readJsonFile(defaultUserConfigPath());
+  const raw = getNestedValue(data, "peering.attachments");
+  const { limits, warnings } = resolveTransferLimits(typeof raw === "object" && raw !== null ? raw : {});
+  for (const warning of warnings) console.warn(warning);
+  return limits;
 }
 
 export interface ReadConfigOptions {

@@ -317,7 +317,7 @@ export function buildSystemCoordinatorAgent(
  */
 export async function sendToSystemCoordinator(
   message: string,
-  opts?: { fromAgent?: string; cwd?: string; peerSend?: PeerEnqueueOptions; raw?: boolean },
+  opts?: { fromAgent?: string; cwd?: string; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean },
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   const { IB_COORDINATOR_SESSION } = await import("./coordinator");
   // Remote enqueue probes the delivery pane under its own bounded deadline.
@@ -342,12 +342,13 @@ export async function sendToSystemCoordinator(
   // serializes all writes to the `ib-coordinator` tmux session so they can't
   // interleave. There is no central dispatcher — the lock is keyed to the
   // single coordinator session, exactly mirroring the per-agent design.
-  const sendOpts: { fromAgent?: string; cwd?: string; peerSend?: PeerEnqueueOptions; raw?: boolean; outboxDir?: string } = {
+  const sendOpts: { fromAgent?: string; cwd?: string; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean; outboxDir?: string } = {
     cwd,
     outboxDir: getCoordinatorHome(),
     ...(opts?.peerSend && { peerSend: opts.peerSend }),
   };
   if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
+  if (opts?.noPassthrough) sendOpts.noPassthrough = true;
   if (opts?.raw) sendOpts.raw = true;
   const result = await sendMessage(syntheticAgent, message, sendOpts);
 
@@ -544,10 +545,11 @@ const COMMAND_HELP: Record<string, string> = {
     "  Show pending agent questions across all repos.\n" +
     "  --all, -a       Include already-acknowledged questions",
   send:
-    "Usage: ib send [--from <id>] <target> [-f|--file <path>] [message...]\n" +
+    "Usage: ib send [--from <id>] <target> [-f|--file <path>] [--attach <file>]... [message...]\n" +
     "  Send a message to an agent, the system coordinator, a repo coordinator,\n" +
     "  or a team. If no inline message and no -f file is given, the message body\n" +
     "  is read from stdin.\n" +
+    "  --attach <file>  Copy a file for local recipients (repeatable)\n" +
     "  --from <id>     Mark the sender for the recipient's notification\n" +
     "  -f, --file <p>  Read the message body from a file (wins over stdin)\n" +
     "\n" +
@@ -1943,6 +1945,7 @@ export async function main() {
       const sendArgs = args.slice(1);
       let fromAgent: string | undefined;
       let filePath: string | undefined;
+      const attachments: string[] = [];
       const filteredSendArgs: string[] = [];
       let seenTarget = false;
       for (let i = 0; i < sendArgs.length; i++) {
@@ -1953,6 +1956,11 @@ export async function main() {
         if (tok === "--from") {
           if (!sendArgs[i + 1]) { console.error("Error: --from requires a value"); process.exit(1); }
           fromAgent = sendArgs[++i];
+          continue;
+        }
+        if (tok === "--attach") {
+          if (!sendArgs[i + 1]) { console.error("Error: --attach requires a path"); process.exit(1); }
+          attachments.push(sendArgs[++i]!);
           continue;
         }
         if (tok === "-f" || tok === "--file") {
@@ -1975,7 +1983,7 @@ export async function main() {
         }
       }
 
-      const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [message...]\n  -f, --file <path>  Read message body from a file";
+      const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [--attach <file>]... [message...]\n  -f, --file <path>  Read message body from a file\n  --attach <file>    Copy a file for local recipients (repeatable)";
 
       if (!filteredSendArgs[0]) {
         console.error(usage);
@@ -1996,9 +2004,9 @@ export async function main() {
       const interruptedInput = Promise.withResolvers<void>();
       const interrupt = () => { controller.abort(); interruptedInput.resolve(); };
       process.on("SIGINT", interrupt);
-      let repos: RepoEntry[];
-      let resolved;
-      let resolveMessageBody: ReturnType<typeof messageBodyReader>;
+      let staged: Awaited<ReturnType<typeof import("./peers/local-attachments").stageLocalAttachments>> | undefined;
+      let retain = false;
+      let result: Awaited<ReturnType<typeof cliActions.sendMessage>>;
       try {
         const prepare = async () => {
           const repos = await listRepos();
@@ -2013,58 +2021,46 @@ export async function main() {
         };
         const input = await Promise.race([prepare(), interruptedInput.promise.then((): never => { throw controller.signal.reason; })]);
         controller.signal.throwIfAborted();
-        repos = input.repos;
-        resolveMessageBody = messageBodyReader(inlineMessage, input.fileContent);
-        const readBeforePublication = () => Promise.race([resolveMessageBody(), interruptedInput.promise.then(() => "")]);
+        const repos = input.repos;
+        const readBody = messageBodyReader(inlineMessage, input.fileContent);
+        const hasAttachments = attachments.length > 0;
+        const readMessage = async () => {
+          if (staged) return staged.message;
+          const body = await Promise.race([readBody(), interruptedInput.promise.then(() => "")]);
+          controller.signal.throwIfAborted();
+          if (!hasAttachments) return body;
+          const { stageLocalAttachments } = await import("./peers/local-attachments");
+          staged = await stageLocalAttachments(body, attachments, controller.signal);
+          return staged.message;
+        };
         const { routeCliSend } = await import("./send-broker");
-        const route = await routeCliSend({ target, fromAgent, readMessage: readBeforePublication, usage, repos }, { signal: controller.signal });
-        if ("result" in route) { await printAndExit(route.result); break; }
-        resolved = route.local;
+        const route = await routeCliSend({ target, fromAgent, readMessage, usage, repos, hasAttachments }, {
+          signal: controller.signal, onUncertain: () => { retain = true; },
+        });
+        if ("result" in route) {
+          result = route.result;
+        } else {
+          const { agent, isSystemCoordinator, team } = route.local;
+          if (!agent && !isSystemCoordinator && !team) throw new Error(`Agent not found: ${target}`);
+          const message = await readMessage();
+          controller.signal.throwIfAborted();
+          if (!message) throw new Error(usage);
+          const opts = fromAgent || hasAttachments
+            ? { ...(fromAgent && { fromAgent }), ...(hasAttachments && { noPassthrough: true }) }
+            : undefined;
+          if (isSystemCoordinator) result = await cliActions.sendToSystemCoordinator(message, opts);
+          else if (team) result = await cliActions.teamSend(team.name, team.members, message, opts, repos);
+          else result = await cliActions.sendMessage(agent!, message, opts);
+        }
+        retain ||= result.ok;
       } catch (err) {
-        if (controller.signal.aborted) {
-          const { interruptedSend } = await import("./spawn-broker");
-          await printAndExit(interruptedSend("unpublished"));
-        }
-        console.error(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      } finally { process.off("SIGINT", interrupt); }
-      const { agent: resolvedAgent, isSystemCoordinator, team } = resolved;
-
-      if (isSystemCoordinator) {
-        const coordMessage = await resolveMessageBody();
-        if (!coordMessage) {
-          console.error(usage);
-          process.exit(1);
-        }
-        const result = await cliActions.sendToSystemCoordinator(coordMessage, fromAgent ? { fromAgent } : undefined);
-        await printAndExit(result);
-        break;
+        const { brokerFail, interruptedSend } = await import("./spawn-broker");
+        result = controller.signal.aborted ? interruptedSend("unpublished") : brokerFail(err instanceof Error ? err.message : String(err));
+      } finally {
+        process.off("SIGINT", interrupt);
+        if (!retain) await staged?.cleanup();
       }
-
-      // A team target resolves to ZERO-OR-MORE recipients, so it must branch
-      // BEFORE the single-recipient `!resolvedAgent` guard below (§16.4): an
-      // empty team is a no-op SUCCESS, not the exit-1 an unresolved single
-      // `@name` produces. `teamSend` handles the empty recipient set itself.
-      if (team) {
-        const teamMessage = await resolveMessageBody();
-        if (!teamMessage) {
-          console.error(usage);
-          process.exit(1);
-        }
-        await printAndExit(await cliActions.teamSend(team.name, team.members, teamMessage, fromAgent ? { fromAgent } : undefined, repos));
-        break;
-      }
-
-      if (!resolvedAgent) {
-        process.exit(1);
-      }
-
-      const message = await resolveMessageBody();
-      if (!message) {
-        console.error(usage);
-        process.exit(1);
-      }
-      await printAndExit(await cliActions.sendMessage(resolvedAgent, message, fromAgent ? { fromAgent } : undefined));
+      await printAndExit(result);
       break;
     }
     case "nickname": {

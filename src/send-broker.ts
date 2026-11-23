@@ -80,7 +80,8 @@ export const SEND_OP = "send";
 /** Longest target accepted: an agent id or nickname, `@repo/agent`, a team. */
 export const SEND_MAX_TARGET_CHARS = 256;
 
-const REQUEST_FIELDS = new Set(["v", "id", "op", "target", "message"]);
+const REMOTE_ATTACHMENTS_ERROR = "attachments to other machines come in the next update";
+const REQUEST_FIELDS = new Set(["v", "id", "op", "target", "message", "noPassthrough"]);
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 
 /**
@@ -101,6 +102,7 @@ export interface SendRequest {
   op: typeof SEND_OP | "remote-send";
   target: string;
   message: string;
+  noPassthrough?: true;
 }
 
 type ParsedSendRequest = { ok: true; request: SendRequest } | { ok: false; error: string };
@@ -156,6 +158,9 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
   if (obj.v !== 1) return { ok: false, error: "unsupported send request version" };
   if (obj.id !== expectedId) return { ok: false, error: "send request id does not match its file name" };
   if (obj.op !== SEND_OP && obj.op !== "remote-send") return { ok: false, error: "send request has an unsupported op" };
+  if (obj.noPassthrough !== undefined && (obj.noPassthrough !== true || obj.op !== SEND_OP)) {
+    return { ok: false, error: "invalid noPassthrough for send request" };
+  }
   if (!isBrokerableTarget(obj.target)) {
     return { ok: false, error: "send request has an invalid target" };
   }
@@ -166,7 +171,7 @@ export function parseSendRequest(text: string, expectedId: string): ParsedSendRe
   if (Buffer.byteLength(obj.message, "utf8") > SPAWN_MAX_PROMPT_BYTES) {
     return { ok: false, error: "send request message is too large" };
   }
-  return { ok: true, request: { v: 1, id: expectedId, op: obj.op, target: obj.target, message: obj.message } };
+  return { ok: true, request: { v: 1, id: expectedId, op: obj.op, target: obj.target, message: obj.message, ...(obj.noPassthrough === true && { noPassthrough: true }) } };
 }
 
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
@@ -183,6 +188,7 @@ export async function requestSendViaWatchdog(
   target: string,
   message: string,
   deps: SpawnClientDeps = {},
+  noPassthrough = false,
 ): Promise<IbCommandResult | null> {
   let caller: ResolvedCallerContext | null;
   try {
@@ -198,10 +204,10 @@ export async function requestSendViaWatchdog(
         "so there is no agent watchdog to ask. Run `ib send` from an agent's own worktree.",
     );
   }
-  return submitSendRequest("send", caller.agentDir, caller.meta.id, target, message, deps);
+  return submitSendRequest("send", caller.agentDir, caller.meta.id, target, message, deps, noPassthrough);
 }
 
-async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps) {
+async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: string, target: string, message: string, deps: SpawnClientDeps, noPassthrough = false) {
   const remote = op === "remote-send";
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!isBrokerableTarget(target)) return remote ? brokerFail("send request has an invalid target") : null;
@@ -211,7 +217,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
   catch (err) { return deps.signal?.aborted ? interruptedSend("unpublished") : brokerFail(String(err)); }
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!live) return remote ? brokerFail("Remote sends from a worktree agent need its watchdog running") : null;
-  const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message };
+  const request: SendRequest = { v: 1, id: randomBytes(16).toString("hex"), op, target, message, ...(noPassthrough && { noPassthrough: true }) };
   const result = await submitWatchdogRequest(
     dir,
     callerId,
@@ -231,6 +237,7 @@ async function submitSendRequest(op: SendRequest["op"], dir: string, callerId: s
 
 /** What `ib send` hands the broker. */
 export interface SendCommand {
+  hasAttachments?: boolean;
   target: string;
   /** `--from`, when given. */
   fromAgent?: string;
@@ -278,7 +285,7 @@ export async function routeSendThroughWatchdog(
   const message = await command.readMessage();
   if (deps.signal?.aborted) return interruptedSend("unpublished");
   if (!message) return brokerFail(command.usage);
-  return requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller });
+  return requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller }, command.hasAttachments);
 }
 
 type CliSendRoute = { result: IbCommandResult } | { local: ResolvedSendTarget };
@@ -312,6 +319,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       const localName = await readMachineName().catch(() => "");
       localMachine = machine.toLowerCase() === localName.toLowerCase();
       deferred = !localMachine && (!!worktree || isSandboxedProcess());
+      if (!localMachine && command.hasAttachments) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
       if (!localMachine) {
         message = await command.readMessage();
         if (deps.signal?.aborted) return cancelled();
@@ -324,6 +332,12 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       deferred = !!worktree && !!resolved.incompleteVisibility;
     }
     if (deps.signal?.aborted) return cancelled();
+    if (command.hasAttachments && resolved?.remote) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
+    if (command.hasAttachments && deferred) {
+      // Only the watchdog can disambiguate a bare address across hidden repos.
+      const local = await routeSendThroughWatchdog(command, deps);
+      return { result: local ?? brokerFail(resolved?.error ?? "Cannot resolve local attachment target") };
+    }
     if (deferred || resolved?.remote) {
       const { cliRemoteSender, handoffRemoteMessage, qualifiedAgentSender, textHeader } = await import("./peers/peer-outbox");
       const sender = await cliRemoteSender(repos, command.fromAgent, cwd);
@@ -351,6 +365,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     if (brokered) return { result: brokered };
     resolved ??= await resolveAddress(target, repos, cwd);
     if (deps.signal?.aborted) return cancelled();
+    if (command.hasAttachments && resolved.remote) return { result: brokerFail(REMOTE_ATTACHMENTS_ERROR) };
     return resolved.error ? { result: brokerFail(resolved.error) } : { local: resolved };
   } catch (err) {
     return deps.signal?.aborted ? cancelled() : { result: brokerFail(err instanceof Error ? err.message : String(err)) };
@@ -367,21 +382,21 @@ export interface SendServerDeps {
     repos: RepoEntry[],
     cwd: string,
   ) => Promise<ResolvedSendTarget & { error?: string }>;
-  sendMessage?: (agent: Agent, message: string, opts: { fromAgent: string }) => Promise<IbCommandResult>;
+  sendMessage?: (agent: Agent, message: string, opts: { noPassthrough?: true; fromAgent: string }) => Promise<IbCommandResult>;
   teamSend?: (
     teamName: string,
     members: Agent[],
     message: string,
-    opts: { fromAgent: string; excludeRecipient: (agent: Agent) => Promise<boolean> },
+    opts: { noPassthrough?: true; fromAgent: string; excludeRecipient: (agent: Agent) => Promise<boolean> },
     repos: RepoEntry[],
   ) => Promise<IbCommandResult>;
-  sendToSystemCoordinator?: (message: string, opts: { fromAgent: string; cwd: string }) => Promise<IbCommandResult>;
+  sendToSystemCoordinator?: (message: string, opts: { noPassthrough?: true; fromAgent: string; cwd: string }) => Promise<IbCommandResult>;
 }
 
 /** `@system`: the CLI's own function (lazy import, as the watchdog's notifications do). */
 async function sendToSystemCoordinatorDefault(
   message: string,
-  opts: { fromAgent: string; cwd: string },
+  opts: { noPassthrough?: true; fromAgent: string; cwd: string },
 ): Promise<IbCommandResult> {
   const { sendToSystemCoordinator } = await import("./index");
   return sendToSystemCoordinator(message, opts);
@@ -406,6 +421,7 @@ export async function handleSendRequest(
 
   const seams = deps.send ?? {};
   const fromAgent = ctx.agentId;
+  const opts = { fromAgent, ...(parsed.request.noPassthrough && { noPassthrough: true as const }) };
   const self: AgentLocation = { id: ctx.agentId, repoPath: ctx.repoPath, agentDir: ctx.agentDir };
   // Where the requester "is": its own worktree, the cwd of a direct `ib send`
   // there. It decides `@coordinator` and the same-repo-first search of a bare
@@ -424,9 +440,10 @@ export async function handleSendRequest(
       const { handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
       return await handoffRemoteMessage(resolved.remote.peer, textHeader(resolved.remote.target, message, sender));
     }
+    if (resolved.remote && opts.noPassthrough) return brokerFail(REMOTE_ATTACHMENTS_ERROR);
     if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
     if (resolved.isSystemCoordinator) {
-      return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { fromAgent, cwd: callerCwd });
+      return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { ...opts, cwd: callerCwd });
     }
     // Never deliver to the requester itself (see isAgentAt). A team drops it
     // like the sender; a single target is refused.
@@ -436,7 +453,7 @@ export async function handleSendRequest(
         resolved.team.name,
         resolved.team.members,
         message,
-        { fromAgent, excludeRecipient },
+        { ...opts, excludeRecipient },
         repos,
       );
     }
@@ -444,7 +461,7 @@ export async function handleSendRequest(
     if (await excludeRecipient(resolved.agent)) {
       return brokerFail(`Error: '${ctx.agentId}' cannot send to itself through its watchdog; send directly`);
     }
-    return await (seams.sendMessage ?? sendMessage)(resolved.agent, message, { fromAgent });
+    return await (seams.sendMessage ?? sendMessage)(resolved.agent, message, opts);
   } catch (err) {
     return brokerFail(`Error: send failed: ${err instanceof Error ? err.message : String(err)}`);
   }

@@ -4416,6 +4416,7 @@ export async function sendMessage(
     outboxDir?: string;
     peerSend?: PeerEnqueueOptions;
     team?: string;
+    noPassthrough?: boolean;
     /**
      * Dashboard-only: stage local file-path references at send time (see the
      * function docstring). Internal opt — deliberately NOT exposed through any
@@ -4459,7 +4460,7 @@ export async function sendMessage(
   const attachmentSend = opts?.stageAttachments === true;
   let outgoing = message;
   let stagedCleanup: (() => Promise<void>) | null = null;
-  let noPassthrough = false;
+  let noPassthrough = opts?.noPassthrough === true;
   if (attachmentSend) {
     let staged: StagedMessage;
     try {
@@ -4547,7 +4548,7 @@ export async function sendMessage(
   // probe or the drain. Report success either way, keep the queued copy and the
   // staged files for the next drainer, and surface the underlying error as a
   // non-fatal stderr diagnostic.
-  if (attachmentSend) {
+  if (attachmentSend || noPassthrough) {
     try {
       const result = await drainIfNeeded();
       return { ok: true, exitCode: 0, stdout, stderr: result.ok ? "" : result.stderr };
@@ -4697,6 +4698,7 @@ export async function teamSend(
   opts:
     | {
         fromAgent?: string;
+        noPassthrough?: boolean;
         /** Dashboard-only: stage local file paths per recipient (see docstring). */
         stageAttachments?: boolean;
         /** Base dir for relative attachment paths; defaults to each recipient's repoPath. */
@@ -4760,7 +4762,7 @@ export async function teamSend(
   // /tmp snapshot). ONE record per send, never per recipient. Best-effort: a
   // channel-append failure must never fail the send (§17.4).
   const skip = new Set(opts?.skipRecipientIds ?? []);
-  const stagedSend = opts?.stageAttachments === true;
+  const stagedSend = opts?.stageAttachments === true || opts?.noPassthrough === true;
   const recordRoomMessage = async () => {
     if (!message) return;
     await appendChannelMessage(name, {
@@ -4833,6 +4835,7 @@ export async function teamSend(
     const res = await sendMessage(recipient, message, {
       fromAgent,
       team: name,
+      noPassthrough: opts?.noPassthrough,
       stageAttachments: opts?.stageAttachments,
       attachmentBaseDir: opts?.attachmentBaseDir,
     });

@@ -173,13 +173,13 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       if (!signal?.aborted) {
         const result = await readResult();
         if (result && !signal?.aborted) return result;
-        if (resultDiagnostic && !signal?.aborted) return fail(`outcome unknown — check the recipient (${resultDiagnostic})`);
       }
       claimed ??= await findClaim(base, header.id);
       if (claimed) await writeFile(join(claimed, "cancel"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
       const last = await readResult();
       if (last && !signal?.aborted) return last;
+      if (resultDiagnostic && !signal?.aborted) return fail(`outcome unknown — check the recipient (${resultDiagnostic})`);
     }
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
@@ -258,6 +258,7 @@ export function createPeerOutboxPoll(now = Date.now) {
     if (existsSync(join(dir, "result.json"))) return;
     if (transferOwnerState(claim.owner, 0) === "proven-dead") {
       // A claim can survive a crash on either side of FIN. Never re-dispatch it.
+      await rm(join(dir, "files"), { recursive: true, force: true });
       await writeJson(dir, "result.json", { ok: false, error: "outcome unknown — check the recipient" });
     }
   }

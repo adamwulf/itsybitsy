@@ -3593,6 +3593,22 @@ describe("runPerAgentWatchdog", () => {
     await watch;
   });
 
+  test("watchdog shutdown expires with a transfer stuck in cleanup", async () => {
+    const release = Promise.withResolvers<void>();
+    let signal: AbortSignal | undefined;
+    setPerAgentSpawnBroker({ setup: async () => null, process: async (id, _repo, jobs, lifetime) => {
+      signal = lifetime;
+      jobs.set(id, release.promise);
+    } });
+    let checks = 0;
+    setPerAgentExistsSync(() => ++checks <= 1);
+    setPerAgentReadState(async () => undefined);
+    try {
+      await runPerAgentWatchdog("agent-test1", "/tmp/test");
+      expect(signal?.aborted).toBe(true);
+    } finally { release.resolve(); }
+  }, 3000);
+
   test("a spawn-request handler that throws never crashes the watchdog", async () => {
     let calls = 0;
     setPerAgentSpawnBroker({

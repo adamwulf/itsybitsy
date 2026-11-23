@@ -2286,7 +2286,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     stopWatching();
     process.off("SIGTERM", stop);
     process.off("SIGINT", stop);
-    await Promise.allSettled(jobs.values());
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([Promise.allSettled(jobs.values()), new Promise<void>(resolve => {
+        deadline = setTimeout(resolve, 1500);
+      })]);
+    } finally { clearTimeout(deadline); }
   }
 }
 

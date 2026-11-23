@@ -1,6 +1,7 @@
 import * as runtimeNames from "./runtime-names";
 import { dirname, isAbsolute, join, resolve } from "path";
-import { readdir, realpath, stat } from "fs/promises";
+import { constants } from "node:fs";
+import { open, readdir, realpath, stat } from "fs/promises";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
@@ -117,6 +118,24 @@ function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
   return ancestors;
 }
 
+/** Git pointer files hold one path. Bound the read itself even if the file grows after fstat. */
+async function readGitPointer(path: string): Promise<string> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  try {
+    const limit = 4096;
+    const info = await file.stat();
+    if (!info.isFile() || info.size > limit) throw new Error("Invalid Git pointer file");
+    const bytes = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length);
+      if (!bytesRead) return bytes.toString("utf8", 0, length).trim();
+      length += bytesRead;
+    }
+    throw new Error("Git pointer file too large");
+  } finally { await file.close(); }
+}
+
 /**
  * An existing agent worktree already identifies its caller. Verify both the
  * registered repository and Git's worktree backlink before taking this fast
@@ -136,7 +155,7 @@ export async function isRegisteredAgentWorktree(cwd: string, roots: string[], al
     if (!meta || Array.isArray(meta) || meta.id !== agentId || meta.worktree === false) return false;
 
     const gitFile = join(worktreePath, ".git");
-    const pointer = (await Bun.file(gitFile).text()).trim().match(/^gitdir: (.+)$/);
+    const pointer = (await readGitPointer(gitFile)).match(/^gitdir: (.+)$/);
     if (!pointer) return false;
     const gitDir = await realpath(resolve(worktreePath, pointer[1]!));
     // Git's worktree administration directory must belong to this registered
@@ -145,13 +164,13 @@ export async function isRegisteredAgentWorktree(cwd: string, roots: string[], al
     if (allowParentGitFile && (await stat(repoGitDir)).isFile()) {
       // A registered submodule's .git file points into the superproject's
       // administration directory. Resolve a relative pointer from the module.
-      const parent = (await Bun.file(repoGitDir).text()).trim().match(/^gitdir: (.+)$/);
+      const parent = (await readGitPointer(repoGitDir)).match(/^gitdir: (.+)$/);
       if (!parent) return false;
       repoGitDir = resolve(repoPath, parent[1]!);
     }
     const worktreesDir = await realpath(join(repoGitDir, "worktrees"));
     if (dirname(gitDir) !== worktreesDir) return false;
-    const backlink = (await Bun.file(join(gitDir, "gitdir")).text()).trim();
+    const backlink = await readGitPointer(join(gitDir, "gitdir"));
     if (!backlink) return false;
     return await realpath(resolve(gitDir, backlink)) === await realpath(gitFile);
   } catch {

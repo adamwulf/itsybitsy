@@ -306,6 +306,19 @@ describe("send broker", () => {
       expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("verified Git backlink") });
     });
 
+    test("a FIFO worktree pointer is refused and the watchdog processes the next request", async () => {
+      const cwd = await linkWorktree();
+      const git = join(cwd, ".git");
+      await rm(git);
+      expect(Bun.spawnSync(["mkfifo", git]).exitCode).toBe(0);
+      const second = "b".repeat(32);
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", target: "laptop/@system" }));
+      await queue(second, sendRequest(second));
+      expect(await processSpawnRequests(SENDER_ID, senderRepo, server().deps)).toBe(2);
+      expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("verified Git backlink") });
+      expect(await result(second)).toMatchObject({ ok: true });
+    }, 2000);
+
     test("the sender is the verified agent: --from cannot be smuggled in the request", async () => {
       const { deps } = server();
       await queue(ID_A, sendRequest(ID_A, { from: OTHER_ID }));

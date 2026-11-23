@@ -191,7 +191,9 @@ export async function inspectBrokerLease(dir: string, id: string): Promise<{ sta
       stamp = await openBrokerLease(dir, id, "owner.json");
     }
     const saved = await readOwnerFields(stamp);
-    return { state: transferOwnerState(saved?.pid === seed.pid ? saved : undefined, created, observed), created, identity };
+    // Even without a usable saved stamp, a missing lease PID proves death.
+    const owner = saved?.pid === seed.pid ? saved : { pid: seed.pid, start: null };
+    return { state: transferOwnerState(owner, leaseInfo.birthtimeMs, observed), created, identity };
   } catch { return { state: "unverifiable", created }; }
   finally { await stamp?.close(); await lease?.close(); }
 }

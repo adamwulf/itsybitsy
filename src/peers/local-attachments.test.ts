@@ -394,3 +394,18 @@ test("a shared-checkout worker sends with its own policy even from another agent
   snapshots.push(dirname(dirname(record.message.split(" → ")[1])));
   expect(record.fromAgent).toBe("worker");
 });
+
+test("a case-insensitive registration matches the sender directory by identity", async () => {
+  const alias = join(dirname(recipient.repoPath), basename(recipient.repoPath).toUpperCase());
+  if (!await stat(alias).then(() => true, () => false)) return;
+  await fixture.writeRegistry({ version: 1, repos: [{ path: alias, name: "project" }] });
+  const sender = await fixture.addAgent(recipient.repoPath, "sender", { sandbox: { enabled: false } });
+  await Bun.write(join(sender.sessionCwd, "report"), "ok");
+  const result = await fixture.run(["send", "reader", "--attach", "report", "read"], {
+    cwd: sender.sessionCwd, actions: { sendMessage: "real" }, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  const record = JSON.parse(await queue().text());
+  snapshots.push(dirname(dirname(record.message.split(" → ")[1])));
+  expect(record.fromAgent).toBe("sender");
+});

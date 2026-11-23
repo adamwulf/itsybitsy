@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { hasFreeSpace } from "./attachment-space";
 import { checkManifestLimits } from "./transfer-limits";
@@ -11,7 +11,7 @@ import { registeredRepoRoots, locateRegisteredAgentDir } from "../hooks/agent-co
 import { matchWorktreeCaller } from "../runtime-names";
 import { remoteCliCaller } from "./peer-outbox";
 import { buildAgentAccessTable, buildSystemHookPolicy, pathDenialReason } from "../hooks/paths-table";
-import { metaKernelSandboxed, metadataRealpath, resolvePreparedAccess, type PreparedAccessTable } from "../sandbox";
+import { metaKernelSandboxed, resolvePreparedAccess, type PreparedAccessTable } from "../sandbox";
 import { readMachineName } from "../machine-name";
 import { buildAttachmentManifest, fileChunks, hashFile, type ManifestEntry } from "./attachment-manifest";
 import { rewriteAttachmentPaths, type AttachmentMapping } from "./attachment-paths";
@@ -54,6 +54,29 @@ export async function copyLocalAttachments(
 
 export type AttachmentSender = { kind: "user" | "system" } | { kind: "agent"; caller: ResolvedCallerContext };
 
+async function directoryIdentity(path: string): Promise<string | undefined> {
+  try {
+    const dir = await stat(path, { bigint: true });
+    if (dir.isDirectory()) return `${dir.dev}:${dir.ino}`;
+  } catch (error) {
+    if (!["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+  }
+}
+
+/** Match the closest registered directory by metadata, including APFS case aliases. */
+async function registeredCallerRepo(home: string, cwd: string, worktreeRepo?: string) {
+  const registered = new Set<string>();
+  for (const root of await registeredRepoRoots(home)) {
+    const id = await directoryIdentity(root);
+    if (id) registered.add(id);
+  }
+  for (let dir = worktreeRepo ?? cwd; ; dir = dirname(dir)) {
+    const id = await directoryIdentity(dir);
+    if (id && registered.has(id)) return dir;
+    if (worktreeRepo || dir === dirname(dir)) return undefined;
+  }
+}
+
 export async function resolveAttachmentSender(cwd = process.cwd()): Promise<AttachmentSender> {
   if (await remoteCliCaller.isHuman()) return { kind: "user" };
   const unknown = "cannot verify the sender of an attachment";
@@ -63,12 +86,8 @@ export async function resolveAttachmentSender(cwd = process.cwd()): Promise<Atta
     if (await remoteCliCaller.isSystem()) return { kind: "system" };
     throw new Error(unknown);
   }
-  // Match registry aliases by metadata alone. Inside a kernel sandbox even
-  // realpath of an unrelated repository root can generate an access denial.
-  const roots = (await registeredRepoRoots(home)).map(metadataRealpath).filter((p): p is string => p !== null);
   const worktree = matchWorktreeCaller(cwd);
-  const repo = worktree ? roots.find(root => root === worktree[1])
-    : roots.filter(root => cwd === root || cwd.startsWith(root + "/")).sort((a, b) => b.length - a.length)[0];
+  const repo = await registeredCallerRepo(home, cwd, worktree?.[1]);
   if (!repo) throw new Error(unknown);
   const shared = await resolveAttachmentSharedCaller(cwd, repo);
   if (shared) return { kind: "agent", caller: shared };

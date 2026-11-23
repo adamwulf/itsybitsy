@@ -22,7 +22,9 @@ export async function writeTransferOwner(dir: string, owner: TransferOwner) {
 
 async function readOwnerFields(handle: FileHandle): Promise<TransferOwner | undefined> {
   const stat = await handle.stat();
-  if (!stat.isFile() || stat.nlink !== 1 || stat.size > 256) return;
+  // A create-once record can retain its temporary hard link if its publisher
+  // exits just after link(). Both names refer to the complete protected record.
+  if (!stat.isFile() || stat.nlink < 1 || stat.size > 256) return;
   const data = Buffer.alloc(257);
   const { bytesRead } = await handle.read(data);
   let value;

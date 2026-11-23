@@ -148,3 +148,16 @@ test("a dead lease PID proves death even with an unreadable stamp", async () => 
   await sweepStagingLease(root, id, Date.now());
   expect(await readdir(join(root, "send-attachments"))).toEqual([]);
 });
+
+test("a published watchdog stamp remains authoritative across a crash before temp unlink", async () => {
+  const id = "f".repeat(32), dir = join(root, "send-attachments", id);
+  await mkdir(dir, { recursive: true });
+  await Bun.write(join(dir, "lease"), JSON.stringify({ pid: process.pid }));
+  const temp = join(dir, ".record-" + crypto.randomUUID());
+  await Bun.write(temp, JSON.stringify({ pid: process.pid, start: 10 }));
+  await fs.link(temp, join(dir, "owner.json"));
+  expect((await inspectBrokerLease(root, id)).state).toBe("verified-live");
+  processStartEpochSecondsCtx.set(() => 11);
+  await sweepStagingLease(root, id, Date.now());
+  expect(await readdir(join(root, "send-attachments"))).toEqual([]);
+});

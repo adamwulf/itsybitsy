@@ -7,11 +7,22 @@ import { stageMessageAttachments, type StagedMessage } from "./message-attachmen
 describe("send-time message attachments", () => {
   let dir: string;
   let attempts: StagedMessage[];
+  let staging: string;
+  const allocate = fsPromises.mkdtemp;
+  let restore: () => void;
   beforeEach(async () => {
     dir = await realpath(await mkdtemp("/tmp/attachment-test-"));
     attempts = [];
+    staging = await allocate("/tmp/ib-staging-test-");
+    const spy = spyOn(fsPromises, "mkdtemp").mockImplementation(((prefix: string) => {
+      expect(prefix).toBe("/tmp/itsybitsy-attachments-");
+      return allocate(join(staging, "itsybitsy-attachments-"));
+    }) as typeof allocate);
+    restore = () => spy.mockRestore();
   });
   afterEach(async () => {
+    restore();
+    await rm(staging, { recursive: true, force: true });
     for (const attempt of attempts) await attempt.cleanup();
     await rm(dir, { recursive: true, force: true });
   });
@@ -22,7 +33,7 @@ describe("send-time message attachments", () => {
   }
   function dropped(path: string) { return path.replaceAll(" ", "\\ "); }
   function stagedPaths(message: string): string[] {
-    return [...message.matchAll(/\/tmp\/itsybitsy-attachments-[^/]+\/\d+\/[^\s"']+/g)]
+    return [...message.matchAll(/\/tmp\/ib-staging-test-[^/]+\/itsybitsy-attachments-[^/]+\/\d+\/[^\s"']+/g)]
       .map((match) => match[0]);
   }
 
@@ -32,7 +43,7 @@ describe("send-time message attachments", () => {
     await writeFile(original, "snapshot");
     const result = await stage(`Please inspect ${dropped(original)} for me.`);
     expect(result.staged).toBe(true);
-    expect(result.message.startsWith("Please inspect /tmp/itsybitsy-attachments-")).toBe(true);
+    expect(result.message.startsWith("Please inspect " + staging + "/itsybitsy-attachments-")).toBe(true);
     expect(result.message.endsWith(`${dropped(filename)} for me.`)).toBe(true);
     const staged = result.message.slice("Please inspect ".length, -" for me.".length).replaceAll("\\ ", " ");
     expect(await readFile(staged, "utf8")).toBe("snapshot");
@@ -89,7 +100,7 @@ describe("send-time message attachments", () => {
     await writeFile(join(dir, "image.png"), "image");
     const result = await stage("Do not use `rm; inspect ./image.png instead.");
     expect(result.staged).toBe(true);
-    expect(result.message).toMatch(/^Do not use `rm; inspect \/tmp\/itsybitsy-attachments-.* instead\.$/);
+    expect(result.message).toMatch(/^Do not use `rm; inspect \/tmp\/ib-staging-test-[^/]+\/itsybitsy-attachments-.* instead\.$/);
     const fenced = "Example:\n```sh\ncat ./image.png";
     expect((await stage(fenced)).message).toBe(fenced);
   });
@@ -150,18 +161,18 @@ describe("send-time message attachments", () => {
   test("replaces only a Markdown path and preserves trailing punctuation", async () => {
     await writeFile(join(dir, "image.png"), "image");
     const result = await stage("See [image](./image.png), thanks.");
-    expect(result.message).toMatch(/^See \[image\]\(\/tmp\/itsybitsy-attachments-[^/]+\/0\/image.png\), thanks\.$/);
+    expect(result.message).toMatch(/^See \[image\]\(\/tmp\/ib-staging-test-[^/]+\/itsybitsy-attachments-[^/]+\/0\/image.png\), thanks\.$/);
   });
 
   test("missing files, incomplete quoting and directories fail without staging any files", async () => {
     await writeFile(join(dir, "good.png"), "good");
-    const before = (await readdir("/tmp")).filter((name) => name.startsWith("itsybitsy-attachments-"));
+    const before = (await readdir(staging)).filter((name) => name.startsWith("itsybitsy-attachments-"));
     await expect(stage('./good.png ./missing.png')).rejects.toThrow("Cannot stage attachment");
     await expect(stage('"./good.png')).rejects.toThrow("Unclosed quote");
     await expect(stage('./good.png\\')).rejects.toThrow("Incomplete escape");
     await expect(stage(dir)).rejects.toThrow("directories are not copied");
     await expect(stage('"./good.png."')).rejects.toThrow("Cannot stage attachment");
-    const after = (await readdir("/tmp")).filter((name) => name.startsWith("itsybitsy-attachments-"));
+    const after = (await readdir(staging)).filter((name) => name.startsWith("itsybitsy-attachments-"));
     expect(after).toEqual(before);
   });
 
@@ -183,7 +194,7 @@ describe("send-time message attachments", () => {
   test("cleans the whole staging attempt when a later copy fails", async () => {
     await writeFile(join(dir, "one.png"), "one");
     await writeFile(join(dir, "two.png"), "two");
-    const before = (await readdir("/tmp")).filter((name) => name.startsWith("itsybitsy-attachments-"));
+    const before = (await readdir(staging)).filter((name) => name.startsWith("itsybitsy-attachments-"));
     const copy = fsPromises.copyFile;
     let calls = 0;
     const spy = spyOn(fsPromises, "copyFile").mockImplementation(async (...args) => {
@@ -196,7 +207,7 @@ describe("send-time message attachments", () => {
     } finally {
       spy.mockRestore();
     }
-    const after = (await readdir("/tmp")).filter((name) => name.startsWith("itsybitsy-attachments-"));
+    const after = (await readdir(staging)).filter((name) => name.startsWith("itsybitsy-attachments-"));
     expect(after).toEqual(before);
   });
 });

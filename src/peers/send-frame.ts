@@ -18,6 +18,7 @@ export interface SendHeader {
 }
 
 type Bytes = Uint8Array | number[];
+interface ReadStream { read(limit: number): Promise<Bytes> }
 
 export function encodeSendHeader(header: SendHeader): Buffer {
   const json = JSON.stringify(header);
@@ -107,7 +108,7 @@ async function waitForIO<T>(options: FileBodyOptions, operation: () => T | Promi
 }
 
 export async function streamFileBody(
-  stream: { read(limit: number): Promise<Bytes> }, size: number,
+  stream: ReadStream, size: number,
   sink: (chunk: Uint8Array) => void | Promise<void>, options: FileBodyOptions = {},
 ): Promise<string> {
   options.signal?.throwIfAborted();
@@ -126,6 +127,12 @@ export async function streamFileBody(
     options.onProgress?.(written);
   }
   return hash.digest("hex");
+}
+
+/** Complete a request after all declared bodies, including a text-only request. */
+export async function requireSendFin(stream: ReadStream, options: FileBodyOptions = {}): Promise<void> {
+  const trailing = await waitForIO(options, () => stream.read(1));
+  if (trailing.length) throw new Error("Trailing data after declared file bodies");
 }
 
 /** Only the caller knows when the last file has been sent and may finish the stream. */

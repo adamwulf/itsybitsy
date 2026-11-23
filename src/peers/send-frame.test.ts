@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, open, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decodeSendHeader, encodeSendHeader, sendFileBody, streamFileBody, type SendHeader } from "./send-frame";
+import { decodeSendHeader, encodeSendHeader, requireSendFin, sendFileBody, streamFileBody, type SendHeader } from "./send-frame";
 import { rewriteAttachmentPaths } from "./attachment-paths";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
 
@@ -185,4 +185,33 @@ test("header spellings preserve two identical basenames and repeated references 
   const decoded = await decodeSendHeader(new MemoryStream(encodeSendHeader(input)));
   const mapping = decoded.files.map(({ name, spellings }, index) => ({ spellings, destination: "/tmp/" + index + "/" + name }));
   expect(rewriteAttachmentPaths(decoded.message, mapping)).toBe("/tmp/0/image.png /tmp/1/image.png /tmp/0/image.png");
+});
+
+test("requires clean FIN after zero or more file bodies using a one-byte read", async () => {
+  for (const body of ["", "body"]) {
+    const clean = new MemoryStream(Buffer.from(body));
+    if (body) await streamFileBody(clean, body.length, () => {});
+    await requireSendFin(clean);
+    expect(clean.reads.at(-1)).toBe(1);
+    const trailing = new MemoryStream(Buffer.from(body + "extra"));
+    if (body) await streamFileBody(trailing, body.length, () => {});
+    await expect(requireSendFin(trailing)).rejects.toThrow(/trailing/i);
+    expect(trailing.offset).toBe(body.length + 1);
+  }
+});
+
+test("stalled FIN can time out or be aborted", async () => {
+  const stream = { read: () => new Promise<number[]>(() => {}) };
+  let expire!: () => void;
+  const waiting = requireSendFin(stream, { setTimer(ms, fn) {
+    expect(ms).toBe(IDLE_TIMEOUT_MS);
+    expire = fn;
+    return () => {};
+  } });
+  expire();
+  await expect(waiting).rejects.toThrow(/progress/i);
+  const controller = new AbortController();
+  const cancelled = requireSendFin(stream, { signal: controller.signal });
+  controller.abort(new Error("cancel FIN"));
+  await expect(cancelled).rejects.toThrow("cancel FIN");
 });

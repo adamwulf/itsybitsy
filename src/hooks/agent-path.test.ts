@@ -4478,8 +4478,8 @@ test("broad tmp grants cannot change trusted staging through either spelling", a
   try {
     const ctx = makeCtx({ access: makeAccess({ allowWrite: [root] }) });
     for (const alias of paths) {
-      for (const path of [alias, join(alias, "incoming/x.partial/owner.json")]) {
-        expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: path } }), ctx).decision).toBe("deny");
+      for (const path of [alias, join(alias, "outgoing/snapshot-test/0")]) {
+        for (const toolName of ["Write", "Read"]) expect(checkPathAccess(makeInput({ toolName, toolInput: { file_path: path } }), ctx).decision).toBe("deny");
       }
     }
   } finally { spy.mockRestore(); await fs.rm(root, { recursive: true, force: true }); }

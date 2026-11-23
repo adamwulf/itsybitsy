@@ -95,6 +95,7 @@ test("shipped floor denies the peering secret key despite the ~/.itsybitsy read 
       expect(pattern.test(root + "/other-file")).toBe(false);
     }
     for (const path of transferStagingPaths()) {
+      expect(profile).toContain(`(deny file-read* (subpath "${path}") (with message "${tag}"))`);
       expect(profile).toContain(`(deny file-write* (subpath "${path}") (with message "${tag}"))`);
     }
     expect(profile).toContain(`(deny file-read* (subpath "${key}") (with message "${tag}"))`);

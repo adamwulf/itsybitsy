@@ -648,7 +648,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       if (stalledRead) closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
       return;
     }
-    const rest = await stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES - first.length);
+    const rest = await waitForIO(options, () => stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES - first.length));
     request = decodePeerRequest(Buffer.concat([first, rest]));
   } catch (err) {
     if (err instanceof PeerProtocolError || err instanceof PairProtocolError) {

@@ -63,8 +63,10 @@ Both features run on the existing trusted ALPN `itsybitsy/peer/1` and reuse its 
 
 ## Questions for Adam (recommendation first)
 
-- **A.1 Exposure.** Any paired machine could read this machine's coordinator screen. Recommended: yes. Pairing is the trust decision, as it is for remote starts.
-- **A.2 Refresh rate.** About 2 s while highlighted. Recommended: yes.
+- **A.0 Which coordinator: DECIDED (Adam, 2026-11-22).** The system coordinator (`@system`).
+- **A.1 Exposure.** Any paired machine can read this machine's coordinator screen. Pairing is the trust decision, as it is for remote starts. Adam asked for the feature, so this is taken as accepted.
+- **A.2 Refresh rate: DECIDED (Adam, 2026-11-22).** About 2 s while the row is highlighted, for now.
+- **A.3 Read-only.** The coordinator row has no sends until B decides whether it gets them.
 - **B.1 Who may send.** Recommended: (a) a human in `ib watch` first.
   - (b) Also humans through `ib send <machine>/...` from the CLI. The CLI would need to hand the request to the running `ib watch`, which owns the endpoint.
   - (c) Agents too, so an agent on one machine can message an agent on the other.

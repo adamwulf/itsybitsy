@@ -636,7 +636,7 @@ test.each([false, true])("pane cancellation releases its slot after a settled or
   rig.poller.start();
   try {
     await waitFor(() => rig.state(P1)?.connected === true);
-    const pane = expect(rig.poller.fetchCoordinatorPane(P1)).rejects.toThrow("request timed out");
+    const pane = rig.poller.fetchCoordinatorPane(P1).catch((err: Error) => err);
     await reading.promise;
     rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
     await entered.promise;
@@ -647,7 +647,8 @@ test.each([false, true])("pane cancellation releases its slot after a settled or
       expect(a.closeInfo()).toBeNull();
       rig.clock.advance(1);
     }
-    await pane;
+    expect(await pane).toBeInstanceOf(Error);
+    expect(String(await pane)).toContain("request timed out");
     expect(rig.poller["paneReads"].has(a)).toBe(false);
     expect(a.closeInfo() !== null).toBe(stalled);
   } finally { pendingStop.resolve(); rig.poller.stop(); }

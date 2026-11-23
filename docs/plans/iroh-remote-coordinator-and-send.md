@@ -25,7 +25,7 @@ Both features run on the existing trusted ALPN `itsybitsy/peer/1` and reuse its 
   - It writes one `watch.log` line the first time each peer reads the pane.
   - It does not run any command on behalf of the requester.
 - **Guard.**
-  - The row stays read-only. It has no input box, and retire, resume and every other action are refused with a notice.
+  - The row stays read-only. It has no input box, and actions on the coordinator are refused with a notice. SPEC §20.5 lists the allowed shortcuts.
   - Remote sends belong to Feature B. Its revised scope and sender rules are recorded in decision B.0.
 
 ## B. Remote sends

@@ -94,6 +94,10 @@ export async function decodeSendHeader(stream: ReadStream, options: FileBodyOpti
   if (length > MAX_HEADER_BYTES) throw new Error(`Send header exceeds ${MAX_HEADER_BYTES} bytes`);
   const bytes = await readHeaderBytes(stream, length, options);
   const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  return parseSendHeader(value);
+}
+
+export function parseSendHeader(value: unknown): SendHeader {
   if (!object(value) || !onlyKeys(value, "op", "id", "from", "target", "message", "files") ||
       value.op !== "send" || typeof value.id !== "string" || !UUID.test(value.id) ||
       !validFrom(value.from) || !validTarget(value.target) || typeof value.message !== "string" ||

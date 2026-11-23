@@ -4018,7 +4018,7 @@ function activeAttachmentStager(): StageMessageAttachmentsFn {
  * drains the queue. The resolved id (real agent id, `@system` sentinel, or ""
  * for the human user) is stored in the queued record.
  */
-function resolveSenderId(agentRepoPath: string, opts?: { fromAgent?: string; cwd?: string }): string {
+export function resolveSenderId(agentRepoPath: string, opts?: { fromAgent?: string; cwd?: string }): string {
   let fromId = opts?.fromAgent ?? "";
   if (fromId) return fromId;
 

@@ -5,6 +5,8 @@ import { basename, resolve } from "node:path";
 import * as runtimeNames from "./runtime-names";
 import { readMachineName } from "./machine-name";
 import { readConnectedPeers } from "./peers/remote-agents";
+import type { SendTarget } from "./peers/send-frame";
+import { hasLivePeerWatcher } from "./peers/endpoint-lock";
 import type { Agent, AgentReadError } from "./agents";
 import { repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
 import { normalizeTeamName, getTeam } from "./teams";
@@ -46,6 +48,7 @@ export function matchAgentById(id: string, agents: Agent[]): Agent | null {
 export interface ResolvedSendTarget {
   agent: Agent | null;
   isSystemCoordinator: boolean;
+  remote?: { peer: string; target: SendTarget };
   team?: { name: string; members: Agent[] };
 }
 
@@ -236,7 +239,17 @@ export async function resolveAgentTarget(
   if (typeof localMachine !== "string") return localMachine;
   const includesLocal = !machine || localMachine.toLowerCase() === machine;
   const peers = connected.filter((p) => !machine || p.name.toLowerCase() === machine);
-  if (!includesLocal && !peers.length) return failure(`Unknown machine: ${parts[0]}`);
+  if (!includesLocal && !peers.length) {
+    if (purpose === "send" && !await hasLivePeerWatcher()) return failure("remote sends need ib watch running on this machine");
+    return failure(`Unknown machine: ${parts[0]}`);
+  }
+  if (!includesLocal && parts.length === 2 && name.startsWith("@") && name.length > 1) {
+    if (purpose !== "send") return failure("remote agents are read-only");
+    if (peers.length !== 1) return failure(`Ambiguous machine: ${parts[0]}`);
+    return { agent: null, isSystemCoordinator: false, remote: {
+      peer: peers[0]!.id, target: name === "@system" ? { kind: "system" } : { kind: "repo-coordinator", repo: name.slice(1) },
+    } };
+  }
 
   searched = includesLocal ? searched.filter((r) => !repoName || r.name.toLowerCase() === repoName) : [];
   const { agents, errors } = await readAgents(searched);
@@ -245,7 +258,7 @@ export async function resolveAgentTarget(
   if (note && !repoName) {
     return failure(`Cannot resolve '${target}'${note}; use machine/repo/agent`, unreadable);
   }
-  const matches: { machine: string; repo: string; agent?: Agent }[] = [];
+  const matches: { machine: string; repo: string; agent?: Agent; remote?: { peer: string; target: SendTarget } }[] = [];
   for (const repo of searched) {
     for (const agent of matchesInRepo(name, agents.filter((a) => a.repoPath === repo.path))) {
       if (!matches.some((m) => m.agent?.id === agent.id && sameRepoPath(m.agent.repoPath, agent.repoPath))) {
@@ -257,7 +270,11 @@ export async function resolveAgentTarget(
     const matchingRepos = new Set(peer.agents.filter((a) =>
       (!repoName || a.repo.toLowerCase() === repoName) && (a.id === name || a.nickname === name)
     ).map((a) => a.repo));
-    for (const repo of matchingRepos) matches.push({ machine: peer.name, repo });
+    for (const repo of matchingRepos) {
+      const inRepo = peer.agents.filter(a => a.repo === repo);
+      const match = inRepo.find(a => a.id === name) ?? inRepo.find(a => a.nickname === name)!;
+      matches.push({ machine: peer.name, repo, remote: { peer: peer.id, target: { kind: "agent", repo, agent: match.id } } });
+    }
   }
   const incomplete = incompleteNickname(name, matches.flatMap((m) => m.agent ? [m.agent] : []), unreadable);
   if (incomplete) return incomplete;
@@ -288,9 +305,8 @@ export async function resolveAgentTarget(
   }
   const agent = matches[0]!.agent;
   if (agent) return local(agent);
-  return failure(purpose === "send"
-    ? "sending to agents on other machines is not supported yet"
-    : "remote agents are read-only");
+  if (purpose === "send") return { agent: null, isSystemCoordinator: false, remote: matches[0]!.remote };
+  return failure("remote agents are read-only");
 }
 
 export function resolveSendTarget(target: string, repos: RepoEntry[], cwd = process.cwd()): Promise<TargetResult> {

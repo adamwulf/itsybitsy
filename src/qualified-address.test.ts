@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { setUserHome, resetUserHome } from "./home";
 import { addMember, getTeam } from "./teams";
 import { checkIbCommandAccess } from "./hooks/agent-path";
+import { pollPeerOutbox } from "./peers/peer-outbox";
+import type { SendHeader } from "./peers/send-frame";
+import { resolveSendTarget } from "./resolve-target";
 import { createCliFixture, type CliFixture } from "./test-cli-runner";
 
 describe("qualified agent addresses", () => {
@@ -256,15 +259,58 @@ describe("qualified agent addresses", () => {
     expect(result.exitCode).toBe(1);
   });
 
-  test("a unique remote id or nickname produces the command-specific error", async () => {
+  test("remote agent and coordinator addresses resolve for sends only", async () => {
     await peer();
-    expect((await retire("remote-id")).stderr.trim()).toBe("remote agents are read-only");
     for (const address of ["remote-id", "LAPTOP-B/foo", "laptop-B/ReMoTe/foo"]) {
-      const sent = await cli.run(["send", address, "hello"]);
-      expect(sent.exitCode).toBe(1);
-      expect(sent.stderr.trim()).toBe("sending to agents on other machines is not supported yet");
+      expect((await resolveSendTarget(address, [], cli.cwd)).remote)
+        .toEqual({ peer: "peer-id", target: { kind: "agent", repo: "remote", agent: "remote-id" } });
+      expect((await retire(address)).stderr.trim()).toBe("remote agents are read-only");
+    }
+    for (const [target, shape] of [["@system", { kind: "system" }], ["@photos", { kind: "repo-coordinator", repo: "photos" }]] as const) {
+      expect((await resolveSendTarget("laptop-b/" + target, [], cli.cwd)).remote?.target).toEqual(shape);
+      expect((await retire("laptop-b/" + target)).stderr.trim()).toBe("remote agents are read-only");
+    }
+    for (const kind of hookKinds) {
+      expect(await dispatchHook(kind, "mgr", "ib send laptop-b/remote/remote-id hi", worktree)).toMatchObject({ decision: "allow" });
     }
   });
+
+  test("remote CLI hands the verified sender to the watcher and prints the acknowledgement", async () => {
+    await peer();
+    const seen: SendHeader[] = [];
+    const timer = setInterval(() => { void pollPeerOutbox(async (id, header) => {
+      expect(id).toBe("peer-id");
+      seen.push(header);
+      if (header.message === "refuse") throw new Error("Recipient stopped");
+      return header.id;
+    }, line => { throw new Error(line); }); }, 25);
+    const send = (args: string[], cwd = cli.cwd) => cli.run(["send", "laptop-b/remote/remote-id", ...args], { cwd });
+    try {
+      expect((await send(["hi"])).stdout.trim()).toBe("Sent to remote/remote-id");
+      expect((await send(["refuse"])).stderr.trim()).toBe("Recipient stopped");
+      expect((await send(["--from", "mgr", "hello"], worktree)).exitCode).toBe(0);
+      expect((await send(["--from", "imposter", "hello"], worktree)).stderr).toContain("--from must match");
+      expect((await send(["system message"], join(cli.home, ".itsybitsy"))).exitCode).toBe(0);
+      expect(seen.map(h => h.from)).toEqual([{ kind: "user" }, { kind: "user" },
+        { kind: "agent", id: "laptop-a/App/mgr" }, { kind: "system" }]);
+      expect(seen.every(h => h.files.length === 0)).toBe(true);
+    } finally { clearInterval(timer); }
+  });
+
+  test("remote sends diagnose a missing watcher from its lock", async () => {
+    const result = await cli.run(["send", "laptop-b/remote/remote-id", "hi"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.trim()).toBe("remote sends need ib watch running on this machine");
+  });
+
+  test("an unclaimed CLI handoff times out and cannot be sent later", async () => {
+    await peer();
+    const result = await cli.run(["send", "laptop-b/remote/remote-id", "hi"], { timeoutMs: 15_000 });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("timed out before ib watch claimed");
+    await pollPeerOutbox(async () => { throw new Error("unexpected send"); }, () => {});
+    expect(await (await import("node:fs/promises")).readdir(join(cli.home, ".itsybitsy", "peer-outbox"))).toEqual([]);
+  }, 16_000);
 
   test("ambiguous bare names show the shortest exact forms per machine", async () => {
     await peer();

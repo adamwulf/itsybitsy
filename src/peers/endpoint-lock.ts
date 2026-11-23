@@ -110,6 +110,15 @@ export async function hasLiveEndpointOwner(snapshotMtime: number, maxLeaseAge: n
   } finally { await lock.close(); }
 }
 
+export async function hasLivePeerWatcher(): Promise<boolean> {
+  try {
+    return await hasLiveEndpointOwner(Infinity, 15_000);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+}
+
 /** Remove the lock only if it still holds exactly `expected`. Returns true when this call removed it. */
 async function unlinkIfUnchanged(path: string, expected: string): Promise<boolean> {
   if ((await readLock(path)) !== expected) return false;

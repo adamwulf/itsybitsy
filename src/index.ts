@@ -2024,7 +2024,16 @@ export async function main() {
         if (brokered) await printAndExit(brokered);
       }
 
-      const { agent: resolvedAgent, isSystemCoordinator, team } = await resolveTarget(target, repos);
+      const { agent: resolvedAgent, isSystemCoordinator, team, remote } = await resolveTarget(target, repos);
+
+      if (remote) {
+        const message = await resolveMessageBody();
+        if (!message) { console.error(usage); process.exit(1); }
+        const { cliRemoteSender, handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");
+        const sender = await cliRemoteSender(repos, fromAgent);
+        await printAndExit(await handoffRemoteMessage(remote.peer, textHeader(remote.target, message, sender)));
+        break;
+      }
 
       if (isSystemCoordinator) {
         const coordMessage = await resolveMessageBody();

@@ -84,7 +84,8 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
   reservations = storage.tempDir === "/tmp" ? watcherTmpReservations : new VolumeReservations(),
 ) {
   const accepted = new Map<string, number>();
-  const pending = new Map<string, Promise<void>>();
+  type Replay = (failure?: { error: unknown }) => void;
+  const pending = new Map<string, Set<Replay>>();
   let waiters = 0;
   const receiving = new Set<string>();
   return async (header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>,
@@ -104,7 +105,21 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
     if (earlier) {
       if (waiters >= 8) throw new Error("busy, try again");
       waiters++;
-      try { options.admitted?.(false); return await earlier; } finally { waiters--; }
+      const signal = options.signal;
+      const result = Promise.withResolvers<void>();
+      const finish: Replay = failure => failure ? result.reject(failure.error) : result.resolve();
+      const closed = () => result.reject(signal!.reason);
+      try {
+        options.admitted?.(false);
+        signal?.throwIfAborted();
+        earlier.add(finish);
+        signal?.addEventListener("abort", closed, { once: true });
+        return await result.promise;
+      } finally {
+        earlier.delete(finish);
+        signal?.removeEventListener("abort", closed);
+        waiters--;
+      }
     }
     if (accepted.size + pending.size >= capacity) throw new Error("busy, try again");
     const work = async () => {
@@ -155,8 +170,14 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
       log(line);
       notice(line);
     };
-    const task = work();
-    pending.set(key, task);
-    try { await task; } finally { pending.delete(key); }
+    const replays = new Set<Replay>();
+    pending.set(key, replays);
+    try {
+      await work();
+      for (const finish of replays) finish();
+    } catch (error) {
+      for (const finish of replays) finish({ error });
+      throw error;
+    } finally { pending.delete(key); }
   };
 }

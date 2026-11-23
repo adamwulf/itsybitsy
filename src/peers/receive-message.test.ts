@@ -702,3 +702,32 @@ test("shutdown waits for an admitted text-only receipt and prevents its queue ap
   expect(await receipt).toBeInstanceOf(Error);
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
+
+test("closing a replay connection frees its waiter while the original body is pending", async () => {
+  await receiveFixture();
+  const req = header({ files: [manifestFile("abc")] });
+  const owner = new AbortController();
+  const admitted = Promise.withResolvers<void>();
+  const first = receiver(req, "peer", paired, { read: () => new Promise(() => {}) },
+    { signal: owner.signal, admitted: () => admitted.resolve() }).catch(err => err);
+  await admitted.promise;
+  const waiters = Array.from({ length: 8 }, () => {
+    const link = createMemoryLink("peer", "local");
+    const entered = Promise.withResolvers<void>();
+    const serving = serveTrustedConnection(link.b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+      log() {}, setTimer: createFakeClock().setTimer, receiveMessage: (h, p, name, body, options) =>
+        receiver(h, p, name, body, { ...options, admitted: owns => { options?.admitted?.(owns); entered.resolve(); } }) });
+    return { link, serving, entered };
+  });
+  try {
+    await Promise.all(waiters.map(async w => { const stream = await w.link.a.openBi(); await stream.writeAll(encodeSendHeader(req)); await w.entered.promise; }));
+    await expect(receiver(req, "peer", paired)).rejects.toThrow("busy");
+    waiters[0]!.link.a.close(0, "replay cancelled");
+    await waiters[0]!.serving;
+    const admittedAgain = Promise.withResolvers<void>();
+    const result = receiver(req, "peer", paired, undefined, { admitted: () => admittedAgain.resolve() }).catch(err => err);
+    await admittedAgain.promise;
+    owner.abort();
+    await result;
+  } finally { owner.abort(); for (const w of waiters) w.link.a.close(0, "done"); await first; await Promise.all(waiters.map(w => w.serving)); }
+});

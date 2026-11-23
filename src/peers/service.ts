@@ -708,7 +708,7 @@ export class PeerService {
     const done = Promise.withResolvers<void>();
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await receive(header, peer, name, body, { ...options, signal: controller.signal, admitted: ownsBody => {
+      await receive(header, peer, name, body, { ...options, signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal, admitted: ownsBody => {
         if (this.shuttingDown) throw new Error("Watcher shutting down");
         this.receipts.set(id, { row: ownsBody ? row : undefined, controller, done: done.promise });
         if (ownsBody) {

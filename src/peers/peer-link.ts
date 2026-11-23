@@ -537,6 +537,8 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
     closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
     return;
   }
+  const lifetime = new AbortController();
+  void conn.closed().then(() => lifetime.abort(new Error("Peer connection closed")), err => lifetime.abort(err));
   deps.log(`peer link: ${from} connected`);
   for (;;) {
     let stream: PairStream;
@@ -559,7 +561,7 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
       continue;
     }
     headerReaders.add(stream);
-    void serveRequest(conn, stream, from, deps);
+    void serveRequest(conn, stream, from, deps, lifetime.signal);
   }
 }
 
@@ -594,7 +596,7 @@ async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerRe
 }
 
 /** One request on its own stream. Every error stays here. */
-async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps): Promise<void> {
+async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
   try {
     // Every valid sized header begins with zero (the cap is 256 KiB).
@@ -619,7 +621,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
           const name = await deps.peerName(conn.remoteId);
           if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
           return name;
-        }, stream, { ...options, admitted: () => deps.headerReaders?.delete(stream), cancelStream: () => {
+        }, stream, { ...options, signal, admitted: () => deps.headerReaders?.delete(stream), cancelStream: () => {
           void settledWithinGrace(stream.cancel(), deps).then(ok => {
             if (!ok) closeQuietly(conn, PEER_CLOSE.error, "receive reset stalled");
           });

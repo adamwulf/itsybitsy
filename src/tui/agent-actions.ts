@@ -174,6 +174,7 @@ export function killActiveDiffProc() {
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
   readonly dialog: DialogState;
+  focusRemoteMessage(): void;
   remoteStartPending: boolean;
   refuseOnRemoteRow(key: string): boolean;
   peerService: PeersDialogService | null;
@@ -1334,6 +1335,10 @@ export function handleMerge(ctx: ActionCtx) {
 }
 
 export function handleSend(ctx: ActionCtx) {
+  if (ctx.remoteSelection) {
+    if (ctx.remoteSelection.kind !== "remote-repo-header") ctx.focusRemoteMessage();
+    return;
+  }
   // §17.3a: team-target branch — when the Teams tree OWNS THE ACTIVE
   // SELECTION (Phase 2, §17.1) AND a team anchor is selected, open a
   // `Send message to @<team>:` dialog and route through `teamSend` (§16.4

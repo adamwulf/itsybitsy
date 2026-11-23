@@ -9204,6 +9204,7 @@ const PEERS_OTHER = "0a".repeat(32);
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
+  sendRemoteMessage = mock<PeersDialogService["sendRemoteMessage"]>(async (_id, header) => header.id);
   fetchCoordinatorPane = mock(async (_peerId: string) => ({ state: "running", text: "peer capture" }));
   remoteStartDenial: string | null = null;
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
@@ -10047,12 +10048,16 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.activeSelectionSource).toBe("teams");
   });
 
-  test("Tab visits the full-width peer capture once", () => {
+  test("Tab visits the full-width peer capture, its editor and Send", () => {
     const { dashboard } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
     dashboard.focusManager.setFocus("right-pane");
     selectByKey(dashboard, PEER_B + "/@system");
     expect(dashboard.focus).toBe("active-agent");
+    for (const sub of ["input", "send"]) {
+      dashboard.handleInput("\t");
+      expect(dashboard.focusManager.subFocus).toBe(sub);
+    }
     for (const stop of ["agent-tree", "info", "active-agent"] as const) {
       dashboard.handleInput("\t");
       expect(dashboard.focus).toBe(stop);
@@ -10212,7 +10217,14 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("peer capture"));
       expect(service.fetchCoordinatorPane.mock.calls).toEqual([[PEER_B]]);
       dashboard.handleInput("s");
-      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(dashboard.focusManager.subFocus).toBe("input");
+      dashboard.handleInput("hi");
+      dashboard.inputField.submit();
+      await waitFor(() => dashboard.inputField.getText() === "");
+      expect(service.sendRemoteMessage.mock.calls).toMatchObject([[PEER_B, {
+        from: { kind: "user" }, target: { kind: "system" }, message: "hi", files: [],
+      }]]);
+      dashboard.focusManager.setFocus("agent-tree");
       dashboard.handleInput("k");
       expect(stripAnsi(dashboard.render(180).join("\n"))).not.toContain("peer capture");
     } finally {
@@ -10272,12 +10284,12 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    const permittedAscii = new Set([..."jkJK123@?/I;l", "\t", "\x03"]);
+    const permittedAscii = new Set([..."jkJK123@?/I;ls", "\t", "\x03"]);
     const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
     for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
     const refused = new Set([
       ...ascii.filter(key => !permittedAscii.has(key)),
-      "s", "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "a", "N",
+      "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "a", "N",
       "d", "o", "O", "G", "C", "h", "E", "\x1b[200~pasted text\x1b[201~",
     ]);
     const handlers = [
@@ -10721,6 +10733,38 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("remote text input retains a refused draft and clears it on acceptance", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("s");
+    dashboard.handleInput("/compact");
+    service.remoteStartDenial = "Dashboard is inside tmux";
+    dashboard.inputField.submit();
+    await Bun.sleep(0);
+    expect(dashboard.notice).toBe("Dashboard is inside tmux");
+    expect(service.sendRemoteMessage).not.toHaveBeenCalled();
+    expect(dashboard.inputField.getText()).toBe("/compact");
+
+    service.remoteStartDenial = null;
+    service.sendRemoteMessage.mockRejectedValueOnce(new Error("Machine is disconnected"));
+    dashboard.inputField.submit();
+    await Bun.sleep(0);
+    expect(dashboard.notice).toBe("Machine is disconnected");
+    expect(dashboard.inputField.getText()).toBe("/compact");
+
+    const pending = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
+    dashboard.inputField.submit();
+    expect(dashboard.notice).toBe("sending…");
+    const [peer, header] = service.sendRemoteMessage.mock.calls[1]!;
+    expect(peer).toBe(PEER_B);
+    expect(header).toMatchObject({ from: { kind: "user" }, message: "/compact", files: [],
+      target: { kind: "agent", repo: "itsybitsy", agent: "worker-abc" } });
+    pending.resolve(header.id);
+    await waitFor(() => dashboard.inputField.getText() === "");
+    expect(dashboard.notice).toContain("Sent to Laptop B/");
+  });
+
   test("the guard refuses action keys on a remote row with the notice, and none of their handlers run", () => {
     const { dashboard } = setup();
     selectByKey(dashboard, WORKER_KEY);
@@ -10729,7 +10773,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["x", "m", "s", "R", "a", ".", "t", "!", "S", "o"]) {
+      for (const key of ["x", "m", "R", "a", ".", "t", "!", "S", "o"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -11063,7 +11107,8 @@ describe("Unified peer repos in the Agents tree", () => {
     const text = footer();
     const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
-    for (const hint of ["s: send", "m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
+    expect(text).toContain("s: send");
+    for (const hint of ["m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
     // Every key the remote footer names is one the guard allows.

@@ -93,6 +93,8 @@ import {
 } from "./widths";
 import { cancelPaste } from "./clipboard";
 import type { LayoutState } from "./layout";
+import { textHeader } from "../peers/peer-outbox";
+import type { SendTarget } from "../peers/send-frame";
 import { InputFieldComponent } from "./input-field";
 import { pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
 import { sendStagedMessage } from "./message-send";
@@ -436,6 +438,11 @@ export function remoteCenterText(entry: RemoteEntry): string {
 }
 
 /** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
+function remoteMessageTarget(entry: RemoteEntry | null): SendTarget | undefined {
+  if (entry?.kind === "remote-coordinator") return { kind: "system" };
+  if (entry?.kind === "remote-agent") return { kind: "agent", repo: entry.remote.repoRegistryName, agent: entry.remote.id };
+}
+
 function remoteTitle(entry: RemoteEntry): string {
   switch (entry.kind) {
     case "remote-coordinator":
@@ -536,7 +543,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll" : "p/n: pane"}    1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -1151,6 +1158,11 @@ export class DashboardComponent implements Component {
     this.inputField.onSubmit = (text: string) => {
       const agent = this.agentTree.selectedAgent;
       const trimmed = text.trim();
+      const remote = this.remoteSelection;
+      const target = remoteMessageTarget(remote);
+      if (remote && remote.kind !== "remote-repo-header" && target && trimmed) {
+        return this.submitRemoteMessage(remote.peerId, remoteTitle(remote), target, trimmed);
+      }
       if (!agent || !trimmed) return;
       return promptAndStageAttachmentsIfNeeded({
         text: trimmed,
@@ -1491,7 +1503,7 @@ export class DashboardComponent implements Component {
     if (peerCoordinator) {
       this.focusManager.skipTargets.add("right-pane");
       const focus = this.focusManager.current();
-      if (focus === "right-pane" || focus === "active-agent") this.focusManager.setFocus("active-agent");
+      if (focus === "right-pane") this.focusManager.setFocus("active-agent");
     } else {
       this.focusManager.skipTargets.delete("right-pane");
     }
@@ -1961,6 +1973,28 @@ export class DashboardComponent implements Component {
     return this.activeSelectionSource === "agents" ? this.agentTree.selectedRemote : null;
   }
 
+  focusRemoteMessage(): void {
+    if (this.rightPane.mode === "TREE") this.jumpToMode(PANE_MODES[DEFAULT_MODE_INDEX]!);
+    this.focusManager.setFocus("active-agent");
+    this.focusManager.setSubFocus("input");
+    this.tui?.requestRender();
+  }
+
+  private async submitRemoteMessage(peer: string, label: string, target: SendTarget, text: string): Promise<boolean> {
+    const service = this.peerService;
+    try {
+      if (!service) throw new Error("Remote messaging is unavailable");
+      if (service.remoteStartDenial !== null) throw new Error(service.remoteStartDenial);
+      this.setNotice("sending…", "info");
+      await service.sendRemoteMessage(peer, textHeader(target, text, { kind: "user" }));
+      this.setNotice(`Sent to ${label}`, "info");
+      return true;
+    } catch (err) {
+      this.setNotice(err instanceof Error ? err.message : String(err), "error");
+      return false;
+    }
+  }
+
   /**
    * The read-only guard (SPEC §20.5): while the effective selection is a
    * remote row, refuse `key` with a notice unless isRemoteAllowedKey
@@ -1977,6 +2011,7 @@ export class DashboardComponent implements Component {
       this.setNotice("view mode is fixed for remote coordinators", "info");
       return true;
     }
+    if (key === "s" && remoteMessageTarget(remote)) return false;
     if (remote === null || isRemoteAllowedKey(key)) return false;
     if (remote.kind === "remote-coordinator" && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
@@ -2546,7 +2581,9 @@ export class DashboardComponent implements Component {
 
     // Determine the effective key for change detection: the agent's fully
     // qualified id, so the same bare id in another repo is a change too.
-    const newKey = isCoordinator ? "__coordinator__" : (selected ? this.agentTree.agentKey(selected) : null);
+    const remoteDraft = remote?.kind === "remote-agent" ? `${remote.peerId}/${remote.remote.repoRegistryName}/${remote.remote.id}`
+      : peerCoordinator ? remote.peerId + "/@system" : null;
+    const newKey = remoteDraft ?? (isCoordinator ? "__coordinator__" : (selected ? this.agentTree.agentKey(selected) : null));
     if (newKey !== this.currentAgentKey) {
       this.currentAgentKey = newKey;
       this.setTerminalTitle(isCoordinator ? "ib: coordinator" : (selected ? `ib: ${selected.id}` : "ib"));
@@ -3001,14 +3038,11 @@ export class DashboardComponent implements Component {
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;
 
-    // The read-only guard (SPEC §20.5): ONE check, ahead of every key handler,
-    // so a key added later is refused on a remote row by default.
-    if (this.refuseOnRemoteRow(data)) return;
-
     // When active-agent panel is focused, use three-level sub-focus: pane → input → send.
     // In 'pane' sub-focus, dashboard shortcuts work normally. In 'input', the input field
     // captures all input. In 'send', Enter submits and other keys fall through. (SPEC §13.4)
-    if (this.focusManager.current() === "active-agent" && this.agentTree.selectedAgent) {
+    const editingRemote = this.rightPane.mode !== "TREE" && !!remoteMessageTarget(this.remoteSelection);
+    if (this.focusManager.current() === "active-agent" && (editingRemote || (!this.remoteSelection && this.agentTree.selectedAgent))) {
       const sf = this.focusManager.subFocus;
 
       // Tab navigation through sub-focus states
@@ -3068,6 +3102,10 @@ export class DashboardComponent implements Component {
 
       // Pane sub-focus and Send sub-focus: fall through to normal dashboard key handling
     }
+
+    // Editor keystrokes above are consumed as text. Every action, including the
+    // fallthrough from Send sub-focus, must still pass the remote-row guard.
+    if (this.refuseOnRemoteRow(data)) return;
 
     // The coordinator editor belongs only to the effective local coordinator selection.
     if (this.focusManager.current() === "coordinator" && this.activeSelectionSource === "agents"
@@ -3831,12 +3869,16 @@ export class DashboardComponent implements Component {
       this.coordinatorInputField.active = false;
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
-    } else if (remoteCoordinator) {
-      mainLines = [mainTitleSep, ...this.remotePane.render(mainWidth, availableHeight)];
     } else if (remoteView) {
-      // A remote row: placeholders only. No tmux pane, right pane or input
-      // field renders, so nothing local is drawn for (or loaded by) it.
-      mainLines = [mainTitleSep, ...renderRemotePanes(remote, mainWidth, leftPaneW, availableHeight)];
+      const acceptsText = remote.kind !== "remote-repo-header";
+      const focused = this.focusManager.current() === "active-agent";
+      this.inputField.active = acceptsText && focused && this.focusManager.subFocus !== "pane";
+      this.inputField.setFocusState(this.focusManager.subFocus === "send" ? "send" : "text");
+      const input = acceptsText ? this.inputField.render(mainWidth) : [];
+      const height = Math.max(0, availableHeight - input.length);
+      const body = remoteCoordinator ? this.remotePane.render(mainWidth, height)
+        : renderRemotePanes(remote, mainWidth, leftPaneW, height);
+      mainLines = [mainTitleSep, ...body, ...input];
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
       // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set

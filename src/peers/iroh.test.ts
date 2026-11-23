@@ -265,6 +265,6 @@ test("native stream cancellation preserves unexpected failures and waits for bot
   const cancelled = stream.cancel().finally(() => { finished = true; });
   await Bun.sleep(0);
   expect(finished).toBe(false);
-  reset.reject(Error("native reset failed"));
-  await expect(cancelled).rejects.toThrow("native reset failed");
+  reset.reject(Error("stream reset failed"));
+  await expect(cancelled).rejects.toThrow("stream reset failed");
 });

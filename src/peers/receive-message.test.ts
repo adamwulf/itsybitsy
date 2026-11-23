@@ -951,3 +951,37 @@ test("a timed-out native read that drains during reply grace keeps the connectio
     expect(await requestAgents(a)).toMatchObject({ agents: [] });
   } finally { a.close(0, "done"); await serving; }
 });
+
+test("a stalled destination write and close retain their reservation but release the receipt slot", async () => {
+  const clock = createFakeClock();
+  const sizes: number[] = [];
+  receiver = createMessageReceiver(() => {}, () => {}, Date.now, 4096, { tempDir: cli.root, hasFreeSpace: async (_, size) => { sizes.push(size); return true; } });
+  const writing = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const openFile = fs.open;
+  const spy = spyOn(fs, "open").mockImplementation(async (...args) => {
+    const file = await openFile(...args);
+    if (String(args[0]).endsWith("/blocked")) {
+      const close = file.close.bind(file);
+      file.writeFile = async () => { writing.resolve(); await release.promise; };
+      file.close = async () => { await release.promise; await close(); };
+    }
+    return file;
+  });
+  const { a, b } = createMemoryLink("authenticated", "destination");
+  const serving = serveTrustedConnection(b, { peerName: paired, receiveMessage: receiver, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: clock.setTimer });
+  const incoming = join(cli.root, "staging/incoming");
+  try {
+    const wire = await a.openBi();
+    await wire.writeAll(encodeSendHeader(header({ files: [manifestFile("abc", "blocked")] })));
+    await wire.writeAll(Buffer.from("abc")); await wire.finish();
+    await writing.promise; clock.advance(60_000);
+    expect(JSON.parse(new TextDecoder().decode(await wire.readToEnd(4096))).reason).toContain("No progress");
+    expect(await readdir(incoming)).toHaveLength(1);
+    const next = () => exchange(header({ files: [manifestFile("x")] }), paired, false, Buffer.from("x"));
+    expect(await next()).toMatchObject({ ok: true });
+    release.resolve();
+    await waitFor(async () => !(await readdir(incoming)).length);
+    expect(await next()).toMatchObject({ ok: true });
+    expect(sizes).toEqual([3, 4, 1]);
+  } finally { release.resolve(); spy.mockRestore(); a.close(0, "done"); await serving; }
+});

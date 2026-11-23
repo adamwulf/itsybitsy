@@ -1,3 +1,4 @@
+import { trackSendCleanup } from "../send-cleanup";
 /**
  * The trusted link between paired installs (docs/plans/iroh-peering.md,
  * "Reconnection" and "First connected feature"; SPEC.md §20.4).
@@ -445,7 +446,13 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
             try { return await wireWrite(() => active.write(chunk)); }
             catch (err) { writeError = err; throw err; }
           } }, { setTimer, signal, onProgress: n => options.onProgress?.(sent + n) });
-        } finally { await handle.close(); }
+        } catch (err) {
+          // FileHandle.close waits for an outstanding staged read. The open fd
+          // pins the snapshot and its allocated blocks while transport finishes.
+          trackSendCleanup(handle.close(), "Staged attachment close failed");
+          throw err;
+        }
+        await handle.close();
         sent += file.size;
       }
       signal.throwIfAborted();

@@ -48,7 +48,7 @@ async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnque
 
 type ReceiveStorage = { tempDir: string; stagingRoot?: string; hasFreeSpace: typeof hasFreeSpace };
 
-async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions, reserve: (bytes: number) => number) {
+async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "read">, storage: ReceiveStorage, options: FileBodyOptions, reserve: (bytes: number) => number, defer: (cleanup: Promise<void>) => void) {
   const limits = checkIncomingFiles(header.files, await readTransferLimits(), { machine: await readMachineName() });
   if (!limits.ok) throw new Error(limits.error);
   const total = header.files.reduce((sum, file) => sum + file.size, 0);
@@ -59,6 +59,8 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
   let current = join(await stagingArea(staging, "incoming"), id + ".partial");
   await mkdir(current, { mode: 0o700 });
   const cleanup = () => rm(current, { recursive: true, force: true });
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let writing: Promise<void> | undefined;
   try {
     await writeTransferOwner(current, { pid: process.pid, start: stagingOwnerStart(process.pid) });
     let received = 0;
@@ -67,13 +69,14 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
       const dir = join(current, String(index));
       await mkdir(dir, { mode: 0o700 });
       const destination = join(dir, sanitizeAttachmentName(file.name));
-      const handle = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      try {
-        const digest = await streamFileBody(body, file.size, chunk => handle.writeFile(chunk), {
-          ...options, onProgress: bytes => options.onProgress?.(received + bytes),
-        });
-        if (digest !== file.sha256.toLowerCase()) throw new Error("Attachment hash mismatch");
-      } finally { await handle.close(); }
+      handle = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      const digest = await streamFileBody(body, file.size, chunk => {
+        writing = handle!.writeFile(chunk);
+        return writing.finally(() => { writing = undefined; });
+      }, { ...options, onProgress: bytes => options.onProgress?.(received + bytes) });
+      await handle.close();
+      handle = undefined;
+      if (digest !== file.sha256.toLowerCase()) throw new Error("Attachment hash mismatch");
       received += file.size;
       mapping.push({ destination: join(root, String(index), sanitizeAttachmentName(file.name)), spellings: file.spellings });
     }
@@ -90,7 +93,11 @@ async function receiveAttachments(header: SendHeader, body: Pick<PairStream, "re
       },
     };
   } catch (error) {
-    await cleanup();
+    const rollback = async () => {
+      try { await handle?.close(); } finally { await cleanup(); }
+    };
+    if (writing) defer(rollback());
+    else await rollback();
     throw error;
   }
 }
@@ -149,6 +156,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
       let staged: Awaited<ReturnType<typeof receiveAttachments>> | undefined;
       let bodyError: unknown;
       const reserve = reservations.transfer();
+      let cleanupOwnsReservation = false;
       const total = files.reduce((sum, file) => sum + file.size, 0);
       if (files.length) {
         if (receiving.has(peerId) || receiving.size >= 2) throw new Error("busy, try again");
@@ -171,7 +179,10 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
                   nextNotice = now() + 1000;
                   notice(`Receiving from ${name}: ${bytes} / ${total} bytes`);
                 }
-              } }, reserve);
+              } }, reserve, cleanup => {
+                cleanupOwnsReservation = true;
+                void cleanup.catch(err => log(`Attachment cleanup failed: ${err}`)).finally(() => reserve(0));
+              });
               return staged.message;
             } catch (err) { bodyError = err; throw err; }
           } : undefined,
@@ -186,7 +197,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
       } catch (error) {
         await staged?.cleanup();
         throw error;
-      } finally { reserve(0); if (files.length) receiving.delete(peerId); }
+      } finally { if (!cleanupOwnsReservation) reserve(0); if (files.length) receiving.delete(peerId); }
       accepted.set(key, now() + 600_000);
       const summary = files.length ? ` (${files.length} files, ${(total / 1024 ** 2).toFixed(2)} MB)` : "";
       const line = `${cleanRemoteText(name)} sent a message${summary} to ${cleanRemoteText(targetLabel(header.target))}`;

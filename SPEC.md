@@ -1711,7 +1711,7 @@ This ensures the system coordinator can only run `ib` commands (e.g., `ib list`,
 
 **`ib peer` is user-only.** It manages this install's iroh peering identity and trusted peers (`docs/plans/iroh-peering.md`). The same check denies every `ib peer` invocation to every agent, `@system` included: like `nuke`, it runs before the `@system` bypass. It reads shell words the same way, so a message that only mentions `ib peer` is not denied. The subcommands:
 
-- `ib peer id` prints this install's id on one line: the ed25519 public key as 64 lowercase hex characters. The key is `~/.itsybitsy/peer/secret.key` (the 32 secret-key bytes as hex, mode 0600, in a 0700 directory). It is created with an exclusive create if missing and never overwritten.
+- `ib peer id` prints this install's id on one line: the ed25519 public key as 64 lowercase hex characters. The key is `~/.itsybitsy/peer/secret.key` (the 32 secret-key bytes as hex, mode 0600, in a 0700 directory). When missing, it is published by linking a complete private key from sealed staging. A losing creator reads the published key.
 - `ib peer list` prints each paired peer's name, full id and `pairedAt` from `~/.itsybitsy/peer/peers.json`, or `No paired peers.`
 - `ib peer remove <name|id>` removes one peer by exact full id or exact name. A name that several peers share removes nothing, fails, and lists their ids. Removal is one-sided. A running `ib watch` refuses the removed peer's next request, even on a connection it already has (§20.4).
 

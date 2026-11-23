@@ -51,7 +51,7 @@ These came from Adam through @system.
 The receiver rewrites the message after every file has been verified.
 
 - **Text references.** Each reference in the message that exactly matches an attached file is replaced with B's path, quoted with `spellPath`. A reference matches when it is the same `--attach` spelling, or the same path after resolving `~` and the cwd, as found by `references()` outside code spans.
-- **Unreferenced attachments.** An attached file the text never mentions is appended as `\n\nAttachments: <path> <path>`, so the agent always learns where it is.
+- **Unreferenced attachments.** An attached file the text never mentions is appended as `\n\nAttachments: <path> <path>`, so the agent always learns where it is. Bare names such as `file.png` stay literal in prose. With `--attach file.png`, the destination is appended unless the text also contains a matching path reference.
 - **Nothing else changes.** Other text, other paths and code spans are left untouched. A path that was not transferred is never rewritten.
 
 ### 3. Wire protocol
@@ -64,8 +64,11 @@ There is no new ALPN. A new op `send` runs on the trusted ALPN `itsybitsy/peer/1
 u32 big-endian header length
 UTF-8 JSON header:
   {"op":"send","id":"<uuid>","from":{"kind":"user"}|{"kind":"agent","id":"<machine>/<repo>/<agent>"},
-   "target":{"repo":"<registryName>","agent":"<id or nickname>"}, "message":"<text>",
-   "files":[{"name":"<basename>","size":<bytes>,"sha256":"<hex>"}]}
+   "target":{"kind":"agent","agent":"<id or nickname>","repo":"<optional registryName>"}
+          | {"kind":"system"}
+          | {"kind":"repo-coordinator","repo":"<registryName>"},
+   "message":"<text>",
+   "files":[{"name":"<basename>","size":<bytes>,"sha256":"<hex>","spellings":["./dir/image.png","/src/dir/image.png"]}]}
 then, for each file in order, exactly `size` raw bytes, then finish()
 ```
 

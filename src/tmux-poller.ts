@@ -8,6 +8,7 @@ import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { keepAllowedLinks, linkifyMessageUrls } from "./hyperlinks";
 import { stripAnsi } from "./parse-state";
 import { SpawnContext } from "./types";
+import { logToWatchLog } from "./watch-log";
 import { tmuxSessionTarget } from "./validation";
 
 /** Spawn context for tmux poller operations */
@@ -84,19 +85,32 @@ export const COORDINATOR_PANE_ID = "@ib-system-coordinator-pane-id";
 export const COORDINATOR_PANE_COMMAND = "@ib-system-coordinator-command";
 
 /** Capture the launch pane only while its recorded CLI is still in the foreground. */
-export async function captureMarkedCoordinatorPane(session: string, machine: string, timeoutMs = 5_000): Promise<string | null> {
+export async function captureMarkedCoordinatorPane(
+  session: string, machine: string, { timeoutMs = 5_000, log = logToWatchLog } = {},
+): Promise<string | null> {
+  const failed = (detail: unknown) => {
+    log(`[coordinator] Peer pane capture failed: ${detail instanceof Error ? detail.message : detail}`);
+    return new Error("Coordinator capture failed");
+  };
+  const run = (cmd: string[]) => readCoordinatorCommand(cmd, timeoutMs).catch(err => { throw failed(err); });
   const target = tmuxSessionTarget(session);
-  const record = await readCoordinatorCommand(["tmux", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID], timeoutMs);
-  if (record.code !== 0 && /^(?:can't find session:|no server running on|error connecting to .*No such file or directory)/i.test(record.error.trim())) return null;
+  const record = await run(["tmux", "show-options", "-qv", "-t", target, COORDINATOR_PANE_ID]);
+  if (record.code !== 0) {
+    if (/^can't find session:/i.test(record.error.trim())) return null;
+    throw failed(record.error.trim() || `show-options exited ${record.code}`);
+  }
   const unverified = `Unverified coordinator pane; restart the system coordinator on ${machine}`;
   const id = record.text.trim();
-  if (record.code !== 0 || !/^%\d+$/.test(id)) throw new Error(unverified);
+  if (!/^%\d+$/.test(id)) throw new Error(unverified);
   // Evaluate all three conditions in tmux's capture queue, even if the
   // pane died or its foreground changed after we looked up the launch id.
   const recordedCommand = `#{${COORDINATOR_PANE_COMMAND}}`;
   const matches = `#{==:#{pane_id}:#{pane_dead}:#{pane_current_command},#{${COORDINATOR_PANE_ID}}:0:${recordedCommand}}`;
-  const capture = await readCoordinatorCommand(["tmux", "if-shell", "-F", "-t", id,
-    `#{&&:#{!=:${recordedCommand},},${matches}}`, displayCaptureArgs(id, 200).join(" ")], timeoutMs);
+  const capture = await run(["tmux", "if-shell", "-F", "-t", id,
+    `#{&&:#{!=:${recordedCommand},},${matches}}`, displayCaptureArgs(id, 200).join(" ")]);
+  if (capture.code !== 0 && !/^can't find pane:/i.test(capture.error.trim())) {
+    throw failed(capture.error.trim() || `capture-pane exited ${capture.code}`);
+  }
   if (capture.code !== 0 || !capture.text) throw new Error(unverified);
   return capture.text;
 }

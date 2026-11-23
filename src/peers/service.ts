@@ -160,7 +160,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
   return {
     remoteStartDenial,
     captureCoordinator: async () => {
-      const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine);
+      const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log });
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },

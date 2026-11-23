@@ -1396,6 +1396,29 @@ test.skipIf(!Bun.which("tmux"))("coordinator capture checks the recorded identit
   }
 });
 
+test("capture distinguishes operational errors, missing sessions and stale launch records", async () => {
+  const logs: string[] = [];
+  const capture = () => captureMarkedCoordinatorPane("ib-coordinator", "Desk", { log: line => logs.push(line) });
+  try {
+    for (const stage of ["show-options", "if-shell"]) {
+      spawnCtx.set(cmd => cmd[1] === stage
+        ? { stdout: emptyStream(), stderr: streamOf("socket /private/path: Permission denied"), exited: Promise.resolve(1) }
+        : { stdout: streamOf("%4"), stderr: emptyStream(), exited: Promise.resolve(0) });
+      await expect(capture()).rejects.toThrow(/^Coordinator capture failed$/);
+      expect(logs.pop()).toContain("socket /private/path: Permission denied");
+    }
+    mockSpawn("", 1, 0, "can't find session: ib-coordinator");
+    expect(await capture()).toBeNull();
+    spawnCtx.set(cmd => cmd[1] === "show-options"
+      ? { stdout: streamOf("%4"), stderr: emptyStream(), exited: Promise.resolve(0) }
+      : { stdout: emptyStream(), stderr: streamOf("can't find pane: %4"), exited: Promise.resolve(1) });
+    await expect(capture()).rejects.toThrow("restart the system coordinator on Desk");
+    expect(logs).toEqual([]);
+  } finally {
+    spawnCtx.reset();
+  }
+});
+
 test("stalled coordinator capture is killed and reaped before returning a bounded error", async () => {
   const exit = Promise.withResolvers<number>();
   const kills: (number | string | undefined)[] = [];
@@ -1407,12 +1430,14 @@ test("stalled coordinator capture is killed and reaped before returning a bounde
     : { stdout, stderr, exited: exit.promise, kill: signal => { kills.push(signal); } });
   try {
     let settled = false;
-    const read = captureMarkedCoordinatorPane("ib-coordinator", "Desk", 5).catch(err => { settled = true; return err.message; });
+    const logs: string[] = [];
+    const read = captureMarkedCoordinatorPane("ib-coordinator", "Desk", { timeoutMs: 5, log: line => logs.push(line) }).catch(err => { settled = true; return err.message; });
     await waitFor(() => kills.length > 0);
     expect(kills).toEqual(["SIGKILL"]);
     expect(settled).toBe(false);
     exit.resolve(137);
-    expect(await read).toBe("Coordinator capture timed out");
+    expect(await read).toBe("Coordinator capture failed");
+    expect(logs[0]).toContain("Coordinator capture timed out");
     expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
     expect(stdout.locked).toBe(false);
     expect(stderr.locked).toBe(false);

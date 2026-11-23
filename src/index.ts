@@ -319,7 +319,7 @@ export function buildSystemCoordinatorAgent(
  */
 export async function sendToSystemCoordinator(
   message: string,
-  opts?: { fromAgent?: string; cwd?: string; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean },
+  opts?: { fromAgent?: string; cwd?: string; queueGuard?: import("./outbox").LocalQueueGuard; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean },
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   const { IB_COORDINATOR_SESSION } = await import("./coordinator");
   // Remote enqueue probes the delivery pane under its own bounded deadline.
@@ -344,10 +344,11 @@ export async function sendToSystemCoordinator(
   // serializes all writes to the `ib-coordinator` tmux session so they can't
   // interleave. There is no central dispatcher — the lock is keyed to the
   // single coordinator session, exactly mirroring the per-agent design.
-  const sendOpts: { fromAgent?: string; cwd?: string; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean; outboxDir?: string } = {
+  const sendOpts: { fromAgent?: string; cwd?: string; queueGuard?: import("./outbox").LocalQueueGuard; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean; outboxDir?: string } = {
     cwd,
     outboxDir: getCoordinatorHome(),
     ...(opts?.peerSend && { peerSend: opts.peerSend }),
+    ...(opts?.queueGuard && { queueGuard: opts.queueGuard }),
   };
   if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
   if (opts?.noPassthrough) sendOpts.noPassthrough = true;

@@ -166,11 +166,18 @@ async function withQueueMutation<T>(dir: string, create: boolean, signal: AbortS
   });
 }
 
+/** Watchdog-owned guard for a sandboxed local attachment submission. */
+export interface LocalQueueGuard {
+  signal: AbortSignal;
+  beforeAppend(): Promise<void>;
+}
+
 export async function enqueueOutbox(
   dir: string,
   msg: Omit<OutboxMessage, "id" | "enqueuedAtMs"> & { id?: string; enqueuedAtMs?: number },
   reservedKey?: string,
   signal?: AbortSignal,
+  beforeAppend?: LocalQueueGuard["beforeAppend"],
 ): Promise<OutboxMessage> {
   try {
     return await withQueueMutation(dir, reservedKey === undefined, signal, async parent => {
@@ -208,6 +215,8 @@ export async function enqueueOutbox(
       // the dedupe match above stable against pre-existing queued messages.
       noPassthrough: msg.noPassthrough === true ? true : undefined,
     };
+    signal?.throwIfAborted();
+    if (beforeAppend) await beforeAppend();
     signal?.throwIfAborted();
     const separator = content && !content.endsWith("\n") ? "\n" : "";
     await file.appendFile(separator + JSON.stringify(record) + "\n");

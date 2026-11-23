@@ -4419,6 +4419,7 @@ export async function sendMessage(
     raw?: boolean;
     outboxDir?: string;
     peerSend?: PeerEnqueueOptions;
+    queueGuard?: import("./outbox").LocalQueueGuard;
     team?: string;
     noPassthrough?: boolean;
     /**
@@ -4525,7 +4526,7 @@ export async function sendMessage(
     }
     await enqueueOutbox(queueDir, {
       message: outgoing, fromAgent: fromId, peerSender: opts?.peerSend?.senderKind, raw, team: opts?.team, noPassthrough,
-    }, reservedKey, opts?.peerSend?.signal);
+    }, reservedKey, opts?.peerSend?.signal ?? opts?.queueGuard?.signal, opts?.queueGuard?.beforeAppend);
   } catch (err) {
     // Enqueue failed — nothing is queued. Undo any staged copies so an
     // abandoned attempt leaves no unused attachment behind (no partial copy).
@@ -4707,6 +4708,7 @@ export async function teamSend(
     | {
         fromAgent?: string;
         noPassthrough?: boolean;
+        queueGuard?: import("./outbox").LocalQueueGuard;
         /** Dashboard-only: stage local file paths per recipient (see docstring). */
         stageAttachments?: boolean;
         /** Base dir for relative attachment paths; defaults to each recipient's repoPath. */
@@ -4806,7 +4808,10 @@ export async function teamSend(
     // first attempt, then every member was pruned before the skip-carrying
     // retry) already recorded on that first attempt; recording again here would
     // duplicate the line, so the skip guard suppresses it.
-    if (stagedSend && skip.size === 0) await recordRoomMessage();
+    if (stagedSend && skip.size === 0) {
+      if (opts?.queueGuard) { await opts.queueGuard.beforeAppend(); opts.queueGuard.signal.throwIfAborted(); }
+      await recordRoomMessage();
+    }
     return { ...teamOk(`no recipients in @${name}`), acceptedRecipientIds: [] };
   }
 
@@ -4843,6 +4848,7 @@ export async function teamSend(
     const res = await sendMessage(recipient, message, {
       fromAgent,
       team: name,
+      ...(opts?.queueGuard && { queueGuard: opts.queueGuard }),
       noPassthrough: opts?.noPassthrough,
       stageAttachments: opts?.stageAttachments,
       attachmentBaseDir: opts?.attachmentBaseDir,

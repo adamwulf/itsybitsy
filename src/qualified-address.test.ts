@@ -1,3 +1,5 @@
+import * as fsPromises from "node:fs/promises";
+import { spyOn } from "bun:test";
 import { existsSync } from "node:fs";
 import { processStartEpochSecondsCtx } from "./agents";
 import { fixtureProcessStart } from "./test-cli-driver";
@@ -375,9 +377,9 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); clearInterval(watchdog); await processing; }
   });
 
-  test.each(["local recipient", "self", "changed bytes"])("sandboxed local --attach through the worktree watchdog: %s", async mode => {
+  test.each(["local recipient", "self", "changed bytes", "dead before append", "dead before self append"])("sandboxed local --attach through the worktree watchdog: %s", async mode => {
     const agentDir = dirname(worktree);
-    const recipient = mode === "self" ? "mgr" : "foo";
+    const recipient = mode.includes("self") ? "mgr" : "foo";
     const live = JSON.stringify({ watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false,
       tmux_rate_limited: false, has_background_tasks: false });
     await Bun.write(join(agentDir, "meta.transient.json"), live);
@@ -393,10 +395,24 @@ describe("qualified agent addresses", () => {
         send.then(result => { throw Error("CLI exited before handoff: " + result.stderr); })]);
       const [id] = await readdir(join(agentDir, "send-attachments"));
       if (mode === "changed bytes") await Bun.write(join(agentDir, "send-attachments", id!, "0"), "modified");
-      await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: cli.cwd } });
+      const death = mode.startsWith("dead before");
+      const open = fsPromises.open;
+      const { pid } = await Bun.file(join(agentDir, "send-attachments", id!, "lease")).json();
+      const held = spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+        const file = await open(...args);
+        if (death && String(args[0]).endsWith("/outbox.jsonl")) {
+          processStartEpochSecondsCtx.set(current => fixtureProcessStart(current) + (current === pid ? 1 : 0));
+        }
+        return file;
+      });
+      try { await processSpawnRequests("mgr", app, { verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: cli.cwd } }); }
+      finally { held.mockRestore(); }
       const result = await send;
       const queue = Bun.file(join(cli.home, ".itsybitsy", "agents", recipient, "outbox.jsonl"));
-      if (mode === "changed bytes") {
+      if (death) {
+        expect(result.stderr).toContain("Cannot verify the staging lease owner");
+        expect(await queue.text()).toBe("");
+      } else if (mode === "changed bytes") {
         expect(result.stderr).toContain("hash mismatch");
         expect(await queue.exists()).toBe(false);
         expect((await readdir(cli.cwd)).filter(n => n.startsWith("itsybitsy-attachments-"))).toEqual([]);

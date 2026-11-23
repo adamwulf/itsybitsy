@@ -1,3 +1,4 @@
+import type { LocalQueueGuard } from "./outbox";
 import { openBrokerResults, pinnedPath } from "./pinned-directory";
 import { cancellationPoll, cancellationMarkerExists } from "./send-cleanup";
 import { inspectBrokerLease, stagingOwnerStart, transferOwnerState, type TransferOwner, reclaimTransfer, transferDirectoryBatch } from "./peers/transfer-owner";
@@ -520,7 +521,7 @@ export async function handleSendRequest(
 
   const seams = deps.send ?? {};
   const fromAgent = ctx.agentId;
-  const opts = { fromAgent, ...((localFiles || parsed.request.noPassthrough) && { noPassthrough: true as const }) };
+  const sendOpts = { fromAgent, ...((localFiles || parsed.request.noPassthrough) && { noPassthrough: true as const }) };
   const self: AgentLocation = { id: ctx.agentId, repoPath: ctx.repoPath, agentDir: ctx.agentDir };
   // Where the requester "is": its own worktree, the cwd of a direct `ib send`
   // there. It decides `@coordinator` and the same-repo-first search of a bare
@@ -536,6 +537,38 @@ export async function handleSendRequest(
     // The ordinary commands, as the watchdog's own agent. `fromAgent` is
     // always passed: these functions otherwise detect the sender from the
     // cwd, which here is the watchdog's. `stageAttachments` is never set.
+    async function dispatchLocal(queueGuard?: LocalQueueGuard) {
+      const opts = queueGuard ? { ...sendOpts, queueGuard } : sendOpts;
+      if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
+      if (resolved.isSystemCoordinator) {
+        return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { ...opts, cwd: callerCwd });
+      }
+      // Never deliver to the requester itself (see isAgentAt). A team drops it
+      // like the sender; a single target is refused.
+      const excludeRecipient = (agent: Agent): Promise<boolean> => isAgentAt(agent, self);
+      if (resolved.team) {
+        return await (seams.teamSend ?? teamSend)(
+          resolved.team.name,
+          resolved.team.members,
+          message,
+          { ...opts, excludeRecipient },
+          repos,
+        );
+      }
+      if (!resolved.agent) return brokerFail(`Agent not found: ${target}`);
+      if (await excludeRecipient(resolved.agent)) {
+        if (localFiles) {
+          // The requester's own watchdog drains its queue normally. Never use
+          // requester-writable tmux metadata for an inline delivery here.
+          const { enqueueOutbox, agentOutboxDir } = await import("./outbox");
+          const dir = agentOutboxDir({ id: ctx.agentId, meta: resolved.agent.meta });
+          await enqueueOutbox(dir, { message, fromAgent, noPassthrough: true, raw: false }, resolved.agent.meta.queue_key, queueGuard?.signal, queueGuard?.beforeAppend);
+          return { ok: true, exitCode: 0, stdout: "", stderr: "" };
+        }
+        return brokerFail(`Error: '${ctx.agentId}' cannot send to itself through its watchdog; send directly`);
+      }
+      return await (seams.sendMessage ?? sendMessage)(resolved.agent, message, opts);
+    }
     if (remote || localFiles) {
       if (localFiles && resolved.remote) return brokerFail("Local attachment sends require a local target");
       if (remote && !resolved.remote) {
@@ -609,6 +642,7 @@ export async function handleSendRequest(
         if (localFiles) {
           message = await publishLocalBrokerAttachments(message, stage!, checkLease, signal, seams.attachmentTempDir);
           signal.throwIfAborted();
+          return await dispatchLocal({ signal, beforeAppend: checkLease });
         } else {
           const result = await handoffRemoteMessage(resolved.remote!.peer, textHeader(resolved.remote!.target, message, sender!), signal, stage, progress,
             files.length ? checkLease : undefined, origin);
@@ -621,35 +655,7 @@ export async function handleSendRequest(
         trackSendCleanup(Promise.resolve(publication).then(() => rm(textProgress, { force: true })).finally(() => results.close()), "Broker progress cleanup failed");
       }
     }
-    if (resolved.remote) return brokerFail("Use a machine-qualified address to send remotely");
-    if (resolved.isSystemCoordinator) {
-      return await (seams.sendToSystemCoordinator ?? sendToSystemCoordinatorDefault)(message, { ...opts, cwd: callerCwd });
-    }
-    // Never deliver to the requester itself (see isAgentAt). A team drops it
-    // like the sender; a single target is refused.
-    const excludeRecipient = (agent: Agent): Promise<boolean> => isAgentAt(agent, self);
-    if (resolved.team) {
-      return await (seams.teamSend ?? teamSend)(
-        resolved.team.name,
-        resolved.team.members,
-        message,
-        { ...opts, excludeRecipient },
-        repos,
-      );
-    }
-    if (!resolved.agent) return brokerFail(`Agent not found: ${target}`);
-    if (await excludeRecipient(resolved.agent)) {
-      if (localFiles) {
-        // The requester's own watchdog drains its queue normally. Never use
-        // requester-writable tmux metadata for an inline delivery here.
-        const { enqueueOutbox, agentOutboxDir } = await import("./outbox");
-        const dir = agentOutboxDir({ id: ctx.agentId, meta: resolved.agent.meta });
-        await enqueueOutbox(dir, { message, fromAgent, noPassthrough: true, raw: false }, resolved.agent.meta.queue_key, deps.transferSignal);
-        return { ok: true, exitCode: 0, stdout: "", stderr: "" };
-      }
-      return brokerFail(`Error: '${ctx.agentId}' cannot send to itself through its watchdog; send directly`);
-    }
-    return await (seams.sendMessage ?? sendMessage)(resolved.agent, message, opts);
+    return await dispatchLocal();
   } catch (err) {
     return brokerFail(`Error: send failed: ${err instanceof Error ? err.message : String(err)}`);
   }

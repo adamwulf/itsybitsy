@@ -280,11 +280,17 @@ test("insufficient staging space refuses before creating any snapshot", async ()
   }
 });
 
-test.each(["-f", "--file", "--from", "--attach", ""])("--attach requires a path before %j", async option => {
+test.each(["-f", "--file", "--from", "--attach", "--help", "-h", ""])("--attach requires a path before %j", async option => {
   const result = await send("--attach", ...(option ? [option] : []));
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toContain("--attach requires a path");
   expect(await queue().exists()).toBe(false);
+});
+
+test.each(["--help", "-h"])("send %s lists attachment usage", async flag => {
+  const run = await fixture.run(["send", flag]);
+  expect(run.exitCode).toBe(0);
+  expect(run.stdout).toContain("--attach <file>");
 });
 
 test("--attach before the target combines with a file body and explicit attribution", async () => {

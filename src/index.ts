@@ -1065,6 +1065,10 @@ export async function main() {
   // `ib team add --help` resolves to the "team add" entry, while `ib team
   // --help` resolves to the "team" entry.
   if (command && hasHelpFlag(args)) {
+    if (command === "send" && args.some((arg, i) => arg === "--attach" && (args[i + 1] === "-h" || args[i + 1] === "--help"))) {
+      console.error("Error: --attach requires a path");
+      process.exit(1);
+    }
     // Try the deepest match first: "<command> <sub>" if a sub is present.
     // Only do this for the known sub-grouped commands; everywhere else, the
     // top-level command key is the only valid lookup.

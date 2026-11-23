@@ -496,7 +496,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
     } else if (transfer.signal?.aborted || err instanceof TransferIdleError) {
       closeQuietly(conn, PEER_CLOSE.error, "send open interrupted");
     }
-    if (mayBeQueued && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN);
+    if (mayBeQueued && !(err instanceof PeerErrorReply)) throw new Error(SEND_UNKNOWN, { cause: err });
     throw err;
   } finally { finished = true; }
 }

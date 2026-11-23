@@ -1,3 +1,4 @@
+import { PendingQueueAppend } from "../outbox";
 import { transferStagingRoot } from "../runtime-names";
 import { stagingArea, stagingOwnerStart, writeTransferOwner } from "./transfer-owner";
 import { constants } from "node:fs";
@@ -225,12 +226,23 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
     };
     const replays = new Set<Replay>();
     pending.set(key, replays);
+    let unfinished = false;
     try {
       await work();
       for (const finish of replays) finish();
     } catch (error) {
-      for (const finish of replays) finish({ error });
+      if (error instanceof PendingQueueAppend) {
+        unfinished = true;
+        void error.completion.then(() => {
+          accepted.set(key, now() + 600_000);
+          for (const finish of replays) finish();
+        }, failure => {
+          for (const finish of replays) finish({ error: failure });
+        }).finally(() => pending.delete(key));
+      } else {
+        for (const finish of replays) finish({ error });
+      }
       throw error;
-    } finally { pending.delete(key); }
+    } finally { if (!unfinished) pending.delete(key); }
   };
 }

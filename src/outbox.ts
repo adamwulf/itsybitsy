@@ -27,6 +27,7 @@
  * The Telegram channel outbox lives in `src/channels/outbox.ts`.
  */
 
+import { waitForIO, TransferIdleError, type FileBodyOptions } from "./peers/send-frame";
 import { withPinnedDirectory } from "./pinned-directory";
 import { constants } from "node:fs";
 import { join } from "path";
@@ -175,18 +176,30 @@ async function openQueue(parent: string, append: boolean) {
  *
  * `id` and `enqueuedAtMs` are injectable for deterministic tests.
  */
+export class PendingQueueAppend extends Error {
+  constructor(readonly completion: Promise<void>, cause: unknown) {
+    super("Queue append outcome unknown — check the recipient", { cause });
+  }
+}
+
 export async function enqueueOutbox(
   dir: string,
   msg: Omit<OutboxMessage, "id" | "enqueuedAtMs"> & { id?: string; enqueuedAtMs?: number },
   reservedKey?: string,
   signal?: AbortSignal,
+  timing?: Pick<FileBodyOptions, "setTimer">,
 ): Promise<OutboxMessage> {
+  const lifetime = new AbortController();
+  const active = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
+  let append: Promise<void> | undefined;
   try {
-    return await withPinnedDirectory(dir, reservedKey === undefined, async parent => {
+    return await waitForIO({ ...timing, signal }, () => withPinnedDirectory(dir, reservedKey === undefined, async parent => {
       const file = await openQueue(parent, true);
       try { return await appendRecord(file); } finally { await file.close(); }
-    });
+    }));
   } catch (err) {
+    lifetime.abort(err);
+    if (append && (err instanceof TransferIdleError || signal?.aborted)) throw new PendingQueueAppend(append, err);
     if (reservedKey !== undefined && (err as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`agent ${reservedKey} no longer exists`);
     throw err;
   }
@@ -216,8 +229,9 @@ export async function enqueueOutbox(
       // the dedupe match above stable against pre-existing queued messages.
       noPassthrough: msg.noPassthrough === true ? true : undefined,
     };
-    signal?.throwIfAborted();
-    await file.appendFile(JSON.stringify(record) + "\n");
+    active.throwIfAborted();
+    append = file.appendFile(JSON.stringify(record) + "\n");
+    await append;
     return record;
   }
 }

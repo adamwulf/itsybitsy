@@ -1112,3 +1112,37 @@ test.each([false, true])("literal and escaped attachment spellings cannot name d
   expect(result).toMatchObject({ op: "error", reason: expect.stringContaining("same attachment spelling") });
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
+
+test("an uncertain queue append releases admission and its replay observes the original append", async () => {
+  await receiveFixture();
+  const clock = createFakeClock(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const open = fs.open;
+  let appends = 0;
+  const spy = spyOn(fs, "open").mockImplementation(async (...args) => {
+    const file = await open(...args);
+    if (String(args[0]).endsWith("/outbox.jsonl")) {
+      const append = file.appendFile.bind(file);
+      file.appendFile = async (...args) => {
+        if (++appends === 1) { entered.resolve(); await release.promise; }
+        return append(...args);
+      };
+    }
+    return file;
+  });
+  const body = () => {
+    let read = false;
+    return { read: async () => { if (read) return new Uint8Array(); read = true; return Buffer.from("x"); } };
+  };
+  try {
+    const req = header({ files: [manifestFile("x")] });
+    const first = receiver(req, "peer", paired, body(), { setTimer: clock.setTimer }).catch(err => err);
+    await entered.promise; clock.advance(60_000);
+    expect(String(await first)).toContain("outcome unknown");
+    const again = receiver(req, "peer", paired, body());
+    const other = header({ target: { kind: "repo-coordinator", repo: "photos" }, files: [manifestFile("x")] });
+    await receiver(other, "peer", paired, body());
+    release.resolve(); await again;
+    await receiver(req, "peer", paired, body());
+    expect(appends).toBe(2);
+  } finally { release.resolve(); spy.mockRestore(); }
+});

@@ -9727,7 +9727,7 @@ describe("setup Peers tab", () => {
       const service = new FakePeerService();
       const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
       service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
-        lastError: "connection refused", repos: null, agents: null })) });
+        coordinator: null, lastError: "connection refused", repos: null, agents: null })) });
       dashboard.setPeerService(service);
       dashboard.handleInput("I");
       service.setSession("initiator", { stage: "code-entry" });
@@ -9795,7 +9795,7 @@ describe("setup Peers tab", () => {
       const service = new FakePeerService();
       const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: "N".repeat(32), pairedAt: "x" }));
       service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
-        lastError: "connection refused", repos: null, agents: null })) });
+        coordinator: null, lastError: "connection refused", repos: null, agents: null })) });
       dashboard.setPeerService(service);
       dashboard.handleInput("I");
       dashboard.handleInput("abc");

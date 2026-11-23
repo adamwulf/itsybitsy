@@ -1,4 +1,4 @@
-import { ownerIsDead, readTransferOwner, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
+import { inspectTransferDirectory, safeTransferParent, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
 import { trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
@@ -7,7 +7,7 @@ export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
 import { constants, existsSync, renameSync, writeFileSync } from "node:fs";
 import { IDLE_TIMEOUT_MS, MAX_HEADER_BYTES } from "./transfer-limits";
-import { mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { IbCommandResult } from "../ib-commands";
 import { readMachineName } from "../machine-name";
@@ -82,8 +82,10 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     await mkdir(join(base, ".staging"), { mode: 0o700, recursive: true });
     await mkdir(staging, { mode: 0o700 });
     try {
-      // The watcher captures process birth stamps. The submitter can run with ps denied.
-      await writeTransferOwner(staging, { pid: process.pid, start: null });
+      // Worktree CLI requests arrive here through their unsandboxed watchdog.
+      const start = stagingOwnerStart(process.pid);
+      if (start === null) throw new Error("Cannot verify the peer-outbox owner");
+      await writeTransferOwner(staging, { pid: process.pid, start });
       if (stage) {
         header = { ...header, files: await stage(join(staging, "files")) };
         encodeSendHeader(parseSendHeader(header));
@@ -160,46 +162,30 @@ export function createPeerOutboxPoll(now = Date.now) {
   let lastBase: string | undefined;
   let workers = 0;
 
-  async function sweep(parent: string, isStaging = false) {
-    let entries;
-    try { entries = await readdir(parent, { withFileTypes: true }); }
-    catch (err) { if (missing(err)) return; throw err; }
-    for (const entry of entries) {
-      const path = join(parent, entry.name);
-      const [id, pid, extra] = entry.name.split(".");
-      if (!entry.isDirectory() || !requestId.test(id!) || extra !== undefined || active.has(path)) continue;
-      if (isStaging ? !pid || !/^[1-9]\d*$/.test(pid) || !Number.isSafeInteger(Number(pid)) : pid !== undefined) continue;
-      try {
-        const recorded = await readTransferOwner(path);
-        // A crash immediately after mkdir still leaves the staging PID in its name.
-        const owner = recorded ?? (isStaging ? { pid: Number(pid), start: null } : undefined);
-        if (!owner) continue;
-        if (ownerIsDead(owner) && !active.has(path)) {
-          await rm(path, { recursive: true, force: true });
-        } else if (isStaging && recorded?.start === null) {
-          const start = stagingOwnerStart(recorded.pid);
-          if (start !== null) await writeTransferOwner(path, { pid: recorded.pid, start });
-        }
-      } catch (err) { if (!missing(err)) throw err; }
+  let sweeping: Promise<void> | undefined;
+  async function sweep(parent: string, staging = false) {
+    for (const name of await transferDirectoryBatch(parent)) {
+      const id = staging ? name.replace(/\.[1-9]\d*$/, "") : name;
+      const path = join(parent, name);
+      if (requestId.test(id) && !active.has(path)) await sweepTransferDirectory(path, now());
     }
   }
 
   return async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true): Promise<void> {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
-    if (base !== lastBase || now() >= nextSweep) {
+    if (!sweeping && (base !== lastBase || now() >= nextSweep)) {
       lastBase = base;
       nextSweep = now() + 30_000;
-      await Promise.all([sweep(claimed), sweep(join(base, ".staging"), true)]);
+      sweeping = Promise.all([sweep(base), sweep(claimed), sweep(join(base, ".staging"), true)]).then(() => {}).finally(() => { sweeping = undefined; });
     }
+    await sweeping;
     if (!ownsEndpoint() || workers >= 4) return;
-    let entries;
-    try { entries = await readdir(base, { withFileTypes: true }); }
-    catch (err) { if (missing(err)) return; throw err; }
-    const ready = entries.filter(e => e.isDirectory() && requestId.test(e.name));
+    const ready = (await transferDirectoryBatch(base, "dispatch")).filter(name => requestId.test(name));
     if (!ready.length) return;
     await mkdir(claimed, { recursive: true, mode: 0o700 });
-    const ids = ready.map(e => e.name).values();
+    await safeTransferParent(claimed);
+    const ids = ready.values();
     async function worker() {
       workers++;
       try {
@@ -207,6 +193,7 @@ export function createPeerOutboxPoll(now = Date.now) {
           if (!ownsEndpoint()) return;
           const dir = join(claimed, id);
           try {
+            if ((await inspectTransferDirectory(join(base, id))).state !== "verified-live") continue;
             await rename(join(base, id), dir);
           } catch (err) {
             if (!missing(err)) log(`peer-outbox: ${detail(err)}`);
@@ -214,13 +201,11 @@ export function createPeerOutboxPoll(now = Date.now) {
           }
           active.add(dir);
           try {
-            const submittedBy = await readTransferOwner(dir);
-            if (submittedBy && ownerIsDead(submittedBy)) {
-              await rm(dir, { recursive: true, force: true });
-              continue;
-            }
-            const clientOwner = submittedBy && { pid: submittedBy.pid, start: submittedBy.start ?? stagingOwnerStart(submittedBy.pid) };
-            await writeTransferOwner(dir, { pid: process.pid, start: stagingOwnerStart(process.pid) });
+            const { owner: clientOwner, state } = await inspectTransferDirectory(dir);
+            if (state !== "verified-live" || !clientOwner) continue;
+            const start = stagingOwnerStart(process.pid);
+            if (start === null) throw new Error("Cannot verify the peer-outbox worker");
+            await writeTransferOwner(dir, { pid: process.pid, start });
             let result;
             try {
               const { peer, header: raw } = await readRequest(join(dir, "request.json"));
@@ -252,7 +237,11 @@ export function createPeerOutboxPoll(now = Date.now) {
                 tick();
               } finally { clearInterval(timer); }
             } catch (err) { result = { ok: false, error: detail(err) }; }
-            if (clientOwner) await writeTransferOwner(dir, clientOwner);
+            if (existsSync(join(dir, "cancel"))) {
+              await rm(dir, { recursive: true, force: true });
+              continue;
+            }
+            await writeTransferOwner(dir, clientOwner);
             await writeJson(dir, "result.json", result);
             await rm(join(dir, "files"), { recursive: true, force: true })
               .catch(err => log(`peer-outbox: could not remove sent files: ${detail(err)}`));

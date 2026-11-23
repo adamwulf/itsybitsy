@@ -1,3 +1,5 @@
+import { processStartEpochSecondsCtx } from "../agents";
+import { writeTransferOwner } from "./transfer-owner";
 import * as fs from "node:fs/promises";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
@@ -13,14 +15,16 @@ let base: string;
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), "ib-handoff-"));
   setUserHome(home);
+  processStartEpochSecondsCtx.set(() => 100);
   base = join(home, ".itsybitsy", "peer-outbox");
 });
-afterEach(async () => { resetUserHome(); await rm(home, { recursive: true, force: true }); });
+afterEach(async () => { processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); });
 
 test.each(["oversize", "symlink", "FIFO"])("refuses a %s peer request without sending", async kind => {
   const id = crypto.randomUUID();
   const dir = join(base, id);
   await mkdir(dir, { recursive: true });
+  await writeTransferOwner(dir, { pid: process.pid, start: 100 });
   const path = join(dir, "request.json");
   const header = { ...textHeader({ kind: "system" }, "hi", { kind: "user" }), id };
   const envelope = JSON.stringify({ peer: "peer", header });
@@ -129,12 +133,14 @@ test("Ctrl-C during a successful claimed result read still reports unknown", asy
 });
 
 
-test("startup recovers an unpublished staging directory when its creator died before writing the owner", async () => {
+test("staging without a record survives until hard expiry regardless of the name", async () => {
   const parent = join(base, ".staging");
   const stranded = join(parent, crypto.randomUUID() + ".2147483647");
-  const active = join(parent, crypto.randomUUID() + "." + process.pid);
   await mkdir(stranded, { recursive: true });
-  await mkdir(active);
-  await createPeerOutboxPoll()(async () => { throw new Error("unexpected send"); }, () => {}, () => false);
-  expect(await fs.readdir(parent)).toEqual([active.slice(parent.length + 1)]);
+  const created = (await fs.stat(stranded)).birthtimeMs;
+  const poll = (now: number) => createPeerOutboxPoll(() => now)(async () => { throw new Error("unexpected send"); }, () => {}, () => false);
+  await poll(created + 24 * 3600_000 - 1);
+  expect(await fs.readdir(parent)).toHaveLength(1);
+  await poll(created + 24 * 3600_000);
+  expect(await fs.readdir(parent)).toEqual([]);
 });

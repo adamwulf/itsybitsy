@@ -1113,7 +1113,7 @@ test.each([false, true])("literal and escaped attachment spellings cannot name d
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toEqual([]);
 });
 
-test("an uncertain queue append releases admission and its replay observes the original append", async () => {
+test("a slow queue append retains admission until the append and drain scheduling finish", async () => {
   await receiveFixture();
   const clock = createFakeClock(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
   const open = fs.open;
@@ -1137,11 +1137,11 @@ test("an uncertain queue append releases admission and its replay observes the o
     const req = header({ files: [manifestFile("x")] });
     const first = receiver(req, "peer", paired, body(), { setTimer: clock.setTimer }).catch(err => err);
     await entered.promise; clock.advance(60_000);
-    expect(String(await first)).toContain("outcome unknown");
     const again = receiver(req, "peer", paired, body());
     const other = header({ target: { kind: "repo-coordinator", repo: "photos" }, files: [manifestFile("x")] });
+    await expect(receiver(other, "peer", paired, body())).rejects.toThrow("busy");
+    release.resolve(); await first; await again;
     await receiver(other, "peer", paired, body());
-    release.resolve(); await again;
     await receiver(req, "peer", paired, body());
     expect(appends).toBe(2);
   } finally { release.resolve(); spy.mockRestore(); }

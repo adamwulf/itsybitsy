@@ -1,4 +1,3 @@
-import { PendingQueueAppend } from "./outbox";
 import { waitForIO, type FileBodyOptions } from "./peers/send-frame";
 import { fullyQualifiedAgentId } from "./tui/row-keys";
 import { initializeMachineName } from "./machine-name";
@@ -4526,9 +4525,8 @@ export async function sendMessage(
     }
     await enqueueOutbox(queueDir, {
       message: outgoing, fromAgent: fromId, peerSender: opts?.peerSend?.senderKind, raw, team: opts?.team, noPassthrough,
-    }, reservedKey, opts?.peerSend?.signal, opts?.peerSend);
+    }, reservedKey, opts?.peerSend?.signal);
   } catch (err) {
-    if (opts?.peerSend && err instanceof PendingQueueAppend) throw err;
     // Enqueue failed — nothing is queued. Undo any staged copies so an
     // abandoned attempt leaves no unused attachment behind (no partial copy).
     if (stagedCleanup) await stagedCleanup().catch(() => {});

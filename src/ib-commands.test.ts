@@ -1,3 +1,5 @@
+import * as fsPromises from "node:fs/promises";
+import { spyOn } from "bun:test";
 import { useAttachmentTemp } from "./test-attachment-temp";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { resolveNoWorktreeCaller } from "./no-worktree-caller";
@@ -1180,6 +1182,38 @@ describe("sendMessage send-time attachment staging", () => {
 
     await rm(srcDir, { recursive: true, force: true });
     await rm(join(stagedPath, "..", ".."), { recursive: true, force: true });
+  });
+
+  test("a slow dashboard append keeps its snapshot and both sends drain once", async () => {
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, state: "running" as AgentState });
+    const snapshot = join(tempDir, "snapshot");
+    await Bun.write(snapshot, "preserved");
+    setMessageAttachmentStagerForTesting(async () => ({
+      message: snapshot, staged: true, cleanup: () => rm(snapshot),
+    }));
+    const entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+    const original = fsPromises.open;
+    const opening = spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+      const file = await original(...args);
+      const append = file.appendFile.bind(file);
+      file.appendFile = async (...data) => {
+        if (String(data[0]).includes(snapshot)) { entered.resolve(); await resume.promise; }
+        return append(...data);
+      };
+      return file;
+    });
+    try {
+      const first = sendMessage(agent, "attached", { cwd: "/", stageAttachments: true });
+      await entered.promise;
+      const second = sendMessage(agent, "second", { cwd: "/" });
+      expect(deliveredMessage()).toBeUndefined();
+      resume.resolve();
+      expect((await first).ok).toBe(true);
+      expect((await second).ok).toBe(true);
+      expect(await Bun.file(snapshot).text()).toBe("preserved");
+      const delivered = spawnCalls.filter(call => call[1] === "send-keys" && call[4] === "-l").map(call => call[6]);
+      expect(delivered).toEqual(["[sent by user]: " + snapshot, "[sent by user]: second"]);
+    } finally { resume.resolve(); opening.mockRestore(); }
   });
 
   test("queues the staged replacement (not the original) before any delivery, marked no-passthrough", async () => {

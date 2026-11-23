@@ -196,8 +196,8 @@ Press `?` in the dashboard for this list.
 | Open | `w` / `o` / `O` | Worktree in Finder / external diff / diff vs manager |
 | | `G` / `C` | Ghostty: repo worktree / agent's tmux session |
 | | `S` | Save debug snapshot |
-| App | `h` | Setup dialog (hooks + config) |
-| | `I` | Peers dialog: this install's id, paired peers and their connection state, pairing with another install |
+| App | `h` | Open setup (Hooks, Config, Peers) |
+| | `I` | Open setup on Peers to see this install's id, check link states, or pair with another install |
 | | `?` / `Ctrl-C` | Help / quit |
 
 ## CLI overview

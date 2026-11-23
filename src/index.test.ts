@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
-import { mkdir, mkdtemp, rm } from "fs/promises";
+import { chmod, mkdir, mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { makeAgent, makeSpawnResult } from "./test-utils";
@@ -41,6 +41,35 @@ import {
 // Raising the bound only changes how long a genuinely stuck spawn takes to
 // fail; it weakens no assertion, and passing tests are unaffected.
 setDefaultTimeout(60_000);
+
+test("restart @system reports the local launch and prints a registration warning on stderr", async () => {
+  const home = await mkdtemp(join(tmpdir(), "ib-cli-coordinator-"));
+  try {
+    const tmux = join(home, "tmux");
+    // Only this fixture's executable is in PATH. It reaches readiness, then
+    // fails the registration write after the launcher has returned.
+    await Bun.write(tmux, [
+      "#!/bin/sh", 'case "$1" in',
+      'new-session) echo %4 ;;',
+      'capture-pane) echo "Claude Code v1.0.0" ;;',
+      'display-message) echo claude ;;',
+      'set-option) case "$*" in *@ib-system-coordinator-command*) echo "record write failed" >&2; exit 1 ;; esac ;;',
+      'esac',
+    ].join("\n"));
+    await chmod(tmux, 0o755);
+    const git = join(home, "git");
+    await Bun.write(git, "#!/bin/sh\nexit 0\n");
+    await chmod(git, 0o755);
+    const result = await runIsolatedCli(["restart", "@system"], {
+      home, env: { PATH: home }, allowedProcesses: [["tmux"], ["git"]],
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("System coordinator restart scheduled (fresh session)");
+    expect(result.stderr).toContain("Remote coordinator capture disabled: record write failed");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 describe("findAgentByIdInRepo", () => {
   test("duplicate exact IDs resolve only inside the explicitly selected repository", async () => {

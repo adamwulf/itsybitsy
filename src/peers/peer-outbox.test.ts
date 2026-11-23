@@ -254,3 +254,17 @@ test("a worker that died before the rename leaves the request ready", async () =
   await worker(async () => header.id, () => {});
   expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: true, id: header.id });
 });
+
+test.each([null, 201])("a worker whose observed start changes to %s after claiming cannot send", async observed => {
+  const { client, ready, claimed } = await readyRequest();
+  const rename = fs.rename;
+  const change = spyOn(fs, "rename").mockImplementation(async (source, dest) => {
+    await rename(source, dest);
+    if (source === ready) processStartEpochSecondsCtx.set(pid => pid === client.pid ? client.start : observed);
+  });
+  let sent = false;
+  try { await createPeerOutboxPoll()(async () => { sent = true; return ""; }, () => {}); }
+  finally { change.mockRestore(); }
+  expect(sent).toBe(false);
+  expect(await Bun.file(join(claimed, "result.json")).json()).toEqual({ ok: false, error: "Cannot verify the peer-outbox worker" });
+});

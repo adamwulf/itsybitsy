@@ -234,6 +234,8 @@ export function createPeerOutboxPoll(now = Date.now) {
               const { peer, header: raw } = await readRequest(join(dir, "request.json"));
               const header = parseSendHeader(raw);
               if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
+              const worker = await inspectTransferDirectory(dir, "worker.json");
+              if (worker.owner?.pid !== process.pid || worker.state !== "verified-live") throw new Error("Cannot verify the peer-outbox worker");
               const controller = new AbortController();
               let bytes = 0;
               let sequence = 0;

@@ -113,3 +113,10 @@ test("resolves symlinks before parent components for both cwd and home arguments
   expect(entry!.spellings).toEqual(expect.arrayContaining(args));
   expect(entry!.spellings).not.toContain(join(cwd, "x"));
 });
+
+test("every disable switch takes precedence over a missing path", async () => {
+  for (const field of ["maxFileBytes", "maxMessageBytes", "maxFiles"] as const) {
+    const limits = { ...DEFAULT_TRANSFER_LIMITS, [field]: 0 };
+    await expect(manifest(["missing"], { cwd, home, limits, machine: "desk" })).rejects.toThrow("attachments are disabled on desk");
+  }
+});

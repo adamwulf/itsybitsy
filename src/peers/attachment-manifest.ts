@@ -4,7 +4,7 @@ import { open, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { sanitizeAttachmentName } from "./attachment-name";
-import { CHUNK_BYTES, checkManifestLimits, DEFAULT_TRANSFER_LIMITS, type TransferLimits } from "./transfer-limits";
+import { CHUNK_BYTES, checkAttachmentsEnabled, checkManifestLimits, DEFAULT_TRANSFER_LIMITS, type TransferLimits } from "./transfer-limits";
 
 // Bun normalizes ".." before its realpath call. Resolve the directory to
 // the left of each parent step first, leaving symlink traversal to the OS.
@@ -40,6 +40,8 @@ export async function buildAttachmentManifest(
   paths: readonly string[], { cwd, home, limits = DEFAULT_TRANSFER_LIMITS, machine = "this machine" }: ManifestOptions,
 ): Promise<ManifestEntry[]> {
   if (!paths.length) return [];
+  const enabled = checkAttachmentsEnabled(limits, machine);
+  if (!enabled.ok) throw new Error(enabled.error);
   const protectedDirs = ["peer", "sealed"].map(name => canonicalizeSandboxPath(join(home, ".itsybitsy", name)));
   const entries = new Map<string, ManifestEntry>();
   try {

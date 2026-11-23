@@ -134,6 +134,8 @@ export class PeerPoller {
    * still never gets a second one.
    */
   private readonly inFlight = new Set<string>();
+  /** Each peer has one live link. Its native pane read can outlast the wire deadline. */
+  private readonly paneReads = new WeakMap<PairConnection, AbortSignal>();
   /** Bumped by every stop(): work started before a stop is ignored when it settles, even after a restart. */
   private generation = 0;
   private running = false;
@@ -179,15 +181,21 @@ export class PeerPoller {
   async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
     const conn = this.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
+    const pending = this.paneReads.get(conn);
+    if (pending) throw pending.reason ?? new Error("Previous coordinator pane read is still pending");
     const abort = new AbortController();
+    this.paneReads.set(conn, abort.signal);
     const deadline = Promise.withResolvers<never>();
     const cancel = this.deps.setTimer(PEER_REQUEST_TIMEOUT_MS, () => {
-      const error = new PeerRequestTimeout();
+      const error = new Error("Coordinator pane request timed out. Previous read is still pending.");
       abort.abort(error);
       deadline.reject(error);
     });
+    // iroh 1.2.0's readToEnd holds the receive mutex needed by stop(). Release
+    // the slot when the underlying exchange settles, even if the caller timed out.
+    const read = requestCoordinatorPane(conn, abort.signal).finally(() => this.paneReads.delete(conn));
     try {
-      return await Promise.race([requestCoordinatorPane(conn, abort.signal), deadline.promise]);
+      return await Promise.race([read, deadline.promise]);
     } finally {
       cancel();
     }
@@ -286,7 +294,10 @@ export class PeerPoller {
       changed = true;
       const conn = link.conn;
       link.conn = null;
-      if (conn !== null) closeQuietly(conn, PEER_CLOSE.done, "removed");
+      if (conn !== null) {
+        this.paneReads.delete(conn);
+        closeQuietly(conn, PEER_CLOSE.done, "removed");
+      }
       this.deps.log(`peer link: stopped polling ${link.name} (${shortPeerId(link.id)}): no longer in peers.json`);
     }
     const reordered = [...next.keys()].join() !== [...this.links.keys()].join();
@@ -376,6 +387,7 @@ export class PeerPoller {
   /** When `conn` closes while it is still `link`'s connection: mark the peer disconnected, so the next tick redials. */
   private watchClose(link: Link, conn: PairConnection, generation: number): void {
     const closed = (message: string) => {
+      this.paneReads.delete(conn);
       if (link.conn !== conn) return; // replaced, or closed on purpose by this side
       link.conn = null;
       if (this.isCurrent(link, generation)) this.failed(link, message);

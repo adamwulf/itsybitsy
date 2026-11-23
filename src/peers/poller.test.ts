@@ -601,3 +601,77 @@ test("a coordinator timeout resets only its stream during a remote start on the 
     rig.poller.stop();
   }
 });
+
+test.each(["read settles", "connection closes", "peer is removed"])("a timed-out native pane read holds one slot until the %s", async end => {
+  const rig = makeRig([peer(P1, "B")]);
+  const { a, b } = createMemoryLink(SELF, P1);
+  const release = Promise.withResolvers<void>();
+  const requests: string[] = [];
+  const interceptOpen = (conn: MemoryConnection) => {
+    const open = conn.openBi.bind(conn);
+    conn.openBi = async () => {
+      const stream = await open();
+      const write = stream.writeAll.bind(stream);
+      stream.writeAll = bytes => {
+        const op = JSON.parse(new TextDecoder().decode(bytes)).op;
+        if (op === "coordinator-pane" && !requests.includes(op)) {
+          const read = stream.readToEnd.bind(stream);
+          stream.readToEnd = async limit => { await release.promise; return read(limit); };
+        }
+        requests.push(op);
+        return write(bytes);
+      };
+      return stream;
+    };
+  };
+  interceptOpen(a);
+  rig.setDial(async () => a);
+  const pane = { state: "running", text: "current capture" };
+  const serve = (conn: MemoryConnection) => serveTrustedConnection(conn, {
+    peerName: async () => "paired", snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    captureCoordinator: async () => pane, startAgent: async () => "worker-1", log: () => {}, setTimer: rig.clock.setTimer,
+  });
+  void serve(b);
+  rig.poller.start();
+  try {
+    await waitFor(() => rig.state(P1)?.connected === true);
+    const first = rig.poller.fetchCoordinatorPane(P1);
+    await waitFor(() => requests.includes("coordinator-pane"));
+    rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
+    await expect(first).rejects.toThrow("Previous read is still pending");
+    for (let i = 0; i < 3; i++) {
+      // No advance of the fake clock: retries must return immediately.
+      await expect(rig.poller.fetchCoordinatorPane(P1)).rejects.toThrow("Previous read is still pending");
+    }
+    await waitFor(() => rig.state(P1)?.lastOkAt === rig.clock.now());
+    expect(await requestNewAgent(a, { repo: "app", type: "worker", prompt: "hello" }, rig.clock.setTimer)).toBe("worker-1");
+    expect(requests).toEqual(["agents", "coordinator-pane", "agents", "new-agent"]);
+    if (end === "read settles") {
+      release.resolve();
+      await new Promise<void>(done => setImmediate(done));
+    } else {
+      if (end === "peer is removed") {
+        rig.setPeers([]);
+        await rig.poller.tick();
+        expect(rig.state(P1)).toBeUndefined();
+        expect(a.closeInfo()).not.toBeNull();
+        rig.setPeers([peer(P1, "B")]);
+      } else {
+        b.close(0, "restart");
+      }
+      const next = createMemoryLink(SELF, P1);
+      interceptOpen(next.a);
+      void serve(next.b);
+      rig.setDial(async () => next.a);
+      await rig.poller.tick();
+      await waitFor(() => rig.poller.connectedConnection(P1) === next.a);
+      // The old native read is still waiting on release.
+    }
+    expect(await rig.poller.fetchCoordinatorPane(P1)).toEqual(pane);
+    expect(requests.filter(op => op === "coordinator-pane")).toHaveLength(2);
+    expect(rig.dials.length).toBe(end === "read settles" ? 1 : 2);
+  } finally {
+    release.resolve();
+    rig.poller.stop();
+  }
+});

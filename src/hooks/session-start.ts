@@ -13,6 +13,7 @@ import { logAgent } from "../agent-lifecycle";
 import { listTeams } from "../teams";
 import { listRepos } from "../registry";
 import { sameRepoPath } from "../repo-identity";
+import { suggestedAddress } from "../resolve-target";
 import { isValidSessionId } from "../validation";
 import { resolveSandboxEnabled, type SandboxConfig } from "../sandbox";
 import { metadataCli } from "../agent-cli";
@@ -488,7 +489,9 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
  * does not resolve: `@<name>` takes a registry name or nickname, and the two
  * differ for a dotted folder (coordinator `adamwulf_me`, repo `adamwulfme`).
  * So the send address is `@<registry name>` of `repo_path`, or the bare
- * coordinator ID when that repo is not registered.
+ * coordinator ID when that repo is not registered, shell-quoted when it needs
+ * it (a registry name taken from a folder before names were validated can
+ * hold a space).
  */
 async function formatSpawnerInfo(spawnedBy: { agent_id: string; repo_path: string | null }): Promise<string> {
   const id = spawnedBy.agent_id;
@@ -501,7 +504,7 @@ async function formatSpawnerInfo(spawnedBy: { agent_id: string; repo_path: strin
     const repo = repoPath
       ? (await listRepos().catch(() => [])).find((r) => sameRepoPath(r.path, repoPath))
       : undefined;
-    const address = repo ? `@${repo.name}` : coordinatorId;
+    const address = suggestedAddress(repo ? `@${repo.name}` : coordinatorId);
     return `You were spawned by the per-repo coordinator \`${coordinatorId}\`. You can send messages to it with: \`ib send ${address} "message"\``;
   }
   const repoLabel = spawnedBy.repo_path ? ` in repo \`${basename(spawnedBy.repo_path)}\`` : "";

@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } fr
 import { detectRole, generateInstructions, teamAwarenessBlock, interpolateTemplate, buildPathIsolationSection, hookSessionStart, oversizedInstructionsQuestion, HOOK_CONTEXT_CHAR_CAP, type SessionContext } from "./session-start";
 import { readAgentState } from "../agents";
 import { setSayRunner, resetSayRunner, setAskQuestionTelegramRunner, resetAskQuestionTelegramRunner } from "../ib-commands";
-import { mkdtemp, rm, mkdir } from "fs/promises";
+import { mkdtemp, rm, mkdir, realpath, symlink } from "fs/promises";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -323,6 +323,55 @@ describe("session-start", () => {
       instructions = await generateInstructions(detectRole(cwd, meta));
       expect(instructions).toContain('ib send @adamwulfme "message"');
       expect(instructions).not.toContain("ib send @adamwulf_me");
+    } finally {
+      await saveRegistry({ repos: [] });
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("a coordinator spawner's registry name is shell-quoted when it needs it", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "ib-session-quoted-"));
+    const repoPath = join(parent, "my site");
+    await mkdir(repoPath);
+    const cwd = join(parent, "other", ".itsybitsy", "agents", "agent-abc12345", "repo");
+    const meta = {
+      id: "agent-abc12345",
+      manager: "agent-mgr",
+      worker: true,
+      spawned_by: { agent_id: `@${getCoordinatorAgentId(repoPath)}`, repo_path: repoPath },
+    };
+    try {
+      // A registry name taken from the folder before names were validated.
+      await saveRegistry({ repos: [{ path: repoPath, name: "my site" }] });
+      const instructions = await generateInstructions(detectRole(cwd, meta));
+      expect(instructions).toContain("spawned by the per-repo coordinator `my_site`");
+      expect(instructions).toContain(`ib send '@my site' "message"`);
+    } finally {
+      await saveRegistry({ repos: [] });
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("a coordinator spawner is found when the registry spells its repo through a symlink", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "ib-session-symlink-"));
+    const repoPath = join(parent, "adamwulf.me");
+    const alias = join(parent, "site-link");
+    await mkdir(repoPath);
+    await symlink(repoPath, alias);
+    const cwd = join(parent, "other", ".itsybitsy", "agents", "agent-abc12345", "repo");
+    // spawned_by.repo_path is the real path; the registry keeps the path as typed.
+    const realRepoPath = await realpath(repoPath);
+    expect(realRepoPath).not.toBe(alias);
+    const meta = {
+      id: "agent-abc12345",
+      manager: "agent-mgr",
+      worker: true,
+      spawned_by: { agent_id: `@${getCoordinatorAgentId(realRepoPath)}`, repo_path: realRepoPath },
+    };
+    try {
+      await saveRegistry({ repos: [{ path: alias, name: "adamwulfme" }] });
+      const instructions = await generateInstructions(detectRole(cwd, meta));
+      expect(instructions).toContain('ib send @adamwulfme "message"');
     } finally {
       await saveRegistry({ repos: [] });
       await rm(parent, { recursive: true, force: true });

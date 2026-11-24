@@ -868,8 +868,10 @@ function coordinatorTmuxPath(): string {
 export async function coordinatorSenderPanePid(): Promise<number | null> {
   const binding: CoordinatorTmux = await Bun.file(coordinatorTmuxPath()).json();
   if (!isAbsolute(binding.executable) || !isAbsolute(binding.socket) || !/^%\d+$/.test(binding.paneId)) return null;
+  // The scrubbed env leaves tmux without a UTF-8 locale, and such a client gets
+  // the tab separators back as `_`. `-u` keeps them.
   const result = await runCoordinatorCommand([
-    binding.executable, "-S", binding.socket, "display-message", "-p", "-t",
+    binding.executable, "-S", binding.socket, "-u", "display-message", "-p", "-t",
     binding.paneId, `#{session_name}\t#{pane_id}\t#{pane_dead}\t#{${COORDINATOR_PANE_ID}}\t#{pane_pid}`,
   ], 2000, cmd => coordinatorSpawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe", env: { LC_ALL: "C" } }));
   const [session, pane, dead, markedPane, pid] = result.text.trimEnd().split("\t");

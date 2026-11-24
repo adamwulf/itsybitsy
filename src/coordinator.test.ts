@@ -609,6 +609,20 @@ describe("ensureSystemCoordinator", () => {
     expect(await from(200)).toBe(false);
   });
 
+  test("the pane probe keeps its tab separators under the scrubbed tmux env", async () => {
+    const record = { executable: "/launcher/bin/tmux", socket: "/launcher/socket", paneId: "%22" };
+    await Bun.write(join(tmpDir, "peer", "coordinator-tmux.json"), JSON.stringify(record));
+    // tmux 3.8 prints a tab as `_` to a client it does not treat as UTF-8.
+    coordinatorSpawnCtx.set((cmd, opts) => {
+      const env = opts?.env ?? process.env;
+      const utf8 = cmd.slice(0, cmd.indexOf("display-message")).includes("-u") ||
+        /utf-?8/i.test(env.LC_ALL || env.LC_CTYPE || env.LANG || "");
+      const out = ["ib-coordinator", "%22", "0", "%22", "200"].join(utf8 ? "\t" : "_");
+      return { stdout: mockStream(out), stderr: emptyStream(), exited: Promise.resolve(0) };
+    });
+    expect(await coordinatorSenderPanePid()).toBe(200);
+  });
+
   test("the visible launch line contains only Claude and preserves its exit status", async () => {
     const router = createCommandRouter({ "has-session": { exitCode: 1 }, "new-session": { stdout: "%4" } });
     let keys: string[] = [];

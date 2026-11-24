@@ -1,3 +1,4 @@
+import type { RemoteLifecycleAction } from "./remote-lifecycle";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -185,4 +186,13 @@ export function remoteSendDenial(reason: string): string {
   if (reason === TMUX_START_DENIAL) return "Remote sends are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux";
   return reason.replace(/remote starts/gi, match => match === "Remote starts" ? "Remote sends" : "remote sends")
     .replace("start an agent on another machine", "send to another machine");
+}
+
+export function remoteLifecycleDenial(reason: string, action: RemoteLifecycleAction): string {
+  if (reason === TMUX_START_DENIAL) return `Remote ${action} is disabled inside tmux. Use a terminal outside tmux.`;
+  return reason.replace("Remote starts are", `Remote ${action} is`)
+    .replace("Remote starts require", `Remote ${action} requires`)
+    .replace("remote starts are", `remote ${action} is`)
+    .replace("remote starts", `remote ${action}`)
+    .replace("start an agent on another machine", `${action} an agent on another machine`);
 }

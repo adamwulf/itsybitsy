@@ -1,3 +1,5 @@
+import { suggestedAddress } from "../resolve-target";
+import { AmbiguousRemoteRehire, lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleRequest } from "./remote-lifecycle";
 import { trackSendCleanup } from "../send-cleanup";
 /**
  * The trusted link between paired installs (docs/plans/iroh-peering.md,
@@ -17,7 +19,7 @@ import { trackSendCleanup } from "../send-cleanup";
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
  *
- * SPEC §20.4 defines the wire shapes for agents, pane reads, new-agent and send.
+ * SPEC §20.4 defines the wire shapes for agents, pane reads, new-agent, lifecycle and send.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -31,10 +33,15 @@ import { trackSendCleanup } from "../send-cleanup";
  */
 
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS } from "./transfer-limits";
+import { createHash } from "node:crypto";
+import { MAX_AGENT_DIFF_BYTES, type AgentDiff } from "./agent-diff";
 import { join } from "node:path";
 import { openStagedFile } from "./remote-attachments";
-import { sendFileBody, type FileBodyOptions, encodeSendHeader, TransferIdleError, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
-import { repoDisplayName, type RepoEntry } from "../registry";
+import {
+  decodeFrameHeader, decodeSendHeader, encodeFrameHeader, encodeSendHeader, readHeaderBytes,
+  requireSendFin, sendFileBody, streamFileBody, TransferIdleError, waitForIO, type FileBodyOptions, type SendHeader,
+} from "./send-frame";
+import { isStoredRepoName, repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
@@ -383,6 +390,45 @@ export function requestPane(conn: PairConnection, target: PeerPaneTarget, lines:
   }, { setTimer, timeout: [15_000, new Error(target.op === "agent-pane" ? "Agent pane request timed out" : "Coordinator pane request timed out")] });
 }
 
+export function requestAgentDiff(conn: PairConnection, repo: string, id: string, setTimer = realTimer): Promise<AgentDiff> {
+  return clientExchange(conn, encodeJson({ op: "agent-diff", repo, id }), { read: readDiffReply }, { setTimer });
+}
+
+async function readDiffReply(stream: Pick<PairStream, "read">, options: FileBodyOptions): Promise<AgentDiff> {
+  const prefix = await readHeaderBytes(stream, 4, options);
+  if (prefix[0] !== 0) {
+    // Standard JSON refusal, including a busy or older peer.
+    const parts = [prefix];
+    let length = prefix.length;
+    while (length <= PEER_MAX_REQUEST_BYTES) {
+      const chunk = await waitForIO(options, () => stream.read(PEER_MAX_REQUEST_BYTES + 1 - length));
+      if (!chunk.length) {
+        const reply = decodeObject(Buffer.concat(parts), "reply");
+        if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(sendDiagnostic(reply.reason));
+        break;
+      }
+      parts.push(Buffer.from(chunk));
+      length += chunk.length;
+    }
+    throw new PeerProtocolError("Malformed agent-diff reply");
+  }
+  const header = await decodeFrameHeader(stream, prefix, options);
+  if (!header || typeof header !== "object" || !("op" in header) || header.op !== "agent-diff" ||
+      !("base" in header) || typeof header.base !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(header.base) ||
+      !("sha256" in header) || typeof header.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(header.sha256) ||
+      !("size" in header) || typeof header.size !== "number" || !Number.isSafeInteger(header.size) ||
+      header.size < 1 || header.size > MAX_AGENT_DIFF_BYTES) throw new PeerProtocolError("Malformed agent-diff header");
+  const patch = Buffer.allocUnsafe(header.size);
+  let offset = 0;
+  const digest = await streamFileBody(stream, header.size, chunk => {
+    patch.set(chunk, offset);
+    offset += chunk.length;
+  }, options);
+  if (digest !== header.sha256) throw new PeerProtocolError("Agent diff hash mismatch");
+  await requireSendFin(stream, options);
+  return { base: header.base, patch };
+}
+
 export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt }: RemoteNewAgentRequest, setTimer: Timer): Promise<string> {
   const bytes = encodeJson({ op: "new-agent", repo, type, name, prompt });
   if (bytes.length > NEW_AGENT_MAX_REQUEST_BYTES) throw new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
@@ -392,6 +438,38 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
     throw new PeerProtocolError("malformed new-agent reply");
   }, { setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")] });
+}
+
+/** Lifecycle commands use their own overall deadline. A merge may be silent for two minutes. */
+export async function requestLifecycle(conn: PairConnection, request: RemoteLifecycleRequest, machine: string, setTimer: Timer, transfer?: Pick<OutgoingTransfer, "signal" | "verifyClient">): Promise<string> {
+  const bytes = encodeJson({ ...request, op: "lifecycle" });
+  if (bytes.length > PEER_MAX_REQUEST_BYTES) throw new Error("Lifecycle request exceeds the request limit");
+  const unknown = new Error(`outcome unknown — check ${machine}`);
+  try {
+    return await clientExchange(conn, bytes, payload => {
+      const reply = decodeObject(payload, "reply");
+      if (reply.op === "error" && typeof reply.reason === "string") {
+        const reason = lifecycleText(reply.reason);
+        if (!Array.isArray(reply.candidates)) throw new PeerErrorReply(reason);
+        const addresses = reply.candidates.map(candidate => {
+          if (!isStoredRepoName(candidate?.repo) || typeof candidate.id !== "string" || !isValidAgentId(candidate.id)) {
+            throw new PeerProtocolError("Malformed rehire candidate");
+          }
+          return suggestedAddress(`${machine}/${candidate.repo}/${candidate.id}`);
+        }).sort();
+        throw new PeerErrorReply(`${reason}; use ${addresses.join(" or ")}`);
+      }
+      if (reply.ok !== true || typeof reply.output !== "string") throw new PeerProtocolError("Malformed lifecycle reply");
+      return lifecycleText(reply.output);
+    }, { ...transfer, setTimer, unknownAfterFin: unknown.message, timeout: [lifecycleTimeout(request.action), unknown] });
+  } catch (err) {
+    if (err instanceof TransferIdleError) throw unknown;
+    throw err;
+  }
+}
+
+function lifecycleText(text: string): string {
+  return stripAnsi(text).split("\n").map(line => line.replace(/[\p{Cc}\p{Cf}]/gu, " ")).join("\n").slice(0, 32_768);
 }
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
@@ -417,11 +495,13 @@ export interface OutgoingTransfer {
 interface ClientOptions extends OutgoingTransfer {
   setTimer: Timer;
   timeout?: [number, Error];
+  unknownAfterFin?: string;
   files?: SendHeader["files"];
 }
 
+type StreamReply<T> = { read(stream: Pick<PairStream, "read">, options: FileBodyOptions): Promise<T> };
 /** One owner for the request deadline, both halves of the stream, and teardown. */
-async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode: (bytes: Uint8Array) => T, options: ClientOptions): Promise<T> {
+async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode: ((bytes: Uint8Array) => T) | StreamReply<T>, options: ClientOptions): Promise<T> {
   const { setTimer, timeout, files } = options;
   const deadline = new AbortController();
   const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
@@ -441,11 +521,29 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   let sendDone = false;
   let cancelIdle: (() => void) | undefined;
   const renewReplyIdle = () => {
-    if (!sendDone) return;
+    if (!sendDone || typeof decode !== "function") return; // framed readers time each read with waitForIO
     cancelIdle?.();
     cancelIdle = setTimer(IDLE_TIMEOUT_MS, () => deadline.abort(new TransferIdleError(`No progress for ${IDLE_TIMEOUT_MS} ms`)));
   };
+  let frameStop: Promise<unknown> | undefined;
   async function readReply() {
+    if (typeof decode !== "function") {
+      let fin = false;
+      let reading: Promise<Uint8Array> | undefined;
+      try {
+        return await decode.read({ read: async limit => {
+          reading = active.read(limit);
+          const chunk = await reading;
+          fin = chunk.length === 0;
+          return chunk;
+        } }, { setTimer });
+      } catch (err) {
+        // A malformed header can leave a body unread. An idle deadline can
+        // leave a native read pending. Both belong to this exchange's grace.
+        if (!fin) frameStop = Promise.allSettled([reading, active.stopReceiving()]);
+        throw err;
+      }
+    }
     if (!files) return decode(await active.readToEnd(PEER_MAX_REPLY_BYTES));
     const parts: Uint8Array[] = [];
     let length = 0;
@@ -484,7 +582,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     attemptedFin = true;
     await io(() => active.finish());
     sendDone = true;
-    renewReplyIdle();
+    if (files) renewReplyIdle();
   }
 
   type Outcome = { ok: true; value: T } | { ok: false; error: unknown };
@@ -499,15 +597,15 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   if (signal.aborted) abort();
   try {
     const result = await Promise.race([reply, writeRequest().then(() => reply, failure), stopped.promise]);
-    if (!received || !sendDone) {
+    if (!received || !sendDone || frameStop) {
       deadline.abort(new Error("Request writer stopped"));
-      const teardown = Promise.allSettled([reply, sendDone ? undefined : active.resetSending()]);
+      const teardown = Promise.allSettled([reply.then(() => frameStop), sendDone ? undefined : active.resetSending()]);
       if (!await settledWithinGrace(teardown, { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
     }
     if (received?.ok) return received.value;
     if (received && received.error instanceof PeerErrorReply) throw received.error;
     if (result.ok) return result.value;
-    if (files && attemptedFin) throw new Error(SEND_UNKNOWN, { cause: result.error });
+    if (attemptedFin && options.unknownAfterFin) throw new Error(options.unknownAfterFin, { cause: result.error });
     if (result.error instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
     throw result.error;
   } finally {
@@ -522,7 +620,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
     if (reply.ok === true && reply.id === header.id) return header.id;
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(sendDiagnostic(reply.reason));
     throw new PeerProtocolError("Malformed send acknowledgement");
-  }, { ...transfer, setTimer, files: header.files });
+  }, { ...transfer, setTimer, files: header.files, unknownAfterFin: SEND_UNKNOWN });
 }
 
 // ---------------------------------------------------------------------------
@@ -539,10 +637,12 @@ export interface PeerResponderDeps {
   receiveMessage?(header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>, body?: Pick<PairStream, "read">, options?: ReceiptOptions): Promise<void>;
   captureCoordinator?(lines: number): Promise<PeerPane | null>;
   captureAgent?(repo: string, id: string, lines: number): Promise<PeerPane>;
+  captureDiff?(repo: string, id: string): Promise<AgentDiff>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
+  lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<string>;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** watch.log in `ib watch`. */
   log(line: string): void;
@@ -622,11 +722,11 @@ async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerRe
 }
 
 /** The handler owns the reply and teardown. A settled stop or reset is stream-local. */
-async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerResponderDeps, bytes: Uint8Array,
+async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerResponderDeps, bytes: Uint8Array | Uint8Array[],
   stop?: Promise<void>, stalledRead?: Promise<Uint8Array>) {
   const stopped = stop?.catch(() => {});
   const writeReply = async () => {
-    await writeWithProgress(stream, bytes, deps.setTimer);
+    for (const part of Array.isArray(bytes) ? bytes : [bytes]) await writeWithProgress(stream, part, deps.setTimer);
     await waitForIO(deps, () => stream.finish());
   };
   if (stalledRead) {
@@ -744,7 +844,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     return;
   }
 
-  let reply: Uint8Array;
+  let reply: Uint8Array | Uint8Array[];
   let capturedCoordinator = false;
   if (request.op === "agents") {
     try {
@@ -778,6 +878,21 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
       return;
     }
+  } else if (request.op === "agent-diff") {
+    try {
+      if (typeof request.repo !== "string" || typeof request.id !== "string") throw new Error("Malformed agent-diff request");
+      if (!deps.captureDiff) throw new Error("Remote diffs are unavailable");
+      const { base, patch } = await deps.captureDiff(request.repo, request.id);
+      if (patch.length > MAX_AGENT_DIFF_BYTES) throw new Error("Agent diff exceeds 64 MiB");
+      const sha256 = createHash("sha256").update(patch).digest("hex");
+      reply = [encodeFrameHeader({ op: "agent-diff", base, size: patch.length, sha256 }), patch];
+    } catch (err) {
+      reply = encodeErrorReply(sendDiagnostic(errorDetail(err)));
+    }
+    if (await deps.peerName(conn.remoteId) === null) {
+      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+      return;
+    }
   } else if (request.op === "new-agent") {
     try {
       const id = await startAgentWithDeadline(deps, request, conn.remoteId);
@@ -786,6 +901,17 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       const error = cleanRemoteText(errorDetail(err));
       deps.log(`peer link: new-agent from ${from} failed: ${error}`);
       reply = encodeErrorReply(error);
+    }
+  } else if (request.op === "lifecycle") {
+    try {
+      if (!deps.lifecycle) throw new Error("Remote lifecycle commands are unavailable");
+      const output = await deps.lifecycle(parseLifecycleRequest(request), () => deps.peerName(conn.remoteId));
+      reply = encodeJson({ ok: true, output: lifecycleText(output) });
+    } catch (err) {
+      const error = lifecycleText(errorDetail(err));
+      deps.log(`peer link: lifecycle request from ${from} failed: ${singleLine(error)}`);
+      reply = err instanceof AmbiguousRemoteRehire
+        ? encodeJson({ op: "error", reason: error, candidates: err.candidates }) : encodeErrorReply(error);
     }
   } else {
     reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);

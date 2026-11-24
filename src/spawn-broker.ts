@@ -147,8 +147,8 @@ export async function withdrawPublishedRequest(ready: string, withdrawn: string)
   return true;
 }
 
-export function interruptedSend(state: "unpublished" | "withdrawn" | "claimed"): IbCommandResult {
-  const stderr = state === "claimed" ? "outcome unknown — check the recipient" : "cancelled before sending";
+export function interruptedSend(state: "unpublished" | "withdrawn" | "claimed", recipient = "the recipient"): IbCommandResult {
+  const stderr = state === "claimed" ? `outcome unknown — check ${recipient}` : "cancelled before sending";
   return { ok: false, exitCode: 130, stdout: "", stderr };
 }
 

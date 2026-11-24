@@ -69,6 +69,7 @@ export function findOwnRepo(cwd: string, repos: RepoEntry[]): RepoEntry | undefi
 type TargetResult = ResolvedSendTarget & {
   error?: string;
   incompleteVisibility?: { unreadableDirs: string[] };
+  candidates?: { repo: string; id: string }[];
 };
 
 function failure(error: string, unreadableDirs: string[] = []): TargetResult {
@@ -87,7 +88,7 @@ async function readAddressMachineName(): Promise<string | TargetResult> {
   }
 }
 
-function suggestedAddress(address: string): string {
+export function suggestedAddress(address: string): string {
   return /^[a-zA-Z0-9_@./-]+$/.test(address) ? address : shellQuote(address);
 }
 
@@ -96,7 +97,7 @@ export async function resolveAgentTarget(
   target: string,
   repos: RepoEntry[],
   cwd: string = process.cwd(),
-  purpose: "send" | "agent" | "rehire" = "agent",
+  purpose: "send" | "agent" | "rehire" | "lifecycle" = "agent",
   inboundPeer = false,
   requirePeerVisibility = false,
 ): Promise<TargetResult> {
@@ -112,7 +113,7 @@ export async function resolveAgentTarget(
   }
 
   function matchesInRepo(name: string, agents: Agent[]): Agent[] {
-    if (inboundPeer) return agents.filter(agent => agent.id === name);
+    if (inboundPeer && purpose !== "rehire") return agents.filter(agent => agent.id === name);
     const first = matchAgentById(name, agents);
     if (!first) return [];
     if (purpose !== "rehire" || first.id === name) return [first];
@@ -225,7 +226,7 @@ export async function resolveAgentTarget(
   const repoName = parts.length === 3 ? parts[1]!.toLowerCase() : undefined;
 
   // A bare name first searches the caller's repo, including its worktrees.
-  const ownRepo = machine ? undefined : findOwnRepo(cwd, repos);
+  const ownRepo = machine || (inboundPeer && purpose === "rehire") ? undefined : findOwnRepo(cwd, repos);
   let searched = repos;
   let ownErrors: AgentReadError[] = [];
   if (ownRepo) {
@@ -247,6 +248,7 @@ export async function resolveAgentTarget(
     return failure(`Unknown machine: ${parts[0]}`);
   }
   if (!includesLocal && parts.length === 2 && name.startsWith("@") && name.length > 1) {
+    if (purpose === "lifecycle") return failure("Select a remote agent");
     if (purpose !== "send") return failure("remote agents are read-only");
     if (peers.length !== 1) return failure(`Ambiguous machine: ${parts[0]}`);
     return { agent: null, isSystemCoordinator: false, remote: {
@@ -285,6 +287,11 @@ export async function resolveAgentTarget(
     return failure(`Agent not found: ${target}${note}`, unreadable);
   }
   if (matches.length > 1) {
+    if (inboundPeer && purpose === "rehire") {
+      // The caller owns the pairing name, so only it can build usable addresses.
+      return { ...failure(`'${name}' matches several agents`),
+        candidates: matches.map(m => ({ repo: m.repo, id: m.agent!.id })) };
+    }
     if (!machine && matches.some((m) => m.agent)) {
       const localName = await readAddressMachineName();
       if (typeof localName === "string") {
@@ -308,7 +315,7 @@ export async function resolveAgentTarget(
   }
   const agent = matches[0]!.agent;
   if (agent) return local(agent);
-  if (purpose === "send") return { agent: null, isSystemCoordinator: false, remote: matches[0]!.remote };
+  if (purpose === "send" || (machine && purpose === "lifecycle")) return { agent: null, isSystemCoordinator: false, remote: matches[0]!.remote };
   return failure("remote agents are read-only");
 }
 

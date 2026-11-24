@@ -9,6 +9,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setUserHome, resetUserHome } from "../home";
+import { acceptRemoteLifecycle } from "./remote-lifecycle";
+import { lifecycleFixture } from "./test-remote-lifecycle";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import type { Agent } from "../agents";
@@ -23,6 +25,7 @@ import {
   NEW_AGENT_MAX_REQUEST_BYTES,
   requestNewAgent,
   requestPane,
+  requestLifecycle,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
   PeerProtocolError,
@@ -69,7 +72,7 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
   const readerId = options.readerId ?? ID_A;
   const link = createMemoryLink(readerId, ID_B);
   const peers = options.peers ?? new Set([readerId]);
@@ -80,6 +83,7 @@ function serve(options: { readerId?: string; captureAgent?: PeerResponderDeps["c
   const done = serveTrustedConnection(link.b, {
     setTimer: clock.setTimer,
     startAgent: options.startAgent,
+    lifecycle: options.lifecycle,
     captureCoordinator: options.captureCoordinator,
     captureAgent: options.captureAgent,
     paneReaders: options.paneReaders ?? new Set(),
@@ -370,6 +374,81 @@ describe("serveTrustedConnection", () => {
   });
 });
 
+
+test("lifecycle requests run the receiver’s local commands, return merge errors and resolve retired agents", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "ib-peer-lifecycle-"));
+  const deps = await lifecycleFixture(repo);
+  const side = serve({ lifecycle: (req, name) => acceptRemoteLifecycle(req, name, deps, () => {}) });
+  const target = { id: "worker", repo: "app" };
+  try {
+    const ask = (request: Parameters<typeof requestLifecycle>[1]) => requestLifecycle(side.a, request, "Laptop", side.clock.setTimer);
+    expect(await ask({ ...target, action: "merge", checkOnly: true })).toBe("Ready");
+    expect(deps.mergeAgent).not.toHaveBeenCalled();
+    deps.mergeAgent.mockResolvedValueOnce({ ok: false, exitCode: 1, stderr: "Merge conflict in app.ts", stdout: "" });
+    await expect(ask({ ...target, action: "merge" })).rejects.toThrow("Merge conflict in app.ts");
+    deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Merged one commit", stderr: "" });
+    expect(await ask({ ...target, action: "merge", keep: true, force: true })).toBe("Merged one commit");
+    expect(deps.mergeAgent.mock.calls.at(-1)).toEqual([expect.objectContaining({ id: "worker" }), repo, { keep: true }]);
+    await ask({ ...target, action: "resume" });
+    await ask({ ...target, action: "retire" });
+    await ask({ id: "worker", action: "rehire" });
+    expect(deps.rehireAgent.mock.calls).toEqual([["worker", { repoPath: repo }]]);
+    expect(deps.notice.mock.calls.flat()).toEqual(["merged", "resumed", "retired", "rehired"].map(verb => `Alice ${verb} worker in App`));
+    deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Nothing to merge: branch is current", stderr: "" });
+    expect(await ask({ ...target, action: "merge", keep: true })).toBe("Nothing to merge: branch is current");
+    expect(deps.notice.mock.calls.at(-1)?.[0]).toContain("Nothing to merge: branch is current");
+  } finally {
+    side.a.close(0, "done");
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("ambiguous retired nicknames suggest addresses on the paired machine", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "ib-peer-ambiguous-rehire-"));
+  const deps = await lifecycleFixture(repo);
+  const side = serve({ lifecycle: (req, name) => acceptRemoteLifecycle(req, name, deps, () => {}) });
+  try {
+    for (const id of ["first", "second"]) {
+      await Bun.write(join(repo, ".itsybitsy", "archive", id, "meta.json"), JSON.stringify({ id, nickname: "reviewer" }));
+    }
+    for (const scope of [{}, { repo: "app" }]) {
+      await expect(requestLifecycle(side.a, { ...scope, action: "rehire", id: "reviewer" }, "Laptop B", side.clock.setTimer))
+        .rejects.toThrow("'reviewer' matches several agents; use 'Laptop B/App/first' or 'Laptop B/App/second'");
+    }
+    expect(deps.rehireAgent).not.toHaveBeenCalled();
+  } finally {
+    side.a.close(0, "done");
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("dropping the trusted link after lifecycle FIN leaves the outcome unknown", async () => {
+  const link = createMemoryLink(ID_A, ID_B);
+  const clock = createFakeClock();
+  const result = requestLifecycle(link.a, { action: "retire", repo: "app", id: "worker" }, "Laptop B", clock.setTimer);
+  const stream = await link.b.acceptBi();
+  expect(decodeText(await stream.readToEnd(4096))).toMatchObject({ op: "lifecycle", action: "retire", id: "worker" });
+  link.b.close(0, "receiver stopped");
+  await expect(result).rejects.toThrow("outcome unknown — check Laptop B");
+});
+
+test.each([["merge", 120000], ["retire", 30000], ["rehire", 30000], ["resume", 30000]] as const)(
+  "%s waits for its own deadline and reports the machine to check", async (action, ms) => {
+    const link = createMemoryLink(ID_A, ID_B);
+    const clock = createFakeClock();
+    let settled = false;
+    const pending = requestLifecycle(link.a, { action, id: "worker", repo: "app" }, "Laptop", clock.setTimer)
+      .catch(err => err.message).finally(() => { settled = true; });
+    await (await link.b.acceptBi()).readToEnd(4096);
+    await Bun.sleep(0);
+    clock.advance(ms - 1);
+    await Bun.sleep(0);
+    expect(settled).toBe(false);
+    clock.advance(1);
+    await Bun.sleep(0);
+    clock.advance(750);
+    expect(await pending).toBe("outcome unknown — check Laptop");
+  });
 
 test("a new-agent stream without a reply times out at 30 s", async () => {
   const link = createMemoryLink(ID_A, ID_B);

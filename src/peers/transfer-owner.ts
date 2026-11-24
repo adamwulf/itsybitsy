@@ -1,7 +1,7 @@
 import { transferStagingRoot } from "../runtime-names";
 import { openBrokerLease, publishBrokerRecord, stagingDirectoryStat } from "./remote-attachments";
 import { constants, type Dir } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, opendir, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, opendir, readdir, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
@@ -128,7 +128,7 @@ export async function sweepTransferDirectory(dir: string, now: number) {
   } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
 }
 
-export async function stagingArea(root: string, area: "incoming" | "outgoing" | `local-${string}`) {
+export async function stagingArea(root: string, area: "incoming" | "outgoing" | "diffs" | `local-${string}`) {
   await safeTransferParent(dirname(root));
   for (const dir of [root, join(root, area)]) {
     await mkdir(dir, { mode: 0o700 }).catch(err => { if (err.code !== "EEXIST") throw err; });
@@ -200,6 +200,18 @@ export async function sweepOutgoingDirectories(root = transferStagingRoot(), now
       if (/^snapshot-[a-zA-Z0-9]{6}$/.test(entry)) await sweepTransferDirectory(join(area, entry), now);
     })),
   ]);
+}
+
+const DIFF_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** A GUI can keep reading a copy after its launcher exits. Keep it for a week. */
+export async function sweepDiffCopies(root = transferStagingRoot(), now = Date.now()) {
+  const area = await stagingArea(root, "diffs");
+  for (const entry of await readdir(area, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^copy-[a-zA-Z0-9]{6}$/.test(entry.name)) continue;
+    const dir = join(area, entry.name);
+    if (now - (await lstat(dir)).birthtimeMs > DIFF_RETENTION_MS) await rm(dir, { recursive: true, force: true });
+  }
 }
 
 /** A sandbox writes its PID alone. Only the watchdog observes and records its

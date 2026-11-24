@@ -720,6 +720,24 @@ describe("PeerService at boot", () => {
     }
   });
 
+  test("dashboard lifecycle commands require the startup human decision before opening a stream", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const decision = gate<string | null>();
+    const { service, endpoint } = makeService({ remoteStartDenial: decision.promise });
+    const connections = answerDials(endpoint, []);
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      const open = spyOn(connections[0]!.peer, "openBi");
+      const request = { action: "merge" as const, repo: "app", id: "worker" };
+      await expect(service.runRemoteLifecycle(ID_REMOTE, request)).rejects.toThrow("checking whether remote merge is allowed");
+      decision.resolve("Only a human can start an agent on another machine");
+      await flushMicrotasks();
+      await expect(service.runRemoteLifecycle(ID_REMOTE, request)).rejects.toThrow("Only a human can merge an agent on another machine");
+      expect(open).not.toHaveBeenCalled();
+    } finally { await service.shutdown(); }
+  });
+
   test("a verified CLI handoff uses the connected stream even when dashboard sends are denied", async () => {
     const { textHeader } = await import("./peer-outbox");
     const header = textHeader({ kind: "agent", agent: "helper" }, "hi", { kind: "user" });

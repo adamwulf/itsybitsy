@@ -33,6 +33,7 @@ import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { EMPTY_DIFF, prepareDiffCopy } from "../peers/agent-diff";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { cleanRemoteText } from "../peers/peer-link";
@@ -180,6 +181,7 @@ export interface ActionCtx {
   refuseOnRemoteRow(key: string): boolean;
   peerService: PeersDialogService | null;
   remoteSelection: RemoteEntry | null;
+  runRemoteRowCommand(row: Extract<RemoteEntry, { kind: "remote-agent" }>, options: Pick<import("../peers/remote-lifecycle").RemoteLifecycleRequest, "action" | "checkOnly" | "keep">): Promise<string>;
   agentTree: {
     selectedAgent: Agent | null;
     selectedRepoHeader: string | null;
@@ -334,6 +336,11 @@ export interface ActionCtx {
 }
 
 export function handleRetire(ctx: ActionCtx) {
+  const row = ctx.remoteSelection;
+  if (row?.kind === "remote-agent") {
+    retireDialog(ctx, remoteAgentLabel(row), () => ctx.runRemoteRowCommand(row, { action: "retire" }));
+    return;
+  }
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
@@ -360,20 +367,28 @@ function showCoordinatorResetResult(ctx: ActionCtx, agent: Agent, result: IbComm
  * by `x` on an agent (`handleRetire`) and the "Retire" row of the team-member
  * picker (`handleManageTeamMember`).
  */
+function remoteAgentLabel(row: Extract<RemoteEntry, { kind: "remote-agent" }>) {
+  return `${row.peerName}/${row.remote.repoRegistryName}/${row.remote.id}`;
+}
+
 function confirmRetire(ctx: ActionCtx, agent: Agent) {
+  retireDialog(ctx, agent.id, async () => {
+    const result = await retireAgent(agent);
+    if (result.ok) showTeardownResult(ctx, `Retired ${agent.id}`, result.stderr);
+    else ctx.setNotice(`Retire failed: ${result.stderr || result.stdout}`, "error");
+  });
+}
+
+function retireDialog(ctx: ActionCtx, label: string, retire: () => Promise<unknown>) {
   ctx.showDialog({
     type: "confirm",
-    prompt: `Retire agent ${agent.id}?`,
+    prompt: `Retire agent ${label}?`,
     confirmLabel: "Retire",
     focusedButton: "cancel",
     confirmColor: RED,
     onYes: () => {
       ctx.closeDialog();
-      ctx.executeAndRefresh(async () => {
-        const result = await retireAgent(agent);
-        if (result.ok) showTeardownResult(ctx, `Retired ${agent.id}`, result.stderr);
-        else ctx.setNotice(`Retire failed: ${result.stderr || result.stdout}`, "error");
-      });
+      ctx.executeAndRefresh(async () => { await retire(); });
     },
   });
 }
@@ -508,6 +523,11 @@ export function handleNukeAll(ctx: ActionCtx) {
 }
 
 export function handleResume(ctx: ActionCtx) {
+  const row = ctx.remoteSelection;
+  if (row?.kind === "remote-agent") {
+    ctx.executeAndRefresh(async () => { await ctx.runRemoteRowCommand(row, { action: "resume" }); });
+    return;
+  }
   if (ctx.agentTree.isSystemCoordinatorSelected) {
     handleRestartSystemCoordinator(ctx);
     return;
@@ -1294,6 +1314,17 @@ export function handleDisbandTeam(ctx: ActionCtx, teamName: string) {
 }
 
 export function handleMerge(ctx: ActionCtx) {
+  const row = ctx.remoteSelection;
+  if (row?.kind === "remote-agent") {
+    ctx.executeAndRefresh(async () => {
+      const output = await ctx.runRemoteRowCommand(row, { action: "merge", checkOnly: true });
+      const selected = ctx.remoteSelection;
+      if (ctx.dialog || selected?.kind !== "remote-agent" || row.peerId !== selected.peerId ||
+          row.remote.id !== selected.remote.id || row.remote.repoRegistryName !== selected.remote.repoRegistryName) return;
+      mergeDialog(ctx, remoteAgentLabel(row), output, keep => ctx.runRemoteRowCommand(row, { action: "merge", keep }));
+    });
+    return;
+  }
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
@@ -1311,27 +1342,30 @@ export function handleMerge(ctx: ActionCtx) {
       ctx.setNotice(`Merge-check failed for ${agent.id}: ${checkOutput}`, "error");
       return;
     }
-    const checkbox = { label: "Keep agent after merge", checked: false };
-    ctx.showDialog({
-      type: "confirm",
-      prompt: `Merge ${agent.id}?\n${checkOutput}`,
-      confirmLabel: "Merge",
-      focusedButton: "cancel",
-      checkbox,
-      onYes: () => {
-        const keep = checkbox.checked;
-        ctx.closeDialog();
-        ctx.executeAndRefresh(async () => {
-          const result = await mergeAgent(agent, agent.repoPath, { keep });
-          if (result.ok) {
-            const notice = keep
-              ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
-              : `Merged ${agent.id}`;
-            showTeardownResult(ctx, notice, result.stderr);
-          } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
-        });
-      },
+    mergeDialog(ctx, agent.id, checkOutput, async keep => {
+      const result = await mergeAgent(agent, agent.repoPath, { keep });
+      if (result.ok) {
+        const notice = keep
+          ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
+          : `Merged ${agent.id}`;
+        showTeardownResult(ctx, notice, result.stderr);
+      } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
     });
+  });
+}
+
+function mergeDialog(ctx: ActionCtx, label: string, output: string, merge: (keep: boolean) => Promise<unknown>) {
+  const checkbox = { label: "Keep agent after merge", checked: false };
+  ctx.showDialog({
+    type: "confirm",
+    prompt: `Merge ${label}?\n${output}`,
+    confirmLabel: "Merge",
+    focusedButton: "cancel",
+    checkbox,
+    onYes: () => {
+      ctx.closeDialog();
+      ctx.executeAndRefresh(async () => { await merge(checkbox.checked); });
+    },
   });
 }
 
@@ -2215,12 +2249,7 @@ export function handleOpenWorktree(ctx: ActionCtx) {
 
 /** 'o' — diff the agent's worktree against its merge-base with main. */
 export async function handleOpenDiffTool(ctx: ActionCtx) {
-  await openDiffTool(ctx, async (cwd) => {
-    const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], { cwd, stdout: "pipe", stderr: "ignore" });
-    const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-    if (!mergeBase) return { error: "Could not determine merge-base with main" };
-    return { ref: mergeBase, label: "merge-base with main" };
-  });
+  await openDiffTool(ctx);
 }
 
 /**
@@ -2251,49 +2280,65 @@ export async function handleOpenDiffToolVsManager(ctx: ActionCtx) {
  */
 async function openDiffTool(
   ctx: ActionCtx,
-  resolveBase: (cwd: string, agent: Agent) => Promise<{ ref: string; label?: string } | { error: string }>,
+  resolveBase?: (cwd: string, agent: Agent) => Promise<{ ref: string } | { error: string }>,
 ) {
   // Kill previous diff process before doing anything else
-  if (activeDiffProc) {
-    try { activeDiffProc.proc.kill(); } catch {}
-    activeDiffProc = null;
-  }
+  killActiveDiffProc();
 
   if (diffToolLaunching) { ctx.setNotice("Diff tool is already launching", "error"); return; }
 
   const agent = ctx.agentTree.selectedAgent;
-  if (!agent) { ctx.setNotice("No agent selected", "error"); return; }
+  const remote = !resolveBase && ctx.remoteSelection?.kind === "remote-agent" ? ctx.remoteSelection : null;
+  if (!agent && !remote) { ctx.setNotice("No agent selected", "error"); return; }
   if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json", "error"); return; }
   const tool = ctx.diffTool;
 
-  const cwd = agentWorktreePath(agent);
-
-  if (!existsSync(cwd)) {
-    ctx.setNotice("Worktree no longer exists — agent may have been merged", "error");
-    return;
-  }
-
   diffToolLaunching = true;
+  try {
+    if (remote) {
+      const service = ctx.peerService;
+      if (!service) throw new Error("Remote diffs are unavailable");
+      if (service.remoteStartDenial !== null) throw new Error(service.remoteStartDenial);
+      const { repoRegistryName: repo, id } = remote.remote;
+      const local = ctx.repos.find(r => r.name.toLowerCase() === repo.toLowerCase());
+      if (!local) throw new Error(`Open diff needs ${repo} on this machine`);
+      const diff = await service.fetchAgentDiff(remote.peerId, repo, id);
+      const cwd = await prepareDiffCopy(local.path, repo, remote.peerName, diff);
+      launchDiffTool(ctx, cwd, tool, id);
+      return;
+    }
+    const cwd = agentWorktreePath(agent!);
+    if (!existsSync(cwd)) throw new Error("Worktree no longer exists — agent may have been merged");
+    let ref: string;
+    if (resolveBase) {
+      const base = await resolveBase(cwd, agent!);
+      if ("error" in base) throw new Error(base.error);
+      ref = base.ref;
+    } else {
+      const base = await Bun.$`git merge-base HEAD main`.cwd(cwd).quiet().nothrow();
+      if (base.exitCode) throw new Error("Could not determine merge-base with main");
+      ref = base.text().trim();
+    }
+    const check = await Bun.$`git diff --quiet ${ref}`.cwd(cwd).quiet().nothrow();
+    if (check.exitCode === 0) throw new Error(EMPTY_DIFF);
+    launchDiffTool(ctx, cwd, tool, agent!.id, resolveBase ? ref : undefined);
+  } catch (err) {
+    ctx.setNotice(err instanceof Error ? err.message : String(err), "error");
+  } finally { diffToolLaunching = false; }
+}
 
-  const base = await resolveBase(cwd, agent);
-  if ("error" in base) { diffToolLaunching = false; ctx.setNotice(base.error, "error"); return; }
-
-  // Check for empty diff before launching tool
-  const checkProc = Bun.spawn(["git", "diff", "--quiet", base.ref], { cwd, stdout: "ignore", stderr: "ignore" });
-  const checkCode = await checkProc.exited;
-  if (checkCode === 0) { diffToolLaunching = false; ctx.setNotice("No changes to show — diff is empty", "error"); return; }
-
+function launchDiffTool(ctx: ActionCtx, cwd: string, tool: string, agentId: string, managerRef?: string) {
   // Run diff tool in the worktree against the resolved base ref.
   // 'exec' replaces bash so kill signals reach the actual process tree.
   // WEBDIFF_RUN_IN_PROCESS=1 prevents webdiff from forking/detaching, keeping
   // the HTTP server under ib's control (harmless for other diff tools).
   const proc = Bun.spawn(
-    ["/bin/bash", "-c", 'exec $1 $2', "--", tool, base.ref],
+    managerRef ? ["/bin/bash", "-c", 'exec $1 $2', "--", tool, managerRef]
+      : ["/bin/bash", "-c", 'exec $1 $(git merge-base HEAD main)', "--", tool],
     { cwd, stdout: "ignore", stderr: "pipe", env: { ...process.env, WEBDIFF_RUN_IN_PROCESS: "1" } },
   );
-  activeDiffProc = { proc, agentId: agent.id };
-  diffToolLaunching = false;
-  ctx.setNotice(`Opened diff vs ${base.label ?? base.ref} in ${tool}`, "info");
+  activeDiffProc = { proc, agentId };
+  ctx.setNotice(`Opened diff vs ${managerRef ?? "merge-base with main"} in ${tool}`, "info");
 
   // Report errors asynchronously, stripping newlines for single-line status bar display
   (async () => {

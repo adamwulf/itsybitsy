@@ -591,6 +591,7 @@ const COMMAND_HELP: Record<string, string> = {
     "  --clear         Remove the existing nickname",
   retire:
     "Usage: ib retire <agent-id> [--force]\n" +
+    "  For a paired machine use <machine>/<agent> or <machine>/<repo>/<agent>.\n" +
     "  Retire an agent: stop it and archive its directory. Removes the tmux\n" +
     "  session and git worktree.\n" +
     "  --force         Skip confirmation prompts",
@@ -608,6 +609,7 @@ const COMMAND_HELP: Record<string, string> = {
     "  parent. Does not perform the merge.",
   merge:
     "Usage: ib merge <agent-id> [--force] [--keep]\n" +
+    "  For a paired machine use <machine>/<agent> or <machine>/<repo>/<agent>.\n" +
     "  Merge an agent's branch into its parent and close the agent.\n" +
     "  --force         Accepted for compatibility (no-op; the native merge never prompts)\n" +
     "  --keep          Merge exactly as above (same checks, rebase and merge;\n" +
@@ -616,6 +618,7 @@ const COMMAND_HELP: Record<string, string> = {
     "                  land newer commits, or `ib merge <agent-id>` to close.",
   resume:
     "Usage: ib resume <agent-id> [--force]\n" +
+    "  For a paired machine use <machine>/<agent> or <machine>/<repo>/<agent>.\n" +
     "  Resume a stopped agent in its existing worktree.\n" +
     "  --force         Skip confirmation prompts",
   respawn:
@@ -1114,6 +1117,22 @@ export async function main() {
     // Unknown command + --help — fall through to top-level usage.
     printUsage();
     return;
+  }
+
+  if (command === "merge" || command === "retire" || command === "rehire" || command === "resume") {
+    const merge = command === "merge" ? parseMergeArgs(args.slice(1)) : undefined;
+    const address = merge?.agentId ?? args[1];
+    if (address?.includes("/") && !address.startsWith("@")) {
+      const { routeQualifiedLifecycle } = await import("./peers/cli-lifecycle");
+      const result = await routeQualifiedLifecycle(address, {
+        action: command, force: args.includes("--force"), ...(merge && { keep: merge.keep }),
+      });
+      if (result) {
+        const unknown = merge?.unknown ?? args.slice(2).filter(arg => arg !== "--force");
+        if (unknown.length) console.error(`Warning: unknown arguments ignored: ${unknown.join(" ")}`);
+        await printAndExit(result);
+      }
+    }
   }
 
   switch (command) {

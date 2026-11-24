@@ -15,10 +15,13 @@ import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { resetUserHome, setUserHome } from "../home";
 import { makeAgent, waitFor } from "../test-utils";
 import { loadOrCreateIdentity } from "./identity";
+import { captureAgentDiff } from "./agent-diff";
 import { loadIroh, type Iroh } from "./iroh";
 import { listeningOrThrow } from "./test-pair-transport";
 import { generatePairCode } from "./pair-code";
 import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer-link";
+import { lifecycleFixture } from "./test-remote-lifecycle";
+import type { RemoteLifecycleDeps } from "./remote-lifecycle";
 import type { RemoteSpawnDeps } from "./new-agent";
 import { captureAgentPane } from "./agent-pane";
 import { createMessageReceiver } from "./receive-message";
@@ -78,7 +81,7 @@ interface Side {
 /** Direct addresses by endpoint id, so a dial by id can reach another loopback endpoint. */
 function makeNetwork(iroh: Iroh) {
   const addresses = new Map<string, string[]>();
-  async function makeSide(label: string, agents: Agent[], remoteSpawn?: RemoteSpawnDeps): Promise<Side> {
+  async function makeSide(label: string, agents: Agent[], remoteSpawn?: RemoteSpawnDeps, remoteLifecycle?: RemoteLifecycleDeps): Promise<Side> {
     const home = await mkdtemp(join(tmpdir(), `ib-peer-link-real-${label}-`));
     homes.push(home);
     const id = (await inHome(home, loadOrCreateIdentity)).id;
@@ -88,12 +91,13 @@ function makeNetwork(iroh: Iroh) {
 
     const service = new PeerService({
       remoteStartDenial: null,
-      remoteSpawn,
+      remoteSpawn, remoteLifecycle,
       receiveMessage: (header, peerId, _peerName, body, options) => inHome(home, () =>
         receive(header, peerId, async () => (await readPeers()).find(p => p.id === peerId)?.name ?? null, body, options)),
 
       captureAgent: (repo, id, lines) => captureAgentPane(agents, repo, id, lines),
       captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
+      captureDiff: (repo, id) => captureAgentDiff(agents, repo, id),
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
       loadIdentity: () => inHome(home, loadOrCreateIdentity),
@@ -243,6 +247,23 @@ test("a trusted loopback new-agent stream starts the stubbed agent and returns i
   expect(notice.mock.calls).toEqual([["A started agent worker-23 in App"]]);
 });
 
+test("a trusted loopback peer retires and rehires an archived agent on the other machine", async () => {
+  const net = makeNetwork(await loadIroh());
+  const repo = await mkdtemp(join(tmpdir(), "ib-peer-real-lifecycle-"));
+  homes.push(repo);
+  const deps = await lifecycleFixture(repo);
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", [], undefined, deps);
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  await a.service.runRemoteLifecycle(b.id, { action: "retire", repo: "app", id: "worker" });
+  await a.service.runRemoteLifecycle(b.id, { action: "rehire", id: "worker" });
+  expect(deps.retireAgent.mock.calls[0]?.[0]).toMatchObject({ repoPath: repo, id: "worker" });
+  expect(deps.rehireAgent.mock.calls).toEqual([["worker", { repoPath: repo }]]);
+  expect(deps.notice.mock.calls).toEqual([["A retired worker in App"], ["A rehired worker in App"]]);
+});
+
 test("reads the paired machine's system coordinator over a real loopback connection", async () => {
   const net = makeNetwork(await loadIroh());
   const a = await net.makeSide("a", []);
@@ -283,6 +304,28 @@ test.skipIf(!Bun.which("tmux"))("reads a registered agent's tmux history over lo
     paneProbe.reset();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("opens an agent diff larger than the JSON reply limit over a paired loopback connection", async () => {
+  const net = makeNetwork(await loadIroh());
+  const agent = localAgent("worker", { worktree: false });
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", [agent]);
+  agent.repoPath = b.home;
+  await Bun.$`git init -qb main`.cwd(b.home).quiet();
+  await Bun.write(join(b.home, "tracked"), "before\n");
+  await Bun.$`git add tracked`.cwd(b.home).quiet();
+  await Bun.$`git -c user.name=test -c user.email=test@example.org commit -qm base`.cwd(b.home).quiet();
+  const base = (await Bun.$`git rev-parse HEAD`.cwd(b.home).text()).trim();
+  await Bun.write(join(b.home, "tracked"), "working tree\n".repeat(90_000));
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  const reply = await a.service.fetchAgentDiff(b.id, "app", "worker");
+  expect(reply.base).toBe(base);
+  expect(reply.patch.length).toBeGreaterThan(1_048_576);
+  expect(reply.patch.equals((await Bun.$`git diff --binary ${base}`.cwd(b.home).quiet()).stdout)).toBe(true);
+  expect(await a.service.fetchPane(b.id, { op: "coordinator-pane" }, 200)).toMatchObject({ text: "b coordinator" });
 });
 
 test("agents send text and two files in both directions over real paired endpoints", async () => {

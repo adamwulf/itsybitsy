@@ -171,6 +171,14 @@ Press `h` → **Config** to edit the integer limits under `peering.attachments`.
 
 Press Ctrl-C during a CLI send, or Esc on the dashboard’s transfer row. `cancelled before sending` means nothing was queued. With `outcome unknown`, the full message may already be queued. Check the recipient before sending again.
 
+### Managing agents on paired machines
+
+Start the dashboard from a human terminal outside tmux. Select a remote agent and press `m` for its merge check and confirmation, `x` to confirm retirement, or `R` to resume a stopped agent. The merge dialog includes the usual **Keep agent after merge** checkbox.
+
+From a human terminal outside tmux, `ib merge`, `ib retire`, `ib resume` and `ib rehire` accept `<machine>/<agent>` or `<machine>/<repo>/<agent>`. After retirement the row disappears. Run `ib rehire <machine>/<agent>` to restore it from the receiving machine’s archive. Both machines need a connected `ib watch`. A merge waits up to two minutes and the other commands wait up to 30 seconds. If the outcome is unknown, check the receiving machine before trying again.
+
+To inspect a remote agent’s changes in your configured `externalDiffTool`, select its row in `ib watch` and press `o`. Register the repo under the same name on both machines and fetch or pull if your copy lacks the remote merge base. The tool opens in a temporary local checkout and shows committed and uncommitted tracked changes, including binary changes. The patch limit is 64 MiB.
+
 ### Models
 
 Models are selected as `<cli>:<model>` — for example `claude:opus` or `codex:gpt-5-codex` — so one flag picks both the CLI and the model. `ib list-models` shows the known selectors. Reasoning effort is threaded the same way: `--effort low|medium|high|xhigh|max` (Codex has no `xhigh`/`max`; both map to its `high`). Defaults live in config and in the agent-type files.

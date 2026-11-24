@@ -1793,6 +1793,21 @@ describe("peerRetryDelayMs", () => {
   });
 });
 
+test("defaultPeerServiceDeps gives message sends and remote starts one attachment receiver", async () => {
+  const deps = defaultPeerServiceDeps("local", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, null, join(home, "staging"));
+  const file = { name: "a.txt", size: 1, sha256: "0".repeat(64), spellings: ["./a.txt"] };
+  const release = Promise.withResolvers<void>();
+  // A remote start from "peer" holds its transfer slot.
+  const holding = deps.remoteSpawn!.attachments!("peer", [file], { peerName: "Laptop C", log() {}, notice() {} }, () => release.promise);
+  try {
+    const send = { op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "agent", agent: "nobody" }, message: "x", files: [file] } as const;
+    await expect(deps.receiveMessage!({ ...send, files: [file] }, "peer", async () => "Laptop C")).rejects.toThrow("busy, try again");
+  } finally {
+    release.resolve();
+    await holding;
+  }
+});
+
 describe("PeerService trusted ALPN", () => {
   test("answers a listed peer from agents(), projected to the allowed fields, and closes anyone else unread", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });

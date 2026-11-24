@@ -11287,11 +11287,15 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(notifications).toHaveBeenCalledTimes(3);
   });
 
-  test("selecting an inbound progress row and pressing Esc aborts that receipt", () => {
+  test("an inbound transfer shows in the header alert; Ctrl-T selects it and Esc aborts that receipt", () => {
     const { dashboard, service } = setup();
+    const before = dashboard.render(WIDTH).map(stripAnsi);
     service.set({ incoming: [{ id: "first", label: "Laptop → worker", bytes: 3, total: 12 }] });
-    expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 12 bytes");
+    const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(header()).toStartWith("ib — receiving Laptop → worker  3 / 12 bytes  Ctrl-T: select");
+    expect(dashboard.render(WIDTH).slice(1).map(stripAnsi)).toEqual(before.slice(1));
     dashboard.handleInput("\x14");
+    expect(header()).toStartWith("ib — › receiving Laptop → worker  3 / 12 bytes  Esc: cancel");
     dashboard.handleInput("\x1b");
     expect(service.cancelReceipt.mock.calls).toEqual([["first"]]);
   });
@@ -11313,7 +11317,9 @@ describe("Unified peer repos in the Agents tree", () => {
     }
     const content = () => stripAnsi(dashboard.render(WIDTH).join("\n"));
     dashboard.setNotice("Incoming peer message", "info");
-    expect(content()).toContain("Incoming peer message");
+    // The notice comes first, then each send; the one Esc cancels leads.
+    expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toMatch(
+      /^ib — Incoming peer message {2}· {2}sending to Laptop B\/abc-nick… {2}Esc: cancel {2}· {2}sending to Laptop B\/@system…/);
     expect(content().match(/sending to Laptop B\//g)).toHaveLength(2);
     first.resolve("first");
     await Bun.sleep(0);

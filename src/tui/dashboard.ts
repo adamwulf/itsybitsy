@@ -3813,18 +3813,20 @@ export class DashboardComponent implements Component {
 
     // Header. Its alert shows the transient notice, then each peer transfer in
     // flight (SPEC §20.5), so a transfer never adds a row and shifts the layout.
+    // The transfer Esc acts on goes first, so its hint survives a cut header.
     const cancellableSend = this.escapeSend();
     const incoming = this.peerService?.view().incoming ?? [];
     const transfers = [
       ...[...this.pendingRemoteSends.values()].map((send) => {
         const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
-        return `sending to ${send.label}…${progress}${send === cancellableSend ? "  Esc: cancel" : ""}`;
+        const esc = send === cancellableSend;
+        return { esc, text: `sending to ${send.label}…${progress}${esc ? "  Esc: cancel" : ""}` };
       }),
       ...incoming.map((row) => {
-        const selected = row.id === this.selectedReceipt;
-        return `${selected ? "› " : ""}receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${selected ? "Esc: cancel" : "Ctrl-T: select"}`;
+        const esc = row.id === this.selectedReceipt;
+        return { esc, text: `${esc ? "› " : ""}receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${esc ? "Esc: cancel" : "Ctrl-T: select"}` };
       }),
-    ];
+    ].sort((a, b) => Number(b.esc) - Number(a.esc)).map((transfer) => transfer.text);
     const noticeColor = this.lastSentNoticeKind === "error" ? RED : YELLOW;
     const alerts = [
       ...(this.lastSentNotice ? [`${noticeColor}${this.lastSentNotice}${RESET}`] : []),

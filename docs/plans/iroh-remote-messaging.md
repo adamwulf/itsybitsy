@@ -1,6 +1,6 @@
 # iroh peering: messages and file attachments across machines
 
-Status: APPROVED on 2026-11-23, with Adam's answers recorded under "Decisions (Adam, 2026-11-23)" below. M1 and M2 are merged on the phase branch. M3a is built: local CLI snapshots, sender access checks and live attachment limits in Config. M3b is built on this branch. M4 (two-machine acceptance) remains pending. This plan supersedes feature B of [iroh-remote-coordinator-and-send.md](iroh-remote-coordinator-and-send.md); the decisions recorded there still apply. It follows [iroh-unified-repos.md](iroh-unified-repos.md).
+Status: M1–M3b and the sender-identity phase are built and merged on `agent/iroh-peering`. M4 (docs and checklist) is done. Adam runs live two-machine acceptance in the [Phase 8 checklist](iroh-unified-repos.md#phase-8-checklist-adam-two-laptops). Adam approved this plan on 2026-11-23. His answers are recorded under “Decisions (Adam, 2026-11-23)” below. This plan supersedes feature B of [iroh-remote-coordinator-and-send.md](iroh-remote-coordinator-and-send.md). The decisions recorded there still apply.
 
 ## Goal (Adam, 2026-11-22 and 2026-11-23)
 

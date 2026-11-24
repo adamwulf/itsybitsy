@@ -319,7 +319,7 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
    - It should appear once in the tree.
    - Its remote agents should be drawn in italic below the local ones.
 4. **Remote-only repo.** A repo registered only on B should show a header on A with only italic rows.
-5. **Read-only guard.** On A, select a remote agent. Send, retire and merge should all be refused with a notice. The info panel should show "Machine: <B> · connected".
+5. **Remote agent actions.** On A, select a running agent on B. Its info panel should show `Machine: <B> · connected`. Press `s` to open its message editor. Both the dashboard and `ib send` can send to it (step 10). Try retire and merge on the row. A should refuse each with a notice and the agent should stay running on B.
 6. **Remote start.**
    - On A, press `a` on the shared repo.
    - Set Machine to B, pick a type and type a prompt.
@@ -337,6 +337,19 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
    - Create an agent with the same name on both laptops.
    - On A, `ib send <name>` should go to A's own agent, because the same repo comes first.
    - From outside that repo, the send should fail and list the qualified forms.
+10. **Text in both directions.** Have a running worktree agent, system coordinator and repo coordinator on each laptop. Substitute each peer’s saved name for `A` or `B` and the registered repo name for `<repo>`.
+    - From a human terminal on A, run `ib send B/<agent> "A to agent"`, `ib send B/@system "A to system"` and `ib send B/@<repo> "A to repo"`. In A’s dashboard, select B’s agent, press `s` and send “A to dashboard”. Each send should succeed on A. Check all four messages in their recipient panes on B for `[sent by user]` (or `[sent by user <name>]` when B has a user name configured).
+    - Have A’s worktree agent run `ib send B/<agent> "A to B from agent"`. B’s agent should see `[sent by agent <machine>/<repo>/<id>]` identifying A’s sender. Swap laptops and repeat the CLI, dashboard and agent sends. Check each label on A.
+11. **Files in both directions.** On A, create `one.txt` and `two.txt` with different known contents in the sending directory. Run `ib send B/<agent> --attach ./one.txt --attach ./two.txt "Compare ./one.txt with ./two.txt"`. On B, have the worktree agent create its own pair of files in its checkout and run the same command addressed to A’s agent.
+    - For each send, check success on the sender. On the receiver, both paths in “Compare … with …” should point under `/tmp/itsybitsy-attachments-*`. The appended `Attachments copied to this machine:` block should map both original paths in order. Open each mapped file and compare its contents with the sender’s original. Save B’s received paths for steps 15 and 17.
+    - In A’s dashboard, drop the absolute path of a file outside the project into B’s agent message editor and press Send. Check the success notice on A, then the rewritten path, mapping and file contents on B.
+12. **Receiver limits.** Leave A’s limits at their defaults. On B, press `h` → **Config** and set `peering.attachments.maxFileMB` to 1. From A, send a 2 MiB file to B with `--attach`. A’s error should name B and `peering.attachments.maxFileMB = 1`.
+    - Set `peering.attachments.maxFiles` to 0 on B. From A, try a small file and an empty file separately. Both errors should name B and `peering.attachments.maxFiles = 0`. B should receive none of the refused messages. Restore B’s defaults (1024 MiB per file, 2048 MiB per message, 20 files).
+13. **Offline send.** Quit the endpoint-owning `ib watch` on B. Once A shows B offline, run `ib send B/<agent> "offline probe"` on A. It should fail with an error. Restart `ib watch` on B and wait for reconnection. Send a fresh probe from A and verify that only the fresh probe appears on B.
+14. **Cancel a transfer.** From A, attach a large file within both machines’ limits and press Ctrl-C mid-transfer. Repeat from A’s dashboard and press Esc on the pending transfer row. For `cancelled before sending` or the dashboard’s `Send cancelled`, B should receive nothing. For `outcome unknown`, check B before retrying. B may have the complete message and file. Neither attempt should deliver a partial message or file.
+15. **Read-only delivery.** Ask B’s receiving agent to read one of the files from step 11 and then edit it in place with its edit tool. The read should return A’s original contents and the edit should be refused. Read the same path again and confirm the original text.
+16. **Sender identity.** Have A’s agent run `ib send --from <other-agent> B/<agent> "identity probe"`. A should report `agents can only act as themselves; drop --from`, and B should receive nothing. From a human terminal in that same agent checkout, run `ib send B/<agent> "human probe"`. B should see the user label from step 10.
+17. **Retention.** After several more sends from A, reopen B’s saved paths from step 11. Both files should still contain A’s originals. ib never deletes delivered files from `/tmp`.
 
 ## Cross-cutting checklist
 

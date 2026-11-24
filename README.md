@@ -147,9 +147,27 @@ Transient labels (`merging`, `restarting`, `op_stuck`) appear while a lifecycle 
 | `@<repo>/<agent-id>` | An agent in a specific repo |
 | `@<team>` | Every member of a team |
 
-Use `ib send reader --attach ./plot.png --attach ./data.csv "Compare ./plot.png with ./data.csv"` to share local files. The recipient gets private snapshots in `/tmp`, with a mapping from each original name to its copy. You can also supply the message body through stdin or `-f`. To send across machines, use a paired target such as `ib send laptop/photos/reader --attach ./plot.png "Review ./plot.png"`. Run `ib watch` on both machines. Ctrl-C cancels the CLI transfer. In the dashboard, drop a file path into the remote row’s message field and press Send. The pending row shows bytes sent and Esc cancels it.
+You can also supply the message body through stdin or `-f`.
 
 Agents ask you questions with `ib ask`; `ib questions` lists what is pending and `ib acknowledge` clears one. Teams are named groups for broadcast: `ib team create/add/remove/list/delete`, `ib roster <name>`.
+
+### Messaging between paired machines
+
+Run `ib watch` on both machines. Use `ib send <machine>/<agent> "message"` for a running agent, or `<machine>/<repo>/<agent>` to choose its registered repo. A bare ID or nickname searches your local repo first. If there’s no match there, it must identify one agent across local repos and connected peers. Use `<machine>/@system` for the peer’s system coordinator and `<machine>/@<repo>` for a registered repo’s coordinator.
+
+Ordinary messages from a human shell or the dashboard carry the same user label as local sends. An agent can only send as itself and appears as `[sent by agent <machine>/<repo>/<id>]`. A successful send confirms that the receiver queued the message. Delivery to the recipient follows.
+
+Repeat `--attach <file>` to send several files to a local or remote recipient.
+
+```sh
+ib send laptop/photos/reader --attach ./plot.png --attach ./data.csv "Compare ./plot.png with ./data.csv"
+```
+
+In the dashboard, press `s` on a remote agent or coordinator row, drop a file from outside the project into the message and press Send. The receiver copies attached files under `/tmp/itsybitsy-attachments-*`, rewrites matching paths in the text and appends an `Attachments copied to this machine:` block mapping originals to copies. Delivered directories are read-only to agents. `ib` never deletes delivered files. They stay available until the OS cleans up `/tmp`.
+
+Press `h` → **Config** to edit the integer limits under `peering.attachments`. Defaults are `maxFileMB` 1024 (0–65536), `maxMessageMB` 2048 (0–131072), and `maxFiles` 20 (0–100). MB means MiB. When both sizes are positive, the message limit must cover at least one maximum-size file. Zero in any field rejects every attachment, even an empty file. The receiver enforces its own limits and each refusal names the machine, limit and value.
+
+Press Ctrl-C during a CLI send, or Esc on the dashboard’s transfer row. `cancelled before sending` means nothing was queued. With `outcome unknown`, the full message may already be queued. Check the recipient before sending again.
 
 ### Models
 
@@ -296,7 +314,7 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 | `hooks.injectStatus` / `hooks.statusVisible` | `true` | Agents-status injection in the main session |
 | `channels.telegram.bot_token` | — | Telegram bridge |
 
-In `ib watch`, press `h`, then choose **Config** to edit the limits for explicit CLI attachments (`ib send --attach`). These limits also apply to files sent from remote rows in the dashboard. Local dashboard drag-and-drop uses its existing staging rules. MB means MiB. A zero in any field disables all attachments, including empty files. Text messages still work. The sender and the receiving machine each enforce their own current settings. The receiver queues the message after verifying every file.
+The attachment limits apply to explicit CLI attachments and to files sent from remote dashboard rows. Each machine checks its own limits. Text-only messages still work when attachments are disabled. See [Messaging between paired machines](#messaging-between-paired-machines).
 
 Per-agent-type permissions do **not** live here — they live in the agent-type `.md` files (old `permissions.*` config keys are deprecated and print migration hints).
 

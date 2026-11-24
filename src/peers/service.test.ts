@@ -698,7 +698,7 @@ describe("PeerService at boot", () => {
     expect(changes).toEqual([denial]);
   });
 
-  test.each(["caller denied", "local removal"])("coordinator pane opens no stream while pending or after %s", async scenario => {
+  test.each(["caller denied", "local removal"])("pane and prompt reads open no stream while pending or after %s", async scenario => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const decision = gate<string | null>();
     const { service, endpoint } = makeService({ remoteStartDenial: decision.promise });
@@ -708,12 +708,13 @@ describe("PeerService at boot", () => {
       await waitFor(() => service.view().links[0]?.connected === true);
       const open = spyOn(connections[0]!.peer, "openBi");
       await expect(service.fetchPane(ID_REMOTE, { op: "coordinator-pane" }, 200)).rejects.toThrow("checking whether remote starts are allowed");
+      await expect(service.fetchAgentPrompt(ID_REMOTE, "app", "worker")).rejects.toThrow("checking whether remote starts are allowed");
       decision.resolve(scenario === "caller denied" ? "Dashboard inside tmux" : null);
       await flushMicrotasks();
       if (scenario === "local removal") await writeFile(peersFile(), "[]");
-      await expect(service.fetchPane(ID_REMOTE, { op: "agent-pane", repo: "app", id: "worker" }, 200)).rejects.toThrow(
-        scenario === "caller denied" ? "Dashboard inside tmux" : "Machine is no longer paired",
-      );
+      const refusal = scenario === "caller denied" ? "Dashboard inside tmux" : "Machine is no longer paired";
+      await expect(service.fetchPane(ID_REMOTE, { op: "agent-pane", repo: "app", id: "worker" }, 200)).rejects.toThrow(refusal);
+      await expect(service.fetchAgentPrompt(ID_REMOTE, "app", "worker")).rejects.toThrow(refusal);
       expect(open).not.toHaveBeenCalled();
     } finally {
       await service.shutdown();

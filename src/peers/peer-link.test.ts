@@ -16,7 +16,7 @@ import { listSpawnableTypeNamesSync } from "../agent-types";
 import { readRepoAgents, type Agent } from "../agents";
 import { logAgent } from "../agent-lifecycle";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
-import { captureAgentPane } from "./agent-pane";
+import { captureAgentPane, readAgentPromptText } from "./agent-pane";
 import { spawnCtx as paneCapture } from "../tmux-poller";
 import { makeAgent, makeSpawnResult, waitFor } from "../test-utils";
 import { irohAddonLoaderCtx } from "./iroh";
@@ -26,6 +26,7 @@ import {
   NEW_AGENT_MAX_REQUEST_BYTES,
   requestNewAgent,
   requestPane,
+  requestAgentPrompt,
   requestLifecycle,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
@@ -73,7 +74,7 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; readPrompt?: PeerResponderDeps["readPrompt"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
   const readerId = options.readerId ?? ID_A;
   const link = createMemoryLink(readerId, ID_B);
   const peers = options.peers ?? new Set([readerId]);
@@ -87,6 +88,7 @@ function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; readerId?:
     lifecycle: options.lifecycle,
     captureCoordinator: options.captureCoordinator,
     captureAgent: options.captureAgent,
+    readPrompt: options.readPrompt,
     paneReaders: options.paneReaders ?? new Set(),
     peerName: async (id) => {
       checks++;
@@ -688,6 +690,53 @@ describe("agent-pane", () => {
       expect(captureAgent.mock.calls).toEqual([["App", "reader", expected]]);
       expect(captureCoordinator.mock.calls).toEqual([[expected]]);
     } finally { side.a.close(0, "done"); }
+  });
+});
+
+describe("agent-prompt", () => {
+  test("reads the registered agent's prompt.txt, else meta.prompt; the dialer keeps line breaks and drops control characters", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-peer-prompt-"));
+    const agent = { ...fullAgent("reader"), storageDir: dir };
+    const other = { ...fullAgent("reader"), repoRegistryName: "another", storageDir: join(dir, "other") };
+    const system = { ...fullAgent("system", { agentType: SYSTEM_COORDINATOR_TYPE }), storageDir: dir };
+    const side = serve({ readPrompt: (repo, id) => readAgentPromptText([other, system, agent], repo, id) });
+    try {
+      // No prompt.txt: meta.prompt, as the local pane falls back.
+      expect(await requestAgentPrompt(side.a, "App", "reader")).toBe("SECRET PROMPT");
+      await Bun.write(join(dir, "prompt.txt"), "line 1\r\n\tline\x1b[31m 2‮");
+      expect(await requestAgentPrompt(side.a, "App", "reader")).toBe("line 1\n   line[31m 2");
+      for (const [repo, id] of [["App", "missing"], ["elsewhere", "reader"], ["App", "system"]]) {
+        await expect(requestAgentPrompt(side.a, repo!, id!)).rejects.toThrow(new PeerErrorReply("Agent not found"));
+      }
+    } finally {
+      side.a.close(0, "done");
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a malformed request, an install without the reader, and a prompt over the reply cap", async () => {
+    const side = serve({ readPrompt: async () => "x".repeat(PEER_MAX_REPLY_BYTES) });
+    const bare = serve();
+    try {
+      expect(decodeText(await rawRequest(side.a, encode({ op: "agent-prompt", repo: "App" })))).toEqual({ op: "error", reason: "Expected repo and agent id" });
+      await expect(requestAgentPrompt(side.a, "App", "reader")).rejects.toThrow(new PeerErrorReply(`The prompt is over ${PEER_MAX_REPLY_BYTES} bytes`));
+      await expect(requestAgentPrompt(bare.a, "App", "reader")).rejects.toThrow(new PeerErrorReply("Remote prompts are unavailable"));
+    } finally {
+      side.a.close(0, "done");
+      bare.a.close(0, "done");
+    }
+  });
+
+  test("a peer removed while its prompt is read gets no prompt, only the not-a-peer close", async () => {
+    const read = Promise.withResolvers<string>();
+    let started = false;
+    const side = serve({ readPrompt: () => { started = true; return read.promise; } });
+    const reply = requestAgentPrompt(side.a, "App", "reader");
+    await waitFor(() => started);
+    side.peers.delete(ID_A);
+    read.resolve("the prompt");
+    await expect(reply).rejects.toThrow();
+    expect(side.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.notPeer, reason: "not a peer" });
   });
 });
 

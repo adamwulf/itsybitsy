@@ -23,7 +23,7 @@ import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer
 import { lifecycleFixture } from "./test-remote-lifecycle";
 import type { RemoteLifecycleDeps } from "./remote-lifecycle";
 import type { RemoteSpawnDeps } from "./new-agent";
-import { captureAgentPane } from "./agent-pane";
+import { captureAgentPane, readAgentPromptText } from "./agent-pane";
 import { createMessageReceiver } from "./receive-message";
 import { captureLiveDisplayPane, spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
@@ -98,6 +98,7 @@ function makeNetwork(iroh: Iroh) {
       captureAgent: (repo, id, lines) => captureAgentPane(agents, repo, id, lines),
       captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
       captureDiff: (repo, id) => captureAgentDiff(agents, repo, id),
+      readPrompt: (repo, id) => readAgentPromptText(agents, repo, id),
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
       loadIdentity: () => inHome(home, loadOrCreateIdentity),
@@ -326,6 +327,20 @@ test("opens an agent diff larger than the JSON reply limit over a paired loopbac
   expect(reply.patch.length).toBeGreaterThan(1_048_576);
   expect(reply.patch.equals((await Bun.$`git diff --binary ${base}`.cwd(b.home).quiet()).stdout)).toBe(true);
   expect(await a.service.fetchPane(b.id, { op: "coordinator-pane" }, 200)).toMatchObject({ text: "b coordinator" });
+});
+
+test("reads a registered agent's prompt.txt over a paired loopback connection", async () => {
+  const net = makeNetwork(await loadIroh());
+  const agent = localAgent("worker");
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", [agent]);
+  agent.storageDir = join(b.home, "worker");
+  await Bun.write(join(agent.storageDir, "prompt.txt"), "Build it\nthen test it");
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  expect(await a.service.fetchAgentPrompt(b.id, "app", "worker")).toBe("Build it\nthen test it");
+  await expect(a.service.fetchAgentPrompt(b.id, "app", "missing")).rejects.toThrow("Agent not found");
 });
 
 test("agents send text and two files in both directions over real paired endpoints", async () => {

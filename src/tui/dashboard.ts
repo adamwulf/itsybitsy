@@ -59,6 +59,7 @@ import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
 import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import { RemotePane } from "./remote-pane";
+import { RemotePrompt } from "./remote-prompt";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
@@ -120,7 +121,7 @@ import {
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
-import { captureAgentPane } from "../peers/agent-pane";
+import { captureAgentPane, readAgentPromptText } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { peerEntryKey, remoteDisplayName, remoteMessageTarget, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
@@ -433,8 +434,13 @@ function padToWidth(str: string, width: number): string {
   return str + (needsReset ? RESET : "") + " ".repeat(width - vw);
 }
 
-/** The right pane's text for a selected remote row, in every mode (SPEC §20.5). */
+/** The right pane's text for a selected remote row, in every mode but INITIAL PROMPT on an agent (SPEC §20.5). */
 export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
+
+/** A remote agent's key: `currentAgentKey` and its draft while it is selected. */
+function remoteAgentKey(row: Extract<RemoteEntry, { kind: "remote-agent" }>): string {
+  return `${row.peerId}/${row.remote.repoRegistryName}/${row.remote.id}`;
+}
 
 /**
  * The selected remote agent's capture (or a repo header's placeholder)
@@ -442,9 +448,10 @@ export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
  * `input` renders the message editor at the center pane's width; it sits at
- * the bottom of the center pane, as on a local agent's tmux pane.
+ * the bottom of the center pane, as on a local agent's tmux pane. `rightPane`,
+ * when given, renders the right pane in place of the placeholder.
  */
-function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number, input?: (width: number) => string[]): string[] {
+function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number, input?: (width: number) => string[], rightPane?: (width: number, rows: number) => string[]): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
   const editor = input?.(lw) ?? [];
@@ -453,7 +460,7 @@ function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: numb
   const bodyHeight = Math.max(0, height - editor.length);
   const body = entry.kind === "remote-repo-header" ? placeholder(`Remote repo on ${entry.peerName} (read-only)`, lw, bodyHeight) : pane.render(lw, bodyHeight);
   const center = [...body, ...editor];
-  const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw, height);
+  const right = rightPane?.(rw, height) ?? placeholder(REMOTE_RIGHT_PANE_TEXT, rw, height);
   const sep = `${DIM_GRAY}│${RESET}`;
   return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
 }
@@ -851,9 +858,20 @@ export class DashboardComponent implements Component {
     (peerId, target, lines) => this.peerService!.fetchPane(peerId, target, lines),
     () => this.tui?.requestRender(),
   );
+  private readonly remotePrompt = new RemotePrompt(
+    (peerId, repo, id) => this.peerService!.fetchAgentPrompt(peerId, repo, id),
+    (key, lines) => {
+      // As in loadAgentPrompt: a read for an agent no longer selected is only cached.
+      if (key !== this.currentAgentKey) return;
+      this.rightPane.promptContent = lines;
+      this.rightPane.updateContent();
+      this.tui?.requestRender();
+    },
+  );
 
   private syncRemotePane(): void {
     const row = this.remoteSelection;
+    const visible = this._dialog === null && !this.expandedAgentsTreeVisible;
     if (row && row.kind !== "remote-repo-header" && this.tmuxPoller.isRunning() && this.peerService) {
       this.remotePane.displayHeight = Math.max(0, this.availableMainHeight() - this.inputField.getHeight(this.getMainWidth()));
       this.remotePane.select({
@@ -861,10 +879,15 @@ export class DashboardComponent implements Component {
         target: row.kind === "remote-agent"
           ? { op: "agent-pane", repo: row.remote.repoRegistryName, id: row.remote.id }
           : { op: "coordinator-pane" },
-      }, this.peerService.remoteStartDenial, this._dialog === null && !this.expandedAgentsTreeVisible);
+      }, this.peerService.remoteStartDenial, visible);
     } else {
       this.remotePane.select(null);
     }
+    // Read a remote agent's prompt only while INITIAL PROMPT shows it.
+    this.remotePrompt.select(row?.kind === "remote-agent" && this.rightPane.mode === "INITIAL PROMPT" && visible
+      && this.tmuxPoller.isRunning() && this.peerService
+      ? { key: remoteAgentKey(row), peerId: row.peerId, repo: row.remote.repoRegistryName, id: row.remote.id }
+      : null);
   }
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
@@ -1444,6 +1467,7 @@ export class DashboardComponent implements Component {
   stopPolling() {
     this.tmuxPoller.stop();
     this.remotePane.select(null);
+    this.remotePrompt.select(null);
     this.coordinatorPoller.stop();
     this.repoCoordinatorPoller.stop();
     if (this.usageTimer) {
@@ -2112,6 +2136,11 @@ export class DashboardComponent implements Component {
   private scrollOutput(up: boolean): void {
     if (remoteMessageTarget(this.remoteSelection)) {
       this.remotePane.scroll(up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP);
+      // As on a local agent, a remote agent's right pane (INITIAL PROMPT) scrolls
+      // with the output. A peer coordinator has no right pane.
+      if (this.remoteSelection?.kind === "remote-agent") {
+        this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset + (up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP));
+      }
     } else if (up) agentActions.handleScrollUp(this);
     else agentActions.handleScrollDown(this);
   }
@@ -2487,11 +2516,12 @@ export class DashboardComponent implements Component {
     // A remote row (SPEC §20.5). It is none of the above: `selected`,
     // `isCoordinator` and the repo header are all empty for it, so every local
     // path below (tmux pollers, git probe, right-pane loaders, the per-repo
-    // coordinator) sees no selection. Only the info panel and render() use it.
+    // coordinator) sees no selection. Only the info panel, render() and the
+    // remote pane and prompt readers (syncRemotePane) use it.
     const remote = this.remoteSelection;
     const peerCoordinator = remote?.kind === "remote-coordinator";
     const leftPeerCoordinator = !peerCoordinator && this.infoPanel.remote?.kind === "remote-coordinator";
-    const remoteDraft = remote?.kind === "remote-agent" ? `${remote.peerId}/${remote.remote.repoRegistryName}/${remote.remote.id}`
+    const remoteDraft = remote?.kind === "remote-agent" ? remoteAgentKey(remote)
       : peerCoordinator ? remote.peerId + "/@system" : null;
     const enteredFromTree = this.rightPane.mode === "TREE" && (peerCoordinator || (remoteDraft !== null && remoteDraft !== this.currentAgentKey));
     if (enteredFromTree || (peerCoordinator && this.modeIndex !== DEFAULT_MODE_INDEX)) {
@@ -2520,6 +2550,7 @@ export class DashboardComponent implements Component {
     }
 
     this.rightPane.agent = selected;
+    this.rightPane.remoteAgent = remote?.kind === "remote-agent";
     this.rightPane.selectedRepo = repo;
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
@@ -4025,7 +4056,13 @@ export class DashboardComponent implements Component {
         mainLines = [mainTitleSep, ...[...body, ...input].slice(0, availableHeight)];
       } else {
         const input = acceptsText ? (width: number) => this.inputField.render(width) : undefined;
-        mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight, input)];
+        const prompt = remote.kind === "remote-agent" && this.rightPane.mode === "INITIAL PROMPT"
+          ? (width: number, rows: number) => {
+            this.rightPane.displayHeight = rows;
+            return this.rightPane.render(width);
+          }
+          : undefined;
+        mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight, input, prompt)];
       }
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
@@ -4471,6 +4508,7 @@ export async function launchDashboard(): Promise<void> {
       dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message));
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
   peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
+  peerDeps.readPrompt = (repo, id) => readAgentPromptText(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
   const peerService = new PeerService(peerDeps);
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:

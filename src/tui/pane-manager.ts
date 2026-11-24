@@ -186,6 +186,8 @@ export class RightPaneComponent implements Component {
   loadedProxyLogWindow: LoadedLogWindow | null = null;
   proxyLogLoading = false;
   promptContent: string[] | null = null;
+  /** A remote agent is selected (`agent` is null): the dashboard fills `promptContent` from the peer (SPEC §20.5). */
+  remoteAgent = false;
   denialsContent: DenialEntry[] | null = null;
   denialsLoading = false;
   loadedDenialsLog: { agentKey: string; fileSize: number } | null = null;
@@ -380,7 +382,7 @@ export class RightPaneComponent implements Component {
         break;
       }
       case "INITIAL PROMPT":
-        if (!this.agent) { this.content = [`${DIM}No agent selected${RESET}`]; }
+        if (!this.agent && !this.remoteAgent) { this.content = [`${DIM}No agent selected${RESET}`]; }
         else if (this.promptContent) { this.content = [`${BOLD}Prompt:${RESET}`, "", ...this.promptContent]; }
         else { this.content = [`${DIM}Loading prompt.txt...${RESET}`]; }
         break;

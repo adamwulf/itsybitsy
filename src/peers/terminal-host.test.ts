@@ -17,9 +17,12 @@ import {
   type TerminalSize,
 } from "./terminal-frame";
 import {
+  MAX_TERMINAL_BACKLOG,
   MAX_TERMINAL_SESSIONS,
   TERMINAL_PAIRING_CHECK_MS,
+  TERMINAL_PAUSE_BYTES,
   findAgentSession,
+  serveTerminal,
   spawnPtyProcess,
   spawnTmuxAttach,
   type TerminalHostDeps,
@@ -45,10 +48,14 @@ function fakeProcess(onData: (bytes: Uint8Array) => void) {
     input: [] as string[],
     sizes: [] as TerminalSize[],
     kills: 0,
+    pauses: 0,
+    resumes: 0,
     output: (value: string) => onData(new TextEncoder().encode(value)),
     exit: (code: number | null) => done.resolve(code),
     write: (bytes: Uint8Array) => { proc.input.push(text(bytes)); },
     resize: (size: TerminalSize) => { proc.sizes.push(size); },
+    pause: () => { proc.pauses++; },
+    resume: () => { proc.resumes++; },
     kill: () => { proc.kills++; done.resolve(129); },
     exited: done.promise,
   };
@@ -217,6 +224,85 @@ describe("remote terminal host", () => {
   });
 });
 
+describe("remote terminal flow control", () => {
+  /** A stream whose writes wait until the test releases them: a link slower than the PTY. */
+  function slowStream() {
+    const gates: Array<() => void> = [];
+    const written: Uint8Array[] = [];
+    const stopped = Promise.withResolvers<never>();
+    stopped.promise.catch(() => {});
+    const stream: PairStream = {
+      read: () => stopped.promise,
+      write: async (bytes) => bytes.length,
+      writeAll: (bytes) => { written.push(bytes); return new Promise<void>(resolve => gates.push(resolve)); },
+      finish: async () => {},
+      resetSending: async () => {},
+      stopReceiving: async () => { stopped.reject(new Error("stream stopped")); },
+      cancel: async () => { stopped.reject(new Error("stream cancelled")); },
+      readToEnd: () => stopped.promise,
+    };
+    /** Let every queued write through, including the ones each release starts (a write starts a turn later). */
+    const drain = async () => {
+      for (let idle = 0; idle < 5;) {
+        await Bun.sleep(0);
+        const release = gates.shift();
+        if (release) { idle = 0; release(); } else idle++;
+      }
+    };
+    return { stream, written, gates, drain };
+  }
+
+  async function serveSlow() {
+    const link = slowStream();
+    const logs: string[] = [];
+    let proc: ReturnType<typeof fakeProcess> | undefined;
+    const done = serveTerminal(CLIENT, link.stream, encodeTerminalOpen({ agent: "worker", cols: 80, rows: 24 }), "a1a1a1a1a1", {
+      findSession: () => "itsybitsy-0000abcd-worker",
+      spawn: async (_session, _size, onData) => (proc = fakeProcess(onData)),
+      sessions: new Set(),
+      peerName: async () => "Alice",
+      setTimer: createFakeClock().setTimer,
+      log: (line) => logs.push(line),
+      closeNotPeer: () => {},
+      closeError: () => {},
+    });
+    await waitFor(() => proc !== undefined, { message: "attach spawned" });
+    const chunk = "x".repeat(64 * 1024);
+    /** Output `bytes` (rounded up to 64 KiB chunks) from the PTY at once. */
+    const burst = (bytes: number) => { for (let n = 0; n < bytes; n += chunk.length) proc!.output(chunk); };
+    return { ...link, logs, done, proc: () => proc!, burst };
+  }
+
+  test(`output queued past ${TERMINAL_PAUSE_BYTES} bytes pauses the tmux client until it drains`, async () => {
+    const s = await serveSlow();
+    s.burst(TERMINAL_PAUSE_BYTES - 64 * 1024);
+    expect(s.proc().pauses).toBe(0);
+    s.burst(2 * 64 * 1024);
+    expect(s.proc().pauses).toBe(1);
+    s.burst(4 * 64 * 1024); // still paused: no second pause
+    expect(s.proc().pauses).toBe(1);
+
+    await s.drain();
+    expect(s.proc().resumes).toBe(1);
+    expect(s.proc().kills).toBe(0);
+    s.proc().exit(0);
+    await s.drain();
+    await s.done;
+    const frames = new TerminalFrameReader().push(Buffer.concat(s.written));
+    expect(exitOf(frames)).toEqual({ code: 0, reason: "exited" });
+  });
+
+  test(`output still queued past ${MAX_TERMINAL_BACKLOG} bytes ends the session as outrunning the link`, async () => {
+    const s = await serveSlow();
+    s.burst(MAX_TERMINAL_BACKLOG + 64 * 1024);
+    expect(s.proc().kills).toBe(1);
+    await s.drain();
+    await s.done;
+    const frames = new TerminalFrameReader().push(Buffer.concat(s.written));
+    expect(exitOf(frames)).toEqual({ code: 129, reason: "terminal output outran the link" });
+  });
+});
+
 describe("findAgentSession", () => {
   const agent = (id: string, repo: string, extra: Record<string, unknown> = {}) => {
     const a = makeAgent({ id, repoName: repo, repoRegistryName: repo, repoPath: `/repos/${repo}`, state: "running" });
@@ -261,6 +347,23 @@ describe("spawnPtyProcess", () => {
     expect(output).toContain("got:hi");
   });
 
+  test("pause stops its output, resume continues it, and kill ends it while paused", async () => {
+    let ticks = 0;
+    const proc = spawnPtyProcess(["sh", "-c", "while :; do echo tick; sleep 0.02; done"], { cols: 80, rows: 24 },
+      bytes => { ticks += text(bytes).split("tick").length - 1; });
+    await waitFor(() => ticks >= 2, { message: "first ticks" });
+    proc.pause();
+    await Bun.sleep(60); // let a tick already in flight arrive
+    const pausedAt = ticks;
+    await Bun.sleep(150);
+    expect(ticks).toBe(pausedAt);
+    proc.resume();
+    await waitFor(() => ticks > pausedAt, { message: "ticks after resume" });
+    proc.pause();
+    proc.kill();
+    expect(await proc.exited).not.toBe(0);
+  });
+
   test("kill ends the process", async () => {
     const proc = spawnPtyProcess(["sh", "-c", "sleep 30"], { cols: 80, rows: 24 }, () => {});
     proc.kill();
@@ -277,7 +380,7 @@ describe("spawnTmuxAttach", () => {
       hasClients: async (session) => { calls.push(["has-clients", session]); return otherClients; },
       spawnPty: (argv, size) => {
         calls.push([...argv, `${size.cols}x${size.rows}`]);
-        return { write: () => {}, resize: () => {}, kill: () => {}, exited: exited.promise };
+        return { write: () => {}, resize: () => {}, pause: () => {}, resume: () => {}, kill: () => {}, exited: exited.promise };
       },
     });
     return { calls, proc, exited };

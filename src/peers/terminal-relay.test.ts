@@ -90,6 +90,8 @@ describe("ib peer attach through the ib watch relay", () => {
         return {
           write: (bytes) => { spawned.input.push(text(bytes)); },
           resize: ({ cols, rows }) => { spawned.sizes.push(`${cols}x${rows}`); },
+          pause: () => {},
+          resume: () => {},
           kill: () => { spawned.kills++; done.resolve(129); },
           exited: done.promise,
         };
@@ -184,6 +186,7 @@ describe("ib peer attach through the ib watch relay", () => {
     expect(term.errors.join("")).toContain("[remote terminal ended: connection lost");
     term.stdin.emit("data", Buffer.from("\n"));
     expect(await done).toBe(1);
+    await waitFor(() => spawns[0]!.kills === 1, { message: "remote client killed" });
   });
 
   test("a client that goes away detaches the remote tmux client", async () => {

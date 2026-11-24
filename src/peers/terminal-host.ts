@@ -37,7 +37,16 @@ import {
 export const MAX_TERMINAL_SESSIONS = 8;
 /** How often a live session re-reads `peers.json`, so `ib peer remove` ends it. */
 export const TERMINAL_PAIRING_CHECK_MS = 5_000;
-/** Output queued for a client that does not read it; past this the session ends. */
+/**
+ * Flow control. Bun.Terminal reads the PTY as fast as it can and has no pause,
+ * so when output outruns the link the host stops the tmux client instead:
+ * past TERMINAL_PAUSE_BYTES queued it is paused, and below
+ * TERMINAL_RESUME_BYTES it continues. Meanwhile tmux holds the client's
+ * output and catches it up with a redraw.
+ */
+export const TERMINAL_PAUSE_BYTES = 1024 * 1024;
+export const TERMINAL_RESUME_BYTES = 256 * 1024;
+/** A backstop past the pause: output still queued beyond this ends the session. */
 export const MAX_TERMINAL_BACKLOG = 4 * 1024 * 1024;
 const TERM = "xterm-256color";
 
@@ -45,7 +54,10 @@ const TERM = "xterm-256color";
 export interface TerminalProcess {
   write(bytes: Uint8Array): void;
   resize(size: TerminalSize): void;
-  /** End the process: for `tmux attach-session`, the client detaches and the agent keeps running. */
+  /** Stop producing output until {@link resume} (SIGSTOP / SIGCONT). */
+  pause(): void;
+  resume(): void;
+  /** End the process: for `tmux attach-session`, the client detaches and the agent keeps running. Works while paused. */
   kill(): void;
   /** The exit code, once the process has exited and its output has been delivered. */
   exited: Promise<number | null>;
@@ -167,17 +179,29 @@ async function runSession(
     }
   };
 
-  // One writer, in order. A client that stops reading ends the session
-  // instead of growing the queue without bound.
+  // One writer, in order. Past TERMINAL_PAUSE_BYTES queued the tmux client is
+  // paused until the queue drains; the backstop ends the session instead of
+  // growing the queue without bound.
   let writing = Promise.resolve();
   let backlog = 0;
+  let paused = false;
   let writeFailed = false;
   const send = (frame: Uint8Array) => {
     if (writeFailed) return;
     backlog += frame.length;
-    if (backlog > MAX_TERMINAL_BACKLOG) end("the client stopped reading");
+    if (backlog > MAX_TERMINAL_BACKLOG) end("terminal output outran the link");
+    else if (!paused && backlog > TERMINAL_PAUSE_BYTES) {
+      paused = true;
+      proc?.pause();
+    }
     writing = writing.then(() => writeFailed ? undefined : stream.writeAll(frame)).then(
-      () => { backlog -= frame.length; },
+      () => {
+        backlog -= frame.length;
+        if (paused && backlog < TERMINAL_RESUME_BYTES) {
+          paused = false;
+          proc?.resume();
+        }
+      },
       err => { writeFailed = true; end(`stream write failed: ${errorDetail(err)}`); },
     );
   };
@@ -190,7 +214,9 @@ async function runSession(
   }
   const attached = proc;
   deps.log(`peer link: ${who} attached a terminal to ${open.agent}`);
-  if (reason !== null) end(reason); // the output backlog filled before spawn returned
+  // Output that arrived before spawn returned may already have asked for these.
+  if (paused) attached.pause();
+  if (reason !== null) end(reason);
 
   let clientFinished = false;
   let protocolError: string | null = null;
@@ -315,7 +341,10 @@ export function spawnPtyProcess(argv: string[], size: TerminalSize, onData: (byt
       if (queued.length === 1) flush();
     },
     resize: ({ cols, rows }) => { if (!terminal.closed) terminal.resize(cols, rows); },
-    kill: () => { proc.kill("SIGHUP"); },
+    pause: () => { proc.kill("SIGSTOP"); },
+    resume: () => { proc.kill("SIGCONT"); },
+    // A stopped process only acts on SIGHUP once it is continued.
+    kill: () => { proc.kill("SIGHUP"); proc.kill("SIGCONT"); },
     // The PTY can still hold output when the process exits: wait for its EOF,
     // briefly, before the caller sends the exit frame.
     exited: proc.exited.then(async (code) => {

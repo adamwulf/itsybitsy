@@ -3602,7 +3602,7 @@ describe("handleFolderBrowser", () => {
     }
 
     const notice = await waitForValue(() => notices[0], { message: "the registration refusal", timeoutMs: WAIT_MS });
-    expect(notice).toContain(`folder name "Repo" is already used by registered repo "${existing.name}" (${existing.path})`);
+    expect(notice).toContain(`coordinator id "Repo" (from repo root folder name "Repo") is already used by registered repo "${existing.name}" (${existing.path})`);
     expect((await loadRegistry()).repos).toEqual([existing]);
     expect(existsSync(target)).toBe(action === "Add");
     expect(existsSync(join(target, ".git"))).toBe(false);

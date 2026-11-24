@@ -160,7 +160,6 @@ function makeMockCtx(overrides?: {
   const ctx: ActionCtx = {
     remoteStartPending: false,
     submitRemoteMessage: async () => true,
-    refuseOnRemoteRow: () => false,
     runRemoteRowCommand: async () => { throw new Error("Unexpected remote command"); },
     acknowledgePeerQuestion: async () => { throw new Error("Unexpected peer acknowledge"); },
     get dialog() { return currentDialog; },

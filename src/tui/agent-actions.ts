@@ -182,7 +182,6 @@ export interface ActionCtx {
   /** Send to a remote row (SPEC §20.5); true once the peer accepts. Aborting `controller` cancels. */
   submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller?: AbortController): Promise<boolean>;
   remoteStartPending: boolean;
-  refuseOnRemoteRow(key: string): boolean;
   peerService: PeersDialogService | null;
   remoteSelection: RemoteEntry | null;
   runRemoteRowCommand(row: Extract<RemoteEntry, { kind: "remote-agent" }>, options: Pick<import("../peers/remote-lifecycle").RemoteLifecycleRequest, "action" | "checkOnly" | "keep">): Promise<string>;
@@ -1900,6 +1899,15 @@ export function handleNewAgent(ctx: ActionCtx) {
     showNewAgentFormDialog(ctx, null, remote.repoRegistryName, remote.repoName);
     return;
   }
+  // A remote agent: its repo, as for a local agent. Registry names match
+  // across machines ignoring case (SPEC §20.5), so the form offers this
+  // machine too when the repo is registered here.
+  if (remote?.kind === "remote-agent") {
+    const registryName = remote.remote.repoRegistryName;
+    const local = ctx.repos.find(r => r.name.toLowerCase() === registryName.toLowerCase()) ?? null;
+    showNewAgentFormDialog(ctx, local, registryName, local ? repoDisplayName(local) : remote.remote.repoName);
+    return;
+  }
   const path = ctx.agentTree.selectedAgent?.repoPath ?? ctx.agentTree.selectedRepoPath;
   const repo = ctx.repos.find(r => r.path === path)
     ?? ctx.repos.find(r => repoDisplayName(r) === ctx.agentTree.selectedRepoHeader)
@@ -2556,7 +2564,6 @@ export function handleSetup(ctx: ActionCtx, initialTab = 0) {
   let loaded: Awaited<ReturnType<typeof loadSetupSettings>> | undefined;
 
   const showSetupDialogForTab = (tab: number) => {
-    if (tab !== PEERS_TAB && ctx.refuseOnRemoteRow("h")) return;
     const dialog: Extract<DialogState, { type: "setup" }> = {
       type: "setup",
       tab,

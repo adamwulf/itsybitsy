@@ -1,8 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readdir, rm } from "fs/promises";
+import { writeFileSync } from "node:fs";
+import { fixtureProcessStart } from "./test-cli-driver";
+import * as fs from "fs/promises";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdtemp, mkdir, readdir, rename, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { resetListTmuxSessionsCache, type Agent, type AgentMeta } from "./agents";
+import { processStartEpochSecondsCtx, resetListTmuxSessionsCache, type Agent, type AgentMeta } from "./agents";
 import { resetUserHome, setUserHome } from "./home";
 import {
   resetMessageAttachmentStagerForTesting,
@@ -21,6 +24,7 @@ import {
   parseSendRequest,
   requestSendViaWatchdog,
   routeSendThroughWatchdog,
+  routeCliSend,
   type SendCommand,
 } from "./send-broker";
 import {
@@ -69,6 +73,7 @@ describe("send broker", () => {
   };
 
   beforeEach(async () => {
+    processStartEpochSecondsCtx.set(fixtureProcessStart);
     // The outbox (`~/.itsybitsy/agents/<machine>/<repo>/<agent>/`) and teams.json resolve under
     // this home, never the real one.
     home = await mkdtemp(join(tmpdir(), "ib-send-home-"));
@@ -92,6 +97,7 @@ describe("send broker", () => {
     resetListTmuxSessionsCache();
   });
   afterEach(async () => {
+    processStartEpochSecondsCtx.reset();
     setSandboxedProcessOverride(null);
     resetSendSpawnRunner();
     tmuxPollerSpawnCtx.reset();
@@ -137,6 +143,15 @@ describe("send broker", () => {
     return dir;
   }
 
+  async function linkWorktree() {
+    const cwd = join(agentDir, "repo");
+    const git = join(cwd, ".git");
+    const admin = join(senderRepo, ".git", "worktrees", SENDER_ID);
+    await Bun.write(git, "gitdir: " + admin);
+    await Bun.write(join(admin, "gitdir"), git);
+    return cwd;
+  }
+
   /** The messages queued for an agent (`~/.itsybitsy/agents/<machine>/<repo>/<agent>/outbox.jsonl`). */
   async function outbox(id: string, repo = id === TARGET_ID ? "iris" : "hunch"): Promise<Array<Record<string, unknown>>> {
     const file = Bun.file(join(home, ".itsybitsy", "agents", "studio", repo, id, "outbox.jsonl"));
@@ -178,7 +193,7 @@ describe("send broker", () => {
         return ok("Question submitted (q-1-abcdef)");
       },
       ...rest,
-      send: { listRepos: async () => repos, ...sendOver },
+      send: { verifySendProcess: async () => true, listRepos: async () => repos, ...sendOver },
     };
     return { deps, spawned, asked };
   }
@@ -280,6 +295,129 @@ describe("send broker", () => {
       expect(tmuxCalls).toEqual([]);
       expect(tmuxListCalls).toEqual([]);
     });
+
+    test("shutdown suppresses a busy response already writing its temporary result", async () => {
+      const jobs = new Map([[agentDir, Promise.resolve()]]);
+      const controller = new AbortController();
+      const { deps } = server({ transferJobs: jobs, transferSignal: controller.signal });
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
+      const realWrite = fs.writeFile;
+      const spy = spyOn(fs, "writeFile").mockImplementation(async (path, data, options) => {
+        await realWrite(path, data, options);
+        if (String(path).includes(ID_A + ".json.") && String(path).endsWith(".tmp")) controller.abort(new Error("watchdog stopped"));
+      });
+      try {
+        await expect(processSpawnRequests(SENDER_ID, senderRepo, deps)).rejects.toThrow("watchdog stopped");
+        expect(await readdir(spawnResultDir(agentDir))).toEqual([]);
+      } finally { spy.mockRestore(); }
+    });
+
+    test("a live CLI outside the recorded agent process tree cannot send", async () => {
+      await linkWorktree();
+      const { isAgentSendProcess } = await import("./peers/remote-start-caller");
+      const started = "Sat Nov 21 12:01:00 2026", epoch = Date.parse(started) / 1000;
+      const table = async () => ["PID PPID STARTED                  KERNEL COMMAND",
+        "300  200 " + started + " bash   bash", "200    1 " + started + " codex  codex",
+        "100    1 " + started + " codex  codex", "  1    0 " + started + " init   /sbin/launchd"].join("\n");
+      const client = { pid: 300, start: epoch };
+      expect(await isAgentSendProcess(client, { claude_pid: "200", claude_pid_epoch: epoch }, table)).toBe(true);
+      const { deps } = server({ send: {
+        resolveTarget: async () => ({ agent: null, isSystemCoordinator: false, remote: { peer: "peer", target: { kind: "system" } } }),
+        verifySendProcess: () => isAgentSendProcess(client, { claude_pid: "100", claude_pid_epoch: epoch }, table),
+      } });
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
+      await processSpawnRequests(SENDER_ID, senderRepo, deps);
+      expect((await result(ID_A)).stderr).toContain("belongs to this agent process");
+    });
+
+    test("a stalled system session probe is cancelled and its late success cannot enqueue", async () => {
+      const { setSystemCoordinatorHasSessionFn, resetSystemCoordinatorHasSessionFn } = await import("./index");
+      const entered = Promise.withResolvers<void>(), reply = Promise.withResolvers<boolean>();
+      let signal: AbortSignal | undefined, timeout!: () => void;
+      setSystemCoordinatorHasSessionFn(async (_name, probeSignal) => {
+        signal = probeSignal; entered.resolve(); return reply.promise;
+      });
+      try {
+        const { deps } = server({ send: { setTimer: (_ms, cb) => { timeout = cb; return () => {}; } } });
+        await queue(ID_A, sendRequest(ID_A, { target: "@system" }));
+        const draining = processSpawnRequests(SENDER_ID, senderRepo, deps);
+        await entered.promise; timeout(); await draining;
+        expect(signal?.aborted).toBe(true);
+        expect((await result(ID_A)).stderr).toContain("No progress");
+        reply.resolve(true); await Bun.sleep(0);
+        expect(await Bun.file(join(home, ".itsybitsy/outbox.jsonl")).exists()).toBe(false);
+      } finally { reply.resolve(false); resetSystemCoordinatorHasSessionFn(); }
+    });
+
+    test("an expired bare-name lookup releases the job before the next qualified request", async () => {
+      await linkWorktree();
+      const jobs = new Map<string, Promise<void>>();
+      const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+      let expired!: () => void;
+      const seen: string[] = [];
+      const { deps } = server({ transferJobs: jobs, send: {
+        listRepos: async () => repos,
+        setTimer: (_ms, fn) => { expired = fn; return () => {}; },
+        resolveTarget: async name => {
+          seen.push(name);
+          if (name === "bare") { entered.resolve(); await release.promise; }
+          return { agent: null, isSystemCoordinator: false, remote: { peer: "peer", target: { kind: "system" } } };
+        },
+      } });
+      for (const [id, name] of [[ID_A, "bare"], ["b".repeat(32), "peer/@system"]] as const) {
+        await queue(id, sendRequest(id, { op: "remote-send", clientPid: process.pid, target: name }));
+        await processSpawnRequests(SENDER_ID, senderRepo, deps);
+        const job = jobs.get(agentDir);
+        if (name === "bare") { await entered.promise; expired(); }
+        await job;
+        expect((await result(id)).stderr).toContain(name === "bare" ? "No progress" : "need ib watch");
+      }
+      release.resolve();
+      await Bun.sleep(0);
+      expect((await result(ID_A)).stderr).toContain("No progress");
+      expect(seen).toEqual(["bare", "peer/@system"]);
+    });
+
+    test("finishing a remote job cannot recreate a retired agent directory", async () => {
+      const release = Promise.withResolvers<void>();
+      const jobs = new Map<string, Promise<void>>();
+      const { deps } = server({ transferJobs: jobs, readMeta: async () => { await release.promise; return { meta: null }; } });
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
+      await processSpawnRequests(SENDER_ID, senderRepo, deps);
+      const job = jobs.get(agentDir);
+      expect(job).toBeDefined();
+      await rm(agentDir, { recursive: true });
+      release.resolve();
+      await job;
+      await expect(fs.stat(agentDir)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    test.each([true, undefined])("a sealed repo coordinator with worktree=%s cannot publish through the worktree broker", async worktree => {
+      await linkWorktree();
+      const { deps } = server({ readMeta: async () => ({ meta: senderMeta({ agentType: "repo-coordinator", worktree }) }) });
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
+      await processSpawnRequests(SENDER_ID, senderRepo, deps);
+      expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("require a worktree agent") });
+    });
+
+    test("a sealed requester without its own physical worktree cannot send remotely", async () => {
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
+      await processSpawnRequests(SENDER_ID, senderRepo, server().deps);
+      expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("verified Git backlink") });
+    });
+
+    test("a FIFO worktree pointer is refused and the watchdog processes the next request", async () => {
+      const cwd = await linkWorktree();
+      const git = join(cwd, ".git");
+      await rm(git);
+      expect(Bun.spawnSync(["mkfifo", git]).exitCode).toBe(0);
+      const second = "b".repeat(32);
+      await queue(ID_A, sendRequest(ID_A, { op: "remote-send", clientPid: process.pid, target: "laptop/@system" }));
+      await queue(second, sendRequest(second));
+      expect(await processSpawnRequests(SENDER_ID, senderRepo, server().deps)).toBe(2);
+      expect(await result(ID_A)).toMatchObject({ ok: false, stderr: expect.stringContaining("verified Git backlink") });
+      expect(await result(second)).toMatchObject({ ok: true });
+    }, 2000);
 
     test("the sender is the verified agent: --from cannot be smuggled in the request", async () => {
       const { deps } = server();
@@ -589,6 +727,212 @@ describe("send broker", () => {
       expect(await readdir(spawnRequestDir(agentDir))).toEqual([]);
     });
 
+    test.each(["unpublished", "pending", "claimed"])("broker interrupt while %s", async state => {
+      const control = new AbortController();
+      if (state === "unpublished") control.abort();
+      const out = await requestSendViaWatchdog("laptop/@system", MESSAGE, clientDeps({
+        signal: control.signal,
+        sleep: async () => {
+          const dir = spawnRequestDir(agentDir);
+          if (state === "claimed") {
+            const [name] = await readdir(dir);
+            await rename(join(dir, name!), join(dir, name + ".claimed"));
+          }
+          control.abort();
+        },
+      }));
+      expect(out?.exitCode).toBe(130);
+      expect(out?.stdout).toBe("");
+      expect(out?.stderr).toContain(state === "claimed" ? "outcome unknown" : "cancelled before sending");
+      expect((await readdir(spawnRequestDir(agentDir)).catch(() => [])).filter(name => name.endsWith(".json"))).toEqual([]);
+    });
+
+    test("a delayed worktree claim gets one transfer window and an empty progress marker cannot renew it", async () => {
+      const cwd = await linkWorktree();
+      let now = 0, id = "";
+      const answer = await routeCliSend({ target: "laptop/@system", readMessage: async () => MESSAGE, usage: "usage", repos }, {
+        cwd, watchdogLive: async () => true, now: () => now, sleep: async () => {
+          now += 3000;
+          if (now === 9000) {
+            const [name] = await readdir(spawnRequestDir(agentDir));
+            id = name!.replace(/\.json$/, "");
+            await rm(join(spawnRequestDir(agentDir), name!));
+          }
+          if (now === 57_000) await Bun.write(join(spawnResultDir(agentDir), id + ".progress"), "");
+        },
+      });
+      expect(answer).toMatchObject({ result: { ok: false, stderr: expect.stringContaining("timed out") } });
+      expect(now).toBe(69_000);
+    });
+
+    test("text-only progress in the result directory extends the CLI deadline", async () => {
+      const cwd = await linkWorktree();
+      let now = 0;
+      let id = "";
+      const answer = await routeCliSend({ target: "laptop/@system", readMessage: async () => MESSAGE, usage: "usage", repos }, {
+        cwd, watchdogLive: async () => true, now: () => now,
+        sleep: async () => {
+          now += 40_000;
+          if (!id) {
+            const [name] = await readdir(spawnRequestDir(agentDir));
+            id = name!.replace(/\.json$/, "");
+            await rm(join(spawnRequestDir(agentDir), name!));
+          }
+          const path = join(spawnResultDir(agentDir), id + ".progress");
+          await mkdir(spawnResultDir(agentDir), { recursive: true });
+          if (!await Bun.file(path).exists()) await Bun.write(path, Buffer.alloc(16));
+          await fs.appendFile(path, "1");
+          if (now >= 120_000) await Bun.write(join(spawnResultDir(agentDir), id + ".json"), JSON.stringify({ id, ok: true, exitCode: 0 }));
+        },
+      });
+      expect(answer).toMatchObject({ result: { ok: true } });
+      expect(now).toBe(120_000);
+      await expect(fs.stat(join(agentDir, "send-attachments"))).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    test.each(["progress", "withdrawal"])("a watchdog result published during the final %s is consumed", async when => {
+      const { submitWatchdogRequest } = await import("./spawn-broker");
+      let now = 0;
+      const ready = join(spawnRequestDir(agentDir), ID_A + ".json");
+      await mkdir(spawnResultDir(agentDir), { recursive: true });
+      const publish = () => writeFileSync(join(spawnResultDir(agentDir), ID_A + ".json"), JSON.stringify({ id: ID_A, ok: true, exitCode: 0 }));
+      const rename = fs.rename;
+      const spy = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+        if (from === ready && when === "withdrawal") await publish();
+        return rename(from, to);
+      });
+      try {
+        const result = await submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
+          { request: "send", action: "send", alreadyStarted: "claimed" }, 100, { now: () => now,
+            sleep: async () => { await rm(ready, { force: true }); now += 100; },
+            readProgress: async () => { if (now && when === "progress") { publish(); return new Promise<number>(() => {}); } return 0; },
+          });
+        expect(result.ok).toBe(true);
+      } finally { spy.mockRestore(); }
+    });
+
+    test.each(["interrupt", "deadline", "read error"])("a watchdog result lookup respects %s after claim", async kind => {
+      const { submitWatchdogRequest } = await import("./spawn-broker");
+      const control = new AbortController();
+      const path = join(spawnResultDir(agentDir), ID_A + ".json");
+      const ready = join(spawnRequestDir(agentDir), ID_A + ".json");
+      const file = Bun.file.bind(Bun);
+      let claimed = false, attempts = 0;
+      const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+      const spy = spyOn(Bun, "file").mockImplementation((location: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number, options?: Parameters<typeof Bun.file>[1]) => {
+        const handle: Bun.BunFile = Reflect.apply(file, Bun, [location, options]);
+        if (location === path && claimed) handle.json = async () => {
+          attempts++; entered.resolve();
+          if (kind === "read error") throw Error("fixture read error");
+          await release.promise; return {};
+        };
+        return handle;
+      });
+      try {
+        const result = submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
+          { request: "send", action: "send", alreadyStarted: "outcome unknown" }, 60, {
+            signal: control.signal, pollMs: 5,
+            sleep: async () => { if (!claimed) { await rm(ready); claimed = true; } await Bun.sleep(1); },
+          });
+        await entered.promise;
+        if (kind === "interrupt") control.abort();
+        const outcome = await result;
+        expect(outcome.stderr).toContain("outcome unknown");
+        if (kind === "read error") expect(outcome.stderr).toContain("fixture read error");
+        else expect(attempts).toBe(1);
+      } finally { release.resolve(); spy.mockRestore(); }
+    });
+
+    test("Ctrl-C inside a successful claimed broker result read reports unknown", async () => {
+      const { submitWatchdogRequest } = await import("./spawn-broker");
+      const control = new AbortController();
+      const path = join(spawnResultDir(agentDir), ID_A + ".json");
+      const file = Bun.file.bind(Bun);
+      const spy = spyOn(Bun, "file").mockImplementation((location: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number, options?: Parameters<typeof Bun.file>[1]) => {
+        const handle: Bun.BunFile = Reflect.apply(file, Bun, [location, options]);
+        if (location === path) {
+          const read = handle.json.bind(handle);
+          handle.json = async () => { const value = await read(); control.abort(); return value; };
+        }
+        return handle;
+      });
+      try {
+        const result = await submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
+          { request: "send", action: "send", alreadyStarted: "claimed" }, 5000, {
+            signal: control.signal, cancelClaimed: async () => {},
+            sleep: async () => {
+              await rm(join(spawnRequestDir(agentDir), ID_A + ".json"));
+              await Bun.write(path, JSON.stringify({ id: ID_A, ok: true, exitCode: 0 }));
+            },
+          });
+        expect(result).toMatchObject({ exitCode: 130, stderr: "outcome unknown — check the recipient" });
+      } finally { spy.mockRestore(); }
+    });
+
+    test("an error signalling the claimed broker job leaves the outcome unknown", async () => {
+      const { submitWatchdogRequest } = await import("./spawn-broker");
+      const control = new AbortController();
+      const result = await submitWatchdogRequest(agentDir, SENDER_ID, { id: ID_A },
+        { request: "send", action: "send", alreadyStarted: "claimed" }, 5000, {
+          signal: control.signal,
+          sleep: async () => { await rm(join(spawnRequestDir(agentDir), ID_A + ".json")); control.abort(); },
+          cancelClaimed: async () => { throw new Error("signal unavailable"); },
+        });
+      expect(result.stderr).toBe("outcome unknown — check the recipient");
+    });
+
+    test.each([true, false])("remote recipient timeout races the watchdog claim (watchdog wins=%s)", async wins => {
+      const cwd = await linkWorktree();
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let dispatched = 0;
+      const { deps } = server({ send: { resolveTarget: async () => {
+        dispatched++;
+        return { agent: null, isSystemCoordinator: false, remote: { peer: "laptop", target: { kind: "system" } } };
+      } } });
+      // Stop after listing but before claiming, or after reading the bytes
+      // but before unlinking them. The latter was the old duplicate-send window.
+      const renameFile = fs.rename;
+      const renameSpy = spyOn(fs, "rename").mockImplementation(async (from, to) => {
+        if (!wins && String(to).endsWith(".claimed")) { entered.resolve(); await release.promise; }
+        return renameFile(from, to);
+      });
+      const file = Bun.file.bind(Bun);
+      const readSpy = spyOn(Bun, "file").mockImplementation((path: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number, options?: Parameters<typeof Bun.file>[1]) => {
+        const handle: Bun.BunFile = Reflect.apply(file, Bun, [path, options]);
+        if (wins && String(path).startsWith(spawnRequestDir(agentDir) + "/")) {
+          const read = handle.text.bind(handle);
+          handle.text = async () => { const text = await read(); entered.resolve(); await release.promise; return text; };
+        }
+        return handle;
+      });
+      let work: Promise<number> | undefined;
+      try {
+        let clock = 0;
+        const route = await routeCliSend({
+          target: "laptop/@system", readMessage: async () => MESSAGE, usage: "usage", repos,
+        }, {
+          cwd, watchdogLive: async () => true, now: () => clock,
+          sleep: async () => {
+            work ??= processSpawnRequests(SENDER_ID, senderRepo, deps);
+            await entered.promise;
+            clock += 60_000;
+          },
+        });
+        if (!("result" in route)) throw new Error("expected remote broker route");
+        const out = route.result;
+        release.resolve();
+        expect(out?.stderr).toContain(wins ? "may still be delivered" : "withdrawn");
+        expect(await work).toBe(wins ? 1 : 0);
+        expect(dispatched).toBe(wins ? 1 : 0);
+      } finally {
+        release.resolve();
+        await work;
+        renameSpy.mockRestore();
+        readSpy.mockRestore();
+      }
+    });
+
     test("a timeout after the watchdog took the request says it may still be delivered (no direct send)", async () => {
       let clock = 0;
       const out = await requestSendViaWatchdog(TARGET_ID, MESSAGE, clientDeps({
@@ -654,6 +998,95 @@ describe("send broker", () => {
       expect(out).toEqual({ ok: true, exitCode: 0, stdout: "", stderr: "" });
       expect((await outbox(TARGET_ID)).map((m) => m.fromAgent)).toEqual([SENDER_ID]);
       expect(reads).toBe(1);
+    });
+
+    test.each(["claude", "codex", "fugu", "agy"])("%s worktree routes raw remote addresses through its own watchdog", async cli => {
+      const disabled = cli === "fugu" || cli === "claude";
+      setSandboxedProcessOverride(() => !disabled);
+      const { deps } = server();
+      const meta = { worktree: true, model: cli + ":test", sandbox: { enabled: !disabled } };
+      await writeAgent(senderRepo, SENDER_ID, meta);
+      deps.readMeta = async () => ({ meta: senderMeta(meta) });
+      if (disabled) deps.verifySeal = async () => ({ ok: false, field: "(missing)" } as any);
+      const cwd = await linkWorktree();
+      if (cli === "codex") {
+        // Model a registered submodule whose real Git admin directory lives in its superproject.
+        const superGit = join(home, "super", ".git", "modules", "sub");
+        await mkdir(join(home, "super", ".git", "modules"), { recursive: true });
+        await rename(join(senderRepo, ".git"), superGit);
+        await Bun.write(join(senderRepo, ".git"), "gitdir: " + superGit);
+        await Bun.write(join(cwd, ".git"), "gitdir: " + join(superGit, "worktrees", SENDER_ID));
+      }
+      const peerDir = join(home, ".itsybitsy", "peer");
+      const generation = crypto.randomUUID();
+    await Bun.write(join(peerDir, "endpoint.lock"), process.pid + "\n" + generation);
+      await Bun.write(join(peerDir, "remote-agents.json"), JSON.stringify({ generation, peers: [{
+        id: "peer-b", name: "laptop", connected: true,
+        agents: [{ repo: "remote", id: "worker", nickname: null, state: "running" }],
+      }] }));
+      const { pollPeerOutbox } = await import("./peers/peer-outbox");
+      const seen: unknown[] = [];
+      const timer = setInterval(() => { void pollPeerOutbox(async (peer, header) => {
+        seen.push({ peer, header });
+        return header.id;
+      }, () => {}); }, 25);
+      try {
+        const hiddenRepo = { name: "hidden", path: join(home, "hidden") };
+        await Bun.write(join(hiddenRepo.path, ".itsybitsy", "agents"), "unlistable directory");
+        const route = async (target: string, hidden = false, text = MESSAGE) => {
+          const answer = await routeCliSend(command({ target, readMessage: async () => text }), {
+            cwd, watchdogLive: async () => true,
+            resolveTarget: async (...args) => {
+              if (target.includes("/")) throw new Error("qualified remote lookup in CLI");
+              expect(args[3]).toBe(true);
+              if (hidden) args[1] = [...repos, hiddenRepo];
+              return (await import("./resolve-target")).resolveSendTarget(...args);
+            },
+            sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
+          });
+          if (!("result" in answer)) throw new Error("unexpected direct local send");
+          return answer.result;
+        };
+        expect(await route("laptop/remote/worker")).toMatchObject({ ok: true });
+        expect(seen).toMatchObject([{ peer: "peer-b", header: {
+          from: { kind: "agent", id: `studio/hunch/${SENDER_ID}` },
+          target: { kind: "agent", repo: "remote", agent: "worker" }, files: [], message: MESSAGE,
+        } }]);
+        expect((await route("worker")).ok).toBe(true);
+        const local = await route(TARGET_ID, true);
+        if (disabled) expect(local.stderr).toContain("@<repo>/<agent> for a local send");
+        else expect((await outbox(TARGET_ID)).map(record => record.message)).toEqual([MESSAGE]);
+        await writeAgent(targetRepo, "worker", {});
+        for (const hidden of [true, false]) {
+          const ambiguity = await route("worker", hidden);
+          expect(ambiguity.stderr).toContain("laptop/worker");
+          expect(ambiguity.stderr).toContain("studio/worker");
+        }
+        expect((await route("laptop/remote/worker", false, "x".repeat(300 * 1024))).stderr).toContain("Send header exceeds 262144 bytes");
+        deps.send!.listRepos = async () => repos.filter(repo => repo.path !== senderRepo);
+        expect((await route("laptop/remote/worker")).stderr).toContain("repo to be registered");
+        expect(seen).toHaveLength(2);
+      } finally { clearInterval(timer); }
+    });
+
+    test.each(["classification", "liveness"])("SIGINT wins when a pending %s check subsequently fails", async check => {
+      const cwd = await linkWorktree();
+      const control = new AbortController();
+      const entered = Promise.withResolvers<void>();
+      const verdict = Promise.withResolvers<never>();
+      const failing = () => { entered.resolve(); return verdict.promise; };
+      const { remoteCliCaller } = await import("./peers/peer-outbox");
+      const callerCheck = spyOn(remoteCliCaller, "humanDenial").mockImplementation(check === "classification" ? failing : async () => "agent terminal");
+      try {
+        const pending = routeCliSend(command({ target: "laptop/@system" }), {
+          cwd, signal: control.signal, watchdogLive: failing,
+        });
+        await entered.promise;
+        control.abort();
+        verdict.reject(new Error("check failed"));
+        expect(await pending).toMatchObject({ result: { exitCode: 130, stdout: "", stderr: "cancelled before sending" } });
+        expect(await readdir(spawnRequestDir(agentDir)).catch(() => [])).toEqual([]);
+      } finally { callerCheck.mockRestore(); }
     });
 
     test("--from for the caller itself is accepted", async () => {

@@ -144,11 +144,30 @@ export class IrohSecretKey {
  * receive half (`readToEnd`) together.
  */
 export class IrohBiStream {
+  private receivedFin = false;
+  private sentFin = false;
   constructor(private readonly raw: AddonBiStream) {}
 
-  /** Abort only this request, even if the send half was already finished. */
+  async resetSending(): Promise<void> {
+    if (!this.sentFin) await this.raw.send.reset(0n).catch(() => {});
+  }
+
+  async stopReceiving(): Promise<void> {
+    if (!this.receivedFin) await this.raw.recv.stop(0n).catch(() => {});
+  }
+
   async cancel(): Promise<void> {
-    await Promise.allSettled([this.raw.recv.stop(0n), this.raw.send.reset(0n)]);
+    await Promise.allSettled([this.stopReceiving(), this.resetSending()]);
+  }
+
+  async read(limit: number): Promise<Uint8Array> {
+    const chunk = toUint8(await callAsync("RecvStream.read", () => this.raw.recv.read(limit)));
+    if (!chunk.length) this.receivedFin = true;
+    return chunk;
+  }
+
+  write(bytes: Uint8Array): Promise<number> {
+    return callAsync("SendStream.write", () => this.raw.send.write(toArray(bytes)));
   }
 
   /** Write all of `bytes`. */
@@ -157,8 +176,9 @@ export class IrohBiStream {
   }
 
   /** Finish the send half: the other side's `readToEnd` then completes. */
-  finish(): Promise<void> {
-    return callAsync("SendStream.finish", () => this.raw.send.finish());
+  async finish(): Promise<void> {
+    try { await callAsync("SendStream.finish", () => this.raw.send.finish()); }
+    finally { this.sentFin = true; }
   }
 
   /**
@@ -166,7 +186,9 @@ export class IrohBiStream {
    * {@link isIrohTooLong} accepts when the stream is longer than `limit` bytes.
    */
   async readToEnd(limit: number): Promise<Uint8Array> {
-    return toUint8(await callAsync("RecvStream.readToEnd", () => this.raw.recv.readToEnd(limit)));
+    const bytes = toUint8(await callAsync("RecvStream.readToEnd", () => this.raw.recv.readToEnd(limit)));
+    this.receivedFin = true;
+    return bytes;
   }
 }
 

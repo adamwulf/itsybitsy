@@ -1,3 +1,4 @@
+import { peerDir, peerOutboxDir } from "./runtime-names";
 import { describe, expect, spyOn, test } from "bun:test";
 import * as fs from "fs";
 import { existsSync } from "fs";
@@ -253,6 +254,13 @@ describe("sandbox profile emission", () => {
       tagged('(deny file-read* (subpath (param "TMUXSOCK")))'),
       tagged('(deny file-write* (subpath (param "TMUXSOCK")))'),
       tagged('(deny network-outbound (remote unix-socket (subpath (param "TMUXSOCK"))))'),
+      ...["file-write*", "file-link"].map(op => tagged(`(deny ${op} (regex #"^/(private/)?tmp/itsybitsy-attachments-[^/]*(/|$)"))`)),
+      ...["/private/tmp", "/tmp"].flatMap(prefix => ["file-read*", "file-write*", "file-link"].map(op =>
+        tagged(`(deny ${op} (subpath "${prefix}/itsybitsy-staging-${process.getuid!()}"))`))),
+      tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
       tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
       tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
@@ -278,6 +286,13 @@ describe("sandbox profile emission", () => {
       // deny for a spawner.
       '(allow file-read* (subpath (param "PARENTCLAUDE")))',
       '(allow file-write* (subpath (param "PARENTCLAUDE")))',
+      ...["file-write*", "file-link"].map(op => tagged(`(deny ${op} (regex #"^/(private/)?tmp/itsybitsy-attachments-[^/]*(/|$)"))`)),
+      ...["/private/tmp", "/tmp"].flatMap(prefix => ["file-read*", "file-write*", "file-link"].map(op =>
+        tagged(`(deny ${op} (subpath "${prefix}/itsybitsy-staging-${process.getuid!()}"))`))),
+      tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
+      tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
       tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
       tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
@@ -426,8 +441,8 @@ describe("sandbox profile emission", () => {
     );
     const denies = profile.trimEnd().split("\n").filter((line) => line.startsWith("(deny"));
     // default, 2 read-only write denies (/tmp/read-only, REPOID), 2 raw, 2 per
-    // config deny, 2 seal-helper denies.
-    expect(denies.length).toBe(11);
+    // config deny, 6 staging denies, 2 delivered-attachment denies, 4 peer and handoff denies, 2 seal-helper denies.
+    expect(denies.length).toBe(23);
     for (const line of denies) expect(line.endsWith(` (with message "${TAG}"))`)).toBe(true);
     // A string that merely contains "(deny" is not a second rule.
     expect(profile).toContain(tagged('(deny file-read* (literal "/x (deny y)"))'));
@@ -2515,4 +2530,13 @@ describe("anchorRelativePaths", () => {
     });
     expect(anchorRelativePaths(input, ANCHOR)).toEqual(input);
   });
+});
+
+test("an old broad type and raw grants cannot reopen the peer handoff for writes", () => {
+  const broad = "(allow file-write*)";
+  const profile = generateProfile(config({ rawAllow: [broad] }), paths({ allowWrite: ["/"] }), PARAMS);
+  for (const dir of [peerOutboxDir(PARAMS.HOME), peerDir(PARAMS.HOME)]) {
+    const deny = tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(dir)}"))`);
+    expect(profile.indexOf(deny)).toBeGreaterThan(profile.indexOf(broad));
+  }
 });

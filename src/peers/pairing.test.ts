@@ -499,6 +499,10 @@ describe("pair protocol: read failures close the connection", () => {
         const stream = await link.b.acceptBi();
         if (++accepted !== failOn) return stream;
         return {
+          write: bytes => stream.write(bytes),
+          resetSending: () => stream.resetSending(),
+          stopReceiving: () => stream.stopReceiving(),
+          read: limit => stream.read(limit),
           writeAll: (bytes) => stream.writeAll(bytes),
           cancel: () => stream.cancel(),
           finish: () => stream.finish(),

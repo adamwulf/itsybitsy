@@ -281,6 +281,23 @@ describe("serveTrustedConnection", () => {
     await side.done;
   });
 
+  test("non-framed reads renew their idle deadline on each fragment", async () => {
+    const side = serve({ snapshot });
+    try {
+      const stream = await side.a.openBi();
+      const bytes = encode({ op: "agents" });
+      await stream.writeAll(bytes.subarray(0, 3));
+      await Bun.sleep(0);
+      side.clock.advance(35_000);
+      await stream.writeAll(bytes.subarray(3));
+      await Bun.sleep(0);
+      side.clock.advance(35_000);
+      await stream.finish();
+      expect(decodeAgentsReply(await stream.readToEnd(PEER_MAX_REPLY_BYTES))).toEqual(snapshot());
+    }
+    finally { side.a.close(0, "done"); await side.done; }
+  });
+
   test.each([262144, 262145])("reads at most 262144 bytes for a %i-byte encoded new-agent request", async size => {
     const startAgent = mock(async () => "agent-id");
     const side = serve({ startAgent });
@@ -288,14 +305,15 @@ describe("serveTrustedConnection", () => {
     const limits: number[] = [];
     spyOn(side.b, "acceptBi").mockImplementationOnce(async () => {
       const stream = await accept();
-      const read = stream.readToEnd.bind(stream);
-      spyOn(stream, "readToEnd").mockImplementation(limit => { limits.push(limit); return read(limit); });
+      const read = stream.read.bind(stream);
+      spyOn(stream, "read").mockImplementation(limit => { limits.push(limit); return read(limit); });
       return stream;
     });
     const request = { op: "new-agent", repo: "app", type: "worker", prompt: "é" };
     request.prompt += "x".repeat(size - encode(request).length);
     const reply = await rawRequest(side.a, encode(request));
-    expect(limits).toEqual([262144]);
+    expect(limits[0]).toBe(1);
+    expect(Math.max(...limits)).toBeLessThanOrEqual(64 * 1024);
     if (size === 262144) {
       expect(decodeText(reply)).toEqual({ ok: true, id: "agent-id" });
       expect(startAgent).toHaveBeenCalledTimes(1);
@@ -358,9 +376,10 @@ test("a new-agent stream without a reply times out at 30 s", async () => {
   expect(decodeText(await stream.readToEnd(4096))).toEqual({ op: "new-agent", repo: "app", type: "worker", prompt: "hello" });
   clock.advance(29_999);
   expect(link.a.closeInfo()).toBeNull();
-  clock.advance(1);
+  clock.advance(1); await Bun.sleep(0); clock.advance(750);
   await expect(pending).rejects.toThrow("timed out after 30 s");
-  expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.done });
+  expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
+  link.a.close(0, "done");
 });
 
 test.each(["", "bad/id", "agent\u001b[32m", "white space"])("rejects a malformed success id %j as a protocol error", async id => {
@@ -411,7 +430,7 @@ describe("trusted new-agent responder", () => {
   ] as const)("refuses %s before spawning", async (_, overrides, reason) => {
     const { side, spawn, notice } = receiver();
     const reply = decodeText(await rawRequest(side.a, encode({ ...request, ...overrides })));
-    expect(reply).toEqual({ ok: false, error: expect.stringContaining(reason) });
+    expect(reply).toEqual({ op: "error", reason: expect.stringContaining(reason) });
     expect(spawn).not.toHaveBeenCalled();
     expect(notice).not.toHaveBeenCalled();
     side.a.close(0, "done");
@@ -442,7 +461,7 @@ describe("trusted new-agent responder", () => {
     await Bun.write(join(home, ".itsybitsy", "agent-types", "system-coordinator.md"), "---\nspawnable: true\n---\n");
     const { side, spawn } = receiver();
     const reply = decodeText(await rawRequest(side.a, encode({ ...request, type: SYSTEM_COORDINATOR_TYPE })));
-    expect(reply).toEqual({ ok: false, error: "Cannot start a system-coordinator remotely" });
+    expect(reply).toEqual({ op: "error", reason: "Cannot start a system-coordinator remotely" });
     expect(spawn).not.toHaveBeenCalled();
     side.a.close(0, "done");
   });
@@ -455,7 +474,7 @@ describe("trusted new-agent responder", () => {
     await waitFor(() => lookup.mock.calls.length === 1);
     side.peers.clear();
     registry.resolve([{ name: "app", path: "/app" }]);
-    expect(decodeText(await reply)).toEqual({ ok: false, error: "Machine is no longer paired" });
+    expect(decodeText(await reply)).toEqual({ op: "error", reason: "Machine is no longer paired" });
     expect(spawn).not.toHaveBeenCalled();
     side.a.close(0, "done");
   });
@@ -474,7 +493,7 @@ describe("trusted new-agent responder", () => {
     await waitFor(() => spawn.mock.calls.length === 1);
     expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.clock.advance(25_000);
-    expect(decodeText(await pending)).toEqual({ ok: false, error: expect.stringContaining("outcome unknown") });
+    expect(decodeText(await pending)).toEqual({ op: "error", reason: expect.stringContaining("outcome unknown") });
     expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.a.close(0, "done");
   });
@@ -482,7 +501,7 @@ describe("trusted new-agent responder", () => {
   test("a throwing spawn gets an error reply and leaves the connection usable", async () => {
     const { side, spawn } = receiver();
     spawn.mockRejectedValue(new Error("spawn failed"));
-    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "spawn failed" });
+    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ op: "error", reason: "spawn failed" });
     expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
     side.a.close(0, "done");
   });
@@ -498,7 +517,7 @@ describe("trusted new-agent responder", () => {
 
   test("returns spawn failures with one log entry and no success notice", async () => {
     const { side, notice } = receiver(false);
-    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ ok: false, error: "Worktree is dirty" });
+    expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ op: "error", reason: "Worktree is dirty" });
     expect(side.logs.filter(line => line.includes("Worktree is dirty"))).toHaveLength(1);
     expect(notice).not.toHaveBeenCalled();
     side.a.close(0, "done");
@@ -629,4 +648,154 @@ describe("coordinator-pane", () => {
       side.a.close(0, "done");
     });
   }
+});
+
+
+test("a lost send acknowledgement reports uncertainty and never opens another stream", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock();
+  const header = { op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "system" }, files: [], message: "hi" } as const;
+  const opens = spyOn(a, "openBi");
+  const sent = requestSend(a, { ...header, files: [] }, clock.setTimer);
+  const incoming = await b.acceptBi();
+  await incoming.readToEnd(4096);
+  await Bun.sleep(0);
+  clock.advance(60_000); await Bun.sleep(0); clock.advance(750);
+  await expect(sent).rejects.toThrow("outcome unknown — check the agent");
+  expect(opens).toHaveBeenCalledTimes(1);
+  expect(clock.pending()).toBe(0);
+  expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
+  a.close(0, "done");
+});
+
+test("acknowledgement progress keeps a send alive beyond sixty seconds", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { textHeader } = await import("./peer-outbox");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock();
+  const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  const sent = requestSend(a, header, clock.setTimer);
+  try {
+    const stream = await b.acceptBi();
+    await stream.readToEnd(4096);
+    const reply = encode({ ok: true, id: header.id });
+    for (const part of [reply.subarray(0, 4), reply.subarray(4)]) {
+      await Bun.sleep(0);
+      clock.advance(40_000);
+      await stream.writeAll(part);
+    }
+    await stream.finish();
+    expect(await sent).toBe(header.id);
+    expect(clock.pending()).toBe(0);
+  } finally { a.close(0, "done"); }
+});
+
+test.each(["writeAll", "finish"] as const)("new-agent reads a busy reply after %s rejects", async op => {
+  const { a, b } = createMemoryLink("client", "server");
+  const client = await a.openBi();
+  a.openBi = async () => client;
+  const server = await b.acceptBi();
+  client[op] = async () => { throw Error("request half stopped"); };
+  try {
+    await server.writeAll(encode({ op: "error", reason: "busy, try again" }));
+    await server.finish();
+    await expect(requestNewAgent(a, { repo: "app", prompt: "x", type: "worker" }, createFakeClock().setTimer)).rejects.toThrow("busy, try again");
+    expect(a.closeInfo()).toBeNull();
+  } finally { a.close(0, "done"); }
+});
+
+test("a flow-controlled write surfaces a finished refusal before cancellation", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { textHeader } = await import("./peer-outbox");
+  const { a, b } = createMemoryLink("client", "server");
+  const clock = createFakeClock();
+  const writing = Promise.withResolvers<void>();
+  const stream = await a.openBi();
+  a.openBi = async () => stream;
+  stream.write = async () => { writing.resolve(); await a.closed(); throw Error("closed"); };
+  const cancelled = spyOn(stream, "resetSending");
+  try {
+    const result = requestSend(a, textHeader({ kind: "system" }, "hi", { kind: "user" }), clock.setTimer).catch(err => err);
+    const peer = await b.acceptBi();
+    await writing.promise;
+    await peer.writeAll(encode({ op: "error", reason: "busy, try again" }));
+    await peer.finish();
+    clock.advance(60_000);
+    expect((await result).message).toBe("busy, try again");
+    expect(cancelled).toHaveBeenCalledTimes(1);
+    expect(a.closeInfo()).toBeNull();
+  } finally { a.close(0, "done"); }
+});
+
+test.each([true, false])("the original read observes the whole writer grace (late refusal=%s)", async refused => {
+  const { a, b } = createMemoryLink("client", "server");
+  const clock = createFakeClock();
+  const stream = await a.openBi(); a.openBi = async () => stream;
+  const pending = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+  const reading = spyOn(stream, "readToEnd");
+  stream.writeAll = async () => { entered.resolve(); await pending.promise; };
+  const peer = await b.acceptBi();
+  try {
+    const outcome = requestNewAgent(a, { repo: "repo", type: "worker", prompt: "hi" }, clock.setTimer).catch(err => err);
+    await entered.promise;
+    clock.advance(30_000); await Bun.sleep(0);
+    clock.advance(400); pending.resolve();
+    if (refused) {
+      await peer.writeAll(encode({ op: "error", reason: "late refusal" })); await peer.finish();
+      expect((await outcome).message).toContain("late refusal"); expect(a.closeInfo()).toBeNull();
+    } else {
+      clock.advance(350); expect((await outcome).message).toContain("timed out");
+      expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
+    }
+    expect(reading).toHaveBeenCalledTimes(1);
+  } finally { pending.resolve(); a.close(0, "done"); }
+});
+
+test("each partial header write reports a milestone with zero body bytes", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const open = a.openBi.bind(a);
+  let writes = 0;
+  spyOn(a, "openBi").mockImplementation(async () => {
+    const stream = await open(), write = stream.write.bind(stream);
+    stream.write = chunk => { writes++; return write(chunk.subarray(0, 16)); };
+    return stream;
+  });
+  const header = { op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "system" }, message: "hello" } as const;
+  const progress: number[] = [];
+  const sent = requestSend(a, { ...header, files: [] }, createFakeClock().setTimer, { onProgress: bytes => progress.push(bytes) });
+  const peer = await b.acceptBi();
+  await peer.readToEnd(4096);
+  expect(writes).toBeGreaterThan(1);
+  expect(progress).toEqual(Array(writes).fill(0));
+  await peer.writeAll(encode({ ok: true, id: header.id }));
+  await peer.finish();
+  expect(await sent).toBe(header.id);
+  a.close(0, "done");
+});
+
+test("a client that exits while openBi is pending writes nothing and resets", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const clock = createFakeClock(), opened = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const open = a.openBi.bind(a);
+  let alive = true, writes = 0, resets = 0;
+  spyOn(a, "openBi").mockImplementation(async () => {
+    const stream = await open(), reset = stream.resetSending.bind(stream);
+    stream.write = async bytes => { writes++; return bytes.length; };
+    stream.resetSending = async () => { resets++; return reset(); };
+    opened.resolve(); await release.promise; return stream;
+  });
+  const send = requestSend(a, { op: "send", id: crypto.randomUUID(), target: { kind: "system" },
+    from: { kind: "user" }, message: "hi", files: [] }, clock.setTimer, {
+      verifyClient() { if (!alive) throw Error("sender exited"); },
+    }).catch(err => err);
+  const remote = await b.acceptBi();
+  await opened.promise; alive = false; release.resolve();
+  await waitFor(() => resets === 1);
+  await remote.finish();
+  expect(String(await send)).toContain("sender exited");
+  expect(writes).toBe(0);
+  a.close(0, "done");
 });

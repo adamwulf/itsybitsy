@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import { lstatSync, readdirSync, readlinkSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
+import { peerDir, peerOutboxDir, deliveredAttachmentPath, deliveredAttachmentPattern, transferStagingPaths } from "./runtime-names";
 import { userHome } from "./home";
 
 /** Fully-resolved, spawn-time sandbox configuration. */
@@ -295,7 +296,7 @@ const MAX_SYMLINK_EXPANSIONS = 32;
  * realpathSync fails: a missing or non-directory component, a dangling link, a
  * loop. Unlike realpathSync it keeps the letter case as spelled.
  */
-function metadataRealpath(absolute: string): string | null {
+export function metadataRealpath(absolute: string): string | null {
   const pending = absolute.split("/").filter((part) => part.length > 0);
   let resolved = "/";
   let isDirectory = true;
@@ -879,6 +880,9 @@ function orderedPathEntry(
   };
 }
 
+/** A stored attachment policy may have no recorded Git runtime root. */
+export type AccessTableParams = Omit<SandboxProfileParams, "GITDIR"> & { GITDIR: string | undefined };
+
 /**
  * Runtime ALLOW roots, keyed on the resolved spawn capability. AGENTDIR,
  * WORKTREE, and GITDIR are always read+write boot roots. REPOAGENTS is a write
@@ -891,19 +895,21 @@ function orderedPathEntry(
  * table (storedPathAccessTable).
  */
 function profileRuntimeAllowRoots(
-  params: SandboxProfileParams,
+  params: AccessTableParams,
   canonicalize: (path: string) => string = canonicalizeSandboxPath,
 ): ProfileRuntimePathRoot[] {
   const roots: ProfileRuntimePathRoot[] = [
     { path: canonicalize(params.AGENTDIR), op: "write", parameterName: "AGENTDIR" },
     { path: canonicalize(params.WORKTREE), op: "write", parameterName: "WORKTREE" },
-    { path: canonicalize(params.GITDIR), op: "write", parameterName: "GITDIR" },
-    {
-      path: canonicalize(params.REPOAGENTS),
-      op: params.canSpawnChildren ? "write" : "read",
-      parameterName: "REPOAGENTS",
-    },
   ];
+  if (params.GITDIR !== undefined) {
+    roots.push({ path: canonicalize(params.GITDIR), op: "write", parameterName: "GITDIR" });
+  }
+  roots.push({
+    path: canonicalize(params.REPOAGENTS),
+    op: params.canSpawnChildren ? "write" : "read",
+    parameterName: "REPOAGENTS",
+  });
   if (params.canSpawnChildren) {
     roots.push({
       path: canonicalize(params.PARENTCLAUDE),
@@ -959,7 +965,7 @@ function profileRuntimeAllowRoots(
  * deny row emits both read and write denies.
  */
 function profileRuntimeDenyRoots(
-  params: SandboxProfileParams,
+  params: AccessTableParams,
   canonicalize: (path: string) => string = canonicalizeSandboxPath,
 ): ProfileRuntimePathRoot[] {
   if (params.canSpawnChildren) return [];
@@ -971,7 +977,7 @@ function profileRuntimeDenyRoots(
 /** Build the canonical table used by both the profile and hook-side resolver. */
 export function sandboxPathAccessTable(
   paths: PathsConfig,
-  params: SandboxProfileParams,
+  params: AccessTableParams,
 ): PathAccessTable {
   const canonicalPaths = canonicalizePathsConfig(paths, sandboxHome(params.HOME));
   return {
@@ -981,7 +987,7 @@ export function sandboxPathAccessTable(
 }
 
 function runtimeRootRows(
-  params: SandboxProfileParams,
+  params: AccessTableParams,
   canonicalize: (path: string) => string,
 ): Pick<PathAccessTable, "runtimeRoots" | "runtimeDenyRoots"> {
   return {
@@ -1010,7 +1016,7 @@ function runtimeRootRows(
  */
 export function storedPathAccessTable(
   paths: PathsConfig,
-  params: SandboxProfileParams,
+  params: AccessTableParams,
 ): PathAccessTable {
   const stored = resolvePathsConfig(paths);
   const provisional = prepareAccessTable({
@@ -1085,6 +1091,7 @@ export function orderedEntryMatches(entry: OrderedPathEntry, absolutePath: strin
 export interface PreparedAccessTable {
   allow: OrderedPathEntry[];
   deny: OrderedPathEntry[];
+  transferStagingRoots?: string[];
   /**
    * Set when the resolving process runs inside the agent's kernel sandbox (the
    * PreToolUse hooks): paths are then canonicalized without opening what the
@@ -1106,6 +1113,7 @@ export function prepareAccessTable(
   return {
     allow: sortedAllowEntries(table, allowRoots),
     deny: sortedDenyEntries(table, denyRoots),
+    transferStagingRoots: transferStagingPaths(),
   };
 }
 
@@ -1190,6 +1198,8 @@ export function resolvePreparedAccess(
   }
   const canonical = canonicalizeAccessPath(prepared, absolutePath);
 
+  if (op === "write" && deliveredAttachmentPath.test(canonical)) return "deny";
+  if (prepared.transferStagingRoots?.some(root => canonical === root || canonical.startsWith(root + "/"))) return "deny";
   if (prepared.deny.some((entry) => orderedEntryMatches(entry, canonical))) {
     return "deny";
   }
@@ -1498,6 +1508,20 @@ export function generateProfile(
   denyRoots.forEach((root) => {
     lines.push(denyRule(`network-outbound (remote unix-socket (subpath (param "${root.parameterName}")))`, tag));
   });
+
+  const delivered = `(regex #"${deliveredAttachmentPattern}")`;
+  lines.push(denyRule(`file-write* ${delivered}`, tag), denyRule(`file-link ${delivered}`, tag));
+  for (const root of transferStagingPaths()) {
+    const subtree = `(subpath "${escapeSbplString(root)}")`;
+    lines.push(denyRule(`file-read* ${subtree}`, tag), denyRule(`file-write* ${subtree}`, tag), denyRule(`file-link ${subtree}`, tag));
+  }
+
+  // Upgraded installs may still have a type file with a broad home write grant.
+  const home = sandboxHome(params.HOME);
+  for (const dir of [peerOutboxDir(home), peerDir(home)]) {
+    const subtree = `(subpath "${escapeSbplString(canonicalizeSandboxPath(dir))}")`;
+    lines.push(denyRule(`file-write* ${subtree}`, tag), denyRule(`file-link ${subtree}`, tag));
+  }
 
   // The ordinary /private/tmp floor lets the parent read the helper's
   // atomically-published status/output, but it must never be able to forge or

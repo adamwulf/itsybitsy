@@ -540,3 +540,12 @@ describe("ensureConfigFilePerms / writeConfig 0600 enforcement", () => {
     expect(st.mode & 0o777).toBe(0o600);
   });
 });
+
+test("edits create a missing config but preserve malformed JSON byte for byte", async () => {
+  await writeConfig(userCfgPath, "peering.attachments.maxFiles", 3);
+  expect((await Bun.file(userCfgPath).json()).peering.attachments.maxFiles).toBe(3);
+  const broken = '  { "maxAgents": 3,';
+  await Bun.write(userCfgPath, broken);
+  await expect(writeConfig(userCfgPath, "peering.attachments.maxFiles", 1)).rejects.toThrow();
+  expect(await Bun.file(userCfgPath).text()).toBe(broken);
+});

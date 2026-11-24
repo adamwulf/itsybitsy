@@ -47,6 +47,8 @@ export interface IsolatedCliOptions {
   cwd?: string;
   /** Default: an empty directory that exists for this run only. */
   home?: string;
+  /** Optional separate fixture for OS-account policy. */
+  accountHome?: string;
   /** Piped to the child. Default: no stdin at all (/dev/null). */
   stdin?: string;
   /** Extra environment. Nothing else is inherited. */
@@ -60,6 +62,8 @@ export interface IsolatedCliOptions {
   ancestry?: CliAncestry;
   /** Return blocked effects instead of throwing, to assert on them. */
   expectViolations?: boolean;
+  /** Deliver SIGINT to this isolated child when the fixture requests it. */
+  interrupt?: AbortSignal;
   timeoutMs?: number;
 }
 
@@ -148,6 +152,7 @@ export async function runIsolatedCli(cliArgs: string[], options: IsolatedCliOpti
     const config: CliDriverConfig = {
       cwd,
       home,
+      accountHome: options.accountHome && await assertIsolatedPath(options.accountHome, "account home"),
       logDir,
       sandboxed: options.sandboxed ?? false,
       actions: options.actions ?? {},
@@ -162,7 +167,11 @@ export async function runIsolatedCli(cliArgs: string[], options: IsolatedCliOpti
       env: { ...minimalEnv(home, tmp, options.env), [CLI_DRIVER_CONFIG_ENV]: JSON.stringify(config) },
     });
     const label = `ib ${cliArgs.join(" ")}`;
-    const run = await collect(proc, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, label);
+    const interrupt = () => proc.kill("SIGINT");
+    options.interrupt?.addEventListener("abort", interrupt, { once: true });
+    if (options.interrupt?.aborted) interrupt();
+    const run = await collect(proc, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, label)
+      .finally(() => options.interrupt?.removeEventListener("abort", interrupt));
 
     const contextFile = Bun.file(join(logDir, "context.json"));
     if (!(await contextFile.exists())) {
@@ -240,7 +249,7 @@ export async function createCliFixture(): Promise<CliFixture> {
       const agentDir = runtimeNames.agentDir(repoPath, id);
       const worktree = meta.worktree !== false;
       await mkdir(agentDir, { recursive: true });
-      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `ib-fixture-${id}`, worktree, ...meta }));
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id, tmux_session: `ib-fixture-${id}`, worktree, claude_pid: "", ...meta }));
       if (!worktree) return { id, repoPath, agentDir, sessionCwd: repoPath };
       const sessionCwd = join(agentDir, "repo");
       const gitDir = join(repoPath, ".git", "worktrees", id);

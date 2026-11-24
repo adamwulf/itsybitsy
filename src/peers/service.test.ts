@@ -1,6 +1,7 @@
-import { remoteStartDenialAtStartup } from "./remote-start-caller";
+import { createPeerOutboxPoll, handoffRemoteMessage, textHeader } from "./peer-outbox";
+import { humanSendTerminalDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { spyOn, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx, resetProcessStartEpochSecondsCache } from "../agents";
@@ -206,7 +207,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
   return { service, endpoint, logs, binds, clock, calls };
 }
 
-const lockContents = () => readFile(peerEndpointLockFile(), "utf-8").catch(() => null);
+const lockContents = () => readFile(peerEndpointLockFile(), "utf-8").then(text => text.replace(/\n[a-f0-9-]{36}\n$/, "\n")).catch(() => null);
 
 /** When the pending automatic rebind runs, or null when the status is not an error with one pending. */
 function retryAt(service: PeerService): number | null {
@@ -605,6 +606,14 @@ describe("PeerService at boot", () => {
       },
     };
     const decision = await remoteStartDenialAtStartup(input);
+    // Redirected input is valid for a CLI send with a terminal on stdout.
+    const sendDenial = await humanSendTerminalDenial(input);
+    expect(sendDenial === null).toBe(kind === "human" || kind === "non-TTY input");
+    if (tmux !== undefined) {
+      expect(decision).toBe("Remote starts are disabled inside tmux");
+      expect(sendDenial).toContain("run ib send from a terminal outside tmux");
+      expect(await humanSendTerminalDenial(input, "local-send")).toBeNull();
+    }
     const { service } = makeService({ remoteStartDenial: decision });
     if (reason === null) expect(decision).toBeNull();
     else expect(decision).toContain(reason);
@@ -640,25 +649,27 @@ describe("PeerService at boot", () => {
         return "no-agent";
       },
     }, clock);
-    const service = new PeerService(defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, decision));
-    const observed = await reading.promise;
-    await service.bootIfPaired();
-    expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
-    const request = { repo: "app", type: "worker", prompt: "hello" };
-    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("checking whether remote starts are allowed");
-    const changes: (string | null)[] = [];
-    service.onChange(() => changes.push(service.remoteStartDenial));
-    clock.advance(stage === "process table" ? 1_999 : 499);
-    await flushMicrotasks();
-    expect(observed.aborted).toBe(false);
-    expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
-    clock.advance(1);
-    expect(await decision).toContain("timed out");
-    expect(observed.aborted).toBe(true);
-    release.resolve();
-    await flushMicrotasks();
-    expect(changes).toEqual([service.remoteStartDenial]);
-    await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("timed out");
+    const service = new PeerService(defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, decision, home));
+    try {
+      const observed = await reading.promise;
+      await service.bootIfPaired();
+      expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
+      const request = { repo: "app", type: "worker", prompt: "hello" };
+      await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("checking whether remote starts are allowed");
+      const changes: (string | null)[] = [];
+      service.onChange(() => changes.push(service.remoteStartDenial));
+      clock.advance(stage === "process table" ? 1_999 : 499);
+      await flushMicrotasks();
+      expect(observed.aborted).toBe(false);
+      expect(service.remoteStartDenial).toBe("checking whether remote starts are allowed");
+      clock.advance(1);
+      expect(await decision).toContain("timed out");
+      expect(observed.aborted).toBe(true);
+      release.resolve();
+      await flushMicrotasks();
+      expect(changes).toEqual([service.remoteStartDenial]);
+      await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("timed out");
+    } finally { release.resolve(); await service.shutdown(); }
   });
 
   test("caches one denial when the reader succeeds at the deadline before the timer fires", async () => {
@@ -709,6 +720,44 @@ describe("PeerService at boot", () => {
     }
   });
 
+  test("a verified CLI handoff uses the connected stream even when dashboard sends are denied", async () => {
+    const { textHeader } = await import("./peer-outbox");
+    const header = textHeader({ kind: "agent", agent: "helper" }, "hi", { kind: "user" });
+    const { service, endpoint } = makeService({ remoteStartDenial: "inside tmux" });
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const received: string[] = [];
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer, peerName: async () => "paired",
+        snapshot: () => ({ coordinator: null, repos: [], agents: [] }), log() {},
+        receiveMessage: async message => { received.push(message.id); },
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    try {
+      await expect(service.sendRemoteMessage(ID_REMOTE, header, "handoff")).rejects.toThrow("disconnected");
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      await expect(service.sendRemoteMessage(ID_REMOTE, header)).rejects.toThrow("inside tmux");
+      let alive = true;
+      const name = service["peerName"].bind(service);
+      const pairing = spyOn(service as any, "peerName").mockImplementation(async () => {
+        const paired = await name(ID_REMOTE); alive = false; return paired;
+      });
+      try {
+        await expect(service.sendRemoteMessage(ID_REMOTE, header, "handoff", {
+          verifyClient() { if (!alive) throw Error("client exited"); },
+        })).rejects.toThrow("client exited");
+        expect(received).toEqual([]);
+      } finally { pairing.mockRestore(); }
+      expect(await service.sendRemoteMessage(ID_REMOTE, header, "handoff")).toBe(header.id);
+      await writeFile(peersFile(), "[]");
+      await expect(service.sendRemoteMessage(ID_REMOTE, header, "handoff")).rejects.toThrow("no longer paired");
+      expect(received).toEqual([header.id]);
+    } finally { await service.shutdown(); }
+  });
+
   test("startRemoteAgent uses the connected peer stream and honors local unpairing before the next poll", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const { service, endpoint } = makeService();
@@ -746,7 +795,7 @@ describe("PeerService at boot", () => {
     const file = join(peerDir(), "remote-agents.json");
     try {
       await waitFor(() => service.view().links[0]?.connected === true, { message: "first snapshot" });
-      const first = JSON.parse(await readFile(file, "utf8"));
+      const first = JSON.parse(await readFile(file, "utf8")).peers;
       expect(first).toEqual([{ id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: clock.now(),
         agents: [{ repo: "app", id: "agent-r1", nickname: null, state: "running" }] }]);
       const original = await open(file);
@@ -765,11 +814,11 @@ describe("PeerService at boot", () => {
         starts.delete(process.pid);
         expect(await readConnectedPeers()).toEqual(first);
         starts.set(process.pid, ME_START);
-        expect(JSON.parse(await readFile(file, "utf8"))).toEqual(first);
+        expect(JSON.parse(await readFile(file, "utf8")).peers).toEqual(first);
         await service.shutdown();
         expect((await stat(file)).ino).not.toBe(inode);
-        expect(JSON.parse(await original.readFile("utf8"))).toEqual(first);
-        expect(JSON.parse(await readFile(file, "utf8"))[0].connected).toBe(false);
+        expect(JSON.parse(await original.readFile("utf8")).peers).toEqual(first);
+        expect(JSON.parse(await readFile(file, "utf8")).peers[0].connected).toBe(false);
       } finally {
         await original.close();
       }
@@ -1676,6 +1725,10 @@ const irohTooLong = () => new IrohError("RecvStream.readToEnd", "TooLong");
 /** `stream` with its reads failing as `fail` says. */
 function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
   return {
+    write: bytes => stream.write(bytes),
+          resetSending: () => stream.resetSending(),
+          stopReceiving: () => stream.stopReceiving(),
+          read: limit => stream.read(limit),
     writeAll: (bytes) => stream.writeAll(bytes),
     cancel: () => stream.cancel(),
     finish: () => stream.finish(),
@@ -1704,7 +1757,7 @@ describe("toPairConnection maps iroh's TooLong to PairProtocolError", () => {
       });
 
       const stream = await link.a.openBi();
-      await stream.writeAll(alpn === PAIR_ALPN ? encodePairMessage({ op: "pair-hello" }) : encodePeerRequest("agents"));
+      await stream.writeAll(alpn === PAIR_ALPN ? encodePairMessage({ op: "pair-hello" }) : Buffer.alloc(NEW_AGENT_MAX_REQUEST_BYTES + 1, "a"));
       await stream.finish();
       await waitFor(() => link.a.closeInfo() !== null, { message: "the connection closed" });
       // Unmapped, the pair ALPN would close it as a "connection error", and the
@@ -1726,4 +1779,172 @@ describe("toPairConnection maps iroh's TooLong to PairProtocolError", () => {
     const passthrough = toPairConnection({ ...conn, openBi: async () => failingReads(await conn.openBi(), () => other) });
     await expect((await passthrough.openBi()).readToEnd(10)).rejects.toBe(other);
   });
+});
+
+describe("endpoint owner peer-outbox polling", () => {
+  test("only the lock owner recovers a ready entry without peers or a bound endpoint", async () => {
+    const base = join(home, ".itsybitsy", "peer-outbox");
+    const dir = join(base, crypto.randomUUID());
+    await mkdir(dir, { recursive: true });
+    const { writeTransferOwner } = await import("./transfer-owner");
+    await writeTransferOwner(dir, { pid: OTHER.pid, start: OTHER.startEpoch });
+    const deps = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, agents: [], repos: [] }), () => {}, null, home);
+    const locked = new PeerService({ ...deps, acquireLock: async () => ({ acquired: false, ownerPid: 42 }) });
+    const owner = new PeerService(deps);
+    try {
+      await locked.bootIfPaired();
+      expect((await stat(dir)).isDirectory()).toBe(true);
+      await owner.bootIfPaired();
+      expect(await readdir(base)).toEqual([]);
+      expect(owner.view().status.kind).not.toBe("listening");
+    } finally { await locked.shutdown(); await owner.shutdown(); }
+  });
+
+  test("a malformed peer list leaves the lock owner recovering without binding", async () => {
+    const events: string[] = [];
+    const { service, binds } = makeService({ recoverTransfers: async () => { events.push("recover"); },
+      readPeers: async () => { events.push("read peers"); throw Error("invalid peer list"); } });
+    try {
+      await service.bootIfPaired();
+      expect(events).toEqual(["recover", "read peers"]);
+      expect(binds).toHaveLength(0);
+      expect(service.view().peersError).toBe("invalid peer list");
+    } finally { await service.shutdown(); }
+  });
+
+  test("a suspended recovery retains the service lock through endpoint close", async () => {
+    const held = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    let hold = false;
+    const owner = makeService({ recoverTransfers: async () => { if (hold) { entered.resolve(); await held.promise; } } });
+    const other = makeService({ acquireLock: () => acquireEndpointLock(OTHER), releaseLock: () => releaseEndpointLock(OTHER),
+      recoverTransfers: async () => {} });
+    alive.add(OTHER.pid); starts.set(OTHER.pid, OTHER.startEpoch);
+    try {
+      owner.service.openDialog();
+      await waitFor(() => owner.service.view().status.kind === "listening");
+      hold = true;
+      const sweep = owner.service.bootIfPaired();
+      await entered.promise;
+      const closing = owner.service.shutdown();
+      await other.service.bootIfPaired();
+      expect(other.service.view().status.kind).toBe("disabled");
+      held.resolve(); await sweep; await closing;
+      await other.service.bootIfPaired();
+      expect(other.service.view().status.kind).toBe("idle");
+    } finally { held.resolve(); await owner.service.shutdown(); await other.service.shutdown(); }
+  });
+
+  test("only the owner polls, overlapping ticks send each id once with four active, and endpoint loss stops claims", async () => {
+    const base = join(home, ".itsybitsy", "peer-outbox");
+    const owner = makeService({ pollOutbox: createPeerOutboxPoll() });
+    const secondPoll = mock(createPeerOutboxPoll());
+    const second = makeService({ acquireLock: () => acquireEndpointLock(OTHER), pollOutbox: secondPoll });
+    const gate = Promise.withResolvers<void>();
+    const send = spyOn(owner.service, "sendRemoteMessage").mockImplementation(async (_peer, header) => {
+      await gate.promise;
+      return header.id;
+    });
+    const headers = Array.from({ length: 6 }, () => textHeader({ kind: "system" }, "message", { kind: "user" }));
+    const abort = new AbortController();
+    let requests: ReturnType<typeof handoffRemoteMessage>[] = [];
+    try {
+      owner.service.openDialog();
+      await waitFor(() => owner.service.view().status.kind === "listening");
+      second.service.openDialog();
+      await waitFor(() => second.service.view().status.kind === "disabled");
+      requests = headers.map(header => handoffRemoteMessage(ID_REMOTE, header, abort.signal));
+      await waitFor(() => send.mock.calls.length === 4);
+      const id = send.mock.calls[0]![1].id;
+      const dir = join(base, ".claimed", id + `@${process.pid}-${processStartEpochSecondsCtx.fn(process.pid)}`);
+      expect((await stat(dir)).mode & 0o777).toBe(0o700);
+      expect((await stat(join(dir, "request.json"))).mode & 0o777).toBe(0o600);
+      await Bun.sleep(300);
+      expect(send).toHaveBeenCalledTimes(4);
+      gate.resolve();
+      expect((await Promise.all(requests)).every(r => r.ok)).toBe(true);
+      expect(send.mock.calls.map(call => call[1].id).sort()).toEqual(headers.map(header => header.id).sort());
+      expect(send.mock.calls.every(call => call[2] === "handoff")).toBe(true);
+      owner.endpoint.failAccept(new Error("lost endpoint"));
+      await waitFor(() => owner.service.view().status.kind === "error");
+      const pending = textHeader({ kind: "system" }, "after loss", { kind: "user" });
+      const path = join(base, pending.id, "request.json");
+      await Bun.write(path, JSON.stringify({ peer: ID_REMOTE, header: pending }));
+      await Bun.sleep(350);
+      expect(await Bun.file(path).exists()).toBe(true);
+      expect(send).toHaveBeenCalledTimes(6);
+      expect(secondPoll).not.toHaveBeenCalled();
+    } finally {
+      abort.abort();
+      gate.resolve();
+      await Promise.all(requests);
+      await second.service.shutdown();
+      await owner.service.shutdown();
+    }
+  });
+
+  test("an owner keeps live claims across sweeps and reclaims dead claims without replay", async () => {
+    const base = join(home, ".itsybitsy", "peer-outbox", ".claimed");
+    const crashed = textHeader({ kind: "system" }, "old", { kind: "user" });
+    const done = textHeader({ kind: "system" }, "complete", { kind: "user" });
+    const abandoned = join(base, crashed.id + `@${OTHER.pid}-${OTHER.startEpoch}`, "request.json");
+    const unread = join(base, done.id + `@${OTHER.pid}-${OTHER.startEpoch}`, "result.json");
+    await Bun.write(abandoned, JSON.stringify({ peer: ID_REMOTE, header: crashed }));
+    await Bun.write(unread, JSON.stringify({ ok: true, id: done.id }));
+    const { writeTransferOwner } = await import("./transfer-owner");
+    alive.add(OTHER.pid);
+    starts.set(OTHER.pid, OTHER.startEpoch);
+    for (const id of [crashed.id, done.id]) await writeTransferOwner(join(base, id + `@${OTHER.pid}-${OTHER.startEpoch}`), { pid: OTHER.pid, start: OTHER.startEpoch! });
+    let now = Date.now();
+    const tick = createPeerOutboxPoll(() => now);
+    let finishedAt = -1;
+    const poll: import("./peer-outbox").PeerOutboxPoll = async (...args) => {
+      const startedAt = now;
+      await tick(...args);
+      finishedAt = startedAt;
+    };
+    const { service } = makeService({ pollOutbox: poll, recoverTransfers: () => tick.recover() });
+    const send = spyOn(service, "sendRemoteMessage");
+    try {
+      service.openDialog();
+      await waitFor(() => finishedAt === now);
+      now += 599_000;
+      await waitFor(() => finishedAt === now);
+      now += 29_999;
+      await waitFor(() => finishedAt === now);
+      expect(await Bun.file(abandoned).exists()).toBe(true);
+      expect(await Bun.file(unread).exists()).toBe(true);
+      alive.delete(OTHER.pid);
+      now++;
+      await service.bootIfPaired();
+      await waitFor(() => finishedAt === now);
+      expect(await Bun.file(abandoned).exists()).toBe(false);
+      expect(await Bun.file(unread).exists()).toBe(false);
+      expect(send).not.toHaveBeenCalled();
+    } finally { await service.shutdown(); }
+  });
+});
+
+test("watcher shutdown aborts an outbox worker and waits for its cleanup", async () => {
+  const started = Promise.withResolvers<void>();
+  const cleanup = Promise.withResolvers<void>();
+  const header = textHeader({ kind: "system" }, "hello", { kind: "user" });
+  let signal: AbortSignal | undefined;
+  const { service } = makeService({ pollOutbox: async send => {
+    try { await send(ID_REMOTE, header, {}); } finally { await cleanup.promise; }
+  } });
+  spyOn(service, "sendRemoteMessage").mockImplementation(async (_id, _header, _src, transfer) => {
+    signal = transfer!.signal;
+    started.resolve();
+    return new Promise(resolve => signal!.addEventListener("abort", () => resolve(header.id), { once: true }));
+  });
+  await service.openDialog();
+  await started.promise;
+  let done = false;
+  const stop = service.shutdown().then(() => { done = true; });
+  await Bun.sleep(10);
+  expect(signal?.aborted).toBe(true);
+  expect(done).toBe(false);
+  cleanup.resolve();
+  await stop;
 });

@@ -289,6 +289,56 @@ describe("spawn broker", () => {
       expect(written.stdout).toContain("(truncated)");
     });
 
+    test("recovers progress and interrupted temps only for a proven dead publisher", async () => {
+      const { isPidAliveCtx, processStartEpochSecondsCtx } = await import("./agents");
+      const dir = spawnResultDir(agentDir);
+      await mkdir(dir, { recursive: true });
+      const paths = [];
+      for (const [id, pid] of [[ID_A, 10], [ID_B, 11]] as const) {
+        const marker = join(dir, id + ".progress"), temp = marker + "." + pid + "-40-aaaaaaaaaaaaaaaa.tmp";
+        const bytes = Buffer.alloc(16);
+        bytes.writeDoubleLE(pid); bytes.writeDoubleLE(40, 8);
+        await Bun.write(marker, bytes); await Bun.write(temp, "");
+        paths.push(marker, temp);
+      }
+      isPidAliveCtx.set(pid => pid === 11); processStartEpochSecondsCtx.set(() => null);
+      try {
+        await processSpawnRequests(AGENT_ID, repo, server().deps);
+        expect(await Promise.all(paths.map(path => Bun.file(path).exists()))).toEqual([false, false, true, true]);
+      } finally { isPidAliveCtx.reset(); processStartEpochSecondsCtx.reset(); }
+    });
+
+    test("a linked result directory cannot redirect publication or stale cleanup", async () => {
+      const { symlink } = await import("node:fs/promises");
+      const protectedDir = join(repo, "protected");
+      await mkdir(protectedDir);
+      await mkdir(agentDir, { recursive: true });
+      const stale = join(protectedDir, ID_B + ".json");
+      await Bun.write(stale, "keep");
+      await (await import("node:fs/promises")).utimes(stale, 1, 1);
+      await symlink(protectedDir, spawnResultDir(agentDir));
+      await queue(ID_A, validRequest(ID_A));
+      await processSpawnRequests(AGENT_ID, repo, server().deps);
+      expect(await readdir(protectedDir)).toEqual([ID_B + ".json"]);
+      expect(await Bun.file(stale).text()).toBe("keep");
+    });
+
+    test("abandoned JSON temps and withdrawals are recovered without dispatch", async () => {
+      const { isPidAliveCtx } = await import("./agents");
+      const requests = spawnRequestDir(agentDir), results = spawnResultDir(agentDir);
+      for (const dir of [requests, results]) await mkdir(dir, { recursive: true });
+      const dead = [join(requests, "." + ID_A + ".json.42-0-aaaabbbb.tmp"), join(results, "." + ID_B + ".json.42-123-aaaabbbb.tmp"),
+        join(requests, ID_A + "@42-0.json.withdrawn")];
+      const live = join(requests, ID_A + "@43-0.json.withdrawn");
+      for (const file of [...dead, live]) await Bun.write(file, "{}");
+      isPidAliveCtx.set(pid => pid !== 42);
+      try {
+        expect(await processSpawnRequests(AGENT_ID, repo, server().deps)).toBe(0);
+        expect(await Promise.all(dead.map(path => Bun.file(path).exists()))).toEqual([false, false, false]);
+        expect(await Bun.file(live).exists()).toBe(true);
+      } finally { isPidAliveCtx.reset(); }
+    });
+
     test("prunes results the client never collected, and only old ones", async () => {
       await mkdir(spawnResultDir(agentDir), { recursive: true });
       const stale = join(spawnResultDir(agentDir), `${ID_A}.json`);

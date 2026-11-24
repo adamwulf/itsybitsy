@@ -7,7 +7,7 @@
  *   Input ids are trimmed and lowercased first.
  * - A name is a local label, and the first segment of the peer's row keys in
  *   `ib watch`. The pairing name prompt refuses a name another peer or this
- *   machine has (peerNameProblem); the store itself does not check.
+ *   machine has (peerNameProblem). The store reserves leading @ for local addresses.
  * - `pairedAt` is an ISO 8601 timestamp.
  * - Every write replaces the whole file atomically (temp file + rename), so a
  *   reader sees the old or the new array, never a torn one.
@@ -69,6 +69,7 @@ export function sanitizePeerName(name: string, id: string): string {
  */
 export function peerNameProblem(name: string, id: string, peers: readonly Peer[], machineName: string): string | null {
   const stored = sanitizePeerName(name, id);
+  if (stored.startsWith("@")) return "A machine name cannot start with @.";
   if (stored.includes("/")) return `A name cannot contain "/".`;
   const lower = stored.toLowerCase();
   if (lower === machineName.toLowerCase()) return `"${machineName}" is this machine's name.`;
@@ -147,7 +148,11 @@ export async function addPeer(peer: { id: string; name: string; pairedAt?: strin
     name: sanitizePeerName(peer.name, id),
     pairedAt: peer.pairedAt ?? new Date().toISOString(),
   };
-  const peers = (await readPeers()).filter((p) => p.id !== id);
+  const previous = await readPeers();
+  if (stored.name.startsWith("@") && !previous.some(p => p.id === id && p.name === stored.name)) {
+    throw new Error("A machine name cannot start with @.");
+  }
+  const peers = previous.filter((p) => p.id !== id);
   peers.push(stored);
   await writePeers(peers);
   return stored;

@@ -325,7 +325,7 @@ export async function hookAgyPreToolUse(
       rootRepo: ctxResolved.rootRepo,
       allowList: permissions.allow,
       access,
-      protectedWritePaths: agentProtectedWritePaths(ctxResolved.agentDir),
+      protectedWritePaths: agentProtectedWritePaths(ctxResolved.agentDir, false, access),
     };
 
     // Parity with hookCheckPath: manager-only ib subcommands (retire / merge /

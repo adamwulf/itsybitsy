@@ -10,6 +10,9 @@ export const STATUS_TAG = "itsybitsy-status";
 export const AGY_HOOK_KEY = "itsybitsy";
 export const AGY_RULE_FILE = ".agents/rules/itsybitsy-agent.md";
 
+// tmux invokes start.sh and resume.sh by absolute path. Export only in that script's process tree.
+export const AGENT_LAUNCH_HEADER = '#!/bin/bash\nexport IB_AGENT_DIR="$(cd -- "${0%/*}" && pwd -P)"';
+
 export const runtimeDir = (repo: string): string => join(repo, RUNTIME_DIR_NAME);
 export const agentsDir = (repo: string): string => join(runtimeDir(repo), "agents");
 export const agentDir = (repo: string, id: string): string => join(agentsDir(repo), id);
@@ -22,7 +25,8 @@ export const userQuestionsFile = (repo: string): string => join(runtimeDir(repo)
 // iroh peering (docs/plans/iroh-peering.md): one directory per install, under
 // the user home, never under a repo. Resolved through userHome() so tests
 // redirect it with setUserHome().
-export const peerDir = (): string => join(userHome(), RUNTIME_DIR_NAME, "peer");
+export const peerOutboxDir = (home = userHome()): string => join(runtimeDir(home), "peer-outbox");
+export const peerDir = (home = userHome()): string => join(runtimeDir(home), "peer");
 export const peerSecretKeyFile = (): string => join(peerDir(), "secret.key");
 export const peersFile = (): string => join(peerDir(), "peers.json");
 export const peerEndpointLockFile = (): string => join(peerDir(), "endpoint.lock");
@@ -41,6 +45,7 @@ export const isRetiredHeadRef = (ref: unknown, key: string): ref is string => re
 // Keep the individual callers' first/last, prefix/exact and capture semantics.
 export const AGENT_CWD_PATTERN = /\/\.itsybitsy\/agents\/([^/]+)\/repo(\/|$)/;
 export const AGENT_WORKTREE_PATTERN = /\/\.itsybitsy\/agents\/[^/]+\/repo(\/|$)/;
+export const isAgentLaunchCommand = (command: string): boolean => /\.itsybitsy\/agents\/[^/]+\/(?:start|resume)\.sh\b/.test(command);
 export const matchWorktreePath = (path: string): RegExpMatchArray | null => path.match(AGENT_CWD_PATTERN);
 export const matchExactWorktree = (path: string): RegExpMatchArray | null => path.match(/\/\.itsybitsy\/agents\/[^/]+\/repo$/);
 export const matchWorktreeRepo = (path: string): RegExpMatchArray | null => path.match(/^(.+?)\/\.itsybitsy\/agents\/[^/]+\/repo(?:\/|$)/);
@@ -54,3 +59,16 @@ export const agentDirSuffix = (id: string): string => `/.itsybitsy/agents/${id}`
 export const isExactAgentDir = (path: string): boolean => path.startsWith("/") && /\/\.itsybitsy\/agents\/[^/]+$/.test(path);
 export const containsRuntimeDir = (path: string): boolean => path.includes("/.itsybitsy/");
 export const registeredAgentsPrefix = (repo: string): string => `${repo}${repo.endsWith("/") ? "" : "/"}${RUNTIME_DIR_NAME}/agents/`;
+
+// Static policy anchors. Building a profile or hook table must never open them.
+export function transferStagingPaths(): string[] {
+  const leaf = "itsybitsy-staging-" + process.getuid!();
+  return [join("/private/tmp", leaf), join("/tmp", leaf)];
+}
+export function transferStagingRoot(): string {
+  return transferStagingPaths()[process.platform === "darwin" ? 0 : 1]!;
+}
+
+// Both aliases are static: profile generation must not probe a delivered path.
+export const deliveredAttachmentPattern = "^/(private/)?tmp/itsybitsy-attachments-[^/]*(/|$)";
+export const deliveredAttachmentPath = new RegExp(deliveredAttachmentPattern, "i");

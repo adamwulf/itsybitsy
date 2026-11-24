@@ -9,16 +9,22 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { resetUserHome, setUserHome } from "../home";
 import { makeAgent, waitFor } from "../test-utils";
 import { loadOrCreateIdentity } from "./identity";
 import { loadIroh, type Iroh } from "./iroh";
+import { listeningOrThrow } from "./test-pair-transport";
 import { generatePairCode } from "./pair-code";
 import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer-link";
 import type { RemoteSpawnDeps } from "./new-agent";
+import { createMessageReceiver } from "./receive-message";
+import { spawnCtx as paneProbe } from "../tmux-poller";
+import { readOutbox } from "../outbox";
+import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
+import { makeSpawnResult } from "../test-utils";
 import { PeerService } from "./service";
 import { addPeer, readPeers, removePeer, shortPeerId } from "./store";
 
@@ -29,6 +35,8 @@ const services: PeerService[] = [];
 afterEach(async () => {
   for (const service of services.splice(0)) await service.shutdown();
   resetUserHome();
+  resetSendSpawnRunner();
+  paneProbe.reset();
   for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true });
 });
 
@@ -75,9 +83,14 @@ function makeNetwork(iroh: Iroh) {
     const id = (await inHome(home, loadOrCreateIdentity)).id;
     const logs: string[] = [];
     let snapshots = 0;
+    const receive = createMessageReceiver(line => logs.push(line), () => {}, Date.now, 4096, { tempDir: home, hasFreeSpace: async () => true });
+
     const service = new PeerService({
       remoteStartDenial: null,
       remoteSpawn,
+      receiveMessage: (header, peerId, _peerName, body, options) => inHome(home, () =>
+        receive(header, peerId, async () => (await readPeers()).find(p => p.id === peerId)?.name ?? null, body, options)),
+
       captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
@@ -122,6 +135,12 @@ async function pairBoth(a: Side, b: Side): Promise<void> {
   await inHome(b.home, () => addPeer({ id: a.id, name: "A" }));
 }
 
+async function bootPair(a: Side, b: Side): Promise<void> {
+  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  expect(listeningOrThrow(a.service)).toBe(true);
+  expect(listeningOrThrow(b.service)).toBe(true);
+}
+
 const link = (side: Side) => side.service.view().links[0];
 
 test("each side binds at boot and its poller fetches the other's snapshot, with exactly the allowed fields", async () => {
@@ -132,7 +151,7 @@ test("each side binds at boot and its poller fetches the other's snapshot, with 
   const b = await net.makeSide("b", bAgents);
   await pairBoth(a, b);
 
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   expect(a.service.view().status).toEqual({ kind: "listening" });
   expect(b.service.view().status).toEqual({ kind: "listening" });
   await waitFor(() => link(a)?.connected === true && link(b)?.connected === true, { message: "both polled", timeoutMs: 10_000 });
@@ -156,7 +175,7 @@ test("an id not in peers.json is closed on the peer ALPN before anything is read
   const b = await net.makeSide("b", [localAgent("agent-b1")]);
   // B lists nobody, so it binds when its dialog opens rather than at boot.
   b.service.openDialog();
-  await waitFor(() => b.service.view().status.kind === "listening", { message: "B listening", timeoutMs: 10_000 });
+  await waitFor(() => listeningOrThrow(b.service), { message: "B listening", timeoutMs: 10_000 });
 
   const stranger = await iroh.Endpoint.bind({
     secretKey: iroh.SecretKey.generate().toBytes(),
@@ -188,7 +207,7 @@ test("after the responder removes a peer, the next request on the existing conne
   const a = await net.makeSide("a", []);
   const b = await net.makeSide("b", [localAgent("agent-b1")]);
   await pairBoth(a, b);
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
   const list = link(a)!.agents;
   expect(b.logs).toContain(`peer link: ${shortPeerId(a.id)} connected`);
@@ -212,7 +231,7 @@ test("a trusted loopback new-agent stream starts the stubbed agent and returns i
   const a = await net.makeSide("a", []);
   const b = await net.makeSide("b", [], { listSpawnableTypes, listRepos: async () => [{ name: "App", path: "/b/app" }], newAgent, notice });
   await pairBoth(a, b);
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
   const prompt = "read this ".repeat(800);
   expect(await a.service.startRemoteAgent(b.id, { repo: "app", type, prompt })).toBe("worker-23");
@@ -227,8 +246,90 @@ test("reads the paired machine's system coordinator over a real loopback connect
   const a = await net.makeSide("a", []);
   const b = await net.makeSide("b", []);
   await pairBoth(a, b);
-  await Promise.all([a.service.bootIfPaired(), b.service.bootIfPaired()]);
+  await bootPair(a, b);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
   expect(await a.service.fetchCoordinatorPane(b.id)).toEqual({ state: "running", text: "b coordinator" });
   expect(b.logs.some(line => line.includes("read the system coordinator pane"))).toBe(true);
+});
+
+test("agents send text and two files in both directions over real paired endpoints", async () => {
+  const net = makeNetwork(await loadIroh());
+  const a = await net.makeSide("a", [localAgent("alice")]);
+  const b = await net.makeSide("b", [localAgent("bob")]);
+  setSendSpawnRunner(() => makeSpawnResult());
+  paneProbe.set(() => makeSpawnResult(0, "0"));
+  for (const [side, agent] of [[a, "alice"], [b, "bob"]] as const) {
+    const repo = join(side.home, "app");
+    const dir = join(repo, ".itsybitsy", "agents", agent);
+    await Bun.write(join(side.home, ".itsybitsy/machine-name"), agent);
+    await Bun.write(join(side.home, ".itsybitsy", "repos.json"), JSON.stringify({ version: 1, repos: [{ path: repo, name: "app" }] }));
+    await Bun.write(join(dir, "meta.json"), JSON.stringify(localAgent(agent, { tmux_session: "ib-" + agent }).meta));
+    await Bun.write(join(dir, "meta.transient.json"), JSON.stringify({
+      watchdog_pid: process.pid, updated_at_ms: Date.now(), tmux_compacting: false, tmux_rate_limited: false, has_background_tasks: false,
+    }));
+  }
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected && !!link(b)?.connected, { message: "both connected", timeoutMs: 10_000 });
+  for (const [sender, recipient, from, to] of [[a, b, "A/app/alice", "bob"], [b, a, "B/app/bob", "alice"]] as const) {
+    const id = crypto.randomUUID();
+    const filesDir = join(sender.home, "staged");
+    const files = [];
+    for (const [index, name] of ["one.txt", "two.txt"].entries()) {
+      const content = from + "/" + name;
+      await Bun.write(join(filesDir, String(index)), content);
+      files.push({ name, spellings: ["./" + name], size: content.length, sha256: new Bun.CryptoHasher("sha256").update(content).digest("hex") });
+    }
+    expect(await sender.service.sendRemoteMessage(recipient.id, {
+      op: "send", from: { kind: "agent", id: from }, id, target: { kind: "agent", repo: "app", agent: to }, message: "read ./one.txt ./two.txt", files,
+    }, "handoff", { filesDir })).toBe(id);
+    const queued = await readOutbox(join(recipient.home, ".itsybitsy", "agents", to));
+    expect(queued).toMatchObject([{ fromAgent: from, noPassthrough: true }]);
+    const [body, , heading, first, second] = queued[0]!.message.split("\n");
+    const paths = [first!, second!].map(line => line.split(" → ")[1]!);
+    const root = dirname(dirname(paths[0]!));
+    expect(root).toStartWith(join(recipient.home, "itsybitsy-attachments-"));
+    try {
+      expect(body).toBe("read " + paths.join(" "));
+      expect(heading).toBe("Attachments copied to this machine:");
+      for (const [index, path] of paths.entries()) {
+        expect(path).toBe(join(root, String(index), files[index]!.name));
+        expect(await Bun.file(path).text()).toBe(from + "/" + files[index]!.name);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("a refusal preserves the shared connection for the next exchange", async () => {
+  const net = makeNetwork(await loadIroh());
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", []);
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  const connection = a.service["poller"].connectedConnection(b.id)!;
+  const filesDir = join(a.home, "refused");
+  await Bun.write(join(filesDir, "0"), "a");
+  const file = { name: "one", size: 1, sha256: new Bun.CryptoHasher("sha256").update("a").digest("hex"), spellings: ["./one"] };
+  await expect(a.service.sendRemoteMessage(b.id, { op: "send", id: crypto.randomUUID(), from: { kind: "user" },
+    target: { kind: "agent", agent: "missing" }, message: "hello", files: [file] }, "handoff", { filesDir })).rejects.toThrow("not found");
+  expect(await a.service.fetchCoordinatorPane(b.id)).toMatchObject({ text: "b coordinator" });
+  expect(a.service["poller"].connectedConnection(b.id)).toBe(connection);
+});
+
+test("an agents poll during header saturation receives busy and stays connected", async () => {
+  const net = makeNetwork(await loadIroh());
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", []);
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  const connection = a.service["poller"].connectedConnection(b.id)!;
+  const streams = await Promise.all(Array.from({ length: 8 }, () => connection.openBi()));
+  try {
+    for (const stream of streams) await stream.writeAll(Uint8Array.of(0));
+    await waitFor(() => link(a)?.lastError === "busy, try again");
+    expect(link(a)?.connected).toBe(true);
+    expect(a.service["poller"].connectedConnection(b.id)).toBe(connection);
+  } finally { await Promise.all(streams.map(s => s.cancel())); }
 });

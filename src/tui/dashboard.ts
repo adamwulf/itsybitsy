@@ -1,3 +1,11 @@
+import { inspectTransferDirectory, makeOutgoingDirectory } from "../peers/transfer-owner";
+import { watcherTmpReservations } from "../peers/attachment-space";
+import { join } from "node:path";
+import { rm } from "node:fs/promises";
+import { dashboardAttachmentPaths } from "../peers/dashboard-attachments";
+import { remoteAttachmentStage } from "../peers/remote-attachments";
+import { repoRowKey } from "./row-keys";
+import { remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
  * Composes AgentTree, TmuxPane, RightPane, StatusBar, and dialog system.
@@ -93,6 +101,8 @@ import {
 } from "./widths";
 import { cancelPaste } from "./clipboard";
 import type { LayoutState } from "./layout";
+import { textHeader } from "../peers/peer-outbox";
+import type { SendTarget } from "../peers/send-frame";
 import { InputFieldComponent } from "./input-field";
 import { pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
 import { sendStagedMessage } from "./message-send";
@@ -427,15 +437,20 @@ export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 export function remoteCenterText(entry: RemoteEntry): string {
   switch (entry.kind) {
     case "remote-coordinator":
-      return `System coordinator on ${entry.peerName} (read-only)`;
+      return `System coordinator on ${entry.peerName} (output pane is read-only)`;
     case "remote-agent":
-      return `Remote agent on ${entry.peerName} (read-only)`;
+      return `Remote agent on ${entry.peerName} (output pane is read-only)`;
     case "remote-repo-header":
       return `Remote repo on ${entry.peerName} (read-only)`;
   }
 }
 
 /** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
+function remoteMessageTarget(entry: RemoteEntry | null): SendTarget | undefined {
+  if (entry?.kind === "remote-coordinator") return { kind: "system" };
+  if (entry?.kind === "remote-agent") return { kind: "agent", repo: entry.remote.repoRegistryName, agent: entry.remote.id };
+}
+
 function remoteTitle(entry: RemoteEntry): string {
   switch (entry.kind) {
     case "remote-coordinator":
@@ -536,7 +551,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll" : "p/n: pane"}    1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "(read-only remote agent)"}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -640,7 +655,7 @@ class DialogOverlayComponent implements Component {
       case "input": {
         return {
           title: dialog.prompt,
-          contentLines: [truncateToWidth(`> ${dialog.value}█`, innerWidth, "")],
+          contentLines: [...(dialog.hint ? wordWrapLines(dialog.hint, innerWidth) : []), truncateToWidth(`> ${dialog.value}█`, innerWidth, "")],
         };
       }
       case "add-permission": {
@@ -876,6 +891,8 @@ export class DashboardComponent implements Component {
     const repoPath = this.agentTree.selectedRepoPath ?? (this.agentTree.selectedAgent?.repoPath ?? null);
     return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
   }
+  private selectedReceipt: string | undefined;
+  private pendingRemoteSends = new Map<string, { id: string; peerId: string; target: SendTarget; label: string; bytes: number; total?: number; controller: AbortController; done: Promise<void> }>();
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
   private usageTimer: ReturnType<typeof setInterval> | null = null;
@@ -1151,6 +1168,11 @@ export class DashboardComponent implements Component {
     this.inputField.onSubmit = (text: string) => {
       const agent = this.agentTree.selectedAgent;
       const trimmed = text.trim();
+      const remote = this.remoteSelection;
+      const target = remoteMessageTarget(remote);
+      if (remote && remote.kind !== "remote-repo-header" && target && trimmed) {
+        return this.submitRemoteMessage(remote, target, trimmed);
+      }
       if (!agent || !trimmed) return;
       return promptAndStageAttachmentsIfNeeded({
         text: trimmed,
@@ -1491,7 +1513,7 @@ export class DashboardComponent implements Component {
     if (peerCoordinator) {
       this.focusManager.skipTargets.add("right-pane");
       const focus = this.focusManager.current();
-      if (focus === "right-pane" || focus === "active-agent") this.focusManager.setFocus("active-agent");
+      if (focus === "right-pane") this.focusManager.setFocus("active-agent");
     } else {
       this.focusManager.skipTargets.delete("right-pane");
     }
@@ -1897,14 +1919,18 @@ export class DashboardComponent implements Component {
   /** Poll updates can affect the unified tree, a remote selection, and the Peers tab. */
   setPeerService(service: PeersDialogService): void {
     this.peerService = service;
+    let receipts = JSON.stringify(service.view().incoming ?? []);
     service.onChange(() => {
+      const next = JSON.stringify(service.view().incoming ?? []);
+      const receiptsChanged = next !== receipts;
+      receipts = next;
       const changed = this.refreshPeerRepos();
       this.syncRemotePane();
       const dialog = this._dialog;
       if (dialog?.type === "setup" && dialog.peers) {
         syncPeersDialog(dialog.peers);
         this.tui?.requestRender();
-      } else if (changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form") {
+      } else if (receiptsChanged || changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form") {
         if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
         this.tui?.requestRender();
       }
@@ -1961,6 +1987,88 @@ export class DashboardComponent implements Component {
     return this.activeSelectionSource === "agents" ? this.agentTree.selectedRemote : null;
   }
 
+  focusRemoteMessage(): void {
+    if (this.rightPane.mode === "TREE") this.jumpToMode(PANE_MODES[DEFAULT_MODE_INDEX]!);
+    this.focusManager.setFocus("active-agent");
+    this.focusManager.setSubFocus("input");
+    this.tui?.requestRender();
+  }
+
+  private escapeSend() {
+    if (!this.pendingRemoteSends.size || this._dialog) return;
+    if (this.selectedReceipt && this.peerService?.view().incoming?.some(row => row.id === this.selectedReceipt)) return;
+    const selected = this.remoteSelection;
+    const target = remoteMessageTarget(selected);
+    if (!selected || selected.kind === "remote-repo-header" || !target) return;
+    return [...this.pendingRemoteSends.values()].reverse().find(send =>
+      send.peerId === selected.peerId && JSON.stringify(send.target) === JSON.stringify(target));
+  }
+
+  async stopRemoteSends() {
+    const sends = [...this.pendingRemoteSends.values()];
+    for (const { controller } of sends) controller.abort(new Error("Dashboard shutting down"));
+    await Promise.allSettled(sends.map(send => send.done));
+  }
+
+  async shutdownPeerTransfers(service: Pick<PeerService, "shutdown">) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([this.stopRemoteSends(), service.shutdown()]),
+        new Promise<void>(resolve => { timer = setTimeout(resolve, 2000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+
+  private async submitRemoteMessage(remote: Exclude<RemoteEntry, { kind: "remote-repo-header" }>, target: SendTarget, text: string): Promise<boolean> {
+    const service = this.peerService;
+    const header = textHeader(target, text, { kind: "user" });
+    const label = remoteTitle(remote);
+    const controller = new AbortController();
+    const done = Promise.withResolvers<void>();
+    const pending = { id: header.id, peerId: remote.peerId, target: header.target, label, controller, done: done.promise, bytes: 0, total: undefined as number | undefined };
+    let staging: string | undefined;
+    try {
+      if (!service) throw new Error("Remote messaging is unavailable");
+      if (service.remoteStartDenial !== null) throw new Error(remoteSendDenial(service.remoteStartDenial));
+      this.pendingRemoteSends.set(header.id, pending);
+      this.invalidate();
+      this.tui?.requestRender();
+      const repo = remote.kind === "remote-agent" ? remote.remote : undefined;
+      const local = repo && this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo.repoRegistryName));
+      const { paths, noPassthrough } = await dashboardAttachmentPaths(text, repo?.repoPath, local?.path);
+      if (noPassthrough) header.noPassthrough = true;
+      controller.signal.throwIfAborted();
+      let filesDir: string | undefined;
+      if (paths.length) {
+        staging = await makeOutgoingDirectory();
+        filesDir = join(staging, "files");
+        header.files = await remoteAttachmentStage(paths, { kind: "user" }, controller.signal, undefined, watcherTmpReservations)(filesDir);
+        pending.total = header.files.reduce((sum, file) => sum + file.size, 0);
+        const { owner, state } = await inspectTransferDirectory(staging);
+        if (state !== "verified-live" || owner?.pid !== process.pid) throw new Error("Cannot verify the outgoing attachment owner");
+      }
+      await service.sendRemoteMessage(remote.peerId, header, "dashboard", {
+        filesDir, signal: controller.signal, onProgress: bytes => {
+          pending.bytes = bytes;
+          this.invalidate();
+          this.tui?.requestRender();
+        },
+      });
+      this.setNotice(`Sent to ${label}`, "info");
+      return true;
+    } catch (err) {
+      this.setNotice(err instanceof Error ? err.message : String(err), "error");
+      return false;
+    } finally {
+      try { if (staging) await rm(staging, { recursive: true, force: true }); }
+      catch (err) { this.addError(`Outgoing attachment cleanup failed: ${err}`); }
+      finally { this.pendingRemoteSends.delete(header.id); done.resolve(); }
+      this.invalidate();
+      this.tui?.requestRender();
+    }
+  }
+
   /**
    * The read-only guard (SPEC §20.5): while the effective selection is a
    * remote row, refuse `key` with a notice unless isRemoteAllowedKey
@@ -1977,6 +2085,7 @@ export class DashboardComponent implements Component {
       this.setNotice("view mode is fixed for remote coordinators", "info");
       return true;
     }
+    if (key === "s" && remoteMessageTarget(remote)) return false;
     if (remote === null || isRemoteAllowedKey(key)) return false;
     if (remote.kind === "remote-coordinator" && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
@@ -2546,7 +2655,9 @@ export class DashboardComponent implements Component {
 
     // Determine the effective key for change detection: the agent's fully
     // qualified id, so the same bare id in another repo is a change too.
-    const newKey = isCoordinator ? "__coordinator__" : (selected ? this.agentTree.agentKey(selected) : null);
+    const remoteDraft = remote?.kind === "remote-agent" ? `${remote.peerId}/${remote.remote.repoRegistryName}/${remote.remote.id}`
+      : peerCoordinator ? remote.peerId + "/@system" : null;
+    const newKey = remoteDraft ?? (isCoordinator ? "__coordinator__" : (selected ? this.agentTree.agentKey(selected) : null));
     if (newKey !== this.currentAgentKey) {
       this.currentAgentKey = newKey;
       this.setTerminalTitle(isCoordinator ? "ib: coordinator" : (selected ? `ib: ${selected.id}` : "ib"));
@@ -3001,14 +3112,33 @@ export class DashboardComponent implements Component {
     // Dialog input takes priority
     if (this._dialog && handleDialogInput(this, data)) return;
 
-    // The read-only guard (SPEC §20.5): ONE check, ahead of every key handler,
-    // so a key added later is refused on a remote row by default.
-    if (this.refuseOnRemoteRow(data)) return;
+    const incoming = this.peerService?.view().incoming ?? [];
+    if (incoming.length && matchesKey(data, Key.ctrl("t"))) {
+      const index = incoming.findIndex(row => row.id === this.selectedReceipt);
+      this.selectedReceipt = incoming[(index + 1) % incoming.length]!.id;
+      this.invalidate();
+      this.tui?.requestRender();
+      return;
+    }
+    if (incoming.some(row => row.id === this.selectedReceipt) && matchesKey(data, Key.escape)) {
+      this.peerService?.cancelReceipt?.(this.selectedReceipt!);
+      this.selectedReceipt = undefined;
+      return;
+    }
+    this.selectedReceipt = undefined;
+    if (matchesKey(data, Key.escape)) {
+      const send = this.escapeSend();
+      if (send) {
+        send.controller.abort(new Error("Send cancelled"));
+        return;
+      }
+    }
 
     // When active-agent panel is focused, use three-level sub-focus: pane → input → send.
     // In 'pane' sub-focus, dashboard shortcuts work normally. In 'input', the input field
     // captures all input. In 'send', Enter submits and other keys fall through. (SPEC §13.4)
-    if (this.focusManager.current() === "active-agent" && this.agentTree.selectedAgent) {
+    const editingRemote = this.rightPane.mode !== "TREE" && !!remoteMessageTarget(this.remoteSelection);
+    if (this.focusManager.current() === "active-agent" && (editingRemote || (!this.remoteSelection && this.agentTree.selectedAgent))) {
       const sf = this.focusManager.subFocus;
 
       // Tab navigation through sub-focus states
@@ -3068,6 +3198,10 @@ export class DashboardComponent implements Component {
 
       // Pane sub-focus and Send sub-focus: fall through to normal dashboard key handling
     }
+
+    // Editor keystrokes above are consumed as text. Every action, including the
+    // fallthrough from Send sub-focus, must still pass the remote-row guard.
+    if (this.refuseOnRemoteRow(data)) return;
 
     // The coordinator editor belongs only to the effective local coordinator selection.
     if (this.focusManager.current() === "coordinator" && this.activeSelectionSource === "agents"
@@ -3702,7 +3836,17 @@ export class DashboardComponent implements Component {
     // Compute available height for the main content area.
     // Chrome lines: header(1) + main title separator(1) +
     //               bottom separator(1) + status bar(2) = 5.
-    const chromeLines = 5;
+    const cancellableSend = this.escapeSend();
+    for (const send of this.pendingRemoteSends.values()) {
+      const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
+      lines.push(truncateToWidth(`sending to ${send.label}…${progress}${send === cancellableSend ? "  Esc: cancel" : ""}`, width, "…"));
+    }
+    const incoming = this.peerService?.view().incoming ?? [];
+    for (const row of incoming) {
+      const selected = row.id === this.selectedReceipt;
+      lines.push(truncateToWidth(`${selected ? "›" : " "} receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${selected ? "Esc: cancel" : "Ctrl-T: select"}`, width, "…"));
+    }
+    const chromeLines = 5 + this.pendingRemoteSends.size + incoming.length;
     const availableHeight = Math.max(5, terminalRows - chromeLines);
 
     // Width math comes from the widths module — never inline.
@@ -3831,12 +3975,16 @@ export class DashboardComponent implements Component {
       this.coordinatorInputField.active = false;
       this.systemDashboard.displayHeight = availableHeight;
       mainLines = [mainTitleSep, ...this.systemDashboard.render(mainWidth)];
-    } else if (remoteCoordinator) {
-      mainLines = [mainTitleSep, ...this.remotePane.render(mainWidth, availableHeight)];
     } else if (remoteView) {
-      // A remote row: placeholders only. No tmux pane, right pane or input
-      // field renders, so nothing local is drawn for (or loaded by) it.
-      mainLines = [mainTitleSep, ...renderRemotePanes(remote, mainWidth, leftPaneW, availableHeight)];
+      const acceptsText = remote.kind !== "remote-repo-header";
+      const focused = this.focusManager.current() === "active-agent";
+      this.inputField.active = acceptsText && focused && this.focusManager.subFocus !== "pane";
+      this.inputField.setFocusState(this.focusManager.subFocus === "send" ? "send" : "text");
+      const input = acceptsText ? this.inputField.render(mainWidth) : [];
+      const height = Math.max(0, availableHeight - input.length);
+      const body = remoteCoordinator ? this.remotePane.render(mainWidth, height)
+        : renderRemotePanes(remote, mainWidth, leftPaneW, height);
+      mainLines = [mainTitleSep, ...body, ...input];
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
       // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set
@@ -4452,10 +4600,7 @@ export async function launchDashboard(): Promise<void> {
     // dialog bound it) and release the endpoint lock. Raced like Telegram:
     // under the n0 preset close() can take about a second, and a stuck one
     // must not hold up the exit.
-    const stopPeers = Promise.race([
-      peerService.shutdown(),
-      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-    ]);
+    const stopPeers = dashboard.shutdownPeerTransfers(peerService);
     // Flush layout save to disk before exiting, then release coordinator
     Promise.all([
       flushPendingSave().catch(() => { /* ignore write errors on exit */ }),

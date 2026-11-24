@@ -41,7 +41,7 @@ export const defaultMachineNameDeps: MachineNameDeps = {
  * `-`, trimmed, and cut to {@link MAX_MACHINE_NAME} characters. May be empty.
  */
 export function sanitizeMachineName(raw: string): string {
-  const cleaned = raw.replace(/[\p{Cc}\p{Cf}]/gu, "").replace(/\//g, "-").trim();
+  const cleaned = raw.replace(/[\p{Cc}\p{Cf}]/gu, "").replace(/\//g, "-").trim().replace(/^[@\s]+/u, "");
   const name = Array.from(cleaned).slice(0, MAX_MACHINE_NAME).join("").trimEnd();
   return name === "." || name === ".." ? "" : name;
 }

@@ -1,3 +1,6 @@
+import { waitForIO } from "./send-frame";
+import { transferStagingRoot } from "../runtime-names";
+import { finishRecovery, sweepOutgoingDirectories } from "./transfer-owner";
 /**
  * The iroh endpoint inside `ib watch` (docs/plans/iroh-peering.md, "Process
  * model" and "Reconnection"; SPEC.md §20.3), the one pairing session it runs
@@ -12,17 +15,16 @@
  *   opens the dialog never loads the addon or touches the network. Before
  *   binding it takes the endpoint lock; when another live `ib watch` holds it,
  *   it does not bind and reports "peering disabled: ib watch pid N owns the
- *   endpoint". Each later dialog open retries, so peering moves here once the
- *   owner exits.
+ *   endpoint". A disabled watcher retries the lock every 30 s and whenever
+ *   the Peers dialog opens.
  * - After a failure (a bind that fails, or the accept loop failing once its
  *   endpoint is closed), the service rebinds on its own through the same
  *   path, after 5 s, then 10, 20, 40 and 60 s, staying at 60 s; a rebind
  *   whose endpoint stays up for 60 s resets that, while one whose accept
  *   loop dies sooner is one more failure, so a flapping endpoint backs off
  *   too. It retries only while something needs the endpoint:
- *   `peers.json` lists a peer, or the Peers tab is open. It stops for good
- *   when another live `ib watch` holds the lock ("disabled"; the lock is never
- *   polled), and on shutdown. Opening the dialog while a retry is pending
+ *   `peers.json` lists a peer, or the Peers tab is open. A live lock holder switches the watcher to the 30 s
+ *   lock poll. Shutdown stops both retry paths. Opening the dialog while a retry is pending
  *   binds at once, in place of the retry. `binding` is held from the start of
  *   a bind (or of a failed endpoint's close) until its retry is armed, so two
  *   binds never run and each failure leaves at most one endpoint and one lock.
@@ -61,7 +63,11 @@
  * dialog shows them even when peering is disabled or the addon fails.
  */
 
-import { remoteStartDenialAtStartup } from "./remote-start-caller";
+import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
+import type { SendHeader } from "./send-frame";
+import { cleanRemoteText, requestSend } from "./peer-link";
+import { createMessageReceiver, targetLabel } from "./receive-message";
+import { remoteSendDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
@@ -101,6 +107,10 @@ import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
 // ---------------------------------------------------------------------------
 
 export interface ServiceStream {
+  write(bytes: Uint8Array): Promise<number>;
+  resetSending(): Promise<void>;
+  stopReceiving(): Promise<void>;
+  read(limit: number): Promise<Uint8Array>;
   writeAll(bytes: Uint8Array): Promise<void>;
   finish(): Promise<void>;
   readToEnd(limit: number): Promise<Uint8Array>;
@@ -128,10 +138,14 @@ export interface ServiceEndpoint {
 }
 
 export interface PeerServiceDeps {
+  notice?(message: string): void;
+  pollOutbox?: typeof pollPeerOutbox;
+  recoverTransfers?(): Promise<void>;
+  receiveMessage?: ReturnType<typeof createMessageReceiver>;
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   remoteStartDenial: string | null | Promise<string | null>;
   remoteSpawn?: RemoteSpawnDeps;
-  writeRemoteAgents?(states: PeerLinkState[]): void;
+  writeRemoteAgents?(states: PeerLinkState[], generation: string): void;
   renewLease?(): Promise<void>;
   acquireLock(): Promise<EndpointLockResult>;
   releaseLock(): Promise<unknown>;
@@ -156,8 +170,15 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup()): PeerServiceDeps {
+export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = transferStagingRoot()): PeerServiceDeps {
+  const poll = createPeerOutboxPoll();
   return {
+    notice,
+    pollOutbox: poll,
+    recoverTransfers: async () => {
+      await finishRecovery([sweepOutgoingDirectories(recoveryRoot), poll.recover()]);
+    },
+    receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,
     captureCoordinator: async () => {
       const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log });
@@ -238,7 +259,10 @@ export interface PeerSessionView {
   stage: PairStage;
 }
 
+export interface IncomingTransfer { id: string; label: string; bytes: number; total: number }
+
 export interface PeerServiceView {
+  incoming?: IncomingTransfer[];
   status: EndpointStatus;
   /** This install's id, once loaded. */
   selfId: string | null;
@@ -265,6 +289,10 @@ function plural(count: number, noun: string): string {
 /** Adapt a wrapper connection to the pair protocol's seam. */
 export function toPairConnection(conn: ServiceConnection): PairConnection {
   const stream = (s: ServiceStream): PairStream => ({
+    read: (limit) => s.read(limit),
+    write: bytes => s.write(bytes),
+    resetSending: () => s.resetSending(),
+    stopReceiving: () => s.stopReceiving(),
     writeAll: (bytes) => s.writeAll(bytes),
     finish: () => s.finish(),
     cancel: () => s.cancel(),
@@ -313,6 +341,13 @@ export class PeerService {
   /** Cancels the check that a rebind has stayed up for PEER_RETRY_STABLE_MS; null when none is armed. */
   private cancelStableTimer: (() => void) | null = null;
   private lockHeld = false;
+  private lockGeneration?: string;
+  private recovery?: Promise<void>;
+  private recoverTransfers(): Promise<void> {
+    if (!this.lockHeld || this.shuttingDown || !this.deps.recoverTransfers) return Promise.resolve();
+    return this.recovery ??= this.deps.recoverTransfers().catch(err => this.deps.log(`transfer cleanup: ${errorDetail(err)}`))
+      .finally(() => { this.recovery = undefined; });
+  }
   private shuttingDown = false;
   private dialogOpen = false;
   private selfId: string | null = null;
@@ -324,6 +359,17 @@ export class PeerService {
   private readonly listeners = new Set<() => void>();
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
+  private readonly outboxPolls = new Set<Promise<void>>();
+  private recoveryTimer?: ReturnType<typeof setInterval>;
+  private outboxOwner?: AbortController;
+  private outboxTimer?: ReturnType<typeof setInterval>;
+  private readonly receipts = new Map<string, { row?: IncomingTransfer; controller: AbortController; done: Promise<void> }>();
+  cancelReceipt(id: string) {
+    const receipt = this.receipts.get(id);
+    if (receipt?.row) receipt.controller.abort(new Error("Receive cancelled"));
+  }
+
+  private readonly headerReaders = new Set<import("./pairing").PairStream>();
   private readonly paneReaders = new Set<string>();
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
@@ -363,7 +409,7 @@ export class PeerService {
 
   private publishRemoteAgents(): void {
     try {
-      this.deps.writeRemoteAgents?.(this.poller.states());
+      if (this.lockHeld && this.lockGeneration) this.deps.writeRemoteAgents?.(this.poller.states(), this.lockGeneration);
     } catch (err) {
       this.deps.log(`peering: could not write remote-agents.json: ${errorDetail(err)}`);
     }
@@ -389,6 +435,7 @@ export class PeerService {
         ? null
         : { id: active.id, role: active.session.role, peerId: active.session.peerId, stage: active.session.stage },
       links: this.poller.states(),
+      ...(this.receipts.size && { incoming: Array.from(this.receipts.values()).flatMap(entry => entry.row ? [{ ...entry.row }] : []) }),
     };
   }
 
@@ -400,22 +447,26 @@ export class PeerService {
    */
   async bootIfPaired(): Promise<void> {
     if (this.shuttingDown) return;
-    let peers: Peer[];
-    try {
-      peers = await this.deps.readPeers();
-      this.peers = peers;
-      this.peersError = null;
-    } catch (err) {
-      this.peersError = errorDetail(err);
-      this.deps.log(`peering: not binding at boot: ${this.peersError}`);
-      this.notify();
-      return;
+    if (this.deps.recoverTransfers && !this.recoveryTimer) {
+      this.recoveryTimer = setInterval(() => {
+        if (this.endpoint) void this.recoverTransfers();
+        else if (!this.cancelRetryTimer) void this.bootIfPaired();
+      }, 30_000);
     }
-    this.notify();
-    if (peers.length === 0) return;
-    this.deps.log(`peering: binding at boot for ${peers.length} paired peer${peers.length === 1 ? "" : "s"}`);
-    this.startBind();
+    if (this.endpoint) { await this.recoverTransfers(); return; }
+    if (!this.deps.recoverTransfers && (!await this.readPeersAtBoot() || !this.peers.length)) return;
+    this.startBind(false, !!this.deps.recoverTransfers);
     if (this.binding !== null) await this.binding;
+  }
+
+  private async readPeersAtBoot() {
+    await this.refreshPeers();
+    if (this.peersError) {
+      this.deps.log(`peering: not binding at boot: ${this.peersError}`);
+      return false;
+    }
+    if (this.peers.length) this.deps.log(`peering: binding at boot for ${this.peers.length} paired peer${this.peers.length === 1 ? "" : "s"}`);
+    return true;
   }
 
   /**
@@ -435,11 +486,11 @@ export class PeerService {
    * which it replaces. `retry` marks the retry timer's bind, which first
    * checks that something still needs the endpoint.
    */
-  private startBind(retry = false): void {
+  private startBind(retry = false, readPeersAtBoot = false): void {
     const kind = this.status.kind;
     if (this.shuttingDown || this.binding !== null || kind === "starting" || kind === "listening") return;
     this.cancelRetry();
-    this.track(this.bindOrStop(retry));
+    this.track(this.bindOrStop(retry, readPeersAtBoot));
   }
 
   /** Hold `binding` until `work` settles, so no bind starts meanwhile. */
@@ -455,7 +506,7 @@ export class PeerService {
    * outcome asks for: a retry after a failure, none when another `ib watch`
    * owns the endpoint. The retry timer's bind first re-reads `peers.json`.
    */
-  private async bindOrStop(retry: boolean): Promise<void> {
+  private async bindOrStop(retry: boolean, readPeersAtBoot: boolean): Promise<void> {
     if (retry) {
       const notNeeded = await this.whyNotNeeded();
       if (this.shuttingDown) return;
@@ -464,7 +515,7 @@ export class PeerService {
         return;
       }
     }
-    const outcome = await this.bind();
+    const outcome = await this.bind(readPeersAtBoot);
     if (outcome.kind === "failed") this.retryLater(outcome.failure);
     else if (outcome.kind === "disabled" && this.failures > 0) this.stopRetrying("another ib watch owns the endpoint");
   }
@@ -654,6 +705,61 @@ export class PeerService {
     return this.poller.fetchCoordinatorPane(peerId);
   }
 
+  async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
+    const [header, peer, name, body, options] = args;
+    if (this.shuttingDown) throw new Error("Watcher shutting down");
+    const receive = this.deps.receiveMessage!;
+    const id = crypto.randomUUID();
+    const controller = new AbortController();
+    const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
+    const row = { id, label: cleanRemoteText(label + " → " + targetLabel(header.target)), bytes: 0, total: header.files.reduce((sum, f) => sum + f.size, 0) };
+    const done = Promise.withResolvers<void>();
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await receive(header, peer, name, body, { ...options, signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal, admitted: ownsBody => {
+        if (this.shuttingDown) throw new Error("Watcher shutting down");
+        this.receipts.set(id, { row: ownsBody ? row : undefined, controller, done: done.promise });
+        if (ownsBody) {
+          if (options?.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
+          this.notify();
+        }
+        options?.admitted?.(ownsBody);
+      }, committing: () => {
+        const receipt = this.receipts.get(id);
+        if (receipt?.row) { receipt.row = undefined; this.notify(); }
+        options?.committing?.();
+      }, onProgress: bytes => {
+        row.bytes = bytes;
+        progressTimer ??= setTimeout(() => {
+          progressTimer = undefined;
+          this.notify();
+        }, 100);
+      } });
+    } finally {
+      clearTimeout(progressTimer);
+      const visible = this.receipts.get(id)?.row;
+      this.receipts.delete(id);
+      if (visible) this.notify();
+      done.resolve();
+    }
+  }
+
+  async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
+    if (source === "dashboard") {
+      if (this.remoteStartDenial !== null) throw new Error(remoteSendDenial(this.remoteStartDenial));
+      if (header.from.kind !== "user") throw new Error("Dashboard sends require a user sender");
+    }
+    const peer = await waitForIO({ setTimer: this.deps.setTimer, signal: transfer?.signal }, () => this.peerName(peerId));
+    if (peer === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    const id = await requestSend(conn, header, this.deps.setTimer, transfer);
+    const line = `Sent a message to ${peer}/${targetLabel(header.target)}`;
+    this.deps.log(line);
+    if (source === "handoff") this.deps.notice?.(line);
+    return id;
+  }
+
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
     if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
@@ -702,11 +808,21 @@ export class PeerService {
    */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    clearInterval(this.recoveryTimer);
+    const receipts = [...this.receipts.values()];
+    for (const receipt of receipts) receipt.controller.abort(new Error("Watcher shutting down"));
     this.cancelRetry();
     this.active?.session.cancel();
     this.active = null;
-    if (this.binding !== null) await this.binding;
-    await this.closeEndpoint();
+    this.outboxOwner?.abort(new Error("Watcher shutting down"));
+    const drain = async () => {
+      if (this.binding !== null) await this.binding;
+      await Promise.all([this.closeEndpoint(), Promise.allSettled(receipts.map(entry => entry.done)), Promise.allSettled(this.outboxPolls)]);
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([drain(), new Promise<void>(resolve => { timer = setTimeout(resolve, 1500); })]);
+    } finally { clearTimeout(timer); }
   }
 
   /**
@@ -717,6 +833,8 @@ export class PeerService {
    */
   private async closeEndpoint(logClosed = true): Promise<void> {
     this.cancelStable();
+    clearInterval(this.outboxTimer);
+    this.outboxOwner?.abort(new Error("Endpoint stopped"));
     this.poller.stop();
     const ep = this.endpoint;
     this.endpoint = null;
@@ -725,6 +843,7 @@ export class PeerService {
     } catch (err) {
       this.deps.log(`peering: closing the endpoint failed: ${errorDetail(err)}`);
     } finally {
+      await this.recovery;
       if (this.lockHeld) {
         this.lockHeld = false;
         try {
@@ -761,33 +880,48 @@ export class PeerService {
    * poller. Every failure is shown, leaves the lock released, and is returned
    * for the caller to log once with the retry it arms (retryLater).
    */
-  private async bind(): Promise<BindOutcome> {
+  private async bind(readPeersAtBoot: boolean): Promise<BindOutcome> {
     this.setStatus({ kind: "starting" });
-    let identity: PeerIdentity;
-    try {
-      identity = await this.deps.loadIdentity();
-      this.selfId = identity.id;
-      this.identityError = null;
-    } catch (err) {
-      this.identityError = errorDetail(err);
-      this.setStatus({ kind: "error", message: this.identityError, retryAt: null });
-      return { kind: "failed", failure: `could not load this install's identity: ${this.identityError}` };
-    }
-
     let lock: EndpointLockResult;
     try {
-      lock = await this.deps.acquireLock();
+      lock = this.lockHeld ? { acquired: true, generation: this.lockGeneration } : await this.deps.acquireLock();
     } catch (err) {
       const message = `could not take the endpoint lock: ${errorDetail(err)}`;
       this.setStatus({ kind: "error", message, retryAt: null });
       return { kind: "failed", failure: message };
     }
     if (!lock.acquired) {
+      if (readPeersAtBoot) await this.refreshPeers();
+      if (this.dialogOpen || this.peers.length) {
+        try { this.selfId = (await this.deps.loadIdentity()).id; this.identityError = null; }
+        catch (err) { this.identityError = errorDetail(err); }
+      }
       this.deps.log(`peering disabled: ib watch pid ${lock.ownerPid} owns the endpoint`);
       this.setStatus({ kind: "disabled", ownerPid: lock.ownerPid });
       return { kind: "disabled" };
     }
     this.lockHeld = true;
+    this.lockGeneration = lock.generation;
+    await this.recoverTransfers();
+    if (this.shuttingDown) return { kind: "shutting-down" };
+    const readable = !readPeersAtBoot || await this.readPeersAtBoot();
+    if (!readable || !this.dialogOpen && !this.peers.length) {
+      this.setStatus({ kind: "idle" });
+      return { kind: "bound" };
+    }
+    let identity: PeerIdentity;
+    try {
+      identity = await this.deps.loadIdentity();
+      this.selfId = identity.id;
+      this.identityError = null;
+    } catch (err) {
+      this.lockHeld = false;
+      await this.deps.releaseLock().catch(() => {});
+      this.identityError = errorDetail(err);
+      this.setStatus({ kind: "error", message: this.identityError, retryAt: null });
+      return { kind: "failed", failure: `could not load this install's identity: ${this.identityError}` };
+    }
+
     this.publishRemoteAgents(); // replace any snapshot left by the previous lock owner
     if (lock.takenFromPid !== undefined) {
       this.deps.log(`peering: took over the endpoint lock from pid ${lock.takenFromPid}, which is gone`);
@@ -798,6 +932,7 @@ export class PeerService {
       ep = await this.deps.bindEndpoint(identity.secretKey, [PAIR_ALPN, PEER_ALPN]);
     } catch (err) {
       const message = errorDetail(err);
+      await this.recovery;
       this.lockHeld = false;
       await this.deps.releaseLock().catch(() => {});
       this.setStatus({ kind: "error", message, retryAt: null });
@@ -816,6 +951,23 @@ export class PeerService {
     this.setStatus({ kind: "listening" });
     this.acceptLoopDone = this.acceptLoop(ep);
     this.poller.start();
+    const poll = this.deps.pollOutbox;
+    if (poll) {
+      const owner = this.outboxOwner = new AbortController();
+      const dispatches = new Set<symbol>();
+      this.outboxTimer = setInterval(() => {
+        if (owner.signal.aborted || dispatches.size >= 4) return;
+        const dispatch = Symbol();
+        dispatches.add(dispatch);
+        const dispatchFinished = () => { dispatches.delete(dispatch); };
+        const work = poll((peer, header, transfer) => this.sendRemoteMessage(peer, header, "handoff", {
+          ...transfer, signal: transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal,
+        }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown, dispatchFinished)
+          .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`))
+          .finally(() => { dispatchFinished(); this.outboxPolls.delete(work); });
+        this.outboxPolls.add(work);
+      }, 250);
+    }
     return { kind: "bound" };
   }
 
@@ -875,9 +1027,10 @@ export class PeerService {
           peerName: (id) => this.peerName(id),
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
+          receiveMessage: this.deps.receiveMessage && ((...args) => this.receiveTracked(...args)),
           snapshot: this.deps.snapshot,
           captureCoordinator: this.deps.captureCoordinator,
-          paneReaders: this.paneReaders,
+          paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           log: this.deps.log,
         });
         return;

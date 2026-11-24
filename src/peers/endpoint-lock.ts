@@ -1,33 +1,10 @@
-/**
- * `~/.itsybitsy/peer/endpoint.lock`: one iroh endpoint per machine
- * (docs/plans/iroh-peering.md, "Process model"). Two endpoints with the same
- * key would fight over the relay connection and discovery records, so only the
- * `ib watch` that holds this lock binds one.
- *
- * The lock file holds `<pid> <startEpoch>` and a newline: the owner's pid and
- * its REAL process start time in epoch seconds (selfProcessStartEpochSeconds),
- * the same stamp the lifecycle locks in src/agents.ts use. Not the time of the
- * write: the Peers tab can take the lock hours after `ib watch` started.
- * The lock survives a reboot, so a pid alone is not enough: after an unclean
- * exit, an unrelated process can get the same pid. The owner counts as alive
- * only when isPidAliveSinceUncached accepts its pid AND start time. When a
- * process cannot read its own start time (`ps` denied), it writes the pid
- * alone, and such a lock counts as alive while the pid is.
- *
- * src/peers/service.ts takes it before binding (at boot when peers.json lists
- * a peer, or when the Peers tab first opens) and releases it when `ib watch`
- * exits.
- *
- * Taking over a dead owner's lock follows the outbox lock's steal: remove the
- * lock only while it still holds what we read, then retry the exclusive
- * create, which is the real arbiter. Two processes that read the same dead
- * owner at the same instant could, in a window of microseconds, both end up
- * believing they hold it. Only a human starting two `ib watch` at once over a
- * stale lock could hit that.
- */
-
-import { open, readFile, unlink } from "node:fs/promises";
-import { isPidAliveSinceUncached, isPidAliveCtx, processStartEpochSecondsCtx, selfProcessStartEpochSeconds } from "../agents";
+/** One watcher owns the endpoint and its transfer recovery task. */
+import { randomUUID } from "node:crypto";
+import { flock, LOCK_EX, LOCK_NB } from "../file-lock";
+import { dirname, join } from "node:path";
+import { opendir, open, readFile, link, rename, rm, stat, writeFile, unlink } from "node:fs/promises";
+import { stagingOwnerStart, transferOwnerState } from "./transfer-owner";
+import { isPidAliveCtx, processStartEpochSecondsCtx } from "../agents";
 import { peerEndpointLockFile } from "../runtime-names";
 import { ensurePeerDir } from "./peer-dir";
 
@@ -40,38 +17,32 @@ export interface EndpointLockOwner {
 
 export type EndpointLockResult =
   /** We hold the lock. `takenFromPid` is the dead owner whose lock we took over, if any. */
-  | { acquired: true; takenFromPid?: number }
+  | { acquired: true; takenFromPid?: number; generation?: string }
   /** A live process holds the lock. */
   | { acquired: false; ownerPid: number };
 
-/**
- * A process that loses the exclusive create can read the lock in the moment
- * between the winner's create and its write, and see it empty. Re-read
- * contents that are not an owner this many times, this far apart, before
- * taking the lock over as stale.
- */
-const UNREADABLE_RETRIES = 10;
-const UNREADABLE_DELAY_MS = 20;
-/** Create/take-over rounds before giving up. Each lost round means another process moved first. */
-const MAX_ROUNDS = 5;
-
 /** This process, as a lock owner. */
 export function currentEndpointLockOwner(): EndpointLockOwner {
-  const startEpoch = selfProcessStartEpochSeconds();
-  return startEpoch === undefined ? { pid: process.pid } : { pid: process.pid, startEpoch };
+  const startEpoch = stagingOwnerStart(process.pid);
+  return startEpoch === null ? { pid: process.pid } : { pid: process.pid, startEpoch };
 }
 
 function formatOwner(owner: EndpointLockOwner): string {
   return owner.startEpoch === undefined ? `${owner.pid}\n` : `${owner.pid} ${owner.startEpoch}\n`;
 }
 
-function parseOwner(text: string): EndpointLockOwner | null {
-  const match = /^([1-9][0-9]*)(?: ([1-9][0-9]*))?$/.exec(text.trim());
+function parseOwner(text: string): (EndpointLockOwner & { generation?: string }) | null {
+  const match = /^([1-9][0-9]*)(?: ([1-9][0-9]*))?(?:\n([a-f0-9-]{36}))?$/.exec(text.trim());
   if (!match) return null;
   const pid = Number(match[1]);
   const startEpoch = match[2] === undefined ? undefined : Number(match[2]);
   if (!Number.isSafeInteger(pid) || (startEpoch !== undefined && !Number.isSafeInteger(startEpoch))) return null;
-  return startEpoch === undefined ? { pid } : { pid, startEpoch };
+  return { pid, startEpoch, generation: match[3] };
+}
+
+function sameOwner(text: string | null, self: EndpointLockOwner) {
+  const owner = text === null ? null : parseOwner(text);
+  return owner?.pid === self.pid && owner.startEpoch === self.startEpoch;
 }
 
 /** The lock's contents, or null when it does not exist. */
@@ -88,7 +59,7 @@ async function readLock(path: string): Promise<string | null> {
 export async function renewEndpointLease(): Promise<void> {
   const lock = await open(peerEndpointLockFile(), "r+");
   try {
-    if (await lock.readFile("utf8") === formatOwner(currentEndpointLockOwner())) {
+    if (sameOwner(await lock.readFile("utf8"), currentEndpointLockOwner())) {
       const now = new Date();
       await lock.utimes(now, now);
     }
@@ -96,13 +67,13 @@ export async function renewEndpointLease(): Promise<void> {
 }
 
 /** If a sandbox hides process birth times, a fresh owner heartbeat bounds stale visibility. */
-export async function hasLiveEndpointOwner(snapshotMtime: number, maxLeaseAge: number): Promise<boolean> {
+export async function hasLiveEndpointOwner(generation: string | undefined, maxLeaseAge: number): Promise<boolean> {
   const lock = await open(peerEndpointLockFile(), "r");
   try {
     const owner = parseOwner(await lock.readFile("utf8"));
     if (!owner || !isPidAliveCtx.fn(owner.pid)) return false;
     const stat = await lock.stat();
-    if (stat.birthtimeMs > snapshotMtime) return false;
+    if (generation !== undefined && owner.generation !== generation) return false;
     const start = owner.startEpoch === undefined ? null : processStartEpochSecondsCtx.fn(owner.pid);
     if (start !== null) return start === owner.startEpoch;
     const age = Date.now() - stat.mtimeMs;
@@ -110,81 +81,78 @@ export async function hasLiveEndpointOwner(snapshotMtime: number, maxLeaseAge: n
   } finally { await lock.close(); }
 }
 
-/** Remove the lock only if it still holds exactly `expected`. Returns true when this call removed it. */
-async function unlinkIfUnchanged(path: string, expected: string): Promise<boolean> {
-  if ((await readLock(path)) !== expected) return false;
+export async function hasLivePeerWatcher(): Promise<boolean> {
   try {
-    await unlink(path);
-    return true;
+    return await hasLiveEndpointOwner(undefined, 15_000);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;
   }
 }
 
-/**
- * Take the endpoint lock for `self` (default: this process).
- *
- * - No lock: create it exclusively with our pid and start time.
- * - The lock holds exactly what we write: we hold it already.
- * - The lock holds a live owner (pid alive with a matching start time): fail
- *   with that owner's pid.
- * - The lock holds a dead owner, a pid now used by a process that started at
- *   another time, our own pid from an earlier process, or contents that stay
- *   unreadable: take it over.
- *
- * Errors other than "the lock exists" (e.g. permissions) are thrown.
- */
-export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpointLockOwner()): Promise<EndpointLockResult> {
-  await ensurePeerDir();
-  const path = peerEndpointLockFile();
-  let takenFromPid: number | undefined;
-
-  for (let round = 0; round < MAX_ROUNDS; round++) {
-    try {
-      const file = await open(path, "wx");
-      try {
-        await file.writeFile(formatOwner(self));
-      } finally {
-        await file.close();
-      }
-      return takenFromPid === undefined ? { acquired: true } : { acquired: true, takenFromPid };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+/** All cooperating writers serialize namespace mutations using a stable inode.
+ * Kernel release on exit includes a crash between tombstoning and publication. */
+async function withLockGuard<T>(path: string, action: () => Promise<T>) {
+  const guard = await open(path + ".guard", "a+", 0o600);
+  try {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (flock(guard.fd, LOCK_EX | LOCK_NB) === 0) return await action();
+      await Bun.sleep(10);
     }
-
-    let contents = await readLock(path);
-    for (let i = 0; i < UNREADABLE_RETRIES && contents !== null && parseOwner(contents) === null; i++) {
-      await Bun.sleep(UNREADABLE_DELAY_MS);
-      contents = await readLock(path);
-    }
-    if (contents === null) continue; // released in the meantime: create again
-
-    const owner = parseOwner(contents);
-    if (owner !== null) {
-      if (contents === formatOwner(self)) return { acquired: true };
-      // No other live process can have our pid, so a lock with our pid that
-      // is not exactly ours was written by an earlier process: stale.
-      if (owner.pid !== self.pid && isPidAliveSinceUncached(owner.pid, owner.startEpoch)) {
-        return { acquired: false, ownerPid: owner.pid };
-      }
-      takenFromPid = owner.pid;
-    }
-    await unlinkIfUnchanged(path, contents);
-  }
-
-  throw new Error(`could not take ${path}: other processes kept changing it`);
+    throw Error("Endpoint lock update is busy");
+  } finally { await guard.close(); }
 }
 
-/**
- * Release the endpoint lock held by `self` (default: this process). Deletes
- * the file only if it still holds exactly our pid and start time, so a process
- * whose lock was taken over never deletes the new owner's. Returns true when
- * it deleted the lock.
- */
+export async function acquireEndpointLock(self: EndpointLockOwner = currentEndpointLockOwner()): Promise<EndpointLockResult> {
+  if (self.startEpoch === undefined) throw Error("Cannot verify this watcher’s process start time");
+  await ensurePeerDir();
+  const path = peerEndpointLockFile();
+  const generation = randomUUID();
+  const temp = path + "." + generation;
+  return withLockGuard(path, async (): Promise<EndpointLockResult> => {
+    const directory = dirname(path);
+    const artifacts = /^endpoint\.lock\.(?:dead\.)?[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+    for await (const entry of await opendir(directory)) {
+      if (entry.isFile() && artifacts.test(entry.name)) await unlink(join(directory, entry.name));
+    }
+    try {
+      await writeFile(temp, formatOwner(self) + generation + "\n", { mode: 0o600, flag: "wx" });
+      const contents = await readLock(path);
+      if (contents === null) { await link(temp, path); return { acquired: true, generation }; }
+      const owner = parseOwner(contents);
+      if (!owner) throw Error("~/.itsybitsy/peer/endpoint.lock is empty or damaged (likely left by a crashed older ib watch). If no other ib watch is running, delete it and restart ib watch.");
+
+      if (sameOwner(contents, self)) {
+        if (owner?.generation) return { acquired: true, generation: owner.generation };
+        await rename(temp, path);
+        return { acquired: true, generation };
+      }
+      const state = async (file: string) => {
+        const birth = (await stat(file)).birthtimeMs;
+        return transferOwnerState({ pid: owner.pid, start: owner.startEpoch ?? null }, birth);
+      };
+      if (await state(path) !== "proven-dead") return { acquired: false, ownerPid: owner.pid };
+      const tombstone = path + ".dead." + randomUUID();
+      await rename(path, tombstone);
+      try {
+        if ((await readLock(tombstone)) !== contents || await state(tombstone) !== "proven-dead") {
+          await link(tombstone, path);
+          throw Error("Endpoint lock changed during takeover");
+        }
+        await link(temp, path);
+        return { acquired: true, generation, takenFromPid: owner.pid };
+      } finally { await rm(tombstone, { force: true }); }
+    } finally { await rm(temp, { force: true }); }
+  });
+}
+
 export async function releaseEndpointLock(self: EndpointLockOwner = currentEndpointLockOwner()): Promise<boolean> {
   const path = peerEndpointLockFile();
-  const contents = formatOwner(self);
-  if ((await readLock(path)) !== contents) return false;
-  return unlinkIfUnchanged(path, contents);
+  try {
+    return await withLockGuard(path, async () => {
+      if (!sameOwner(await readLock(path), self)) return false;
+      await unlink(path);
+      return true;
+    });
+  } catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return false; throw err; }
 }

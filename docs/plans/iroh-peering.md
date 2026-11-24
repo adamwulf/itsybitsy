@@ -131,8 +131,9 @@ turns on n0's public relays and discovery:
   the wait only once it has stayed up for 60 s; an accept loop that dies
   sooner is one more failure, so a flapping endpoint backs off too. It
   retries only while `peers.json` lists a peer or the Peers tab is open.
-  It stops when another live `ib watch` holds the lock (peering shows as
-  disabled, and the lock is not polled) and on exit. Opening the tab
+  When another live `ib watch` holds the lock, peering shows as disabled.
+  Every 30 s the standby retries the lock and runs recovery if it wins.
+  Exiting stops retries. Opening the tab
   while a retry is pending binds at once instead. Each failure is one
   `watch.log` line with its wait; once the wait reaches 60 s, a repeat of
   the same failure is not logged again. When that failure is the accept
@@ -147,23 +148,18 @@ relay keeps one connection per id, the discovery records would overwrite each
 other, and requests could reach either process. So only one `ib watch` owns
 the endpoint:
 
-1. Before binding, `ib watch` creates `~/.itsybitsy/peer/endpoint.lock` with
-   `O_CREAT|O_EXCL` and writes `<pid> <startEpoch>` into it. `startEpoch` is
-   its real process start time.
-2. If the lock exists and its process is alive (the same pid with the same
-   start time), this `ib watch` skips peering.
-   It logs "peering disabled: ib watch pid N owns the endpoint" to
-   `watch.log`, and its Peers tab says the same.
-3. If that process is gone, this `ib watch` takes the lock over. "Gone" means
-   the pid is dead, or it now belongs to a process with a different start
-   time. A different start time can happen after a reboot. The owner deletes
-   the lock when it exits.
-
-A second `ib watch` tries for the lock only when it binds: at boot, when the
-Peers tab opens, or in an automatic rebind after its own failure. It never
-polls the lock: when a bind finds the lock held, retrying stops there. So once
-the owner exits, opening Peers or restarting moves peering to the second one.
-This works like Telegram, where the first poller wins.
+1. Before binding or running transfer recovery, the watcher writes its PID,
+   process start and a fresh generation UUID to a private temporary file.
+   Under the endpoint guard's exclusive flock it publishes the complete file
+   by linking it to `~/.itsybitsy/peer/endpoint.lock`.
+2. A standby that finds a live owner reports its PID in the Peers tab and
+   watch.log. It retries acquisition every 30 seconds, including when no
+   peers are paired. Opening Peers also triggers an acquisition attempt.
+3. When the PID is gone or its saved start differs, the contender renames the
+   stale lock under the guard, verifies it again and links its own record.
+   An incomplete legacy lock requires manual removal after checking for a running owner. The winner runs
+   recovery and binds when paired or when Peers is open. On exit it releases
+   its lock under the same guard.
 
 ### Key generation and storage
 

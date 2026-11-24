@@ -1,6 +1,10 @@
 import { mkdir } from "fs/promises";
 import * as runtimeNames from "./runtime-names";
 
+export function isRepoId(id: string): boolean {
+  return /^[0-9a-f]{8}$/.test(id);
+}
+
 async function storedRepoId(repoPath: string): Promise<string | null> {
   const file = runtimeNames.repoIdFile(repoPath);
   let id: string;
@@ -11,7 +15,7 @@ async function storedRepoId(repoPath: string): Promise<string | null> {
     throw new Error(`Cannot read repository id ${file}: ${err}. Refusing to generate a new id over one that may already exist.`);
   }
   if (!id) return null;
-  if (!/^[0-9a-f]{8}$/.test(id)) throw new Error(`Invalid repository id in ${file}: expected 8 lowercase hexadecimal characters`);
+  if (!isRepoId(id)) throw new Error(`Invalid repository id in ${file}: expected 8 lowercase hexadecimal characters`);
   return id;
 }
 

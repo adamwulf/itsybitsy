@@ -1,4 +1,5 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import * as fs from "node:fs/promises";
+import { spyOn, test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, readFile, writeFile, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -23,6 +24,65 @@ describe("outbox queue", () => {
 
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
+  });
+
+  test.each(["symlink", "FIFO", "hardlink"])("refuses a %s queue for reads and appends", async kind => {
+    const target = join(dir, "protected");
+    await writeFile(target, "original");
+    const fs = await import("node:fs/promises");
+    if (kind === "symlink") await fs.symlink(target, outboxPath(dir));
+    else if (kind === "hardlink") await fs.link(target, outboxPath(dir));
+    else expect(Bun.spawnSync(["mkfifo", outboxPath(dir)]).exitCode).toBe(0);
+    await expect(readOutbox(dir)).rejects.toThrow("single-link regular");
+    await expect(enqueueOutbox(dir, { message: "hi", fromAgent: "", raw: false })).rejects.toThrow("single-link regular");
+    expect(await readFile(target, "utf8")).toBe("original");
+  });
+
+  test.each(["symlink", "FIFO"])("a %s delivery lock is never read, stolen or released", async kind => {
+    const target = join(dir, "other");
+    const path = outboxLockPath(dir);
+    await writeFile(target, "1:token");
+    if (kind === "symlink") await fs.symlink(target, path);
+    else expect(Bun.spawnSync(["mkfifo", path]).exitCode).toBe(0);
+    expect(await acquireOutboxLock(dir, { steal: true, staleMs: -1, timeoutMs: 0 })).toBeNull();
+    await releaseOutboxLock({ dir, path, token: "token" });
+    const info = await fs.lstat(path);
+    expect(kind === "symlink" ? info.isSymbolicLink() : info.isFIFO()).toBe(true);
+    expect(await readFile(target, "utf8")).toBe("1:token");
+  });
+
+  test.each(["", "\n", "\n{broken"])("appending after a legacy record with tail %j preserves both complete records", async tail => {
+    await writeFile(outboxPath(dir), JSON.stringify({ id: "old", message: "legacy", raw: false, fromAgent: "" }) + tail);
+    await enqueueOutbox(dir, { id: "new", message: "new", fromAgent: "", raw: false });
+    expect((await readOutbox(dir)).map(m => m.id)).toEqual(["old", "new"]);
+  });
+
+  test("a concurrent append survives a drain paused immediately before replacement", async () => {
+    for (const id of ["one", "two"]) await enqueueOutbox(dir, { id, message: id, fromAgent: "", raw: false });
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const rename = fs.rename;
+    const spy = spyOn(fs, "rename").mockImplementation(async (...args) => {
+      entered.resolve(); await release.promise; return rename(...args);
+    });
+    try {
+      const drain = rewriteOutboxRemoving(dir, new Set(["one"]));
+      await entered.promise;
+      const append = Bun.spawn([process.execPath, "-e", `
+        import { open } from "node:fs/promises";
+        import { flock, LOCK_EX, LOCK_NB } from "./src/file-lock";
+        import { enqueueOutbox } from "./src/outbox";
+        const dir = process.argv[1];
+        const fd = await open(dir, "r");
+        console.log(flock(fd.fd, LOCK_EX | LOCK_NB) === 0 ? "unlocked" : "locked");
+        await fd.close();
+        await enqueueOutbox(dir, { id: "three", message: "three", fromAgent: "", raw: false });
+      `, dir], { stdout: "pipe", stderr: "inherit" });
+      const { value } = await append.stdout.getReader().read();
+      expect(new TextDecoder().decode(value).trim()).toBe("locked");
+      expect((await readOutbox(dir)).map(m => m.id)).toEqual(["one", "two"]);
+      release.resolve(); await drain; expect(await append.exited).toBe(0);
+      expect((await readOutbox(dir)).map(m => m.id)).toEqual(["two", "three"]);
+    } finally { release.resolve(); spy.mockRestore(); }
   });
 
   test("enqueue then read returns the message in FIFO order", async () => {
@@ -75,7 +135,9 @@ describe("outbox queue", () => {
     await enqueueOutbox(dir, { message: "b", fromAgent: "", raw: false, id: "b" });
     await enqueueOutbox(dir, { message: "c", fromAgent: "", raw: false, id: "c" });
 
+    await writeFile(outboxPath(dir) + ".tmp", "interrupted rewrite");
     await rewriteOutboxRemoving(dir, new Set(["a"]));
+    expect(await Bun.file(outboxPath(dir) + ".tmp").exists()).toBe(false);
     let msgs = await readOutbox(dir);
     expect(msgs.map((m) => m.id)).toEqual(["b", "c"]);
 
@@ -213,7 +275,7 @@ describe("outbox lock", () => {
   test("steal removes a stale lock (mtime older than staleMs)", async () => {
     // Hold the lock with a "stale" mtime by writing the file directly, then
     // forcing the staleness check via injected now().
-    await writeFile(outboxLockPath(dir), "99999");
+    await writeFile(outboxLockPath(dir), "2147483647");
     const lockStat = await stat(outboxLockPath(dir));
 
     // now() far in the future so the existing lock looks stale.
@@ -232,7 +294,7 @@ describe("outbox lock", () => {
   });
 
   test("steal does NOT remove a fresh lock", async () => {
-    await writeFile(outboxLockPath(dir), "99999");
+    await writeFile(outboxLockPath(dir), "2147483647");
     const lockStat = await stat(outboxLockPath(dir));
 
     // now() barely after the lock — within staleMs, so not stealable.
@@ -245,7 +307,7 @@ describe("outbox lock", () => {
     });
     expect(lock).toBeNull();
     // Original holder pid untouched.
-    expect(await readFile(outboxLockPath(dir), "utf-8")).toBe("99999");
+    expect(await readFile(outboxLockPath(dir), "utf-8")).toBe("2147483647");
   });
 
   test("release after a steal does NOT delete the thief's lock (ownership token)", async () => {
@@ -257,7 +319,8 @@ describe("outbox lock", () => {
     expect(a).not.toBeNull();
     const aStat = await stat(outboxLockPath(dir));
 
-    // B steals A's (now-stale) lock.
+    // Simulate A's death before B attempts to reclaim its generation.
+    await writeFile(outboxLockPath(dir), `2147483647:${a!.token}`);
     const b = await acquireOutboxLock(dir, {
       steal: true,
       staleMs: 30_000,

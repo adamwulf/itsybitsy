@@ -1,12 +1,13 @@
+import { localAttachmentVolume } from "./peers/local-attachments";
 import { test, expect, describe, beforeEach, afterEach, beforeAll, afterAll, mock, spyOn, setDefaultTimeout } from "bun:test";
 import { join } from "path";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "./home";
 import { saveRegistry } from "./registry";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { claudeUsageFromRecord, readClaudeUsage, recordClaudeRateLimits, type ClaudeRateLimits } from "./claude-rate-limits";
-import { agentOutboxDir, OUTBOX_FILENAME, readOutbox } from "./outbox";
+import { agentOutboxDir, enqueueOutbox, outboxLockPath, OUTBOX_FILENAME, readOutbox } from "./outbox";
 import { makeAgent, makeSpawnResult, waitFor } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -199,6 +200,9 @@ function agent(id: string, state: AgentState, manager: string | null = null): Ag
     },
   });
 }
+
+beforeEach(() => localAttachmentVolume.set(join(tmpdir(), "ib-watch-recovery-" + crypto.randomUUID())));
+afterEach(() => localAttachmentVolume.reset());
 
 describe("watchdog", () => {
   let spawnMock: ReturnType<typeof mockSpawnRunner>;
@@ -3369,6 +3373,31 @@ describe("runPerAgentWatchdog", () => {
     clearAllAgentsCache();
   });
 
+  test("a replacement watchdog drains a queue left locked by a dead owner", async () => {
+    const repo = join(outboxHome, "repo");
+    const target = makeAgent({ repoPath: repo, id: "review" });
+    const dir = agentOutboxDir(target);
+    await enqueueOutbox(dir, { message: "waiting for delivery", fromAgent: "@watchdog", raw: false });
+    const lock = outboxLockPath(dir);
+    await Bun.write(lock, "2147483647:1700000000:dead-owner");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+
+    const typed: string[] = [];
+    resetPerAgentDrain();
+    setPerAgentReadMeta(async () => ({ meta: target.meta }));
+    setPerAgentReadState(async () => "running");
+    setPerAgentSleep(async () => { worktreeExists = false; });
+    setSendSpawnRunner(cmd => {
+      if (cmd.includes("-l")) typed.push(cmd.at(-1)!);
+      return makeSpawnResult();
+    });
+
+    await runPerAgentWatchdog(target.id, repo);
+    expect(typed).toEqual(["[sent by watchdog]: waiting for delivery"]);
+    expect(await readOutbox(dir)).toEqual([]);
+  });
+
   test.each([undefined, "spawn-host/original-registration/review"])("watchdog drains a newly queued send between polls (stored key %p)", async (key) => {
     const repo = join(outboxHome, "unregistered");
     const target = makeAgent({ repoPath: repo, id: "review" });
@@ -3571,6 +3600,43 @@ describe("runPerAgentWatchdog", () => {
     expect(processed.length).toBeGreaterThanOrEqual(1);
     expect(processed.every(([id, repo]) => id === "agent-test1" && repo === "/tmp/test")).toBe(true);
   });
+
+  test("removing the worktree aborts the watchdog's transfer and drains its cleanup", async () => {
+    const aborted = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    setPerAgentSpawnBroker({
+      setup: async () => null,
+      process: async (id, _repo, jobs, signal) => {
+        signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+        jobs.set(id, release.promise);
+      },
+    });
+    let existsChecks = 0;
+    setPerAgentExistsSync(() => ++existsChecks <= 1);
+    setPerAgentReadState(async () => undefined);
+    let done = false;
+    const watch = runPerAgentWatchdog("agent-test1", "/tmp/test").then(() => { done = true; });
+    await aborted.promise;
+    expect(done).toBe(false);
+    release.resolve();
+    await watch;
+  });
+
+  test("watchdog shutdown expires with a transfer stuck in cleanup", async () => {
+    const release = Promise.withResolvers<void>();
+    let signal: AbortSignal | undefined;
+    setPerAgentSpawnBroker({ setup: async () => null, process: async (id, _repo, jobs, lifetime) => {
+      signal = lifetime;
+      jobs.set(id, release.promise);
+    } });
+    let checks = 0;
+    setPerAgentExistsSync(() => ++checks <= 1);
+    setPerAgentReadState(async () => undefined);
+    try {
+      await runPerAgentWatchdog("agent-test1", "/tmp/test");
+      expect(signal?.aborted).toBe(true);
+    } finally { release.resolve(); }
+  }, 3000);
 
   test("a spawn-request handler that throws never crashes the watchdog", async () => {
     let calls = 0;

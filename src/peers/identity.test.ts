@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -121,4 +122,54 @@ describe("node:crypto id derivation matches iroh", () => {
   test("deriveEndpointId rejects a seed that is not 32 bytes", () => {
     expect(() => deriveEndpointId(new Uint8Array(31))).toThrow("32 bytes, got 31");
   });
+});
+
+test("a suspended identity publisher exposes only a complete winning key", async () => {
+  const paused = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  const link = fs.link;
+  let held = false;
+  const publish = spyOn(fs, "link").mockImplementation(async (from, to) => {
+    if (!held && to === peerSecretKeyFile()) {
+      held = true;
+      expect(String(from)).toContain("/sealed/.key-staging/");
+      expect((await stat(from)).mode & 0o777).toBe(0o600);
+      paused.resolve(); await resume.promise;
+    }
+    await link(from, to);
+  });
+  try {
+    const first = loadOrCreateIdentity();
+    await paused.promise;
+    expect(await Bun.file(peerSecretKeyFile()).exists()).toBe(false);
+    const winner = await loadOrCreateIdentity();
+    resume.resolve();
+    expect((await first).id).toBe(winner.id);
+    expect((await stat(peerSecretKeyFile())).nlink).toBe(1);
+    expect(await fs.readdir(join(home, ".itsybitsy/sealed/.key-staging"))).toEqual([]);
+  } finally { resume.resolve(); publish.mockRestore(); }
+});
+
+test("cross-device identity publication leaves no key or temporary secret", async () => {
+  const fail = spyOn(fs, "link").mockRejectedValue(Object.assign(Error("cross-device link"), { code: "EXDEV" }));
+  try {
+    await expect(loadOrCreateIdentity()).rejects.toMatchObject({ code: "EXDEV" });
+    expect(await Bun.file(peerSecretKeyFile()).exists()).toBe(false);
+    expect(await fs.readdir(join(home, ".itsybitsy/sealed/.key-staging"))).toEqual([]);
+  } finally { fail.mockRestore(); }
+});
+
+test("identity load removes an interrupted dead publisher's extra link", async () => {
+  const { writeTransferOwner } = await import("./transfer-owner");
+  const { isPidAliveCtx } = await import("../agents");
+  const original = await loadOrCreateIdentity();
+  const dir = join(home, ".itsybitsy/sealed/.key-staging", crypto.randomUUID());
+  await mkdir(dir);
+  await writeTransferOwner(dir, { pid: 42, start: 10 });
+  await fs.link(peerSecretKeyFile(), join(dir, "key"));
+  isPidAliveCtx.set(pid => pid !== 42);
+  try {
+    expect((await loadOrCreateIdentity()).id).toBe(original.id);
+    expect((await stat(peerSecretKeyFile())).nlink).toBe(1);
+    expect(await fs.readdir(join(home, ".itsybitsy/sealed/.key-staging"))).toEqual([]);
+  } finally { isPidAliveCtx.reset(); }
 });

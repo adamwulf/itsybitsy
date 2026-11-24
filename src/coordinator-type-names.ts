@@ -26,6 +26,6 @@ export const SYSTEM_COORDINATOR_TYPE = "system-coordinator";
  * Whether `typeName` is one of the two coordinator types. Coordinators get the
  * `_all` layer but skip the `_non_coordinator` layer.
  */
-export function isCoordinatorType(typeName: string | undefined): boolean {
+export function isCoordinatorType(typeName: unknown): typeName is typeof REPO_COORDINATOR_TYPE | typeof SYSTEM_COORDINATOR_TYPE {
   return typeName === REPO_COORDINATOR_TYPE || typeName === SYSTEM_COORDINATOR_TYPE;
 }

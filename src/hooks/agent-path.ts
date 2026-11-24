@@ -261,15 +261,33 @@ export function peerDirWriteDenyReason(path: string): string {
  * directory is a symlink — `agentDir` here is derived from cwd and is NOT
  * necessarily realpath'd.
  */
+const transferStagingGuards = () => runtimeNames.transferStagingPaths().map(path => ({
+  path, subtree: true, reason: "Only ib watch can stage peer transfers",
+}));
+
 export function agentProtectedWritePaths(
   agentDir: string,
   protectIsolatedClaudeSettings = false,
+  access?: PreparedAccessTable,
 ): ProtectedWritePath[] {
-  const protectedPaths: ProtectedWritePath[] = [{
+  // This directory can be unreadable under the frozen profile. In that
+  // case keep the named anchor: structuralPath compares it by identity.
+  // Only the unsandboxed hook needs to resolve home symlinks here.
+  const anchor = (path: string) => access && !access.kernelSandboxed ? canonicalizeSandboxPath(path) : path;
+  const peer = anchor(runtimeNames.peerDir());
+  const protectedPaths: ProtectedWritePath[] = [...transferStagingGuards(), {
     path: canonicalizeSandboxPath(join(agentDir, "meta.json")),
     subtree: false,
     reason: META_WRITE_DENY_REASON,
-  }];
+  }, {
+    path: anchor(join(agentDir, "send-attachments")),
+    subtree: true,
+    reason: "Only ib send can stage remote attachments",
+  }, {
+    path: anchor(runtimeNames.peerOutboxDir()),
+    subtree: true,
+    reason: "Only ib send and the watchdog can publish remote send requests",
+  }, { path: peer, subtree: true, reason: peerDirWriteDenyReason(peer) }];
   if (protectIsolatedClaudeSettings) {
     protectedPaths.push({
       path: canonicalizeSandboxPath(join(agentDir, ".claude", "settings.local.json")),
@@ -306,6 +324,8 @@ export function systemProtectedWritePaths(itsybitsyHome: string): ProtectedWrite
     file("repos.json"),
     file("layout.json"),
     dir("sealed"),
+    dir("peer-outbox"),
+    ...transferStagingGuards(),
     { path: peer, subtree: true, reason: peerDirWriteDenyReason(peer) },
   ];
 }
@@ -319,6 +339,7 @@ export function matchProtectedWrite(
   protectedWritePaths: ProtectedWritePath[],
   filePath: string,
 ): string | null {
+  if (runtimeNames.deliveredAttachmentPath.test(filePath)) return "Delivered attachments are read-only";
   if (isSealHelperResultPath(filePath)) return SEAL_HELPER_RESULT_WRITE_DENY_REASON;
   for (const entry of protectedWritePaths) {
     if (entry.subtree) {
@@ -2012,10 +2033,6 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
     // Skipped for @system because there is no meta.json to write to.
     await writeAgentState(agentDir, "running");
 
-    // A normal agent may not rewrite its own meta.json (the hook reads its path
-    // lists and canSpawnChildren from it).
-    protectedWritePaths = agentProtectedWritePaths(agentDir, isNoWorktree);
-
     // Build the access table from meta.paths ∪ the spawn-keyed runtime roots. A
     // build failure (e.g. an invalid frozen paths block) denies, never fails open.
     try {
@@ -2027,6 +2044,7 @@ async function hookCheckPathImpl(agentId: string, rawStdin?: string): Promise<vo
         rootRepo,
         home: userHome(),
       });
+      protectedWritePaths = agentProtectedWritePaths(agentDir, isNoWorktree, access);
     } catch (error) {
       await emitPathDecision(agentDir, toolName, toolInput, {
         decision: "deny",

@@ -29,6 +29,8 @@ import { wordWrapSingleLine, wrapSingleLine } from "./wrap";
 export interface PeersDialogService {
   readonly remoteStartDenial: string | null;
   view(): PeerServiceView;
+  cancelReceipt?(id: string): void;
+  sendRemoteMessage: import("../peers/service").PeerService["sendRemoteMessage"];
   fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane>;
   startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;
   openDialog(): void;
@@ -237,6 +239,7 @@ function peerListLines(view: PeerServiceView, innerWidth: number, available: num
     } else {
       lines.push(truncatePeerField(peer.name, innerWidth), ...wordWrapSingleLine(`${id}  ${state}`, innerWidth));
     }
+    if (peer.name.startsWith("@")) lines.push(...wordWrapSingleLine("Remove and re-pair this machine with a name that does not start with @.", innerWidth));
     const error = link && !link.connected && link.lastError !== null
       ? wordWrapSingleLine(link.lastError, Math.max(1, innerWidth - 4)).map(line => `    ${RED}${line}${RESET}`)
       : [];

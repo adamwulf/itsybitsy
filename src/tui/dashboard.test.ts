@@ -1,3 +1,4 @@
+import { useAttachmentTemp } from "../test-attachment-temp";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, mock, spyOn } from "bun:test";
 import { join } from "path";
 import { mkdtemp, rm, mkdir, readdir, realpath, symlink, writeFile } from "fs/promises";
@@ -6224,6 +6225,7 @@ describe("input field integration", () => {
       return { ok: true, exitCode: 0, stdout: "", stderr: "" };
     });
 
+    const restoreTemp = useAttachmentTemp(testDir);
     try {
       const dashboard = makeDashboard();
       const agent = makeAgent("agent-a", testDir);
@@ -6255,10 +6257,11 @@ describe("input field integration", () => {
       await dashboard.flushPendingActions();
 
       expect(sends).toHaveLength(1);
-      expect(sends[0]).toContain("/tmp/itsybitsy-attachments-");
+      expect(sends[0]).toContain(testDir + "/itsybitsy-attachments-");
       expect(sends[0]).not.toContain(file);
       expect(dashboard.inputField.getText()).toBe("");
     } finally {
+      restoreTemp();
       resetStagedSenderForTests();
       await rm(testDir, { recursive: true, force: true });
     }
@@ -9204,6 +9207,8 @@ const PEERS_OTHER = "0a".repeat(32);
  * notifies like the real one.
  */
 class FakePeerService implements PeersDialogService {
+  cancelReceipt = mock((_id: string) => {});
+  sendRemoteMessage = mock<PeersDialogService["sendRemoteMessage"]>(async (_id, header) => header.id);
   fetchCoordinatorPane = mock(async (_peerId: string) => ({ state: "running", text: "peer capture" }));
   remoteStartDenial: string | null = null;
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
@@ -9371,6 +9376,106 @@ describe("setup Peers tab", () => {
     }
   });
 
+  test("Config edits live attachment limits and keeps invalid edits open", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-attachment-config-"));
+    const path = join(dir, "config.json");
+    setUserConfigPath(path);
+    const dashboard = makeDashboard();
+    try {
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      async function edit(key: string) {
+        await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+        const setup = assertDialog(dashboard.dialog, "setup");
+        setup.configSelectedIndex = setup.configItems!.findIndex(item => item.key === "peering.attachments." + key);
+        dashboard.handleInput("\r");
+        expect(text(dashboard)).toContain("0 = attachments disabled");
+        if (key.endsWith("MB")) expect(text(dashboard)).toContain("MB");
+        return assertDialog(dashboard.dialog, "input");
+      }
+      const file = await edit("maxFileMB");
+      for (const [value, reason] of [["1.5", "integer"], ["65537", "between 0 and 65536"], ["2049", "≤ maxMessageMB (2048)"]] as const) {
+        file.onSubmit(value);
+        await waitFor(() => dashboard.notice?.includes(reason) === true);
+        expect(dashboard.dialog).toBe(file);
+        expect(await Bun.file(path).exists()).toBe(false);
+      }
+      dashboard.handleInput("\x1b");
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      (await edit("maxMessageMB")).onSubmit("0");
+      const disabled = await edit("maxMessageMB");
+      expect(disabled.value).toBe("0");
+      expect((await settings.readTransferLimits()).maxMessageBytes).toBe(0);
+      disabled.onSubmit("2048");
+      const restored = await edit("maxFileMB");
+      expect((await settings.readTransferLimits()).maxMessageBytes).toBe(2048 * 1024 ** 2);
+      restored.onSubmit("25");
+      const message = await edit("maxMessageMB");
+      message.onSubmit("24");
+      await waitFor(() => dashboard.notice?.includes("≥ maxFileMB (25)") === true);
+      message.onSubmit("100");
+      const count = await edit("maxFiles");
+      count.onSubmit("0");
+      await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+      expect((await Bun.file(path).json()).peering.attachments).toEqual({ maxFileMB: 25, maxMessageMB: 100, maxFiles: 0 });
+      expect(await settings.readTransferLimits()).toEqual({ maxFileBytes: 25 * 1024 ** 2, maxMessageBytes: 100 * 1024 ** 2, maxFiles: 0 });
+    } finally {
+      resetUserConfigPath();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("Config shows a stored 512 MB message limit that conflicts with the default file limit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-config-repair-"));
+    const path = join(dir, "config.json");
+    setUserConfigPath(path);
+    try {
+      await Bun.write(path, JSON.stringify({ peering: { attachments: { maxMessageMB: 512 } } }));
+      const dashboard = makeDashboard();
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+      const setup = assertDialog(dashboard.dialog, "setup");
+      setup.configSelectedIndex = setup.configItems!.findIndex(item => item.key.endsWith(".maxMessageMB"));
+      expect(text(dashboard)).toContain("512 (needs repair)");
+      dashboard.handleInput("\r");
+      expect(assertDialog(dashboard.dialog, "input").value).toBe("512");
+      expect(text(dashboard)).toContain("maxMessageMB = 512");
+      expect(text(dashboard)).toContain("maxFileMB (1024)");
+      await expect(settings.writeConfig(path, "peering.attachments.maxFileMB", 700)).rejects.toThrow("≤ maxMessageMB (512)");
+      await settings.writeConfig(path, "peering.attachments.maxFileMB", 512);
+      expect((await settings.readTransferLimits()).maxMessageBytes).toBe(512 * 1024 ** 2);
+    } finally {
+      resetUserConfigPath();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("Config displays the malformed companion and enforces its effective budget", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-attachment-companion-"));
+    const path = join(dir, "config.json");
+    setUserConfigPath(path);
+    const original = JSON.stringify({ peering: { attachments: { maxFileMB: "typo" } } });
+    try {
+      await Bun.write(path, original);
+      const dashboard = makeDashboard();
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+      const setup = assertDialog(dashboard.dialog, "setup");
+      setup.configSelectedIndex = setup.configItems!.findIndex(item => item.key.endsWith(".maxMessageMB"));
+      dashboard.handleInput("\r");
+      expect(text(dashboard)).toContain('maxFileMB = "typo" (using 1024)');
+      assertDialog(dashboard.dialog, "input").onSubmit("512");
+      await waitFor(() => dashboard.notice?.includes("≥ maxFileMB (1024)") === true);
+      expect(await Bun.file(path).text()).toBe(original);
+    } finally {
+      resetUserConfigPath();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("Kitty Tab and Shift+Tab cycle setup in both directions", () => {
     const { dashboard, service } = open();
     dashboard.handleInput("\x1b[9u");
@@ -9454,6 +9559,13 @@ describe("setup Peers tab", () => {
     out = text(dashboard);
     expect(out).toContain("unavailable: secret.key is not 64 lowercase hex characters");
     expect(out).toContain("peers.json: not valid JSON");
+  });
+
+  test("shows how to replace a legacy peer name starting with @", () => {
+    const { dashboard, service } = open();
+    service.set({ peers: [{ id: OTHER, name: "@legacy", pairedAt: "x" }] });
+    expect(text(dashboard)).toContain("@legacy");
+    expect(text(dashboard)).toContain("Remove and re-pair");
   });
 
   test("paired peers show a colored link status and the last error under an offline peer", () => {
@@ -9674,6 +9786,7 @@ describe("setup Peers tab", () => {
     expect(submit("laptop").error).toBe(`Another peer is already named "Laptop".`);
     expect(text(dashboard)).toContain(`Another peer is already named "Laptop".`);
     expect(submit(" STUDIO ").error).toBe(`"Studio" is this machine's name.`);
+    expect(submit("@office").error).toBe("A machine name cannot start with @.");
     expect(submit("home/office").error).toBe(`A name cannot contain "/".`);
     expect(service.calls).toEqual([]);
 
@@ -10047,12 +10160,16 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.activeSelectionSource).toBe("teams");
   });
 
-  test("Tab visits the full-width peer capture once", () => {
+  test("Tab visits the full-width peer capture, its editor and Send", () => {
     const { dashboard } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
     dashboard.focusManager.setFocus("right-pane");
     selectByKey(dashboard, PEER_B + "/@system");
     expect(dashboard.focus).toBe("active-agent");
+    for (const sub of ["input", "send"] as const) {
+      dashboard.handleInput("\t");
+      expect(dashboard.focusManager.subFocus).toBe(sub);
+    }
     for (const stop of ["agent-tree", "info", "active-agent"] as const) {
       dashboard.handleInput("\t");
       expect(dashboard.focus).toBe(stop);
@@ -10212,7 +10329,14 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("peer capture"));
       expect(service.fetchCoordinatorPane.mock.calls).toEqual([[PEER_B]]);
       dashboard.handleInput("s");
-      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(dashboard.focusManager.subFocus).toBe("input");
+      dashboard.handleInput("hi");
+      dashboard.inputField.submit();
+      await waitFor(() => dashboard.inputField.getText() === "");
+      expect(service.sendRemoteMessage.mock.calls[0]?.slice(0, 2)).toMatchObject([PEER_B, {
+        from: { kind: "user" }, target: { kind: "system" }, message: "hi", files: [],
+      }]);
+      dashboard.focusManager.setFocus("agent-tree");
       dashboard.handleInput("k");
       expect(stripAnsi(dashboard.render(180).join("\n"))).not.toContain("peer capture");
     } finally {
@@ -10257,6 +10381,7 @@ describe("Unified peer repos in the Agents tree", () => {
       ]);
     }
     const rows = treeRows(dashboard);
+    expect(stripAnsi(rows[0]!)).toContain("running");
     expect(rows[1]).toContain(ITALIC + "Laptop B");
     expect(rows[1]).toContain(GREEN + "connected" + RESET);
     expect(rows[2]).toContain(RED + "offline" + RESET);
@@ -10271,12 +10396,12 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    const permittedAscii = new Set([..."jkJK123@?/I;l", "\t", "\x03"]);
+    const permittedAscii = new Set([..."jkJK123@?/I;ls", "\t", "\x03"]);
     const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
     for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
     const refused = new Set([
       ...ascii.filter(key => !permittedAscii.has(key)),
-      "s", "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "a", "N",
+      "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "a", "N",
       "d", "o", "O", "G", "C", "h", "E", "\x1b[200~pasted text\x1b[201~",
     ]);
     const handlers = [
@@ -10631,7 +10756,7 @@ describe("Unified peer repos in the Agents tree", () => {
     for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
       dashboard.jumpToMode(mode);
       const lines = dashboard.render(WIDTH);
-      expect(paneText(lines, 2)).toBe("Remote agent on Laptop B (read-only)");
+      expect(paneText(lines, 2)).toBe("Remote agent on Laptop B (output pane is read-only)");
       // The right pane is narrow at this width: the placeholder wraps rather than being cut.
       expect(paneText(lines, 1)).toBe(REMOTE_RIGHT_PANE_TEXT);
       expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
@@ -10720,6 +10845,315 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("remote text input retains a refused draft and clears it on acceptance", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("s");
+    dashboard.handleInput("/compact");
+    service.remoteStartDenial = "Remote starts are disabled inside tmux";
+    dashboard.inputField.submit();
+    await Bun.sleep(0);
+    expect(dashboard.notice).toBe("Remote sends are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux");
+    service.remoteStartDenial = "Only a human can start an agent on another machine";
+    dashboard.inputField.submit();
+    await Bun.sleep(0);
+    expect(dashboard.notice).toBe("Only a human can send to another machine");
+    expect(service.sendRemoteMessage).not.toHaveBeenCalled();
+    expect(dashboard.inputField.getText()).toBe("/compact");
+
+    service.remoteStartDenial = null;
+    service.sendRemoteMessage.mockRejectedValueOnce(new Error("Machine is disconnected"));
+    dashboard.inputField.submit();
+    await waitFor(() => dashboard.notice !== "Only a human can send to another machine");
+    expect(dashboard.notice).toBe("Machine is disconnected");
+    expect(dashboard.inputField.getText()).toBe("/compact");
+
+    const pending = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
+    dashboard.inputField.submit();
+    await Bun.sleep(3100);
+    expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("sending to Laptop B/");
+    const [peer, header] = service.sendRemoteMessage.mock.calls[1]!;
+    expect(peer).toBe(PEER_B);
+    expect(header).toMatchObject({ from: { kind: "user" }, message: "/compact", files: [],
+      target: { kind: "agent", repo: "itsybitsy", agent: "worker-abc" } });
+    pending.resolve(header.id);
+    await waitFor(() => dashboard.inputField.getText() === "");
+    expect(dashboard.notice).toContain("Sent to Laptop B/");
+  });
+
+  test.each(["Esc", "shutdown"])("remote row detects files, shows progress and cleans staging on %s", async action => {
+    const home = await mkdtemp(join(tmpdir(), "ib-dashboard-transfer-"));
+    setUserHome(home);
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    const stagingRoot = spyOn(await import("../runtime-names"), "transferStagingRoot").mockReturnValue(join(home, "staging"));
+    processStartEpochSecondsCtx.set(() => 123);
+    try {
+      await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
+      const source = join(home, "notes.txt");
+      await Bun.write(source, "contents");
+      const { dashboard, service } = setup();
+      const entered = Promise.withResolvers<void>();
+      let staged: string | undefined;
+      service.sendRemoteMessage.mockImplementationOnce(async (_peer, header, _source, transfer) => {
+        expect(header.files).toHaveLength(1);
+        expect(header.files[0]?.spellings).toContain(source);
+        staged = join(transfer!.filesDir!, "0");
+        expect(await Bun.file(staged).text()).toBe("contents");
+        transfer!.onProgress!(3);
+        entered.resolve();
+        return new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason)));
+      });
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(`Read ${source} and ./live.ts`);
+      dashboard.inputField.submit();
+      await entered.promise;
+      expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 8 bytes");
+      if (action === "Esc") dashboard.handleInput("\x1b");
+      else await dashboard.stopRemoteSends();
+      await waitFor(() => dashboard.notice === (action === "Esc" ? "Send cancelled" : "Dashboard shutting down"));
+      await waitFor(async () => !await Bun.file(staged!).exists());
+      expect(dashboard.inputField.getText()).toContain(source);
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+  });
+
+  test("a dashboard snapshot whose owner cannot be verified is refused locally", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ib-dashboard-owner-"));
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    setUserHome(home);
+    const stagingRoot = spyOn(await import("../runtime-names"), "transferStagingRoot").mockReturnValue(join(home, "staging"));
+    processStartEpochSecondsCtx.set(() => null);
+    try {
+      const path = join(home, "file");
+      await Bun.write(path, "contents");
+      await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(path);
+      dashboard.inputField.submit();
+      await waitFor(() => dashboard.notice === "Cannot verify the outgoing attachment owner");
+      expect(service.sendRemoteMessage).not.toHaveBeenCalled();
+      await dashboard.stopRemoteSends();
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+  });
+
+  test("a mixed-case local registry root keeps its dashboard file live on the peer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "ib-project-case-"));
+    try {
+      const path = join(project, "file");
+      await Bun.write(path, "live");
+      const { dashboard, service } = setup();
+      dashboard.setRepos([{ name: "ITSYBITSY", path: project }]);
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(path);
+      dashboard.inputField.submit();
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      expect(service.sendRemoteMessage.mock.calls[0]![1]).toMatchObject({ files: [], message: path, noPassthrough: true });
+    } finally { await rm(project, { recursive: true, force: true }); }
+  });
+
+  test("a local editor keeps Escape while remote requests have duplicate display labels", async () => {
+    const { dashboard, service, local } = setup();
+    const result = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementation(() => result.promise);
+    const sameLabel = links();
+    sameLabel[0]!.agents = sameLabel[0]!.agents!.map(agent => ({ ...agent, nickname: "duplicate" }));
+    service.set({ links: sameLabel });
+    for (const key of [WORKER_KEY, agentKey(PEER_B, "itsybitsy", "manager-def")]) {
+      dashboard.focusManager.setFocus("agent-tree");
+      selectByKey(dashboard, key);
+      dashboard.handleInput("s");
+      dashboard.handleInput("hello");
+      dashboard.inputField.submit();
+    }
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 2);
+    const rows = () => stripAnsi(dashboard.render(WIDTH).join("\n")).split("\n").filter(line => line.includes("sending to"));
+    expect(rows()).toHaveLength(2);
+    expect(rows().filter(line => line.includes("Esc: cancel"))).toHaveLength(1);
+    dashboard.agentTree.selectAgent(local);
+    dashboard.syncSelectedAgent();
+    dashboard.focusManager.setFocus("active-agent");
+    dashboard.focusManager.setSubFocus("input");
+    expect(rows().every(line => !line.includes("Esc: cancel"))).toBe(true);
+    dashboard.handleInput("\x1b");
+    expect(dashboard.focusManager.subFocus).toBe("pane");
+    expect(service.sendRemoteMessage.mock.calls.every(call => !call[3]?.signal?.aborted)).toBe(true);
+    result.resolve("accepted");
+  });
+
+  test("dashboard submission and incoming admission reserve the same temporary volume", async () => {
+    const { createCliFixture } = await import("../test-cli-runner");
+    const { createMessageReceiver } = await import("../peers/receive-message");
+    const { textHeader } = await import("../peers/peer-outbox");
+    const space = await import("../peers/attachment-space");
+    const cli = await createCliFixture();
+    setUserHome(cli.home);
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    const stagingRoot = spyOn(await import("../runtime-names"), "transferStagingRoot").mockReturnValue(join(cli.root, "staging"));
+    processStartEpochSecondsCtx.set(() => 123);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const seen: number[] = [];
+    const receiver = createMessageReceiver(() => {}, () => {}, Date.now, 4096, {
+      tempDir: "/tmp", hasFreeSpace: async (_dir, bytes) => { seen.push(bytes); return false; },
+    });
+    const actual = space.hasFreeSpace;
+    const spy = spyOn(space, "hasFreeSpace").mockImplementation(async (dir, bytes) => {
+      if (!dir.startsWith(join(cli.root, "staging/outgoing") + "/")) return actual(dir, bytes);
+      entered.resolve(); await release.promise; return true;
+    });
+    try {
+      await Bun.write(join(cli.home, ".itsybitsy/machine-name"), "local");
+      const repo = await cli.addRepo("example");
+      await cli.addAgent(repo, "worker", { tmux_session: "ib-worker" });
+      tmuxPollerSpawnCtx.set(() => makeSpawnResult(0, "0"));
+      const source = join(cli.home, "report");
+      await Bun.write(source, "abc");
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(source);
+      dashboard.inputField.submit();
+      await entered.promise;
+      const header = textHeader({ kind: "agent", agent: "worker" }, "read", { kind: "user" });
+      header.files = [{ name: "file", size: 4, sha256: "0".repeat(64), spellings: ["file"] }];
+      await expect(receiver(header, "peer", async () => "desk", { read: async () => Buffer.alloc(0) })).rejects.toThrow("Insufficient space");
+      expect(seen).toEqual([7]);
+      release.resolve();
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      await dashboard.stopRemoteSends();
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); release.resolve(); spy.mockRestore(); resetUserHome(); await cli.cleanup(); }
+  });
+
+  test("dashboard quit closes a held reset before exit and startup reclaims stranded staging", async () => {
+    const { PeerService, defaultPeerServiceDeps } = await import("../peers/service");
+    const { requestSend } = await import("../peers/peer-link");
+    const { createMemoryLink } = await import("../peers/test-pair-transport");
+    const owners = await import("../peers/transfer-owner");
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    const fs = await import("node:fs/promises");
+    const root = await mkdtemp(join(tmpdir(), "ib-quit-recovery-"));
+    setUserHome(root);
+    processStartEpochSecondsCtx.set(() => 123);
+    const create = owners.makeOutgoingDirectory;
+    let staged = "";
+    const make = spyOn(owners, "makeOutgoingDirectory").mockImplementation(async () => staged = await create(root));
+    const remove = fs.rm;
+    const failCleanup = spyOn(fs, "rm").mockImplementation(async (path, options) => {
+      if (staged && path === staged) throw Error("storage temporarily unavailable");
+      return remove(path, options);
+    });
+    const { a, b } = createMemoryLink("sender", "peer");
+    const started = Promise.withResolvers<void>();
+    const open = a.openBi.bind(a);
+    a.openBi = async () => {
+      const stream = await open();
+      stream.write = async () => { started.resolve(); return new Promise(() => {}); };
+      stream.cancel = () => new Promise(() => {});
+      return stream;
+    };
+    const deps = { ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null),
+      readPeers: async () => [], recoverTransfers: () => owners.sweepOutgoingDirectories(root) };
+    const next = new PeerService(deps);
+    try {
+      const source = join(root, "report");
+      await Bun.write(source, "file");
+      await Bun.write(join(root, ".itsybitsy/machine-name"), "sender");
+      const { dashboard, service } = setup();
+      service.sendRemoteMessage.mockImplementation((_peer, header, _source, transfer) =>
+        requestSend(a, header, (ms, fn) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); }, transfer));
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      dashboard.handleInput(source);
+      dashboard.inputField.submit();
+      await started.promise;
+      await dashboard.shutdownPeerTransfers(new PeerService(deps));
+      expect(b.closeInfo()?.reason).toBe("send reset stalled");
+      expect(await Bun.file(join(staged, "owner.json")).json()).toEqual({ pid: process.pid, start: 123 });
+      failCleanup.mockRestore();
+      processStartEpochSecondsCtx.set(() => 124);
+      await next.bootIfPaired();
+      expect(await Bun.file(join(staged, "owner.json")).exists()).toBe(false);
+    } finally {
+      await next.shutdown(); a.close(0, "done");
+      failCleanup.mockRestore(); make.mockRestore(); processStartEpochSecondsCtx.reset();
+      resetUserHome(); await remove(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a local selection renders receipt admission, one coalesced progress burst, and removal", async () => {
+    const { PeerService, defaultPeerServiceDeps } = await import("../peers/service");
+    const { textHeader } = await import("../peers/peer-outbox");
+    const release = Promise.withResolvers<void>();
+    const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null),
+      receiveMessage: async (_header, _peer, _name, _body, options) => {
+        options?.admitted?.(true);
+        for (let byte = 1; byte <= 100; byte++) options?.onProgress?.(byte);
+        await release.promise;
+      },
+    });
+    const { dashboard } = setup();
+    const counter = countingTui();
+    dashboard.setTui(counter.tui);
+    let beforeNotify = 0;
+    service.onChange(() => { beforeNotify = counter.renders(); });
+    dashboard.setPeerService(service);
+    expect(dashboard.remoteSelection).toBeNull();
+    const notifications = mock(() => { expect(counter.renders()).toBe(beforeNotify + 1); });
+    service.onChange(notifications);
+    const header = textHeader({ kind: "system" }, "read", { kind: "user" });
+    header.files = [{ name: "f", size: 100, sha256: "0".repeat(64), spellings: ["f"] }];
+    const transfer = service.receiveTracked(header, PEER_B, async () => "peer");
+    try {
+      expect(notifications).toHaveBeenCalledTimes(1);
+      await waitFor(() => notifications.mock.calls.length === 2);
+      expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("100 / 100 bytes");
+    } finally { release.resolve(); await transfer; }
+    expect(notifications).toHaveBeenCalledTimes(3);
+  });
+
+  test("selecting an inbound progress row and pressing Esc aborts that receipt", () => {
+    const { dashboard, service } = setup();
+    service.set({ incoming: [{ id: "first", label: "Laptop → worker", bytes: 3, total: 12 }] });
+    expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 12 bytes");
+    dashboard.handleInput("\x14");
+    dashboard.handleInput("\x1b");
+    expect(service.cancelReceipt.mock.calls).toEqual([["first"]]);
+  });
+
+  test("incoming notices and overlapping completions leave each pending send visible", async () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.agentTree.selectSystemCoordinator();
+    dashboard.syncSelectedAgent();
+    const first = Promise.withResolvers<string>();
+    const second = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+    for (const key of [PEER_B + "/@system", WORKER_KEY]) {
+      dashboard.focusManager.setFocus("agent-tree");
+      selectByKey(dashboard, key);
+      dashboard.handleInput("s");
+      dashboard.handleInput("hello");
+      dashboard.inputField.submit();
+    }
+    const content = () => stripAnsi(dashboard.render(WIDTH).join("\n"));
+    dashboard.setNotice("Incoming peer message", "info");
+    expect(content()).toContain("Incoming peer message");
+    expect(content().match(/sending to Laptop B\//g)).toHaveLength(2);
+    first.resolve("first");
+    await Bun.sleep(0);
+    expect(content()).toContain("Sent to Laptop B/@system");
+    expect(content()).not.toContain("sending to Laptop B/@system");
+    expect(content()).toContain("sending to Laptop B/");
+    second.reject(new Error("disconnected"));
+    await Bun.sleep(0);
+    expect(content()).toContain("disconnected");
+    expect(content()).not.toContain("sending to Laptop B/");
+  });
+
   test("the guard refuses action keys on a remote row with the notice, and none of their handlers run", () => {
     const { dashboard } = setup();
     selectByKey(dashboard, WORKER_KEY);
@@ -10728,7 +11162,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["x", "m", "s", "R", "a", ".", "t", "!", "S", "o"]) {
+      for (const key of ["x", "m", "R", "a", ".", "t", "!", "S", "o"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -11062,7 +11496,8 @@ describe("Unified peer repos in the Agents tree", () => {
     const text = footer();
     const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
-    for (const hint of ["s: send", "m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
+    expect(text).toContain("s: send");
+    for (const hint of ["m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
     // Every key the remote footer names is one the guard allows.

@@ -1,3 +1,4 @@
+import { waitForIO, type FileBodyOptions } from "./peers/send-frame";
 import { fullyQualifiedAgentId } from "./tui/row-keys";
 import { initializeMachineName } from "./machine-name";
 import { getRepoId, readRepoId } from "./repo-id";
@@ -54,7 +55,6 @@ import {
   registeredQueueRepo,
   queueDirForKey,
   type OutboxMessage,
-  type AcquireLockOpts,
 } from "./outbox";
 import { stageMessageAttachments, type StagedMessage } from "./message-attachments";
 import {
@@ -100,7 +100,7 @@ import {
   resolveUserStatusLine,
 } from "./settings-builder";
 import { listRepos, readRegistryStrict, repoDisplayName, type RepoEntry } from "./registry";
-import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
+import { resolveNoWorktreeCaller, type CallerLookupOptions, type NoWorktreeCaller } from "./no-worktree-caller";
 import {
   type Team,
   normalizeTeamName,
@@ -122,7 +122,7 @@ import {
 } from "./team-channel";
 import { timed } from "./perf";
 import { WATCHDOG_SENTINEL } from "./watchdog";
-import { resolveCodexPathGrants } from "./codex-paths";
+import { resolveAgentCodexPathGrants } from "./codex-paths";
 import {
   anchorRelativePaths,
   findRelativeEscapes,
@@ -2016,7 +2016,7 @@ export async function resumeAgent(
         try {
           // Replay frozen policy, expanding its globs against today's files.
           // Only sandbox refresh may replace this policy from live type files.
-          codexPathGrants = await resolveCodexPathGrants(resolvePathsConfig(agent.meta.paths));
+          codexPathGrants = await resolveAgentCodexPathGrants(resolvePathsConfig(agent.meta.paths));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           await logAgent(agentDir, `[resume] ${message}`);
@@ -2267,7 +2267,7 @@ export async function resumeAgent(
       const qMetaJson = shellQuote(join(agentDir, "meta.json"));
       const qAgentLog = shellQuote(join(agentDir, "agent.log"));
       const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-      const resumeContent = `#!/bin/bash
+      const resumeContent = `${runtimeNames.AGENT_LAUNCH_HEADER}
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 # Suppress the "How is Claude doing?" feedback survey for spawned agents
@@ -4018,9 +4018,9 @@ function activeAttachmentStager(): StageMessageAttachmentsFn {
  * drains the queue. The resolved id (real agent id, `@system` sentinel, or ""
  * for the human user) is stored in the queued record.
  */
-function resolveSenderId(agentRepoPath: string, opts?: { fromAgent?: string; cwd?: string }): string {
+export function resolveSenderId(agentRepoPath: string, opts?: { fromAgent?: string; cwd?: string }): string {
   let fromId = opts?.fromAgent ?? "";
-  if (fromId) return fromId;
+  if (opts?.fromAgent !== undefined) return fromId;
 
   const cwd = opts?.cwd ?? process.cwd();
   const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
@@ -4086,22 +4086,7 @@ export async function cancelTmuxPaneModeIfActive(tmuxSession: string): Promise<b
   return (await cancel.exited) === 0;
 }
 
-/**
- * Deliver ONE queued message to an agent's tmux session — the single tmux
- * writer. This is the exact body the historical `sendMessage` ran for one
- * message: has-session check, view/copy-mode cancel (`cancelTmuxPaneModeIfActive`),
- * sender-prefix formatting (including the `user.name` config read), chunked
- * `send-keys -l`, inter-chunk sleep, length-scaled delay, `Enter`,
- * recipient/sender logging, `writeAgentState`.
- *
- * Callers (the watchdog drain and the inline fallback) hold the per-session
- * delivery lock for the whole batch, so two `send-keys`/`Enter` sequences to
- * the same session can never interleave.
- *
- * Returns an IbCommandResult so callers can propagate failures. On failure the
- * message is NOT removed from the outbox (no message loss).
- */
-export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promise<IbCommandResult> {
+async function checkSendSession(agent: Agent): Promise<IbCommandResult | null> {
   const tmuxSession = agent.meta.tmux_session;
   if (!tmuxSession) {
     return { ok: false, exitCode: 1, stdout: "", stderr: "Agent has no tmux session" };
@@ -4122,6 +4107,39 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   if (hasSessionExit !== 0) {
     return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running` };
   }
+
+  return null;
+}
+
+/** Inbound peer messages acknowledge enqueue, including for recipients without a watchdog. */
+export interface PeerEnqueueOptions {
+  setTimer?: FileBodyOptions["setTimer"];
+  signal?: AbortSignal;
+  senderKind?: OutboxMessage["peerSender"];
+  prepareMessage?(): Promise<string>;
+  beforeEnqueue(): Promise<void>;
+  log(line: string): void;
+}
+
+/**
+ * Deliver ONE queued message to an agent's tmux session — the single tmux
+ * writer. This is the exact body the historical `sendMessage` ran for one
+ * message: has-session check, view/copy-mode cancel (`cancelTmuxPaneModeIfActive`),
+ * sender-prefix formatting (including the `user.name` config read), chunked
+ * `send-keys -l`, inter-chunk sleep, length-scaled delay, `Enter`,
+ * recipient/sender logging, `writeAgentState`.
+ *
+ * Callers (the watchdog drain and the inline fallback) hold the per-session
+ * delivery lock for the whole batch, so two `send-keys`/`Enter` sequences to
+ * the same session can never interleave.
+ *
+ * Returns an IbCommandResult so callers can propagate failures. On failure the
+ * message is NOT removed from the outbox (no message loss).
+ */
+export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promise<IbCommandResult> {
+  const unavailable = await checkSendSession(agent);
+  if (unavailable) return unavailable;
+  const tmuxSession = agent.meta.tmux_session!;
 
   // Log/state writes target the per-worktree agent dir.
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
@@ -4188,7 +4206,9 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   if (!raw && !userPassthrough) {
     if (fromId) {
       let label: string;
-      if (fromId.startsWith("@")) {
+      if (queued.peerSender) {
+        label = queued.peerSender === "agent" ? `agent ${fromId}` : fromId;
+      } else if (fromId.startsWith("@")) {
         label = BARE_RENDERED_SENTINELS.has(fromId) ? fromId.slice(1) : fromId;
       } else {
         // In a team context the ` in @<team>` clause already establishes that
@@ -4261,7 +4281,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   }
 
   // Log to sender's agent.log if applicable
-  if (fromId) {
+  if (fromId && !queued.peerSender) {
     const senderDir = runtimeNames.agentDir(agent.repoPath, fromId);
     const verb = raw ? "Sent raw message" : "Sent message";
     await logAgent(senderDir, `${verb} to ${agent.id}: ${message}`);
@@ -4291,8 +4311,8 @@ const DRAIN_SETTLE_GAP_MS = 250;
  *   - On delivery failure the message REMAINS in the outbox and the drain
  *     stops (it will be retried on the next tick / call). No message loss.
  *
- * `lockOpts.steal` is set by the inline fallback so a crashed holder can't
- * wedge delivery; the watchdog leaves it false and simply retries next tick.
+ * All drainers reclaim a stale lock only when its owner is proven dead.
+ * Inline drainers also recheck for appends made while they were typing.
  * Returns the IbCommandResult of the FIRST delivered message (so the inline
  * `sendMessage` path can return the historical success/failure shape), or a
  * synthetic ok result when the queue was empty / lock unavailable.
@@ -4300,34 +4320,31 @@ const DRAIN_SETTLE_GAP_MS = 250;
 export async function drainOutbox(
   agent: Agent,
   dir: string,
-  lockOpts?: AcquireLockOpts,
+  opts?: { recheckQueue?: boolean },
 ): Promise<IbCommandResult> {
-  const lock = await acquireOutboxLock(dir, lockOpts);
+  const lock = await acquireOutboxLock(dir, { steal: true });
   if (!lock) {
     // Could not acquire — messages stay enqueued, another drainer will get them.
     return { ok: true, exitCode: 0, stdout: `Sent to ${agent.id}`, stderr: "" };
   }
 
-  const delivered = new Set<string>();
   let firstResult: IbCommandResult | null = null;
   try {
-    const batch = await readOutbox(dir);
-    for (let i = 0; i < batch.length; i++) {
-      const queued = batch[i]!;
-      const settleGap = sendDelayOverrideMs !== null ? sendDelayOverrideMs : DRAIN_SETTLE_GAP_MS;
-      if (i > 0 && settleGap > 0) await Bun.sleep(settleGap);
+    do {
+      const batch = await readOutbox(dir);
+      if (!batch.length) break;
+      for (const queued of batch) {
+        const settleGap = sendDelayOverrideMs ?? DRAIN_SETTLE_GAP_MS;
+        if (firstResult && settleGap > 0) await Bun.sleep(settleGap);
 
-      const result = await deliverMessage(agent, queued);
-      if (firstResult === null) firstResult = result;
-      if (!result.ok) {
-        // Stop the drain — leave this message (and the rest) enqueued.
-        break;
+        const result = await deliverMessage(agent, queued);
+        firstResult ??= result;
+        if (!result.ok) return firstResult;
+        await rewriteOutboxRemoving(dir, new Set([queued.id]));
       }
-      delivered.add(queued.id);
-      // Remove just-delivered messages now, before delivering the next one, so
-      // a crash mid-batch never redelivers an already-sent message.
-      await rewriteOutboxRemoving(dir, delivered);
-    }
+      // An inline contender may already have timed out waiting for us.
+      // Watchdogs have a next tick; inline-only queues need us to recheck.
+    } while (opts?.recheckQueue);
   } finally {
     await releaseOutboxLock(lock);
   }
@@ -4397,7 +4414,10 @@ export async function sendMessage(
     cwd?: string;
     raw?: boolean;
     outboxDir?: string;
+    peerSend?: PeerEnqueueOptions;
+    queueGuard?: import("./outbox").LocalQueueGuard;
     team?: string;
+    noPassthrough?: boolean;
     /**
      * Dashboard-only: stage local file-path references at send time (see the
      * function docstring). Internal opt — deliberately NOT exposed through any
@@ -4429,7 +4449,7 @@ export async function sendMessage(
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
 
   // Resolve sender at ENQUEUE time (depends on the sender process's cwd).
-  const fromId = resolveSenderId(agent.repoPath, opts);
+  const fromId = opts?.peerSend ? opts.fromAgent ?? "" : resolveSenderId(agent.repoPath, opts);
   const raw = opts?.raw === true;
 
   // ---- Send-time attachment staging (dashboard opt-in only) ----------------
@@ -4441,7 +4461,7 @@ export async function sendMessage(
   const attachmentSend = opts?.stageAttachments === true;
   let outgoing = message;
   let stagedCleanup: (() => Promise<void>) | null = null;
-  let noPassthrough = false;
+  let noPassthrough = opts?.noPassthrough === true;
   if (attachmentSend) {
     let staged: StagedMessage;
     try {
@@ -4489,7 +4509,20 @@ export async function sendMessage(
   try {
     queueDir = opts?.outboxDir ?? agentOutboxDir(agent);
     const reservedKey = opts?.outboxDir === undefined ? agent.meta.queue_key : undefined;
-    await enqueueOutbox(queueDir, { message: outgoing, fromAgent: fromId, raw, team: opts?.team, noPassthrough }, reservedKey);
+    if (opts?.peerSend) {
+      const { isDeliveryPaneLive } = await import("./tmux-poller");
+      const probe = () => waitForIO(opts.peerSend!, () => isDeliveryPaneLive(tmuxSession));
+      let live = await probe();
+      if (live && opts.peerSend.prepareMessage) {
+        outgoing = await opts.peerSend.prepareMessage();
+        live = await probe();
+      }
+      if (!live) return { ok: false, exitCode: 1, stdout: "", stderr: `Agent '${agent.id}' is not running` };
+      await opts.peerSend.beforeEnqueue();
+    }
+    await enqueueOutbox(queueDir, {
+      message: outgoing, fromAgent: fromId, peerSender: opts?.peerSend?.senderKind, raw, team: opts?.team, noPassthrough,
+    }, reservedKey, opts?.peerSend?.signal ?? opts?.queueGuard?.signal, opts?.queueGuard);
   } catch (err) {
     // Enqueue failed — nothing is queued. Undo any staged copies so an
     // abandoned attempt leaves no unused attachment behind (no partial copy).
@@ -4499,6 +4532,19 @@ export async function sendMessage(
 
   const stdout = fromId ? "" : `Sent to ${agent.id}`;
 
+  async function drainIfNeeded(): Promise<IbCommandResult> {
+    if (await hasLiveWatchdog(agentDir)) return { ok: true, exitCode: 0, stdout, stderr: "" };
+    return drainOutbox(agent, queueDir, { recheckQueue: true });
+  }
+
+  if (opts?.peerSend) {
+    const { log } = opts.peerSend;
+    void drainIfNeeded().then(result => {
+      if (!result.ok) log(result.stderr);
+    }).catch(err => log(`Delivery error after enqueue: ${err}`));
+    return { ok: true, exitCode: 0, stdout, stderr: "" };
+  }
+
   // After a successful enqueue the message is durably queued. For a staged send
   // NOTHING past this point may surface as failure: reporting failure would make
   // the dashboard retry, re-stage under a FRESH /tmp path the outbox dedupe
@@ -4507,12 +4553,9 @@ export async function sendMessage(
   // probe or the drain. Report success either way, keep the queued copy and the
   // staged files for the next drainer, and surface the underlying error as a
   // non-fatal stderr diagnostic.
-  if (attachmentSend) {
+  if (attachmentSend || noPassthrough) {
     try {
-      if (await hasLiveWatchdog(agentDir)) {
-        return { ok: true, exitCode: 0, stdout, stderr: "" };
-      }
-      const result = await drainOutbox(agent, queueDir, { steal: true });
+      const result = await drainIfNeeded();
       return { ok: true, exitCode: 0, stdout, stderr: result.ok ? "" : result.stderr };
     } catch (err) {
       return {
@@ -4527,13 +4570,7 @@ export async function sendMessage(
   // Ordinary (non-staged) send — historical behavior exactly. If a live watchdog
   // will drain, just return — it owns delivery. (The system coordinator has no
   // per-agent watchdog, so a coordinator send always drains inline below.)
-  if (await hasLiveWatchdog(agentDir)) {
-    return { ok: true, exitCode: 0, stdout, stderr: "" };
-  }
-
-  // No live watchdog — the sender becomes the drainer for this batch. Steal a
-  // stale lock so a crashed holder can't wedge delivery forever.
-  const result = await drainOutbox(agent, queueDir, { steal: true });
+  const result = await drainIfNeeded();
   // Preserve the historical stdout shape (drainOutbox returns deliverMessage's
   // result, whose stdout already matches; but on empty/lock-skip it returns a
   // generic success — normalize the success stdout to the sender-aware value).
@@ -4666,6 +4703,8 @@ export async function teamSend(
   opts:
     | {
         fromAgent?: string;
+        noPassthrough?: boolean;
+        queueGuard?: import("./outbox").LocalQueueGuard;
         /** Dashboard-only: stage local file paths per recipient (see docstring). */
         stageAttachments?: boolean;
         /** Base dir for relative attachment paths; defaults to each recipient's repoPath. */
@@ -4729,14 +4768,14 @@ export async function teamSend(
   // /tmp snapshot). ONE record per send, never per recipient. Best-effort: a
   // channel-append failure must never fail the send (§17.4).
   const skip = new Set(opts?.skipRecipientIds ?? []);
-  const stagedSend = opts?.stageAttachments === true;
+  const stagedSend = opts?.stageAttachments === true || opts?.noPassthrough === true;
   const recordRoomMessage = async () => {
     if (!message) return;
     await appendChannelMessage(name, {
       ts: Math.floor(Date.now() / 1000),
       fromAgent: senderId,
       message,
-    }).catch(() => {});
+    }).then(() => opts?.queueGuard?.accepted?.(), () => {});
   };
 
   // Legacy (non-staged) fan-out records the message REGARDLESS of delivery
@@ -4765,7 +4804,10 @@ export async function teamSend(
     // first attempt, then every member was pruned before the skip-carrying
     // retry) already recorded on that first attempt; recording again here would
     // duplicate the line, so the skip guard suppresses it.
-    if (stagedSend && skip.size === 0) await recordRoomMessage();
+    if (stagedSend && skip.size === 0) {
+      if (opts?.queueGuard) { await opts.queueGuard.beforeAppend(); opts.queueGuard.signal.throwIfAborted(); }
+      await recordRoomMessage();
+    }
     return { ...teamOk(`no recipients in @${name}`), acceptedRecipientIds: [] };
   }
 
@@ -4788,7 +4830,7 @@ export async function teamSend(
     };
   }
 
-  const fromAgent = senderId || undefined;
+  const fromAgent = senderId;
   let failures = 0;
   let newlyAccepted = 0;
   const failureLines: string[] = [];
@@ -4802,6 +4844,8 @@ export async function teamSend(
     const res = await sendMessage(recipient, message, {
       fromAgent,
       team: name,
+      ...(opts?.queueGuard && { queueGuard: opts.queueGuard }),
+      noPassthrough: opts?.noPassthrough,
       stageAttachments: opts?.stageAttachments,
       attachmentBaseDir: opts?.attachmentBaseDir,
     });
@@ -5186,7 +5230,7 @@ export interface NewAgentOptions {
   /** Override cwd for auto-detect manager (used in tests). */
   _cwd?: string;
   /**
-   * INTERNAL. The already-verified calling agent, supplied ONLY by the watchdog
+   * INTERNAL. The already-verified calling agent, supplied by the CLI or by the watchdog
    * spawn broker (spawn-broker.ts) after it checked the requester's meta against
    * its sealed record. It replaces the cwd-based caller lookup, which cannot work
    * from the watchdog: for a worktree:false agent the lookup verifies process
@@ -5196,7 +5240,7 @@ export interface NewAgentOptions {
    * applies to this identity exactly as it would to a direct call. The CLI never
    * populates this field from user input.
    */
-  _trustedCaller?: ResolvedCallerContext;
+  _trustedCaller?: ResolvedCallerContext | null;
 }
 
 /** Spawn context for newAgent operations */
@@ -5233,7 +5277,7 @@ export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
 
 /** Type for readCallerMetaFromCwd override in tests */
 export type CallerMetaReaderFn = (cwd: string) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
-export type NoWorktreeCallerResolverFn = (cwd: string) => Promise<NoWorktreeCaller | null>;
+export type NoWorktreeCallerResolverFn = (cwd: string, options?: CallerLookupOptions & { coordinatorId?: string; roots?: string[] }) => Promise<NoWorktreeCaller | null>;
 
 let callerMetaReaderOverride: CallerMetaReaderFn | null = null;
 let noWorktreeCallerResolverOverride: NoWorktreeCallerResolverFn | null = null;
@@ -6177,11 +6221,15 @@ export interface ResolvedCallerContext {
  * Throws on an unverifiable or ambiguous caller; a destructive-command gate must
  * treat a throw as "deny" (fail-closed), matching newAgent()'s posture.
  */
-export async function resolveCallerAgentContext(cwd: string): Promise<ResolvedCallerContext | null> {
-  return readCallerMetaFromCwd(cwd);
+export function resolveRemoteSharedCaller(cwd: string, repoPath: string, coordinatorId: string): Promise<NoWorktreeCaller | null> {
+  return (noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller)(cwd, { roots: [repoPath], coordinatorId });
 }
 
-async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext | null> {
+export async function resolveCallerAgentContext(cwd: string, options?: CallerLookupOptions): Promise<ResolvedCallerContext | null> {
+  return readCallerMetaFromCwd(cwd, options);
+}
+
+async function readCallerMetaFromCwd(cwd: string, options?: CallerLookupOptions): Promise<ResolvedCallerContext | null> {
   if (callerMetaReaderOverride !== null) {
     const meta = await callerMetaReaderOverride(cwd);
     if (!meta) return null;
@@ -6193,9 +6241,11 @@ async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext
   // need ancestry verification so a forged worktree cannot upgrade a leaf.
   const noWorktreeCaller = await (
     noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller
-  )(cwd);
-  if (noWorktreeCaller) return noWorktreeCaller;
+  )(cwd, options);
+  return noWorktreeCaller ?? readWorktreeCaller(cwd);
+}
 
+export async function readWorktreeCaller(cwd: string): Promise<ResolvedCallerContext | null> {
   const agentPattern = runtimeNames.AGENT_CWD_PATTERN;
   if (agentPattern.test(cwd)) {
     const callerDir = runtimeNames.worktreeAgentDir(cwd);
@@ -6262,7 +6312,7 @@ async function spawnAgent(
   const callerCwd = opts?._cwd ?? process.cwd();
   let callerContext: ResolvedCallerContext | null;
   try {
-    callerContext = opts?._trustedCaller ?? await readCallerMetaFromCwd(callerCwd);
+    callerContext = opts?._trustedCaller !== undefined ? opts._trustedCaller : await readCallerMetaFromCwd(callerCwd);
   } catch (err) {
     return {
       ok: false,
@@ -6881,7 +6931,7 @@ async function spawnAgent(
     const anchoredPaths = anchorRelativePaths(mergedSandboxLayers.paths, rootRepoPath);
     resolvedPathsConfig = canonicalizePathsConfig(anchoredPaths, userHome());
     if (isCodexBackedCli(agentCli) && !resolvedSandboxConfig.enabled) {
-      codexPathGrants = await resolveCodexPathGrants(resolvedPathsConfig);
+      codexPathGrants = await resolveAgentCodexPathGrants(resolvedPathsConfig);
     }
   } catch (err) {
     return {
@@ -7858,7 +7908,7 @@ echo ""
     const claudeLaunchCommand = usesClaudePidBootstrap
       ? buildClaudePidBootstrapCommand(id, claudeCommand, trustedClaudeIbCommand!)
       : claudeCommand;
-    startContent = `#!/bin/bash
+    startContent = `${runtimeNames.AGENT_LAUNCH_HEADER}
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 # Suppress the "How is Claude doing?" feedback survey for spawned agents

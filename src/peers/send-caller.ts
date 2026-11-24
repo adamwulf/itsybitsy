@@ -1,0 +1,137 @@
+import { realpath, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { accountHome } from "../home";
+import { registeredRepoRoots } from "../hooks/agent-context";
+import { readWorktreeCaller, resolveCallerAgentContext, resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
+import { checkCoordinatorExists, IB_COORDINATOR_SESSION } from "../coordinator";
+import { isCoordinatorType } from "../coordinator-type-names";
+import { hasGitWorktreeBacklink, matchesLiveLaunch, registeredWorktreeRecord } from "../no-worktree-caller";
+import { metadataRealpath, orderedEntryMatches, prepareAccessTable, resolvePathsConfig, type PathsConfig } from "../sandbox";
+import { isSandboxedProcess } from "../sandbox-detect";
+import { isAgentLaunchCommand, isAgentTmuxSession, matchWorktreeCaller } from "../runtime-names";
+import { humanSendTerminalDenial, isSystemPaneCaller, TMUX_SEND_DENIAL } from "./remote-start-caller";
+
+export const remoteCliCaller = { humanDenial: humanSendTerminalDenial, isSystem: isSystemPaneCaller };
+
+export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind: "agent"; caller: ResolvedCallerContext };
+
+/** For local attribution, a human can use their own tmux session. Resolve the
+ * invoking pane explicitly: tmux's default target can be another client. */
+export async function localHumanInCheckout(cwd: string, caller: ResolvedCallerContext): Promise<boolean> {
+  if (!matchWorktreeCaller(cwd) || matchesLiveLaunch(caller)) return false;
+  if (!process.env.TMUX) return await remoteCliCaller.humanDenial(undefined, "local-send") === null;
+  const pane = process.env.TMUX_PANE;
+  if (!pane || !/^%\d+$/.test(pane)) return false;
+  try {
+    const probe = Bun.spawnSync(["tmux", "display-message", "-p", "-t", pane, "#{session_name}\t#{pane_start_command}"], {
+      stdout: "pipe", stderr: "ignore", timeout: 2000,
+    });
+    const [session, command] = probe.stdout.toString().replace(/\n$/, "").split("\t");
+    if (probe.exitCode !== 0 || !session || command === undefined || session === IB_COORDINATOR_SESSION) return false;
+    // A managed session can also contain the operator's shell in another window.
+    // ib launches its own pane with the absolute start.sh or resume.sh command.
+    const managed = session === caller.meta.tmux_session || isAgentTmuxSession(session);
+    if (managed && isAgentLaunchCommand(command)) return false;
+    return await remoteCliCaller.humanDenial(undefined, "local-send") === null;
+  } catch { return false; }
+}
+
+/** Local commands accept an explicit actor when the caller cannot be identified.
+ * Spawning keeps its existing fail-closed caller permission gate. */
+export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: boolean; checkHuman?: boolean } = {}): Promise<VerifiedSendCaller> {
+  let caller: ResolvedCallerContext | null;
+  try {
+    // A sandboxed spawn only selects the watchdog. It verifies the requester and spawn permission.
+    const allowSessionFallback = !options.forSpawn || isSandboxedProcess();
+    caller = await resolveCallerAgentContext(cwd, { includeWorktreePids: true, allowSessionFallback });
+  } catch (error) {
+    if (options.forSpawn) throw error;
+    // A restricted process table can still leave the caller's own worktree
+    // metadata readable. Preserve that positive attribution.
+    caller = await readWorktreeCaller(cwd);
+  }
+  if (caller && typeof caller.meta.id === "string") {
+    // A human terminal can open an agent checkout and use the local override.
+    if (options.checkHuman && await localHumanInCheckout(cwd, caller)) {
+      return { kind: "user" };
+    }
+    return { kind: "agent", caller };
+  }
+  return { kind: await remoteCliCaller.isSystem() ? "system" : "user" };
+}
+
+export function cliActorId(actor: VerifiedSendCaller, explicit?: string, flag = "--from"): string {
+  if (actor.kind === "agent") {
+    const id = String(actor.caller.meta.id);
+    if (explicit !== undefined && explicit !== id) {
+      throw new Error(`Error: agents can only act as themselves; drop ${flag}`);
+    }
+    return id;
+  }
+  return explicit ?? (actor.kind === "system" ? "@system" : "");
+}
+
+async function directoryIdentity(path: string): Promise<string | undefined> {
+  try {
+    const dir = await stat(path, { bigint: true });
+    if (dir.isDirectory()) return `${dir.dev}:${dir.ino}`;
+  } catch (error) {
+    if (!["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+  }
+}
+
+/** Match the closest registered directory by metadata, including APFS case aliases. */
+async function registeredCallerRepo(roots: readonly string[], cwd: string, worktreeRepo?: string) {
+  const registered = new Set<string>();
+  for (const root of roots) {
+    const id = await directoryIdentity(root);
+    if (id) registered.add(id);
+  }
+  for (let dir = worktreeRepo ?? cwd; ; dir = dirname(dir)) {
+    const id = await directoryIdentity(dir);
+    if (id && registered.has(id)) return dir;
+    if (worktreeRepo || dir === dirname(dir)) return undefined;
+  }
+}
+
+/** Only the repo coordinator needs process ancestry in a shared checkout. */
+export async function verifiedSendCaller(cwd: string, purpose: "attachments" | "remote", roots?: readonly string[]): Promise<VerifiedSendCaller> {
+  const humanDenial = await remoteCliCaller.humanDenial();
+  if (humanDenial === null) return { kind: "user" };
+  let refusal = "cannot verify the sender of a remote send; run it from a terminal or from the agent's worktree";
+  if (purpose === "attachments") refusal = "cannot verify the sender for attachments; send from the agent's worktree or from a terminal outside tmux";
+  else if (humanDenial === TMUX_SEND_DENIAL) refusal = humanDenial;
+  const path = await realpath(cwd);
+  const systemDir = join(accountHome(), ".itsybitsy");
+  if (path === systemDir || path.startsWith(systemDir + "/")) {
+    if (await remoteCliCaller.isSystem()) return { kind: "system" };
+    throw new Error(refusal);
+  }
+  const worktree = matchWorktreeCaller(path);
+  const repo = await registeredCallerRepo(roots ?? await registeredRepoRoots(accountHome()), path, worktree?.[1]);
+  if (!repo) {
+    if (worktree && purpose === "remote") throw new Error("Remote sends require the requester's repo to be registered");
+    throw new Error(refusal);
+  }
+  if (worktree) {
+    const caller = await registeredWorktreeRecord(path, [repo]);
+    if (!caller || caller.meta.worktree !== true || isCoordinatorType(caller.meta.agentType)) throw new Error(refusal);
+    // A remote worktree is only a broker destination here. Its watchdog
+    // checks the seal, registration and backlink before publishing anything.
+    if (purpose === "attachments") {
+      const { deny } = prepareAccessTable({ ...resolvePathsConfig(caller.meta.paths as PathsConfig | undefined), runtimeRoots: [], runtimeDenyRoots: [] });
+      const verified = await hasGitWorktreeBacklink(caller, true, file => {
+        const canonical = metadataRealpath(file);
+        if (!canonical || deny.some(entry => orderedEntryMatches(entry, canonical))) throw new Error(refusal);
+        return file;
+      });
+      if (!verified) throw new Error(refusal);
+    }
+    return { kind: "agent", caller };
+  }
+  const coordinator = await checkCoordinatorExists(repo);
+  if (!coordinator.exists || !coordinator.isCoordinator) throw new Error(refusal);
+  const caller = await resolveRemoteSharedCaller(path, repo, coordinator.agentId).catch(() => null);
+  if (!caller) throw new Error(refusal);
+  return { kind: "agent", caller };
+}

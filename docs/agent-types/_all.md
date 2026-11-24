@@ -72,6 +72,8 @@ paths:
     # `ib peer` (human-only) and `ib watch` use it. An installed _all.md gets
     # this line by hand; there is no migration.
     - "~/.itsybitsy/peer/secret.key"
+    # Only the trusted CLI and the unsandboxed watchdog publish peer requests.
+    - "~/.itsybitsy/peer-outbox"
 sandbox:
   # Omitted enablement inherits; the final default is true. More-specific
   # types can set sandbox: false or sandbox.enabled: false, or turn it back on.

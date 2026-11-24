@@ -49,8 +49,8 @@ test("restart @system reports the local launch and prints a registration warning
     // Only this fixture's executable is in PATH. It reaches readiness, then
     // fails the registration write after the launcher has returned.
     await Bun.write(tmux, [
-      "#!/bin/sh", 'case "$1" in',
-      'new-session) echo %4 ;;',
+      "#!/bin/sh", 'if [ "$1" = "-S" ]; then shift 2; fi', 'case "$1" in',
+      'new-session) printf "%s\\t%s\\n" "%4" "/fixture/socket" ;;',
       'capture-pane) echo "Claude Code v1.0.0" ;;',
       'display-message) echo claude ;;',
       'set-option) case "$*" in *@ib-system-coordinator-command*) echo "record write failed" >&2; exit 1 ;; esac ;;',
@@ -61,7 +61,7 @@ test("restart @system reports the local launch and prints a registration warning
     await Bun.write(git, "#!/bin/sh\nexit 0\n");
     await chmod(git, 0o755);
     const result = await runIsolatedCli(["restart", "@system"], {
-      home, env: { PATH: home }, allowedProcesses: [["tmux"], ["git"]],
+      home, env: { PATH: home }, allowedProcesses: [[tmux], ["tmux"], ["git"]],
     });
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("System coordinator restart scheduled (fresh session)");
@@ -703,6 +703,7 @@ describe("CLI arg parsing", () => {
         manager: "agent-mgr",
         name: "the-name",
         noWorktree: true,
+        _trustedCaller: null,
         spawnedBy: { agent_id: "agent-spawner", repo_path: "/some/repo" },
       },
     ]);
@@ -713,7 +714,7 @@ describe("CLI arg parsing", () => {
     const result = await runCli(["new", "--spawned-by", "agent-spawner", "hello"], { actions: { newAgent: "record" } });
     const { args } = onlyAction(result);
     expect(args[1]).toBe("hello");
-    expect(args[2]).toEqual({ spawnedBy: { agent_id: "agent-spawner", repo_path: result.context.cwd } });
+    expect(args[2]).toEqual({ _trustedCaller: null, spawnedBy: { agent_id: "agent-spawner", repo_path: result.context.cwd } });
   });
 
   test("new-agent --spawned-by-repo without --spawned-by is rejected", async () => {
@@ -913,7 +914,7 @@ describe("CLI arg parsing", () => {
       actions: { newAgent: "record" },
     });
     expect(result.stderr).not.toContain("prompt required");
-    expect(onlyAction(result).args).toEqual([repo, "fix $(whoami) and `date` for $USER literally", { type: "worker" }]);
+    expect(onlyAction(result).args).toEqual([repo, "fix $(whoami) and `date` for $USER literally", { type: "worker", _trustedCaller: null }]);
   });
 
   test("new-agent with empty stdin + registered repo still errors 'prompt required'", async () => {
@@ -1896,4 +1897,14 @@ describe("CLI entry points", () => {
       expect(stderr).not.toContain("Cross-repo agent dashboard");
     },
   );
+});
+
+test("send help and missing-target usage list every remote address form", async () => {
+  for (const args of [["send", "--help"], ["send"]]) {
+    const { stdout, stderr } = await runIsolatedCli(args);
+    for (const form of ["<machine>/<agent>", "<machine>/<repo>/<agent>", "<machine>/@system", "<machine>/@<repo>"]) {
+      expect(stdout + stderr).toContain(form);
+    }
+    expect(stdout + stderr).not.toContain("not supported");
+  }
 });

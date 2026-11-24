@@ -177,13 +177,10 @@ describe("endpoints over a relay-disabled loopback (real addon, no network)", ()
 
   test("close() resolves a pending acceptNext with null", async () => {
     const iroh = await loadIroh();
-    const ep = await iroh.Endpoint.bind({
-      secretKey: iroh.SecretKey.generate().toBytes(),
-      alpns: [ALPN],
-      preset: { kind: "local", bindAddr: "127.0.0.1:0" },
-    });
+    const ep = await bindLocal(iroh, [ALPN]);
     const pending = ep.acceptNext();
     await ep.close();
+    endpoints.splice(endpoints.indexOf(ep), 1);
     expect(await pending).toBeNull();
   });
 });
@@ -257,4 +254,18 @@ test("only src/peers/iroh.ts references @number0/iroh, and only through a dynami
     expect(line).not.toMatch(/\bfrom\s+["']/);
     expect(line).not.toContain("require(");
   }
+});
+
+test("native cancellation waits for both halves even when stop and reset reject", async () => {
+  const { IrohBiStream } = await import("./iroh");
+  const reset = Promise.withResolvers<void>();
+  const stream = new IrohBiStream({ recv: { stop: async () => { throw Error("closed stream"); } },
+    send: { reset: () => reset.promise } } as never);
+  let finished = false;
+  const cancelled = stream.cancel().finally(() => { finished = true; });
+  await Bun.sleep(0);
+  expect(finished).toBe(false);
+  reset.reject(Error("stream reset failed"));
+  await cancelled;
+  expect(finished).toBe(true);
 });

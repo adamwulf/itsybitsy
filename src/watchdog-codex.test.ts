@@ -1,3 +1,4 @@
+import { localAttachmentVolume } from "./peers/local-attachments";
 /**
  * Phase 6 regression tests — runPerAgentWatchdog + the rate-limited / api-error
  * handlers must skip their claude-specific bare-Enter / "please retry" / Anthropic
@@ -145,6 +146,9 @@ function countRetryCalls(spawnMock: ReturnType<typeof mockSpawnRunner>): number 
     return c.args.some((a: unknown) => typeof a === "string" && a.includes("please retry"));
   }).length;
 }
+
+beforeEach(() => localAttachmentVolume.set(join(tmpdir(), "ib-watch-recovery-" + crypto.randomUUID())));
+afterEach(() => localAttachmentVolume.reset());
 
 describe("Phase 6 — handler-level cli gating", () => {
   let spawnMock: ReturnType<typeof mockSpawnRunner>;

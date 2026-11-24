@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveCodexPathGrants } from "./codex-paths";
+import { resetUserHome, setUserHome } from "./home";
+import { resolveAgentCodexPathGrants, resolveCodexPathGrants } from "./codex-paths";
 import { prepareAccessTable, orderedEntryMatches, resolvePreparedAccess, type PathsConfig } from "./sandbox";
 
 let root: string;
@@ -28,6 +29,18 @@ function nativeAccess(grants: Record<string, "read" | "write" | "deny">, target:
 }
 
 describe("resolveCodexPathGrants", () => {
+  test("old broad and nested write grants cannot reopen the native Codex peer handoff", async () => {
+    setUserHome(root);
+    try {
+      const dir = p(".itsybitsy/peer-outbox");
+      const request = join(dir, "id", "request.json");
+      const grants = await resolveAgentCodexPathGrants(paths([], [p(".itsybitsy"), request]));
+      expect(grants[dir]).toBe("deny");
+      expect(grants[request]).toBeUndefined();
+      expect(nativeAccess(grants, request)).toBe("deny");
+    } finally { resetUserHome(); }
+  });
+
   test("empty frozen policy adds no grants", async () => {
     expect(await resolveCodexPathGrants(paths())).toEqual({});
   });

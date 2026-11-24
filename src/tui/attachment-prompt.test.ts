@@ -1,3 +1,4 @@
+import { useAttachmentTemp } from "../test-attachment-temp";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,14 +16,17 @@ import type { DialogState } from "./dialog-handler";
 describe("attachment-prompt", () => {
   let testDir: string;
   let homeDir: string;
+  let restoreTemp: () => void;
 
   beforeEach(async () => {
     testDir = await mkdtemp(join(process.cwd(), ".att-test-"));
     homeDir = await mkdtemp(join(process.cwd(), ".att-home-"));
+    restoreTemp = useAttachmentTemp(testDir);
     setUserHome(homeDir);
   });
 
   afterEach(async () => {
+    restoreTemp();
     resetUserHome();
     await rm(testDir, { recursive: true, force: true });
     await rm(homeDir, { recursive: true, force: true });
@@ -151,14 +155,15 @@ describe("attachment-prompt", () => {
       const stagedMsg = await stageSelectedAttachments(msg, selected, candidates);
 
       expect(stagedMsg).not.toContain(file1);
-      expect(stagedMsg).toMatch(/\/tmp\/itsybitsy-attachments-[^/]+\/0\/first\.txt/);
+      expect(stagedMsg).toStartWith(`check ${testDir}/itsybitsy-attachments-`);
+      expect(stagedMsg).toMatch(/\/itsybitsy-attachments-[^/]+\/0\/first\.txt/);
       // file2 was NOT selected, so it must stay untouched
       expect(stagedMsg).toContain(file2);
 
       // Verify copied file content
-      const match = stagedMsg.match(/\/tmp\/itsybitsy-attachments-[^/]+\/0\/first\.txt/);
+      const match = stagedMsg.match(/\/itsybitsy-attachments-[^/]+\/0\/first\.txt/);
       expect(match).not.toBeNull();
-      expect(await readFile(match![0], "utf8")).toBe("first");
+      expect(await readFile(testDir + match![0], "utf8")).toBe("first");
     });
   });
 
@@ -252,7 +257,8 @@ describe("attachment-prompt", () => {
 
       expect(res).toBe(true);
       expect(confirmedText).not.toContain(file1);
-      expect(confirmedText).toMatch(/\/tmp\/itsybitsy-attachments-[^/]+\/0\/submit\.png/);
+      expect(confirmedText).toStartWith(`look at ${testDir}/itsybitsy-attachments-`);
+      expect(confirmedText).toMatch(/\/itsybitsy-attachments-[^/]+\/0\/submit\.png/);
     });
 
     test("onSubmit with NO checked items leaves text unchanged and does not copy", async () => {

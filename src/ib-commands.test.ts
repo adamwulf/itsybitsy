@@ -1,3 +1,6 @@
+import * as fsPromises from "node:fs/promises";
+import { spyOn } from "bun:test";
+import { useAttachmentTemp } from "./test-attachment-temp";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { resolveNoWorktreeCaller } from "./no-worktree-caller";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
@@ -978,6 +981,49 @@ describe("sendMessage outbox integration", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  test.each([
+    { label: "the inline owner drains a second @system send after its lock wait expires", ageLock: false },
+    { label: "a live @system delivery older than 30 seconds is never typed twice", ageLock: true },
+  ])("$label", async ({ ageLock }) => {
+    const { sendToSystemCoordinator, setSystemCoordinatorHasSessionFn, resetSystemCoordinatorHasSessionFn } = await import("./index");
+    const { getCoordinatorHome } = await import("./coordinator");
+    const { outboxLockPath, readOutbox } = await import("./outbox");
+    const typing = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<number>();
+    const chunks: string[] = [];
+    setSystemCoordinatorHasSessionFn(async () => true);
+    setSendSpawnRunner(cmd => {
+      const result = makeSpawnResult();
+      if (cmd[1] === "send-keys" && cmd.includes("-l")) {
+        chunks.push(cmd.at(-1)!);
+        if (chunks.length === 1) {
+          typing.resolve();
+          return { ...result, exited: resume.promise };
+        }
+      }
+      return result;
+    });
+    const opts = { cwd: tempDir, raw: true };
+    const long = "a".repeat(701);
+    const first = sendToSystemCoordinator(long, opts);
+    try {
+      await typing.promise;
+      if (ageLock) {
+        const old = new Date(Date.now() - 60_000);
+        await fsPromises.utimes(outboxLockPath(getCoordinatorHome()), old, old);
+      }
+      const second = await sendToSystemCoordinator("next", opts);
+      expect(second.ok).toBe(true);
+      expect(chunks).toEqual([long.slice(0, 500)]);
+    } finally {
+      resume.resolve(0);
+      await first;
+      resetSystemCoordinatorHasSessionFn();
+    }
+    expect(chunks).toEqual([long.slice(0, 500), long.slice(500), "next"]);
+    expect(await readOutbox(getCoordinatorHome())).toEqual([]);
+  }, 12_000);
+
   test("defers to a live watchdog: enqueues but does NOT deliver inline", async () => {
     // A fresh transient file with a live watchdog pid means a watchdog will
     // drain — sendMessage must enqueue and return without typing into tmux.
@@ -1106,6 +1152,7 @@ describe("sendMessage outbox integration", () => {
 // sandbox. Legacy sends (no stageAttachments) must be entirely unaffected.
 // ---------------------------------------------------------------------------
 describe("sendMessage send-time attachment staging", () => {
+  let restoreTemp: () => void;
   let spawnCalls: string[][];
   let tempDir: string;
   let agentDir: string;
@@ -1123,6 +1170,7 @@ describe("sendMessage send-time attachment staging", () => {
   beforeEach(async () => {
     spawnCalls = [];
     tempDir = await mkdtemp(join(tmpdir(), "send-stage-"));
+    restoreTemp = useAttachmentTemp(tempDir);
     await useFixtureRepo(tempDir);
     agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(agentDir, { recursive: true });
@@ -1139,6 +1187,7 @@ describe("sendMessage send-time attachment staging", () => {
   });
 
   afterEach(async () => {
+    restoreTemp();
     resetUserHome();
     resetSendSpawnRunner();
     resetUserConfigPath();
@@ -1176,6 +1225,38 @@ describe("sendMessage send-time attachment staging", () => {
 
     await rm(srcDir, { recursive: true, force: true });
     await rm(join(stagedPath, "..", ".."), { recursive: true, force: true });
+  });
+
+  test("a slow dashboard append keeps its snapshot and both sends drain once", async () => {
+    const agent = _makeAgent({ id: "agent-abc", repoPath: tempDir, state: "running" as AgentState });
+    const snapshot = join(tempDir, "snapshot");
+    await Bun.write(snapshot, "preserved");
+    setMessageAttachmentStagerForTesting(async () => ({
+      message: snapshot, staged: true, cleanup: () => rm(snapshot),
+    }));
+    const entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+    const original = fsPromises.open;
+    const opening = spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+      const file = await original(...args);
+      const append = file.appendFile.bind(file);
+      file.appendFile = async (...data) => {
+        if (String(data[0]).includes(snapshot)) { entered.resolve(); await resume.promise; }
+        return append(...data);
+      };
+      return file;
+    });
+    try {
+      const first = sendMessage(agent, "attached", { cwd: "/", stageAttachments: true });
+      await entered.promise;
+      const second = sendMessage(agent, "second", { cwd: "/" });
+      expect(deliveredMessage()).toBeUndefined();
+      resume.resolve();
+      expect((await first).ok).toBe(true);
+      expect((await second).ok).toBe(true);
+      expect(await Bun.file(snapshot).text()).toBe("preserved");
+      const delivered = spawnCalls.filter(call => call[1] === "send-keys" && call[4] === "-l").map(call => call[6]);
+      expect(delivered).toEqual(["[sent by user]: " + snapshot, "[sent by user]: second"]);
+    } finally { resume.resolve(); opening.mockRestore(); }
   });
 
   test("queues the staged replacement (not the original) before any delivery, marked no-passthrough", async () => {
@@ -4333,6 +4414,8 @@ describe("resumeAgent (native)", () => {
     const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
     expect(newSessionCall).toBeDefined();
     expect(newSessionCall!.some(arg => arg.includes("resume.sh"))).toBe(true);
+    expect(newSessionCall!.join(" ")).not.toContain("IB_AGENT_DIR");
+    expect(resumeScript).toContain("export IB_AGENT_DIR=");
 
     // dispatcher precheck must have run (3 events) — calls go through
     // dispatcherDryRunSpawnCtx, NOT the resume spawn runner, so we read from
@@ -10688,6 +10771,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const tmuxNewSession = spawnCalls.find(c => c.includes("new-session"));
     expect(tmuxNewSession).toBeDefined();
     expect(tmuxNewSession).toContain("-d");
+    expect(tmuxNewSession!.join(" ")).not.toContain("IB_AGENT_DIR");
+    expect(await Bun.file(join(agentsDir, "test-tmux", "start.sh")).text()).toContain("export IB_AGENT_DIR=");
     expect(tmuxNewSession).toContain("-x");
     // Width comes from saved layout.json (or DEFAULT_TMUX_WIDTH if none)
     const xIndex = tmuxNewSession!.indexOf("-x");

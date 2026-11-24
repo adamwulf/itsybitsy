@@ -1,3 +1,4 @@
+import { localAttachmentVolume } from "./peers/local-attachments";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
@@ -22,6 +23,9 @@ import { runPerAgentWatchdog } from "./watchdog";
 const MANAGER_ID = "agent-manager";
 const CHILD_ID = "agent-child";
 const ID_A = "a".repeat(32);
+
+beforeEach(() => localAttachmentVolume.set(join(tmpdir(), "ib-watch-recovery-" + crypto.randomUUID())));
+afterEach(() => localAttachmentVolume.reset());
 
 describe("lifecycle broker", () => {
   let home: string;

@@ -147,7 +147,27 @@ Transient labels (`merging`, `restarting`, `op_stuck`) appear while a lifecycle 
 | `@<repo>/<agent-id>` | An agent in a specific repo |
 | `@<team>` | Every member of a team |
 
+You can also supply the message body through stdin or `-f`.
+
 Agents ask you questions with `ib ask`; `ib questions` lists what is pending and `ib acknowledge` clears one. Teams are named groups for broadcast: `ib team create/add/remove/list/delete`, `ib roster <name>`.
+
+### Messaging between paired machines
+
+Run `ib watch` on both machines. For human remote sends, launch the dashboard or run `ib send` from a terminal outside tmux. Local text sends work inside tmux. Use `ib send <machine>/<agent> "message"` for a running agent, or `<machine>/<repo>/<agent>` to choose its registered repo. A bare ID or nickname searches your local repo first. If there’s no match there, it must identify one agent across local repos and connected peers. Use `<machine>/@system` for the peer’s system coordinator and `<machine>/@<repo>` for a registered repo’s coordinator.
+
+Ordinary messages from a human shell or the dashboard carry the same user label as local sends. An agent can only send as itself and appears as `[sent by agent <machine>/<repo>/<id>]`. A successful send confirms that the receiver queued the message. Delivery to the recipient follows.
+
+Repeat `--attach <file>` to send several files to a local or remote recipient.
+
+```sh
+ib send laptop/photos/reader --attach ./plot.png --attach ./data.csv "Compare ./plot.png with ./data.csv"
+```
+
+In the dashboard, press `s` on a remote agent or coordinator row, drop a file from outside the project into the message and press Send. The receiver copies attached files under `/tmp/itsybitsy-attachments-*`, rewrites matching paths in the text and appends an `Attachments copied to this machine:` block mapping originals to copies. Delivered directories are read-only to agents. `ib` never deletes delivered files. They stay available until the OS cleans up `/tmp`.
+
+Press `h` → **Config** to edit the integer limits under `peering.attachments`. Defaults are `maxFileMB` 1024 (0–65536), `maxMessageMB` 2048 (0–131072), and `maxFiles` 20 (0–100). MB means MiB. When both sizes are positive, the message limit must cover at least one maximum-size file. Zero in any field rejects every attachment, even an empty file. The receiver enforces its own limits and each refusal names the machine, limit and value.
+
+Press Ctrl-C during a CLI send, or Esc on the dashboard’s transfer row. `cancelled before sending` means nothing was queued. With `outcome unknown`, the full message may already be queued. Check the recipient before sending again.
 
 ### Models
 
@@ -282,6 +302,9 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 |---|---|---|
 | `model` | `claude:opus` | Default model selector for new agents |
 | `effort` | `xhigh` | Default reasoning effort |
+| `peering.attachments.maxFileMB` | `1024` | MB per file, 0–65536 |
+| `peering.attachments.maxMessageMB` | `2048` | MB per message, 0–131072, at least maxFileMB when both are positive |
+| `peering.attachments.maxFiles` | `20` | Files per message, 0–100 |
 | `maxAgents` | `10` | Max concurrent agents per repo |
 | `allowAgentQuestions` | `true` | Let agents ask the user questions |
 | `externalDiffTool` | — | Enables `o`/`O` (e.g. `"code --diff"`) |
@@ -290,6 +313,8 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 | `tree.groupByParent` | `false` | Group repos under their parent directory |
 | `hooks.injectStatus` / `hooks.statusVisible` | `true` | Agents-status injection in the main session |
 | `channels.telegram.bot_token` | — | Telegram bridge |
+
+The attachment limits apply to explicit CLI attachments and to files sent from remote dashboard rows. Each machine checks its own limits. Text-only messages still work when attachments are disabled. See [Messaging between paired machines](#messaging-between-paired-machines).
 
 Per-agent-type permissions do **not** live here — they live in the agent-type `.md` files (old `permissions.*` config keys are deprecated and print migration hints).
 
@@ -310,6 +335,6 @@ bun run build          # rebuild the `ib` binary
 
 After rebuilding, confirm the binary dispatches: `ib list-types` should print a table.
 
-`./bounce.sh` runs `./build.sh` and then `./ib watch` in a loop: each time `ib watch` quits, it counts down 5 seconds, rebuilds, and relaunches. Press Ctrl-C during the countdown to stop the loop. It rebuilds only this checkout's `./ib`, so merged ib work reaches hooks and agents only when the `ib` on your `PATH` is that file: add the project directory to `PATH` (or symlink `ib` to it) rather than copying the binary to `/usr/local/bin`.
+`./bounce.sh` runs `./ib pull ./`, `./build.sh` and then `./ib watch` in a loop: each time `ib watch` quits, it counts down 5 seconds, pulls, rebuilds, and relaunches. A failed pull (uncommitted changes, `main` not checked out, no fast-forward) prints a message and builds what is checked out; a fresh clone skips the pull until the first build makes `./ib`. Press Ctrl-C during the countdown to stop the loop. It rebuilds only this checkout's `./ib`, so merged ib work reaches hooks and agents only when the `ib` on your `PATH` is that file: add the project directory to `PATH` (or symlink `ib` to it) rather than copying the binary to `/usr/local/bin`.
 
 The system coordinator can start a bounce itself with `ib bounce`, which quits `ib watch` 5 seconds later (so Claude Code can save the coordinator's last turn first); the relaunched `ib watch` resumes the coordinator's session, tells it when the bounce happened and whether `ib` was rebuilt, and then sends it "ib watch has restarted after a bounce". `ib bounce` refuses unless exactly one `ib watch` is running and `bounce.sh` started it. A bounce leaves per-repo coordinators running.

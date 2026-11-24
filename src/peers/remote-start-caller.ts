@@ -1,12 +1,17 @@
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 import { CLAUDE_PID_START_MARGIN_SECONDS } from "../agents";
+import { coordinatorSenderPanePid } from "../coordinator";
 import { resolveDashboardCaller } from "../no-worktree-caller";
 
 interface DashboardCaller {
   stdinTTY?: boolean;
   stdoutTTY?: boolean;
+  stderrTTY?: boolean;
+  hasControllingTerminal?: () => Promise<boolean>;
   env: NodeJS.ProcessEnv;
   cwd: string;
   pid: number;
@@ -15,6 +20,8 @@ interface DashboardCaller {
 }
 
 const execFileAsync = promisify(execFile);
+const TMUX_START_DENIAL = "Remote starts are disabled inside tmux";
+export const TMUX_SEND_DENIAL = "Remote sends from a human are disabled inside tmux; run ib send from a terminal outside tmux";
 
 async function readProcessTable([file, ...args]: [string, ...string[]], signal: AbortSignal): Promise<string> {
   const { stdout } = await execFileAsync(file, args, { signal, maxBuffer: 4 * 1024 * 1024, env: { LC_ALL: "C" } });
@@ -63,15 +70,26 @@ async function readAncestors(pid: number, readTable: NonNullable<DashboardCaller
   return null;
 }
 
-async function classifyCaller(signal: AbortSignal, input?: DashboardCaller): Promise<string | null> {
+async function hasControllingTerminal(): Promise<boolean> {
+  try {
+    const tty = await open("/dev/tty", constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOCTTY);
+    await tty.close();
+    return true;
+  } catch { return false; }
+}
+
+async function classifyCaller(signal: AbortSignal, input: DashboardCaller | undefined, mode: "start" | "remote-send" | "local-send"): Promise<string | null> {
   const unverified = "Cannot verify the dashboard caller’s agent metadata for remote starts";
   try {
-    const { stdinTTY, stdoutTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable = readProcessTable } = input ?? {
-      stdinTTY: process.stdin.isTTY, stdoutTTY: process.stdout.isTTY, env: process.env,
+    const { stdinTTY, stdoutTTY, stderrTTY, hasControllingTerminal: controllingTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable = readProcessTable } = input ?? {
+      stdinTTY: process.stdin.isTTY, stdoutTTY: process.stdout.isTTY, stderrTTY: process.stderr.isTTY,
+      hasControllingTerminal, env: process.env,
       cwd: process.cwd(), pid: process.pid, readProcessTable, resolveCaller: resolveDashboardCaller,
     };
-    if (stdinTTY !== true || stdoutTTY !== true) return "Remote starts require an interactive terminal";
-    if (env.TMUX !== undefined) return "Remote starts are disabled inside tmux";
+    const humanSend = mode !== "start";
+    const interactive = humanSend ? stdoutTTY === true || stderrTTY === true || await controllingTTY?.() : stdinTTY === true && stdoutTTY === true;
+    if (!interactive) return "Remote starts require an interactive terminal";
+    if (mode !== "local-send" && env.TMUX !== undefined) return mode === "start" ? TMUX_START_DENIAL : TMUX_SEND_DENIAL;
     const ancestors = await readAncestors(pid, readTable, signal);
     if (!ancestors) return "Cannot verify dashboard process ancestry for remote starts";
     for (const { names } of ancestors.values()) {
@@ -81,6 +99,8 @@ async function classifyCaller(signal: AbortSignal, input?: DashboardCaller): Pro
     // Verify shared-repo PID epochs against this same snapshot, without
     // running the ordinary caller resolver's synchronous ps probes.
     const caller = await resolveCaller(cwd, new Set(ancestors.keys()), {
+      ...(humanSend && { humanSend }),
+      ...(mode === "local-send" && { localCheckout: true }),
       identityCurrent: (pid, epoch) => {
         const ancestor = ancestors.get(pid);
         return ancestor !== undefined && epoch !== undefined
@@ -104,7 +124,7 @@ const startupClock = {
 };
 
 /** One startup decision, including process and filesystem reads, under one deadline. */
-export async function remoteStartDenialAtStartup(input?: DashboardCaller, clock = startupClock): Promise<string | null> {
+async function terminalCallerDenial(input: DashboardCaller | undefined, clock: typeof startupClock, mode: "start" | "remote-send" | "local-send"): Promise<string | null> {
   const timeout = "Remote starts are disabled because checking the dashboard caller timed out";
   const timeoutMs = 2_000;
   const deadline = clock.now() + timeoutMs;
@@ -115,9 +135,54 @@ export async function remoteStartDenialAtStartup(input?: DashboardCaller, clock 
     controller.abort();
   });
   try {
-    const result = await Promise.race([expired.promise, classifyCaller(controller.signal, input)]);
+    const result = await Promise.race([expired.promise, classifyCaller(controller.signal, input, mode)]);
     return clock.now() >= deadline ? timeout : result;
   } finally {
     cancelTimer();
   }
+}
+
+export function remoteStartDenialAtStartup(input?: DashboardCaller, clock = startupClock): Promise<string | null> {
+  return terminalCallerDenial(input, clock, "start");
+}
+
+export function humanSendTerminalDenial(input?: DashboardCaller, mode: "remote-send" | "local-send" = "remote-send"): Promise<string | null> {
+  return terminalCallerDenial(input, startupClock, mode);
+}
+
+/** A cwd under the coordinator home identifies @system only inside its live pane's process tree. */
+export async function isSystemPaneCaller(
+  pid = process.pid,
+  readPane = coordinatorSenderPanePid,
+  readTable = readProcessTable,
+): Promise<boolean> {
+  const signal = AbortSignal.timeout(2000);
+  try {
+    const pane = await readPane();
+    if (pane === null || signal.aborted) return false;
+    const ancestors = await readAncestors(pid, readTable, signal);
+    return !signal.aborted && ancestors?.has(pane) === true;
+  } catch { return false; }
+}
+
+/** Check the named CLI and its recorded agent ancestor in one process snapshot.
+ * This verifies the named process tree, not the writer of a broker record. */
+export async function isAgentSendProcess(
+  origin: { pid: number; start: number | null }, meta: { claude_pid: string; claude_pid_epoch?: number },
+  readTable = readProcessTable,
+): Promise<boolean> {
+  const agent = Number(meta.claude_pid);
+  if (!Number.isSafeInteger(agent) || agent <= 1 || agent === origin.pid || !meta.claude_pid_epoch || origin.start === null) return false;
+  const signal = AbortSignal.timeout(2000);
+  const ancestors = await readAncestors(origin.pid, readTable, signal);
+  const cli = ancestors?.get(origin.pid), parent = ancestors?.get(agent);
+  return !signal.aborted && !!cli && !!parent && Date.parse(cli.started) / 1000 === origin.start &&
+    Math.abs(Date.parse(parent.started) / 1000 - meta.claude_pid_epoch) <= CLAUDE_PID_START_MARGIN_SECONDS;
+}
+
+/** Use the same startup decision when the dashboard sends a message. */
+export function remoteSendDenial(reason: string): string {
+  if (reason === TMUX_START_DENIAL) return "Remote sends are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux";
+  return reason.replace(/remote starts/gi, match => match === "Remote starts" ? "Remote sends" : "remote sends")
+    .replace("start an agent on another machine", "send to another machine");
 }

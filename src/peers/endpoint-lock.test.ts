@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,12 +46,12 @@ async function writeLock(contents: string): Promise<void> {
   await writeFile(peerEndpointLockFile(), contents);
 }
 
-const lockContents = () => readFile(peerEndpointLockFile(), "utf-8").catch(() => null);
+const lockContents = () => readFile(peerEndpointLockFile(), "utf-8").then(text => text.replace(/\n[a-f0-9-]{36}\n$/, "\n")).catch(() => null);
 const line = (o: { pid: number; startEpoch: number }) => `${o.pid} ${o.startEpoch}\n`;
 
 describe("acquireEndpointLock", () => {
   test("creates the lock with our pid and start time, in a 0700 peer directory", async () => {
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: true });
+    expect(await acquireEndpointLock(ME)).toMatchObject({ acquired: true });
     expect(await lockContents()).toBe(line(ME));
     expect((await stat(peerDir())).mode & 0o777).toBe(0o700);
   });
@@ -58,13 +59,13 @@ describe("acquireEndpointLock", () => {
   test("defaults to this process's pid and real start time", async () => {
     starts.set(process.pid, 1_699_999_000);
     expect(currentEndpointLockOwner()).toEqual({ pid: process.pid, startEpoch: 1_699_999_000 });
-    expect(await acquireEndpointLock()).toEqual({ acquired: true });
+    expect(await acquireEndpointLock()).toMatchObject({ acquired: true });
     expect(await lockContents()).toBe(`${process.pid} 1699999000\n`);
   });
 
-  test("writes the pid alone when this process cannot read its start time", async () => {
-    expect(await acquireEndpointLock({ pid: ME.pid })).toEqual({ acquired: true });
-    expect(await lockContents()).toBe(`${ME.pid}\n`);
+  test("refuses ownership when this process cannot read its start time", async () => {
+    await expect(acquireEndpointLock({ pid: ME.pid })).rejects.toThrow("process start time");
+    expect(await lockContents()).toBeNull();
   });
 
   test("fails with the owner's pid while a live process holds it, leaving the lock alone", async () => {
@@ -76,16 +77,16 @@ describe("acquireEndpointLock", () => {
 
   test("takes over a dead owner's lock", async () => {
     await writeLock(line(OTHER));
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: true, takenFromPid: OTHER.pid });
+    expect(await acquireEndpointLock(ME)).toMatchObject({ acquired: true, takenFromPid: OTHER.pid });
     expect(await lockContents()).toBe(line(ME));
   });
 
   test("takes over when the owner's pid is alive but belongs to a process that started at another time", async () => {
     // An unclean exit left the lock; after a reboot an unrelated process got the pid.
     alive.add(OTHER.pid);
-    starts.set(OTHER.pid, OTHER.startEpoch + 3600);
+    starts.set(OTHER.pid, OTHER.startEpoch + 1);
     await writeLock(line(OTHER));
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: true, takenFromPid: OTHER.pid });
+    expect(await acquireEndpointLock(ME)).toMatchObject({ acquired: true, takenFromPid: OTHER.pid });
     expect(await lockContents()).toBe(line(ME));
   });
 
@@ -100,36 +101,27 @@ describe("acquireEndpointLock", () => {
     await writeLock(`${OTHER.pid}\n`);
     expect(await acquireEndpointLock(ME)).toEqual({ acquired: false, ownerPid: OTHER.pid });
     alive.delete(OTHER.pid);
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: true, takenFromPid: OTHER.pid });
+    expect(await acquireEndpointLock(ME)).toMatchObject({ acquired: true, takenFromPid: OTHER.pid });
   });
 
   test("a lock that holds exactly us is ours", async () => {
     await writeLock(line(ME));
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: true });
+    expect(await acquireEndpointLock(ME)).toMatchObject({ acquired: true });
     expect(await lockContents()).toBe(line(ME));
   });
 
   test("our own pid from an earlier process is stale and taken over", async () => {
     await writeLock(`${ME.pid} ${ME.startEpoch - 86_400}\n`);
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: true, takenFromPid: ME.pid });
+    expect(await acquireEndpointLock(ME)).toMatchObject({ acquired: true, takenFromPid: ME.pid });
     expect(await lockContents()).toBe(line(ME));
   });
 
-  test("takes over a lock whose contents stay unreadable", async () => {
+  test("an unreadable record cannot prove the owner dead", async () => {
     for (const junk of ["", "not a pid\n", "0\n", "-5\n", "12 0\n", "12 x\n"]) {
       await writeLock(junk);
-      expect(await acquireEndpointLock(ME)).toEqual({ acquired: true });
-      expect(await lockContents()).toBe(line(ME));
-      await rm(peerEndpointLockFile());
+      await expect(acquireEndpointLock(ME)).rejects.toThrow("If no other ib watch is running, delete it and restart ib watch.");
+      expect(await lockContents()).toBe(junk);
     }
-  });
-
-  test("waits for an empty lock to get its owner instead of taking it over", async () => {
-    otherRunning();
-    await writeLock("");
-    setTimeout(() => void writeFile(peerEndpointLockFile(), line(OTHER)), 30);
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: false, ownerPid: OTHER.pid });
-    expect(await lockContents()).toBe(line(OTHER));
   });
 
   test("of many processes racing for a free lock, exactly one gets it", async () => {
@@ -169,7 +161,7 @@ describe("releaseEndpointLock", () => {
 
   test("a process whose lock was taken over does not delete the new owner's", async () => {
     await acquireEndpointLock(OTHER); // OTHER owns it, then dies
-    expect(await acquireEndpointLock(ME)).toEqual({ acquired: true, takenFromPid: OTHER.pid });
+    expect(await acquireEndpointLock(ME)).toMatchObject({ acquired: true, takenFromPid: OTHER.pid });
     expect(await releaseEndpointLock(OTHER)).toBe(false);
     expect(await lockContents()).toBe(line(ME));
   });
@@ -183,6 +175,60 @@ describe("releaseEndpointLock", () => {
     await acquireEndpointLock(ME);
     expect(await acquireEndpointLock(OTHER)).toEqual({ acquired: false, ownerPid: ME.pid });
     await releaseEndpointLock(ME);
-    expect(await acquireEndpointLock(OTHER)).toEqual({ acquired: true });
+    expect(await acquireEndpointLock(OTHER)).toMatchObject({ acquired: true });
   });
+});
+
+test("simultaneous standbys replace a dead lock exactly once", async () => {
+  otherRunning(); await writeLock("9999 123\n");
+  const results = await Promise.all([acquireEndpointLock(ME), acquireEndpointLock(OTHER)]);
+  expect(results.filter(r => r.acquired)).toHaveLength(1);
+  const winner = results[0]!.acquired ? ME : OTHER;
+  expect(await lockContents()).toBe(line(winner));
+  expect(results.find(r => !r.acquired)).toEqual({ acquired: false, ownerPid: winner.pid });
+});
+
+test("a suspended identity writer exposes no empty lock", async () => {
+  otherRunning();
+  const writing = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  const original = fs.writeFile;
+  const spy = spyOn(fs, "writeFile").mockImplementation(async (...args) => {
+    if (String(args[1]).startsWith(line(ME))) { writing.resolve(); await resume.promise; }
+    await original(...args);
+  });
+  try {
+    const first = acquireEndpointLock(ME); await writing.promise;
+    expect(await lockContents()).toBeNull();
+    const standby = acquireEndpointLock(OTHER);
+    resume.resolve();
+    expect(await first).toMatchObject({ acquired: true });
+    expect(await standby).toEqual({ acquired: false, ownerPid: ME.pid });
+    expect(await lockContents()).toBe(line(ME));
+  } finally { resume.resolve(); spy.mockRestore(); }
+});
+
+test("snapshot visibility follows each acquisition generation through a clock rollback", async () => {
+  const { readConnectedPeers } = await import("./remote-agents");
+  const lock = await acquireEndpointLock(ME);
+  if (!lock.acquired) throw Error("fixture lock unavailable");
+  const peers = [{ name: "laptop", id: "peer", lastOkAt: 1, connected: true, agents: [] }];
+  const file = join(peerDir(), "remote-agents.json");
+  await writeFile(file, JSON.stringify({ generation: lock.generation, peers }));
+  await fs.utimes(file, new Date(0), new Date(0));
+  expect(await readConnectedPeers()).toEqual(peers);
+  await releaseEndpointLock(ME);
+  const replacement = await acquireEndpointLock(ME);
+  expect(replacement.acquired && replacement.generation).not.toBe(lock.generation);
+  expect(await readConnectedPeers()).toEqual([]);
+});
+
+test("the lock guard reclaims abandoned publication and takeover records", async () => {
+  await writeLock(line(ME));
+  const path = peerEndpointLockFile();
+  const stale = [path + "." + crypto.randomUUID(), path + ".dead." + crypto.randomUUID()];
+  const unrelated = path + ".dead.notes";
+  for (const name of [...stale, unrelated]) await writeFile(name, "retained");
+  await acquireEndpointLock(ME);
+  for (const name of stale) expect(await Bun.file(name).exists()).toBe(false);
+  expect(await readFile(unrelated, "utf8")).toBe("retained");
 });

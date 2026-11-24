@@ -21,6 +21,7 @@
  * `newAgentSpawnCtx` with the rest of the spawn flow.
  */
 
+import * as runtimeNames from "./runtime-names";
 import { shellQuote } from "./validation";
 import {
   buildCodexLaunchArgs,
@@ -186,7 +187,7 @@ export function buildCodexStartContent(input: BuildCodexStartContentInput): stri
   //         <inline -c flags, incl. the permission profile when disabled> "<prompt>"
   // We log only the model + sentinel rather than the prompt content so a leak
   // of agent.log doesn't disclose the prompt.
-  return `#!/bin/bash
+  return `${runtimeNames.AGENT_LAUNCH_HEADER}
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -411,7 +412,7 @@ export function buildCodexResumeContent(input: BuildCodexResumeContentInput): st
   const sandboxPreamble = input.sandboxEnabled ? input.sandboxScriptPreamble! : "";
   const sandboxLaunchPrefix = input.sandboxEnabled ? `${input.sandboxExecPrefix} ` : "";
 
-  return `#!/bin/bash
+  return `${runtimeNames.AGENT_LAUNCH_HEADER}
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 

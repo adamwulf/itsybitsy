@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { collectSendCleanupDiagnostics, finishSendCleanup } from "./send-cleanup";
 import { sameRepoPath } from "./repo-identity";
 import * as runtimeNames from "./runtime-names";
 /**
@@ -9,11 +10,13 @@ import * as runtimeNames from "./runtime-names";
 import { isAbsolute, join } from "path";
 import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
+import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { resolveAgentIcon } from "./agents";
+import type { PeerEnqueueOptions, ResolvedCallerContext } from "./ib-commands";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { kernelSandboxStatus } from "./agent-cli";
 import { resolvePathsConfig } from "./sandbox";
-import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
+import { isValidAgentId, isValidPeerSenderIdSegment, isValidShellPath, tmuxSessionTarget } from "./validation";
 import { resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./hooks/shared";
 import { findOwnRepo, matchAgentById, resolveAgentTarget, resolveTarget } from "./resolve-target";
 
@@ -138,7 +141,7 @@ export async function resolveLauncherAgentDir(
   cwd: string,
   repos: RepoEntry[],
 ): Promise<string | null> {
-  if (!isValidAgentId(agentId)) return null;
+  if (!isValidPeerSenderIdSegment(agentId)) return null;
 
   const { realpath } = await import("fs/promises");
   let canonicalCwd: string;
@@ -169,6 +172,8 @@ export async function resolveLauncherAgentDir(
         continue;
       }
 
+      if (!isValidAgentId(agentId) && ((meta as AgentMeta).agentType !== REPO_COORDINATOR_TYPE || (meta as AgentMeta).worktree !== false)) continue;
+
       const expectedCwd = (meta as { worktree?: unknown }).worktree === false
         ? repoPath
         : await realpath(join(agentDir, "repo"));
@@ -192,6 +197,7 @@ export async function resolveLauncherAgentDir(
 export async function printAndExit(result: { ok: boolean; exitCode: number; stdout: string; stderr: string }): Promise<never> {
   if (result.stdout) console.log(result.stdout);
   if (result.stderr) console.error(result.stderr);
+  await finishSendCleanup();
   process.exit(result.exitCode);
 }
 
@@ -241,30 +247,22 @@ export function messageBodyReader(
  * Default implementation calls `tmux has-session -t ib-coordinator`. Tests can
  * override via `setSystemCoordinatorHasSessionFn()` to avoid invoking tmux.
  */
-let systemCoordinatorHasSessionFn: (sessionName: string) => Promise<boolean> = async (
-  sessionName: string,
-) => {
-  const exit = await Bun.spawn(["tmux", "has-session", "-t", tmuxSessionTarget(sessionName)], {
-    stdout: "ignore",
-    stderr: "ignore",
-  }).exited;
-  return exit === 0;
-};
+async function probeSystemCoordinator(sessionName: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  const process = Bun.spawn(["tmux", "has-session", "-t", tmuxSessionTarget(sessionName)], {
+    stdout: "ignore", stderr: "ignore", signal, killSignal: "SIGKILL",
+  });
+  return await process.exited === 0;
+}
 
-export function setSystemCoordinatorHasSessionFn(
-  fn: (sessionName: string) => Promise<boolean>,
-): void {
+let systemCoordinatorHasSessionFn = probeSystemCoordinator;
+
+export function setSystemCoordinatorHasSessionFn(fn: typeof probeSystemCoordinator): void {
   systemCoordinatorHasSessionFn = fn;
 }
 
 export function resetSystemCoordinatorHasSessionFn(): void {
-  systemCoordinatorHasSessionFn = async (sessionName: string) => {
-    const exit = await Bun.spawn(["tmux", "has-session", "-t", tmuxSessionTarget(sessionName)], {
-      stdout: "ignore",
-      stderr: "ignore",
-    }).exited;
-    return exit === 0;
-  };
+  systemCoordinatorHasSessionFn = probeSystemCoordinator;
 }
 
 /**
@@ -316,11 +314,20 @@ export function buildSystemCoordinatorAgent(
  */
 export async function sendToSystemCoordinator(
   message: string,
-  opts?: { fromAgent?: string; cwd?: string; raw?: boolean },
+  opts?: { fromAgent?: string; cwd?: string; queueGuard?: import("./outbox").LocalQueueGuard; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean },
+  probeOptions?: import("./peers/send-frame").FileBodyOptions,
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
   const { IB_COORDINATOR_SESSION } = await import("./coordinator");
-  const running = await systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION);
-  if (!running) {
+  // Remote enqueue probes the delivery pane under its own bounded deadline.
+  async function sessionRunning() {
+    if (!probeOptions) return systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION);
+    const { waitForIO } = await import("./peers/send-frame");
+    const probe = new AbortController();
+    const signal = probeOptions.signal ? AbortSignal.any([probeOptions.signal, probe.signal]) : probe.signal;
+    try { return await waitForIO({ ...probeOptions, signal }, () => systemCoordinatorHasSessionFn(IB_COORDINATOR_SESSION, signal)); }
+    finally { probe.abort(); }
+  }
+  if (!opts?.peerSend && !await sessionRunning()) {
     return {
       ok: false,
       exitCode: 1,
@@ -341,11 +348,14 @@ export async function sendToSystemCoordinator(
   // serializes all writes to the `ib-coordinator` tmux session so they can't
   // interleave. There is no central dispatcher — the lock is keyed to the
   // single coordinator session, exactly mirroring the per-agent design.
-  const sendOpts: { fromAgent?: string; cwd?: string; raw?: boolean; outboxDir?: string } = {
+  const sendOpts: { fromAgent?: string; cwd?: string; queueGuard?: import("./outbox").LocalQueueGuard; peerSend?: PeerEnqueueOptions; noPassthrough?: boolean; raw?: boolean; outboxDir?: string } = {
     cwd,
     outboxDir: getCoordinatorHome(),
+    ...(opts?.peerSend && { peerSend: opts.peerSend }),
+    ...(opts?.queueGuard && { queueGuard: opts.queueGuard }),
   };
-  if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
+  if (opts?.fromAgent !== undefined) sendOpts.fromAgent = opts.fromAgent;
+  if (opts?.noPassthrough) sendOpts.noPassthrough = true;
   if (opts?.raw) sendOpts.raw = true;
   const result = await sendMessage(syntheticAgent, message, sendOpts);
 
@@ -445,6 +455,19 @@ export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]
   return agent;
 }
 
+/** The exact caller ID needs no registry lookup. Resolve other --id spellings
+ * the same way as ordinary CLI addresses, including their repository scope. */
+async function requireActingAgent(id: string, caller: ResolvedCallerContext | null) {
+  if (caller && id === caller.meta.id) return { id, repoPath: caller.repoPath, agentDir: caller.agentDir };
+  const agent = await requireAgent(id, await listRepos());
+  if (caller && (agent.id !== caller.meta.id || !sameRepoPath(agent.repoPath, caller.repoPath))) {
+    console.error("Error: agents can only act as themselves; drop --id");
+    process.exit(1);
+  }
+  const agentDir = agent.storageDir ?? join(runtimeNames.runtimeDir(agent.repoPath), agent.archived ? "archive" : "agents", agent.id);
+  return { id: agent.id, repoPath: agent.repoPath, agentDir };
+}
+
 /**
  * True when `args` (excluding the command itself at index 0) contains a help flag.
  * Used at the top of each command case block to print a per-command usage string
@@ -527,7 +550,7 @@ const COMMAND_HELP: Record<string, string> = {
   log:
     'Usage: ib log [--id <agent-id>] [--quiet|-q] "message"\n' +
     "  Append a line to an agent's log file.\n" +
-    "  --id <id>       Target agent id (defaults to cwd-detected agent)\n" +
+    "  --id <id>       Target agent id (defaults to the calling agent)\n" +
     "  --quiet, -q     Do not also echo the message to stdout",
   "parse-state":
     "Usage: ib parse-state [file] [-v|--verbose]\n" +
@@ -542,11 +565,12 @@ const COMMAND_HELP: Record<string, string> = {
     "  Show pending agent questions across all repos.\n" +
     "  --all, -a       Include already-acknowledged questions",
   send:
-    "Usage: ib send [--from <id>] <target> [-f|--file <path>] [message...]\n" +
+    "Usage: ib send [--from <id>] <target> [-f|--file <path>] [--attach <file>]... [message...]\n" +
     "  Send a message to an agent, the system coordinator, a repo coordinator,\n" +
     "  or a team. If no inline message and no -f file is given, the message body\n" +
     "  is read from stdin.\n" +
-    "  --from <id>     Mark the sender for the recipient's notification\n" +
+    "  --attach <file>  Copy a file for local or paired remote recipients (repeatable)\n" +
+    "  --from <id>     Set the sender (agents use their own ID)\n" +
     "  -f, --file <p>  Read the message body from a file (wins over stdin)\n" +
     "\n" +
     "Targets:\n" +
@@ -558,7 +582,8 @@ const COMMAND_HELP: Record<string, string> = {
     "  <agent-id>             Exact id or nickname, preferring the caller's repo\n" +
     "  <machine>/<agent>      Unique on the named machine\n" +
     "  <machine>/<repo>/<agent>  Exact registered repo on that machine\n" +
-    "  Sending to agents on other machines is not supported yet.",
+    "  <machine>/@system      System coordinator on that machine\n" +
+    "  <machine>/@<repo>      Repo coordinator on that machine",
   nickname:
     "Usage: ib nickname <agent-id> [<new-nickname> | --clear]\n" +
     "  Set, clear, or show an agent's nickname. With no third arg, prints the\n" +
@@ -634,7 +659,7 @@ const COMMAND_HELP: Record<string, string> = {
     'Usage: ib ask [--id <agent-id>] "question"\n' +
     "  Ask the user a question from an agent context. The question may be passed\n" +
     "  positionally or piped on stdin.\n" +
-    "  --id <id>       Agent id (defaults to cwd-detected agent)",
+    "  --id <id>       Agent id (defaults to the calling agent)",
   "init-types":
     "Usage: ib init-types [--check]\n" +
     "  Alias: init-agent-types\n" +
@@ -957,7 +982,7 @@ function printUsage(): void {
   console.log("  info <id>           Show agent's metadata");
   console.log("");
   console.log("Communication:");
-  console.log("  send <id> <msg>     Send a message to an agent or @<team> (--from <id>, stdin)");
+  console.log("  send <id> <msg>     Send to an agent or @<team> (--from <id>, stdin, --attach <file>)");
   console.log("  ask <question>      Ask user a question (--id <agent-id>)");
   console.log("  questions, q        Show pending agent questions (--all)");
   console.log("  acknowledge <qid>   Acknowledge a pending question");
@@ -1059,7 +1084,9 @@ export async function main() {
   // subcommands (hooks / team / config / peer) are checked at both layers — e.g.
   // `ib team add --help` resolves to the "team add" entry, while `ib team
   // --help` resolves to the "team" entry.
-  if (command && hasHelpFlag(args)) {
+  const wantsHelp = hasHelpFlag(args);
+  // The send parser checks --attach operands before returning its help text.
+  if (command && command !== "send" && wantsHelp) {
     // Try the deepest match first: "<command> <sub>" if a sub is present.
     // Only do this for the known sub-grouped commands; everywhere else, the
     // top-level command key is the only valid lookup.
@@ -1654,7 +1681,7 @@ export async function main() {
         console.error("Usage: ib write-pid <agent-id> <pid>");
         process.exit(1);
       }
-      if (!isValidAgentId(wpAgentId)) {
+      if (!isValidPeerSenderIdSegment(wpAgentId)) {
         console.error(`Invalid agent ID: ${wpAgentId}`);
         process.exit(1);
       }
@@ -1932,15 +1959,28 @@ export async function main() {
       break;
     }
     case "send": {
-      const repos = await listRepos();
-      // Parse known flags (--from, -f/--file) at any position. Unknown short
+      collectSendCleanupDiagnostics();
+      // Parse known flags (--attach, --from, -f/--file) at any position. Unknown short
       // flags (e.g. `-x`) and unknown long flags (e.g. `--bogus`) are rejected
       // BEFORE the target is seen so typos surface immediately. AFTER the
       // target, raw tokens — including ones that start with `-` — are joined
       // as the message body, so users can send messages like "-n hello".
       const sendArgs = args.slice(1);
+      // Check the raw tokens before --from or -f can consume an incomplete
+      // --attach as its own operand, even when help was requested.
+      const sendOptions = ["--attach", "--from", "-f", "--file", "-h", "--help"];
+      if (sendArgs.some((token, i) => token === "--attach" && (!sendArgs[i + 1] || sendOptions.includes(sendArgs[i + 1]!)))) {
+        console.error("Error: --attach requires a path");
+        process.exit(1);
+      }
+      if (wantsHelp) {
+        printCommandHelp("send");
+        return;
+      }
+
       let fromAgent: string | undefined;
       let filePath: string | undefined;
+      const attachments: string[] = [];
       const filteredSendArgs: string[] = [];
       let seenTarget = false;
       for (let i = 0; i < sendArgs.length; i++) {
@@ -1951,6 +1991,10 @@ export async function main() {
         if (tok === "--from") {
           if (!sendArgs[i + 1]) { console.error("Error: --from requires a value"); process.exit(1); }
           fromAgent = sendArgs[++i];
+          continue;
+        }
+        if (tok === "--attach") {
+          attachments.push(sendArgs[++i]!);
           continue;
         }
         if (tok === "-f" || tok === "--file") {
@@ -1973,11 +2017,11 @@ export async function main() {
         }
       }
 
-      const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [message...]\n  -f, --file <path>  Read message body from a file";
+      const usage = "Usage: ib send [--from <id>] <target> [-f <path>] [--attach <file>]... [message...]\n  -f, --file <path>  Read message body from a file\n  --attach <file>    Copy a file for local or paired remote recipients (repeatable)";
 
       if (!filteredSendArgs[0]) {
         console.error(usage);
-        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, @<team>, <agent-id>, <machine>/<agent>, or <machine>/<repo>/<agent>");
+        console.error("Targets: @system, @coordinator, @<repo>, @<repo>/<agent-id>, @<team>, <agent-id>, <machine>/<agent>, <machine>/<repo>/<agent>, <machine>/@system, or <machine>/@<repo>");
         process.exit(1);
       }
 
@@ -1990,76 +2034,71 @@ export async function main() {
         process.exit(1);
       }
 
-      // Read file upfront so file errors are reported before agent lookup.
-      let fileContent: string | undefined;
-      if (filePath) {
-        try {
-          const f = Bun.file(filePath);
-          if (!(await f.exists())) {
-            console.error(`Error: file not found: ${filePath}`);
-            process.exit(1);
+      const controller = new AbortController();
+      const interruptedInput = Promise.withResolvers<void>();
+      const interrupt = () => { controller.abort(); interruptedInput.resolve(); };
+      process.on("SIGINT", interrupt);
+      let staged: Awaited<ReturnType<typeof import("./peers/local-attachments").stageLocalAttachments>> | undefined;
+      let retain = false;
+      let result: Awaited<ReturnType<typeof cliActions.sendMessage>>;
+      try {
+        const prepare = async () => {
+          const repos = await listRepos();
+          let fileContent: string | undefined;
+          if (filePath) {
+            const file = Bun.file(filePath);
+            if (!await file.exists()) throw new Error(`Error: file not found: ${filePath}`);
+            try { fileContent = (await file.text()).trim(); }
+            catch (err) { throw new Error(`Error: could not read file ${filePath}: ${err instanceof Error ? err.message : String(err)}`); }
           }
-          fileContent = (await f.text()).trim();
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(`Error: could not read file ${filePath}: ${msg}`);
-          process.exit(1);
+          return { repos, fileContent };
+        };
+        const input = await Promise.race([prepare(), interruptedInput.promise.then((): never => { throw controller.signal.reason; })]);
+        controller.signal.throwIfAborted();
+        const repos = input.repos;
+        const readBody = messageBodyReader(inlineMessage, input.fileContent);
+        let sender: ReturnType<typeof import("./peers/local-attachments").resolveAttachmentSender> | undefined;
+        const attachmentSender = attachments.length ? () =>
+          sender ??= import("./peers/local-attachments").then(module => module.resolveAttachmentSender()) : undefined;
+        const readRawMessage = async () => {
+          const body = await Promise.race([readBody(), interruptedInput.promise.then(() => "")]);
+          controller.signal.throwIfAborted();
+          return body;
+        };
+        const readMessage = async () => {
+          if (staged) return staged.message;
+          const body = await readRawMessage();
+          if (!attachmentSender) return body;
+          const { stageLocalAttachments } = await import("./peers/local-attachments");
+          staged = await stageLocalAttachments(body, attachments, await attachmentSender(), controller.signal);
+          return staged.message;
+        };
+        const { routeCliSend } = await import("./send-broker");
+        const route = await routeCliSend({ target, fromAgent, readMessage, usage, repos, attachmentSender, attachments, readRawMessage }, {
+          signal: controller.signal, onUncertain: () => { retain = true; },
+        });
+        if ("result" in route) {
+          result = route.result;
+        } else {
+          const { agent, isSystemCoordinator, team } = route.local;
+          if (!agent && !isSystemCoordinator && !team) throw new Error(`Agent not found: ${target}`);
+          const message = await readMessage();
+          controller.signal.throwIfAborted();
+          if (!message) throw new Error(usage);
+          const opts = { fromAgent: route.fromAgent, ...(attachmentSender && { noPassthrough: true }) };
+          if (isSystemCoordinator) result = await cliActions.sendToSystemCoordinator(message, opts);
+          else if (team) result = await cliActions.teamSend(team.name, team.members, message, opts, repos);
+          else result = await cliActions.sendMessage(agent!, message, opts);
         }
+        retain ||= result.ok;
+      } catch (err) {
+        const { brokerFail, interruptedSend } = await import("./spawn-broker");
+        result = controller.signal.aborted ? interruptedSend("unpublished") : brokerFail(err instanceof Error ? err.message : String(err));
+      } finally {
+        process.off("SIGINT", interrupt);
+        if (!retain) await staged?.cleanup();
       }
-
-      // Resolve message content per precedence: inline > file > stdin, at most
-      // once: the broker below may read it before the direct path does.
-      const resolveMessageBody = messageBodyReader(inlineMessage, fileContent);
-
-      // A sandboxed WORKTREE agent cannot list other repos' agents, so it asks
-      // its own — unsandboxed — watchdog to resolve the target and send. The
-      // message travels as text: the file and stdin are read here, inside the
-      // sandbox. Null for every other caller, and when the watchdog cannot take
-      // the request (not live, or older than the broker); those send directly
-      // as before. See routeSendThroughWatchdog.
-      {
-        const { routeSendThroughWatchdog } = await import("./send-broker");
-        const brokered = await routeSendThroughWatchdog({ target, fromAgent, readMessage: resolveMessageBody, usage, repos });
-        if (brokered) await printAndExit(brokered);
-      }
-
-      const { agent: resolvedAgent, isSystemCoordinator, team } = await resolveTarget(target, repos);
-
-      if (isSystemCoordinator) {
-        const coordMessage = await resolveMessageBody();
-        if (!coordMessage) {
-          console.error(usage);
-          process.exit(1);
-        }
-        const result = await cliActions.sendToSystemCoordinator(coordMessage, fromAgent ? { fromAgent } : undefined);
-        await printAndExit(result);
-        break;
-      }
-
-      // A team target resolves to ZERO-OR-MORE recipients, so it must branch
-      // BEFORE the single-recipient `!resolvedAgent` guard below (§16.4): an
-      // empty team is a no-op SUCCESS, not the exit-1 an unresolved single
-      // `@name` produces. `teamSend` handles the empty recipient set itself.
-      if (team) {
-        const teamMessage = await resolveMessageBody();
-        if (!teamMessage) {
-          console.error(usage);
-          process.exit(1);
-        }
-        await printAndExit(await cliActions.teamSend(team.name, team.members, teamMessage, fromAgent ? { fromAgent } : undefined, repos));
-        break;
-      }
-
-      if (!resolvedAgent) {
-        process.exit(1);
-      }
-
-      const message = await resolveMessageBody();
-      if (!message) {
-        console.error(usage);
-        process.exit(1);
-      }
-      await printAndExit(await cliActions.sendMessage(resolvedAgent, message, fromAgent ? { fromAgent } : undefined));
+      await printAndExit(result);
       break;
     }
     case "nickname": {
@@ -2475,15 +2514,22 @@ export async function main() {
         console.error("Error: --spawned-by-repo requires --spawned-by");
         process.exit(1);
       }
-      if (spawnedByAgentId && !isValidAgentId(spawnedByAgentId)) {
+      const { localCliActor, cliActorId } = await import("./peers/send-caller");
+      const actor = await localCliActor(process.cwd(), { forSpawn: true, checkHuman: spawnedByAgentId !== undefined });
+      cliActorId(actor, spawnedByAgentId, "--spawned-by");
+      const caller = actor.kind === "agent" ? actor.caller : null;
+      opts._trustedCaller = caller;
+      if (!caller && spawnedByAgentId && !isValidAgentId(spawnedByAgentId)) {
         console.error("Error: invalid --spawned-by agent ID");
         process.exit(1);
       }
-      if (spawnedByAgentId) {
+      if (!caller && spawnedByAgentId) {
         opts.spawnedBy = {
           agent_id: spawnedByAgentId,
           repo_path: spawnedByRepoPath ?? process.cwd(),
         };
+      } else if (actor.kind === "system") {
+        opts.spawnedBy = { agent_id: "@system", repo_path: null };
       }
 
       // A SANDBOXED process cannot spawn a child itself (nested sandbox-exec is
@@ -2495,8 +2541,8 @@ export async function main() {
         const { routeNewAgentThroughWatchdog } = await import("./spawn-broker");
         const brokered = await routeNewAgentThroughWatchdog(prompt, opts, {
           repoArg,
-          spawnedByFlags: spawnedByAgentId !== undefined || spawnedByRepoPath !== undefined,
-        });
+          spawnedByFlags: !caller && spawnedByAgentId !== undefined,
+        }, { resolveCaller: async () => caller });
         if (brokered) await printAndExit(brokered);
       }
 
@@ -2512,7 +2558,7 @@ export async function main() {
         }
         repoPath = resolved.repo.path;
       } else {
-        const cwd = process.cwd();
+        const cwd = caller?.repoPath || process.cwd();
         const cwdMatch = repos.find((r) => cwd === r.path || cwd.startsWith(r.path + "/"));
         if (cwdMatch) {
           repoPath = cwdMatch.path;
@@ -2568,7 +2614,7 @@ export async function main() {
       break;
     }
     case "ask": {
-      // Parse --id flag or auto-detect from CWD
+      // An explicit ID is optional when the caller identifies an agent.
       const askArgs = args.slice(1);
       let askAgentId: string | undefined;
       const askQuestionParts: string[] = [];
@@ -2589,14 +2635,10 @@ export async function main() {
         askQuestionText = await readStdinIfPiped();
       }
 
-      // Auto-detect agent ID from CWD
-      if (!askAgentId) {
-        const cwd = process.cwd();
-        const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
-        if (worktreeMatch) {
-          askAgentId = worktreeMatch[1];
-        }
-      }
+      const { localCliActor } = await import("./peers/send-caller");
+      const actor = await localCliActor(process.cwd(), { checkHuman: askAgentId !== undefined });
+      const caller = actor.kind === "agent" ? actor.caller : null;
+      askAgentId ??= caller ? String(caller.meta.id) : process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
 
       if (!askAgentId) {
         console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id <agent-id>.");
@@ -2607,14 +2649,14 @@ export async function main() {
         process.exit(1);
       }
 
-      const askAgent = await requireAgent(askAgentId, await listRepos());
+      const askAgent = await requireActingAgent(askAgentId, caller);
       // A sandboxed WORKTREE agent cannot record a question itself
       // (`<repo>/.itsybitsy/user-questions.json` is outside its write roots), so
       // it asks its own — unsandboxed — watchdog to do it. Null for every other
       // caller, which asks directly as before. See routeAskThroughWatchdog.
       {
         const { routeAskThroughWatchdog } = await import("./ask-broker");
-        const brokered = await routeAskThroughWatchdog(askQuestionText, askAgent.id, { targetRepoPath: askAgent.repoPath });
+        const brokered = await routeAskThroughWatchdog(askQuestionText, askAgent.id, { targetRepoPath: askAgent.repoPath, resolveCaller: async () => caller });
         if (brokered) await printAndExit(brokered);
       }
 
@@ -2622,7 +2664,6 @@ export async function main() {
       break;
     }
     case "log": {
-      const repos = await listRepos();
       // Parse --id and --quiet flags
       const logArgs = args.slice(1);
       let logAgentId: string | undefined;
@@ -2640,14 +2681,10 @@ export async function main() {
       }
       const logMessage = logMessageParts.join(" ");
 
-      // Auto-detect agent ID from cwd if not specified
-      if (!logAgentId) {
-        const cwd = process.cwd();
-        const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
-        if (worktreeMatch) {
-          logAgentId = worktreeMatch[1];
-        }
-      }
+      const { localCliActor } = await import("./peers/send-caller");
+      const actor = await localCliActor(process.cwd(), { checkHuman: logAgentId !== undefined });
+      const caller = actor.kind === "agent" ? actor.caller : null;
+      logAgentId ??= caller ? String(caller.meta.id) : process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
 
       if (!logAgentId) {
         console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id.");
@@ -2658,11 +2695,8 @@ export async function main() {
         process.exit(1);
       }
 
-      const agent = await requireAgent(logAgentId, repos);
-
-      const { join } = await import("path");
       const { logAgent } = await import("./agent-lifecycle");
-      const agentDir = join(runtimeNames.runtimeDir(agent.repoPath), agent.archived ? "archive" : "agents", agent.id);
+      const { agentDir } = await requireActingAgent(logAgentId, caller);
       await logAgent(agentDir, logMessage);
 
       if (!logQuiet) {
@@ -3131,7 +3165,8 @@ export async function main() {
             process.exit(1);
           }
           // createdBy is left "" for human CLI creation (§16 DETAIL 7).
-          await printAndExit(await teamCreate(name));
+          const { cliActorId, localCliActor } = await import("./peers/send-caller");
+          await printAndExit(await teamCreate(name, { createdBy: cliActorId(await localCliActor(process.cwd(), { checkHuman: true })) }));
           break;
         }
         case "add": {

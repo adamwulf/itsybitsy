@@ -1,3 +1,4 @@
+import { trackSendCleanup } from "../send-cleanup";
 /**
  * The trusted link between paired installs (docs/plans/iroh-peering.md,
  * "Reconnection" and "First connected feature"; SPEC.md §20.4).
@@ -14,9 +15,9 @@
  * Each request uses its own bi stream: the dialer writes one JSON object and
  * calls `finish`; the responder reads the bounded request, writes one
  * JSON reply and calls `finish`; the dialer reads the reply with
- * `readToEnd(1 MB)`. No framing code.
+ * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
  *
- * SPEC §20.4 defines the wire shapes for agents, coordinator-pane and new-agent.
+ * SPEC §20.4 defines the wire shapes for agents, coordinator-pane, new-agent and send.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -29,6 +30,10 @@
  * throws {@link PairProtocolError} when the stream is over its limit.
  */
 
+import { CHUNK_BYTES, IDLE_TIMEOUT_MS } from "./transfer-limits";
+import { join } from "node:path";
+import { openStagedFile } from "./remote-attachments";
+import { sendFileBody, type FileBodyOptions, encodeSendHeader, TransferIdleError, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
 import type { Agent } from "../agents";
@@ -40,7 +45,7 @@ import { expandTabs } from "../tmux-poller";
 import { stripAnsi } from "../parse-state";
 
 export const PEER_ALPN = "itsybitsy/peer/1";
-/** All requests except new-agent. */
+/** Unframed JSON requests except new-agent. */
 export const PEER_MAX_REQUEST_BYTES = 4096;
 export const NEW_AGENT_MAX_REQUEST_BYTES = 256 * 1024;
 export const NEW_AGENT_TIMEOUT_MS = 30_000;
@@ -58,11 +63,11 @@ export const PEER_MAX_REPLY_BYTES = 1_048_576;
 
 /** Connection close codes on the trusted ALPN. */
 export const PEER_CLOSE = {
-  /** A normal close: this side is shutting down, stopped polling the peer, or gave up on a request that timed out. */
+  /** A normal close: this side is shutting down or stopped polling the peer. */
   done: 0,
   /** The other side's id is not in this install's `peers.json`. */
   notPeer: 1,
-  /** A malformed request. The reason says which. */
+  /** A protocol error or stream teardown still pending at the grace deadline. */
   error: 3,
 } as const;
 
@@ -171,8 +176,19 @@ export class PeerErrorReply extends Error {
  * dropped, one line, capped.
  */
 export function cleanRemoteText(text: string): string {
-  const flat = text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
+  const flat = singleLine(text);
   return flat.length > MAX_REMOTE_TEXT ? `${flat.slice(0, MAX_REMOTE_TEXT - 1)}…` : flat;
+}
+
+function singleLine(text: string) {
+  return text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
+}
+
+function sendDiagnostic(text: string) {
+  const flat = singleLine(text);
+  // Limit refusals end with the machine and setting. Keep that suffix
+  // intact even when the peer supplied a very long filename.
+  return flat.length > 300 ? flat.slice(0, 99) + "…" + flat.slice(-200) : flat;
 }
 
 /**
@@ -202,6 +218,8 @@ const encodeJson = (value: unknown): Uint8Array => new TextEncoder().encode(JSON
 export function encodePeerRequest(op: string): Uint8Array {
   return encodeJson({ op });
 }
+
+export class PeerBusyReply extends PeerErrorReply {}
 
 function encodeErrorReply(reason: string): Uint8Array {
   return encodeJson({ op: "error", reason });
@@ -286,6 +304,7 @@ export function decodeAgentsReply(bytes: Uint8Array): PeerSnapshot {
   const message = decodeObject(bytes, "reply");
   if (message.op === "error") {
     const reason = typeof message.reason === "string" ? cleanRemoteText(message.reason) : "";
+    if (reason === "busy, try again") throw new PeerBusyReply(reason);
     throw new PeerErrorReply(`the other side reported: ${reason || "an error"}`);
   }
   if (message.op !== "agents" || !Array.isArray(message.agents)) throw new PeerProtocolError("reply is not an agent list");
@@ -340,82 +359,182 @@ function errorDetail(err: unknown): string {
  * failure: the transport's error, a {@link PeerErrorReply}, or a
  * {@link PeerProtocolError} for a malformed or oversized reply.
  */
-export async function requestAgents(conn: PairConnection): Promise<PeerSnapshot> {
-  return decodeAgentsReply(await requestRead(conn, "agents"));
+type Timer = PeerResponderDeps["setTimer"];
+const realTimer: Timer = (ms, fn) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); };
+
+export function requestAgents(conn: PairConnection, setTimer = realTimer, timeoutError = new Error("request timed out")): Promise<PeerSnapshot> {
+  return clientExchange(conn, encodePeerRequest("agents"), decodeAgentsReply, { setTimer, timeout: [15_000, timeoutError] });
 }
 
-async function requestRead(conn: PairConnection, op: string, signal?: AbortSignal): Promise<Uint8Array> {
-  const stream = await conn.openBi();
-  const cancel = () => { void stream.cancel().catch(() => {}); };
-  if (signal?.aborted) {
-    cancel();
-    throw signal.reason;
-  }
-  signal?.addEventListener("abort", cancel, { once: true });
-  try {
-    await stream.writeAll(encodePeerRequest(op));
-    await stream.finish();
-    return await stream.readToEnd(PEER_MAX_REPLY_BYTES);
-  } catch (err) {
-    if (err instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
-    throw err;
-  } finally {
-    signal?.removeEventListener("abort", cancel);
-  }
+export function requestCoordinatorPane(conn: PairConnection, signal?: AbortSignal, setTimer = realTimer): Promise<CoordinatorPane> {
+  return clientExchange(conn, encodePeerRequest("coordinator-pane"), bytes => {
+    const reply = decodeObject(bytes, "reply");
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
+    if (reply.op !== "coordinator-pane" || typeof reply.state !== "string" || typeof reply.text !== "string") {
+      throw new PeerProtocolError("malformed coordinator-pane reply");
+    }
+    return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
+  }, { signal, setTimer, timeout: [15_000, new Error("Coordinator pane request timed out")] });
 }
 
-export async function requestCoordinatorPane(conn: PairConnection, signal?: AbortSignal): Promise<CoordinatorPane> {
-  const reply = decodeObject(await requestRead(conn, "coordinator-pane", signal), "reply");
-  if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
-  if (reply.op !== "coordinator-pane" || typeof reply.state !== "string" || typeof reply.text !== "string") {
-    throw new PeerProtocolError("malformed coordinator-pane reply");
-  }
-  return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
-}
-
-/** Use a separate stream on the live trusted connection. Never retry a spawn. */
-export async function requestNewAgent(
-  conn: PairConnection,
-  { repo, type, name, prompt }: RemoteNewAgentRequest,
-  setTimer: (ms: number, fn: () => void) => () => void,
-): Promise<string> {
+export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt }: RemoteNewAgentRequest, setTimer: Timer): Promise<string> {
   const bytes = encodeJson({ op: "new-agent", repo, type, name, prompt });
   if (bytes.length > NEW_AGENT_MAX_REQUEST_BYTES) throw new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
-  const exchange = async () => {
-    const stream = await conn.openBi();
-    await stream.writeAll(bytes);
-    await stream.finish();
-    const reply = decodeObject(await stream.readToEnd(PEER_MAX_REPLY_BYTES), "reply");
+  return clientExchange(conn, bytes, payload => {
+    const reply = decodeObject(payload, "reply");
     if (reply.ok === true && typeof reply.id === "string" && isValidAgentId(reply.id)) return reply.id;
-    if (reply.ok === false && typeof reply.error === "string") throw new PeerErrorReply(cleanRemoteText(reply.error));
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
     throw new PeerProtocolError("malformed new-agent reply");
-  };
-  let cancel: (() => void) | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    cancel = setTimer(NEW_AGENT_TIMEOUT_MS, () => {
-      reject(new Error("Remote agent request timed out after 30 s. Check the peer for the agent."));
-      closeQuietly(conn, PEER_CLOSE.done, "request timed out");
-    });
-  });
-  try {
-    return await Promise.race([exchange(), timeout]);
-  } finally {
-    cancel?.();
+  }, { setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")] });
+}
+
+export const SEND_UNKNOWN = "outcome unknown — check the agent";
+
+async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal, milestone?: () => void) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
+    const n = await waitForIO({ setTimer, signal }, () => stream.write(chunk));
+    if (!Number.isInteger(n) || n <= 0 || n > chunk.length) throw new Error("Invalid send write count");
+    offset += n;
+    milestone?.();
   }
+}
+
+export interface OutgoingTransfer {
+  verifyClient?: () => void;
+  filesDir?: string;
+  signal?: AbortSignal;
+  onProgress?: (bytes: number) => void;
+}
+
+interface ClientOptions extends OutgoingTransfer {
+  setTimer: Timer;
+  timeout?: [number, Error];
+  files?: SendHeader["files"];
+}
+
+/** One owner for the request deadline, both halves of the stream, and teardown. */
+async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode: (bytes: Uint8Array) => T, options: ClientOptions): Promise<T> {
+  const { setTimer, timeout, files } = options;
+  const deadline = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
+  const clear = timeout && setTimer(timeout[0], () => deadline.abort(timeout[1]));
+  const io = <V>(operation: () => Promise<V>) => waitForIO({ setTimer, signal }, operation);
+  let opening: Promise<PairStream> | undefined;
+  let active: PairStream;
+  try { active = await io(() => { options.verifyClient?.(); return opening = conn.openBi(); }); }
+  catch (err) {
+    clear?.();
+    if (opening && !await settledWithinGrace(opening.then(stream => stream.cancel()), { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+    throw err;
+  }
+
+  let sent = 0;
+  let attemptedFin = false;
+  let sendDone = false;
+  let cancelIdle: (() => void) | undefined;
+  const renewReplyIdle = () => {
+    if (!sendDone) return;
+    cancelIdle?.();
+    cancelIdle = setTimer(IDLE_TIMEOUT_MS, () => deadline.abort(new TransferIdleError(`No progress for ${IDLE_TIMEOUT_MS} ms`)));
+  };
+  async function readReply() {
+    if (!files) return decode(await active.readToEnd(PEER_MAX_REPLY_BYTES));
+    const parts: Uint8Array[] = [];
+    let length = 0;
+    for (;;) {
+      const chunk = await active.read(Math.min(CHUNK_BYTES, PEER_MAX_REPLY_BYTES + 1 - length));
+      if (!chunk.length) return decode(Buffer.concat(parts, length));
+      length += chunk.length;
+      if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
+      parts.push(chunk);
+      options.onProgress?.(sent);
+      renewReplyIdle();
+    }
+  }
+  async function writeRequest() {
+    options.verifyClient?.();
+    if (files) await writeWithProgress(active, bytes, setTimer, signal, () => options.onProgress?.(0));
+    else await io(() => active.writeAll(bytes));
+    for (const [index, file] of (files ?? []).entries()) {
+      signal.throwIfAborted();
+      const opening = openStagedFile(join(options.filesDir!, String(index)), file.size);
+      let handle: Awaited<typeof opening>;
+      try { handle = await io(() => opening); }
+      catch (err) {
+        trackSendCleanup(opening.then(file => file.close(), () => {}), "Late staged attachment close failed");
+        throw err;
+      }
+      try { await sendFileBody({ handle, size: file.size }, active, { setTimer, signal, onProgress: n => options.onProgress?.(sent + n) }); }
+      catch (err) { trackSendCleanup(handle.close(), "Staged attachment close failed"); throw err; }
+      const closing = handle.close();
+      try { await io(() => closing); }
+      catch (err) { trackSendCleanup(closing, "Staged attachment close failed"); throw err; }
+      sent += file.size;
+    }
+    signal.throwIfAborted();
+    options.verifyClient?.();
+    attemptedFin = true;
+    await io(() => active.finish());
+    sendDone = true;
+    renewReplyIdle();
+  }
+
+  type Outcome = { ok: true; value: T } | { ok: false; error: unknown };
+  let received: Outcome | undefined;
+  const failure = (error: unknown): Outcome => ({ ok: false, error });
+  // This single reader owns the native receive mutex through FIN, including
+  // the teardown grace. It stays alive when the independent writer stops.
+  const reply = readReply().then((value): Outcome => ({ ok: true, value }), failure).then(result => received = result);
+  const stopped = Promise.withResolvers<Outcome>();
+  const abort = () => stopped.resolve(failure(signal.reason));
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  try {
+    const result = await Promise.race([reply, writeRequest().then(() => reply, failure), stopped.promise]);
+    if (!received || !sendDone) {
+      deadline.abort(new Error("Request writer stopped"));
+      const teardown = Promise.allSettled([reply, sendDone ? undefined : active.resetSending()]);
+      if (!await settledWithinGrace(teardown, { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+    }
+    if (received?.ok) return received.value;
+    if (received && received.error instanceof PeerErrorReply) throw received.error;
+    if (result.ok) return result.value;
+    if (files && attemptedFin) throw new Error(SEND_UNKNOWN, { cause: result.error });
+    if (result.error instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
+    throw result.error;
+  } finally {
+    clear?.(); cancelIdle?.(); signal.removeEventListener("abort", abort);
+  }
+}
+
+export async function requestSend(conn: PairConnection, header: SendHeader, setTimer: Timer, transfer: OutgoingTransfer = {}): Promise<string> {
+  if (header.files.length && !transfer.filesDir) throw new Error("Missing staged attachments");
+  return clientExchange(conn, encodeSendHeader(header), bytes => {
+    const reply = decodeObject(bytes, "reply");
+    if (reply.ok === true && reply.id === header.id) return header.id;
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(sendDiagnostic(reply.reason));
+    throw new PeerProtocolError("Malformed send acknowledgement");
+  }, { ...transfer, setTimer, files: header.files });
 }
 
 // ---------------------------------------------------------------------------
 // Responder
 // ---------------------------------------------------------------------------
 
+export interface ReceiptOptions extends FileBodyOptions { cancelStream?: () => void; admitted?: (ownsBody: boolean) => void; committing?: () => void }
+
 export interface PeerResponderDeps {
   /** Paired name for this id, re-read on every call. A failed read returns null. */
   peerName(id: string): Promise<string | null>;
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
+  receiveMessage?(header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>, body?: Pick<PairStream, "read">, options?: ReceiptOptions): Promise<void>;
   captureCoordinator?(): Promise<CoordinatorPane | null>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
+  headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** watch.log in `ib watch`. */
@@ -429,7 +548,15 @@ export interface PeerResponderDeps {
  * task with its own error handling. Never throws.
  */
 export async function serveTrustedConnection(conn: PairConnection, deps: PeerResponderDeps): Promise<void> {
+  const headerReaders = deps.headerReaders ??= new Set();
   const from = shortPeerId(conn.remoteId);
+  const lifetime = new AbortController();
+  void conn.closed().then(() => lifetime.abort(new Error("Peer connection closed")), err => lifetime.abort(err));
+  const peerName = deps.peerName.bind(deps);
+  deps = { ...deps, peerName: async id => {
+    try { return await waitForIO({ setTimer: deps.setTimer, signal: lifetime.signal }, () => peerName(id)); }
+    catch (err) { deps.log(`peer link: pairing lookup failed: ${errorDetail(err)}`); return null; }
+  } };
   if ((await deps.peerName(conn.remoteId)) === null) {
     deps.log(`peer link: closed a connection from ${from}: not a peer`);
     closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
@@ -448,7 +575,12 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
       closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
       return;
     }
-    void serveRequest(conn, stream, from, deps);
+    if (headerReaders.size >= 8) {
+      await sendReply(conn, stream, deps, encodeErrorReply("busy, try again"), stream.stopReceiving());
+      continue;
+    }
+    headerReaders.add(stream);
+    void serveRequest(conn, stream, from, deps, lifetime.signal);
   }
 }
 
@@ -473,11 +605,117 @@ async function startAgentWithDeadline(
   }
 }
 
-/** One request on its own stream. Every error stays here. */
-async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps): Promise<void> {
-  let request: ReturnType<typeof decodePeerRequest>;
+/** Give the client time to consume its reply, or a reset time to acquire the native stream mutex. */
+async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerResponderDeps, "setTimer">, ms = 750): Promise<boolean> {
+  const deadline = Promise.withResolvers<false>();
+  const cancel = deps.setTimer(ms, () => deadline.resolve(false));
   try {
-    request = decodePeerRequest(await stream.readToEnd(NEW_AGENT_MAX_REQUEST_BYTES));
+    return await Promise.race([operation.then(() => true, () => true), deadline.promise]);
+  } finally { cancel(); }
+}
+
+/** The handler owns the reply and teardown. A settled stop or reset is stream-local. */
+async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerResponderDeps, bytes: Uint8Array,
+  stop?: Promise<void>, stalledRead?: Promise<Uint8Array>) {
+  const stopped = stop?.catch(() => {});
+  const writeReply = async () => {
+    await writeWithProgress(stream, bytes, deps.setTimer);
+    await waitForIO(deps, () => stream.finish());
+  };
+  if (stalledRead) {
+    // The native read is still pending. Bound the entire ACK attempt before
+    // closing, with a delivery grace only if the reply actually settled.
+    if (await settledWithinGrace(writeReply(), deps)) {
+      const drained = Promise.allSettled([stalledRead, stopped]);
+      if (await settledWithinGrace(Promise.race([drained, conn.closed()]), deps, 5000)) return false;
+    }
+    closeQuietly(conn, PEER_CLOSE.error, "send read stalled");
+    return false;
+  }
+  let delivered = true;
+  try { await writeReply(); }
+  catch (err) {
+    delivered = false;
+    if (err instanceof TransferIdleError && !await settledWithinGrace(stream.cancel(), deps)) {
+      closeQuietly(conn, PEER_CLOSE.error, "send reply stalled");
+      return false;
+    }
+  }
+  if (stopped && !await settledWithinGrace(stopped, deps)) closeQuietly(conn, PEER_CLOSE.error, "receive stop stalled");
+  return delivered;
+}
+
+/** One request on its own stream. Every error stays here. */
+async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal): Promise<void> {
+  let request: ReturnType<typeof decodePeerRequest>;
+  let reading: Promise<Uint8Array> | undefined;
+  async function read(limit: number) {
+    reading = stream.read(limit);
+    try { return await reading; } finally { reading = undefined; }
+  }
+  try {
+    // Every valid sized header begins with zero (the cap is 256 KiB).
+    // Other ops begin with JSON. Peek one byte without waiting for FIN.
+    const options = { setTimer: deps.setTimer };
+    const first = await waitForIO(options, () => read(1));
+    if (first[0] === 0) {
+      let prefix: Uint8Array | undefined = first;
+      let receivedFin = false;
+      const reader = { read: async (limit: number) => {
+        const chunk = prefix ?? await read(limit);
+        prefix = undefined;
+        if (!chunk.length) receivedFin = true;
+        return chunk;
+      } };
+      // Native QUIC can reject STOP_SENDING once the receive half reached FIN.
+      let stopping: Promise<void> | undefined;
+      const stopUnreadBody = () => {
+        if (!receivedFin) stopping ??= stream.stopReceiving().catch(() => {});
+      };
+      let reply: Uint8Array;
+      let stalledRead: Promise<Uint8Array> | undefined;
+      try {
+        const header = await decodeSendHeader(reader, options);
+        if (!header.files.length) await requireSendFin(reader, options);
+        if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
+        await deps.receiveMessage(header, conn.remoteId, async () => {
+          const name = await deps.peerName(conn.remoteId);
+          if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+          return name;
+        }, reader, { ...options, signal, admitted: () => deps.headerReaders?.delete(stream), cancelStream: () => {
+          stopping ??= stream.cancel().catch(() => {});
+        } });
+        // A replay can acknowledge a previously queued attachment without
+        // consuming its duplicate body.
+        if (header.files.length) stopUnreadBody();
+        reply = encodeJson({ ok: true, id: header.id });
+      } catch (err) {
+        if (err instanceof TransferIdleError) stalledRead = reading;
+        // STOP_SENDING is independent of the send half. The error ACK can
+        // finish even if the native reader is still unwinding a stalled read.
+        stopUnreadBody();
+        reply = encodeErrorReply(sendDiagnostic(errorDetail(err)));
+      }
+      await sendReply(conn, stream, deps, reply, stopping, stalledRead);
+      return;
+    }
+    let payload = Buffer.alloc(1024);
+    payload.set(first);
+    let length = first.length;
+    while (true) {
+      const limit = Math.min(CHUNK_BYTES, NEW_AGENT_MAX_REQUEST_BYTES - length + 1);
+      const part = await waitForIO(options, () => read(limit));
+      if (!part.length) break;
+      if (part.length > limit || length + part.length > NEW_AGENT_MAX_REQUEST_BYTES) throw new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
+      if (length + part.length > payload.length) {
+        const next = Buffer.allocUnsafe(Math.min(NEW_AGENT_MAX_REQUEST_BYTES, Math.max(2 * payload.length, length + part.length)));
+        payload.copy(next, 0, 0, length);
+        payload = next;
+      }
+      payload.set(part, length);
+      length += part.length;
+    }
+    request = decodePeerRequest(payload.subarray(0, length));
   } catch (err) {
     if (err instanceof PeerProtocolError || err instanceof PairProtocolError) {
       // PairProtocolError is the seam's readToEnd past its limit.
@@ -485,9 +723,9 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       deps.log(`peer link: ${reason}, from ${from}; closing`);
       closeQuietly(conn, PEER_CLOSE.error, reason);
     }
-    // Anything else: the stream or the connection is gone; there is no one to answer.
+    else await sendReply(conn, stream, deps, encodeErrorReply(sendDiagnostic(errorDetail(err))), stream.stopReceiving(), reading);
     return;
-  }
+  } finally { deps.headerReaders?.delete(stream); }
 
   // Again now, right before answering: the stream was accepted on its first
   // frame, and a client can hold it open across `ib peer remove` before it
@@ -515,7 +753,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       reply = encodeCoordinatorPane(pane);
       capturedPane = true;
     } catch (err) {
-      reply = encodeJson({ ok: false, error: cleanRemoteText(errorDetail(err)) });
+      reply = encodeErrorReply(cleanRemoteText(errorDetail(err)));
     }
     // A tmux capture is asynchronous. Pairing must still hold before sending
     // either the capture or the reason it failed.
@@ -530,19 +768,14 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     } catch (err) {
       const error = cleanRemoteText(errorDetail(err));
       deps.log(`peer link: new-agent from ${from} failed: ${error}`);
-      reply = encodeJson({ ok: false, error });
+      reply = encodeErrorReply(error);
     }
   } else {
     reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);
   }
-  try {
-    await stream.writeAll(reply);
-    await stream.finish();
-    if (capturedPane && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
-      deps.paneReaders.add(conn.remoteId);
-      deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
-    }
-  } catch {
-    // The dialer went away; its poller reports that on its side.
+  const delivered = await sendReply(conn, stream, deps, reply);
+  if (delivered && capturedPane && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
+    deps.paneReaders.add(conn.remoteId);
+    deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
   }
 }

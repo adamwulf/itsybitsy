@@ -1,8 +1,11 @@
 import * as runtimeNames from "./runtime-names";
 import { dirname, isAbsolute, join, resolve } from "path";
-import { readdir, realpath } from "fs/promises";
-import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
-import { isValidAgentId } from "./validation";
+import { constants } from "node:fs";
+import { open, readdir, realpath, stat } from "fs/promises";
+import { CLAUDE_PID_START_MARGIN_SECONDS, isPidAliveSinceUncached } from "./agents";
+import { isCodexBackedCli, metadataCli } from "./agent-cli";
+import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
+import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
 import { userInfo } from "os";
 
 export interface NoWorktreeCaller {
@@ -11,7 +14,14 @@ export interface NoWorktreeCaller {
   repoPath: string;
 }
 
-interface CallerDeps {
+export interface CallerLookupOptions {
+  includeWorktreePids?: boolean;
+  /** Session hints are for local attribution when ps is unavailable. */
+  allowSessionFallback?: boolean;
+}
+
+interface CallerDeps extends CallerLookupOptions {
+  coordinatorId?: string;
   /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
   dashboardAncestry?: ReadonlySet<number>;
   registryHome?: string;
@@ -54,6 +64,25 @@ function processIdentityCurrent(pid: number, epoch: number | undefined): boolean
     const start = Date.parse(result.stdout.toString().trim()) / 1_000;
     return Number.isFinite(start) && Math.abs(start - epoch) <= CLAUDE_PID_START_MARGIN_SECONDS;
   } catch { return false; }
+}
+
+/** The launch environment identifies one registered agent directory across all CLIs.
+ * Older launches may have only their CLI's own session ID. */
+export function matchesLiveLaunch(caller: NoWorktreeCaller): boolean {
+  const { IB_AGENT_DIR, CODEX_THREAD_ID, CLAUDE_SESSION_ID } = process.env;
+  const { meta } = caller;
+  if (IB_AGENT_DIR !== undefined) {
+    if (caller.agentDir !== IB_AGENT_DIR) return false;
+  } else {
+    if ((!CODEX_THREAD_ID && !CLAUDE_SESSION_ID) || (CODEX_THREAD_ID && CLAUDE_SESSION_ID)) return false;
+    const cli = metadataCli(meta.model);
+    if (CODEX_THREAD_ID) {
+      if (!cli || !isCodexBackedCli(cli) || CODEX_THREAD_ID !== meta.codex_session_id) return false;
+    } else if (cli !== "claude" || CLAUDE_SESSION_ID !== meta.session_id) return false;
+  }
+  const owner = Number(meta.claude_pid);
+  return Number.isSafeInteger(owner) && owner > 1 && typeof meta.claude_pid_epoch === "number" &&
+    isPidAliveSinceUncached(owner, meta.claude_pid_epoch);
 }
 
 async function registeredRoots(registryHome: string, strict: boolean): Promise<string[]> {
@@ -115,40 +144,69 @@ function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
   return ancestors;
 }
 
-/**
- * An existing agent worktree already identifies its caller. Verify both the
- * registered repository and Git's worktree backlink before taking this fast
- * path: a directory that only resembles an agent worktree is not sufficient.
- * This uses filesystem reads only; Codex's native sandbox can prohibit ps.
- */
-async function isRegisteredAgentWorktree(cwd: string, roots: string[]): Promise<boolean> {
+/** Git pointer files hold one path. Bound the read itself even if the file grows after fstat. */
+async function readGitPointer(path: string): Promise<string> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
   try {
-    const canonicalCwd = await realpath(cwd);
-    const match = runtimeNames.matchWorktreeCaller(canonicalCwd);
-    if (!match || !roots.includes(match[1]!) || !isValidAgentId(match[2]!)) return false;
-    const repoPath = match[1]!;
-    const agentId = match[2]!;
-    const agentDir = runtimeNames.agentDir(repoPath, agentId);
-    const worktreePath = join(agentDir, "repo");
-    const meta = await Bun.file(join(agentDir, "meta.json")).json();
-    if (!meta || Array.isArray(meta) || meta.id !== agentId || meta.worktree === false) return false;
+    const limit = 4096;
+    const info = await file.stat();
+    if (!info.isFile() || info.size > limit) throw new Error("Invalid Git pointer file");
+    const bytes = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length);
+      if (!bytesRead) return bytes.toString("utf8", 0, length).trim();
+      length += bytesRead;
+    }
+    throw new Error("Git pointer file too large");
+  } finally { await file.close(); }
+}
 
+/** Locate the candidate's own record without opening any Git admin files. */
+export async function registeredWorktreeRecord(canonicalCwd: string, roots: string[]): Promise<NoWorktreeCaller | null> {
+  const match = runtimeNames.matchWorktreeCaller(canonicalCwd);
+  if (!match || !roots.includes(match[1]!) || !isValidAgentId(match[2]!)) return null;
+  const repoPath = match[1]!;
+  const agentId = match[2]!;
+  const agentDir = runtimeNames.agentDir(repoPath, agentId);
+  try {
+    const meta = await Bun.file(join(agentDir, "meta.json")).json();
+    if (!meta || Array.isArray(meta) || meta.id !== agentId || meta.worktree === false) return null;
+    return { repoPath, agentDir, meta };
+  } catch { return null; }
+}
+
+/** Verify Git's backlink before granting worktree authority. A CLI with a
+ * frozen read policy checks each path before opening it; a watchdog verifies
+ * under its own access. Neither needs process ancestry. */
+export async function hasGitWorktreeBacklink(
+  caller: NoWorktreeCaller, allowParentGitFile: boolean, checkRead: (path: string) => string = path => path,
+): Promise<boolean> {
+  try {
+    const { repoPath, agentDir } = caller;
+    const worktreePath = join(agentDir, "repo");
     const gitFile = join(worktreePath, ".git");
-    const pointer = (await Bun.file(gitFile).text()).trim().match(/^gitdir: (.+)$/);
+    const pointer = (await readGitPointer(checkRead(gitFile))).match(/^gitdir: (.+)$/);
     if (!pointer) return false;
-    const gitDir = await realpath(resolve(worktreePath, pointer[1]!));
-    // Git's worktree administration directory must belong to this registered
-    // repo, and its backlink must name this exact worktree's .git file.
-    const worktreesDir = await realpath(join(repoPath, ".git", "worktrees"));
+    const gitDir = await realpath(checkRead(resolve(worktreePath, pointer[1]!)));
+    let repoGitDir = join(repoPath, ".git");
+    if (allowParentGitFile && (await stat(repoGitDir)).isFile()) {
+      const parent = (await readGitPointer(checkRead(repoGitDir))).match(/^gitdir: (.+)$/);
+      if (!parent) return false;
+      repoGitDir = resolve(repoPath, parent[1]!);
+    }
+    const worktreesDir = await realpath(checkRead(join(repoGitDir, "worktrees")));
     if (dirname(gitDir) !== worktreesDir) return false;
-    const backlink = (await Bun.file(join(gitDir, "gitdir")).text()).trim();
+    const backlink = await readGitPointer(checkRead(join(gitDir, "gitdir")));
     if (!backlink) return false;
-    return await realpath(resolve(gitDir, backlink)) === await realpath(gitFile);
-  } catch {
-    // Missing or unverifiable worktree metadata must use the existing caller
-    // verification, never gain an exemption from caller authorization.
-    return false;
-  }
+    return await realpath(checkRead(resolve(gitDir, backlink))) === await realpath(checkRead(gitFile));
+  } catch { return false; }
+}
+
+export async function isRegisteredAgentWorktree(cwd: string, roots: string[], allowParentGitFile = false): Promise<boolean> {
+  const path = await realpath(cwd).catch(() => null);
+  const caller = path && await registeredWorktreeRecord(path, roots);
+  return caller ? hasGitWorktreeBacklink(caller, allowParentGitFile) : false;
 }
 
 /**
@@ -171,9 +229,9 @@ export async function resolveNoWorktreeCaller(
 ): Promise<NoWorktreeCaller | null> {
   const candidates: NoWorktreeCaller[] = [];
   // HOME is model-controlled. Resolve the operator home from the OS account.
-  const strict = deps.dashboardAncestry !== undefined;
+  const strict = deps.coordinatorId !== undefined || deps.dashboardAncestry !== undefined;
   const roots = deps.roots ?? await registeredRoots(deps.registryHome ?? userInfo().homedir, strict);
-  if (!strict && await isRegisteredAgentWorktree(cwd, roots)) return null;
+  if (!deps.dashboardAncestry && await isRegisteredAgentWorktree(cwd, roots)) return null;
   for (const repoPath of roots) {
     const agentsDir = runtimeNames.agentsDir(repoPath);
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
@@ -181,7 +239,9 @@ export async function resolveNoWorktreeCaller(
       throw error;
     });
     for (const entry of entries) {
-      if (!entry.isDirectory() || !isValidAgentId(entry.name)) continue;
+      if (deps.coordinatorId !== undefined && entry.name !== deps.coordinatorId) continue;
+      const dottedCoordinator = entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
+      if (!entry.isDirectory() || (!isValidAgentId(entry.name) && !dottedCoordinator)) continue;
       const agentDir = join(agentsDir, entry.name);
       let meta: Record<string, unknown>;
       try {
@@ -194,7 +254,10 @@ export async function resolveNoWorktreeCaller(
         if (strict) throw new Error("Invalid agent metadata");
         continue;
       }
-      if (meta.worktree !== false) continue;
+      if (dottedCoordinator && (meta.worktree !== false || meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
+      if (meta.worktree !== false && !deps.includeWorktreePids) continue;
+      if (deps.coordinatorId !== undefined && meta.agentType !== REPO_COORDINATOR_TYPE) continue;
+      if (deps.includeWorktreePids && !meta.claude_pid) continue;
       if (strict && meta.claude_pid !== "") {
         const pid = Number(meta.claude_pid);
         if (typeof meta.claude_pid !== "string" || !/^\d+$/.test(meta.claude_pid) || !Number.isSafeInteger(pid) || pid <= 1) {
@@ -209,7 +272,15 @@ export async function resolveNoWorktreeCaller(
   const readParents = deps.readParents ?? readParentPids;
   const identityCurrent = deps.identityCurrent ?? processIdentityCurrent;
   const pid = deps.pid ?? process.pid;
-  const before = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
+  let before: ReadonlySet<number>;
+  try {
+    before = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
+  } catch (error) {
+    if (!deps.allowSessionFallback) throw error;
+    const matches = candidates.filter(matchesLiveLaunch);
+    if (matches.length === 1) return matches[0]!;
+    throw error;
+  }
   const matches = candidates.filter(({ meta }) => {
     const rawPid = meta.claude_pid;
     if (typeof rawPid !== "string" || !/^\d+$/.test(rawPid)) return false;
@@ -235,16 +306,29 @@ export async function resolveNoWorktreeCaller(
 export async function resolveDashboardCaller(
   cwd: string,
   ancestry: ReadonlySet<number>,
-  deps: Pick<CallerDeps, "registryHome" | "identityCurrent"> = {},
+  deps: Pick<CallerDeps, "registryHome" | "identityCurrent"> & { humanSend?: boolean; localCheckout?: boolean } = {},
 ): Promise<"agent" | "no-agent" | "unverifiable"> {
   try {
     const path = await realpath(cwd);
     const worktree = runtimeNames.matchWorktreeCaller(path);
+    let roots: string[] | undefined;
     if (worktree) {
       const meta = await Bun.file(join(runtimeNames.worktreeAgentDir(path), "meta.json")).json();
-      return meta?.id === worktree[2] && meta.worktree === true ? "agent" : "unverifiable";
+      if (meta?.id !== worktree[2] || meta.worktree !== true) return "unverifiable";
+      if (!deps.humanSend) return "agent";
+      // A human terminal can open a running agent's checkout. For sends,
+      // attribute the process tree first, preserving the stricter start gate.
+      roots = await registeredRoots(deps.registryHome ?? userInfo().homedir, !deps.localCheckout);
+      if (!roots.includes(worktree[1]!)) return "unverifiable";
+      // The local override concerns this checkout. An unrelated repo may be unreadable.
+      if (deps.localCheckout) roots = [worktree[1]!];
+      if (meta.claude_pid !== "") {
+        const pid = Number(meta.claude_pid);
+        if (!Number.isSafeInteger(pid) || pid <= 1) return "unverifiable";
+        if (ancestry.has(pid)) return "agent";
+      }
     }
-    const caller = await resolveNoWorktreeCaller(path, { ...deps, dashboardAncestry: ancestry });
+    const caller = await resolveNoWorktreeCaller(path, { ...deps, roots, dashboardAncestry: ancestry });
     return caller === null ? "no-agent" : "agent";
   } catch {
     return "unverifiable";

@@ -1,6 +1,7 @@
 import { join } from "path";
-import { userHome } from "./home";
+import { accountHome, userHome } from "./home";
 import { chmod, stat } from "fs/promises";
+import { DEFAULT_ATTACHMENT_SETTINGS, resolveTransferLimits, attachmentCompanion, attachmentSettingKey, attachmentSettings, validateAttachmentSetting } from "./peers/transfer-limits";
 
 export type ConfigSource = "user" | "default";
 export type ConfigType = "number" | "boolean" | "string" | "string[]";
@@ -16,6 +17,9 @@ export interface ConfigKeyDef {
 export interface ConfigEntry {
   value: unknown;
   source: ConfigSource;
+  companionHint?: string;
+  /** The Config editor shows the actual value to repair, alongside its constraint. */
+  repair?: { value: string; source: ConfigSource; issue: string };
 }
 
 export type ConfigResult = Record<string, ConfigEntry>;
@@ -35,6 +39,9 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "coordinator.imessage", type: "boolean", default: false },
   { key: "coordinator.remoteControlName", type: "string", default: "" },
   { key: "channels.telegram.bot_token", type: "string", default: "" },
+  { key: "peering.attachments.maxFileMB", type: "number", default: DEFAULT_ATTACHMENT_SETTINGS.maxFileMB },
+  { key: "peering.attachments.maxMessageMB", type: "number", default: DEFAULT_ATTACHMENT_SETTINGS.maxMessageMB },
+  { key: "peering.attachments.maxFiles", type: "number", default: DEFAULT_ATTACHMENT_SETTINGS.maxFiles },
   { key: "providers.fugu.api_key", type: "string", default: "", sensitive: true },
   { key: "notifications.sayOnQuestion", type: "boolean", default: true },
   { key: "tree.groupByParent", type: "boolean", default: false },
@@ -76,6 +83,17 @@ export function validateConfigValue(value: unknown, type: ConfigType): boolean {
   }
 }
 
+export async function readConfigFileStrict(filePath: string): Promise<Record<string, unknown>> {
+  try {
+    const data = await Bun.file(filePath).json();
+    if (data === null || typeof data !== "object" || Array.isArray(data)) throw new Error("Expected a JSON object");
+    return data;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+}
+
 async function readJsonFile(filePath: string): Promise<Record<string, unknown>> {
   try {
     const file = Bun.file(filePath);
@@ -100,6 +118,22 @@ export function defaultUserConfigPath(): string {
   return overrideUserConfigPath ?? join(userHome(), ".itsybitsy", "config.json");
 }
 
+/** Read this machine's current policy for each attachment request. */
+export async function readTransferLimits() {
+  const path = overrideUserConfigPath ?? join(accountHome(), ".itsybitsy", "config.json");
+  const data = await readConfigFileStrict(path).catch((error: Error) => {
+    throw new Error(`Cannot read attachment limits from ${path}: ${error.message}`, { cause: error });
+  });
+  const { limits, warnings } = resolveTransferLimits(rawAttachmentSettings(data));
+  for (const warning of warnings) console.warn(warning);
+  return limits;
+}
+
+function rawAttachmentSettings(data: Record<string, unknown>) {
+  const raw = getNestedValue(data, "peering.attachments");
+  return typeof raw === "object" && raw !== null ? raw : {};
+}
+
 export interface ReadConfigOptions {
   userConfigPath?: string;
 }
@@ -108,10 +142,27 @@ export async function readConfig(options?: ReadConfigOptions): Promise<ConfigRes
   const userPath = options?.userConfigPath ?? defaultUserConfigPath();
   const userData = await readJsonFile(userPath);
 
+  const raw = rawAttachmentSettings(userData);
+  const effective = attachmentSettings(resolveTransferLimits(raw).limits);
   const result: ConfigResult = {};
 
   for (const def of CONFIG_KEYS) {
     const userVal = getNestedValue(userData, def.key);
+    const setting = attachmentSettingKey(def.key);
+    if (setting) {
+      const value = effective[setting];
+      const entry: ConfigEntry = { value, source: userVal === value ? "user" : "default" };
+      const companion = attachmentCompanion(setting, raw);
+      if (companion) entry.companionHint = companion.hint;
+      const edited = userVal === undefined ? def.default : userVal;
+      const issue = validateAttachmentSetting(setting, edited, raw);
+      if (issue) {
+        const display = JSON.stringify(edited);
+        entry.repair = { value: display, source: userVal === undefined ? "default" : "user", issue: `${setting} = ${display}. ${issue}` };
+      }
+      result[def.key] = entry;
+      continue;
+    }
     if (userVal !== undefined && validateConfigValue(userVal, def.type)) {
       result[def.key] = { value: userVal, source: "user" };
       continue;
@@ -176,8 +227,15 @@ export async function ensureConfigFilePerms(filePath: string): Promise<void> {
   } catch { /* expected when file is missing or chmod is unsupported */ }
 }
 
+export function validateConfigEdit(data: Record<string, unknown>, key: string, value: unknown) {
+  const setting = attachmentSettingKey(key);
+  return setting && validateAttachmentSetting(setting, value, rawAttachmentSettings(data));
+}
+
 export async function writeConfig(filePath: string, key: string, value: unknown): Promise<void> {
-  const data = await readJsonFile(filePath);
+  const data = await readConfigFileStrict(filePath);
+  const error = validateConfigEdit(data, key, value);
+  if (error) throw new Error(error);
   setNestedValue(data, key, value);
   await Bun.write(filePath, JSON.stringify(data, null, 2) + "\n");
   await ensureConfigFilePerms(filePath);

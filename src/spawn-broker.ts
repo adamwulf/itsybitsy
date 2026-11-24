@@ -1,3 +1,7 @@
+import { openBrokerResults, pinnedPath, withPinnedDirectory } from "./pinned-directory";
+import { requestLookup } from "./request-lookup";
+import { trackSendCleanup, warnSendCleanup } from "./send-cleanup";
+import { isCoordinatorType } from "./coordinator-type-names";
 import * as runtimeNames from "./runtime-names";
 /**
  * Watchdog spawn broker — how a SANDBOXED agent spawns a child agent.
@@ -46,7 +50,7 @@ import * as runtimeNames from "./runtime-names";
  */
 
 import { randomBytes } from "crypto";
-import { mkdir, readdir, realpath, rename, rm, stat } from "fs/promises";
+import { lstat, mkdir, readdir, realpath, rename, rm, stat, writeFile } from "fs/promises";
 import { join } from "path";
 import { readAgentMeta, type AgentMeta } from "./agents";
 import {
@@ -116,15 +120,36 @@ export async function ensureSpawnBrokerDirs(agentDir: string): Promise<void> {
 }
 
 /** Write via a temp name in the same directory, then rename, so a reader never sees half a file. */
-async function writeJsonAtomic(dir: string, name: string, value: unknown): Promise<void> {
-  await mkdir(dir, { recursive: true });
-  const tmp = join(dir, `.${name}.${randomBytes(4).toString("hex")}.tmp`);
-  await Bun.write(tmp, JSON.stringify(value));
-  await rename(tmp, join(dir, name));
+async function writeJsonAtomic(dir: string, name: string, value: unknown, signal?: AbortSignal, createParent = true): Promise<void> {
+  signal?.throwIfAborted();
+  if (createParent) await mkdir(dir, { recursive: true });
+  const start = createParent ? 0 : (await import("./peers/transfer-owner")).stagingOwnerStart(process.pid) ?? 0;
+  const tmp = join(dir, `.${name}.${process.pid}-${start}-${randomBytes(4).toString("hex")}.tmp`);
+  try {
+    await writeFile(tmp, JSON.stringify(value), { flag: "wx", mode: 0o600 });
+    signal?.throwIfAborted();
+    await rename(tmp, join(dir, name));
+  } finally { await rm(tmp, { force: true }); }
 }
 
 export function brokerFail(stderr: string): IbCommandResult {
   return { ok: false, exitCode: 1, stdout: "", stderr };
+}
+
+/** Publication, claim and withdrawal all rename the same ready entry. */
+export async function withdrawPublishedRequest(ready: string, withdrawn: string): Promise<boolean> {
+  try { await rename(ready, withdrawn); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+  await rm(withdrawn, { recursive: true, force: true }).catch(err => warnSendCleanup(`Withdrawn request cleanup failed: ${err}`));
+  return true;
+}
+
+export function interruptedSend(state: "unpublished" | "withdrawn" | "claimed"): IbCommandResult {
+  const stderr = state === "claimed" ? "outcome unknown — check the recipient" : "cancelled before sending";
+  return { ok: false, exitCode: 130, stdout: "", stderr };
 }
 
 /**
@@ -163,39 +188,69 @@ export async function submitWatchdogRequest(
   request: { id: string },
   wording: WatchdogRequestWording,
   timeoutMs: number,
-  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now"> = {},
+  deps: Pick<SpawnClientDeps, "pollMs" | "sleep" | "now" | "signal" | "onUncertain" | "claimTimeoutMs" | "readProgress" | "cancelClaimed"> = {},
 ): Promise<IbCommandResult> {
   const sleep = deps.sleep ?? ((ms: number) => Bun.sleep(ms));
-  const now = deps.now ?? Date.now;
+  const now = deps.now ?? (() => performance.now());
   const pollMs = deps.pollMs ?? SPAWN_RESULT_POLL_MS;
 
+  if (deps.signal?.aborted) return interruptedSend("unpublished");
   try {
-    await writeJsonAtomic(spawnRequestDir(agentDir), `${request.id}.json`, request);
+    await writeJsonAtomic(spawnRequestDir(agentDir), `${request.id}.json`, request, deps.signal);
   } catch (err) {
+    if (deps.signal?.aborted) return interruptedSend("unpublished");
     return brokerFail(`Error: could not write the ${wording.request} request: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const resultFile = join(spawnResultDir(agentDir), `${request.id}.json`);
-  const deadline = now() + timeoutMs;
-  for (;;) {
-    const file = Bun.file(resultFile);
-    if (await file.exists()) {
-      try {
-        const result = (await file.json()) as Partial<SpawnResult>;
-        await rm(resultFile, { force: true });
-        if (result.id !== request.id || typeof result.exitCode !== "number") {
-          return brokerFail(`Error: the watchdog returned a malformed ${wording.request} result`);
-        }
-        return {
-          ok: result.ok === true,
-          exitCode: result.exitCode,
-          stdout: typeof result.stdout === "string" ? result.stdout : "",
-          stderr: typeof result.stderr === "string" ? result.stderr : "",
-        };
-      } catch {
-        // A partially visible file cannot happen (atomic rename); treat a
-        // parse failure as "not ready" only until the deadline.
+  const requestFile = join(spawnRequestDir(agentDir), `${request.id}.json`);
+  let awaitingClaim = deps.claimTimeoutMs !== undefined;
+  let deadline = now() + (deps.claimTimeoutMs ?? timeoutMs);
+  let lastProgress = 0;
+  let progressRead: Promise<void> | undefined;
+  let warnedProgress = false;
+  let resultDiagnostic: string | undefined;
+  const readResult = requestLookup(async (): Promise<IbCommandResult | undefined> => {
+    if (awaitingClaim) {
+      try { await stat(requestFile); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        awaitingClaim = false;
+        deadline = now() + timeoutMs;
       }
+    }
+    let result: Partial<SpawnResult>;
+    try { result = await Bun.file(resultFile).json(); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; throw err; }
+    if (result.id !== request.id || typeof result.exitCode !== "number") {
+      deps.onUncertain?.();
+      return brokerFail(`Error: the watchdog returned a malformed ${wording.request} result`);
+    }
+    return { ok: result.ok === true, exitCode: result.exitCode,
+      stdout: typeof result.stdout === "string" ? result.stdout : "", stderr: typeof result.stderr === "string" ? result.stderr : "" };
+  }, err => { resultDiagnostic = String(err); });
+  const consume = async (result: IbCommandResult) => {
+    const cleanup = rm(resultFile, { force: true });
+    if (deps.cancelClaimed) trackSendCleanup(cleanup, "Remote broker result cleanup failed");
+    else await cleanup;
+    return result;
+  };
+  while (!deps.signal?.aborted) {
+    const result = await readResult(deadline - now(), deps.signal);
+    if (result && !deps.signal?.aborted) return consume(result);
+    if (deps.signal?.aborted) break;
+    if (!awaitingClaim && deps.readProgress) {
+      progressRead ??= deps.readProgress().then(progress => {
+        if (progress > lastProgress) {
+          lastProgress = progress;
+          deadline = now() + timeoutMs;
+        }
+      }, err => {
+        if (!warnedProgress && (err as NodeJS.ErrnoException).code !== "ENOENT") {
+          warnSendCleanup(`Remote send progress read failed: ${err}`);
+          warnedProgress = true;
+        }
+      }).finally(() => { progressRead = undefined; });
     }
     if (now() >= deadline) break;
     await sleep(pollMs);
@@ -203,11 +258,21 @@ export async function submitWatchdogRequest(
 
   // Timed out. Withdraw the request if the watchdog has not taken it yet; if it
   // already has, the command may still finish — say so.
-  const requestFile = join(spawnRequestDir(agentDir), `${request.id}.json`);
-  const stillQueued = await Bun.file(requestFile).exists();
-  if (stillQueued) await rm(requestFile, { force: true });
+  let stillQueued: boolean;
+  try { stillQueued = await withdrawPublishedRequest(requestFile, join(spawnRequestDir(agentDir), `${request.id}@${process.pid}-0.json.withdrawn`)); }
+  catch (err) { deps.onUncertain?.(); return brokerFail(`outcome unknown — check the recipient (could not withdraw request: ${err})`); }
+  if (!stillQueued && !deps.signal?.aborted) {
+    const result = await readResult(150, deps.signal);
+    if (result && !deps.signal?.aborted) return consume(result);
+    if (resultDiagnostic && !deps.signal?.aborted) return brokerFail(`outcome unknown — check the recipient (${resultDiagnostic})`);
+  }
+  if (!stillQueued && deps.signal?.aborted && deps.cancelClaimed) {
+    await deps.cancelClaimed().catch(err => warnSendCleanup(`Could not signal claimed send cancellation: ${err}`));
+  }
+  if (!stillQueued) deps.onUncertain?.();
+  if (deps.signal?.aborted) return interruptedSend(stillQueued ? "withdrawn" : "claimed");
   return brokerFail(
-    `Error: timed out after ${Math.round(timeoutMs / 1000)}s waiting for the watchdog of '${callerId}' to ${wording.action}. ` +
+    `Error: timed out after ${Math.round((awaitingClaim ? deps.claimTimeoutMs! : timeoutMs) / 1000)}s waiting for the watchdog of '${callerId}' to ${wording.action}. ` +
       (stillQueued
         ? "The request was withdrawn; check that the agent's watchdog is healthy and retry."
         : wording.alreadyStarted),
@@ -217,6 +282,12 @@ export async function submitWatchdogRequest(
 // ── Client (runs inside the sandbox) ─────────────────────────────────────────
 
 export interface SpawnClientDeps {
+  cancelClaimed?: () => Promise<void>;
+  readProgress?: () => Promise<number>;
+  claimTimeoutMs?: number;
+  /** A claimed request may have enqueued its snapshots before the reply was lost. */
+  onUncertain?: () => void;
+  signal?: AbortSignal;
   cwd?: string;
   timeoutMs?: number;
   pollMs?: number;
@@ -355,6 +426,9 @@ export async function resolveRoutedCaller(
 // ── Server (runs in the unsandboxed watchdog) ────────────────────────────────
 
 export interface SpawnServerDeps {
+  /** In-flight transfer jobs owned by this watchdog, keyed by agent directory. */
+  transferSignal?: AbortSignal;
+  transferJobs?: Map<string, Promise<void>>;
   newAgent?: (repoPath: string, prompt: string, opts: NewAgentOptions) => Promise<IbCommandResult>;
   verifySeal?: (
     repoPath: string,
@@ -433,7 +507,7 @@ function clip(text: string): string {
   return text.length > SPAWN_MAX_OUTPUT_CHARS ? `${text.slice(0, SPAWN_MAX_OUTPUT_CHARS)}\n…(truncated)` : text;
 }
 
-async function writeResult(agentDir: string, id: string, result: IbCommandResult): Promise<void> {
+async function writeResult(agentDir: string, id: string, result: IbCommandResult, signal?: AbortSignal): Promise<void> {
   const payload: SpawnResult = {
     v: 1,
     id,
@@ -442,24 +516,80 @@ async function writeResult(agentDir: string, id: string, result: IbCommandResult
     stdout: clip(result.stdout),
     stderr: clip(result.stderr),
   };
-  await writeJsonAtomic(spawnResultDir(agentDir), `${id}.json`, payload);
+  signal?.throwIfAborted();
+  const dir = await openBrokerResults(agentDir, true);
+  try { await writeJsonAtomic(await pinnedPath(dir), `${id}.json`, payload, signal, false); }
+  finally { await dir.close(); }
+}
+
+/** Completed markers carry the watchdog identity in their first 16 bytes.
+ * Unpublished temps carry it in the name, even if their write never began. */
+async function pruneBrokerProgress(path: string, name: string) {
+  const { transferOwnerState } = await import("./peers/transfer-owner");
+    const temp = /\.progress\.(\d+)-(\d+)-/.exec(name);
+    let pid: number, start: number;
+    if (temp) {
+      pid = Number(temp[1]); start = Number(temp[2]);
+    } else {
+      const { open } = await import("node:fs/promises");
+      const { constants } = await import("node:fs");
+      const file = await open(join(path, name), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+      try {
+        if (!(await file.stat()).isFile()) return;
+        const bytes = Buffer.alloc(16);
+        if ((await file.read(bytes)).bytesRead !== bytes.length) return;
+        pid = bytes.readDoubleLE(); start = bytes.readDoubleLE(8);
+      } finally { await file.close(); }
+    }
+    if (Number.isSafeInteger(pid) && pid > 0 && Number.isSafeInteger(start) && start >= 0 &&
+        transferOwnerState({ pid, start: start || null }, 0) === "proven-dead") await rm(join(path, name), { force: true });
+}
+
+const JSON_TEMP = /^\.[a-f0-9]{32}\.json\.([1-9]\d*)-(\d+)-[a-f0-9]{8}\.tmp$/;
+const WITHDRAWN = /^[a-f0-9]{32}@([1-9]\d*)-(\d+)\.json\.withdrawn$/;
+const LEGACY_TEMP = /^\.[a-f0-9]{32}\.json\.[a-f0-9]{8}\.tmp$/;
+const LEGACY_WITHDRAWN = /^[a-f0-9]{32}\.json\.withdrawn$/;
+
+async function recoverBrokerArtifact(parent: string, name: string, requests: boolean) {
+  const match = JSON_TEMP.exec(name) ?? (requests && WITHDRAWN.exec(name));
+  if (!match && !LEGACY_TEMP.test(name) && !(requests && LEGACY_WITHDRAWN.test(name))) return false;
+  const { transferOwnerState, reclaimTransfer } = await import("./peers/transfer-owner");
+  const path = join(parent, name);
+  const info = await lstat(path);
+  if (!info.isFile()) return true;
+  const owner = match ? { pid: Number(match[1]), start: Number(match[2]) || null } : undefined;
+  if (owner && (!Number.isSafeInteger(owner.pid) || owner.start !== null && !Number.isSafeInteger(owner.start))) return true;
+  // The sandboxed CLI records only a PID. Keep a running PID even if it
+  // outlives the retention window; its eventual exit permits recovery.
+  const state = transferOwnerState(owner, 0);
+  if (state === "proven-dead" || (!owner && reclaimTransfer(state, `${info.dev}:${info.ino}:${info.birthtimeMs}`, performance.now()))) {
+    await rm(path, { force: true });
+  }
+  return true;
 }
 
 /** Remove results a client never collected. */
 async function pruneStaleResults(agentDir: string, nowMs: number): Promise<void> {
-  let names: string[];
+  const dir = await openBrokerResults(agentDir, false).catch(() => undefined);
+  if (!dir) return;
   try {
-    names = await readdir(spawnResultDir(agentDir));
-  } catch {
-    return;
-  }
+    const parent = await pinnedPath(dir);
+    const names = await readdir(parent);
   for (const name of names) {
-    if (!REQUEST_FILE.test(name)) continue;
-    const path = join(spawnResultDir(agentDir), name);
+    if (await recoverBrokerArtifact(parent, name, false).catch(() => true)) continue;
+    if (/^[a-f0-9]{32}\.progress(?:\.([1-9]\d*)-(\d+)-[a-f0-9]{16}\.tmp)?$/.test(name)) {
+      await pruneBrokerProgress(parent, name).catch(err => {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") warnSendCleanup(`Cannot recover broker progress: ${err}`);
+      });
+      continue;
+    }
+    if (!REQUEST_FILE.test(name) && !/^[a-f0-9]{32}\.cancel$/.test(name)) continue;
+    const path = join(parent, name);
     try {
-      if (nowMs - (await stat(path)).mtimeMs > SPAWN_STALE_RESULT_MS) await rm(path, { force: true });
+      if (nowMs - (await lstat(path)).mtimeMs > SPAWN_STALE_RESULT_MS) await rm(path, { force: true });
     } catch { /* raced with the client's own delete */ }
   }
+  } finally { await dir.close(); }
 }
 
 /**
@@ -476,6 +606,11 @@ export async function processSpawnRequests(
   const nowMs = (deps.now ?? Date.now)();
   await pruneStaleResults(agentDir, nowMs);
 
+  if (deps.transferJobs) {
+    const { sweepStagingRequests } = await import("./send-broker");
+    await sweepStagingRequests(agentDir, performance.now()).catch(err => warnSendCleanup(`Staging cleanup failed: ${err}`));
+  }
+
   let names: string[];
   try {
     names = (await readdir(spawnRequestDir(agentDir))).sort();
@@ -486,36 +621,54 @@ export async function processSpawnRequests(
   let handled = 0;
   for (const name of names) {
     // File names are agent-controlled: only a plain 32-hex id is ever used as a path.
+    if (deps.transferSignal?.aborted) break;
     const match = REQUEST_FILE.exec(name);
-    if (!match) continue;
+    if (!match) {
+      if (JSON_TEMP.test(name) || WITHDRAWN.test(name) || LEGACY_TEMP.test(name) || LEGACY_WITHDRAWN.test(name)) {
+        await withPinnedDirectory(spawnRequestDir(agentDir), false, dir => recoverBrokerArtifact(dir, name, true)).catch(() => {});
+      }
+      continue;
+    }
     const id = match[1]!;
     const requestPath = join(spawnRequestDir(agentDir), name);
 
+    const claimed = requestPath + ".claimed";
+    try { await rename(requestPath, claimed); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
     let text: string;
+    let createdMs: number;
     try {
-      const size = (await stat(requestPath)).size;
+      const { size, birthtimeMs } = await stat(claimed);
+      createdMs = birthtimeMs;
       if (size > SPAWN_MAX_PROMPT_BYTES * 2) {
-        await rm(requestPath, { force: true });
-        await writeResult(agentDir, id, brokerFail("Error: spawn request is too large"));
+        await writeResult(agentDir, id, brokerFail("Error: spawn request is too large"), deps.transferSignal);
         handled++;
         continue;
       }
-      text = await Bun.file(requestPath).text();
-    } catch {
-      continue; // withdrawn by the client, or not yet readable
-    }
-    await rm(requestPath, { force: true });
+      text = await Bun.file(claimed).text();
+    } catch (err) {
+      await writeResult(agentDir, id, brokerFail(`Cannot read claimed request: ${err}`), deps.transferSignal);
+      handled++;
+      continue;
+    } finally { await rm(claimed, { force: true }); }
     handled++;
 
-    let result: IbCommandResult;
-    try {
-      result = await handleOneRequest(agentId, repoPath, agentDir, id, text, deps);
-    } catch (err) {
-      result = brokerFail(`Error: spawn failed: ${err instanceof Error ? err.message : String(err)}`);
+    async function dispatch() {
+      let result: IbCommandResult;
+      try { result = await handleOneRequest(agentId, repoPath, agentDir, id, text, deps, createdMs); }
+      catch (err) { result = brokerFail(`Error: spawn failed: ${err instanceof Error ? err.message : String(err)}`); }
+      try { await writeResult(agentDir, id, result, deps.transferSignal); }
+      catch { /* The client deadline handles an unavailable result channel. */ }
     }
-    try {
-      await writeResult(agentDir, id, result);
-    } catch { /* the client will time out; nothing else to do */ }
+    const jobs = deps.transferJobs;
+    const named = jobs && requestOp(text);
+    if (deps.transferSignal?.aborted) break;
+    if (jobs && named?.present && (named.op === "remote-send" || named.op === "local-attachment-send")) {
+      if (jobs.has(agentDir)) await writeResult(agentDir, id, brokerFail("busy, try again"), deps.transferSignal);
+      else jobs.set(agentDir, dispatch().finally(() => jobs.delete(agentDir)));
+    } else await dispatch();
   }
   return handled;
 }
@@ -561,7 +714,9 @@ export async function verifyBrokerRequester(
     && meta.sandbox?.enabled === false
     && !verification.ok
     && verification.field === "(missing)";
-  if (!verification.ok && !unsealedDisabledSpawn) {
+  const unsealedDisabledSend = verb === "send remotely" && meta.worktree === true
+    && meta.sandbox?.enabled === false && !verification.ok && verification.field === "(missing)";
+  if (!verification.ok && !unsealedDisabledSpawn && !unsealedDisabledSend) {
     return {
       ok: false,
       result: brokerFail(
@@ -570,6 +725,16 @@ export async function verifyBrokerRequester(
           : `Error: meta.json for '${agentId}' does not match its sealed record (${verification.field}); refusing to ${verb}`,
       ),
     };
+  }
+  if (verb === "send remotely") {
+    const { isRegisteredAgentWorktree } = await import("./no-worktree-caller");
+    const root = await realpath(repoPath);
+    const expected = join(runtimeNames.agentDir(root, agentId), "repo");
+    const gitFile = join(expected, ".git");
+    if (isCoordinatorType(meta.agentType) || await realpath(gitFile).catch(() => null) !== gitFile
+        || !await isRegisteredAgentWorktree(expected, [root], true)) {
+      return { ok: false, result: brokerFail("Remote sends through a watchdog require a worktree agent with a verified Git backlink") };
+    }
   }
   return { ok: true, meta };
 }
@@ -597,6 +762,7 @@ async function handleOneRequest(
   id: string,
   text: string,
   deps: SpawnServerDeps,
+  createdMs: number,
 ): Promise<IbCommandResult> {
   const named = requestOp(text);
   if (named.present) {
@@ -605,9 +771,9 @@ async function handleOneRequest(
       const { handleAskRequest } = await import("./ask-broker");
       return handleAskRequest({ agentId, repoPath, agentDir, id, text }, deps);
     }
-    if (named.op === "send") {
+    if (named.op === "send" || named.op === "remote-send" || named.op === "local-attachment-send") {
       const { handleSendRequest } = await import("./send-broker");
-      return handleSendRequest({ agentId, repoPath, agentDir, id, text }, deps);
+      return handleSendRequest({ agentId, repoPath, agentDir, id, text, createdMs }, deps);
     }
     const { handleLifecycleRequest } = await import("./lifecycle-broker");
     return handleLifecycleRequest({ agentId, repoPath, agentDir, id, text }, deps);

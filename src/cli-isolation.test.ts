@@ -360,9 +360,9 @@ describe("CLI routing cannot reach a live agent", () => {
     test.each([
       { args: ["new-agent", "--model", "claude:opus", "x"], message: "cannot pass --model" },
       { args: ["new-agent", "--repo", "caller-repo", "x"], message: "--repo is not supported inside the sandbox" },
-      { args: ["new-agent", "--spawned-by", "agent-x", "x"], message: "--spawned-by / --spawned-by-repo are internal" },
-      { args: ["send", "--from", "agent-other", "agent-peer", "x"], message: "--from for another agent is not supported" },
-      { args: ["ask", "--id", "agent-peer", "x"], message: "--id for another agent is not supported" },
+      { args: ["new-agent", "--spawned-by", "agent-x", "x"], message: "drop --spawned-by" },
+      { args: ["send", "--from", "agent-other", "agent-peer", "x"], message: "drop --from" },
+      { args: ["ask", "--id", "agent-peer", "x"], message: "drop --id" },
     ])("the client refuses `ib $args.0 $args.1` before anything is queued", async ({ args, message }) => {
       await writeHeartbeat(caller);
       const result = await cli.run([...args], { cwd: caller.sessionCwd, sandboxed: true });
@@ -406,6 +406,235 @@ describe("CLI routing cannot reach a live agent", () => {
         cli.run(["retire", "agent-peer"], { cwd: caller.sessionCwd, sandboxed: true }));
       expect(allowed.exitCode).toBe(0);
       expect(calls.map((call) => call.op)).toEqual(["retire"]);
+    });
+  });
+
+  describe("local CLI actor", () => {
+    const ancestry = { pid: 5000, parents: [[5000, 4242], [4242, 1]] as [number, number][], identityCurrent: true };
+    const processMeta = { claude_pid: "4242", claude_pid_epoch: 1_700_000_000 };
+
+    test.each([
+      ["send", "--from", "agent-peer", "@system", "hello"],
+      ["ask", "--id", "agent-peer", "question"],
+      ["log", "--id", "agent-peer", "note"],
+      ["new-agent", "--spawned-by", "agent-peer", "task"],
+    ].map(args => ({ command: args[0], args })))("direct $command rejects a different agent before dispatch", async ({ args }) => {
+      const result = await cli.run(args, { cwd: caller.sessionCwd });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("drop " + args[1]);
+      expect(result.actions).toEqual([]);
+    });
+
+    test.each([true, false])("send, ask and spawn use the same agent (worktree=%s)", async worktree => {
+      const actor = await cli.addAgent(repo, "manager", { ...processMeta, worktree, canSpawnChildren: true });
+      const opts = { cwd: actor.sessionCwd, ancestry };
+      const send = await cli.run(["send", peer.id, "hi"], { ...opts, actions: { sendMessage: "record" } });
+      expect(send.actions[0]?.args[2]).toEqual({ fromAgent: actor.id });
+      const ask = await cli.run(["ask", "question"], { ...opts, actions: { askQuestion: "record" } });
+      expect(ask.actions[0]?.args).toEqual([repo, actor.id, "question"]);
+      const spawn = await cli.run(["new-agent", "task"], { ...opts, actions: { newAgent: "record" } });
+      expect(spawn.actions[0]?.args).toMatchObject([repo, "task", { _trustedCaller: { repoPath: repo, meta: { id: actor.id } } }]);
+    });
+
+    test("a sandboxed Codex manager spawning from scratch with ps denied reaches its own watchdog", async () => {
+      const manager = await cli.addAgent(repo, "codex-manager", {
+        model: "codex:test", canSpawnChildren: true, claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000),
+      });
+      const result = await withFixtureWatchdog(manager, fakeWatchdogDeps(calls, repo), () =>
+        cli.run(["new-agent", "child task"], {
+          cwd: cli.cwd, sandboxed: true, env: { IB_AGENT_DIR: manager.agentDir }, ancestry: { ...ancestry, denyProcessProbe: true },
+        }));
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.actions).toEqual([]);
+      expect(calls).toMatchObject([{ op: "newAgent", args: [repo, "child task", {
+        _trustedCaller: { repoPath: repo, agentDir: manager.agentDir, meta: { id: manager.id, canSpawnChildren: true } },
+      }] }]);
+    });
+
+    test("a worktree agent that moved to a scratch cwd retains its sender id", async () => {
+      const actor = await cli.addAgent(repo, "scratch-worker", processMeta);
+      const result = await cli.run(["send", peer.id, "hi"], { ancestry, actions: { sendMessage: "record" } });
+      expect(result.actions[0]?.args[2]).toEqual({ fromAgent: actor.id });
+    });
+
+    test("a Codex agent sending from scratch with ps denied retains its queue attribution", async () => {
+      const sessionId = crypto.randomUUID();
+      const actor = await cli.addAgent(repo, "codex-worker", {
+        model: "codex:test", codex_session_id: sessionId, claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000),
+      });
+      await writeHeartbeat(peer);
+      const result = await cli.run(["send", peer.id, "from scratch"], {
+        env: { CODEX_THREAD_ID: sessionId }, ancestry: { ...ancestry, denyProcessProbe: true }, actions: { sendMessage: "real" },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      const queue = Bun.file(join(cli.home, ".itsybitsy/agents", peer.id, "outbox.jsonl"));
+      expect(JSON.parse(await queue.text())).toMatchObject({ fromAgent: actor.id, message: "from scratch" });
+    });
+
+    test("an agy launch keeps its repo and sender in a shared checkout and scratch with ps denied", async () => {
+      const live = { claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000) };
+      const agent = await cli.addAgent(repo, "agy-worker", { ...live, worktree: false, model: "agy:default" });
+      const thread = crypto.randomUUID();
+      await cli.addAgent(await cli.addRepo("other"), "codex-worker", { ...live, model: "codex:test", codex_session_id: thread });
+      await writeHeartbeat(peer);
+      for (const cwd of [repo, cli.cwd]) {
+        const result = await cli.run(["send", peer.id, cwd], {
+          cwd, env: { IB_AGENT_DIR: agent.agentDir, CODEX_THREAD_ID: thread },
+          ancestry: { ...ancestry, denyProcessProbe: true }, actions: { sendMessage: "real" },
+        });
+        expect(result.exitCode, result.stderr).toBe(0);
+      }
+      const queue = await Bun.file(join(cli.home, ".itsybitsy/agents", peer.id, "outbox.jsonl")).text();
+      expect(queue.trim().split("\n").map(line => JSON.parse(line))).toMatchObject([
+        { fromAgent: agent.id, message: repo }, { fromAgent: agent.id, message: cli.cwd },
+      ]);
+    });
+
+    test("a legacy Claude session hint cannot identify a Codex agent", async () => {
+      const session = crypto.randomUUID();
+      await cli.addAgent(repo, "codex-worker", {
+        model: "codex:test", session_id: session, claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000),
+      });
+      const result = await cli.run(["send", peer.id, "notice"], {
+        env: { CLAUDE_SESSION_ID: session }, ancestry: { ...ancestry, denyProcessProbe: true }, actions: { sendMessage: "record" },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.actions[0]?.args[2]).toEqual({ fromAgent: "" });
+    });
+
+    test("an agent launch keeps its identity in a detached personal tmux process tree", async () => {
+      const agent = await cli.addAgent(repo, "nested", {
+        claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000),
+      });
+      const result = await cli.run(["send", "--from", peer.id, peer.id, "notice"], {
+        cwd: agent.sessionCwd, env: { IB_AGENT_DIR: agent.agentDir, TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" },
+        ancestry: { ...ancestry, terminal: "tmux", tmuxSession: "nested-shells" },
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("drop --from");
+    });
+
+    test("a dotted coordinator can bootstrap write-pid and report to @system", async () => {
+      const dotted = await cli.addAgent(await cli.addRepo("project.dev"), "project.dev", { worktree: false, agentType: "repo-coordinator" });
+      const pid = await cli.run(["write-pid", dotted.id, "4242"], { cwd: dotted.repoPath });
+      expect(pid.exitCode, pid.stderr).toBe(0);
+      expect(await Bun.file(join(dotted.agentDir, "meta.json")).json()).toMatchObject({ claude_pid: "4242", claude_pid_epoch: expect.any(Number) });
+      const result = await cli.run(["send", "@system", "status"], { cwd: dotted.repoPath, ancestry, actions: { sendToSystemCoordinator: "record" } });
+      expect(result.actions[0]?.args).toEqual(["status", { fromAgent: dotted.id }]);
+    });
+
+    test("a shared agent is recorded in both the team creation audit and channel history", async () => {
+      const actor = await cli.addAgent(repo, "shared", { ...processMeta, worktree: false });
+      const opts = { cwd: repo, ancestry };
+      const create = await cli.run(["team", "create", "room"], opts);
+      expect(create.exitCode, create.stderr).toBe(0);
+      const teamDir = join(cli.home, ".itsybitsy/teams");
+      expect(await Bun.file(join(teamDir, "room.log")).text()).toContain("team created by " + actor.id);
+      const send = await cli.run(["send", "@room", "hello"], { ...opts, actions: { teamSend: "real" } });
+      expect(send.exitCode, send.stderr).toBe(0);
+      const history = (await Bun.file(join(teamDir, "room.channel.jsonl")).text()).trim().split("\n");
+      expect(JSON.parse(history.at(-1)!)).toMatchObject({ fromAgent: actor.id, message: "hello" });
+    });
+
+    test("ask and log accept self nicknames and qualified addresses and reject another repo's same ID", async () => {
+      const self = await cli.addAgent(repo, "manager", { nickname: "captain" });
+      const other = await cli.addRepo("other");
+      await cli.addAgent(other, self.id);
+      const opts = { cwd: self.sessionCwd, actions: { askQuestion: "record" as const } };
+      for (const id of ["captain", "@caller-repo/manager"]) {
+        const ask = await cli.run(["ask", "--id", id, "question"], opts);
+        expect(ask.actions[0]?.args).toEqual([repo, self.id, "question"]);
+        const log = await cli.run(["log", "--id", id, id], opts);
+        expect(log.exitCode, log.stderr).toBe(0);
+        expect(await Bun.file(join(self.agentDir, "agent.log")).text()).toContain(id);
+      }
+      for (const cmd of ["ask", "log"]) {
+        const denied = await cli.run([cmd, "--id", "@other/manager", "wrong repo"], opts);
+        expect(denied.exitCode).toBe(1);
+        expect(denied.stderr).toContain("drop --id");
+      }
+    });
+
+    test.each([false, true])("a human in an agent checkout can attribute commands and create a team (tmux=%s)", async tmux => {
+      const opts = {
+        cwd: caller.sessionCwd,
+        env: tmux ? { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" } : undefined,
+        ancestry: { ...ancestry, terminal: tmux ? "tmux" as const : "human" as const, tmuxSession: tmux ? "my-shells" : undefined },
+      };
+      const send = await cli.run(["send", peer.id, "--from", "@watchdog", "notice"], { ...opts, actions: { sendMessage: "record" } });
+      expect(send.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      const ask = await cli.run(["ask", "--id", peer.id, "question"], { ...opts, actions: { askQuestion: "record" } });
+      expect(ask.actions[0]?.args).toEqual([repo, peer.id, "question"]);
+      const log = await cli.run(["log", "--id", peer.id, "human note"], opts);
+      expect(log.exitCode, log.stderr).toBe(0);
+      expect(await Bun.file(join(peer.agentDir, "agent.log")).text()).toContain("human note");
+      const spawn = await cli.run(["new-agent", "--spawned-by", peer.id, "task"], { ...opts, actions: { newAgent: "record" } });
+      expect(spawn.actions[0]?.args[2]).toMatchObject({ _trustedCaller: null, spawnedBy: { agent_id: peer.id } });
+      const team = await cli.run(["team", "create", "room"], opts);
+      expect(team.exitCode, team.stderr).toBe(0);
+      expect(await Bun.file(join(cli.home, ".itsybitsy/teams/room.log")).text()).toContain("team created by user");
+    });
+
+    test("a human in a personal tmux session can use --from when another registered repo is unreadable", async () => {
+      const other = await cli.addRepo("unreadable");
+      await chmod(other, 0);
+      try {
+        const result = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], {
+          cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" },
+          ancestry: { ...ancestry, terminal: "tmux", tmuxSession: "personal" }, actions: { sendMessage: "record" },
+        });
+        expect(result.exitCode, result.stderr).toBe(0);
+        expect(result.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      } finally {
+        await chmod(other, 0o700);
+      }
+    });
+
+    test.each([false, true])("a nested personal tmux session cannot unlock an agent's --from (ps denied=%s)", async denyProcessProbe => {
+      const result = await cli.run(["send", "--from", peer.id, peer.id, "notice"], {
+        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" },
+        ancestry: { ...ancestry, terminal: "agent", tmuxSession: "nested-shells", denyProcessProbe },
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("drop --from");
+      expect(result.actions).toEqual([]);
+    });
+
+    test.each([
+      { pane: "sibling window", flag: [], expected: "" },
+      { pane: "sibling window", flag: ["--from", "@watchdog"], expected: "@watchdog" },
+      { pane: "agent launch pane", flag: [], expected: "agent-caller" },
+    ])("a send from the $pane with $flag queues the correct sender", async ({ pane, flag, expected }) => {
+      const sibling = pane === "sibling window";
+      await writeHeartbeat(peer);
+      const result = await cli.run(["send", ...flag, peer.id, "hello"], {
+        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: sibling ? "%2" : "%1" },
+        ancestry: { ...ancestry, terminal: "tmux", tmuxSession: "ib-fixture-agent-caller",
+          paneStartCommand: sibling ? "" : join(caller.agentDir, "start.sh") },
+        actions: { sendMessage: "real" },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      const queue = Bun.file(join(cli.home, ".itsybitsy/agents", peer.id, "outbox.jsonl"));
+      expect(JSON.parse(await queue.text())).toMatchObject({ message: "hello", fromAgent: expected });
+    });
+
+    test.each(["ib-fixture-agent-caller", "itsybitsy-deadbeef-agent-caller"])("a managed tmux session %s retains agent attribution", async tmuxSession => {
+      const deny = await cli.run(["log", "--id", peer.id, "note"], {
+        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" }, ancestry: { ...ancestry, terminal: "tmux", tmuxSession, paneStartCommand: join(caller.agentDir, "start.sh") },
+      });
+      expect(deny.stderr).toContain("drop --id");
+    });
+
+    test("a human terminal keeps local --from and the system pane keeps its own label", async () => {
+      const actions = { sendMessage: "record" as const };
+      const human = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], { actions, ancestry: { ...ancestry, terminal: "human" } });
+      expect(human.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      const inCheckout = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], {
+        cwd: caller.sessionCwd, actions, ancestry: { ...ancestry, terminal: "human" },
+      });
+      expect(inCheckout.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      const system = await cli.run(["send", peer.id, "notice"], { actions, ancestry: { pid: 300, parents: [[300, 200], [200, 1]], identityCurrent: true, systemPanePid: 200 } });
+      expect(system.actions[0]?.args[2]).toEqual({ fromAgent: "@system" });
     });
   });
 

@@ -42,6 +42,7 @@ import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
+import { attachmentSettingKey, TRANSFER_SETTING_BOUNDS } from "../peers/transfer-limits";
 import type { ConfigResult } from "../config";
 import { PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
@@ -174,6 +175,7 @@ export function killActiveDiffProc() {
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
   readonly dialog: DialogState;
+  focusRemoteMessage(): void;
   remoteStartPending: boolean;
   refuseOnRemoteRow(key: string): boolean;
   peerService: PeersDialogService | null;
@@ -1334,6 +1336,10 @@ export function handleMerge(ctx: ActionCtx) {
 }
 
 export function handleSend(ctx: ActionCtx) {
+  if (ctx.remoteSelection) {
+    if (ctx.remoteSelection.kind !== "remote-repo-header") ctx.focusRemoteMessage();
+    return;
+  }
   // §17.3a: team-target branch — when the Teams tree OWNS THE ACTIVE
   // SELECTION (Phase 2, §17.1) AND a team anchor is selected, open a
   // `Send message to @<team>:` dialog and route through `teamSend` (§16.4
@@ -2420,7 +2426,7 @@ export function handleSetup(ctx: ActionCtx, initialTab = 0) {
       delete dialog.settingsMessage;
       dialog.items = items;
       if (tab === 1) {
-        dialog.configItems = CONFIG_KEYS.map(def => ({ ...def, ...config[def.key]! }));
+        dialog.configItems = CONFIG_KEYS.map(def => ({ ...def, ...config[def.key]!, ...config[def.key]?.repair }));
         dialog.configSelectedIndex = 0;
         dialog.onConfigAction = handleConfigItemAction(ctx, tab, config, () => {
           if (ctx.dialog === dialog) showSetupDialogForTab(tab);
@@ -2600,15 +2606,17 @@ function handleConfigItemAction(
         : item.type === "string[]"
         ? (item.value as string[] ?? []).join(", ")
         : String(item.value ?? "");
+      const setting = attachmentSettingKey(item.key);
       ctx.closeDialog();
       ctx.showDialog({
         type: "input",
-        prompt: item.sensitive
+        ...(setting && { hint: [item.issue, item.companionHint, `Integer ${TRANSFER_SETTING_BOUNDS[setting].join("–")}. 0 = attachments disabled`].filter(Boolean).join("  ") }),
+        prompt: setting ? `${setting} (${setting === "maxFiles" ? "files" : "MB"})` : item.sensitive
           ? `${item.key} (${item.type}; leave blank to keep current value):`
           : `${item.key} (${item.type}):`,
         value: currentStr,
         onSubmit: (value: string) => {
-          ctx.closeDialog();
+          if (!setting) ctx.closeDialog();
           if (item.sensitive && value === "") {
             handleSetup(ctx, tab);
             return;
@@ -2617,7 +2625,7 @@ function handleConfigItemAction(
           if (item.type === "number") {
             const num = Number(value);
             if (value.trim() === "" || isNaN(num)) {
-              ctx.setNotice("Invalid number", "error");
+              ctx.setNotice(setting ? `${setting} must be an integer` : "Invalid number", "error");
               return;
             }
             parsed = num;

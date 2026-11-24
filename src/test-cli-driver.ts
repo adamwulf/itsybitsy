@@ -31,10 +31,19 @@ import type { cliActions } from "./index";
 /** Read only by this file. Production code never looks at it (test-isolation test). */
 export const CLI_DRIVER_CONFIG_ENV = "IB_TEST_CLI_DRIVER_CONFIG";
 
+/** Process-table evidence shared by an isolated CLI and its fixture watchdog. */
+export const fixtureProcessStart = (pid: number) => 1_700_000_000 + pid;
+
 export type CliActionName = keyof typeof cliActions;
 export type CliActionMode = "record" | "real";
 
 export interface CliAncestry {
+  systemPanePid?: number;
+  tmuxSession?: string;
+  paneStartCommand?: string;
+  denyProcessProbe?: boolean;
+  terminal?: "human" | "tmux" | "agent";
+  sendTTY?: "stdout" | "stderr" | "controlling";
   /** The pid the caller check starts from. */
   pid: number;
   /** [pid, parent pid] pairs, as `ps` would report them. */
@@ -47,6 +56,7 @@ export interface CliDriverConfig {
   /** The cwd and HOME this process must have been started with. */
   cwd: string;
   home: string;
+  accountHome?: string;
   /** Receives context.json, actions.jsonl and violations.jsonl. */
   logDir: string;
   /** What isSandboxedProcess() answers. */
@@ -105,6 +115,11 @@ function installExternalGuards(config: CliDriverConfig, block: (violation: CliVi
     },
     spawnSync: (...spawnArgs: unknown[]) => {
       const argv = argvOf(spawnArgs[0]);
+      if (argv.length === 6 && argv[0] === "tmux" && argv[1] === "display-message" && argv[2] === "-p" &&
+          argv[3] === "-t" && argv[4] === process.env.TMUX_PANE && argv[5] === "#{session_name}\t#{pane_start_command}") {
+        const name = config.ancestry?.tmuxSession;
+        return { exitCode: name ? 0 : 1, stdout: Buffer.from(name ? name + "\t" + (config.ancestry?.paneStartCommand ?? "") + "\n" : "") };
+      }
       if (!allowed(argv)) block({ kind: "process", detail: { argv } });
       return realSpawnSync(...spawnArgs);
     },
@@ -122,17 +137,48 @@ function installExternalGuards(config: CliDriverConfig, block: (violation: CliVi
 }
 
 async function installFixtureCallerEvidence(config: CliDriverConfig, block: (violation: CliViolation) => never): Promise<void> {
-  const { resolveNoWorktreeCaller } = await import("./no-worktree-caller");
+  const { resolveDashboardCaller, resolveNoWorktreeCaller } = await import("./no-worktree-caller");
   const { setNewAgentNoWorktreeCallerResolver } = await import("./ib-commands");
   const { setBoundNoWorktreeCallerResolver, setNoWorktreeRepoRootsLoader } = await import("./hooks/agent-context");
 
+  if (!config.sandboxed || config.ancestry?.denyProcessProbe) {
+    const { processStartEpochSecondsCtx } = await import("./agents");
+    processStartEpochSecondsCtx.set(pid => pid === process.pid ? fixtureProcessStart(pid) : null);
+  }
   const ancestry = (): CliAncestry => config.ancestry ?? block({ kind: "process-ancestry", detail: {} });
-  const resolver = (cwd: string) => resolveNoWorktreeCaller(cwd, {
-    registryHome: config.home,
+  const resolver = (cwd: string, options?: { coordinatorId?: string; roots?: string[] }) => resolveNoWorktreeCaller(cwd, {
+    ...options,
+    registryHome: config.accountHome ?? config.home,
     pid: config.ancestry?.pid,
-    readParents: () => new Map(ancestry().parents),
+    readParents: () => {
+      if (ancestry().denyProcessProbe) throw new Error("fixture denied ps");
+      return new Map(ancestry().parents);
+    },
     identityCurrent: () => ancestry().identityCurrent,
   });
+  const { remoteCliCaller } = await import("./peers/peer-outbox");
+  const { humanSendTerminalDenial, isSystemPaneCaller } = await import("./peers/remote-start-caller");
+  remoteCliCaller.humanDenial = async (_input, mode) => {
+    const terminal = config.ancestry?.terminal;
+    return humanSendTerminalDenial({
+      pid: 300, cwd: config.cwd, stdinTTY: process.stdin.isTTY,
+      stdoutTTY: terminal !== undefined && (config.ancestry?.sendTTY ?? "stdout") === "stdout",
+      stderrTTY: terminal !== undefined && config.ancestry?.sendTTY === "stderr",
+      hasControllingTerminal: async () => terminal !== undefined && config.ancestry?.sendTTY === "controlling",
+      env: terminal === "tmux" || config.ancestry?.tmuxSession ? { TMUX: "/tmp/test" } : {},
+      readProcessTable: async () => config.ancestry?.denyProcessProbe ? "" : [
+        "PID PPID STARTED                  KERNEL COMMAND",
+        "300    1 Sat Nov 21 12:01:00 2026 " + (terminal === "agent" ? "codex  codex" : "bash   bash"),
+        "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
+      ].join("\n"),
+      resolveCaller: (cwd, ancestors, options) => resolveDashboardCaller(cwd, ancestors, { ...options, registryHome: config.accountHome ?? config.home }),
+    }, mode);
+  };
+  remoteCliCaller.isSystem = async () => !!config.ancestry?.systemPanePid && isSystemPaneCaller(ancestry().pid, async () => ancestry().systemPanePid ?? null, async () => [
+    "PID PPID STARTED                  KERNEL COMMAND",
+    ...ancestry().parents.map(([pid, parent]) => `${String(pid).padStart(3)} ${String(parent).padStart(4)} Sat Nov 21 12:01:00 2026 bash   bash`),
+    "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
+  ].join("\n"));
   setNewAgentNoWorktreeCallerResolver(resolver);
   setBoundNoWorktreeCallerResolver(resolver);
   setNoWorktreeRepoRootsLoader(async () => {
@@ -169,6 +215,9 @@ async function runDriver(): Promise<void> {
     throw new Error(`test-cli-driver blocked ${violation.kind}: ${JSON.stringify(violation.detail)}`);
   };
   installExternalGuards(config, block);
+  (await import("./peers/local-attachments")).localAttachmentVolume.set(config.home);
+  const { setUserHome } = await import("./home");
+  setUserHome(config.home, config.accountHome);
 
   const { setSandboxedProcessOverride } = await import("./sandbox-detect");
   setSandboxedProcessOverride(() => config.sandboxed);

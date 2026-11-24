@@ -1601,9 +1601,8 @@ export function resetPerAgentReadState(): void {
  * imports `drainOutbox` from ib-commands (lazy to avoid a static import cycle —
  * ib-commands imports nothing from watchdog at module load, but the watchdog's
  * other helpers already import from ib-commands, so keep this symmetric with
- * the existing lazy `notifySpawner` import). The watchdog leaves
- * `steal: false` (it just retries next tick) so a live inline sender's lock is
- * never stolen out from under it. Returns void — the watchdog ignores the
+ * the existing lazy `notifySpawner` import). The watchdog processes one batch per tick
+ * and can reclaim an aged lock whose owner is proven dead. Returns void — the watchdog ignores the
  * delivery result; failures stay enqueued for the next drain.
  */
 let perAgentDrainFn: (agent: Agent, agentDir: string) => Promise<void> = async (agent, agentDir) => {
@@ -1637,19 +1636,25 @@ export function resetPerAgentDrain(): void {
  * the per-agent watchdog tests never touch the filesystem.
  */
 export interface SpawnBrokerHooks {
+  recoverLocal?: (agentDir: string) => Promise<void>;
   setup: (agentDir: string) => Promise<string | null>;
-  process: (agentId: string, repoPath: string) => Promise<void>;
+  process: (agentId: string, repoPath: string, jobs: Map<string, Promise<void>>, signal: AbortSignal) => Promise<void>;
 }
 
 const defaultSpawnBrokerHooks: SpawnBrokerHooks = {
+  recoverLocal: async agentDir => {
+    const { recoverLocalSnapshots } = await import("./peers/transfer-owner");
+    const { localAttachmentVolume } = await import("./peers/local-attachments");
+    await recoverLocalSnapshots(agentDir, localAttachmentVolume.fn);
+  },
   setup: async (agentDir) => {
     const { ensureSpawnBrokerDirs, spawnRequestDir } = await import("./spawn-broker");
     await ensureSpawnBrokerDirs(agentDir);
     return spawnRequestDir(agentDir);
   },
-  process: async (agentId, repoPath) => {
+  process: async (agentId, repoPath, transferJobs, transferSignal) => {
     const { processSpawnRequests } = await import("./spawn-broker");
-    await processSpawnRequests(agentId, repoPath);
+    await processSpawnRequests(agentId, repoPath, { transferJobs, transferSignal });
   },
 };
 
@@ -1938,13 +1943,22 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
   // detection or the outbox drain. The guard keeps at most one
   // handler running; a request that arrives meanwhile is picked up by the next
   // tick/watch event.
-  let spawnBusy = false;
+  const jobs = new Map<string, Promise<void>>();
+  const lifetime = new AbortController();
+  const stop = () => lifetime.abort(new Error("Watchdog stopped"));
+  let brokerPoll: Promise<void> | undefined;
+  let nextLocalSweep = -Infinity;
   const spawnNow = (): void => {
-    if (spawnBusy) return;
-    spawnBusy = true;
-    void spawnBrokerHooks.process(agentId, repoPath)
+    if (brokerPoll || lifetime.signal.aborted) return;
+    const now = performance.now();
+    let recovery: Promise<void> | undefined;
+    if (now >= nextLocalSweep) {
+      nextLocalSweep = now + 30_000;
+      recovery = spawnBrokerHooks.recoverLocal?.(agentDir).catch(err => logAgent(agentDir, `Local attachment recovery failed: ${err}`));
+    }
+    brokerPoll = Promise.allSettled([recovery, spawnBrokerHooks.process(agentId, repoPath, jobs, lifetime.signal)]).then(() => {})
       .catch(() => { /* never crash the watchdog on a spawn-request error */ })
-      .finally(() => { spawnBusy = false; });
+      .finally(() => { brokerPoll = undefined; });
   };
   let spawnWatcher: FSWatcher | null = null;
   let spawnDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -1967,11 +1981,12 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
     if (spawnWatcher) { try { spawnWatcher.close(); } catch { /* ignore */ } spawnWatcher = null; }
   };
 
-  // Poll loop
-  while (true) {
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
+  try {
+  while (!lifetime.signal.aborted) {
     // Exit condition (a): worktree directory removed (retire/merge/nuke)
     if (!existsSyncFn(worktreeDir)) {
-      stopWatching();
       break;
     }
 
@@ -2081,7 +2096,6 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
       } else if (nowFn() - tmuxGoneSince >= TMUX_GONE_GRACE_MS) {
         // Exit condition (b): tmux gone for >10s
         await logAgent(agentDir, "[watchdog] tmux session gone for >10s — exiting watchdog");
-        stopWatching();
         break;
       }
     } else {
@@ -2277,6 +2291,18 @@ export async function runPerAgentWatchdog(agentId: string, repoPath: string): Pr
 
     // Sleep before next poll
     await sleepFn(POLL_INTERVAL_MS);
+  }
+  } finally {
+    stop();
+    stopWatching();
+    process.off("SIGTERM", stop);
+    process.off("SIGINT", stop);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([Promise.allSettled([brokerPoll, ...jobs.values()]), new Promise<void>(resolve => {
+        deadline = setTimeout(resolve, 1500);
+      })]);
+    } finally { clearTimeout(deadline); }
   }
 }
 

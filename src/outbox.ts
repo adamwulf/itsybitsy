@@ -1,3 +1,4 @@
+import { flock, LOCK_EX, LOCK_NB } from "./file-lock";
 /**
  * Per-agent (and per-coordinator) tmux message-delivery queue.
  *
@@ -27,10 +28,12 @@
  * The Telegram channel outbox lives in `src/channels/outbox.ts`.
  */
 
+import { withPinnedDirectory } from "./pinned-directory";
+import { constants } from "node:fs";
 import { join } from "path";
-import { rename, unlink, stat, readFile, appendFile, open, mkdir, rmdir } from "fs/promises";
+import { rename, unlink, stat, lstat, readFile, writeFile, open, type FileHandle, rm, rmdir } from "fs/promises";
 import type { RepoEntry } from "./registry";
-import type { AgentMeta } from "./agents";
+import { isPidAliveSinceUncached, selfProcessStartEpochSeconds, type AgentMeta } from "./agents";
 import { getCoordinatorHome } from "./coordinator";
 import { isValidAgentId } from "./validation";
 
@@ -103,6 +106,8 @@ export interface OutboxMessage {
   message: string;
   /** Resolved sender: real agent id, `@`-sentinel, or "" for the human user. */
   fromAgent: string;
+  /** Qualified peer labels can start with @, too. Retain their wire kind for the drainer. */
+  peerSender?: "agent" | "system";
   /** Mirrors the historical `opts.raw` — suppresses the `[sent by ...]` prefix. */
   raw: boolean;
   /** Wall-clock ms at enqueue time (debugging / ordering aid). */
@@ -133,75 +138,92 @@ export function outboxLockPath(dir: string): string {
   return join(dir, OUTBOX_LOCK_FILENAME);
 }
 
-/**
- * Append one message to the outbox. A single small `appendFile` of one line is
- * atomic on POSIX (O_APPEND), and the queue directory's lock around the drain means a
- * concurrent drainer never truncates a half-written line: the drainer reads the
- * whole file, parses complete lines, and rewrites only the not-yet-delivered
- * remainder. An append that lands mid-drain is simply picked up next drain.
- *
- * Dedupe: before appending, we scan the current pending queue and skip the
- * append if an identical message from the same sender is ALREADY queued (not
- * yet drained) — matching on `(fromAgent, message, raw, team)`. This caps the
- * queue at one pending copy per that tuple, so a stuck sender that re-fires the
- * SAME notification every tick (e.g. a watchdog whose inline drain into a dead
- * tmux keeps failing) can't grow the queue unbounded. On a skip we return the
- * pre-existing matching record instead of creating a new one. This is
- * best-effort: the read+append is intentionally NOT lock-guarded (the drain
- * lock guards delivery, not enqueue), so a rare concurrent double from two
- * separate processes is acceptable and harmless — the goal is bounding runaway
- * growth from a single re-firing sender, not exactly-once delivery. Dedupe only
- * suppresses while a copy is still PENDING: once the queued copy is drained, an
- * identical message enqueues fresh (nothing is permanently blacklisted).
- *
- * `id` and `enqueuedAtMs` are injectable for deterministic tests.
- */
+async function openVerifiedRecord(path: string, access: number) {
+  const before = await lstat(path).catch(err => { if (err.code !== "ENOENT") throw err; });
+  const invalid = () => new Error("Expected a single-link regular outbox queue file");
+  if (before && (!before.isFile() || before.nlink !== 1)) throw invalid();
+  const file = await open(path, access | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const opened = await file.stat({ bigint: true }), named = await lstat(path, { bigint: true });
+    if (!opened.isFile() || !named.isFile() || opened.nlink !== 1n || named.nlink !== 1n ||
+        opened.dev !== named.dev || opened.ino !== named.ino) throw invalid();
+    return file;
+  } catch (err) { await file.close(); throw err; }
+}
+
+/** Writers lock the directory inode, which survives replacement of the JSONL
+ * file. The independent delivery lock serializes tmux, outside this section. */
+async function withQueueMutation<T>(dir: string, create: boolean, signal: AbortSignal | undefined, work: (parent: string) => Promise<T>) {
+  return withPinnedDirectory(dir, create, async (parent, directory) => {
+    const deadline = performance.now() + 60_000;
+    while (flock(directory.fd, LOCK_EX | LOCK_NB) !== 0) {
+      signal?.throwIfAborted();
+      if (performance.now() >= deadline) throw Error("Timed out waiting for queue mutation lock");
+      await Bun.sleep(10);
+    }
+    signal?.throwIfAborted();
+    return work(parent);
+  });
+}
+
+/** Watchdog-owned guard for a sandboxed local attachment submission. */
+export interface LocalQueueGuard {
+  signal: AbortSignal;
+  beforeAppend(): Promise<void>;
+  accepted?(): void;
+}
+
 export async function enqueueOutbox(
   dir: string,
   msg: Omit<OutboxMessage, "id" | "enqueuedAtMs"> & { id?: string; enqueuedAtMs?: number },
   reservedKey?: string,
+  signal?: AbortSignal,
+  guard?: LocalQueueGuard,
 ): Promise<OutboxMessage> {
-  // Best-effort dedupe: if an identical pending message from the same sender is
-  // already queued, return it instead of appending a second copy. Matches on
-  // everything that makes two messages "the same" — sender, text, raw flag, and
-  // team — deliberately ignoring id/enqueuedAtMs (always unique/irrelevant).
-  // readOutbox returns [] on a missing file, so this is safe before mkdir.
-  const existing = await readOutbox(dir);
-  const dup = existing.find(
-    (m) =>
-      m.fromAgent === msg.fromAgent &&
-      m.message === msg.message &&
-      m.raw === msg.raw &&
-      m.team === msg.team &&
-      (m.noPassthrough === true) === (msg.noPassthrough === true),
-  );
-  if (dup) return dup;
-
-  const record: OutboxMessage = {
-    id: msg.id ?? crypto.randomUUID(),
-    message: msg.message,
-    fromAgent: msg.fromAgent,
-    raw: msg.raw,
-    enqueuedAtMs: msg.enqueuedAtMs ?? Date.now(),
-    team: msg.team,
-    // Persist only when explicitly true so an ordinary record round-trips
-    // identically to before (JSON.stringify drops the undefined key), keeping
-    // the dedupe match above stable against pre-existing queued messages.
-    noPassthrough: msg.noPassthrough === true ? true : undefined,
-  };
-  // A stored key identifies a leaf reserved at spawn. A late send to a
-  // retired recipient must not recreate that reservation.
-  if (reservedKey === undefined) await mkdir(dir, { recursive: true });
-  // Append one newline-terminated record so a torn write can be skipped.
   try {
-    await appendFile(outboxPath(dir), JSON.stringify(record) + "\n");
+    return await withQueueMutation(dir, reservedKey === undefined, signal, async parent => {
+      const file = await openVerifiedRecord(outboxPath(parent), constants.O_RDWR | constants.O_APPEND | constants.O_CREAT);
+      try { return await appendRecord(file); } finally { await file.close(); }
+    });
   } catch (err) {
-    if (reservedKey !== undefined && (err as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`agent ${reservedKey} no longer exists`);
-    }
+    if (reservedKey !== undefined && (err as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`agent ${reservedKey} no longer exists`);
     throw err;
   }
-  return record;
+  async function appendRecord(file: FileHandle) {
+    const content = await file.readFile("utf8");
+    const existing = parseQueue(content);
+    const dup = existing.find(
+      (m) =>
+        m.fromAgent === msg.fromAgent &&
+        m.peerSender === msg.peerSender &&
+        m.message === msg.message &&
+        m.raw === msg.raw &&
+        m.team === msg.team &&
+        (m.noPassthrough === true) === (msg.noPassthrough === true),
+    );
+    if (dup) return dup;
+
+    const record: OutboxMessage = {
+      id: msg.id ?? crypto.randomUUID(),
+      message: msg.message,
+      fromAgent: msg.fromAgent,
+      peerSender: msg.peerSender,
+      raw: msg.raw,
+      enqueuedAtMs: msg.enqueuedAtMs ?? Date.now(),
+      team: msg.team,
+      // Persist only when explicitly true so an ordinary record round-trips
+      // identically to before (JSON.stringify drops the undefined key), keeping
+      // the dedupe match above stable against pre-existing queued messages.
+      noPassthrough: msg.noPassthrough === true ? true : undefined,
+    };
+    signal?.throwIfAborted();
+    if (guard) await guard.beforeAppend();
+    signal?.throwIfAborted();
+    const separator = content && !content.endsWith("\n") ? "\n" : "";
+    await file.appendFile(separator + JSON.stringify(record) + "\n");
+    guard?.accepted?.();
+    return record;
+  }
 }
 
 /**
@@ -210,12 +232,17 @@ export async function enqueueOutbox(
  * skipped rather than throwing — a malformed line must not wedge the queue.
  */
 export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
-  let content: string;
-  try {
-    content = await readFile(outboxPath(dir), "utf-8");
-  } catch {
-    return []; // missing file → empty queue
-  }
+  try { return await withPinnedDirectory(dir, false, readPinnedQueue); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return []; throw err; }
+}
+
+async function readPinnedQueue(parent: string) {
+  const file = await openVerifiedRecord(outboxPath(parent), constants.O_RDONLY);
+  try { return parseQueue(await file.readFile("utf8")); }
+  finally { await file.close(); }
+}
+
+function parseQueue(content: string) {
   const out: OutboxMessage[] = [];
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
@@ -234,6 +261,7 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
           id: obj.id,
           message: obj.message,
           fromAgent: obj.fromAgent,
+          peerSender: obj.peerSender === "system" || obj.peerSender === "agent" ? obj.peerSender : undefined,
           raw: obj.raw,
           enqueuedAtMs: typeof obj.enqueuedAtMs === "number" ? obj.enqueuedAtMs : 0,
           team: typeof obj.team === "string" ? obj.team : undefined,
@@ -261,20 +289,22 @@ export async function readOutbox(dir: string): Promise<OutboxMessage[]> {
  * When the resulting set is empty the file is removed.
  */
 export async function rewriteOutboxRemoving(dir: string, deliveredIds: Set<string>): Promise<void> {
-  const current = await readOutbox(dir);
-  const remaining = current.filter((m) => !deliveredIds.has(m.id));
-  const path = outboxPath(dir);
-  if (remaining.length === 0) {
-    try {
-      await unlink(path);
-    } catch {
-      /* already gone */
-    }
-    return;
-  }
-  const tmpPath = path + ".tmp";
-  await Bun.write(tmpPath, remaining.map((m) => JSON.stringify(m)).join("\n") + "\n");
-  await rename(tmpPath, path);
+  try {
+    await withQueueMutation(dir, false, undefined, async parent => {
+      const current = await readPinnedQueue(parent);
+      const remaining = current.filter(m => !deliveredIds.has(m.id));
+      const path = outboxPath(parent);
+      if (!remaining.length) { await unlink(path); return; }
+      const temp = path + ".tmp";
+      // The directory flock excludes other rewriters. Unlink the old entry
+      // before exclusive creation so a leftover link is never followed.
+      await rm(temp, { force: true });
+      try {
+        await writeFile(temp, remaining.map(m => JSON.stringify(m)).join("\n") + "\n", { flag: "wx", mode: 0o600 });
+        await rename(temp, path);
+      } finally { await rm(temp, { force: true }); }
+    });
+  } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
 }
 
 /** Collect unlink failures so teardown can try each remaining file. */
@@ -327,9 +357,8 @@ export interface AcquireLockOpts {
   /** Backoff between attempts, in ms. Default 25. */
   backoffMs?: number;
   /**
-   * If true and the held lock looks stale (mtime older than `staleMs`), steal
-   * it. The inline fallback sets this so a crashed holder can't wedge delivery
-   * forever; the watchdog leaves it false (it just retries next tick).
+   * If true and the held lock is old enough and its owner is dead, steal
+   * it. Both watchdog and inline drainers use this to recover after a crash.
    */
   steal?: boolean;
   /** Age past which a lock is considered stale and stealable. Default 30000. */
@@ -359,7 +388,7 @@ function tokenFromBody(body: string): string {
  * lock handle on success, or null on timeout.
  *
  * Stealing: when `steal` is set and the existing lock's mtime is older than
- * `staleMs`, the stale lock is removed and re-created. This is the inline
+ * `staleMs`, the lock is reclaimed only if its recorded process is gone. This is the inline
  * fallback's safety valve against a crashed holder. The token (verified on
  * release) ensures a stolen-from holder never deletes the thief's lock.
  */
@@ -375,68 +404,37 @@ export async function acquireOutboxLock(dir: string, opts?: AcquireLockOpts): Pr
   // First attempt is unconditional; subsequent attempts are gated on the
   // deadline so a timeoutMs of 0 still tries exactly once.
   for (;;) {
-    const token = crypto.randomUUID();
+    const token = `${selfProcessStartEpochSeconds() ?? ""}:${crypto.randomUUID()}`;
     try {
-      const handle = await open(path, "wx");
-      try {
-        await handle.writeFile(lockBody(token));
-      } finally {
-        await handle.close();
-      }
-      return { dir, path, token };
-    } catch (err: unknown) {
-      const code = (err as { code?: string })?.code;
-      if (code !== "EEXIST") {
-        // Unexpected error (e.g. dir missing) — treat as un-acquirable.
-        return null;
-      }
-      // Held by someone. Optionally steal if stale.
-      if (opts?.steal) {
-        try {
-          const st = await stat(path);
-          if (now() - st.mtimeMs > staleMs) {
-            // Steal: read the current token so we only remove the lock we
-            // observed as stale (don't unlink a fresh lock a third party may
-            // have just created in the race window). The subsequent O_EXCL
-            // open is the real arbiter — a racing stealer loses with EEXIST
-            // and retries.
-            let staleToken: string | null = null;
-            try {
-              staleToken = tokenFromBody(await readFile(path, "utf-8"));
-            } catch {
-              /* lock vanished — retry immediately */
-              continue;
+      const state = await withQueueMutation(dir, false, undefined, async parent => {
+        const entry = outboxLockPath(parent);
+        let file: FileHandle;
+        try { file = await open(entry, "wx", 0o600); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          const held = await openVerifiedRecord(entry, constants.O_RDONLY);
+          try {
+            if (opts?.steal && now() - (await held.stat()).mtimeMs > staleMs) {
+              // Older locks have only pid:uuid. With no start time, a live
+              // numeric PID still owns the lock.
+              const [pidText, startText] = (await held.readFile("utf8")).split(":");
+              const pid = Number(pidText);
+              if (!Number.isSafeInteger(pid) || pid <= 0 || isPidAliveSinceUncached(pid, Number(startText))) return "held";
+              await unlink(entry);
+              return "retry";
             }
-            await unlinkIfToken(path, staleToken);
-            continue; // retry immediately after steal attempt
-          }
-        } catch {
-          /* lock vanished between EEXIST and stat — retry immediately */
-          continue;
+            return "held";
+          } finally { await held.close(); }
         }
-      }
-    }
+        try { await file.writeFile(lockBody(token)); }
+        finally { await file.close(); }
+        return "acquired";
+      });
+      if (state === "acquired") return { dir, path, token };
+      if (state === "retry") continue;
+    } catch { return null; }
     if (now() >= deadline) return null;
     await sleep(backoffMs);
-  }
-}
-
-/**
- * Remove the lock file ONLY if its on-disk token still matches `token`. This
- * is the ownership guard shared by release and steal: it prevents deleting a
- * lock that has since been re-created by a different holder.
- */
-async function unlinkIfToken(path: string, token: string): Promise<void> {
-  try {
-    const body = await readFile(path, "utf-8");
-    if (tokenFromBody(body) !== token) return; // not our lock anymore — leave it
-  } catch {
-    return; // already gone
-  }
-  try {
-    await unlink(path);
-  } catch {
-    /* raced with another release/steal — fine */
   }
 }
 
@@ -448,5 +446,13 @@ async function unlinkIfToken(path: string, token: string): Promise<void> {
  */
 export async function releaseOutboxLock(lock: OutboxLock | null): Promise<void> {
   if (!lock) return;
-  await unlinkIfToken(lock.path, lock.token);
+  try {
+    await withQueueMutation(lock.dir, false, undefined, async parent => {
+      const path = outboxLockPath(parent);
+      const file = await openVerifiedRecord(path, constants.O_RDONLY);
+      try {
+        if (tokenFromBody(await file.readFile("utf8")) === lock.token) await unlink(path);
+      } finally { await file.close(); }
+    });
+  } catch { /* Already gone or invalid. Leave an unverifiable entry alone. */ }
 }

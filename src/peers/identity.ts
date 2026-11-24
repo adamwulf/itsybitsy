@@ -12,7 +12,10 @@
  */
 
 import { createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
-import { open, readFile, unlink } from "node:fs/promises";
+import { mkdir, readFile, link, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { sealDir } from "../agent-seal";
+import { safeTransferParent, stagingOwnerStart, sweepEntries, sweepTransferDirectory, writeTransferOwner } from "./transfer-owner";
 import { peerSecretKeyFile } from "../runtime-names";
 import { ensurePeerDir } from "./peer-dir";
 
@@ -81,7 +84,7 @@ async function readSecretKey(path: string): Promise<Uint8Array> {
  * Read this install's identity from secret.key, creating the key first when
  * the file does not exist.
  *
- * The file is created with an exclusive create (`wx`, mode 0600), so when two
+ * The sealed 0600 temp is published with an exclusive link, so when two
  * processes race, exactly one writes a key and the other reads it. A
  * malformed file is an error, never overwritten: replacing the key would
  * change the id and break every pairing.
@@ -90,26 +93,32 @@ export async function loadOrCreateIdentity(): Promise<PeerIdentity> {
   const path = peerSecretKeyFile();
   await ensurePeerDir();
 
-  let file;
-  try {
-    file = await open(path, "wx", 0o600);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  const staging = join(sealDir(), ".key-staging");
+  await sweepEntries(staging, async name => {
+    if (/^[a-f0-9-]{36}$/.test(name)) await sweepTransferDirectory(join(staging, name), performance.now());
+  });
+  const existing = async () => {
     const secretKey = await readSecretKey(path);
     return { secretKey, id: deriveEndpointId(secretKey) };
-  }
+  };
+  try { return await existing(); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
 
-  const secretKey = Uint8Array.from(randomBytes(SEED_BYTES));
+  await mkdir(staging, { recursive: true, mode: 0o700 });
+  const attempt = join(await safeTransferParent(staging), crypto.randomUUID());
+  await mkdir(attempt, { mode: 0o700 });
   try {
-    await file.writeFile(encodeSecretKey(secretKey));
-  } catch (err) {
-    // Leave no empty or partial key behind: the next run would refuse it.
-    await file.close();
-    await unlink(path).catch(() => {});
-    throw err;
-  }
-  await file.close();
-  return { secretKey, id: deriveEndpointId(secretKey) };
+    await writeTransferOwner(attempt, { pid: process.pid, start: stagingOwnerStart(process.pid) });
+    const secretKey = Uint8Array.from(randomBytes(SEED_BYTES));
+    const temp = join(attempt, "key");
+    await writeFile(temp, encodeSecretKey(secretKey), { flag: "wx", mode: 0o600 });
+    try { await link(temp, path); }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return await existing();
+      throw err;
+    }
+    return { secretKey, id: deriveEndpointId(secretKey) };
+  } finally { await rm(attempt, { recursive: true, force: true }); }
 }
 
 /** This install's id (64 lowercase hex characters), creating the key if it is missing. */

@@ -42,8 +42,16 @@ import {
   type PathOperation,
   type PathsConfig,
   type PreparedAccessTable,
-  type SandboxProfileParams,
+  type AccessTableParams,
 } from "../sandbox";
+
+function claudeProjectPath(worktreePath: string, home: string): string {
+  return resolve(home, ".claude", "projects", encodeClaudeProjectPath(worktreePath));
+}
+
+function claudeScratchpadPath(worktreePath: string, uid: number): string {
+  return join("/private/tmp", `claude-${uid}`, encodeClaudeProjectPath(worktreePath));
+}
 
 /**
  * Compute the fully-resolved absolute path to an agent's Claude project
@@ -54,9 +62,8 @@ import {
  * Lives here (rather than in agent-path.ts) so paths-table.ts has no import
  * cycle with agent-path.ts; agent-path.ts re-exports it for existing callers.
  */
-export function claudeProjectDirFor(worktreePath: string): string {
-  const encoded = encodeClaudeProjectPath(worktreePath);
-  let projectDir = resolve(join(userHome(), ".claude", "projects", encoded));
+export function claudeProjectDirFor(worktreePath: string, home = userHome()): string {
+  let projectDir = claudeProjectPath(worktreePath, home);
   try {
     projectDir = realpathSync(projectDir);
   } catch {
@@ -75,8 +82,7 @@ export function claudeProjectDirFor(worktreePath: string): string {
  * scratchpad — see SPEC-PATH-ALLOWLIST.md §6.10 answer (a).
  */
 export function claudeScratchpadDirFor(worktreePath: string, uid: number): string {
-  const encoded = encodeClaudeProjectPath(worktreePath);
-  return canonicalizeSandboxPath(`/private/tmp/claude-${uid}/${encoded}`);
+  return canonicalizeSandboxPath(claudeScratchpadPath(worktreePath, uid));
 }
 
 /**
@@ -106,7 +112,7 @@ export interface AgentAccessTableParams {
   agentsDir: string;
   rootRepo: string;
   /** The git common dir (resolved via `git rev-parse --git-common-dir`). */
-  gitDir: string;
+  gitDir: string | undefined;
   /**
    * The tmux socket DIRECTORY (tmuxSocketDirPath) — a deny root for
    * non-spawners. The builder canonicalizes it like every runtime root.
@@ -141,7 +147,7 @@ export interface AgentAccessTableParams {
  * profile that cannot access them (and no agy root to a Claude profile).
  */
 export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable {
-  const params: SandboxProfileParams = {
+  const params: AccessTableParams = {
     AGENTDIR: p.agentDir,
     WORKTREE: p.worktreePath,
     GITDIR: p.gitDir,
@@ -152,11 +158,13 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
     canSpawnChildren: p.canSpawnChildren,
     HOME: p.home,
   };
+  // Pass raw roots to the table builder. Only the stored-table builder knows
+  // which prefixes its provisional policy permits realpath to open.
   if (p.cli === undefined || p.cli === "claude") {
-    params.PROJECTDIR = claudeProjectDirFor(p.worktreePath);
-    params.SCRATCHPAD = claudeScratchpadDirFor(p.worktreePath, process.getuid?.() ?? 0);
+    params.PROJECTDIR = claudeProjectPath(p.worktreePath, p.home ?? userHome());
+    params.SCRATCHPAD = claudeScratchpadPath(p.worktreePath, process.getuid?.() ?? 0);
   } else if (p.cli === "agy") {
-    params.AGYSTATEDIR = agyStateDirFor(p.home ?? userHome());
+    params.AGYSTATEDIR = join(p.home ?? userHome(), ".gemini");
   }
   return p.storedPaths
     ? storedPathAccessTable(p.paths, params)
@@ -166,7 +174,7 @@ export function agentPathAccessTable(p: AgentAccessTableParams): PathAccessTable
 /**
  * Resolve the git common dir the way the kernel profile does (SPEC §8): run
  * `git rev-parse --git-common-dir` in the worktree and resolve a relative
- * answer against the worktree, canonicalized (longest-existing-prefix). Falls
+ * answer against the worktree. The table builder canonicalizes it. Falls
  * back to `<rootRepo>/.git` (or `<worktree>/.git` when rootRepo is unknown) when
  * git fails, so the git dir is always a concrete deny-agnostic write root.
  */
@@ -180,12 +188,11 @@ async function resolveGitCommonDir(worktreePath: string, rootRepo: string): Prom
     if ((await proc.exited) === 0) {
       const trimmed = out.trim().split(/\r?\n/)[0]?.trim() ?? "";
       if (trimmed) {
-        const abs = trimmed.startsWith("/") ? trimmed : resolve(worktreePath, trimmed);
-        return canonicalizeSandboxPath(abs);
+        return resolve(worktreePath, trimmed);
       }
     }
   } catch { /* fall through to the fallback */ }
-  return canonicalizeSandboxPath(join(rootRepo || worktreePath, ".git"));
+  return join(rootRepo || worktreePath, ".git");
 }
 
 /**
@@ -212,10 +219,16 @@ export async function buildAgentAccessTable(input: {
   agentsDir: string;
   rootRepo: string;
   home?: string;
+  kernelSandboxed?: boolean;
+  /** Attachments cannot discover runtime grants by reading Git administration files. */
+  forAttachments?: boolean;
 }): Promise<PreparedAccessTable> {
-  const kernelSandboxed = metaKernelSandboxed(input.meta);
+  const kernelSandboxed = input.kernelSandboxed ?? metaKernelSandboxed(input.meta);
   const paths = resolvePathsConfig(input.meta.paths as PathsConfig | undefined);
-  const gitDir = await resolveGitCommonDir(input.worktreePath, input.rootRepo);
+  // No implicit Git root is persisted in meta. Stored paths still grant every
+  // explicit entry; hooks keep the runtime root needed for Git operations.
+  const gitDir = kernelSandboxed && input.forAttachments
+    ? undefined : await resolveGitCommonDir(input.worktreePath, input.rootRepo);
   const uid = process.getuid?.() ?? 0;
   const table = agentPathAccessTable({
     paths,
@@ -225,7 +238,7 @@ export async function buildAgentAccessTable(input: {
     rootRepo: input.rootRepo,
     gitDir,
     tmuxSock: tmuxSocketDirPath(uid),
-    canSpawnChildren: await metaCanSpawnChildren(input.meta),
+    canSpawnChildren: await metaCanSpawnChildren(input.meta, input.home),
     cli: metadataCli(input.meta.model) ?? null,
     home: input.home ?? userHome(),
     storedPaths: kernelSandboxed,
@@ -277,8 +290,8 @@ export interface SystemHookPolicy {
 export async function buildSystemHookPolicy(home: string): Promise<SystemHookPolicy> {
   const itsyHome = join(home, ".itsybitsy");
   const [allLayer, systemLayer] = await Promise.all([
-    loadAgentType("_all").catch(() => undefined),
-    loadAgentType(SYSTEM_COORDINATOR_TYPE).catch(() => undefined),
+    loadAgentType("_all", home).catch(() => undefined),
+    loadAgentType(SYSTEM_COORDINATOR_TYPE, home).catch(() => undefined),
   ]);
   const paths = unionLayerPaths([allLayer, systemLayer]);
 
@@ -313,10 +326,12 @@ export function pathDenialReason(
   prepared: PreparedAccessTable,
   absolutePath: string,
   op: PathOperation,
+  includeRule = false,
 ): string {
   const canonical = canonicalizeAccessPath(prepared, absolutePath);
-  if (prepared.deny.some((entry) => orderedEntryMatches(entry, canonical))) {
-    return `Access denied: ${op} ${canonical} matches a paths.deny entry`;
+  const deny = prepared.deny.find(entry => orderedEntryMatches(entry, canonical));
+  if (deny) {
+    return `Access denied: ${op} ${canonical} matches a paths.deny entry${includeRule ? " " + JSON.stringify(deny.canonical) : ""}`;
   }
   return `Access denied: ${op} ${canonical} is not in paths.allowRead/allowWrite`;
 }

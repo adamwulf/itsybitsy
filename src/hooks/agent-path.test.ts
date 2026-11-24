@@ -1883,11 +1883,12 @@ describe("checkIbCommandAccess", () => {
     test("defers a bare name that also exists on a connected peer", async () => {
       setSandboxedProcessOverride(() => true);
       await hideArchive();
-      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
-      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify([{
+      const generation = crypto.randomUUID();
+    await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "endpoint.lock"), process.pid + "\n" + generation);
+      await Bun.write(join(tmpDir, "home", ".itsybitsy", "peer", "remote-agents.json"), JSON.stringify({ generation, peers: [{
         name: "other", id: "peer", connected: true, lastOkAt: 1,
         agents: [{ repo: "app", id: "agent-target1", nickname: null, state: "waiting" }],
-      }]));
+      }] }));
       expect(await checkIbCommandAccess("ib rehire agent-target1", "agent-manager1", agentsDir)).toBeNull();
     });
 
@@ -2850,6 +2851,14 @@ describe("checkPathAccess — @system protected config writes (Phase B security)
       expect(result.reason).not.toContain("may read it");
     });
   }
+
+  test("@system file writes and Bash redirects cannot publish peer requests", () => {
+    const path = join(ITSY, "peer-outbox", "x", "request.json");
+    for (const input of [
+      makeInput({ toolName: "Write", toolInput: { file_path: path } }),
+      makeInput({ toolName: "Bash", toolInput: { command: `echo hello > ${path}` }, cwd: ITSY }),
+    ]) expect(checkPathAccess(input, systemCtx()).decision).toBe("deny");
+  });
 
   test("@system Bash redirects into peer/ → DENIED", () => {
     setUserHome("/Users/test");
@@ -4421,4 +4430,72 @@ describe("hook decisions inside the kernel sandbox equal the opening hook's", ()
       spy.mockRestore();
     }
   });
+});
+
+test.each(["peer-outbox/x/request.json", "peer/coordinator-tmux.json"])("an installed broad write grant cannot write %s", relative => {
+  setUserHome("/Users/test");
+  try {
+    const path = join("/Users/test/.itsybitsy", relative);
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/Users/test"] }) });
+    expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: path } }), ctx).decision).toBe("deny");
+    expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: "echo hi > " + path } }), ctx).decision).toBe("deny");
+  } finally { resetUserHome(); }
+});
+
+test("a frozen kernel policy builds its peer-outbox guard without opening the handoff or its parents", () => {
+  const home = "/Users/test";
+  setUserHome(home);
+  const dir = "/repo/.itsybitsy/agents/example";
+  try {
+    const access = makeAccess({ allowWrite: [home] });
+    const realpath = spyOn(fs, "realpathSync");
+    try {
+      const guards = agentProtectedWritePaths(dir, false, { ...access, kernelSandboxed: true });
+      const handoff = join(home, ".itsybitsy", "peer-outbox");
+      expect(guards.some(entry => entry.subtree && entry.path === handoff)).toBe(true);
+      expect(realpath.mock.calls.some(([path]) => String(path).startsWith(home))).toBe(false);
+      agentProtectedWritePaths(dir, false, access);
+      expect(realpath.mock.calls.some(([path]) => String(path) === handoff)).toBe(true);
+    } finally { realpath.mockRestore(); }
+  } finally { resetUserHome(); }
+});
+
+test("agent file tools and shell redirects cannot write CLI attachment staging", () => {
+  const ctx = makeCtx();
+  const file = join(ctx.agentDir, "send-attachments", "request", "0");
+  for (const input of [
+    makeInput({ toolName: "Write", toolInput: { file_path: file } }),
+    makeInput({ toolName: "Bash", toolInput: { command: "echo hi > " + file } }),
+  ]) expect(checkPathAccess(input, ctx)).toMatchObject({ decision: "deny", reason: expect.stringContaining("Only ib send") });
+});
+
+test("broad tmp grants cannot change trusted staging through either spelling", async () => {
+  const names = await import("../runtime-names");
+  const fs = await import("node:fs/promises");
+  const root = await fs.realpath(await fs.mkdtemp(join((await import("node:os")).tmpdir(), "ib-stage-guard-")));
+  const paths = [join(root, "physical"), join(root, "alias")];
+  const spy = (await import("bun:test")).spyOn(names, "transferStagingPaths").mockReturnValue(paths);
+  try {
+    const ctx = makeCtx({ access: makeAccess({ allowWrite: [root] }) });
+    for (const alias of paths) {
+      for (const path of [alias, join(alias, "outgoing/snapshot-test/0")]) {
+        for (const toolName of ["Write", "Read"]) expect(checkPathAccess(makeInput({ toolName, toolInput: { file_path: path } }), ctx).decision).toBe("deny");
+      }
+    }
+  } finally { spy.mockRestore(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("delivered files are readable, while writes and renames are confined to other scratch paths", () => {
+  const ctx = makeCtx({ access: makeAccess({ allowWrite: ["/tmp", "/private/tmp"] }) });
+  for (const root of ["/tmp", "/private/tmp"]) {
+    const dir = root + "/itsybitsy-attachments-fixture";
+    for (const path of [dir, dir + "/0/input.txt"]) {
+      expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: path } }), ctx).decision).toBe("deny");
+      for (const command of ["mv", "ln"]) {
+        expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command: command + " " + path + " /tmp/other-file" } }), ctx).decision).toBe("deny");
+      }
+    }
+    expect(checkPathAccess(makeInput({ toolName: "Read", toolInput: { file_path: dir + "/0/input.txt" } }), ctx).decision).toBe("allow");
+    expect(checkPathAccess(makeInput({ toolName: "Write", toolInput: { file_path: root + "/other-file" } }), ctx).decision).toBe("allow");
+  }
 });

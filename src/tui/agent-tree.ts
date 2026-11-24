@@ -269,9 +269,12 @@ export function formatRemoteAgentRow(
   const fullState = displayState(entry.remote.state);
   const state = truncatePeerField(fullState, stateColWidth);
   const statePad = " ".repeat(Math.max(0, stateColWidth - visibleWidth(state)));
+  // The styling ends at the state word, before its padding, as on a local row:
+  // under a selected row's REVERSE the state color becomes the background, so
+  // a color left on through the padding would paint past the word.
   const line = entry.linkStatus !== "connected"
-    ? `${ITALIC}${DIM}${prefix}${name}${namePad}  ${state}${statePad}${RESET}`
-    : `${ITALIC}${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${statePad}${RESET}`;
+    ? `${ITALIC}${DIM}${prefix}${name}${namePad}  ${state}${RESET}${statePad}`
+    : `${ITALIC}${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${RESET}${statePad}`;
   return highlightRow(truncateToWidth(line, width, ""), selected, width);
 }
 

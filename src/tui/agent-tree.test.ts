@@ -6,6 +6,7 @@ import {
   computeStateColWidth,
   MAX_TREE_HEIGHT,
   nextRepoFilter,
+  remoteStateColor,
 } from "./agent-tree";
 import { isRunningState, isVisibleUnderRunningFilter, buildAgentTree, flattenAgentTree, type Agent, type FlatEntry } from "../agents";
 import { RED, RESET, REVERSE, YELLOW } from "./colors";
@@ -1752,6 +1753,35 @@ describe("fully qualified row keys", () => {
     const stateCols = lines.filter((line) => / (running|waiting)\b/.test(line)).map((line) => line.search(/ (running|waiting)\b/));
     expect(stateCols).toHaveLength(5);
     expect(new Set(stateCols).size).toBe(1);
+  });
+
+  test("a selected remote row colors only its state word, not the state column's padding, like a local row", () => {
+    // Under REVERSE the state color is the background, so the text between
+    // the state color and the next escape is exactly what gets the colored
+    // cell. "waiting" is shorter than the state column, so a color left on
+    // through the padding would paint past the word.
+    const coloredRun = (line: string, state: string): string => {
+      const start = line.indexOf(remoteStateColor(state));
+      expect(start).toBeGreaterThanOrEqual(0);
+      const rest = line.slice(start + remoteStateColor(state).length);
+      return rest.slice(0, rest.indexOf("\x1b"));
+    };
+    const { tree } = twoRepos();
+    const remote = { id: "remote-x", nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/r/alpha", state: "waiting", agentType: "worker", manager: null };
+    tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null, repos: [{ registryName: "alpha", displayName: "alpha" }], agents: [remote] }]);
+    tree.maxHeight = 100;
+    expect(computeStateColWidth(tree.visibleList)).toBeGreaterThan("waiting".length);
+
+    const onRemoteRow = () => tree.selection?.kind === "remote" && peerEntryKey(tree.selection.entry) === "Laptop/alpha/remote-x";
+    for (let i = 0; i < tree.visibleList.length && !onRemoteRow(); i++) tree.moveSelection(1);
+    expect(onRemoteRow()).toBe(true);
+    const remoteLine = tree.render(60).find((line) => line.includes("remote-x"))!;
+    expect(remoteLine.startsWith(REVERSE)).toBe(true);
+    expect(coloredRun(remoteLine, "waiting")).toBe("waiting");
+
+    tree.selectAgentByKey("studio/alpha/dup");
+    const localLine = tree.render(60).find((line) => line.includes("dup") && line.startsWith(REVERSE))!;
+    expect(coloredRun(localLine, "running")).toBe("running");
   });
 
   test("a vanished local row clamps within the local rows (local keys start with this machine's name)", () => {

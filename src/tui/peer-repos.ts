@@ -54,9 +54,18 @@ export function remoteTitle(entry: RemoteEntry): string {
   }
 }
 
+/** One root of a machine's tree, with that machine's child lists and drawn agents. */
+interface MachineRoot {
+  link: PeerLinkState;
+  root: RemoteAgent;
+  children: Map<RemoteAgent, RemoteAgent[]>;
+  visited: Set<RemoteAgent>;
+}
+
 /** First peer supplies the display name and placeholder for a remote-only repo. */
 export function collectPeerRepos(links: readonly PeerLinkState[]): Map<string, PeerRepo> {
   const repos = new Map<string, PeerRepo>();
+  const roots = new Map<string, MachineRoot[]>();
   for (const link of links) {
     const byRepo = new Map<string, RemoteAgent[]>();
     for (const { registryName, displayName } of link.repos ?? []) {
@@ -72,10 +81,18 @@ export function collectPeerRepos(links: readonly PeerLinkState[]): Map<string, P
       if (agent.agentType !== REPO_COORDINATOR_TYPE) byRepo.get(repoRowKey(agent.repoRegistryName))?.push(agent);
     }
     for (const [key, agents] of byRepo) {
-      const repo = repos.get(key)!;
-      appendMachineTree(repo, agents, link);
-      repo.header.agentCount = repo.nodes.length;
+      const { roots: machineRoots, children } = machineForest(agents);
+      const visited = new Set<RemoteAgent>();
+      const list = roots.get(key) ?? [];
+      for (const root of machineRoots) list.push({ link, root, children, visited });
+      roots.set(key, list);
     }
+  }
+  for (const [key, repo] of repos) {
+    // Every machine's roots in one spawn order, oldest first, so the peers' trees interleave.
+    const list = (roots.get(key) ?? []).sort((a, b) => a.root.createdEpoch - b.root.createdEpoch);
+    appendTrees(repo, list);
+    repo.header.agentCount = repo.nodes.length;
   }
   return new Map([...repos].sort(([, a], [, b]) => a.header.repoName.localeCompare(b.header.repoName)
     || a.header.repoRegistryName.localeCompare(b.header.repoRegistryName)));
@@ -92,6 +109,21 @@ export function favoriteRemoteAgents(repo: PeerRepo, favorites: ReadonlySet<stri
     }
   }
   return shown;
+}
+
+/**
+ * Each agent's tree root's spawn time, even when a filter hides that root:
+ * what its rows sort by beside the local agents.
+ */
+export function rootSpawnEpochs(repo: PeerRepo): Map<RemoteAgent, number> {
+  const epochs: number[] = [];
+  const byAgent = new Map<RemoteAgent, number>();
+  for (const { row, parent } of repo.nodes) {
+    const epoch = parent < 0 ? row.remote.createdEpoch : epochs[parent]!;
+    epochs.push(epoch);
+    byAgent.set(row.remote, epoch);
+  }
+  return byAgent;
 }
 
 /** Resolve hidden parents in preorder, then draw connectors across all peers. */
@@ -122,7 +154,8 @@ export function visibleRemoteAgents(repo: PeerRepo, keep: (row: AgentRow) => boo
   });
 }
 
-function appendMachineTree(repo: PeerRepo, agents: RemoteAgent[], link: PeerLinkState): void {
+/** One machine's agents in a repo as roots and child lists, siblings in spawn order. */
+function machineForest(agents: RemoteAgent[]): { roots: RemoteAgent[]; children: Map<RemoteAgent, RemoteAgent[]> } {
   const byId = new Map<string, RemoteAgent>();
   for (const agent of agents) if (!byId.has(agent.id)) byId.set(agent.id, agent);
   const parentOf = (agent: RemoteAgent): RemoteAgent | undefined => {
@@ -160,21 +193,26 @@ function appendMachineTree(repo: PeerRepo, agents: RemoteAgent[], link: PeerLink
       reach(agent);
     }
   }
+  for (const siblings of children.values()) siblings.sort((a, b) => a.createdEpoch - b.createdEpoch);
+  return { roots, children };
+}
 
+function appendTrees(repo: PeerRepo, roots: readonly MachineRoot[]): void {
   // A cycle can revisit a node, but the parent always precedes its child.
-  const visited = new Set<RemoteAgent>();
-  const stack = [...roots].reverse().map((agent) => ({ agent, parent: -1 }));
-  while (stack.length > 0) {
-    const { agent, parent } = stack.pop()!;
-    if (visited.has(agent)) continue;
-    visited.add(agent);
-    const index = repo.nodes.length;
-    repo.nodes.push({
-      parent,
-      row: { kind: "remote-agent", peerId: link.id, peerName: link.name, remote: agent,
-        connector: "", linkStatus: peerLinkStatus(link) },
-    });
-    const kids = children.get(agent) ?? [];
-    for (let i = kids.length - 1; i >= 0; i--) stack.push({ agent: kids[i]!, parent: index });
+  for (const { link, root, children, visited } of roots) {
+    const stack = [{ agent: root, parent: -1 }];
+    while (stack.length > 0) {
+      const { agent, parent } = stack.pop()!;
+      if (visited.has(agent)) continue;
+      visited.add(agent);
+      const index = repo.nodes.length;
+      repo.nodes.push({
+        parent,
+        row: { kind: "remote-agent", peerId: link.id, peerName: link.name, remote: agent,
+          connector: "", linkStatus: peerLinkStatus(link) },
+      });
+      const kids = children.get(agent) ?? [];
+      for (let i = kids.length - 1; i >= 0; i--) stack.push({ agent: kids[i]!, parent: index });
+    }
   }
 }

@@ -596,7 +596,7 @@ function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: stri
 }
 
 const REMOTE_AGENTS: RemoteAgent[] = [
-  { id: "agent-r1", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null },
+  { id: "agent-r1", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, createdEpoch: 1_700_000_000 },
 ];
 
 describe("PeerService at boot", () => {

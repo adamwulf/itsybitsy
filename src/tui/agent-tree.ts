@@ -9,7 +9,8 @@ import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM, ITALIC, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
-import { collectPeerRepos, favoriteRemoteAgents, peerEntryKey, remoteDisplayName, truncatePeerField, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
+import { collectPeerRepos, favoriteRemoteAgents, peerEntryKey, remoteDisplayName, rootSpawnEpochs, truncatePeerField, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
+import type { RemoteAgent } from "../peers/peer-link";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { localAgentKey, repoRowKey } from "./row-keys";
@@ -434,6 +435,32 @@ function recomputeConnectorsForVisible(entries: FlatEntry[], allAgents: Map<stri
   return result;
 }
 
+/** A root's connector is its own branch; a nested row's starts with an ancestor's "│   " or "    ". */
+function isRootConnector(connector: string): boolean {
+  return !/^[│ ]/.test(connector);
+}
+
+/**
+ * Local and remote agents under one header, each root's subtree whole, in the
+ * spawn order of the tree root it descends from (oldest first). The local rows
+ * are not filtered yet, so each starts at its tree root. The remote rows are,
+ * so a row moved up past a hidden manager sorts by `remoteRootEpochs`. Each
+ * source is then already in that order and the sort is stable: each keeps its
+ * last root last, and local agents stay ahead of remote agents spawned in the
+ * same second.
+ */
+function inSpawnOrder(rows: FlatEntry[], remoteRootEpochs: ReadonlyMap<RemoteAgent, number>): FlatEntry[] {
+  const subtrees: { epoch: number; rows: FlatEntry[] }[] = [];
+  for (const row of rows) {
+    if (row.kind !== "agent" && row.kind !== "remote-agent") continue;
+    if (subtrees.length === 0 || isRootConnector(row.connector)) {
+      subtrees.push({ epoch: row.kind === "agent" ? row.agent.meta.created_epoch : remoteRootEpochs.get(row.remote)!, rows: [] });
+    }
+    subtrees.at(-1)!.rows.push(row);
+  }
+  return subtrees.sort((a, b) => a.epoch - b.epoch).flatMap((subtree) => subtree.rows);
+}
+
 /** Agent tree component with height constraint and scrolling */
 export class AgentTreeComponent implements Component {
   private _flatList: FlatEntry[] = [];
@@ -646,9 +673,9 @@ export class AgentTreeComponent implements Component {
   }
 
   /**
-   * Insert each peer forest after its local agents. Unmatched repos follow in
-   * display order, under a "Peer Only" parent-header when the local repos are
-   * grouped by parent directory.
+   * Interleave each peer forest with its local agents by spawn time. Unmatched
+   * repos follow in display order, under a "Peer Only" parent-header when the
+   * local repos are grouped by parent directory.
    */
   private unifiedRows(local: FlatEntry[]): FlatEntry[] {
     if (!this.peerRepos.size && !this.peerCoordinators.length) return local;
@@ -676,8 +703,9 @@ export class AgentTreeComponent implements Component {
       remaining.delete(repoRowKey(header.repoRegistryName));
       const agents = agentsFor(repo);
       rows.push(agents.length > 0 && !header.hasAgents ? { ...header, hasAgents: true } : header);
-      while (local[i + 1]?.kind === "agent") rows.push(local[++i]!);
-      for (const agent of agents) rows.push(agent);
+      const localAgents: FlatEntry[] = [];
+      while (local[i + 1]?.kind === "agent") localAgents.push(local[++i]!);
+      for (const row of inSpawnOrder([...localAgents, ...agents], rootSpawnEpochs(repo))) rows.push(row);
     }
     if (remaining.size > 0 && local.some((row) => row.kind === "parent-header")) {
       rows.push({ kind: "parent-header", parentDir: "", displayName: PEER_ONLY_GROUP_NAME });
@@ -736,12 +764,17 @@ export class AgentTreeComponent implements Component {
     // against only the visible subset.
     if (needsLookup) entries = recomputeConnectorsForVisible(entries, allAgents, this.machineName);
     if (this.peerRepos.size > 0) {
-      // A following remote root continues the local roots' outermost branch.
-      let remoteFollows = false;
+      // Local and remote roots share one outermost branch under a header:
+      // each subtree before the last root continues it.
+      let rootFollows = false;
       for (let i = entries.length - 1; i >= 0; i--) {
         const row = entries[i]!;
-        if (row.kind !== "agent") remoteFollows = row.kind === "remote-agent";
-        else if (remoteFollows) entries[i] = { ...row, connector: row.connector.replace(/^└/, "├").replace(/^    /, "│   ") };
+        if (row.kind !== "agent" && row.kind !== "remote-agent") {
+          rootFollows = false;
+          continue;
+        }
+        if (rootFollows) entries[i] = { ...row, connector: row.connector.replace(/^└/, "├").replace(/^    /, "│   ") };
+        if (isRootConnector(row.connector)) rootFollows = true;
       }
     }
     return entries;

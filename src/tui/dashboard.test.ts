@@ -10060,7 +10060,7 @@ describe("Unified peer repos in the Agents tree", () => {
   });
 
   function remote(id: string, repoName: string, overrides: Partial<RemoteAgent> = {}): RemoteAgent {
-    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
+    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, createdEpoch: Math.floor(Date.now() / 1000), ...overrides };
   }
 
   /** Laptop B connected; Laptop C unreachable, offline; Laptop D never answered. */

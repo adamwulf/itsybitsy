@@ -1923,7 +1923,7 @@ export class DashboardComponent implements Component {
       const old = this.peerLinks[i]!;
       return link.id === old.id && link.name === old.name && link.repos === old.repos && link.agents === old.agents
         && peerLinkStatus(link) === peerLinkStatus(old) && link.coordinator?.state === old.coordinator?.state
-        && (link.connected || link.lastOkAt === old.lastOkAt);
+        && link.connectedAt === old.connectedAt && (link.connected || link.lastOkAt === old.lastOkAt);
     })) return false;
     this.peerLinks = links;
     this.pairedPeers = peers;

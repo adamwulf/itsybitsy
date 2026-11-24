@@ -4,7 +4,7 @@
 
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
-import { resolveAgentIcon, isRunningState, isVisibleUnderRunningFilter, subtreeHasNonStopped, type Agent, type FlatEntry, type RemoteEntry } from "../agents";
+import { computeAge, resolveAgentIcon, isRunningState, isVisibleUnderRunningFilter, subtreeHasNonStopped, type Agent, type FlatEntry, type RemoteEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
@@ -570,7 +570,8 @@ export class AgentTreeComponent implements Component {
       const link = byId.get(peer.id);
       return {
         kind: "remote-coordinator", peerId: peer.id, peerName: peer.name, state: link?.coordinator?.state ?? null,
-        linkStatus: peerLinkStatus(link), lastOkAt: link?.connected ? null : link?.lastOkAt ?? null,
+        linkStatus: peerLinkStatus(link), connectedAt: link?.connected ? link.connectedAt : null,
+        lastOkAt: link?.connected ? null : link?.lastOkAt ?? null,
       };
     });
     this.peerRepos = collectPeerRepos(links);
@@ -1458,9 +1459,12 @@ export class AgentTreeComponent implements Component {
         lines.push(formatRemoteRepoRow(item, selectionActive && i === this.selectedIndex, width));
       } else if (item.kind === "remote-coordinator") {
         const link = peerLinkStateText(item.linkStatus);
-        const seen = item.lastOkAt === null ? "" : `  ${formatAgo(Date.now() - item.lastOkAt)}`;
+        // Connected: how long the link has been up. Otherwise: when the peer last answered.
+        const seen = item.connectedAt !== null ? `  ${computeAge(Math.floor(item.connectedAt / 1000))}`
+          : item.lastOkAt !== null ? `  ${formatAgo(Date.now() - item.lastOkAt)}` : "";
         const available = width - 6 - visibleWidth(link) - visibleWidth(seen);
-        const state = item.state ?? (item.linkStatus === "connected" ? "unavailable" : "");
+        // A connected row needs only the link word; the info panel shows the coordinator's state.
+        const state = item.linkStatus === "connected" ? null : item.state;
         const label = state ? "  " + truncatePeerField(state, Math.min(MAX_REMOTE_STATE_COL_WIDTH, Math.max(1, available - 5))) : "";
         const name = truncatePeerField(item.peerName, Math.max(1, available - visibleWidth(label)));
         const branch = visible[i + 1]?.kind === "remote-coordinator" ? "├── " : "└── ";

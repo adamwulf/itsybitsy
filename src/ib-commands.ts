@@ -67,6 +67,7 @@ import {
   getDescendantsRecursive,
   resolveGitRoot,
   archiveAgent,
+  removeArchivedAgentDirectory,
   captureTmuxOutputToFile,
   isRunningAsAgent,
   prepareAgentRetirement,
@@ -3930,7 +3931,8 @@ export async function mergeAgent(
       await logAgent(agentDir, "Merge complete - archiving and closing agent");
       const res = await archiveAgent(agent.repoPath, agent.id, agentDir);
       await removeAgentQuestions(agent.repoPath, agent.id);
-      try { await rm(agentDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      const warning = await removeArchivedAgentDirectory(agentDir);
+      if (warning) res.warnings.push(warning);
       return res;
     });
 

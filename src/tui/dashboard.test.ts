@@ -38,7 +38,7 @@ import type { PeerLinkState } from "../peers/poller";
 import { remoteTerminalSession, terminalWindowCtx } from "../peers/terminal-window";
 import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
-import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
+import { MIN_TERMINAL_WIDTH, REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
 import { BOLD, DIM, GREEN, ITALIC, RED, RESET, REVERSE, YELLOW } from "./colors";
 import { getStateColors } from "./color-scheme";
 import * as settings from "../config";
@@ -11914,6 +11914,9 @@ describe("Unified peer repos in the Agents tree", () => {
     const text = footer();
     const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "V: filter", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab", "C: terminal"];
     for (const hint of shown) expect(text).toContain(hint);
+    // Nothing is cut at the narrowest width the dashboard draws.
+    const narrow = ((dashboard as any).statusBar.render(MIN_TERMINAL_WIDTH) as string[]).map(stripAnsi).join("\n");
+    for (const hint of ["C: terminal", ".: favorite", "s: send"]) expect(narrow).toContain(hint);
     expect(text).toContain("s: send");
     for (const hint of [".: favorite", "o: diff", "m: merge", "x: retire", "R: resume", "q: questions"]) expect(text).toContain(hint);
     for (const hint of ["a: new agent", "h: setup", "A: add repo", "f: fix"]) {

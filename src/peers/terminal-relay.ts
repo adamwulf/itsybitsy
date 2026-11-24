@@ -36,8 +36,9 @@ export const TERMINAL_OPEN_TIMEOUT_MS = 10_000;
 export interface TerminalRelayDeps {
   /**
    * Why this `ib watch` may not open remote terminals (its startup
-   * human-caller decision, as for every other outbound peer request), or
-   * null when it may.
+   * human-caller decision, as its dashboard's own peer requests use), or
+   * null when it may. The only caller check: `ib peer attach` runs inside
+   * the tmux session `C` opens, so it cannot check its own terminal.
    */
   denial?(): string | null;
   /** The paired peer that `target` (a name or id) names; throws with the reason to show. */

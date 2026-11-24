@@ -2864,7 +2864,7 @@ export function handleOpenGhosttyTmux(ctx: ActionCtx) {
   const remote = ctx.remoteSelection;
   if (remote?.kind === "remote-agent") {
     // A local tmux session running `ib peer attach` (SPEC §20.5), under the
-    // same startup decision as every other outbound peer request.
+    // startup decision the dashboard's other peer requests use.
     const denial = ctx.peerService ? ctx.peerService.remoteStartDenial : "Remote terminals are unavailable";
     if (denial !== null) { ctx.setNotice(remoteTerminalDenial(denial), "error"); return; }
     void openRemoteTerminal({

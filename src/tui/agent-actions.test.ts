@@ -159,7 +159,7 @@ function makeMockCtx(overrides?: {
   let currentDialog: DialogState = null;
   const ctx: ActionCtx = {
     remoteStartPending: false,
-    focusRemoteMessage() {},
+    submitRemoteMessage: async () => true,
     refuseOnRemoteRow: () => false,
     runRemoteRowCommand: async () => { throw new Error("Unexpected remote command"); },
     get dialog() { return currentDialog; },

@@ -47,6 +47,7 @@ import { attachmentSettingKey, TRANSFER_SETTING_BOUNDS } from "../peers/transfer
 import type { ConfigResult } from "../config";
 import { PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
+import { remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 import { fullyQualifiedAgentId } from "./row-keys";
 import type { PaneMode, TailLogMode } from "./pane-manager";
 import { isTailLogMode } from "./pane-manager";
@@ -176,7 +177,8 @@ export function killActiveDiffProc() {
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
   readonly dialog: DialogState;
-  focusRemoteMessage(): void;
+  /** Send to a remote row (SPEC §20.5); true once the peer accepts. Aborting `controller` cancels. */
+  submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller?: AbortController): Promise<boolean>;
   remoteStartPending: boolean;
   refuseOnRemoteRow(key: string): boolean;
   peerService: PeersDialogService | null;
@@ -1371,7 +1373,7 @@ function mergeDialog(ctx: ActionCtx, label: string, output: string, merge: (keep
 
 export function handleSend(ctx: ActionCtx) {
   if (ctx.remoteSelection) {
-    if (ctx.remoteSelection.kind !== "remote-repo-header") ctx.focusRemoteMessage();
+    if (ctx.remoteSelection.kind !== "remote-repo-header") handleSendToRemote(ctx, ctx.remoteSelection);
     return;
   }
   // §17.3a: team-target branch — when the Teams tree OWNS THE ACTIVE
@@ -1576,6 +1578,39 @@ function handleSendToTeam(ctx: ActionCtx, teamName: string) {
           ctx.setNotice(`Send failed: ${result.stderr || result.stdout}`, "error");
         }
       }).finally(() => { dialog.inFlight = false; });
+    },
+  };
+  ctx.showDialog(dialog);
+}
+
+/**
+ * SPEC §20.5: open a `Send message to <peer>/<target>:` dialog for a remote
+ * agent or peer coordinator, sent through the same peer path as the inline
+ * editor. Like the local dialog it is frozen while the send is in flight,
+ * closes on acceptance and keeps the draft on failure; unlike it, Esc while in
+ * flight cancels the send, since a remote send waits on the whole transfer.
+ * There is no send-to-all toggle and no [Send Esc]: neither reaches a peer.
+ */
+function handleSendToRemote(ctx: ActionCtx, remote: RemoteMessageEntry) {
+  const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
+    type: "textarea",
+    prompt: `Send message to ${remoteTitle(remote)}:`,
+    buffer: new TextBuffer(),
+    focusedButton: "text",
+    onSubmit: (message: string) => {
+      if (dialog.inFlight) return;
+      const trimmed = message.trim();
+      if (!trimmed) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
+      const controller = new AbortController();
+      dialog.onCancelInFlight = () => controller.abort(new Error("Send cancelled"));
+      dialog.inFlight = true;
+      void ctx.submitRemoteMessage(remote, trimmed, controller).then((ok) => {
+        if (ok) ctx.closeDialog();
+      }).finally(() => {
+        dialog.inFlight = false;
+        dialog.onCancelInFlight = undefined;
+        ctx.tui?.requestRender();
+      });
     },
   };
   ctx.showDialog(dialog);

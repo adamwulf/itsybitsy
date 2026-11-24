@@ -4,6 +4,7 @@ import { RESET } from "./colors";
 import type { RemoteEntry } from "../agents";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import type { RemoteAgent } from "../peers/peer-link";
+import type { SendTarget } from "../peers/send-frame";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { fullyQualifiedAgentId, repoRowKey } from "./row-keys";
 
@@ -28,6 +29,29 @@ export function truncatePeerField(text: string, width: number): string {
 
 export function remoteDisplayName(remote: RemoteAgent): string {
   return remote.nickname ?? remote.id;
+}
+
+/** A remote row the dashboard can message: an agent or a peer's system coordinator. */
+export type RemoteMessageEntry = Exclude<RemoteEntry, { kind: "remote-repo-header" }>;
+
+/** The wire target for messaging a remote row; none for a repo header. */
+export function remoteMessageTarget(entry: RemoteMessageEntry): SendTarget;
+export function remoteMessageTarget(entry: RemoteEntry | null): SendTarget | undefined;
+export function remoteMessageTarget(entry: RemoteEntry | null): SendTarget | undefined {
+  if (entry?.kind === "remote-coordinator") return { kind: "system" };
+  if (entry?.kind === "remote-agent") return { kind: "agent", repo: entry.remote.repoRegistryName, agent: entry.remote.id };
+}
+
+/** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
+export function remoteTitle(entry: RemoteEntry): string {
+  switch (entry.kind) {
+    case "remote-coordinator":
+      return `${entry.peerName}/@system`;
+    case "remote-agent":
+      return `${entry.peerName}/${remoteDisplayName(entry.remote)}`;
+    case "remote-repo-header":
+      return `${entry.peerName}/${entry.repoName}`;
+  }
 }
 
 /** First peer supplies the display name and placeholder for a remote-only repo. */

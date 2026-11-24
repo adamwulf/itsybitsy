@@ -123,7 +123,7 @@ import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { captureAgentPane } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
-import { remoteDisplayName } from "./peer-repos";
+import { remoteMessageTarget, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -436,23 +436,6 @@ function padToWidth(str: string, width: number): string {
 /** The right pane's text for a selected remote row, in every mode (SPEC §20.5). */
 export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 
-/** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
-function remoteMessageTarget(entry: RemoteEntry | null): SendTarget | undefined {
-  if (entry?.kind === "remote-coordinator") return { kind: "system" };
-  if (entry?.kind === "remote-agent") return { kind: "agent", repo: entry.remote.repoRegistryName, agent: entry.remote.id };
-}
-
-function remoteTitle(entry: RemoteEntry): string {
-  switch (entry.kind) {
-    case "remote-coordinator":
-      return `${entry.peerName}/@system`;
-    case "remote-agent":
-      return `${entry.peerName}/${remoteDisplayName(entry.remote)}`;
-    case "remote-repo-header":
-      return `${entry.peerName}/${entry.repoName}`;
-  }
-}
-
 /**
  * The selected remote agent's capture (or a repo header's placeholder)
  * and the right pane's "not available" placeholder, side by side
@@ -733,6 +716,7 @@ class DialogOverlayComponent implements Component {
         } else {
           lines.push(leftSide);
         }
+        if (dialog.inFlight && dialog.onCancelInFlight) lines.push(`${DIM}Sending… Esc: cancel${RESET}`);
         return { title: dialog.prompt, contentLines: lines };
       }
       case "folder-browser": {
@@ -1169,9 +1153,8 @@ export class DashboardComponent implements Component {
       const agent = this.agentTree.selectedAgent;
       const trimmed = text.trim();
       const remote = this.remoteSelection;
-      const target = remoteMessageTarget(remote);
-      if (remote && remote.kind !== "remote-repo-header" && target && trimmed) {
-        return this.submitRemoteMessage(remote, target, trimmed);
+      if (remote && remote.kind !== "remote-repo-header" && trimmed) {
+        return this.submitRemoteMessage(remote, trimmed);
       }
       if (!agent || !trimmed) return;
       return promptAndStageAttachmentsIfNeeded({
@@ -1987,13 +1970,6 @@ export class DashboardComponent implements Component {
     return this.activeSelectionSource === "agents" ? this.agentTree.selectedRemote : null;
   }
 
-  focusRemoteMessage(): void {
-    if (this.rightPane.mode === "TREE") this.jumpToMode(PANE_MODES[DEFAULT_MODE_INDEX]!);
-    this.focusManager.setFocus("active-agent");
-    this.focusManager.setSubFocus("input");
-    this.tui?.requestRender();
-  }
-
   private escapeSend() {
     if (!this.pendingRemoteSends.size || this._dialog) return;
     if (this.selectedReceipt && this.peerService?.view().incoming?.some(row => row.id === this.selectedReceipt)) return;
@@ -2044,11 +2020,16 @@ export class DashboardComponent implements Component {
     }
   }
 
-  private async submitRemoteMessage(remote: Exclude<RemoteEntry, { kind: "remote-repo-header" }>, target: SendTarget, text: string): Promise<boolean> {
+  /**
+   * Send `text` from the user to a remote row (SPEC §20.5), shown as a pending
+   * `sending to <target>…` row until the peer accepts it. Resolves true on
+   * acceptance; on failure it shows the reason and resolves false. Aborting
+   * `controller` cancels the send.
+   */
+  async submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller = new AbortController()): Promise<boolean> {
     const service = this.peerService;
-    const header = textHeader(target, text, { kind: "user" });
+    const header = textHeader(remoteMessageTarget(remote), text, { kind: "user" });
     const label = remoteTitle(remote);
-    const controller = new AbortController();
     const done = Promise.withResolvers<void>();
     const pending = { id: header.id, peerId: remote.peerId, target: header.target, label, controller, done: done.promise, bytes: 0, total: undefined as number | undefined };
     let staging: string | undefined;
@@ -3787,8 +3768,8 @@ export class DashboardComponent implements Component {
   // --- Rendering ---
 
 
-  private availableMainHeight(receipts = this.peerService?.view().incoming?.length ?? 0): number {
-    const chromeLines = 5 + this.pendingLifecycle.size + this.pendingRemoteSends.size + receipts;
+  private availableMainHeight(): number {
+    const chromeLines = 5 + this.pendingLifecycle.size;
     return Math.max(5, (process.stdout.rows || 24) - chromeLines);
   }
 
@@ -3825,10 +3806,24 @@ export class DashboardComponent implements Component {
     const remoteCoordinator = remoteView && remote.kind === "remote-coordinator" ? remote : null;
     const isFullWidth = remoteCoordinator !== null || (!remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode)));
 
-    // Header
-    const noticeColor = this.lastSentNoticeKind === "error" ? RED : YELLOW;
-    const subtitle = this.lastSentNotice
-      ? `${DIM}—${RESET} ${noticeColor}${this.lastSentNotice}${RESET}`
+    // Header. Its alert shows the transient notice, else the peer transfers in
+    // flight (SPEC §20.5), so a transfer never adds a row and shifts the layout.
+    const cancellableSend = this.escapeSend();
+    const incoming = this.peerService?.view().incoming ?? [];
+    const transfers = [
+      ...[...this.pendingRemoteSends.values()].map((send) => {
+        const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
+        return `sending to ${send.label}…${progress}${send === cancellableSend ? "  Esc: cancel" : ""}`;
+      }),
+      ...incoming.map((row) => {
+        const selected = row.id === this.selectedReceipt;
+        return `${selected ? "› " : ""}receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${selected ? "Esc: cancel" : "Ctrl-T: select"}`;
+      }),
+    ];
+    const alert = this.lastSentNotice ?? (transfers.length > 0 ? transfers.join("  ·  ") : null);
+    const noticeColor = this.lastSentNotice !== null && this.lastSentNoticeKind === "error" ? RED : YELLOW;
+    const subtitle = alert
+      ? `${DIM}—${RESET} ${noticeColor}${alert}${RESET}`
       : `${DIM}— agent dashboard${RESET}`;
     const left = `${BOLD}ib${RESET} ${subtitle}`;
     const indicators: string[] = [];
@@ -3866,17 +3861,7 @@ export class DashboardComponent implements Component {
     // Chrome lines: header(1) + main title separator(1) +
     //               bottom separator(1) + status bar(2) = 5.
     for (const notice of this.pendingLifecycle.values()) lines.push(truncateToWidth(notice, width, "…"));
-    const cancellableSend = this.escapeSend();
-    for (const send of this.pendingRemoteSends.values()) {
-      const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
-      lines.push(truncateToWidth(`sending to ${send.label}…${progress}${send === cancellableSend ? "  Esc: cancel" : ""}`, width, "…"));
-    }
-    const incoming = this.peerService?.view().incoming ?? [];
-    for (const row of incoming) {
-      const selected = row.id === this.selectedReceipt;
-      lines.push(truncateToWidth(`${selected ? "›" : " "} receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${selected ? "Esc: cancel" : "Ctrl-T: select"}`, width, "…"));
-    }
-    const availableHeight = this.availableMainHeight(incoming.length);
+    const availableHeight = this.availableMainHeight();
 
     // Width math comes from the widths module — never inline.
     const renderLayout = this.liveLayout(width);

@@ -530,6 +530,8 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
     throw new PeerProtocolError("malformed new-agent reply");
   }, {
     setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")],
+    // Both forms can be aborted (dashboard shutdown); the file transfer is framed-only.
+    signal: transfer.signal,
     ...framed && { ...transfer, files, timeoutAfterFin: true, unknownAfterFin: NEW_AGENT_UNKNOWN },
   });
 }

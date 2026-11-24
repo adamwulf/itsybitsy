@@ -1995,10 +1995,11 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
         try {
           // This machine's checkout of the same registry name, if any (SPEC §20.5).
           const { candidates } = await peerAttachmentCandidates(prompt, repo?.path);
+          controller.signal.throwIfAborted();
           let paths: PeerAttachmentCandidate[] = [];
           if (candidates.length) {
             // A form dismissed while the paths were found has nothing to come back to.
-            const selected = ctx.dialog === form ? await choosePeerStartPaths(ctx, candidates, target.name) : null;
+            const selected = ctx.dialog === form ? await choosePeerStartPaths(ctx, candidates, target.name, controller.signal) : null;
             if (!selected) {
               ctx.setNotice("New agent cancelled", "info");
               return;
@@ -2072,13 +2073,15 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
 /**
  * The path dialog of a remote start (SPEC §20.5), every path unchecked at
  * first. It takes the frozen form's place, and the form comes back with its
- * draft when it closes. The checked paths, or null when the user cancels.
+ * draft when it closes. The checked paths, or null when the user cancels or
+ * `signal` (the start's, which dashboard shutdown aborts) is aborted.
  */
-function choosePeerStartPaths(ctx: ActionCtx, candidates: readonly PeerAttachmentCandidate[], peerName: string): Promise<Set<string> | null> {
+function choosePeerStartPaths(ctx: ActionCtx, candidates: readonly PeerAttachmentCandidate[], peerName: string, signal: AbortSignal): Promise<Set<string> | null> {
   const previous = ctx.dialog;
   return choosePaths({
     paths: candidates.map(candidate => candidate.argument),
     prompt: peerAttachmentPrompt(peerName),
+    signal, openDialog: () => ctx.dialog,
     showDialog: dialog => ctx.showDialog(dialog),
     closeDialog: () => {
       ctx.closeDialog();

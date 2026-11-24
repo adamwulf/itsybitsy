@@ -207,10 +207,30 @@ export function showPathDialog(opts: PathDialogOptions & {
   });
 }
 
-/** {@link showPathDialog} as a promise: the checked paths, or null on cancel. */
-export function choosePaths(opts: PathDialogOptions): Promise<Set<string> | null> {
+/**
+ * {@link showPathDialog} as a promise: the checked paths, or null on cancel.
+ * Aborting `signal` resolves null too, closing the dialog when `openDialog`
+ * (the host's open dialog) still shows it, so a caller waiting on its own
+ * shutdown never waits on a key press.
+ */
+export function choosePaths(opts: PathDialogOptions & { signal?: AbortSignal; openDialog?: () => DialogState }): Promise<Set<string> | null> {
   return new Promise((resolvePromise) => {
-    showPathDialog({ ...opts, onCancel: () => resolvePromise(null), onSubmit: resolvePromise });
+    const { signal } = opts;
+    if (signal?.aborted) { resolvePromise(null); return; }
+    let shown: DialogState = null;
+    const settle = (selected: Set<string> | null) => {
+      signal?.removeEventListener("abort", abort);
+      resolvePromise(selected);
+    };
+    const abort = () => {
+      if (shown && (!opts.openDialog || opts.openDialog() === shown)) opts.closeDialog();
+      settle(null);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    showPathDialog({
+      ...opts, showDialog: dialog => { shown = dialog; opts.showDialog(dialog); },
+      onCancel: () => settle(null), onSubmit: settle,
+    });
   });
 }
 

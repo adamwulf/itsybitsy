@@ -12019,6 +12019,64 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.remoteStart).toBeNull();
   });
 
+  test("dashboard shutdown while the start's path dialog is open settles at once and closes the dialog", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-start-quit-dialog-"));
+    try {
+      const file = join(dir, "notes.txt");
+      await Bun.write(file, "notes");
+      const { dashboard, service, form } = remoteStartForm(`Read ${file}`);
+      const start = spyOn(service, "startRemoteAgent");
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      await dashboard.stopRemoteSends();
+      expect(dashboard.remoteStartPending).toBe(false);
+      expect(dashboard.remoteStart).toBeNull();
+      expect(dashboard.dialog).toBe(form);
+      expect(start).not.toHaveBeenCalled();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  /** A home whose staging root is under it, as in the dashboard send tests that stage files. */
+  async function withStagingHome(use: (home: string) => Promise<void>) {
+    const home = await mkdtemp(join(tmpdir(), "ib-dashboard-start-stage-"));
+    setUserHome(home);
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    const stagingRoot = spyOn(runtimeNames, "transferStagingRoot").mockReturnValue(join(home, "staging"));
+    processStartEpochSecondsCtx.set(() => 123);
+    try {
+      await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
+      await use(home);
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+  }
+
+  test.each(["shutdown", "failure"])("a start with staged files removes its staging directory on %s", async outcome => {
+    await withStagingHome(async home => {
+      const file = join(home, "notes.txt");
+      await Bun.write(file, "notes");
+      const { dashboard, service, form } = remoteStartForm(`Read ${file}`);
+      let filesDir: string | undefined;
+      let staged: string | undefined;
+      spyOn(service, "startRemoteAgent").mockImplementation(async (_peer, _request, transfer) => {
+        staged = await Bun.file(join(transfer!.filesDir!, "0")).text();
+        filesDir = transfer!.filesDir;
+        if (outcome === "failure") throw new Error("spawn failed");
+        return new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason)));
+      });
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      dashboard.handleInput(" ");
+      dashboard.handleInput("\r");
+      await waitFor(() => filesDir !== undefined, { message: "the start with its staged files" });
+      expect(staged).toBe("notes");
+      if (outcome === "shutdown") await dashboard.stopRemoteSends();
+      await waitFor(() => !dashboard.remoteStartPending);
+      expect(await Bun.file(join(filesDir!, "0")).exists()).toBe(false);
+      expect(await Array.fromAsync(new Bun.Glob("staging/outgoing/*").scan({ cwd: home, onlyFiles: false }))).toEqual([]);
+      expect(dashboard.dialog).toBe(form);
+      expect(form.error).toEqual(outcome === "failure" ? "Remote start on Laptop B: spawn failed" : expect.stringContaining("Remote start on Laptop B"));
+    });
+  });
+
   test.each(["failure first", "peer update first"])("renders both the original peer failure and the new machine (%s)", async order => {
     const { dashboard, service } = setup();
     const [b, c] = links();

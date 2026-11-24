@@ -291,6 +291,22 @@ test("a start without files is still the JSON request", async () => {
   } finally { link.a.close(0, "done"); }
 });
 
+test("a start without files still ends when its signal is aborted", async () => {
+  const link = createMemoryLink("dialer", "receiver");
+  const clock = createFakeClock();
+  const controller = new AbortController();
+  const reply = requestNewAgent(link.a, { repo: "app", type: "worker", prompt: "hello" }, clock.setTimer, { signal: controller.signal })
+    .catch(err => err);
+  try {
+    await (await link.b.acceptBi()).readToEnd(4096);
+    controller.abort(new Error("Dashboard shutting down"));
+    // The unanswered reply gets the teardown grace, then the connection closes.
+    await Bun.sleep(0);
+    clock.advance(750);
+    expect(String(await reply)).toContain("Dashboard shutting down");
+  } finally { link.a.close(0, "done"); }
+});
+
 test("a framed start without its staged directory is refused before opening a stream", async () => {
   const link = createMemoryLink("dialer", "receiver");
   await expect(requestNewAgent(link.a, { repo: "app", type: "worker", prompt: "x", files: [file("abc")] }, createFakeClock().setTimer))

@@ -541,7 +541,7 @@ class StatusBarComponent implements Component {
       // `q` works on every remote agent row, whatever its type (isRemoteAllowedKey).
       const questionsHint = this.remoteRepoSelected || this.remoteCoordinatorVisible ? "" : `${qLabel}    `;
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${questionsHint}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${this.remoteAgentSelected ? "    C: terminal" : ""}${errBadge}${RESET}`;
-      let row2 = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab${this.remoteAgentSelected ? "    o: diff    m: merge    x: retire    R: resume" : ""}${this.remoteRepoSelected ? "" : "    s: send"}${markHint}`;
+      let row2 = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab${this.remoteAgentSelected ? "    o: diff    m: merge    x: retire    R: resume" : ""}${this.remoteRepoSelected ? "    c: clone here" : "    s: send"}${markHint}`;
       // `a` and `h` come last, and only whole: on a narrow terminal the row's
       // own actions and the usage/version on the right matter more than the
       // two global dialogs, and a hint cut in half is noise. The room kept
@@ -2277,6 +2277,8 @@ export class DashboardComponent implements Component {
     if (this.remoteQuestionsVisible && (key === "g" || matchesKey(key, Key.enter) || matchesKey(key, Key.escape))) return false;
     if (remote === null || isRemoteAllowedKey(key, remote)) return false;
     if (remote.kind !== "remote-repo-header" && (key === ";" || key === "l")) return false;
+    // A remote-only header also takes Clone here.
+    if (remote.kind === "remote-repo-header" && key === "c") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
@@ -2475,6 +2477,7 @@ export class DashboardComponent implements Component {
       { label: "reassign manager — r", key: "r", action: () => agentActions.handleReassign(this) },
       { label: "nickname agent — N", key: "N", action: () => agentActions.handleRename(this) },
       { label: "new agent — a", key: "a", action: () => agentActions.handleNewAgent(this) },
+      { label: "clone repo here (peer-only repo) — c", key: "c", action: () => void agentActions.handleCloneHere(this) },
       { label: "open worktree — w", key: "w", action: () => agentActions.handleOpenWorktree(this) },
       { label: "open diff in tool — o", key: "o", action: () => agentActions.handleOpenDiffTool(this) },
       { label: "open diff vs manager in tool — O", key: "O", action: () => agentActions.handleOpenDiffToolVsManager(this) },
@@ -3742,9 +3745,10 @@ export class DashboardComponent implements Component {
       this.jumpToMode("QUESTIONS");
       this.tui?.requestRender();
     }
-    // Clear errors
+    // Clone here (on a remote-only repo header), else clear errors
     else if (data === "c") {
-      if (this.rightPane.mode === "ERRORS") { this.clearErrors(); }
+      if (this.remoteSelection?.kind === "remote-repo-header") { void agentActions.handleCloneHere(this); }
+      else if (this.rightPane.mode === "ERRORS") { this.clearErrors(); }
     }
     // Kill orphaned tmux session (Enter in ERRORS mode)
     else if (matchesKey(data, Key.enter) && this.rightPane.mode === "ERRORS" && this.rightPane.orphanedTmuxSessions.length > 0) {

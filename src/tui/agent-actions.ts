@@ -14,6 +14,7 @@ import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { createRepo } from "../create-repo";
+import { cloneDestination, cloneRepo, resolveCloneRoot } from "../clone-repo";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
@@ -34,6 +35,7 @@ import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { openRemoteTerminal } from "../peers/terminal-window";
 import { remoteTerminalDenial } from "../peers/remote-start-caller";
 import { buildFolderItems } from "./folder-browser";
+import { truncatePeerField } from "./peer-repos";
 import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { EMPTY_DIFF, prepareDiffCopy } from "../peers/agent-diff";
@@ -2598,6 +2600,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("+ / A", "add repo"),
       row("x / D", "remove repo (on header)"),
       row("r", "rename repo (on header)"),
+      row("c", "clone here (on a repo only a peer has)"),
       row("f", "fix resolvable health warnings"),
       row("V", "cycle filter: all / non-empty / running-only"),
       row(".", "pin/unpin repo (on header; stays visible under V)"),
@@ -3327,7 +3330,54 @@ export function newRepoPrompt(parentPath: string): string {
   return `${prefix}${elideLeft(parentPath, room)}${suffix}`;
 }
 
-/** Reload the registry into ctx.repos and point the watcher at the new list. */
+/** Registry names, lowercased, with a "Clone here" in flight: one clone per name at a time. */
+const clonesInFlight = new Set<string>();
+
+/**
+ * 'c' on a remote-only repo header: clone the repo from the remote URL a peer
+ * reports into an editable folder under `repos.cloneRoot`, then register it
+ * under the peer's registry name, so the header becomes a shared local one on
+ * the next refresh (SPEC §20.5). Resolves once the dialog is open; the clone
+ * itself runs after submit.
+ */
+export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
+  const header = ctx.remoteSelection;
+  if (header?.kind !== "remote-repo-header") {
+    ctx.setNotice("Clone here works on a repo header that only a peer has", "error");
+    return;
+  }
+  const { repoRegistryName: name, remoteUrl: url } = header;
+  if (url === null) {
+    ctx.setNotice(`${header.peerName} reports no remote for ${header.repoName}`, "error");
+    return;
+  }
+  const key = name.toLowerCase();
+  if (clonesInFlight.has(key)) {
+    ctx.setNotice(`Already cloning ${name}`, "info");
+    return;
+  }
+  const root = await resolveCloneRoot();
+  ctx.showDialog({
+    type: "input",
+    prompt: truncatePeerField(`Clone ${name} from ${header.remoteUrlPeer ?? header.peerName} into:`, dialogTitleMaxWidth()),
+    value: cloneDestination(root, name, header.relPath),
+    onSubmit: (dest: string) => {
+      ctx.closeDialog();
+      if (!dest.trim()) { ctx.setNotice("Clone cancelled", "info"); return; }
+      if (clonesInFlight.has(key)) { ctx.setNotice(`Already cloning ${name}`, "info"); return; }
+      clonesInFlight.add(key);
+      ctx.setNotice(`Cloning ${name}…`, "info");
+      cloneRepo({ url, dest, registryName: name }).then(async (result) => {
+        ctx.setNotice(result.message, result.ok ? "info" : "error");
+        if (result.ok) await reloadRepos(ctx);
+      }).catch((err) => {
+        ctx.setNotice(`Error cloning: ${err}`, "error");
+      }).finally(() => clonesInFlight.delete(key));
+    },
+  });
+}
+
+/** Reload the registry into ctx.repos and point the host and the watcher at the new list. */
 async function reloadRepos(ctx: ActionCtx) {
   const freshRepos = await listRepos();
   ctx.repos.length = 0;

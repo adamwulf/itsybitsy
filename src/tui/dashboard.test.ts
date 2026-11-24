@@ -1,12 +1,13 @@
 import { useAttachmentTemp } from "../test-attachment-temp";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, mock, spyOn } from "bun:test";
 import { join } from "path";
+import { mkdirSync } from "fs";
 import { mkdtemp, rm, mkdir, readdir, realpath, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentFileWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
-import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
+import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor, waitForValue } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, formatFooterClock, usageFetchCtx, CODEX_LIVE_PROBE_INTERVAL_MS } from "./dashboard";
 import type { CodexUsageReading, GeminiUsageResult } from "../usage";
 import type { CodexLiveUsageResult } from "../codex-live-usage";
@@ -17,7 +18,7 @@ import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, rese
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { gitStatusSpawnCtx } from "../git-status";
-import { IB_COORDINATOR_SESSION } from "../coordinator";
+import { IB_COORDINATOR_SESSION, setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
 import { cloneRepoSpawnCtx } from "../clone-repo";
@@ -11887,7 +11888,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["t", "!", "S", "O", "b"]) {
+      for (const key of ["c", "t", "!", "S", "O", "b"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -12365,6 +12366,88 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toBe("No connected machine has app");
   });
 
+  test("c reaches Clone here only on a remote-only header; with no remote URL it shows a notice and opens nothing", () => {
+    const { dashboard, local } = setup();
+    const clone = spyOn(agentActions, "handleCloneHere");
+    try {
+      // A remote agent row: refused by the guard.
+      selectByKey(dashboard, WORKER_KEY);
+      resetNotice(dashboard);
+      dashboard.handleInput("c");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(clone).not.toHaveBeenCalled();
+
+      // A remote-only header whose peer reports no remote.
+      selectByKey(dashboard, repoKey("other-repo"));
+      resetNotice(dashboard);
+      dashboard.handleInput("c");
+      expect(clone).toHaveBeenCalledTimes(1);
+      expect(dashboard.dialog).toBeNull();
+      expect(dashboard.notice).toBe("Laptop B reports no remote for other-repo");
+
+      // A local row: c is the ERRORS-mode "clear errors" key, as before.
+      for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
+      expect(dashboard.selectedAgent).toBe(local);
+      dashboard.handleInput("c");
+      expect(clone).toHaveBeenCalledTimes(1);
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  test("c on a remote-only header with a remote URL clones into the peer's folders under the clone root, and the header turns local", async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), "ib-dashboard-clone-")));
+    await mkdir(join(home, ".itsybitsy"));
+    setUserHome(home);
+    setCoordinatorHome(join(home, ".itsybitsy"));
+    const clones: string[][] = [];
+    cloneRepoSpawnCtx.set(((cmd: string[]) => {
+      if (cmd[1] !== "clone") return makeSpawnResult(1); // no origin to read
+      clones.push(cmd);
+      mkdirSync(join(cmd[4]!, ".git"), { recursive: true });
+      return makeSpawnResult(0);
+    }) as SpawnFn);
+    try {
+      const { dashboard, service } = setup();
+      const url = "git@github.com:owner/itsybitsy.git";
+      // Laptop C reports a URL for itsybitsy too, but Laptop B is first.
+      service.set({ links: links().map((link) => link.id === PEER_B
+        ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: url, relPath: "bun/itsybitsy" }, ...repos("other-repo")] }
+        : link.id === PEER_C
+          ? { ...link, repos: [...repos("app"), { registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: "https://elsewhere/x", relPath: null }] }
+          : link) });
+      selectByKey(dashboard, repoKey("itsybitsy"));
+      dashboard.handleInput("c");
+      const dialog = await waitForValue(() => dashboard.dialog?.type === "input" ? dashboard.dialog : null);
+      expect(dialog.prompt).toBe("Clone itsybitsy from Laptop B into:");
+      const dest = join(home, "Developer", "bun", "itsybitsy");
+      expect(dialog.value).toBe(dest);
+
+      dialog.onSubmit(dialog.value);
+      expect(dashboard.dialog).toBeNull();
+      expect(dashboard.notice).toBe("Cloning itsybitsy…");
+      // A second c while the clone runs opens no second dialog.
+      dashboard.handleInput("c");
+      expect(dashboard.notice).toBe("Already cloning itsybitsy");
+      await waitFor(() => dashboard.repos.length === 1);
+      expect(dashboard.notice).toBe(`Cloned and added: itsybitsy (${dest})`);
+      expect(clones).toEqual([["git", "clone", "--", url, dest]]);
+      expect(dashboard.repos).toEqual([{ path: dest, name: "itsybitsy" }]);
+
+      // The watcher's next list carries the new local header under the same key:
+      // the selection stays on it, now a shared local header.
+      dashboard.onUpdate([], [makeFlatRepoHeader("itsybitsy", dest, false, false, false, "itsybitsy")], []);
+      expect(dashboard.remoteSelection).toBeNull();
+      expect(dashboard.agentTree.selectedRepoPath).toBe(dest);
+      expect(treeRows(dashboard).map((r) => stripAnsi(r).trim()).filter((r) => r.startsWith("▾ itsybitsy"))).toHaveLength(1);
+    } finally {
+      cloneRepoSpawnCtx.reset();
+      resetCoordinatorHome();
+      resetUserHome();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("all non-allowlisted keys are refused on a remote-only header before dispatch", () => {
     const key = repoKey("itsybitsy");
     const { dashboard } = setup();
@@ -12375,7 +12458,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
       const header = dashboard.agentTree.selectedRemote!;
-      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => !isRemoteAllowedKey(k, header))) {
+      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => k !== "c" && !isRemoteAllowedKey(k, header))) {
         resetNotice(dashboard);
         dashboard.handleInput(k);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -12471,7 +12554,7 @@ describe("Unified peer repos in the Agents tree", () => {
     }
     expect(shownWithVersion).toBeGreaterThan(0);
     (dashboard as any).statusBar.version = "";
-    for (const hint of ["A: add repo", "f: fix"]) {
+    for (const hint of ["c: clone here", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
     // Every key the remote footer names is one the guard allows.
@@ -12484,9 +12567,13 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(footer()).toContain(".: pin");
     expect(footer()).not.toContain("q: questions");
     expect(isRemoteAllowedKey("q", dashboard.agentTree.selectedRemote!)).toBe(false);
+    // A remote-only header adds the two keys it alone takes.
+    for (const hint of ["a: new agent", "c: clone here"]) expect(footer()).toContain(hint);
+    expect(footer()).not.toContain("s: send");
     for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
     expect(footer()).toContain("s: send");
     expect(footer()).not.toContain("C: terminal");
+    expect(footer()).not.toContain("c: clone here");
   });
 
   test("C on a remote agent opens a local tmux session running ib peer attach on it; a remote repo header refuses C", async () => {
@@ -12772,6 +12859,13 @@ describe("Unified peer repos in the Agents tree", () => {
       pick("force kill agent — !");
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
       expect(dashboard.dialog).toBeNull();
+      // Clone here is a remote-only header's key, not a remote agent's.
+      resetNotice(dashboard);
+      pick("clone repo here (peer-only repo) — c");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      selectByKey(dashboard, repoKey("other-repo"));
+      pick("clone repo here (peer-only repo) — c");
+      expect(dashboard.notice).toBe("Laptop B reports no remote for other-repo");
       pick("setup: Peers tab — I");
       expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
       expect(service.calls).toContain("open");

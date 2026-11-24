@@ -10101,6 +10101,13 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(keyOf(dashboard)).toBe(key);
   }
 
+  /** Tab to the selected remote row's message editor (`s` opens the send dialog instead). */
+  function focusEditor(dashboard: DashboardComponent): void {
+    const inEditor = () => dashboard.focus === "active-agent" && dashboard.focusManager.subFocus === "input";
+    for (let i = 0; i < 10 && !inEditor(); i++) dashboard.handleInput("\t");
+    expect(inEditor()).toBe(true);
+  }
+
   /** Every row of the Agents tree at `width`, uncut by the sidebar's height. */
   function treeRows(dashboard: DashboardComponent, width = 60): string[] {
     dashboard.agentTree.maxHeight = 100;
@@ -10338,7 +10345,43 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(lines).toBeGreaterThan(210);
       expect(screen()).toMatch(/history [2-9]\d\d/);
       dashboard.handleInput("s");
-      expect(dashboard.focusManager.subFocus).toBe("input");
+      expect(assertDialog(dashboard.dialog, "textarea").prompt).toBe("Send message to Laptop B/abc-nick:");
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
+  test("the peer coordinator's own input box is trimmed and its status lines sit below the dashboard editor", async () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const sep = "─".repeat(300);
+    service.fetchPane.mockResolvedValue({ state: "running",
+      text: ["peer reply", sep, "❯ /rc", sep, "  ⏵⏵ auto mode on", ""].join("\n") });
+    try {
+      selectByKey(dashboard, PEER_B + "/@system");
+      await Promise.resolve();
+      const main = dashboard.render(180).map((line) => stripAnsi(line).split("│").at(-1)!.trim()).filter(Boolean);
+      expect(main).not.toContain("❯ /rc");
+      const reply = main.indexOf("peer reply");
+      const prompt = main.indexOf("❯");
+      const status = main.indexOf("⏵⏵ auto mode on");
+      expect(reply).toBeGreaterThan(0);
+      expect(prompt).toBeGreaterThan(reply);
+      expect(main[prompt + 1]).toMatch(/^─+ \[Send\] ─+$/);
+      expect(status).toBe(prompt + 2);
+      expect(main.slice(reply + 1, prompt - 1).every((line) => !/^─+$/.test(line))).toBe(true);
+
+      // More status lines than the main area holds (a `/` menu on the peer)
+      // still fill the terminal exactly, with the editor kept on screen.
+      const menu = Array.from({ length: 60 }, (_, i) => `  /command-${i}`);
+      service.fetchCoordinatorPane.mockResolvedValue({ state: "running", text: ["peer reply", sep, "❯ /", sep, ...menu].join("\n") });
+      (dashboard as any).remotePane.poll(PEER_B);
+      await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("/command-0"));
+      const lines = dashboard.render(180);
+      expect(lines).toHaveLength(process.stdout.rows);
+      expect(stripAnsi(lines.join("\n"))).toContain("[Send]");
     } finally {
       running.mockRestore();
       dashboard.stopPolling();
@@ -10359,14 +10402,13 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("peer capture"));
       expect(service.fetchPane.mock.calls).toEqual([[PEER_B, { op: "coordinator-pane" }, 200]]);
       dashboard.handleInput("s");
-      expect(dashboard.focusManager.subFocus).toBe("input");
-      dashboard.handleInput("hi");
-      dashboard.inputField.submit();
-      await waitFor(() => dashboard.inputField.getText() === "");
+      const send = assertDialog(dashboard.dialog, "textarea");
+      expect(send.prompt).toBe("Send message to Laptop B/@system:");
+      send.onSubmit("hi");
+      await waitFor(() => dashboard.dialog === null);
       expect(service.sendRemoteMessage.mock.calls[0]?.slice(0, 2)).toMatchObject([PEER_B, {
         from: { kind: "user" }, target: { kind: "system" }, message: "hi", files: [],
       }]);
-      dashboard.focusManager.setFocus("agent-tree");
       dashboard.handleInput("k");
       expect(stripAnsi(dashboard.render(180).join("\n"))).not.toContain("peer capture");
     } finally {
@@ -10792,12 +10834,14 @@ describe("Unified peer repos in the Agents tree", () => {
     const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
     try {
       selectByKey(dashboard, WORKER_KEY);
-      await waitFor(() => paneText(dashboard.render(WIDTH), 2) === "peer capture");
+      await waitFor(() => paneText(dashboard.render(WIDTH), 2).startsWith("peer capture"));
       expect(service.fetchPane.mock.calls.at(-1)).toEqual([PEER_B, { op: "agent-pane", repo: "itsybitsy", id: "worker-abc" }, 200]);
       for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
         dashboard.jumpToMode(mode);
         const lines = dashboard.render(WIDTH);
-        expect(paneText(lines, 2)).toBe("peer capture");
+        // The message editor sits at the bottom of the center pane, under the
+        // capture, as on a local agent's tmux pane, and never spans the right pane.
+        expect(paneText(lines, 2)).toMatch(/^peer capture ─+ ❯ ─+ \[Send\] ─+$/);
         // The right pane is narrow at this width: the placeholder wraps rather than being cut.
         expect(paneText(lines, 1)).toBe(REMOTE_RIGHT_PANE_TEXT);
         expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
@@ -10825,7 +10869,7 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(tree).not.toContain(REMOTE_RIGHT_PANE_TEXT);
       dashboard.handleInput("k");
       expect(dashboard.rightPane.mode).not.toBe("TREE");
-      await waitFor(() => paneText(dashboard.render(WIDTH), 2) === "peer capture");
+      await waitFor(() => paneText(dashboard.render(WIDTH), 2).startsWith("peer capture"));
       expect(service.fetchPane.mock.calls.at(-1)?.[1]).toEqual({ op: "agent-pane", repo: "itsybitsy", id: "manager-def" });
     } finally {
       running.mockRestore();
@@ -10896,7 +10940,7 @@ describe("Unified peer repos in the Agents tree", () => {
   test("remote text input retains a refused draft and clears it on acceptance", async () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);
-    dashboard.handleInput("s");
+    focusEditor(dashboard);
     dashboard.handleInput("/compact");
     service.remoteStartDenial = "Remote starts are disabled inside tmux";
     dashboard.inputField.submit();
@@ -10930,6 +10974,97 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toContain("Sent to Laptop B/");
   });
 
+  test("s on a remote agent opens the send dialog: a failure keeps the draft, acceptance closes it", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("s");
+    const send = assertDialog(dashboard.dialog, "textarea");
+    expect(send.prompt).toBe("Send message to Laptop B/abc-nick:");
+    expect(send.sendAll).toBeUndefined();
+    expect(send.onSendEsc).toBeUndefined();
+    expect(dashboard.focusManager.subFocus).toBe("pane");
+    for (const ch of "/compact") dashboard.handleInput(ch);
+    dashboard.handleInput("\x1b[Z");
+    expect(send.focusedButton).toBe("send");
+    // Enter on [ Send ]; focus stays there for the retry.
+    const submit = () => dashboard.handleInput("\r");
+
+    service.sendRemoteMessage.mockRejectedValueOnce(new Error("Machine is disconnected"));
+    submit();
+    await waitFor(() => dashboard.notice === "Machine is disconnected");
+    await Bun.sleep(0);
+    expect(dashboard.dialog).toBe(send);
+    expect(send.inFlight).toBe(false);
+    expect(send.buffer.getText()).toBe("/compact");
+
+    const pending = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
+    submit();
+    expect(send.inFlight).toBe(true);
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 2);
+    const [peer, header] = service.sendRemoteMessage.mock.calls[1]!;
+    expect(peer).toBe(PEER_B);
+    expect(header).toMatchObject({ from: { kind: "user" }, message: "/compact", files: [],
+      target: { kind: "agent", repo: "itsybitsy", agent: "worker-abc" } });
+    pending.resolve(header.id);
+    await waitFor(() => dashboard.dialog === null);
+    expect(dashboard.notice).toBe("Sent to Laptop B/abc-nick");
+  });
+
+  test("Esc cancels a remote send in flight from the dialog and keeps the draft", async () => {
+    const { dashboard, service } = setup();
+    service.sendRemoteMessage.mockImplementationOnce((_peer, header, _source, transfer) =>
+      new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason))));
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("s");
+    const send = assertDialog(dashboard.dialog, "textarea");
+    for (const ch of "hello") dashboard.handleInput(ch);
+    dashboard.handleInput("\x1b[Z");
+    dashboard.handleInput("\r");
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+    const overlay = () => stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
+    expect(overlay()).toContain("Sending… Esc: cancel");
+    dashboard.handleInput("x");
+    expect(send.buffer.getText()).toBe("hello");
+    dashboard.handleInput("\x1b");
+    await waitFor(() => dashboard.notice === "Send cancelled");
+    await Bun.sleep(0);
+    expect(dashboard.dialog).toBe(send);
+    expect(send.inFlight).toBe(false);
+    expect(send.buffer.getText()).toBe("hello");
+    expect(overlay()).not.toContain("Sending…");
+    dashboard.handleInput("\x1b");
+    expect(dashboard.dialog).toBeNull();
+  });
+
+  test("a pending remote send shows in the header alert and leaves the layout in place", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const before = dashboard.render(WIDTH).map(stripAnsi);
+    const pending = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
+    dashboard.handleInput("s");
+    assertDialog(dashboard.dialog, "textarea").onSubmit("hello");
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+    dashboard.closeDialog();
+    const during = dashboard.render(WIDTH);
+    expect(during).toHaveLength(before.length);
+    expect(stripAnsi(during[0]!)).toStartWith("ib — sending to Laptop B/abc-nick…");
+    expect(during[0]).toContain(YELLOW);
+    expect(during.slice(1).map(stripAnsi)).toEqual(before.slice(1));
+    // A long alert ends in "…", and leaves any indicators on the line.
+    dashboard.setNotice("x".repeat(WIDTH), "info");
+    const bare = stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(bare).toEndWith("…");
+    expect(visibleWidth(bare)).toBeLessThanOrEqual(WIDTH);
+    dashboard.setTelegramStatus("green");
+    const header = stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(header).toMatch(/…\s+● Telegram$/);
+    expect(visibleWidth(header)).toBeLessThanOrEqual(WIDTH);
+    pending.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+    await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
+  });
+
   test.each(["Esc", "shutdown"])("remote row detects files, shows progress and cleans staging on %s", async action => {
     const home = await mkdtemp(join(tmpdir(), "ib-dashboard-transfer-"));
     setUserHome(home);
@@ -10953,7 +11088,7 @@ describe("Unified peer repos in the Agents tree", () => {
         return new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason)));
       });
       selectByKey(dashboard, WORKER_KEY);
-      dashboard.handleInput("s");
+      focusEditor(dashboard);
       dashboard.handleInput(`Read ${source} and ./live.ts`);
       dashboard.inputField.submit();
       await entered.promise;
@@ -10978,7 +11113,7 @@ describe("Unified peer repos in the Agents tree", () => {
       await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
       const { dashboard, service } = setup();
       selectByKey(dashboard, WORKER_KEY);
-      dashboard.handleInput("s");
+      focusEditor(dashboard);
       dashboard.handleInput(path);
       dashboard.inputField.submit();
       await waitFor(() => dashboard.notice === "Cannot verify the outgoing attachment owner");
@@ -10995,7 +11130,7 @@ describe("Unified peer repos in the Agents tree", () => {
       const { dashboard, service } = setup();
       dashboard.setRepos([{ name: "ITSYBITSY", path: project }]);
       selectByKey(dashboard, WORKER_KEY);
-      dashboard.handleInput("s");
+      focusEditor(dashboard);
       dashboard.handleInput(path);
       dashboard.inputField.submit();
       await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
@@ -11013,19 +11148,21 @@ describe("Unified peer repos in the Agents tree", () => {
     for (const key of [WORKER_KEY, agentKey(PEER_B, "itsybitsy", "manager-def")]) {
       dashboard.focusManager.setFocus("agent-tree");
       selectByKey(dashboard, key);
-      dashboard.handleInput("s");
+      focusEditor(dashboard);
       dashboard.handleInput("hello");
       dashboard.inputField.submit();
     }
     await waitFor(() => service.sendRemoteMessage.mock.calls.length === 2);
-    const rows = () => stripAnsi(dashboard.render(WIDTH).join("\n")).split("\n").filter(line => line.includes("sending to"));
-    expect(rows()).toHaveLength(2);
-    expect(rows().filter(line => line.includes("Esc: cancel"))).toHaveLength(1);
+    // Both pending sends share the header line's alert.
+    const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(header().match(/sending to Laptop B\/duplicate…/g)).toHaveLength(2);
+    expect(header().match(/Esc: cancel/g)).toHaveLength(1);
     dashboard.agentTree.selectAgent(local);
     dashboard.syncSelectedAgent();
     dashboard.focusManager.setFocus("active-agent");
     dashboard.focusManager.setSubFocus("input");
-    expect(rows().every(line => !line.includes("Esc: cancel"))).toBe(true);
+    expect(header().match(/sending to Laptop B\/duplicate…/g)).toHaveLength(2);
+    expect(header()).not.toContain("Esc: cancel");
     dashboard.handleInput("\x1b");
     expect(dashboard.focusManager.subFocus).toBe("pane");
     expect(service.sendRemoteMessage.mock.calls.every(call => !call[3]?.signal?.aborted)).toBe(true);
@@ -11062,7 +11199,7 @@ describe("Unified peer repos in the Agents tree", () => {
       await Bun.write(source, "abc");
       const { dashboard, service } = setup();
       selectByKey(dashboard, WORKER_KEY);
-      dashboard.handleInput("s");
+      focusEditor(dashboard);
       dashboard.handleInput(source);
       dashboard.inputField.submit();
       await entered.promise;
@@ -11114,7 +11251,7 @@ describe("Unified peer repos in the Agents tree", () => {
       service.sendRemoteMessage.mockImplementation((_peer, header, _source, transfer) =>
         requestSend(a, header, (ms, fn) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); }, transfer));
       selectByKey(dashboard, WORKER_KEY);
-      dashboard.handleInput("s");
+      focusEditor(dashboard);
       dashboard.handleInput(source);
       dashboard.inputField.submit();
       await started.promise;
@@ -11163,13 +11300,36 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(notifications).toHaveBeenCalledTimes(3);
   });
 
-  test("selecting an inbound progress row and pressing Esc aborts that receipt", () => {
+  test("an inbound transfer shows in the header alert; Ctrl-T selects it and Esc aborts that receipt", () => {
     const { dashboard, service } = setup();
+    const before = dashboard.render(WIDTH).map(stripAnsi);
     service.set({ incoming: [{ id: "first", label: "Laptop → worker", bytes: 3, total: 12 }] });
-    expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 12 bytes");
+    const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(header()).toStartWith("ib — receiving Laptop → worker  3 / 12 bytes  Ctrl-T: select");
+    expect(dashboard.render(WIDTH).slice(1).map(stripAnsi)).toEqual(before.slice(1));
     dashboard.handleInput("\x14");
+    expect(header()).toStartWith("ib — › receiving Laptop → worker  3 / 12 bytes  Esc: cancel");
     dashboard.handleInput("\x1b");
     expect(service.cancelReceipt.mock.calls).toEqual([["first"]]);
+  });
+
+  test("a Ctrl-T-selected receipt leads the header alert ahead of a pending send", async () => {
+    const { dashboard, service } = setup();
+    const pending = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("s");
+    assertDialog(dashboard.dialog, "textarea").onSubmit("hello");
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+    dashboard.closeDialog();
+    service.set({ incoming: [{ id: "first", label: "Laptop → worker", bytes: 3, total: 12 }] });
+    const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(header()).toStartWith("ib — sending to Laptop B/abc-nick…  Esc: cancel  ·  receiving Laptop → worker");
+    dashboard.handleInput("\x14");
+    expect(header()).toStartWith("ib — › receiving Laptop → worker  3 / 12 bytes  Esc: cancel  ·  sending to Laptop B/abc-nick…");
+    expect(header().match(/Esc: cancel/g)).toHaveLength(1);
+    pending.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+    await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
   });
 
   test("incoming notices and overlapping completions leave each pending send visible", async () => {
@@ -11183,13 +11343,15 @@ describe("Unified peer repos in the Agents tree", () => {
     for (const key of [PEER_B + "/@system", WORKER_KEY]) {
       dashboard.focusManager.setFocus("agent-tree");
       selectByKey(dashboard, key);
-      dashboard.handleInput("s");
+      focusEditor(dashboard);
       dashboard.handleInput("hello");
       dashboard.inputField.submit();
     }
     const content = () => stripAnsi(dashboard.render(WIDTH).join("\n"));
     dashboard.setNotice("Incoming peer message", "info");
-    expect(content()).toContain("Incoming peer message");
+    // The notice comes first, then each send; the one Esc cancels leads.
+    expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toMatch(
+      /^ib — Incoming peer message {2}· {2}sending to Laptop B\/abc-nick… {2}Esc: cancel {2}· {2}sending to Laptop B\/@system…/);
     expect(content().match(/sending to Laptop B\//g)).toHaveLength(2);
     first.resolve("first");
     await Bun.sleep(0);

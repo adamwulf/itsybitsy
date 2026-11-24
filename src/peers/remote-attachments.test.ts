@@ -1,6 +1,6 @@
 import { tmpdir } from "node:os";
 import { expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, open, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { processStartEpochSecondsCtx } from "../agents";
 import { hashFile } from "./attachment-manifest";
@@ -195,5 +195,25 @@ test("a dangling project symlink refuses absolute, relative and nested reference
     for (const reference of [join(project, "link"), "./link", "see ./link.", join(project, "link/file")]) {
       await expect(dashboardAttachmentPaths(reference, project, project)).rejects.toThrow("Unresolved attachment");
     }
+  } finally { await rm(project, { recursive: true, force: true }); }
+});
+
+test("a file under the local checkout's runtime directory is attached, not left live for the peer", async () => {
+  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+  const project = await mkdtemp(join(tmpdir(), "ib-dashboard-runtime-"));
+  try {
+    const worktree = join(project, ".itsybitsy/agents/agent-x/repo");
+    await mkdir(worktree, { recursive: true });
+    const output = join(worktree, "out.png");
+    await writeFile(output, "png");
+    await writeFile(join(project, "live.ts"), "live");
+    expect(await dashboardAttachmentPaths(`see ${output} and ${join(project, "live.ts")}`, "/remote/project", project))
+      .toEqual({ paths: [{ argument: output, source: await realpath(output) }], noPassthrough: false });
+    // A missing runtime-directory file stays literal: with the same checkout
+    // path on both machines it can be the peer agent's own worktree file.
+    const peerFile = join(project, ".itsybitsy/agents/peer-agent/repo/src/foo.ts");
+    expect(await dashboardAttachmentPaths(`read ${peerFile}`, project, project)).toEqual({ paths: [], noPassthrough: false });
+    expect(await dashboardAttachmentPaths(`read ${join(worktree, "missing.png")}`, "/remote/project", project))
+      .toEqual({ paths: [], noPassthrough: false });
   } finally { await rm(project, { recursive: true, force: true }); }
 });

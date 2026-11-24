@@ -60,6 +60,25 @@ test("a denied selection displays the reason without scheduling a read", () => {
   expect(every).not.toHaveBeenCalled();
 });
 
+test("the coordinator's input box is sliced off and its status lines are returned below it", async () => {
+  const sep = "─".repeat(200);
+  const text = ["reply one", "reply two", sep, "❯ ", sep, "  ⏵⏵ auto mode on (shift+tab to cycle)", "  Update available!", ""].join("\n");
+  const pane = new RemotePane(async () => ({ state: "running", text }), () => {}, () => () => {});
+  pane.select({ peerId: "A", target: { op: "coordinator-pane" } });
+  await Promise.resolve();
+  expect(pane.render(40, 3).map(stripAnsi)).toEqual(["reply one", "reply two", ""]);
+  expect(pane.statusLines(20).map(stripAnsi)).toEqual(["  ⏵⏵ auto mode on (s", "  Update available!"]);
+  pane.select({ peerId: "B", target: { op: "coordinator-pane" } }, "Human dashboard required");
+  expect(pane.statusLines(20)).toEqual([]);
+  // An agent's capture is shown whole: its CLI is not known here to pick a detector.
+  pane.select({ peerId: "A", target: { op: "agent-pane", repo: "r", id: "a" } });
+  await Promise.resolve();
+  const whole = stripAnsi(pane.render(40, 20).join("\n"));
+  expect(whole).toContain("❯");
+  expect(whole).toContain("Update available!");
+  expect(pane.statusLines(20)).toEqual([]);
+});
+
 test("scrollback clamps at each wrap width while the error line stays visible", async () => {
   let tick: () => void = () => {};
   const fetch = mock(async () => ({ state: "running", text: "abcdefgh\nijklmnop\nqrstuvwx" }));

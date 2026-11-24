@@ -123,7 +123,7 @@ import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { captureAgentPane } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
-import { remoteDisplayName } from "./peer-repos";
+import { remoteMessageTarget, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -436,36 +436,24 @@ function padToWidth(str: string, width: number): string {
 /** The right pane's text for a selected remote row, in every mode (SPEC §20.5). */
 export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 
-/** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
-function remoteMessageTarget(entry: RemoteEntry | null): SendTarget | undefined {
-  if (entry?.kind === "remote-coordinator") return { kind: "system" };
-  if (entry?.kind === "remote-agent") return { kind: "agent", repo: entry.remote.repoRegistryName, agent: entry.remote.id };
-}
-
-function remoteTitle(entry: RemoteEntry): string {
-  switch (entry.kind) {
-    case "remote-coordinator":
-      return `${entry.peerName}/@system`;
-    case "remote-agent":
-      return `${entry.peerName}/${remoteDisplayName(entry.remote)}`;
-    case "remote-repo-header":
-      return `${entry.peerName}/${entry.repoName}`;
-  }
-}
-
 /**
  * The selected remote agent's capture (or a repo header's placeholder)
  * and the right pane's "not available" placeholder, side by side
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
+ * `input` renders the message editor at the center pane's width; it sits at
+ * the bottom of the center pane, as on a local agent's tmux pane.
  */
-function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number): string[] {
+function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number, input?: (width: number) => string[]): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
-  const placeholder = (text: string, width: number) =>
-    padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), height);
-  const center = entry.kind === "remote-repo-header" ? placeholder(`Remote repo on ${entry.peerName} (read-only)`, lw) : pane.render(lw, height);
-  const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw);
+  const editor = input?.(lw) ?? [];
+  const placeholder = (text: string, width: number, rows: number) =>
+    padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), rows);
+  const bodyHeight = Math.max(0, height - editor.length);
+  const body = entry.kind === "remote-repo-header" ? placeholder(`Remote repo on ${entry.peerName} (read-only)`, lw, bodyHeight) : pane.render(lw, bodyHeight);
+  const center = [...body, ...editor];
+  const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw, height);
   const sep = `${DIM_GRAY}│${RESET}`;
   return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
 }
@@ -733,6 +721,7 @@ class DialogOverlayComponent implements Component {
         } else {
           lines.push(leftSide);
         }
+        if (dialog.inFlight && dialog.onCancelInFlight) lines.push(`${DIM}Sending… Esc: cancel${RESET}`);
         return { title: dialog.prompt, contentLines: lines };
       }
       case "folder-browser": {
@@ -1169,9 +1158,8 @@ export class DashboardComponent implements Component {
       const agent = this.agentTree.selectedAgent;
       const trimmed = text.trim();
       const remote = this.remoteSelection;
-      const target = remoteMessageTarget(remote);
-      if (remote && remote.kind !== "remote-repo-header" && target && trimmed) {
-        return this.submitRemoteMessage(remote, target, trimmed);
+      if (remote && remote.kind !== "remote-repo-header" && trimmed) {
+        return this.submitRemoteMessage(remote, trimmed);
       }
       if (!agent || !trimmed) return;
       return promptAndStageAttachmentsIfNeeded({
@@ -1987,13 +1975,6 @@ export class DashboardComponent implements Component {
     return this.activeSelectionSource === "agents" ? this.agentTree.selectedRemote : null;
   }
 
-  focusRemoteMessage(): void {
-    if (this.rightPane.mode === "TREE") this.jumpToMode(PANE_MODES[DEFAULT_MODE_INDEX]!);
-    this.focusManager.setFocus("active-agent");
-    this.focusManager.setSubFocus("input");
-    this.tui?.requestRender();
-  }
-
   private escapeSend() {
     if (!this.pendingRemoteSends.size || this._dialog) return;
     if (this.selectedReceipt && this.peerService?.view().incoming?.some(row => row.id === this.selectedReceipt)) return;
@@ -2044,11 +2025,16 @@ export class DashboardComponent implements Component {
     }
   }
 
-  private async submitRemoteMessage(remote: Exclude<RemoteEntry, { kind: "remote-repo-header" }>, target: SendTarget, text: string): Promise<boolean> {
+  /**
+   * Send `text` from the user to a remote row (SPEC §20.5), shown as a pending
+   * `sending to <target>…` entry in the header alert until the peer accepts it. Resolves true on
+   * acceptance; on failure it shows the reason and resolves false. Aborting
+   * `controller` cancels the send.
+   */
+  async submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller = new AbortController()): Promise<boolean> {
     const service = this.peerService;
-    const header = textHeader(target, text, { kind: "user" });
+    const header = textHeader(remoteMessageTarget(remote), text, { kind: "user" });
     const label = remoteTitle(remote);
-    const controller = new AbortController();
     const done = Promise.withResolvers<void>();
     const pending = { id: header.id, peerId: remote.peerId, target: header.target, label, controller, done: done.promise, bytes: 0, total: undefined as number | undefined };
     let staging: string | undefined;
@@ -3787,8 +3773,8 @@ export class DashboardComponent implements Component {
   // --- Rendering ---
 
 
-  private availableMainHeight(receipts = this.peerService?.view().incoming?.length ?? 0): number {
-    const chromeLines = 5 + this.pendingLifecycle.size + this.pendingRemoteSends.size + receipts;
+  private availableMainHeight(): number {
+    const chromeLines = 5 + this.pendingLifecycle.size;
     return Math.max(5, (process.stdout.rows || 24) - chromeLines);
   }
 
@@ -3825,10 +3811,29 @@ export class DashboardComponent implements Component {
     const remoteCoordinator = remoteView && remote.kind === "remote-coordinator" ? remote : null;
     const isFullWidth = remoteCoordinator !== null || (!remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode)));
 
-    // Header
+    // Header. Its alert shows the transient notice, then each peer transfer in
+    // flight (SPEC §20.5), so a transfer never adds a row and shifts the layout.
+    // The transfer Esc acts on goes first, so its hint survives a cut header.
+    const cancellableSend = this.escapeSend();
+    const incoming = this.peerService?.view().incoming ?? [];
+    const transfers = [
+      ...[...this.pendingRemoteSends.values()].map((send) => {
+        const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
+        const esc = send === cancellableSend;
+        return { esc, text: `sending to ${send.label}…${progress}${esc ? "  Esc: cancel" : ""}` };
+      }),
+      ...incoming.map((row) => {
+        const esc = row.id === this.selectedReceipt;
+        return { esc, text: `${esc ? "› " : ""}receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${esc ? "Esc: cancel" : "Ctrl-T: select"}` };
+      }),
+    ].sort((a, b) => Number(b.esc) - Number(a.esc)).map((transfer) => transfer.text);
     const noticeColor = this.lastSentNoticeKind === "error" ? RED : YELLOW;
-    const subtitle = this.lastSentNotice
-      ? `${DIM}—${RESET} ${noticeColor}${this.lastSentNotice}${RESET}`
+    const alerts = [
+      ...(this.lastSentNotice ? [`${noticeColor}${this.lastSentNotice}${RESET}`] : []),
+      ...transfers.map((transfer) => `${YELLOW}${transfer}${RESET}`),
+    ];
+    const subtitle = alerts.length > 0
+      ? `${DIM}—${RESET} ${alerts.join(`${DIM}  ·  ${RESET}`)}`
       : `${DIM}— agent dashboard${RESET}`;
     const left = `${BOLD}ib${RESET} ${subtitle}`;
     const indicators: string[] = [];
@@ -3856,27 +3861,19 @@ export class DashboardComponent implements Component {
     }
     if (indicators.length > 0) {
       const right = indicators.join("  ");
-      const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right) - 1);
-      lines.push(truncateToWidth(left + " ".repeat(pad) + right, width, ""));
+      // A long alert ends in "…" before the indicators rather than cutting them off.
+      const fitted = truncateToWidth(left, Math.max(0, width - visibleWidth(right) - 2), "…");
+      const pad = Math.max(1, width - visibleWidth(fitted) - visibleWidth(right) - 1);
+      lines.push(truncateToWidth(fitted + " ".repeat(pad) + right, width, ""));
     } else {
-      lines.push(truncateToWidth(left, width, ""));
+      lines.push(truncateToWidth(left, width, "…"));
     }
 
     // Compute available height for the main content area.
     // Chrome lines: header(1) + main title separator(1) +
     //               bottom separator(1) + status bar(2) = 5.
     for (const notice of this.pendingLifecycle.values()) lines.push(truncateToWidth(notice, width, "…"));
-    const cancellableSend = this.escapeSend();
-    for (const send of this.pendingRemoteSends.values()) {
-      const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
-      lines.push(truncateToWidth(`sending to ${send.label}…${progress}${send === cancellableSend ? "  Esc: cancel" : ""}`, width, "…"));
-    }
-    const incoming = this.peerService?.view().incoming ?? [];
-    for (const row of incoming) {
-      const selected = row.id === this.selectedReceipt;
-      lines.push(truncateToWidth(`${selected ? "›" : " "} receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${selected ? "Esc: cancel" : "Ctrl-T: select"}`, width, "…"));
-    }
-    const availableHeight = this.availableMainHeight(incoming.length);
+    const availableHeight = this.availableMainHeight();
 
     // Width math comes from the widths module — never inline.
     const renderLayout = this.liveLayout(width);
@@ -4009,11 +4006,17 @@ export class DashboardComponent implements Component {
       const focused = this.focusManager.current() === "active-agent";
       this.inputField.active = acceptsText && focused && this.focusManager.subFocus !== "pane";
       this.inputField.setFocusState(this.focusManager.subFocus === "send" ? "send" : "text");
-      const input = acceptsText ? this.inputField.render(mainWidth) : [];
-      const height = Math.max(0, availableHeight - input.length);
-      const body = remoteCoordinator ? this.remotePane.render(mainWidth, height)
-        : renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, height);
-      mainLines = [mainTitleSep, ...body, ...input];
+      if (remoteCoordinator) {
+        // Full width, like the local coordinator's TMUX view: the capture with
+        // its input box sliced off, this input field, then the CLI's status lines.
+        // Clamped like the local view: the peer's status lines can be long (a `/` menu).
+        const input = [...this.inputField.render(mainWidth), ...this.remotePane.statusLines(mainWidth)];
+        const body = this.remotePane.render(mainWidth, Math.max(0, availableHeight - input.length));
+        mainLines = [mainTitleSep, ...[...body, ...input].slice(0, availableHeight)];
+      } else {
+        const input = acceptsText ? (width: number) => this.inputField.render(width) : undefined;
+        mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight, input)];
+      }
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
       // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set

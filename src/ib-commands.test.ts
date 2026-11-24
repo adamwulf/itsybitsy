@@ -594,6 +594,29 @@ describe("ib-commands", () => {
       expect(lastCall).toEqual(["tmux", "send-keys", "-t", "=tmux-agent-abc:", "Enter"]);
     });
 
+    test("a chunk boundary never splits a surrogate pair inside a delivered attachment path", async () => {
+      const agent = makeAgent("agent-abc", tempDir);
+      // A lone surrogate becomes U+FFFD in the spawned argument, so a split
+      // character would deliver a path that does not exist.
+      const prose = "x".repeat(467);
+      const path = "/tmp/itsybitsy-attachments-id/0/\u{1F4F8}.png";
+      expect(prose.length + path.indexOf("\u{1F4F8}")).toBe(499);
+      const result = await sendMessage(agent, prose + path, { cwd: "/", raw: true });
+
+      expect(result.ok).toBe(true);
+      const sendKeysCalls = spawnCalls.filter(
+        (c) => c[0] === "tmux" && c[1] === "send-keys" && c.includes("-l")
+      );
+      expect(sendKeysCalls.map((c) => c[6])).toEqual([
+        prose + path.slice(0, path.indexOf("\u{1F4F8}")),
+        "\u{1F4F8}.png",
+      ]);
+
+      // Final call must be the Enter, after all chunks.
+      const lastCall = spawnCalls[spawnCalls.length - 1]!;
+      expect(lastCall).toEqual(["tmux", "send-keys", "-t", "=tmux-agent-abc:", "Enter"]);
+    });
+
     test("raw=true suppresses [sent by ...] prefix even when fromAgent is set", async () => {
       const agent = makeAgent("agent-abc", tempDir);
       await mkdir(join(tempDir, ".itsybitsy", "agents", "@telegram"), { recursive: true }).catch(() => {});

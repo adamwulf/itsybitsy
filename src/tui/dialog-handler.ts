@@ -108,6 +108,10 @@ export type DialogState =
        *  until the send resolves — cleared on failure so the draft can be
        *  corrected, or the dialog is closed on success. */
       inFlight?: boolean;
+      /** Optional: when set, Escape while `inFlight` invokes this to cancel the
+       *  send (a remote send can wait on a long transfer). The send's failure
+       *  path then unfreezes the dialog with the draft kept. */
+      onCancelInFlight?: () => void;
     } & DialogCommon)
   | ({
       type: "folder-browser";
@@ -251,6 +255,7 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // on THIS dialog, never a later one.
   if (dialog.type === "new-agent-form" && dialog.inFlight && !matchesKey(data, Key.escape)) return true;
   if ((dialog.type === "input" || dialog.type === "textarea") && dialog.inFlight) {
+    if (dialog.type === "textarea" && matchesKey(data, Key.escape)) dialog.onCancelInFlight?.();
     return true;
   }
 

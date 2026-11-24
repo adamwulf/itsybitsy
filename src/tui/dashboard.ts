@@ -4009,8 +4009,10 @@ export class DashboardComponent implements Component {
       if (remoteCoordinator) {
         // Full width, like the local coordinator's TMUX view: the capture with
         // its input box sliced off, this input field, then the CLI's status lines.
+        // Clamped like the local view: the peer's status lines can be long (a `/` menu).
         const input = [...this.inputField.render(mainWidth), ...this.remotePane.statusLines(mainWidth)];
-        mainLines = [mainTitleSep, ...this.remotePane.render(mainWidth, Math.max(0, availableHeight - input.length)), ...input];
+        const body = this.remotePane.render(mainWidth, Math.max(0, availableHeight - input.length));
+        mainLines = [mainTitleSep, ...[...body, ...input].slice(0, availableHeight)];
       } else {
         const input = acceptsText ? (width: number) => this.inputField.render(width) : undefined;
         mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight, input)];

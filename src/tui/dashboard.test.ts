@@ -10922,9 +10922,18 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(ids()).toEqual([]);
       dashboard.jumpToMode("INITIAL PROMPT");
       expect(right()).toBe("Loading prompt.txt...");
-      replies.get("worker-abc")!.resolve(Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n"));
+      const long = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
+      replies.get("worker-abc")!.resolve(long);
       // Anchored at the bottom, as a local agent's prompt is.
       await waitFor(() => right().endsWith("line 99 line 100"));
+      // A dialog over the pane pauses the read; closing it reads again at once.
+      dashboard.handleInput("?");
+      expect(dashboard.dialog).not.toBeNull();
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+      expect(ids()).toEqual(["worker-abc", "worker-abc"]);
+      replies.get("worker-abc")!.resolve(long);
+      await Bun.sleep(0);
       for (let i = 0; i < 40; i++) dashboard.handleInput(";");
       expect(right()).toStartWith("Prompt: line 1 line 2 ");
       for (let i = 0; i < 40; i++) dashboard.handleInput("l");
@@ -10940,7 +10949,7 @@ describe("Unified peer repos in the Agents tree", () => {
       // Back on the worker, its cached prompt shows at once while it is read again.
       dashboard.handleInput("j");
       expect(right()).toEndWith("line 99 line 100");
-      expect(ids()).toEqual(["worker-abc", "manager-def", "worker-abc"]);
+      expect(ids()).toEqual(["worker-abc", "worker-abc", "manager-def", "worker-abc"]);
       // That read finishes after the selection moved: it is cached, not shown.
       dashboard.handleInput("k");
       replies.get("worker-abc")!.resolve("a changed prompt");
@@ -10955,7 +10964,7 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.handleInput("k");
       expect(keyOf(dashboard)).toBe(repoKey("itsybitsy"));
       expect(right()).toBe(REMOTE_RIGHT_PANE_TEXT);
-      expect(ids()).toEqual(["worker-abc", "manager-def", "worker-abc", "manager-def", "worker-abc"]);
+      expect(ids()).toEqual(["worker-abc", "worker-abc", "manager-def", "worker-abc", "manager-def", "worker-abc"]);
     } finally {
       running.mockRestore();
       dashboard.stopPolling();

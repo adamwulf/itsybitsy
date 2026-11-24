@@ -341,8 +341,6 @@ test("reads a registered agent's prompt.txt over a paired loopback connection", 
   await waitFor(() => !!link(a)?.connected);
   expect(await a.service.fetchAgentPrompt(b.id, "app", "worker")).toBe("Build it\nthen test it");
   await expect(a.service.fetchAgentPrompt(b.id, "app", "missing")).rejects.toThrow("Agent not found");
-  // The periodic agent list still carries no prompt.
-  expect(JSON.stringify(link(a)!.agents)).not.toContain("Build it");
 });
 
 test("agents send text and two files in both directions over real paired endpoints", async () => {

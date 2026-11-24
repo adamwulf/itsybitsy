@@ -33,6 +33,8 @@ import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { buildFolderItems } from "./folder-browser";
 import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { EMPTY_DIFF, prepareDiffCopy } from "../peers/agent-diff";
+import { stagingOwnerStart, writeTransferOwner } from "../peers/transfer-owner";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { cleanRemoteText } from "../peers/peer-link";
@@ -2248,12 +2250,7 @@ export function handleOpenWorktree(ctx: ActionCtx) {
 
 /** 'o' — diff the agent's worktree against its merge-base with main. */
 export async function handleOpenDiffTool(ctx: ActionCtx) {
-  await openDiffTool(ctx, async (cwd) => {
-    const mergeBaseProc = Bun.spawn(["git", "merge-base", "HEAD", "main"], { cwd, stdout: "pipe", stderr: "ignore" });
-    const mergeBase = (await new Response(mergeBaseProc.stdout).text()).trim();
-    if (!mergeBase) return { error: "Could not determine merge-base with main" };
-    return { ref: mergeBase, label: "merge-base with main" };
-  });
+  await openDiffTool(ctx);
 }
 
 /**
@@ -2284,49 +2281,67 @@ export async function handleOpenDiffToolVsManager(ctx: ActionCtx) {
  */
 async function openDiffTool(
   ctx: ActionCtx,
-  resolveBase: (cwd: string, agent: Agent) => Promise<{ ref: string; label?: string } | { error: string }>,
+  resolveBase?: (cwd: string, agent: Agent) => Promise<{ ref: string } | { error: string }>,
 ) {
   // Kill previous diff process before doing anything else
-  if (activeDiffProc) {
-    try { activeDiffProc.proc.kill(); } catch {}
-    activeDiffProc = null;
-  }
+  killActiveDiffProc();
 
   if (diffToolLaunching) { ctx.setNotice("Diff tool is already launching", "error"); return; }
 
   const agent = ctx.agentTree.selectedAgent;
-  if (!agent) { ctx.setNotice("No agent selected", "error"); return; }
+  const remote = !resolveBase && ctx.remoteSelection?.kind === "remote-agent" ? ctx.remoteSelection : null;
+  if (!agent && !remote) { ctx.setNotice("No agent selected", "error"); return; }
   if (!ctx.diffTool) { ctx.setNotice("No diff tool configured — set externalDiffTool in ~/.itsybitsy/config.json", "error"); return; }
   const tool = ctx.diffTool;
 
-  const cwd = agentWorktreePath(agent);
-
-  if (!existsSync(cwd)) {
-    ctx.setNotice("Worktree no longer exists — agent may have been merged", "error");
-    return;
-  }
-
   diffToolLaunching = true;
+  try {
+    if (remote) {
+      const service = ctx.peerService;
+      if (!service) throw new Error("Remote diffs are unavailable");
+      if (service.remoteStartDenial !== null) throw new Error(service.remoteStartDenial);
+      const { repoRegistryName: repo, id } = remote.remote;
+      const local = ctx.repos.find(r => r.name.toLowerCase() === repo.toLowerCase());
+      if (!local) throw new Error(`Open diff needs ${repo} on this machine`);
+      const diff = await service.fetchAgentDiff(remote.peerId, repo, id);
+      const copy = await prepareDiffCopy(local.path, repo, remote.peerName, diff);
+      const proc = launchDiffTool(ctx, copy.cwd, tool, id);
+      // bash execs the tool, so this PID owns the copy even if watch exits.
+      await writeTransferOwner(copy.dir, { pid: proc.pid, start: stagingOwnerStart(proc.pid) });
+      return;
+    }
+    const cwd = agentWorktreePath(agent!);
+    if (!existsSync(cwd)) throw new Error("Worktree no longer exists — agent may have been merged");
+    let ref: string;
+    if (resolveBase) {
+      const base = await resolveBase(cwd, agent!);
+      if ("error" in base) throw new Error(base.error);
+      ref = base.ref;
+    } else {
+      const base = await Bun.$`git merge-base HEAD main`.cwd(cwd).quiet().nothrow();
+      if (base.exitCode) throw new Error("Could not determine merge-base with main");
+      ref = base.text().trim();
+    }
+    const check = await Bun.$`git diff --quiet ${ref}`.cwd(cwd).quiet().nothrow();
+    if (check.exitCode === 0) throw new Error(EMPTY_DIFF);
+    launchDiffTool(ctx, cwd, tool, agent!.id, resolveBase ? ref : undefined);
+  } catch (err) {
+    ctx.setNotice(err instanceof Error ? err.message : String(err), "error");
+  } finally { diffToolLaunching = false; }
+}
 
-  const base = await resolveBase(cwd, agent);
-  if ("error" in base) { diffToolLaunching = false; ctx.setNotice(base.error, "error"); return; }
-
-  // Check for empty diff before launching tool
-  const checkProc = Bun.spawn(["git", "diff", "--quiet", base.ref], { cwd, stdout: "ignore", stderr: "ignore" });
-  const checkCode = await checkProc.exited;
-  if (checkCode === 0) { diffToolLaunching = false; ctx.setNotice("No changes to show — diff is empty", "error"); return; }
-
+function launchDiffTool(ctx: ActionCtx, cwd: string, tool: string, agentId: string, managerRef?: string) {
   // Run diff tool in the worktree against the resolved base ref.
   // 'exec' replaces bash so kill signals reach the actual process tree.
   // WEBDIFF_RUN_IN_PROCESS=1 prevents webdiff from forking/detaching, keeping
   // the HTTP server under ib's control (harmless for other diff tools).
   const proc = Bun.spawn(
-    ["/bin/bash", "-c", 'exec $1 $2', "--", tool, base.ref],
+    managerRef ? ["/bin/bash", "-c", 'exec $1 $2', "--", tool, managerRef]
+      : ["/bin/bash", "-c", 'exec $1 $(git merge-base HEAD main)', "--", tool],
     { cwd, stdout: "ignore", stderr: "pipe", env: { ...process.env, WEBDIFF_RUN_IN_PROCESS: "1" } },
   );
-  activeDiffProc = { proc, agentId: agent.id };
-  diffToolLaunching = false;
-  ctx.setNotice(`Opened diff vs ${base.label ?? base.ref} in ${tool}`, "info");
+  activeDiffProc = { proc, agentId };
+  ctx.setNotice(`Opened diff vs ${managerRef ?? "merge-base with main"} in ${tool}`, "info");
 
   // Report errors asynchronously, stripping newlines for single-line status bar display
   (async () => {
@@ -2344,6 +2359,7 @@ async function openDiffTool(
       ctx.setNotice(`Diff tool error: ${msg}`, "error");
     }
   })();
+  return proc;
 }
 
 export function handleHelp(ctx: ActionCtx) {

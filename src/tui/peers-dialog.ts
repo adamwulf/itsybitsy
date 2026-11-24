@@ -33,6 +33,7 @@ export interface PeersDialogService {
   sendRemoteMessage: import("../peers/service").PeerService["sendRemoteMessage"];
   fetchPane(peerId: string, target: PeerPaneTarget, lines: number): Promise<PeerPane>;
   runRemoteLifecycle(peerId: string, request: import("../peers/remote-lifecycle").RemoteLifecycleRequest): Promise<string>;
+  fetchAgentDiff: import("../peers/service").PeerService["fetchAgentDiff"];
   startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;
   openDialog(): void;
   closeDialog(): void;

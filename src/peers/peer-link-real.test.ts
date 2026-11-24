@@ -15,6 +15,7 @@ import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { resetUserHome, setUserHome } from "../home";
 import { makeAgent, waitFor } from "../test-utils";
 import { loadOrCreateIdentity } from "./identity";
+import { captureAgentDiff } from "./agent-diff";
 import { loadIroh, type Iroh } from "./iroh";
 import { listeningOrThrow } from "./test-pair-transport";
 import { generatePairCode } from "./pair-code";
@@ -96,6 +97,7 @@ function makeNetwork(iroh: Iroh) {
 
       captureAgent: (repo, id, lines) => captureAgentPane(agents, repo, id, lines),
       captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
+      captureDiff: (repo, id) => captureAgentDiff(agents, repo, id),
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
       loadIdentity: () => inHome(home, loadOrCreateIdentity),
@@ -302,6 +304,28 @@ test.skipIf(!Bun.which("tmux"))("reads a registered agent's tmux history over lo
     paneProbe.reset();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("opens an agent diff larger than the JSON reply limit over a paired loopback connection", async () => {
+  const net = makeNetwork(await loadIroh());
+  const agent = localAgent("worker", { worktree: false });
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", [agent]);
+  agent.repoPath = b.home;
+  await Bun.$`git init -qb main`.cwd(b.home).quiet();
+  await Bun.write(join(b.home, "tracked"), "before\n");
+  await Bun.$`git add tracked`.cwd(b.home).quiet();
+  await Bun.$`git -c user.name=test -c user.email=test@example.org commit -qm base`.cwd(b.home).quiet();
+  const base = (await Bun.$`git rev-parse HEAD`.cwd(b.home).text()).trim();
+  await Bun.write(join(b.home, "tracked"), "working tree\n".repeat(90_000));
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  const reply = await a.service.fetchAgentDiff(b.id, "app", "worker");
+  expect(reply.base).toBe(base);
+  expect(reply.patch.length).toBeGreaterThan(1_048_576);
+  expect(reply.patch.equals((await Bun.$`git diff --binary ${base}`.cwd(b.home).quiet()).stdout)).toBe(true);
+  expect(await a.service.fetchPane(b.id, { op: "coordinator-pane" }, 200)).toMatchObject({ text: "b coordinator" });
 });
 
 test("agents send text and two files in both directions over real paired endpoints", async () => {

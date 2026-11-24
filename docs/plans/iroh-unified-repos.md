@@ -354,6 +354,7 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
 19. **Remote lifecycle.** Start A’s dashboard from a human terminal outside tmux. Select a stopped test agent on B and press `R` to resume it. Use `m` to check and merge a commit with **Keep agent after merge** checked. Then press `x` and confirm retirement. Check the pending and completion notices on A, the action notices on B, and that the retired row disappears.
     - In a human terminal outside tmux on A, run `ib rehire B/<agent>` after the row disappears. Check that the agent returns on B. Pause it on B, then run `ib resume B/<repo>/<agent>`, `ib merge B/<agent> --keep --force`, `ib retire B/<repo>/<agent> --force` and `ib rehire B/<repo>/<agent>`. Verify each result on both machines.
     - Ask an agent on A to run `ib retire B/<agent> --force`. Check that it receives a refusal and B’s agent is still present.
+20. **Open a remote diff.** Configure `externalDiffTool` on A. In the shared repo, press `o` on a B agent with a committed change and an unstaged edit to a tracked file. Verify the tool opens on A and shows both changes. Press `o` on a B agent whose worktree matches its merge base. Verify A shows `No changes to show — diff is empty`.
 
 ## Cross-cutting checklist
 

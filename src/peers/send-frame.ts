@@ -26,6 +26,10 @@ type Bytes = Uint8Array | number[];
 interface ReadStream { read(limit: number): Promise<Bytes> }
 
 export function encodeSendHeader(header: SendHeader): Buffer {
+  return encodeFrameHeader(header);
+}
+
+export function encodeFrameHeader(header: object): Buffer {
   const json = JSON.stringify(header);
   const length = Buffer.byteLength(json);
   if (length > MAX_HEADER_BYTES) throw new Error(`Send header exceeds ${MAX_HEADER_BYTES} bytes`);
@@ -79,7 +83,7 @@ function validFile(value: unknown): value is SendHeader["files"][number] {
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
-async function readHeaderBytes(stream: ReadStream, size: number, options: FileBodyOptions): Promise<Buffer> {
+export async function readHeaderBytes(stream: ReadStream, size: number, options: FileBodyOptions): Promise<Buffer> {
   const buffer = Buffer.allocUnsafe(size);
   let offset = 0;
   while (offset < size) {
@@ -95,11 +99,14 @@ async function readHeaderBytes(stream: ReadStream, size: number, options: FileBo
 
 export async function decodeSendHeader(stream: ReadStream, options: FileBodyOptions = {}): Promise<SendHeader> {
   const prefix = await readHeaderBytes(stream, 4, options);
+  return parseSendHeader(await decodeFrameHeader(stream, prefix, options));
+}
+
+export async function decodeFrameHeader(stream: ReadStream, prefix: Buffer, options: FileBodyOptions): Promise<unknown> {
   const length = prefix.readUInt32BE();
   if (length > MAX_HEADER_BYTES) throw new Error(`Send header exceeds ${MAX_HEADER_BYTES} bytes`);
   const bytes = await readHeaderBytes(stream, length, options);
-  const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  return parseSendHeader(value);
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
 
 export function parseSendHeader(value: unknown): SendHeader {

@@ -1,6 +1,6 @@
 import { waitForIO } from "./send-frame";
 import { transferStagingRoot } from "../runtime-names";
-import { finishRecovery, sweepOutgoingDirectories } from "./transfer-owner";
+import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./transfer-owner";
 /**
  * The iroh endpoint inside `ib watch` (docs/plans/iroh-peering.md, "Process
  * model" and "Reconnection"; SPEC.md §20.3), the one pairing session it runs
@@ -94,7 +94,7 @@ import { detectAgentStates } from "../agents";
 import { newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
-import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerPane, type PeerPaneTarget, type PeerResponderDeps, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
+import { PEER_ALPN, requestAgentDiff, requestNewAgent, serveTrustedConnection, type PeerPane, type PeerPaneTarget, type PeerResponderDeps, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
 import { captureMarkedCoordinatorPane } from "../tmux-poller";
 import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator";
 import { stripAnsi } from "../parse-state";
@@ -146,6 +146,7 @@ export interface PeerServiceDeps {
   receiveMessage?: ReturnType<typeof createMessageReceiver>;
   captureCoordinator?: PeerResponderDeps["captureCoordinator"];
   captureAgent?: PeerResponderDeps["captureAgent"];
+  captureDiff?: PeerResponderDeps["captureDiff"];
   remoteStartDenial: string | null | Promise<string | null>;
   remoteLifecycle?: RemoteLifecycleDeps;
   remoteSpawn?: RemoteSpawnDeps;
@@ -176,11 +177,14 @@ export interface PeerServiceDeps {
  */
 export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = transferStagingRoot()): PeerServiceDeps {
   const poll = createPeerOutboxPoll();
+  let diffCleanup: Promise<void> | undefined;
   return {
     notice,
     pollOutbox: poll,
     recoverTransfers: async () => {
-      await finishRecovery([sweepOutgoingDirectories(recoveryRoot), poll.recover()]);
+      // Once on startup (or lock takeover). The attachment sweeps also run on a timer.
+      diffCleanup ??= sweepDiffCopies(recoveryRoot).catch(err => { diffCleanup = undefined; throw err; });
+      await finishRecovery([diffCleanup, sweepOutgoingDirectories(recoveryRoot), poll.recover()]);
     },
     receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,
@@ -710,6 +714,14 @@ export class PeerService {
     return this.poller.fetchPane(peerId, target, lines);
   }
 
+  async fetchAgentDiff(peerId: string, repo: string, id: string) {
+    if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
+    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    return requestAgentDiff(conn, repo, id, this.deps.setTimer);
+  }
+
   async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
     const [header, peer, name, body, options] = args;
     if (this.shuttingDown) throw new Error("Watcher shutting down");
@@ -1048,6 +1060,7 @@ export class PeerService {
           snapshot: this.deps.snapshot,
           captureCoordinator: this.deps.captureCoordinator,
           captureAgent: this.deps.captureAgent,
+          captureDiff: this.deps.captureDiff,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           log: this.deps.log,
         });

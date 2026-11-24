@@ -52,6 +52,7 @@ import {
 } from "../coordinator";
 import type { Agent, FlatEntry, RemoteEntry, PendingQuestion } from "../agents";
 import { agentWorktreePath } from "../agents";
+import { captureAgentDiff } from "../peers/agent-diff";
 import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from "../git-status";
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
@@ -542,7 +543,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "o: diff    m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -770,7 +771,7 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
  * The footer's remote hints (StatusBarComponent.remoteSelected) list these keys.
  */
 export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
-  if (data === "m" || data === "x" || data === "R") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
+  if (data === "o" || data === "m" || data === "x" || data === "R") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
   switch (data) {
     case "j": case "k": case "J": case "K":
     case "\t": case "\x1b[Z":
@@ -4456,6 +4457,7 @@ export async function launchDashboard(): Promise<void> {
     peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [],
       dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message));
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
+  peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
   const peerService = new PeerService(peerDeps);
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:

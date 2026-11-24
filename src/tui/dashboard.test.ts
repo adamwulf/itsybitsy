@@ -44,6 +44,7 @@ import * as settings from "../config";
 import * as agentActions from "./agent-actions";
 import * as ghostty from "../ghostty";
 import * as paneManager from "./pane-manager";
+import * as runtimeNames from "../runtime-names";
 
 // Many tests below simulate resize keystrokes, which call persistLayout() and
 // schedule debounced layout saves. Route them to a temp file so a test run can
@@ -9210,6 +9211,7 @@ class FakePeerService implements PeersDialogService {
   cancelReceipt = mock((_id: string) => {});
   sendRemoteMessage = mock<PeersDialogService["sendRemoteMessage"]>(async (_id, header) => header.id);
   fetchPane = mock(async (_peerId: string, _target: import("../peers/peer-link").PeerPaneTarget, _lines: number) => ({ state: "running", text: "peer capture" }));
+  fetchAgentDiff = mock<PeersDialogService["fetchAgentDiff"]>(async () => { throw new Error("No changes to show — diff is empty"); });
   remoteStartDenial: string | null = null;
   runRemoteLifecycle: PeersDialogService["runRemoteLifecycle"] = async () => { throw new Error("Unexpected lifecycle request"); };
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
@@ -11235,6 +11237,69 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toContain("Agent is already running");
   });
 
+  test("o opens only a remote agent diff, requiring the tool, human caller and local registration", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.diffTool = undefined;
+    dashboard.handleInput("o");
+    expect(dashboard.notice).toContain("No diff tool configured");
+    dashboard.diffTool = "diff-tool";
+    service.remoteStartDenial = "Human caller required";
+    dashboard.handleInput("o");
+    expect(dashboard.notice).toBe("Human caller required");
+    service.remoteStartDenial = null;
+    dashboard.handleInput("o");
+    expect(dashboard.notice).toBe("Open diff needs itsybitsy on this machine");
+    expect(service.fetchAgentDiff).not.toHaveBeenCalled();
+    dashboard.repos = [{ name: "ITSYBITSY", path: "/local/app" }];
+    dashboard.handleInput("o");
+    await waitFor(() => dashboard.notice === "No changes to show — diff is empty");
+    expect(service.fetchAgentDiff.mock.calls).toEqual([[PEER_B, "itsybitsy", "worker-abc"]]);
+    selectByKey(dashboard, repoKey("other-repo"));
+    expect(dashboard.refuseOnRemoteRow("o")).toBe(true);
+  });
+
+  test("remote o runs the configured tool in its owned checkout with the merge base as its argument", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const root = await mkdtemp(join(tmpdir(), "remote-tool-"));
+    const staging = join(root, "staging");
+    const stage = spyOn(runtimeNames, "transferStagingRoot").mockReturnValue(staging);
+    try {
+      const repo = join(root, "local");
+      await mkdir(repo);
+      await Bun.$`git init -qb main`.cwd(repo).quiet();
+      await Bun.write(join(repo, "tracked"), "before\n");
+      await Bun.$`git add tracked`.cwd(repo).quiet();
+      await Bun.$`git -c user.name=test -c user.email=test@example.org commit -qm base`.cwd(repo).quiet();
+      const base = (await Bun.$`git rev-parse HEAD`.cwd(repo).text()).trim();
+      await Bun.write(join(repo, "tracked"), "after\n");
+      const patch = (await Bun.$`git diff --binary HEAD`.cwd(repo).quiet()).stdout;
+      await Bun.$`git restore tracked`.cwd(repo).quiet();
+      service.fetchAgentDiff.mockResolvedValue({ base, patch });
+      dashboard.repos = [{ name: "itsybitsy", path: repo }];
+      const tool = join(root, "tool");
+      await writeFile(tool, '#!/bin/bash\nprintf "%s\\n" "$1" "$$" > ../launched\nexec sleep 60\n', { mode: 0o700 });
+      dashboard.diffTool = tool;
+      dashboard.handleInput("o");
+      await waitFor(() => dashboard.notice === `Opened diff vs merge-base with main in ${tool}` && !agentActions.getDiffToolLaunching());
+      const [name] = await readdir(join(staging, "diffs"));
+      const dir = join(staging, "diffs", name!);
+      await waitFor(() => Bun.file(join(dir, "launched")).exists());
+      const owner = await Bun.file(join(dir, "owner.json")).json();
+      expect((await Bun.file(join(dir, "launched")).text()).trim().split("\n")).toEqual([base, String(owner.pid)]);
+      expect(owner.pid).toBe(agentActions.getActiveDiffProc()?.proc.pid);
+      expect(await Bun.file(join(dir, "repo/tracked")).text()).toBe("after\n");
+      expect(await Bun.file(join(repo, "tracked")).text()).toBe("before\n");
+    } finally {
+      const active = agentActions.getActiveDiffProc();
+      agentActions.killActiveDiffProc();
+      await active?.proc.exited;
+      stage.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("the guard refuses action keys on a remote row with the notice, and none of their handlers run", () => {
     const { dashboard } = setup();
     selectByKey(dashboard, WORKER_KEY);
@@ -11243,7 +11308,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["a", ".", "t", "!", "S", "o"]) {
+      for (const key of ["a", ".", "t", "!", "S", "O"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);

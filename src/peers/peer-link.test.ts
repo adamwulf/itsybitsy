@@ -208,9 +208,15 @@ describe("decodeAgentsReply", () => {
     expect(decodeAgentsReply(encodeAgentsReply(sent))).toEqual(sent);
     const absent = decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo" }] }));
     expect(absent.repos).toEqual([{ registryName: "foo", displayName: "Foo", remoteUrl: null, relPath: null }]);
-    // The URL is cleaned like any other field; it is checked against the allowlist only at clone time.
-    const cleaned = decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", remoteUrl: "ext::sh\x1b[31m‮" }] }));
-    expect(cleaned.repos[0]!.remoteUrl).toBe("ext::sh[31m");
+    // A URL that is empty or carries a control or format character is dropped,
+    // not cleaned into another URL. Anything else is kept as sent: the
+    // allowlist checks it only at clone time.
+    const urlOf = (remoteUrl: string) =>
+      decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", remoteUrl }] })).repos[0]!.remoteUrl;
+    for (const dropped of ["", "ext::sh\x1b[31m", "git@host:o/r\n", "git@host:o/r\0", "https://h/o/‮r", "git@host:o/​r"]) {
+      expect(urlOf(dropped)).toBeNull();
+    }
+    for (const kept of ["git@github.com:owner/Foo.git", "ext::ssh", "https://h/o/r"]) expect(urlOf(kept)).toBe(kept);
     for (const bad of [{ remoteUrl: 1 }, { remoteUrl: {} }, { relPath: ["a"] }, { relPath: false }]) {
       expect(() => decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", ...bad }] })))
         .toThrow(new PeerProtocolError("repo 0 in the reply is malformed"));

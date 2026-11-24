@@ -409,7 +409,7 @@ export function decodeAgentsReply(bytes: Uint8Array): PeerSnapshot {
     return {
       registryName: cleanField(entry.registryName),
       displayName: cleanField(entry.displayName),
-      remoteUrl: remoteUrl === null ? null : cleanField(remoteUrl),
+      remoteUrl: safeRemoteUrl(remoteUrl),
       relPath: safeRelPath(relPath),
     };
   });
@@ -425,6 +425,15 @@ export function decodeAgentsReply(bytes: Uint8Array): PeerSnapshot {
     throw new PeerProtocolError("reply has malformed coordinator state");
   }
   return { repos, agents, coordinator: { state: cleanRemoteText(coordinator.state) }, questions };
+}
+
+/**
+ * A peer's `remoteUrl`, or null when it is empty or carries any control or
+ * format character: such a URL is dropped, not cleaned into a different one.
+ * The clone checks what is left against its allowlist (SPEC §20.5).
+ */
+function safeRemoteUrl(remoteUrl: string | null): string | null {
+  return remoteUrl === null || remoteUrl === "" || /[\p{Cc}\p{Cf}]/u.test(remoteUrl) ? null : remoteUrl;
 }
 
 /** Longest `relPath` kept from the other side. */

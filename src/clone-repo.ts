@@ -8,7 +8,7 @@
  * its own.
  */
 
-import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { mkdir, realpath, stat } from "fs/promises";
 import { SpawnContext } from "./types";
 import { readConfig } from "./config";
@@ -55,18 +55,31 @@ export function cloneDestination(cloneRoot: string, registryName: string, relPat
 
 /**
  * The URLs "Clone here" passes to git: `ssh://…`, `https://…`, and scp-style
- * `user@host:path`. Everything else is refused, including `ext::` and
- * `file://`, local paths, plain `http://`, anything starting with `-`, and any
- * whitespace or control character. A host may not start with `-` either.
+ * `[user@]host:path` (an SSH-config alias such as `gh-work:org/repo.git` has
+ * no user). Everything else is refused: `ext::` and every other
+ * `<transport>::` form, `file://` and any other `scheme://`, local paths,
+ * anything starting with `-`, and any whitespace, backslash or control
+ * character. Neither the authority of an ssh/https URL (userinfo included)
+ * nor a host may start with `-`, and an scp-style host has no `/` or `@`.
  */
 export function isAllowedCloneUrl(url: string): boolean {
-  if (url === "" || url.startsWith("-") || /[\s\p{Cc}]/u.test(url)) return false;
+  if (url === "" || url.startsWith("-") || /[\s\\\p{Cc}]/u.test(url)) return false;
   for (const scheme of ["ssh://", "https://"]) {
     if (!url.startsWith(scheme)) continue;
-    const host = url.slice(scheme.length).split("/")[0]!.replace(/^[^@]*@/, "");
-    return host !== "" && !host.startsWith("-");
+    const authority = url.slice(scheme.length).split("/")[0]!;
+    const host = authority.replace(/^[^@]*@/, "");
+    return host !== "" && !authority.startsWith("-") && !host.startsWith("-");
   }
-  return /^[^@:/]+@[^@:/-][^@:/]*:.+$/.test(url);
+  // Any other scheme:// is a URL git would not read as scp-style.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return false;
+  return /^(?:[^@:/]+@)?[^@:/-][^@:/]*:(?!:).+$/.test(url);
+}
+
+/** Why `url` will not be cloned, or null when {@link isAllowedCloneUrl} allows it. */
+export function cloneUrlRefusal(url: string): string | null {
+  return isAllowedCloneUrl(url)
+    ? null
+    : `Will not clone ${JSON.stringify(url)}: only ssh://, https:// and [user@]host:path URLs are allowed`;
 }
 
 /**
@@ -176,11 +189,10 @@ export interface CloneRepoResult {
  * cannot be registered is kept and the result names it.
  */
 export async function cloneRepo({ url, dest, registryName }: { url: string; dest: string; registryName: string }): Promise<CloneRepoResult> {
-  if (!isAllowedCloneUrl(url)) {
-    return { ok: false, message: `Will not clone ${JSON.stringify(url)}: only ssh://, https:// and user@host:path URLs are allowed` };
-  }
+  const refusal = cloneUrlRefusal(url);
+  if (refusal) return { ok: false, message: refusal };
   if (!dest.trim()) return { ok: false, message: "The destination folder is empty" };
-  const target = expandHome(dest.trim());
+  const target = await onDiskSpelling(expandHome(dest.trim()));
 
   let entryError: string | null;
   try {
@@ -210,6 +222,25 @@ export async function cloneRepo({ url, dest, registryName }: { url: string; dest
   const clone = await runGit(["git", "clone", "--", url, target]);
   if (!clone.ok) return { ok: false, message: `git clone failed: ${clone.output}` };
   return register(target, registryName, "Cloned and added", `Cloned into ${target}`);
+}
+
+/**
+ * `path` with its longest existing prefix spelled as on disk (realpath). On a
+ * case-insensitive volume (APFS) a typed `myapp` can name an existing `MyApp`;
+ * the registry must hold the real spelling, which is what git and the exact
+ * path lookups against the git root see. Folders still to be created keep
+ * the typed spelling.
+ */
+async function onDiskSpelling(path: string): Promise<string> {
+  const missing: string[] = [];
+  for (let dir = path; ; dir = dirname(dir)) {
+    try {
+      return join(await realpath(dir), ...missing.reverse());
+    } catch {
+      if (dirname(dir) === dir) return path;
+      missing.push(basename(dir));
+    }
+  }
 }
 
 /** addRepo, with `done` naming what happened on success and `onDisk` on a failure. */

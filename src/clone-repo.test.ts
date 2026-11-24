@@ -1,7 +1,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
-import { mkdirSync } from "fs";
-import { chmod, mkdtemp, mkdir, readdir, rm, symlink } from "fs/promises";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "fs";
+import { chmod, mkdtemp, mkdir, readdir, realpath, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
   cloneDestination,
@@ -20,6 +20,17 @@ import { setUserHome, resetUserHome } from "./home";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import type { SpawnFn } from "./types";
 
+/** Whether the temp volume ignores case (the APFS default), so a typed `myapp` names an existing `MyApp`. */
+const caseInsensitiveTmp = (() => {
+  const dir = mkdtempSync(join(tmpdir(), "ib-case-probe-"));
+  try {
+    mkdirSync(join(dir, "Probe"));
+    return existsSync(join(dir, "probe"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
 describe("cloneDestination", () => {
   test("mirrors the peer's folders under the clone root, in a folder named after the registry name", () => {
     expect(cloneDestination("/Users/me/Developer", "foo", "swift-packages/Foo")).toBe("/Users/me/Developer/swift-packages/foo");
@@ -37,6 +48,10 @@ describe("isAllowedCloneUrl", () => {
     "ssh://host.example:2222/srv/repo",
     "https://github.com/owner/repo.git",
     "https://token@github.com/owner/repo",
+    // User-less scp-style: an SSH-config alias, or a host with the user in ~/.ssh/config.
+    "gh-work:org/repo.git",
+    "host.example:path/to/repo",
+    "localhost:/srv/repo.git",
   ])("allows %p", (url) => {
     expect(isAllowedCloneUrl(url)).toBe(true);
   });
@@ -58,12 +73,26 @@ describe("isAllowedCloneUrl", () => {
     "-x@host:path",
     "ssh://-oProxyCommand=touch/repo",
     "ssh://git@-oProxyCommand=x/repo",
+    // The authority, userinfo included, may not start with "-" either.
+    "ssh://-oProxyCommand=x@host/repo",
+    "https://-x@host/repo",
     "ssh://",
     "https:///path",
     "git@-host:path",
+    "-host:path",
     "git@host:",
-    "host:path",
+    "host:",
+    // <transport>::<address> remote helpers, and other schemes, stay out.
+    "fd::17",
+    "host::path",
+    "git+ssh://host/repo",
+    "ssh+git://host/repo",
+    // A slash or an "@" before the colon is not a host.
+    "./dir:path",
+    "dir/sub:path",
+    "a@b@host:path",
     "git@github.com:owner/repo name",
+    "host:owner\\repo",
     "https://github.com/owner/repo\n",
     "https://github.com/owner/\x1b[31mrepo",
     "git@github.com:owner/repo\0",
@@ -193,7 +222,8 @@ describe("with a temp home", () => {
   });
 
   beforeEach(async () => {
-    baseDir = await mkdtemp(join(tmpdir(), "ib-clone-repo-" + crypto.randomUUID() + "-"));
+    // Real path: the clone registers the on-disk spelling (/var is /private/var on macOS).
+    baseDir = await realpath(await mkdtemp(join(tmpdir(), "ib-clone-repo-" + crypto.randomUUID() + "-")));
     const homeDir = join(baseDir, ".itsybitsy");
     await mkdir(homeDir, { recursive: true });
     setUserHome(baseDir);
@@ -314,6 +344,26 @@ describe("with a temp home", () => {
     expect((await loadRegistry()).repos).toEqual([]);
   });
 
+  test.if(caseInsensitiveTmp)("a typed myapp that names an existing MyApp registers the on-disk spelling", async () => {
+    await mkdir(join(root, "MyApp", ".git"), { recursive: true });
+    cloneRepoSpawnCtx.set(workingGit("git@github.com:owner/myapp.git"));
+    const result = await cloneRepo({ url: "git@github.com:owner/myapp.git", dest: join(root, "myapp"), registryName: "myapp" });
+    const real = join(root, "MyApp");
+    expect(result).toEqual({ ok: true, message: `Added the existing clone: myapp (${real})`, path: real });
+    expect(calls.map((c) => c.cmd)).toEqual([["git", "-C", real, "config", "--get", "remote.origin.url"]]);
+    expect((await loadRegistry()).repos).toEqual([{ path: real, name: "myapp" }]);
+  });
+
+  test.if(caseInsensitiveTmp)("a new clone under an existing folder spelled differently uses that folder's spelling", async () => {
+    await mkdir(join(root, "Swift"));
+    const url = "git@github.com:owner/foo.git";
+    const result = await cloneRepo({ url, dest: join(root, "swift", "foo"), registryName: "foo" });
+    const real = join(root, "Swift", "foo");
+    expect(result.path).toBe(real);
+    expect(calls.filter((c) => c.cmd[1] === "clone").map((c) => c.cmd)).toEqual([["git", "clone", "--", url, real]]);
+    expect((await loadRegistry()).repos).toEqual([{ path: real, name: "foo" }]);
+  });
+
   test("an existing folder that is not a git repo is refused without running git", async () => {
     const dest = join(root, "foo");
     await mkdir(dest);
@@ -337,7 +387,7 @@ describe("with a temp home", () => {
 
   test("a URL outside the allowlist is refused without running git", async () => {
     const result = await cloneRepo({ url: "ext::sh -c touch% /tmp/pwned", dest: join(root, "foo"), registryName: "foo" });
-    expect(result).toEqual({ ok: false, message: 'Will not clone "ext::sh -c touch% /tmp/pwned": only ssh://, https:// and user@host:path URLs are allowed' });
+    expect(result).toEqual({ ok: false, message: 'Will not clone "ext::sh -c touch% /tmp/pwned": only ssh://, https:// and [user@]host:path URLs are allowed' });
     expect(calls).toEqual([]);
     expect(await readdir(root)).toEqual([]);
   });

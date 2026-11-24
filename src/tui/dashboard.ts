@@ -538,7 +538,9 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       const markHint = this.remoteRepoSelected ? "    .: pin" : this.remoteAgentSelected ? "    .: favorite" : "";
-      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${this.remoteAgentSelected ? `${qLabel}    ` : ""}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
+      // `q` works on every remote agent row, whatever its type (isRemoteAllowedKey).
+      const questionsHint = this.remoteRepoSelected || this.remoteCoordinatorVisible ? "" : `${qLabel}    `;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${questionsHint}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "o: diff    m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${markHint}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -2202,7 +2204,8 @@ export class DashboardComponent implements Component {
   }
 
   private scrollOutput(up: boolean): void {
-    if (remoteMessageTarget(this.remoteSelection)) {
+    // A remote agent's QUESTIONS hide its capture: scroll the list, as for a local agent.
+    if (remoteMessageTarget(this.remoteSelection) && !this.remoteQuestionsVisible) {
       this.remotePane.scroll(up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP);
       // As on a local agent, a remote agent's right pane (INITIAL PROMPT) scrolls
       // with the output. A peer coordinator has no right pane.
@@ -2364,7 +2367,8 @@ export class DashboardComponent implements Component {
 
   private handleCommandPalette() {
     // `key` is the command's own key, which the read-only guard checks (a
-    // mode jump has none and is refused on a remote row, as `d`/`e`/`q` are).
+    // mode jump has none and is refused on a remote row, as `d`/`e` are;
+    // QUESTIONS carries `q`, which a remote agent row allows).
     type Command = { label: string; key?: string; action: () => void };
     const commands: Command[] = [
       { label: "AGENT LOG — show agent log", action: () => this.jumpToMode("AGENT LOG") },
@@ -2376,7 +2380,7 @@ export class DashboardComponent implements Component {
       { label: "ERRORS — show errors", action: () => this.jumpToMode("ERRORS") },
       { label: "DIFF — run ib diff", action: () => this.jumpToMode("DIFF", true) },
       { label: "STATUS — run ib status", action: () => this.jumpToMode("STATUS", true) },
-      { label: "QUESTIONS — show pending questions", action: () => this.jumpToMode("QUESTIONS") },
+      { label: "QUESTIONS — show pending questions", key: "q", action: () => this.jumpToMode("QUESTIONS") },
       { label: "send message — s", key: "s", action: () => agentActions.handleSend(this) },
       { label: "merge agent — m", key: "m", action: () => agentActions.handleMerge(this) },
       { label: "retire agent — x", key: "x", action: () => agentActions.handleRetire(this) },

@@ -12384,6 +12384,84 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(listed(dashboard)).toEqual(["local:agent-1", "Laptop B:worker-abc"]);
     });
 
+    /** Open the answer dialog for the selected remote agent's question and press Send on `draft`. */
+    function submitAnswer(dashboard: DashboardComponent, draft: string) {
+      dashboard.handleInput("q");
+      dashboard.handleInput("\r");
+      const dialog = assertDialog(dashboard.dialog, "textarea");
+      for (const ch of draft) dashboard.handleInput(ch);
+      dashboard.handleInput("\x1b[Z");
+      dashboard.handleInput("\r");
+      return dialog;
+    }
+
+    test("a failed answer send keeps the dialog and its draft, and acknowledges nothing", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      service.sendRemoteMessage.mockRejectedValueOnce(new Error("Laptop B is disconnected"));
+      const dialog = submitAnswer(dashboard, "yes");
+      await waitFor(() => dashboard.notice === "Laptop B is disconnected" && !dialog.inFlight);
+      expect(service.sendRemoteMessage).toHaveBeenCalledTimes(1);
+      expect(dashboard.dialog).toBe(dialog);
+      expect(dialog.buffer.getText()).toBe("yes");
+      expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      expect(listed(dashboard)).toContain("Laptop B:worker-abc");
+    });
+
+    test("Esc while the answer is sending cancels it, keeps the draft and acknowledges nothing", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) =>
+        new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason))));
+      const dialog = submitAnswer(dashboard, "yes");
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      expect(dialog.inFlight).toBe(true);
+      dashboard.handleInput("\x1b");
+      await waitFor(() => dashboard.notice === "Send cancelled" && !dialog.inFlight);
+      expect(dashboard.dialog).toBe(dialog);
+      expect(dialog.buffer.getText()).toBe("yes");
+      expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      expect(listed(dashboard)).toContain("Laptop B:worker-abc");
+    });
+
+    test("; and l scroll a remote agent's questions, not its hidden capture", () => {
+      const { dashboard } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      const pane = (dashboard as any).remotePane;
+      dashboard.handleInput("q");
+      dashboard.handleInput(";");
+      expect(pane.scrollBack).toBe(0);
+      expect(dashboard.rightPane.scrollOffset).toBeGreaterThan(0);
+      dashboard.handleInput("l");
+      expect(dashboard.rightPane.scrollOffset).toBe(0);
+      // In the split view `;` scrolls the capture again.
+      dashboard.handleInput("n");
+      dashboard.handleInput(";");
+      expect(pane.scrollBack).toBeGreaterThan(0);
+    });
+
+    test("the palette's QUESTIONS entry passes the guard as q: allowed on a remote agent, refused on a remote header", () => {
+      const { dashboard } = setupQuestions();
+      const runQuestions = () => {
+        dashboard.handleInput("/");
+        const palette = assertDialog(dashboard.dialog, "fuzzy");
+        palette.onSelect(palette.allItems.findIndex((item) => item.startsWith("QUESTIONS")));
+      };
+      selectByKey(dashboard, WORKER_KEY);
+      resetNotice(dashboard);
+      runQuestions();
+      expect(dashboard.notice).toBeNull();
+      expect(dashboard.currentMode).toBe("QUESTIONS");
+      expect(screen(dashboard)).toContain("Laptop B/worker-abc: worker-abc asks?");
+
+      dashboard.handleInput("n");
+      const mode = dashboard.currentMode;
+      selectByKey(dashboard, repoKey("other-repo"));
+      runQuestions();
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(dashboard.currentMode).toBe(mode);
+    });
+
     test("a local agent with the peer agent's id and path never gets the peer's question", () => {
       const { dashboard, local } = setupQuestions("/repos/local");
       expect(local.repoPath).toBe("/repos/local");

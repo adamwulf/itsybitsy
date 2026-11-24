@@ -14,6 +14,7 @@
 
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { hasAttachedClient } from "../tmux-poller";
 import { PINNED_TMUX_WIDTH } from "../tui/widths";
 import { tmuxSessionTarget } from "../validation";
 import type { PairStream } from "./pairing";
@@ -330,6 +331,8 @@ export function spawnPtyProcess(argv: string[], size: TerminalSize, onData: (byt
 export interface TmuxAttachDeps {
   /** Run one tmux command and wait for it; failures are ignored by the caller. */
   runTmux(args: string[]): Promise<unknown>;
+  /** Whether any tmux client is still attached to the session. */
+  hasClients(session: string): Promise<boolean>;
   spawnPty(argv: string[], size: TerminalSize, onData: (bytes: Uint8Array) => void): TerminalProcess;
 }
 
@@ -338,14 +341,17 @@ const defaultTmuxAttachDeps: TmuxAttachDeps = {
     const proc = Bun.spawn(["tmux", ...args], { stdout: "ignore", stderr: "ignore" });
     return proc.exited;
   },
+  hasClients: hasAttachedClient,
   spawnPty: spawnPtyProcess,
 };
 
 /**
  * `tmux attach-session` on `session`, sized like the Ghostty attach
  * (src/ghostty.ts): `window-size latest` first, so the window takes the
- * client's size, and the window is pinned back to PINNED_TMUX_WIDTH once the
- * client exits, so the dashboard's capture keeps its width.
+ * client's size. Once the client exits and no other client (a local Ghostty
+ * attach, another remote one) is left, the window is pinned back to
+ * PINNED_TMUX_WIDTH, so the dashboard's capture keeps its width; like the
+ * dashboard's own re-pin, it waits for the last client to go.
  */
 export async function spawnTmuxAttach(
   session: string, size: TerminalSize, onData: (bytes: Uint8Array) => void, deps: TmuxAttachDeps = defaultTmuxAttachDeps,
@@ -356,7 +362,9 @@ export async function spawnTmuxAttach(
   return {
     ...proc,
     exited: proc.exited.then(async (code) => {
-      await deps.runTmux(["resize-window", "-t", target, "-x", String(PINNED_TMUX_WIDTH)]).catch(() => {});
+      if (!await deps.hasClients(session).catch(() => true)) {
+        await deps.runTmux(["resize-window", "-t", target, "-x", String(PINNED_TMUX_WIDTH)]).catch(() => {});
+      }
       return code;
     }),
   };

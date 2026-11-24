@@ -269,22 +269,38 @@ describe("spawnPtyProcess", () => {
 });
 
 describe("spawnTmuxAttach", () => {
-  test("sizes the window to the client, attaches, and re-pins the window once the client exits", async () => {
+  async function attach(otherClients: boolean) {
     const calls: string[][] = [];
     const exited = Promise.withResolvers<number | null>();
     const proc = await spawnTmuxAttach("itsybitsy-app-w1", { cols: 90, rows: 20 }, () => {}, {
       runTmux: async (args) => { calls.push(["tmux", ...args]); },
+      hasClients: async (session) => { calls.push(["has-clients", session]); return otherClients; },
       spawnPty: (argv, size) => {
         calls.push([...argv, `${size.cols}x${size.rows}`]);
         return { write: () => {}, resize: () => {}, kill: () => {}, exited: exited.promise };
       },
     });
+    return { calls, proc, exited };
+  }
+
+  test("sizes the window to the client, attaches, and re-pins the window once the last client exits", async () => {
+    const { calls, proc, exited } = await attach(false);
     expect(calls).toEqual([
       ["tmux", "set-option", "-t", "=itsybitsy-app-w1:", "window-size", "latest"],
       ["tmux", "attach-session", "-t", "=itsybitsy-app-w1:", "90x20"],
     ]);
     exited.resolve(0);
     expect(await proc.exited).toBe(0);
-    expect(calls[2]).toEqual(["tmux", "resize-window", "-t", "=itsybitsy-app-w1:", "-x", String(PINNED_TMUX_WIDTH)]);
+    expect(calls.slice(2)).toEqual([
+      ["has-clients", "itsybitsy-app-w1"],
+      ["tmux", "resize-window", "-t", "=itsybitsy-app-w1:", "-x", String(PINNED_TMUX_WIDTH)],
+    ]);
+  });
+
+  test("leaves the window sized while another client is still attached", async () => {
+    const { calls, proc, exited } = await attach(true);
+    exited.resolve(0);
+    expect(await proc.exited).toBe(0);
+    expect(calls.slice(2)).toEqual([["has-clients", "itsybitsy-app-w1"]]);
   });
 });

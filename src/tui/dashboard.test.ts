@@ -11947,13 +11947,13 @@ describe("Unified peer repos in the Agents tree", () => {
       resetNotice(dashboard);
       dashboard.handleInput("C");
       await waitFor(() => opened.length === 1, { message: "Ghostty opened" });
-      const session = `ib-remote-${PEER_B.slice(0, 10)}-worker-abc`;
+      const session = `ib-remote-${PEER_B.slice(0, 10)}-itsybitsy-worker-abc`;
       expect(calls).toEqual([
         ["has-session", "-t", `=${session}`],
         ["new-session", "-d", "-s", session, "ib", "peer", "attach", `${PEER_B}/itsybitsy/worker-abc`],
       ]);
       expect(opened).toEqual([session]);
-      await waitFor(() => dashboard.notice === "Opened Laptop B/worker-abc in Ghostty", { message: "notice" });
+      await waitFor(() => dashboard.notice === "Opened Laptop B/itsybitsy/worker-abc in Ghostty", { message: "notice" });
 
       selectByKey(dashboard, repoKey("other-repo"));
       resetNotice(dashboard);

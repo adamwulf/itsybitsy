@@ -3,8 +3,8 @@
  * running `ib peer attach` on that agent, opened in Ghostty the way `C` opens
  * a local agent's session (src/ghostty.ts).
  *
- * The session is named `ib-remote-<peer short id>-<agent>`, outside the
- * `itsybitsy-` prefix, so orphan cleanup never takes it for an agent's. When
+ * The session is named `ib-remote-<peer short id>-<repo>-<agent>`, outside
+ * the `itsybitsy-` prefix, so orphan cleanup never takes it for an agent's. When
  * it already exists (the window was closed but `ib peer attach` still runs)
  * `C` opens it again instead of starting a second attach. It ends when `ib
  * peer attach` exits.
@@ -27,8 +27,10 @@ export const terminalWindowCtx = new InjectionContext<TerminalWindowDeps>({
   openInGhostty,
 });
 
-export function remoteTerminalSession(peerId: string, agent: string): string {
-  return `ib-remote-${shortPeerId(peerId)}-${agent}`;
+/** Agent ids repeat across repos, so the repo is part of the name (characters outside `[\w-]` as `_`). */
+export function remoteTerminalSession(peerId: string, repo: string, agent: string): string {
+  const safeRepo = repo.replace(/[^\w-]/g, "_");
+  return `ib-remote-${shortPeerId(peerId)}-${safeRepo ? `${safeRepo}-` : ""}${agent}`;
 }
 
 export interface RemoteTerminalRow {
@@ -43,9 +45,11 @@ export interface RemoteTerminalRow {
 export async function openRemoteTerminal(row: RemoteTerminalRow, deps: TerminalWindowDeps = terminalWindowCtx.fn): Promise<{ ok: boolean; message: string }> {
   // The id and repo come from the peer: the session name must match
   // openInGhostty's /^[\w-]+$/, and the target must parse as three segments.
+  // A dotted repo-coordinator id is refused too, as the Ghostty attach refuses its session name.
   if (!isValidAgentId(row.agent)) return { ok: false, message: "Invalid remote agent id" };
-  const session = remoteTerminalSession(row.peerId, row.agent);
-  const repo = row.repo.length > 0 && !/[/\p{Cc}\p{Cf}]/u.test(row.repo) ? `${row.repo}/` : "";
+  const repoName = row.repo.length > 0 && !/[/\p{Cc}\p{Cf}]/u.test(row.repo) ? row.repo : "";
+  const session = remoteTerminalSession(row.peerId, repoName, row.agent);
+  const repo = repoName ? `${repoName}/` : "";
   try {
     if (await deps.runTmux(["has-session", "-t", `=${session}`]) !== 0) {
       // Several arguments: tmux runs `ib` directly, never through a shell.
@@ -54,7 +58,7 @@ export async function openRemoteTerminal(row: RemoteTerminalRow, deps: TerminalW
     }
     const opened = await deps.openInGhostty(session);
     if (!opened.ok) return { ok: false, message: `${opened.message}; attach with: tmux attach -t ${session}` };
-    return { ok: true, message: `Opened ${row.peerName}/${row.agent} in Ghostty` };
+    return { ok: true, message: `Opened ${row.peerName}/${repo}${row.agent} in Ghostty` };
   } catch (err) {
     return { ok: false, message: `Remote terminal: ${err instanceof Error ? err.message : String(err)}` };
   }

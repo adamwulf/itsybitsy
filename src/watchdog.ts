@@ -1601,9 +1601,8 @@ export function resetPerAgentReadState(): void {
  * imports `drainOutbox` from ib-commands (lazy to avoid a static import cycle —
  * ib-commands imports nothing from watchdog at module load, but the watchdog's
  * other helpers already import from ib-commands, so keep this symmetric with
- * the existing lazy `notifySpawner` import). The watchdog leaves
- * `steal: false` (it just retries next tick) so a live inline sender's lock is
- * never stolen out from under it. Returns void — the watchdog ignores the
+ * the existing lazy `notifySpawner` import). The watchdog processes one batch per tick
+ * and can reclaim an aged lock whose owner is proven dead. Returns void — the watchdog ignores the
  * delivery result; failures stay enqueued for the next drain.
  */
 let perAgentDrainFn: (agent: Agent, agentDir: string) => Promise<void> = async (agent, agentDir) => {

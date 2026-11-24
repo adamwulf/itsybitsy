@@ -358,8 +358,7 @@ export interface AcquireLockOpts {
   backoffMs?: number;
   /**
    * If true and the held lock is old enough and its owner is dead, steal
-   * it. The inline fallback sets this so a crashed holder can't wedge delivery
-   * forever; the watchdog leaves it false (it just retries next tick).
+   * it. Both watchdog and inline drainers use this to recover after a crash.
    */
   steal?: boolean;
   /** Age past which a lock is considered stale and stealable. Default 30000. */

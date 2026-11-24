@@ -1,13 +1,13 @@
 import { localAttachmentVolume } from "./peers/local-attachments";
 import { test, expect, describe, beforeEach, afterEach, beforeAll, afterAll, mock, spyOn, setDefaultTimeout } from "bun:test";
 import { join } from "path";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "./home";
 import { saveRegistry } from "./registry";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { claudeUsageFromRecord, readClaudeUsage, recordClaudeRateLimits, type ClaudeRateLimits } from "./claude-rate-limits";
-import { agentOutboxDir, OUTBOX_FILENAME, readOutbox } from "./outbox";
+import { agentOutboxDir, enqueueOutbox, outboxLockPath, OUTBOX_FILENAME, readOutbox } from "./outbox";
 import { makeAgent, makeSpawnResult, waitFor } from "./test-utils";
 import type { Agent } from "./agents";
 import type { AgentState } from "./parse-state";
@@ -3371,6 +3371,31 @@ describe("runPerAgentWatchdog", () => {
     resetPerAgentOutboxWatch();
     resetPerAgentSpawnBroker();
     clearAllAgentsCache();
+  });
+
+  test("a replacement watchdog drains a queue left locked by a dead owner", async () => {
+    const repo = join(outboxHome, "repo");
+    const target = makeAgent({ repoPath: repo, id: "review" });
+    const dir = agentOutboxDir(target);
+    await enqueueOutbox(dir, { message: "waiting for delivery", fromAgent: "@watchdog", raw: false });
+    const lock = outboxLockPath(dir);
+    await Bun.write(lock, "2147483647:1700000000:dead-owner");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+
+    const typed: string[] = [];
+    resetPerAgentDrain();
+    setPerAgentReadMeta(async () => ({ meta: target.meta }));
+    setPerAgentReadState(async () => "running");
+    setPerAgentSleep(async () => { worktreeExists = false; });
+    setSendSpawnRunner(cmd => {
+      if (cmd.includes("-l")) typed.push(cmd.at(-1)!);
+      return makeSpawnResult();
+    });
+
+    await runPerAgentWatchdog(target.id, repo);
+    expect(typed).toEqual(["[sent by watchdog]: waiting for delivery"]);
+    expect(await readOutbox(dir)).toEqual([]);
   });
 
   test.each([undefined, "spawn-host/original-registration/review"])("watchdog drains a newly queued send between polls (stored key %p)", async (key) => {

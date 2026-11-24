@@ -55,7 +55,6 @@ import {
   registeredQueueRepo,
   queueDirForKey,
   type OutboxMessage,
-  type AcquireLockOpts,
 } from "./outbox";
 import { stageMessageAttachments, type StagedMessage } from "./message-attachments";
 import {
@@ -4312,8 +4311,8 @@ const DRAIN_SETTLE_GAP_MS = 250;
  *   - On delivery failure the message REMAINS in the outbox and the drain
  *     stops (it will be retried on the next tick / call). No message loss.
  *
- * `lockOpts.steal` is set by the inline fallback so a crashed holder can't
- * wedge delivery; the watchdog leaves it false and simply retries next tick.
+ * All drainers reclaim a stale lock only when its owner is proven dead.
+ * Inline drainers also recheck for appends made while they were typing.
  * Returns the IbCommandResult of the FIRST delivered message (so the inline
  * `sendMessage` path can return the historical success/failure shape), or a
  * synthetic ok result when the queue was empty / lock unavailable.
@@ -4321,9 +4320,9 @@ const DRAIN_SETTLE_GAP_MS = 250;
 export async function drainOutbox(
   agent: Agent,
   dir: string,
-  lockOpts?: AcquireLockOpts,
+  opts?: { recheckQueue?: boolean },
 ): Promise<IbCommandResult> {
-  const lock = await acquireOutboxLock(dir, lockOpts);
+  const lock = await acquireOutboxLock(dir, { steal: true });
   if (!lock) {
     // Could not acquire — messages stay enqueued, another drainer will get them.
     return { ok: true, exitCode: 0, stdout: `Sent to ${agent.id}`, stderr: "" };
@@ -4345,7 +4344,7 @@ export async function drainOutbox(
       }
       // An inline contender may already have timed out waiting for us.
       // Watchdogs have a next tick; inline-only queues need us to recheck.
-    } while (lockOpts?.steal);
+    } while (opts?.recheckQueue);
   } finally {
     await releaseOutboxLock(lock);
   }
@@ -4535,7 +4534,7 @@ export async function sendMessage(
 
   async function drainIfNeeded(): Promise<IbCommandResult> {
     if (await hasLiveWatchdog(agentDir)) return { ok: true, exitCode: 0, stdout, stderr: "" };
-    return drainOutbox(agent, queueDir, { steal: true });
+    return drainOutbox(agent, queueDir, { recheckQueue: true });
   }
 
   if (opts?.peerSend) {

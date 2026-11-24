@@ -4021,7 +4021,7 @@ function activeAttachmentStager(): StageMessageAttachmentsFn {
  */
 export function resolveSenderId(agentRepoPath: string, opts?: { fromAgent?: string; cwd?: string }): string {
   let fromId = opts?.fromAgent ?? "";
-  if (fromId) return fromId;
+  if (opts?.fromAgent !== undefined) return fromId;
 
   const cwd = opts?.cwd ?? process.cwd();
   const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
@@ -4831,7 +4831,7 @@ export async function teamSend(
     };
   }
 
-  const fromAgent = senderId || undefined;
+  const fromAgent = senderId;
   let failures = 0;
   let newlyAccepted = 0;
   const failureLines: string[] = [];
@@ -5231,7 +5231,7 @@ export interface NewAgentOptions {
   /** Override cwd for auto-detect manager (used in tests). */
   _cwd?: string;
   /**
-   * INTERNAL. The already-verified calling agent, supplied ONLY by the watchdog
+   * INTERNAL. The already-verified calling agent, supplied by the CLI or by the watchdog
    * spawn broker (spawn-broker.ts) after it checked the requester's meta against
    * its sealed record. It replaces the cwd-based caller lookup, which cannot work
    * from the watchdog: for a worktree:false agent the lookup verifies process
@@ -5241,7 +5241,7 @@ export interface NewAgentOptions {
    * applies to this identity exactly as it would to a direct call. The CLI never
    * populates this field from user input.
    */
-  _trustedCaller?: ResolvedCallerContext;
+  _trustedCaller?: ResolvedCallerContext | null;
 }
 
 /** Spawn context for newAgent operations */
@@ -5278,7 +5278,7 @@ export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
 
 /** Type for readCallerMetaFromCwd override in tests */
 export type CallerMetaReaderFn = (cwd: string) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
-export type NoWorktreeCallerResolverFn = (cwd: string, options?: { coordinatorId?: string; roots?: string[] }) => Promise<NoWorktreeCaller | null>;
+export type NoWorktreeCallerResolverFn = (cwd: string, options?: { coordinatorId?: string; roots?: string[]; includeWorktreePids?: boolean }) => Promise<NoWorktreeCaller | null>;
 
 let callerMetaReaderOverride: CallerMetaReaderFn | null = null;
 let noWorktreeCallerResolverOverride: NoWorktreeCallerResolverFn | null = null;
@@ -6226,11 +6226,11 @@ export function resolveRemoteSharedCaller(cwd: string, repoPath: string, coordin
   return (noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller)(cwd, { roots: [repoPath], coordinatorId });
 }
 
-export async function resolveCallerAgentContext(cwd: string): Promise<ResolvedCallerContext | null> {
-  return readCallerMetaFromCwd(cwd);
+export async function resolveCallerAgentContext(cwd: string, includeWorktreePids = false): Promise<ResolvedCallerContext | null> {
+  return readCallerMetaFromCwd(cwd, includeWorktreePids);
 }
 
-async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext | null> {
+async function readCallerMetaFromCwd(cwd: string, includeWorktreePids = false): Promise<ResolvedCallerContext | null> {
   if (callerMetaReaderOverride !== null) {
     const meta = await callerMetaReaderOverride(cwd);
     if (!meta) return null;
@@ -6242,9 +6242,11 @@ async function readCallerMetaFromCwd(cwd: string): Promise<ResolvedCallerContext
   // need ancestry verification so a forged worktree cannot upgrade a leaf.
   const noWorktreeCaller = await (
     noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller
-  )(cwd);
-  if (noWorktreeCaller) return noWorktreeCaller;
+  )(cwd, { includeWorktreePids });
+  return noWorktreeCaller ?? readWorktreeCaller(cwd);
+}
 
+export async function readWorktreeCaller(cwd: string): Promise<ResolvedCallerContext | null> {
   const agentPattern = runtimeNames.AGENT_CWD_PATTERN;
   if (agentPattern.test(cwd)) {
     const callerDir = runtimeNames.worktreeAgentDir(cwd);
@@ -6311,7 +6313,7 @@ async function spawnAgent(
   const callerCwd = opts?._cwd ?? process.cwd();
   let callerContext: ResolvedCallerContext | null;
   try {
-    callerContext = opts?._trustedCaller ?? await readCallerMetaFromCwd(callerCwd);
+    callerContext = opts?._trustedCaller !== undefined ? opts._trustedCaller : await readCallerMetaFromCwd(callerCwd);
   } catch (err) {
     return {
       ok: false,

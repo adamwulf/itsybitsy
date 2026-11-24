@@ -133,7 +133,7 @@ test.each([false, true])("an unwrapped caller respects its worktree deny rule wi
   const path = join(recipient.repoPath, ".itsybitsy/agents/sender/repo/private");
   const sender = await fixture.addAgent(recipient.repoPath, "sender", { paths: { deny: [await realpath(recipient.repoPath) + "/.itsybitsy/agents/sender/repo/private"] }, sandbox: { enabled } });
   await Bun.write(path, "fixture");
-  const run = await fixture.run(["send", "reader", ...(enabled ? [] : ["--from", "@system"]), "--attach", "./private", "read"], {
+  const run = await fixture.run(["send", "reader", "--attach", "./private", "read"], {
     cwd: sender.sessionCwd, allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
   });
   expect(run.exitCode).toBe(1);
@@ -142,7 +142,7 @@ test.each([false, true])("an unwrapped caller respects its worktree deny rule wi
   expect(await queue().exists()).toBe(false);
 });
 
-async function sandboxedAttachmentSend(sender: FixtureAgent, args: string[]) {
+async function sandboxedAttachmentSend(sender: FixtureAgent, args: string[], watchdogRepos?: { name: string; path: string }[]) {
   setUserHome(fixture.home);
   processStartEpochSecondsCtx.set(fixtureProcessStart);
   await writeAgentTransient(sender.agentDir, {
@@ -151,8 +151,8 @@ async function sandboxedAttachmentSend(sender: FixtureAgent, args: string[]) {
   });
   let poll: Promise<void> | undefined;
   const timer = setInterval(() => {
-    poll ??= processSpawnRequests("sender", recipient.repoPath, {
-      verifySeal: async () => ({ ok: true }), send: { attachmentTempDir: fixture.home, verifySendProcess: async () => true },
+    poll ??= processSpawnRequests("sender", sender.repoPath, {
+      verifySeal: async () => ({ ok: true }), send: { ...(watchdogRepos && { listRepos: async () => watchdogRepos }), attachmentTempDir: fixture.home, verifySendProcess: async () => true },
     }).then(() => {}).finally(() => { poll = undefined; });
   }, 20);
   try {
@@ -162,6 +162,24 @@ async function sandboxedAttachmentSend(sender: FixtureAgent, args: string[]) {
     });
   } finally { clearInterval(timer); await poll; processStartEpochSecondsCtx.reset(); }
 }
+
+test("a sandboxed worker delivers text and files to a unique bare id across local repos", async () => {
+  const sender = await fixture.addAgent(await fixture.addRepo("other"), "sender", { sandbox: { enabled: true } });
+  // The CLI cannot rule out another match; the watchdog sees the whole registry.
+  const hidden = await fixture.addRepo("hidden");
+  const entries = join(hidden, ".itsybitsy/agents");
+  await rm(entries, { recursive: true });
+  await Bun.write(entries, "unlistable");
+  await Bun.write(join(sender.sessionCwd, "report"), "file content");
+  for (const args of [["plain"], ["--attach", "./report", "with file"]]) {
+    const result = await sandboxedAttachmentSend(sender, args, [{ path: sender.repoPath, name: "other" }, { path: recipient.repoPath, name: "project" }]);
+    expect(result.exitCode, result.stderr).toBe(0);
+  }
+  const records = (await queue().text()).trim().split("\n").map(line => JSON.parse(line));
+  expect(records).toMatchObject([{ fromAgent: "sender", message: "plain" }, { fromAgent: "sender", noPassthrough: true }]);
+  const path = records[1].message.split(" → ")[1];
+  expect(await Bun.file(path).text()).toBe("file content");
+});
 
 test.each(["ordinary", "protected link"] as const)(
   "sandboxed CLI with %s checks the opened source locally", async scenario => {
@@ -214,7 +232,7 @@ test.each(["@system", "@project"])("sends an attachment to %s through the coordi
   const destination = body.split(" → ")[1]!;
   snapshots.push(dirname(dirname(destination)));
   expect(body).toStartWith("Read " + destination);
-  expect(action.args[system ? 1 : 2]).toEqual({ noPassthrough: true });
+  expect(action.args[system ? 1 : 2]).toEqual({ fromAgent: "", noPassthrough: true });
 });
 
 test("team members receive the same verified snapshot", async () => {

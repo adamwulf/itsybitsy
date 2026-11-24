@@ -261,6 +261,11 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
 
 ## Behaviour changes beyond M3b
 
+- **Sender identity.** Local sends, team history, team creation, questions, logs and child spawns identify the calling agent from its worktree or recorded process. An identified agent can omit the identity flags or name itself. A registered repo coordinator with a dotted ID can record its launcher PID.
+- A second send to `@system` arriving during a long delivery is drained by the current inline sender, even after the second sender finishes waiting for the lock.
+- A live drainer retains its delivery lock across long messages. Reclaiming an old lock requires evidence that its owner exited or its PID was reused.
+- A sandboxed worker can send text or attachments to a unique bare agent ID in another local repo through its watchdog.
+
 A worktree CLI under the kernel sandbox sends local `--attach` requests through its own watchdog. The CLI verifies its sources and creates a protected lease. The watchdog verifies a private copy of the numbered bodies, publishes it by rename from protected staging, and enqueues the rewritten message as the originating agent with `noPassthrough`. A self-send goes into the requester's own queue for its regular watchdog drain. Local text sends, unsandboxed and human sends, dashboard sends, and Telegram keep their existing routes.
 
 Delivered attachment directories under `/tmp/itsybitsy-attachments-*` and the corresponding `/private/tmp` paths are read-only to agents. This includes local `--attach`, dashboard snapshots and published receiver snapshots. Agents can read the original and edit a copy elsewhere in their scratch space or project.
@@ -280,9 +285,3 @@ Local sends and remote receipts use the same hardened queue. Its existing JSONL 
 - **Existing issues tracked elsewhere.** The shared broker envelope reader, the flat outbox used for keyless agent IDs, and the window for pairing revocation at queue append.
 
 - **Sandboxed repo coordinators.** A shared-checkout repo coordinator can attach locally through a live watchdog broker. Its normal shared checkout has no `<agentDir>/repo` worktree, and the per-agent watchdog currently exits when that directory is absent. Without a live broker the CLI explains the limitation before staging. Supporting local attachments in that configuration would require keeping the broker available for shared-checkout coordinators.
-
-### Pre-existing local delivery bugs (golden path, fix soon)
-
-- A sandboxed worker sending plain text to a unique bare agent ID in another local repo can fail resolution even when the same address works with `--attach`.
-- Two ordinary sends to `@system` can leave the second queued. The first drainer processes one batch and exits. If the second sender’s five-second wait for the delivery lock expires, there is no system watchdog to drain the remaining message.
-- An inline sender can steal a live delivery lock after 30 seconds. When typing a long message takes longer than that, another drainer can type the same message twice.

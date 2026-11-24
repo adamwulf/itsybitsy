@@ -1,3 +1,4 @@
+import { cliActorId, localCliActor, verifiedSendCaller } from "./peers/send-caller";
 import { isCoordinatorType } from "./coordinator-type-names";
 import { isAgentSendProcess } from "./peers/remote-start-caller";
 import type { LocalQueueGuard } from "./outbox";
@@ -398,7 +399,7 @@ export async function routeSendThroughWatchdog(
   return requestSendViaWatchdog(command.target, message, { ...deps, resolveCaller: async () => caller }, !!command.attachmentSender);
 }
 
-type CliSendRoute = { result: IbCommandResult } | { local: ResolvedSendTarget };
+type CliSendRoute = { result: IbCommandResult } | { local: ResolvedSendTarget; fromAgent: string };
 
 /** Bound the encoded header even when only the watchdog can resolve the raw
  * address. Empty agent/repo fields account for the still-unknown label bytes. */
@@ -441,9 +442,14 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       deferred = !!worktree && !!resolved.incompleteVisibility;
     }
     if (deps.signal?.aborted) return cancelled();
+    const actor = command.attachmentSender ? await command.attachmentSender()
+      : deferred || resolved?.remote ? await verifiedSendCaller(cwd, "remote", repos.map(repo => repo.path))
+      : await localCliActor(cwd, { from: command.fromAgent });
+    const fromAgent = cliActorId(actor, command.fromAgent);
+    const localDeps = { ...deps, resolveCaller: async () => actor.kind === "agent" ? actor.caller : null };
     if (deferred || resolved?.remote) {
       const { cliRemoteSender, handoffRemoteMessage, qualifiedAgentSender, textHeader } = await import("./peers/peer-outbox");
-      const sender = await cliRemoteSender(repos, command.fromAgent, cwd);
+      const sender = await cliRemoteSender(repos, actor, command.fromAgent);
       if (deps.signal?.aborted) return cancelled();
       message ??= await (command.readRawMessage ?? command.readMessage)();
       if (deps.signal?.aborted) return cancelled();
@@ -457,8 +463,8 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
           .catch(() => ({ kind: "agent", id: `//${sender.id}` } as const));
         checkRemoteSize(message, resolved?.remote?.target ?? minimumTarget, from);
         const result = await submitSendRequest("remote-send", sender.agentDir, sender.id, target, message, deps, false, stage);
-        if (stage && !machine && result?.exitCode === LOCAL_TARGET_EXIT) {
-          const local = await routeSendThroughWatchdog(command, deps);
+        if (!machine && result?.exitCode === LOCAL_TARGET_EXIT) {
+          const local = await routeSendThroughWatchdog(command, localDeps);
           return { result: local ?? result };
         }
         // A remote submission always selects a result, even without a watcher.
@@ -472,12 +478,12 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       }
     }
     if (resolved?.error) return { result: brokerFail(resolved.error) };
-    const brokered = await routeSendThroughWatchdog(command, deps);
+    const brokered = await routeSendThroughWatchdog(command, localDeps);
     if (brokered) return { result: brokered };
     resolved ??= await resolveAddress(target, repos, cwd);
     if (deps.signal?.aborted) return cancelled();
     if (resolved.remote) return { result: brokerFail("Use a machine-qualified address to send remotely") };
-    return resolved.error ? { result: brokerFail(resolved.error) } : { local: resolved };
+    return resolved.error ? { result: brokerFail(resolved.error) } : { local: resolved, fromAgent };
   } catch (err) {
     return deps.signal?.aborted ? cancelled() : { result: brokerFail(err instanceof Error ? err.message : String(err)) };
   }
@@ -591,7 +597,7 @@ export async function handleSendRequest(
       if (localFiles && resolved.remote) return brokerFail("Local attachment sends require a local target");
       if (remote && !resolved.remote) {
         const result = brokerFail(LOCAL_REMOTE_TARGET);
-        if (parsed.request.files?.length) result.exitCode = LOCAL_TARGET_EXIT;
+        result.exitCode = LOCAL_TARGET_EXIT;
         return result;
       }
       const { handoffRemoteMessage, textHeader } = await import("./peers/peer-outbox");

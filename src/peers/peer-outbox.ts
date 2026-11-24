@@ -3,7 +3,7 @@ import { transferOwnerState, type TransferOwner, finishRecovery, inspectTransfer
 import { cancellationPoll, cancellationMarkerExists, trackSendCleanup, warnSendCleanup } from "../send-cleanup";
 import type { StageRemoteFiles } from "./remote-attachments";
 import { interruptedSend, withdrawPublishedRequest } from "../spawn-broker";
-import { verifiedSendCaller } from "./send-caller";
+import type { VerifiedSendCaller } from "./send-caller";
 export { remoteCliCaller } from "./send-caller";
 import { randomUUID } from "node:crypto";
 import { constants, existsSync } from "node:fs";
@@ -52,8 +52,7 @@ type RemoteSender =
   | { kind: "direct"; from: SendHeader["from"] }
   | { kind: "worktree"; id: string; repoPath: string; agentDir: string };
 
-export async function cliRemoteSender(repos: RepoEntry[], explicit?: string, cwd = process.cwd()): Promise<RemoteSender> {
-  const identity = await verifiedSendCaller(cwd, "remote", repos.map(repo => repo.path));
+export async function cliRemoteSender(repos: RepoEntry[], identity: VerifiedSendCaller, explicit?: string): Promise<RemoteSender> {
   let id = "";
   let sender: RemoteSender;
   if (identity.kind === "agent") {

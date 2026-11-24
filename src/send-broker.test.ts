@@ -1053,7 +1053,9 @@ describe("send broker", () => {
           target: { kind: "agent", repo: "remote", agent: "worker" }, files: [], message: MESSAGE,
         } }]);
         expect((await route("worker")).ok).toBe(true);
-        expect((await route(TARGET_ID, true)).stderr).toContain("@<repo>/<agent> for a local send");
+        const local = await route(TARGET_ID, true);
+        if (disabled) expect(local.stderr).toContain("@<repo>/<agent> for a local send");
+        else expect((await outbox(TARGET_ID)).map(record => record.message)).toEqual([MESSAGE]);
         await writeAgent(targetRepo, "worker", {});
         for (const hidden of [true, false]) {
           const ambiguity = await route("worker", hidden);

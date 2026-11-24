@@ -59,6 +59,7 @@ describe("fully qualified agent queues", () => {
   async function send(target: string, message: string) {
     const result = await cli.run(["send", target, message], {
       cwd: repoA, actions: { sendMessage: "real" },
+      ancestry: { pid: 300, parents: [[300, 1]], identityCurrent: true },
     });
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);

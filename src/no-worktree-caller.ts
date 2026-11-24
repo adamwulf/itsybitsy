@@ -15,6 +15,7 @@ export interface NoWorktreeCaller {
 
 interface CallerDeps {
   coordinatorId?: string;
+  includeWorktreePids?: boolean;
   /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
   dashboardAncestry?: ReadonlySet<number>;
   registryHome?: string;
@@ -214,7 +215,7 @@ export async function resolveNoWorktreeCaller(
     });
     for (const entry of entries) {
       if (deps.coordinatorId !== undefined && entry.name !== deps.coordinatorId) continue;
-      const dottedCoordinator = deps.coordinatorId && entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
+      const dottedCoordinator = entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
       if (!entry.isDirectory() || (!isValidAgentId(entry.name) && !dottedCoordinator)) continue;
       const agentDir = join(agentsDir, entry.name);
       let meta: Record<string, unknown>;
@@ -228,7 +229,10 @@ export async function resolveNoWorktreeCaller(
         if (strict) throw new Error("Invalid agent metadata");
         continue;
       }
-      if (meta.worktree !== false || (deps.coordinatorId !== undefined && meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
+      if (dottedCoordinator && (meta.worktree !== false || meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
+      if (meta.worktree !== false && !deps.includeWorktreePids) continue;
+      if (deps.coordinatorId !== undefined && meta.agentType !== REPO_COORDINATOR_TYPE) continue;
+      if (deps.includeWorktreePids && !meta.claude_pid) continue;
       if (strict && meta.claude_pid !== "") {
         const pid = Number(meta.claude_pid);
         if (typeof meta.claude_pid !== "string" || !/^\d+$/.test(meta.claude_pid) || !Number.isSafeInteger(pid) || pid <= 1) {

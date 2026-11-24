@@ -163,7 +163,7 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
       resolveCaller: (cwd, ancestors, options) => resolveDashboardCaller(cwd, ancestors, { ...options, registryHome: config.accountHome ?? config.home }),
     });
   };
-  remoteCliCaller.isSystem = () => isSystemPaneCaller(ancestry().pid, async () => ancestry().systemPanePid ?? null, async () => [
+  remoteCliCaller.isSystem = async () => !!config.ancestry?.systemPanePid && isSystemPaneCaller(ancestry().pid, async () => ancestry().systemPanePid ?? null, async () => [
     "PID PPID STARTED                  KERNEL COMMAND",
     ...ancestry().parents.map(([pid, parent]) => `${String(pid).padStart(3)} ${String(parent).padStart(4)} Sat Nov 21 12:01:00 2026 bash   bash`),
     "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",

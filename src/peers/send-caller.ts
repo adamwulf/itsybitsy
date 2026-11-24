@@ -2,7 +2,7 @@ import { realpath, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { accountHome } from "../home";
 import { registeredRepoRoots } from "../hooks/agent-context";
-import { resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
+import { readWorktreeCaller, resolveCallerAgentContext, resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
 import { checkCoordinatorExists } from "../coordinator";
 import { isCoordinatorType } from "../coordinator-type-names";
 import { hasGitWorktreeBacklink, registeredWorktreeRecord } from "../no-worktree-caller";
@@ -13,6 +13,39 @@ import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
 export const remoteCliCaller = { isHuman: isHumanSendTerminal, isSystem: isSystemPaneCaller };
 
 export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind: "agent"; caller: ResolvedCallerContext };
+
+/** Local commands accept an explicit actor when the caller cannot be identified.
+ * Spawning keeps its existing fail-closed caller permission gate. */
+export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: boolean; from?: string } = {}): Promise<VerifiedSendCaller> {
+  let caller: ResolvedCallerContext | null;
+  try {
+    caller = await resolveCallerAgentContext(cwd, true);
+  } catch (error) {
+    if (options.forSpawn) throw error;
+    // A restricted process table can still leave the caller's own worktree
+    // metadata readable. Preserve that positive attribution.
+    caller = await readWorktreeCaller(cwd);
+  }
+  if (caller && typeof caller.meta.id === "string") {
+    // A human terminal can open an agent checkout and use the local override.
+    if (options.from !== undefined && options.from !== caller.meta.id && matchWorktreeCaller(cwd) && await remoteCliCaller.isHuman()) {
+      return { kind: "user" };
+    }
+    return { kind: "agent", caller };
+  }
+  return { kind: await remoteCliCaller.isSystem() ? "system" : "user" };
+}
+
+export function cliActorId(actor: VerifiedSendCaller, explicit?: string, flag = "--from"): string {
+  if (actor.kind === "agent") {
+    const id = String(actor.caller.meta.id);
+    if (explicit !== undefined && explicit !== id) {
+      throw new Error(`Error: agents can only act as themselves; drop ${flag}`);
+    }
+    return id;
+  }
+  return explicit ?? (actor.kind === "system" ? "@system" : "");
+}
 
 async function directoryIdentity(path: string): Promise<string | undefined> {
   try {

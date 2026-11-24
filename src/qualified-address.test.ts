@@ -321,7 +321,7 @@ describe("qualified agent addresses", () => {
       expect((await send(["hi"])).stdout.trim()).toBe("Sent to remote/remote-id");
       expect((await send(["refuse"])).stderr.trim()).toBe("Recipient stopped");
       expect((await send(["--from", "mgr", "hello"], worktree)).exitCode).toBe(0);
-      expect((await send(["--from", "imposter", "hello"], worktree)).stderr).toContain("--from must match");
+      expect((await send(["--from", "imposter", "hello"], worktree)).stderr).toContain("drop --from");
       const system = join(cli.home, ".itsybitsy");
       expect((await send(["human at home"], system, "human")).exitCode).toBe(0);
       const fromHome = (parent: number) => cli.run(["send", "laptop-b/remote/remote-id", "system message"], {

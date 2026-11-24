@@ -703,6 +703,7 @@ describe("CLI arg parsing", () => {
         manager: "agent-mgr",
         name: "the-name",
         noWorktree: true,
+        _trustedCaller: null,
         spawnedBy: { agent_id: "agent-spawner", repo_path: "/some/repo" },
       },
     ]);
@@ -713,7 +714,7 @@ describe("CLI arg parsing", () => {
     const result = await runCli(["new", "--spawned-by", "agent-spawner", "hello"], { actions: { newAgent: "record" } });
     const { args } = onlyAction(result);
     expect(args[1]).toBe("hello");
-    expect(args[2]).toEqual({ spawnedBy: { agent_id: "agent-spawner", repo_path: result.context.cwd } });
+    expect(args[2]).toEqual({ _trustedCaller: null, spawnedBy: { agent_id: "agent-spawner", repo_path: result.context.cwd } });
   });
 
   test("new-agent --spawned-by-repo without --spawned-by is rejected", async () => {
@@ -913,7 +914,7 @@ describe("CLI arg parsing", () => {
       actions: { newAgent: "record" },
     });
     expect(result.stderr).not.toContain("prompt required");
-    expect(onlyAction(result).args).toEqual([repo, "fix $(whoami) and `date` for $USER literally", { type: "worker" }]);
+    expect(onlyAction(result).args).toEqual([repo, "fix $(whoami) and `date` for $USER literally", { type: "worker", _trustedCaller: null }]);
   });
 
   test("new-agent with empty stdin + registered repo still errors 'prompt required'", async () => {

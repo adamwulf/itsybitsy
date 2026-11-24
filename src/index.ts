@@ -10,12 +10,13 @@ import * as runtimeNames from "./runtime-names";
 import { isAbsolute, join } from "path";
 import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
+import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { resolveAgentIcon } from "./agents";
 import type { PeerEnqueueOptions } from "./ib-commands";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { kernelSandboxStatus } from "./agent-cli";
 import { resolvePathsConfig } from "./sandbox";
-import { isValidAgentId, isValidShellPath, tmuxSessionTarget } from "./validation";
+import { isValidAgentId, isValidPeerSenderIdSegment, isValidShellPath, tmuxSessionTarget } from "./validation";
 import { resolveAgentFromCwd, SYSTEM_AGENT_ID } from "./hooks/shared";
 import { findOwnRepo, matchAgentById, resolveAgentTarget, resolveTarget } from "./resolve-target";
 
@@ -140,7 +141,7 @@ export async function resolveLauncherAgentDir(
   cwd: string,
   repos: RepoEntry[],
 ): Promise<string | null> {
-  if (!isValidAgentId(agentId)) return null;
+  if (!isValidPeerSenderIdSegment(agentId)) return null;
 
   const { realpath } = await import("fs/promises");
   let canonicalCwd: string;
@@ -170,6 +171,8 @@ export async function resolveLauncherAgentDir(
           (meta as { id?: unknown }).id !== agentId) {
         continue;
       }
+
+      if (!isValidAgentId(agentId) && ((meta as AgentMeta).agentType !== REPO_COORDINATOR_TYPE || (meta as AgentMeta).worktree !== false)) continue;
 
       const expectedCwd = (meta as { worktree?: unknown }).worktree === false
         ? repoPath
@@ -351,7 +354,7 @@ export async function sendToSystemCoordinator(
     ...(opts?.peerSend && { peerSend: opts.peerSend }),
     ...(opts?.queueGuard && { queueGuard: opts.queueGuard }),
   };
-  if (opts?.fromAgent) sendOpts.fromAgent = opts.fromAgent;
+  if (opts?.fromAgent !== undefined) sendOpts.fromAgent = opts.fromAgent;
   if (opts?.noPassthrough) sendOpts.noPassthrough = true;
   if (opts?.raw) sendOpts.raw = true;
   const result = await sendMessage(syntheticAgent, message, sendOpts);
@@ -534,7 +537,7 @@ const COMMAND_HELP: Record<string, string> = {
   log:
     'Usage: ib log [--id <agent-id>] [--quiet|-q] "message"\n' +
     "  Append a line to an agent's log file.\n" +
-    "  --id <id>       Target agent id (defaults to cwd-detected agent)\n" +
+    "  --id <id>       Target agent id (defaults to the calling agent)\n" +
     "  --quiet, -q     Do not also echo the message to stdout",
   "parse-state":
     "Usage: ib parse-state [file] [-v|--verbose]\n" +
@@ -554,7 +557,7 @@ const COMMAND_HELP: Record<string, string> = {
     "  or a team. If no inline message and no -f file is given, the message body\n" +
     "  is read from stdin.\n" +
     "  --attach <file>  Copy a file for local or paired remote recipients (repeatable)\n" +
-    "  --from <id>     Mark the sender for the recipient's notification\n" +
+    "  --from <id>     Set the sender (agents use their own ID)\n" +
     "  -f, --file <p>  Read the message body from a file (wins over stdin)\n" +
     "\n" +
     "Targets:\n" +
@@ -643,7 +646,7 @@ const COMMAND_HELP: Record<string, string> = {
     'Usage: ib ask [--id <agent-id>] "question"\n' +
     "  Ask the user a question from an agent context. The question may be passed\n" +
     "  positionally or piped on stdin.\n" +
-    "  --id <id>       Agent id (defaults to cwd-detected agent)",
+    "  --id <id>       Agent id (defaults to the calling agent)",
   "init-types":
     "Usage: ib init-types [--check]\n" +
     "  Alias: init-agent-types\n" +
@@ -1665,7 +1668,7 @@ export async function main() {
         console.error("Usage: ib write-pid <agent-id> <pid>");
         process.exit(1);
       }
-      if (!isValidAgentId(wpAgentId)) {
+      if (!isValidPeerSenderIdSegment(wpAgentId)) {
         console.error(`Invalid agent ID: ${wpAgentId}`);
         process.exit(1);
       }
@@ -2069,11 +2072,7 @@ export async function main() {
           const message = await readMessage();
           controller.signal.throwIfAborted();
           if (!message) throw new Error(usage);
-          const detected = await sender;
-          if (!fromAgent && detected?.kind === "agent") fromAgent = String(detected.caller.meta.id);
-          const opts = fromAgent || attachmentSender
-            ? { ...(fromAgent && { fromAgent }), ...(attachmentSender && { noPassthrough: true }) }
-            : undefined;
+          const opts = { fromAgent: route.fromAgent, ...(attachmentSender && { noPassthrough: true }) };
           if (isSystemCoordinator) result = await cliActions.sendToSystemCoordinator(message, opts);
           else if (team) result = await cliActions.teamSend(team.name, team.members, message, opts, repos);
           else result = await cliActions.sendMessage(agent!, message, opts);
@@ -2502,15 +2501,22 @@ export async function main() {
         console.error("Error: --spawned-by-repo requires --spawned-by");
         process.exit(1);
       }
-      if (spawnedByAgentId && !isValidAgentId(spawnedByAgentId)) {
+      const { localCliActor, cliActorId } = await import("./peers/send-caller");
+      const actor = await localCliActor(process.cwd(), { forSpawn: true });
+      cliActorId(actor, spawnedByAgentId, "--spawned-by");
+      const caller = actor.kind === "agent" ? actor.caller : null;
+      opts._trustedCaller = caller;
+      if (!caller && spawnedByAgentId && !isValidAgentId(spawnedByAgentId)) {
         console.error("Error: invalid --spawned-by agent ID");
         process.exit(1);
       }
-      if (spawnedByAgentId) {
+      if (!caller && spawnedByAgentId) {
         opts.spawnedBy = {
           agent_id: spawnedByAgentId,
           repo_path: spawnedByRepoPath ?? process.cwd(),
         };
+      } else if (actor.kind === "system") {
+        opts.spawnedBy = { agent_id: "@system", repo_path: null };
       }
 
       // A SANDBOXED process cannot spawn a child itself (nested sandbox-exec is
@@ -2522,8 +2528,8 @@ export async function main() {
         const { routeNewAgentThroughWatchdog } = await import("./spawn-broker");
         const brokered = await routeNewAgentThroughWatchdog(prompt, opts, {
           repoArg,
-          spawnedByFlags: spawnedByAgentId !== undefined || spawnedByRepoPath !== undefined,
-        });
+          spawnedByFlags: !caller && spawnedByAgentId !== undefined,
+        }, { resolveCaller: async () => caller });
         if (brokered) await printAndExit(brokered);
       }
 
@@ -2539,7 +2545,7 @@ export async function main() {
         }
         repoPath = resolved.repo.path;
       } else {
-        const cwd = process.cwd();
+        const cwd = caller?.repoPath || process.cwd();
         const cwdMatch = repos.find((r) => cwd === r.path || cwd.startsWith(r.path + "/"));
         if (cwdMatch) {
           repoPath = cwdMatch.path;
@@ -2595,7 +2601,7 @@ export async function main() {
       break;
     }
     case "ask": {
-      // Parse --id flag or auto-detect from CWD
+      // An explicit ID is optional when the caller identifies an agent.
       const askArgs = args.slice(1);
       let askAgentId: string | undefined;
       const askQuestionParts: string[] = [];
@@ -2616,14 +2622,11 @@ export async function main() {
         askQuestionText = await readStdinIfPiped();
       }
 
-      // Auto-detect agent ID from CWD
-      if (!askAgentId) {
-        const cwd = process.cwd();
-        const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
-        if (worktreeMatch) {
-          askAgentId = worktreeMatch[1];
-        }
-      }
+      const { cliActorId, localCliActor } = await import("./peers/send-caller");
+      const actor = await localCliActor();
+      const caller = actor.kind === "agent" ? actor.caller : null;
+      if (caller) askAgentId = cliActorId(actor, askAgentId, "--id");
+      askAgentId ??= process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
 
       if (!askAgentId) {
         console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id <agent-id>.");
@@ -2634,14 +2637,14 @@ export async function main() {
         process.exit(1);
       }
 
-      const askAgent = await requireAgent(askAgentId, await listRepos());
+      const askAgent = caller ? { id: askAgentId, repoPath: caller.repoPath } : await requireAgent(askAgentId, await listRepos());
       // A sandboxed WORKTREE agent cannot record a question itself
       // (`<repo>/.itsybitsy/user-questions.json` is outside its write roots), so
       // it asks its own — unsandboxed — watchdog to do it. Null for every other
       // caller, which asks directly as before. See routeAskThroughWatchdog.
       {
         const { routeAskThroughWatchdog } = await import("./ask-broker");
-        const brokered = await routeAskThroughWatchdog(askQuestionText, askAgent.id, { targetRepoPath: askAgent.repoPath });
+        const brokered = await routeAskThroughWatchdog(askQuestionText, askAgent.id, { targetRepoPath: askAgent.repoPath, resolveCaller: async () => caller });
         if (brokered) await printAndExit(brokered);
       }
 
@@ -2667,14 +2670,10 @@ export async function main() {
       }
       const logMessage = logMessageParts.join(" ");
 
-      // Auto-detect agent ID from cwd if not specified
-      if (!logAgentId) {
-        const cwd = process.cwd();
-        const worktreeMatch = cwd.match(runtimeNames.AGENT_CWD_PATTERN);
-        if (worktreeMatch) {
-          logAgentId = worktreeMatch[1];
-        }
-      }
+      const { cliActorId, localCliActor } = await import("./peers/send-caller");
+      const actor = await localCliActor();
+      if (actor.kind === "agent") logAgentId = cliActorId(actor, logAgentId, "--id");
+      logAgentId ??= process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
 
       if (!logAgentId) {
         console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id.");
@@ -2685,11 +2684,13 @@ export async function main() {
         process.exit(1);
       }
 
-      const agent = await requireAgent(logAgentId, repos);
-
-      const { join } = await import("path");
       const { logAgent } = await import("./agent-lifecycle");
-      const agentDir = join(runtimeNames.runtimeDir(agent.repoPath), agent.archived ? "archive" : "agents", agent.id);
+      let agentDir: string;
+      if (actor.kind === "agent") agentDir = actor.caller.agentDir;
+      else {
+        const agent = await requireAgent(logAgentId, repos);
+        agentDir = join(runtimeNames.runtimeDir(agent.repoPath), agent.archived ? "archive" : "agents", agent.id);
+      }
       await logAgent(agentDir, logMessage);
 
       if (!logQuiet) {
@@ -3158,7 +3159,8 @@ export async function main() {
             process.exit(1);
           }
           // createdBy is left "" for human CLI creation (§16 DETAIL 7).
-          await printAndExit(await teamCreate(name));
+          const { cliActorId, localCliActor } = await import("./peers/send-caller");
+          await printAndExit(await teamCreate(name, { createdBy: cliActorId(await localCliActor()) }));
           break;
         }
         case "add": {

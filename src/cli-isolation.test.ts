@@ -360,9 +360,9 @@ describe("CLI routing cannot reach a live agent", () => {
     test.each([
       { args: ["new-agent", "--model", "claude:opus", "x"], message: "cannot pass --model" },
       { args: ["new-agent", "--repo", "caller-repo", "x"], message: "--repo is not supported inside the sandbox" },
-      { args: ["new-agent", "--spawned-by", "agent-x", "x"], message: "--spawned-by / --spawned-by-repo are internal" },
-      { args: ["send", "--from", "agent-other", "agent-peer", "x"], message: "--from for another agent is not supported" },
-      { args: ["ask", "--id", "agent-peer", "x"], message: "--id for another agent is not supported" },
+      { args: ["new-agent", "--spawned-by", "agent-x", "x"], message: "drop --spawned-by" },
+      { args: ["send", "--from", "agent-other", "agent-peer", "x"], message: "drop --from" },
+      { args: ["ask", "--id", "agent-peer", "x"], message: "drop --id" },
     ])("the client refuses `ib $args.0 $args.1` before anything is queued", async ({ args, message }) => {
       await writeHeartbeat(caller);
       const result = await cli.run([...args], { cwd: caller.sessionCwd, sandboxed: true });
@@ -406,6 +406,74 @@ describe("CLI routing cannot reach a live agent", () => {
         cli.run(["retire", "agent-peer"], { cwd: caller.sessionCwd, sandboxed: true }));
       expect(allowed.exitCode).toBe(0);
       expect(calls.map((call) => call.op)).toEqual(["retire"]);
+    });
+  });
+
+  describe("local CLI actor", () => {
+    const ancestry = { pid: 5000, parents: [[5000, 4242], [4242, 1]] as [number, number][], identityCurrent: true };
+    const processMeta = { claude_pid: "4242", claude_pid_epoch: 1_700_000_000 };
+
+    test.each([
+      ["send", "--from", "agent-peer", "@system", "hello"],
+      ["ask", "--id", "agent-peer", "question"],
+      ["log", "--id", "agent-peer", "note"],
+      ["new-agent", "--spawned-by", "agent-peer", "task"],
+    ].map(args => ({ command: args[0], args })))("direct $command rejects a different agent before dispatch", async ({ args }) => {
+      const result = await cli.run(args, { cwd: caller.sessionCwd });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("drop " + args[1]);
+      expect(result.actions).toEqual([]);
+    });
+
+    test.each([true, false])("send, ask and spawn use the same agent (worktree=%s)", async worktree => {
+      const actor = await cli.addAgent(repo, "manager", { ...processMeta, worktree, canSpawnChildren: true });
+      const opts = { cwd: actor.sessionCwd, ancestry };
+      const send = await cli.run(["send", peer.id, "hi"], { ...opts, actions: { sendMessage: "record" } });
+      expect(send.actions[0]?.args[2]).toEqual({ fromAgent: actor.id });
+      const ask = await cli.run(["ask", "question"], { ...opts, actions: { askQuestion: "record" } });
+      expect(ask.actions[0]?.args).toEqual([repo, actor.id, "question"]);
+      const spawn = await cli.run(["new-agent", "task"], { ...opts, actions: { newAgent: "record" } });
+      expect(spawn.actions[0]?.args).toMatchObject([repo, "task", { _trustedCaller: { repoPath: repo, meta: { id: actor.id } } }]);
+    });
+
+    test("a worktree agent that moved to a scratch cwd retains its sender id", async () => {
+      const actor = await cli.addAgent(repo, "scratch-worker", processMeta);
+      const result = await cli.run(["send", peer.id, "hi"], { ancestry, actions: { sendMessage: "record" } });
+      expect(result.actions[0]?.args[2]).toEqual({ fromAgent: actor.id });
+    });
+
+    test("a dotted coordinator can bootstrap write-pid and report to @system", async () => {
+      const dotted = await cli.addAgent(await cli.addRepo("project.dev"), "project.dev", { worktree: false, agentType: "repo-coordinator" });
+      const pid = await cli.run(["write-pid", dotted.id, "4242"], { cwd: dotted.repoPath });
+      expect(pid.exitCode, pid.stderr).toBe(0);
+      expect(await Bun.file(join(dotted.agentDir, "meta.json")).json()).toMatchObject({ claude_pid: "4242", claude_pid_epoch: expect.any(Number) });
+      const result = await cli.run(["send", "@system", "status"], { cwd: dotted.repoPath, ancestry, actions: { sendToSystemCoordinator: "record" } });
+      expect(result.actions[0]?.args).toEqual(["status", { fromAgent: dotted.id }]);
+    });
+
+    test("a shared agent is recorded in both the team creation audit and channel history", async () => {
+      const actor = await cli.addAgent(repo, "shared", { ...processMeta, worktree: false });
+      const opts = { cwd: repo, ancestry };
+      const create = await cli.run(["team", "create", "room"], opts);
+      expect(create.exitCode, create.stderr).toBe(0);
+      const teamDir = join(cli.home, ".itsybitsy/teams");
+      expect(await Bun.file(join(teamDir, "room.log")).text()).toContain("team created by " + actor.id);
+      const send = await cli.run(["send", "@room", "hello"], { ...opts, actions: { teamSend: "real" } });
+      expect(send.exitCode, send.stderr).toBe(0);
+      const history = (await Bun.file(join(teamDir, "room.channel.jsonl")).text()).trim().split("\n");
+      expect(JSON.parse(history.at(-1)!)).toMatchObject({ fromAgent: actor.id, message: "hello" });
+    });
+
+    test("a human terminal keeps local --from and the system pane keeps its own label", async () => {
+      const actions = { sendMessage: "record" as const };
+      const human = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], { actions, ancestry: { ...ancestry, terminal: "human" } });
+      expect(human.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      const inCheckout = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], {
+        cwd: caller.sessionCwd, actions, ancestry: { ...ancestry, terminal: "human" },
+      });
+      expect(inCheckout.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      const system = await cli.run(["send", peer.id, "notice"], { actions, ancestry: { pid: 300, parents: [[300, 200], [200, 1]], identityCurrent: true, systemPanePid: 200 } });
+      expect(system.actions[0]?.args[2]).toEqual({ fromAgent: "@system" });
     });
   });
 

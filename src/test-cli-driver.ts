@@ -157,21 +157,21 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   });
   const { remoteCliCaller } = await import("./peers/peer-outbox");
   const { isHumanSendTerminal, isSystemPaneCaller } = await import("./peers/remote-start-caller");
-  remoteCliCaller.isHuman = async () => {
+  remoteCliCaller.isHuman = async (_input, mode) => {
     const terminal = config.ancestry?.terminal;
     return isHumanSendTerminal({
       pid: 300, cwd: config.cwd, stdinTTY: process.stdin.isTTY,
       stdoutTTY: terminal !== undefined && (config.ancestry?.sendTTY ?? "stdout") === "stdout",
       stderrTTY: terminal !== undefined && config.ancestry?.sendTTY === "stderr",
       hasControllingTerminal: async () => terminal !== undefined && config.ancestry?.sendTTY === "controlling",
-      env: terminal === "tmux" ? { TMUX: "/tmp/test" } : {},
-      readProcessTable: async () => [
+      env: terminal === "tmux" || config.ancestry?.tmuxSession ? { TMUX: "/tmp/test" } : {},
+      readProcessTable: async () => config.ancestry?.denyProcessProbe ? "" : [
         "PID PPID STARTED                  KERNEL COMMAND",
         "300    1 Sat Nov 21 12:01:00 2026 " + (terminal === "agent" ? "codex  codex" : "bash   bash"),
         "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
       ].join("\n"),
       resolveCaller: (cwd, ancestors, options) => resolveDashboardCaller(cwd, ancestors, { ...options, registryHome: config.accountHome ?? config.home }),
-    });
+    }, mode);
   };
   remoteCliCaller.isSystem = async () => !!config.ancestry?.systemPanePid && isSystemPaneCaller(ancestry().pid, async () => ancestry().systemPanePid ?? null, async () => [
     "PID PPID STARTED                  KERNEL COMMAND",

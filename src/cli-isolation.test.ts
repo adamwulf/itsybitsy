@@ -517,6 +517,16 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(await Bun.file(join(cli.home, ".itsybitsy/teams/room.log")).text()).toContain("team created by user");
     });
 
+    test.each([false, true])("a nested personal tmux session cannot unlock an agent's --from (ps denied=%s)", async denyProcessProbe => {
+      const result = await cli.run(["send", "--from", peer.id, peer.id, "notice"], {
+        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" },
+        ancestry: { ...ancestry, terminal: "agent", tmuxSession: "nested-shells", denyProcessProbe },
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("drop --from");
+      expect(result.actions).toEqual([]);
+    });
+
     test.each(["ib-fixture-agent-caller", "itsybitsy-deadbeef-agent-caller"])("a managed tmux session %s retains agent attribution", async tmuxSession => {
       const deny = await cli.run(["log", "--id", peer.id, "note"], {
         cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" }, ancestry: { ...ancestry, terminal: "tmux", tmuxSession },

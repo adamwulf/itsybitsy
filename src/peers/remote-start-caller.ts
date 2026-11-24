@@ -76,7 +76,7 @@ async function hasControllingTerminal(): Promise<boolean> {
   } catch { return false; }
 }
 
-async function classifyCaller(signal: AbortSignal, input: DashboardCaller | undefined, humanSend: boolean): Promise<string | null> {
+async function classifyCaller(signal: AbortSignal, input: DashboardCaller | undefined, mode: "start" | "remote-send" | "local-send"): Promise<string | null> {
   const unverified = "Cannot verify the dashboard caller’s agent metadata for remote starts";
   try {
     const { stdinTTY, stdoutTTY, stderrTTY, hasControllingTerminal: controllingTTY, env, cwd, resolveCaller, pid, readProcessTable: readTable = readProcessTable } = input ?? {
@@ -84,9 +84,10 @@ async function classifyCaller(signal: AbortSignal, input: DashboardCaller | unde
       hasControllingTerminal, env: process.env,
       cwd: process.cwd(), pid: process.pid, readProcessTable, resolveCaller: resolveDashboardCaller,
     };
+    const humanSend = mode !== "start";
     const interactive = humanSend ? stdoutTTY === true || stderrTTY === true || await controllingTTY?.() : stdinTTY === true && stdoutTTY === true;
     if (!interactive) return "Remote starts require an interactive terminal";
-    if (env.TMUX !== undefined) return "Remote starts are disabled inside tmux";
+    if (mode !== "local-send" && env.TMUX !== undefined) return "Remote starts are disabled inside tmux";
     const ancestors = await readAncestors(pid, readTable, signal);
     if (!ancestors) return "Cannot verify dashboard process ancestry for remote starts";
     for (const { names } of ancestors.values()) {
@@ -120,7 +121,7 @@ const startupClock = {
 };
 
 /** One startup decision, including process and filesystem reads, under one deadline. */
-async function terminalCallerDenial(input: DashboardCaller | undefined, clock: typeof startupClock, humanSend: boolean): Promise<string | null> {
+async function terminalCallerDenial(input: DashboardCaller | undefined, clock: typeof startupClock, mode: "start" | "remote-send" | "local-send"): Promise<string | null> {
   const timeout = "Remote starts are disabled because checking the dashboard caller timed out";
   const timeoutMs = 2_000;
   const deadline = clock.now() + timeoutMs;
@@ -131,7 +132,7 @@ async function terminalCallerDenial(input: DashboardCaller | undefined, clock: t
     controller.abort();
   });
   try {
-    const result = await Promise.race([expired.promise, classifyCaller(controller.signal, input, humanSend)]);
+    const result = await Promise.race([expired.promise, classifyCaller(controller.signal, input, mode)]);
     return clock.now() >= deadline ? timeout : result;
   } finally {
     cancelTimer();
@@ -139,11 +140,11 @@ async function terminalCallerDenial(input: DashboardCaller | undefined, clock: t
 }
 
 export function remoteStartDenialAtStartup(input?: DashboardCaller, clock = startupClock): Promise<string | null> {
-  return terminalCallerDenial(input, clock, false);
+  return terminalCallerDenial(input, clock, "start");
 }
 
-export async function isHumanSendTerminal(input?: DashboardCaller): Promise<boolean> {
-  return await terminalCallerDenial(input, startupClock, true) === null;
+export async function isHumanSendTerminal(input?: DashboardCaller, mode: "remote-send" | "local-send" = "remote-send"): Promise<boolean> {
+  return await terminalCallerDenial(input, startupClock, mode) === null;
 }
 
 /** A cwd under the coordinator home identifies @system only inside its live pane's process tree. */

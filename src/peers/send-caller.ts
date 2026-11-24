@@ -27,7 +27,8 @@ export async function localHumanInCheckout(cwd: string, recordedSession: unknown
     });
     const session = probe.stdout.toString().trim();
     return probe.exitCode === 0 && session !== "" && session !== recordedSession &&
-      session !== IB_COORDINATOR_SESSION && !isAgentTmuxSession(session);
+      session !== IB_COORDINATOR_SESSION && !isAgentTmuxSession(session) &&
+      await remoteCliCaller.isHuman(undefined, "local-send");
   } catch { return false; }
 }
 

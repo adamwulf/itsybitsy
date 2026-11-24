@@ -261,6 +261,7 @@ describe("sandbox profile emission", () => {
       tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
+      tagged(`(deny network-outbound (remote unix-socket (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}")))`),
       tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
       tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
@@ -293,6 +294,7 @@ describe("sandbox profile emission", () => {
       tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerOutboxDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
       tagged(`(deny file-link (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}"))`),
+      tagged(`(deny network-outbound (remote unix-socket (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}")))`),
       tagged('(deny file-write* (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
       tagged('(deny file-link (regex #"^/private/tmp/\\.ib-seal-helper-[0-9a-f-]+(/.*)?$"))'),
     ]);
@@ -441,8 +443,8 @@ describe("sandbox profile emission", () => {
     );
     const denies = profile.trimEnd().split("\n").filter((line) => line.startsWith("(deny"));
     // default, 2 read-only write denies (/tmp/read-only, REPOID), 2 raw, 2 per
-    // config deny, 6 staging denies, 2 delivered-attachment denies, 4 peer and handoff denies, 2 seal-helper denies.
-    expect(denies.length).toBe(23);
+    // config deny, 6 staging denies, 2 delivered-attachment denies, 5 peer and handoff denies, 2 seal-helper denies.
+    expect(denies.length).toBe(24);
     for (const line of denies) expect(line.endsWith(` (with message "${TAG}"))`)).toBe(true);
     // A string that merely contains "(deny" is not a second rule.
     expect(profile).toContain(tagged('(deny file-read* (literal "/x (deny y)"))'));
@@ -496,15 +498,18 @@ describe("sandbox profile emission", () => {
   test("domains do not create a baked-in profile permission", () => {
     // Use a spawner (canSpawnChildren: true) so there is NO tmux-socket
     // network-outbound deny in the profile: with empty rawAllow the profile then
-    // has zero network lines, so any "network" or domain string would be a leak
-    // from the domains list (which must go to the proxy allowlist, not SBPL).
+    // has only the peer-socket deny as a network line, so any other "network"
+    // line or a domain string would be a leak from the domains list (which must
+    // go to the proxy allowlist, not SBPL).
     const profile = generateProfile(
       config({ domains: ["example.com"] }),
       EMPTY_PATHS,
       { ...PARAMS, canSpawnChildren: true },
     );
     expect(profile).not.toContain("example.com");
-    expect(profile).not.toContain("network");
+    expect(profile.split("\n").filter(line => line.includes("network"))).toEqual([
+      tagged(`(deny network-outbound (remote unix-socket (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}")))`),
+    ]);
   });
 
   test("a quote-based path injection cannot emit an allow-default rule", () => {
@@ -2539,4 +2544,11 @@ test("an old broad type and raw grants cannot reopen the peer handoff for writes
     const deny = tagged(`(deny file-write* (subpath "${canonicalizeSandboxPath(dir)}"))`);
     expect(profile.indexOf(deny)).toBeGreaterThan(profile.indexOf(broad));
   }
+});
+
+test("a broad unix-socket grant cannot reopen the ib peer attach socket", () => {
+  const broad = "(allow network-outbound (remote unix-socket))";
+  const profile = generateProfile(config({ rawAllow: [broad] }), paths({}), PARAMS);
+  const deny = tagged(`(deny network-outbound (remote unix-socket (subpath "${canonicalizeSandboxPath(peerDir(PARAMS.HOME))}")))`);
+  expect(profile.indexOf(deny)).toBeGreaterThan(profile.indexOf(broad));
 });

@@ -1522,6 +1522,10 @@ export function generateProfile(
     const subtree = `(subpath "${escapeSbplString(canonicalizeSandboxPath(dir))}")`;
     lines.push(denyRule(`file-write* ${subtree}`, tag), denyRule(`file-link ${subtree}`, tag));
   }
+  // `ib peer attach`'s socket (src/peers/terminal-relay.ts) types into a
+  // paired peer's agent sessions. As with the tmux socket above, only a
+  // network-outbound deny stops the connect, past _all.md's blanket allow.
+  lines.push(denyRule(`network-outbound (remote unix-socket (subpath "${escapeSbplString(canonicalizeSandboxPath(peerDir(home)))}"))`, tag));
 
   // The ordinary /private/tmp floor lets the parent read the helper's
   // atomically-published status/output, but it must never be able to forge or

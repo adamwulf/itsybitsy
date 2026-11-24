@@ -10261,7 +10261,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(rows[1]).toContain(GREEN + "connected" + RESET);
     expect(rows[2]).toContain(RED + "offline" + RESET);
     // Connected: the link word and how long it has been up, without the coordinator's state.
-    expect(stripAnsi(rows[1]!).trimEnd()).toEndWith("Laptop B  connected  5m");
+    expect(stripAnsi(rows[1]!).trimEnd()).toMatch(/Laptop B +connected +5m$/);
     expect(stripAnsi(rows[2]!)).toContain("compacting");
     expect(rows[2]).toContain(DIM);
     expect(stripAnsi(rows[2]!)).toContain("2m ago");
@@ -10309,9 +10309,32 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
     const [b] = links();
     service.set({ peers: [{ ...b!, pairedAt: "x" }], links: [b!] });
-    expect(stripAnsi(treeRows(dashboard)[1]!).trimEnd()).toEndWith("Laptop B  connected  5m");
+    expect(stripAnsi(treeRows(dashboard)[1]!).trimEnd()).toMatch(/Laptop B +connected +5m$/);
     selectByKey(dashboard, PEER_B + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("State: unavailable");
+  });
+
+  test("peer coordinator and remote agent rows share the local rows' state and age columns", () => {
+    const { dashboard, service, local } = setup();
+    dashboard.onUpdate([local], [{ kind: "system-coordinator", state: "running", age: "1m" }, makeFlatAgent(local)], []);
+    const [b, c, d] = links();
+    // D has not answered yet (connecting); C is offline and last reported a coordinator state.
+    const current = [b!, { ...c!, coordinator: { state: "compacting" } }, { ...d!, lastError: null }];
+    service.set({ peers: current.map(link => ({ id: link.id, name: link.name, pairedAt: "x" })), links: current });
+    const rows = treeRows(dashboard).map(row => stripAnsi(row).trimEnd());
+    const stateCol =(row: string) => row.search(/ (running|waiting|complete|connected|offline|connecting)\b/) + 1;
+    /** Where the age ends: the state word, its padding, then the age. */
+    const ageEnd = (row: string) => stateCol(row) + row.slice(stateCol(row)).match(/^\S+ +\S+/)![0].length;
+    const coordinator = rows.find(row => row.includes("◆ coordinator"))!;
+    const peer = (name: string) => rows.find(row => row.includes(name))!;
+    const stated = rows.filter(row => stateCol(row) > 0);
+    // The coordinator, three peers, the local agent and four remote agents.
+    expect(stated).toHaveLength(9);
+    for (const row of stated) expect(stateCol(row)).toBe(stateCol(coordinator));
+    expect(peer("Laptop B")).toMatch(/connected +5m$/);
+    expect(peer("Laptop C")).toMatch(/offline +2m ago  compacting$/);
+    expect(peer("Laptop D")).toMatch(/Laptop D +connecting$/);
+    for (const name of ["Laptop B", "Laptop C"]) expect(ageEnd(peer(name))).toBe(ageEnd(coordinator));
   });
 
   test("remote-only repos follow local rows in display order, with italic agents and dim stale rows", () => {

@@ -14,12 +14,15 @@ import { repoDisplayName, type RepoEntry } from "../registry";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { localAgentKey, repoRowKey } from "./row-keys";
 import { peerLinkStateText } from "./peers-dialog";
-import { formatAgo } from "../channels/connection-view";
 import { FALLBACK_MACHINE_NAME } from "../machine-name";
 
 export const MAX_TREE_HEIGHT = 7;
 const MIN_STATE_COL_WIDTH = 8; // minimum: length of "complete"
+/** Widest state column for remote agents: a remote state is the other install's text. */
+const MAX_REMOTE_STATE_COL_WIDTH = 16;
 export const AGE_COL_WIDTH = 3; // max age length: e.g. "27m"
+/** The connector of the last peer coordinator row; "├── " has the same width. */
+const PEER_BRANCH_LAST = "└── ";
 
 /**
  * The largest useful scroll offset for `rowCount` rows in a `maxHeight`-line
@@ -55,7 +58,12 @@ export function displayState(state: string): string {
   return state === "unknown" ? "running" : state;
 }
 
-/** Compute state column width from the agents being displayed */
+/**
+ * Compute state column width from the rows being displayed. A peer
+ * coordinator puts its link word (`connecting`) in this column; a remote
+ * agent its state, capped at MAX_REMOTE_STATE_COL_WIDTH because that is
+ * the other install's text.
+ */
 export function computeStateColWidth(agents: FlatEntry[]): number {
   let maxLen = MIN_STATE_COL_WIDTH;
   for (const f of agents) {
@@ -63,6 +71,10 @@ export function computeStateColWidth(agents: FlatEntry[]): number {
       maxLen = Math.max(maxLen, displayState(f.agent.state).length);
     } else if (f.kind === "system-coordinator") {
       maxLen = Math.max(maxLen, displayState(f.state).length);
+    } else if (f.kind === "remote-coordinator") {
+      maxLen = Math.max(maxLen, f.linkStatus.length);
+    } else if (f.kind === "remote-agent") {
+      maxLen = Math.max(maxLen, Math.min(MAX_REMOTE_STATE_COL_WIDTH, visibleWidth(displayState(f.remote.state))));
     }
   }
   return maxLen;
@@ -206,9 +218,6 @@ function entryKey(f: FlatEntry, machine: string): string | null {
   }
 }
 
-/** Widest state column for remote agents: a remote state is the other install's text. */
-const MAX_REMOTE_STATE_COL_WIDTH = 16;
-
 /**
  * The color of a state the other install sent (already through displayState).
  * Only a state's own entry counts: indexing the color table with remote text
@@ -239,9 +248,10 @@ export function formatRemoteRepoRow(
 
 /**
  * A remote agent row: `<connector><name>  <state>`, indented under its repo
- * header. The name and the state are cut to their columns (nameColWidth and
- * stateColWidth come from the visible remote rows, already capped to the
- * width), so a long remote value cannot push the state off the row. Dimmed
+ * header. nameColWidth and stateColWidth are the tree's shared columns, so
+ * the state lines up with the local rows' state. The caller caps
+ * nameColWidth to the width, and the name and the state are cut to their
+ * columns, so a long remote value cannot push the state off the row. Dimmed
  * while the peer is not connected.
  */
 export function formatRemoteAgentRow(
@@ -263,19 +273,37 @@ export function formatRemoteAgentRow(
   return highlightRow(truncateToWidth(line, width, ""), selected, width);
 }
 
-/** The name and state column widths for the visible remote agent rows at `width`. */
-function remoteColumnWidths(visible: FlatEntry[], width: number, localIndent: string): { nameColWidth: number; stateColWidth: number } {
-  let nameColWidth = 0;
-  let stateColWidth = MIN_STATE_COL_WIDTH;
-  let indent = localIndent;
-  for (const item of visible) {
-    if (item.kind === "remote-repo-header") indent = "";
-    if (item.kind !== "remote-agent") continue;
-    nameColWidth = Math.max(nameColWidth, visibleWidth(indent + item.connector + remoteDisplayName(item.remote)));
-    stateColWidth = Math.max(stateColWidth, visibleWidth(displayState(item.remote.state)));
-  }
-  stateColWidth = Math.min(stateColWidth, MAX_REMOTE_STATE_COL_WIDTH);
-  return { nameColWidth: Math.min(nameColWidth, Math.max(1, width - 2 - stateColWidth)), stateColWidth };
+/**
+ * A paired machine's coordinator row, under the local coordinator:
+ * `<branch><name>  <link>  <age>[  <state>]`. The link word sits in the
+ * tree's state column and the age in its age column, so the row lines up
+ * with the local rows. Connected: how long the link has been up. Otherwise:
+ * when the peer last answered (`2m ago`), then the last reported coordinator
+ * state. The caller caps nameColWidth so the link and age fit the width.
+ * Dimmed while offline.
+ */
+export function formatPeerCoordinatorRow(
+  entry: Extract<RemoteEntry, { kind: "remote-coordinator" }>,
+  branch: string,
+  selected: boolean,
+  width: number,
+  nameColWidth: number,
+  stateColWidth: number,
+): string {
+  const nameWidth = Math.max(1, nameColWidth - visibleWidth(branch));
+  const name = truncatePeerField(entry.peerName, nameWidth);
+  const namePad = " ".repeat(Math.max(0, nameWidth - visibleWidth(name)));
+  const since = entry.connectedAt ?? entry.lastOkAt;
+  const age = since === null ? "" : computeAge(Math.floor(since / 1000)).padStart(AGE_COL_WIDTH);
+  const ago = entry.connectedAt === null && entry.lastOkAt !== null ? " ago" : "";
+  // A connected row needs only the link word; the info panel shows the coordinator's state.
+  const state = entry.linkStatus === "connected" || !entry.state ? ""
+    : `  ${truncatePeerField(entry.state, MAX_REMOTE_STATE_COL_WIDTH)}`;
+  const linkPad = " ".repeat(Math.max(0, stateColWidth - entry.linkStatus.length));
+  const tail = age || state ? `${linkPad}  ${age || " ".repeat(AGE_COL_WIDTH)}${ago}${state}` : "";
+  const dim = entry.linkStatus === "offline" ? DIM : "";
+  const line = `${dim}${branch}${ITALIC}${name}${RESET}${dim}${namePad}  ${peerLinkStateText(entry.linkStatus)}${dim}${tail}${RESET}`;
+  return highlightRow(truncateToWidth(line, width, ""), selected, width);
 }
 
 /**
@@ -1428,24 +1456,35 @@ export class AgentTreeComponent implements Component {
     const groupingActive = visible.some((item) => item.kind === "parent-header");
     const repoIndent = groupingActive ? "  " : "";
 
+    // Remote agents under a local repo header are indented with it; the
+    // remote-only repos after the local ones are not.
+    const remoteOnlyStart = visible.findIndex((row) => row.kind === "remote-repo-header");
+    const remoteIndent = (i: number) => remoteOnlyStart < 0 || i < remoteOnlyStart ? repoIndent : "";
+
     // Compute max name prefix width and state column width across all visible
-    // agent rows. Under grouping, the agent connector is prefixed with
-    // repoIndent so the width math and the rendered text agree (otherwise the
-    // state/age columns misalign).
+    // agent rows, local and remote, so every row's state and age line up.
+    // Under grouping, the agent connector is prefixed with repoIndent so the
+    // width math and the rendered text agree (otherwise the state/age columns
+    // misalign).
     let maxNameWidth = 0;
-    for (const item of visible) {
+    for (let i = 0; i < visible.length; i++) {
+      const item = visible[i]!;
       if (item.kind === "agent") {
         const isFavorite = this.isFavorite(item.agent);
         maxNameWidth = Math.max(maxNameWidth, agentNamePrefixWidth(item.agent, repoIndent + item.connector, isFavorite));
       } else if (item.kind === "system-coordinator") {
         maxNameWidth = Math.max(maxNameWidth, visibleWidth("◆ coordinator"));
+      } else if (item.kind === "remote-coordinator") {
+        maxNameWidth = Math.max(maxNameWidth, visibleWidth(PEER_BRANCH_LAST + item.peerName));
+      } else if (item.kind === "remote-agent") {
+        maxNameWidth = Math.max(maxNameWidth, visibleWidth(remoteIndent(i) + item.connector + remoteDisplayName(item.remote)));
       }
     }
     const stateColWidth = computeStateColWidth(visible);
-    // Remote agents align their own columns, so the local ones are the
-    // same with or without them.
-    const remoteColumns = remoteColumnWidths(visible, width, repoIndent);
-    const remoteOnlyStart = visible.findIndex((row) => row.kind === "remote-repo-header");
+    // Remote rows keep their state (and a peer row its age) on screen at a
+    // narrow width by cutting the name instead.
+    const remoteNameColWidth = Math.min(maxNameWidth, Math.max(1, width - 2 - stateColWidth));
+    const peerNameColWidth = Math.min(maxNameWidth, Math.max(visibleWidth(PEER_BRANCH_LAST) + 1, width - 4 - stateColWidth - AGE_COL_WIDTH));
 
     // Scroll indicator at top (indented with the subtree when grouping so it
     // doesn't float left of the rows it summarizes).
@@ -1458,23 +1497,14 @@ export class AgentTreeComponent implements Component {
       if (item.kind === "remote-repo-header") {
         lines.push(formatRemoteRepoRow(item, selectionActive && i === this.selectedIndex, width));
       } else if (item.kind === "remote-coordinator") {
-        const link = peerLinkStateText(item.linkStatus);
-        // Connected: how long the link has been up. Otherwise: when the peer last answered.
-        const seen = item.connectedAt !== null ? `  ${computeAge(Math.floor(item.connectedAt / 1000))}`
-          : item.lastOkAt !== null ? `  ${formatAgo(Date.now() - item.lastOkAt)}` : "";
-        const available = width - 6 - visibleWidth(link) - visibleWidth(seen);
-        // A connected row needs only the link word; the info panel shows the coordinator's state.
-        const state = item.linkStatus === "connected" ? null : item.state;
-        const label = state ? "  " + truncatePeerField(state, Math.min(MAX_REMOTE_STATE_COL_WIDTH, Math.max(1, available - 5))) : "";
-        const name = truncatePeerField(item.peerName, Math.max(1, available - visibleWidth(label)));
-        const branch = visible[i + 1]?.kind === "remote-coordinator" ? "├── " : "└── ";
-        const dim = item.linkStatus === "offline" ? DIM : "";
-        const row = `${dim}${branch}${ITALIC}${name}${RESET}${dim}${label}  ${link}${dim}${seen}${RESET}`;
-        lines.push(highlightRow(truncateToWidth(row, width, ""), selectionActive && i === this.selectedIndex, width));
+        const branch = visible[i + 1]?.kind === "remote-coordinator" ? "├── " : PEER_BRANCH_LAST;
+        lines.push(formatPeerCoordinatorRow(
+          item, branch, selectionActive && i === this.selectedIndex, width, peerNameColWidth, stateColWidth,
+        ));
       } else if (item.kind === "remote-agent") {
         lines.push(formatRemoteAgentRow(
-          { ...item, connector: (remoteOnlyStart < 0 || i < remoteOnlyStart ? repoIndent : "") + item.connector }, selectionActive && i === this.selectedIndex, width,
-          remoteColumns.nameColWidth, remoteColumns.stateColWidth,
+          { ...item, connector: remoteIndent(i) + item.connector }, selectionActive && i === this.selectedIndex, width,
+          remoteNameColWidth, stateColWidth,
         ));
       } else if (item.kind === "system-coordinator") {
         lines.push(formatCoordinatorRow(

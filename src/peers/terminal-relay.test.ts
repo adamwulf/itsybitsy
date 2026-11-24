@@ -100,7 +100,7 @@ describe("ib peer attach through the ib watch relay", () => {
     void serveTrustedConnection(link.b, {
       setTimer: createFakeClock().setTimer,
       peerName: async (id) => id === LOCAL ? "local" : null,
-      snapshot: () => ({ coordinator: null, repos: [], agents: [] }),
+      snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
       terminal,
       log: () => {},
     });

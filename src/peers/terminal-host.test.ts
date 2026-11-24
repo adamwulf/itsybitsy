@@ -79,7 +79,7 @@ function host(options: { terminal?: TerminalHostDeps | null; sessions?: Set<obje
   const done = serveTrustedConnection(link.b, {
     setTimer: clock.setTimer,
     peerName: async (id) => peers.has(id) ? "Alice" : null,
-    snapshot: () => ({ coordinator: null, repos: [], agents: [] }),
+    snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
     ...(options.terminal !== null && { terminal: options.terminal ?? terminal }),
     log: (line) => logs.push(line),
   });

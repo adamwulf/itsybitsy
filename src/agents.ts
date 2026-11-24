@@ -185,6 +185,8 @@ export interface Agent {
    */
   repoRegistryName: string;
   meta: AgentMeta;
+  /** The local tree can display a placeholder or repaired metadata. Peers require a real agent identity. */
+  metadataError?: string;
   /** Latest watchdog-owned transient state, when available. */
   transient?: TransientState | null;
   state: AgentState;
@@ -1681,7 +1683,7 @@ export interface AgentReadError {
  * sendMessage, resumeAgent, pauseAgent, newAgent). Transient observations
  * live in meta.transient.json — they don't bump meta.json's mtime.
  *
- * Map key: absolute meta.json path. Value: { mtimeMs, meta }.
+ * Each entry also records the file mode so chmod invalidates an earlier successful read.
  * Cache stores a single canonical reference; readers receive an isolated copy
  * via copyAgentMeta() so caller mutations cannot pollute the cache. We do NOT
  * use structuredClone() — it was the 2nd-biggest CPU cost in profiling because
@@ -1691,7 +1693,17 @@ export interface AgentReadError {
  * spawned_by is dramatically cheaper while preserving the same isolation
  * guarantee. See copyAgentMeta().
  */
-const metaCache = new Map<string, { mtimeMs: number; meta: AgentMeta }>();
+const metaCache = new Map<string, { mtimeMs: number; mode: number; meta: AgentMeta; identityError?: string }>();
+
+/** Check the stored identity before the local display reader supplies defaults. An empty PID is valid before launch. */
+export function agentIdentityError(meta: Record<string, unknown> | null, directoryId: string): string | undefined {
+  if (meta?.id !== directoryId) return "missing or mismatched agent id";
+  if (typeof meta.worktree !== "boolean") return "missing or invalid worktree flag";
+  const pid = meta.claude_pid;
+  if (pid !== "" && (typeof pid !== "string" || !/^\d+$/.test(pid) || !Number.isSafeInteger(Number(pid)) || Number(pid) <= 1)) {
+    return "missing or invalid claude_pid";
+  }
+}
 
 /**
  * Return an isolated copy of an AgentMeta cheaply. AgentMeta's fields are all
@@ -1750,15 +1762,17 @@ function invalidateAgentMetaCache(agentDir: string): void {
 /** Read a single agent's meta.json. Returns meta or an error description.
  * Uses an mtime-keyed cache to avoid re-parsing on every refresh tick when
  * meta.json hasn't changed. */
-export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null; error?: string; missing?: true }> {
+export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta | null; error?: string; missing?: true; identityError?: string }> {
   const metaPath = join(agentDir, "meta.json");
 
   // Single syscall: stat() returns mtimeMs and confirms existence.
   // Replaces the previous Bun.file().exists() + file.json() pair.
   let mtimeMs: number;
+  let mode: number;
   try {
     const st = await stat(metaPath);
     mtimeMs = st.mtimeMs;
+    mode = st.mode;
   } catch (err: unknown) {
     if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
       metaCache.delete(metaPath);
@@ -1768,8 +1782,8 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
   }
 
   const cached = metaCache.get(metaPath);
-  if (cached && cached.mtimeMs === mtimeMs) {
-    return { meta: copyAgentMeta(cached.meta) };
+  if (cached && cached.mtimeMs === mtimeMs && cached.mode === mode) {
+    return { meta: copyAgentMeta(cached.meta), identityError: cached.identityError };
   }
 
   try {
@@ -1780,6 +1794,7 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
       metaCache.delete(metaPath);
       return { meta: null, error: `Malformed ${metaPath}: missing or invalid 'id'` };
     }
+    const identityError = agentIdentityError(data, basename(agentDir));
     // Apply sensible defaults for all fields with wrong types
     if (typeof data.session_id !== "string") data.session_id = "";
     if (typeof data.tmux_session !== "string") data.tmux_session = "";
@@ -1854,8 +1869,8 @@ export async function readAgentMeta(agentDir: string): Promise<{ meta: AgentMeta
       }
     }
     const meta = data as AgentMeta;
-    metaCache.set(metaPath, { mtimeMs, meta });
-    return { meta: copyAgentMeta(meta) };
+    metaCache.set(metaPath, { mtimeMs, mode, meta, identityError });
+    return { meta: copyAgentMeta(meta), identityError };
   } catch (err) {
     metaCache.delete(metaPath);
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { meta: null, missing: true, error: `Missing ${metaPath}` };
@@ -1898,7 +1913,7 @@ async function readAgentsFromDir(
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const agentDir = join(dir, entry.name);
-      const [{ meta, error }, transient] = await Promise.all([
+      const [{ meta, error, identityError }, transient] = await Promise.all([
         readAgentMeta(agentDir),
         archived ? Promise.resolve(null) : readAgentTransient(agentDir),
       ]);
@@ -1936,6 +1951,7 @@ async function readAgentsFromDir(
               repoName,
               repoRegistryName,
               meta: placeholderMeta,
+              metadataError: error,
               state: "creating",
               age: computeAge(startEpochSec),
               archived: false,
@@ -1959,6 +1975,7 @@ async function readAgentsFromDir(
         repoName,
         repoRegistryName,
         meta,
+        metadataError: archived ? undefined : identityError,
         transient,
         state: "unknown", // Updated by watcher via parseState()
         age: computeAge(meta.created_epoch),

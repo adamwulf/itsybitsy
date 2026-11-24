@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setUserHome, resetUserHome } from "../home";
@@ -13,7 +13,8 @@ import { acceptRemoteLifecycle } from "./remote-lifecycle";
 import { lifecycleFixture } from "./test-remote-lifecycle";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { listSpawnableTypeNamesSync } from "../agent-types";
-import type { Agent } from "../agents";
+import { readRepoAgents, type Agent } from "../agents";
+import { logAgent } from "../agent-lifecycle";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { captureAgentPane } from "./agent-pane";
 import { spawnCtx as paneCapture } from "../tmux-poller";
@@ -124,6 +125,37 @@ async function rawRequest(conn: MemoryConnection, bytes: Uint8Array): Promise<Ui
 const decodeText = (bytes: Uint8Array | Error) => JSON.parse(new TextDecoder().decode(bytes as Uint8Array));
 
 describe("toRemoteAgents", () => {
+  test("the agents reply omits broken records and local placeholders, including on a cached refresh", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "ib-peer-agents-"));
+    const agentsDir = join(repo, ".itsybitsy", "agents");
+    try {
+      for (const [id, overrides] of [
+        ["active", {}], ["starting", { claude_pid: "" }], ["bad-pid", { claude_pid: 42 }],
+        ["bad-worktree", { worktree: null }], ["wrong-dir", { id: "wrong-id" }],
+      ] as const) {
+        await Bun.write(join(agentsDir, id, "meta.json"), JSON.stringify({ id, worktree: true, claude_pid: "42", ...overrides }));
+      }
+      await Bun.write(join(agentsDir, "broken", "meta.json"), "{");
+      await mkdir(join(agentsDir, "unreadable", "meta.json"), { recursive: true });
+      const placeholder = join(agentsDir, "placeholder");
+      await mkdir(placeholder);
+      await logAgent(placeholder, "[spawn] start id=placeholder");
+      for (let refresh = 0; refresh < 2; refresh++) {
+        const { agents } = await readRepoAgents(repo, "app", false);
+        expect(agents.find(a => a.id === "placeholder")?.state).toBe("creating");
+        const reply = decodeAgentsReply(encodeAgentsReply(peerSnapshot([], agents, undefined)));
+        expect(reply.agents.map(a => a.id).sort()).toEqual(["active", "starting"]);
+      }
+      if (process.getuid?.() !== 0) {
+        await chmod(join(agentsDir, "active", "meta.json"), 0);
+        const { agents } = await readRepoAgents(repo, "app", false);
+        expect(toRemoteAgents(agents).map(a => a.id)).toEqual(["starting"]);
+      }
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
   test("keeps exactly the eight allowed fields and leaves out the system coordinator", () => {
     const worker = fullAgent("agent-1");
     // A nicknamed repo: shown as "library", keyed by its registry name "lib".

@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as fsPromises from "fs/promises";
 import { chmod, mkdtemp, mkdir, realpath, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { remoteStartDenialAtStartup } from "./peers/remote-start-caller";
 import { resolveDashboardCaller, resolveNoWorktreeCaller } from "./no-worktree-caller";
+import { getWatchLogPath, setWatchLogPath } from "./watch-log";
 
 describe("trusted no-worktree caller attribution", () => {
   let repo: string;
@@ -53,20 +55,64 @@ describe("trusted no-worktree caller attribution", () => {
     });
   }
 
-  test.each(["missing", "invalid JSON", "invalid shape"])("the dashboard denies %s metadata in a worktree and in a shared repo", async damage => {
+  async function expectDashboardCallers(path: string) {
+    expect(await resolveDashboardCaller(path, new Set([500, 1]), deps())).toBe("no-agent");
+    expect(await resolveDashboardCaller(path, new Set([500, 300, 1]), deps())).toBe("agent");
+  }
+
+  test.each(["missing", "invalid JSON", "invalid id", "missing worktree"])("the dashboard skips %s metadata and logs the path once", async damage => {
+    await record();
     const { cwd } = await worktree();
     const file = join(cwd, "..", "meta.json");
     if (damage === "missing") await rm(file);
-    else await Bun.write(file, damage === "invalid JSON" ? "{" : "{}");
-    for (const path of [cwd, repo]) {
-      expect(await dashboardDenial(path)).toContain("Cannot verify the dashboard caller’s agent metadata");
+    else await Bun.write(file, damage === "invalid JSON" ? "{" :
+      JSON.stringify({ id: damage === "invalid id" ? "wrong-id" : "worktree-manager", claude_pid: "300" }));
+    const previousLog = getWatchLogPath();
+    const log = join(repo, "watch.log");
+    setWatchLogPath(log);
+    try {
+      for (const path of [cwd, repo]) await expectDashboardCallers(path);
+      const skips = (await Bun.file(log).text()).trim().split("\n");
+      expect(skips).toHaveLength(1);
+      expect(skips[0]).toContain(file + ": ");
+      expect(skips[0]).toMatch(/ENOENT|SyntaxError|agent id|worktree flag/);
+    } finally {
+      setWatchLogPath(previousLog);
     }
   });
 
-  test.each(["0", "1", "9007199254740992"])("the dashboard treats damaged PID %s as unverifiable", async claude_pid => {
-    await record(repo, "manager", { claude_pid });
-    expect(await resolveDashboardCaller(repo, new Set([500, 1]), deps())).toBe("unverifiable");
-    expect(await resolveNoWorktreeCaller(repo, deps())).toBeNull();
+  test.each(["0", "1", "9007199254740992", "3e2", 300, undefined])("the dashboard skips a damaged PID %j", async claude_pid => {
+    await record(repo, "broken", { claude_pid });
+    await record();
+    await expectDashboardCallers(repo);
+  });
+
+  test("a coordinator lookup continues past a broken record with the same id in another repo", async () => {
+    const other = join(repo, "other");
+    await record(other, "manager", { claude_pid: "bad" });
+    await record(repo, "manager", { agentType: "repo-coordinator" });
+    const caller = await resolveNoWorktreeCaller(repo, { ...deps(), roots: [other, repo], coordinatorId: "manager" });
+    expect(caller?.repoPath).toBe(repo);
+  });
+
+  test("a registered repo outside the dashboard's reach (EPERM) does not hide a valid caller", async () => {
+    const blocked = join(repo, "blocked");
+    await record(blocked, "hidden");
+    await record();
+    await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: [{ path: blocked }, { path: repo }],
+    }));
+    const original = fsPromises.realpath;
+    const probe = spyOn(fsPromises, "realpath").mockImplementation((async (path: string) => {
+      if (path === blocked) throw Object.assign(new Error("Operation not permitted"), { code: "EPERM" });
+      return original(path);
+    }) as typeof original);
+    try {
+      await expectDashboardCallers(repo);
+      expect(probe).toHaveBeenCalledWith(blocked);
+    } finally {
+      probe.mockRestore();
+    }
   });
 
   test("the dashboard allows an explicit no-agent result and denies a verified shared-repo caller", async () => {
@@ -181,6 +227,7 @@ describe("trusted no-worktree caller attribution", () => {
   test("malformed registry is an error rather than a human-caller fallback", async () => {
     await Bun.write(join(repo, "home", ".itsybitsy", "repos.json"), "{broken");
     await expect(resolveNoWorktreeCaller(repo, deps())).rejects.toThrow();
+    expect(await resolveDashboardCaller(repo, new Set([500, 1]), deps())).toBe("unverifiable");
   });
 
   // A sandboxed agent can only read its own repo; every other registered repo
@@ -218,6 +265,7 @@ describe("trusted no-worktree caller attribution", () => {
     await chmod(blocked, 0o000);
     try {
       expect((await resolveNoWorktreeCaller(repo, deps()))?.meta.id).toBe("manager");
+      await expectDashboardCallers(repo);
     } finally {
       await chmod(blocked, 0o755);
     }

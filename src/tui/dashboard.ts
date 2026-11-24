@@ -544,10 +544,12 @@ class StatusBarComponent implements Component {
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${questionsHint}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${this.remoteAgentSelected ? "    C: terminal" : ""}${errBadge}${RESET}`;
       let row2 = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab${this.remoteAgentSelected ? "    o: diff    m: merge    x: retire    R: resume" : ""}${this.remoteRepoSelected ? "" : "    s: send"}${markHint}`;
       // `a` and `h` come last, and only whole: on a narrow terminal the row's
-      // own actions matter more than the two global dialogs, and a hint cut
-      // in half is noise.
+      // own actions and the usage/version on the right matter more than the
+      // two global dialogs, and a hint cut in half is noise. The room kept
+      // for the right text is composeLine's minimum: a 2-column gap plus 1.
+      const rightRoom = row2Right ? visibleWidth(row2Right) + 3 : 0;
       for (const hint of ["a: new agent", "h: setup"]) {
-        if (visibleWidth(`${row2}    ${hint}`) > width) break;
+        if (visibleWidth(`${row2}    ${hint}`) + rightRoom > width) break;
         row2 += `    ${hint}`;
       }
       row2Left = `${row2}${RESET}`;

@@ -11927,6 +11927,18 @@ describe("Unified peer repos in the Agents tree", () => {
       const row2 = stripAnsi(((dashboard as any).statusBar.render(cols) as string[])[1]!).trimEnd();
       expect(row2).toMatch(/(\.: favorite|a: new agent|h: setup)$/);
     }
+    // Nor does one push the version on the right out of the row.
+    (dashboard as any).statusBar.version = "0.1.0";
+    let shownWithVersion = 0;
+    for (let cols = MIN_TERMINAL_WIDTH; cols <= 200; cols++) {
+      const row2 = stripAnsi(((dashboard as any).statusBar.render(cols) as string[])[1]!).trimEnd();
+      if (row2.includes("a: new agent")) {
+        expect(row2).toEndWith("v0.1.0");
+        shownWithVersion++;
+      }
+    }
+    expect(shownWithVersion).toBeGreaterThan(0);
+    (dashboard as any).statusBar.version = "";
     for (const hint of ["A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }

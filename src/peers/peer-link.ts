@@ -417,7 +417,7 @@ export async function requestLifecycle(conn: PairConnection, request: RemoteLife
       }
       if (reply.ok !== true || typeof reply.output !== "string") throw new PeerProtocolError("Malformed lifecycle reply");
       return lifecycleText(reply.output);
-    }, { ...transfer, setTimer, timeout: [lifecycleTimeout(request.action), unknown] });
+    }, { ...transfer, setTimer, unknownAfterFin: unknown.message, timeout: [lifecycleTimeout(request.action), unknown] });
   } catch (err) {
     if (err instanceof TransferIdleError) throw unknown;
     throw err;
@@ -451,6 +451,7 @@ export interface OutgoingTransfer {
 interface ClientOptions extends OutgoingTransfer {
   setTimer: Timer;
   timeout?: [number, Error];
+  unknownAfterFin?: string;
   files?: SendHeader["files"];
 }
 
@@ -541,7 +542,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     if (received?.ok) return received.value;
     if (received && received.error instanceof PeerErrorReply) throw received.error;
     if (result.ok) return result.value;
-    if (files && attemptedFin) throw new Error(SEND_UNKNOWN, { cause: result.error });
+    if (attemptedFin && options.unknownAfterFin) throw new Error(options.unknownAfterFin, { cause: result.error });
     if (result.error instanceof PairProtocolError) throw new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`);
     throw result.error;
   } finally {
@@ -556,7 +557,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
     if (reply.ok === true && reply.id === header.id) return header.id;
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(sendDiagnostic(reply.reason));
     throw new PeerProtocolError("Malformed send acknowledgement");
-  }, { ...transfer, setTimer, files: header.files });
+  }, { ...transfer, setTimer, files: header.files, unknownAfterFin: SEND_UNKNOWN });
 }
 
 // ---------------------------------------------------------------------------

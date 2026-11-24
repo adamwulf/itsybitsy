@@ -418,6 +418,16 @@ test("ambiguous retired nicknames suggest addresses on the paired machine", asyn
   }
 });
 
+test("dropping the trusted link after lifecycle FIN leaves the outcome unknown", async () => {
+  const link = createMemoryLink(ID_A, ID_B);
+  const clock = createFakeClock();
+  const result = requestLifecycle(link.a, { action: "retire", repo: "app", id: "worker" }, "Laptop B", clock.setTimer);
+  const stream = await link.b.acceptBi();
+  expect(decodeText(await stream.readToEnd(4096))).toMatchObject({ op: "lifecycle", action: "retire", id: "worker" });
+  link.b.close(0, "receiver stopped");
+  await expect(result).rejects.toThrow("outcome unknown — check Laptop B");
+});
+
 test.each([["merge", 120000], ["retire", 30000], ["rehire", 30000], ["resume", 30000]] as const)(
   "%s waits for its own deadline and reports the machine to check", async (action, ms) => {
     const link = createMemoryLink(ID_A, ID_B);

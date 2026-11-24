@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 import { appendFileSync, closeSync, openSync } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { unlink, writeFile } from "node:fs/promises";
 import { formatLogTimestamp } from "./log-timestamp";
 
 const MAX_HEADER_BYTES = 64 * 1024;
@@ -529,8 +529,8 @@ export async function runSandboxProxy(options: {
     proxyLog: options.logFile,
     agentLog: options.agentLogFile,
   });
-  await Bun.write(options.pidFile, `${process.pid}\n`);
-  await Bun.write(options.readyFile, `ready ${server.port}\n`);
+  await writeFile(options.pidFile, `${process.pid}\n`);
+  await writeFile(options.readyFile, `ready ${server.port}\n`);
 
   const shutdown = () => {
     server.stop();

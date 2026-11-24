@@ -618,7 +618,7 @@ describe("watchdog", () => {
 
     test("saves debug log on first transition to unknown state", async () => {
       const tmpDir = join(tmpdir(), `watchdog-debug-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-      mkdirSync(tmpDir, { recursive: true });
+      mkdirSync(join(tmpDir, ".itsybitsy", "agents", "a1"), { recursive: true });
 
       // Create agent with repoPath pointing to our temp dir
       const a1 = agent("a1", "unknown", "mgr");

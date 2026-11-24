@@ -6,7 +6,7 @@ import * as runtimeNames from "./runtime-names";
 
 import { sameRepoPath } from "./repo-identity";
 import { join, dirname, basename } from "path";
-import { readdir, link, rename, stat, unlink, open } from "fs/promises";
+import { readdir, link, rename, stat, unlink, open, writeFile } from "fs/promises";
 import { randomUUID } from "crypto";
 import type { AgentState } from "./parse-state";
 import { parseState, stripAnsi, stripTrailingBlanks, STARTUP_MARKERS, hasAgyBackgroundTasks, hasClaudeLimitBanner, isCodexApiError } from "./parse-state";
@@ -387,7 +387,7 @@ export async function mutateAgentMeta(
     const next = result ?? current;
     const tmpPath = `${metaPath}.tmp.${process.pid}.${randomUUID()}`;
     try {
-      await Bun.write(tmpPath, JSON.stringify(next, null, 2));
+      await writeFile(tmpPath, JSON.stringify(next, null, 2));
       await rename(tmpPath, metaPath);
       return true;
     } catch {
@@ -606,7 +606,7 @@ export async function writeAgentTransient(agentDir: string, data: TransientState
   const path = join(agentDir, "meta.transient.json");
   try {
     const tmpPath = path + ".tmp";
-    await Bun.write(tmpPath, JSON.stringify(data, null, 2));
+    await writeFile(tmpPath, JSON.stringify(data, null, 2));
     await rename(tmpPath, path);
   } catch {
     /* best-effort */
@@ -1152,11 +1152,8 @@ async function updateAgentTransientUnlocked(
 ): Promise<boolean> {
   const path = join(agentDir, "meta.transient.json");
   try {
-    // Skip if the agent dir is gone. Bun.write auto-creates parent dirs, so
-    // without this guard the post-merge clear path (dir removed at step 17-19,
-    // then clearAgentOperation runs in `finally`) would RESURRECT the deleted
-    // agent dir with a stray meta.transient.json. The stat throws ENOENT on a
-    // missing dir, which the outer catch swallows — a genuine no-op.
+    // Skip the mutator after teardown. If teardown races this check, writeFile
+    // also requires the parent to exist when it opens the temporary file.
     await stat(agentDir);
     const cur = (await readAgentTransient(agentDir)) ?? emptyTransient();
     const next = fn(cur);
@@ -1166,7 +1163,7 @@ async function updateAgentTransientUnlocked(
     // tmp gives each writer its own scratch file so the atomic rename only ever
     // publishes complete content.
     const tmpPath = `${path}.tmp.${process.pid}`;
-    await Bun.write(tmpPath, JSON.stringify(next, null, 2));
+    await writeFile(tmpPath, JSON.stringify(next, null, 2));
     await rename(tmpPath, path);
     return true;
   } catch {

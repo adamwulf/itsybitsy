@@ -12436,6 +12436,19 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.agentTree.questionAgentKeys.size).toBe(0);
     });
 
+    test("g on a remote-only header left in QUESTIONS jumps to STATUS, not to a question it hides", () => {
+      const { dashboard } = setupQuestions();
+      dashboard.handleInput("q");
+      selectByKey(dashboard, repoKey("other-repo"));
+      expect(dashboard.currentMode).toBe("QUESTIONS");
+      expect(dashboard.rightPane.filteredQuestions.length).toBeGreaterThan(0);
+      resetNotice(dashboard);
+      dashboard.handleInput("g");
+      expect(keyOf(dashboard)).toBe(repoKey("other-repo"));
+      expect(dashboard.currentMode).toBe("STATUS");
+      expect(dashboard.notice).toBeNull();
+    });
+
     test("with no agent selected every question is listed, a peer's under its machine, and g selects its remote row", () => {
       const { dashboard } = setupQuestions();
       dashboard.agentTree.deselect();

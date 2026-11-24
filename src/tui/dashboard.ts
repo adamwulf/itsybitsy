@@ -2379,21 +2379,23 @@ export class DashboardComponent implements Component {
   // --- Command palette ---
 
   private handleCommandPalette() {
-    // `key` is the command's own key, which the read-only guard checks. A
-    // mode jump has none: the guard checks it as `p`, the pane cycling that
-    // reaches the same modes, so it works wherever `p`/`n` do (QUESTIONS
-    // carries `q`, which a remote agent row allows).
+    // `key` is the key the read-only guard checks: the command's own key, and
+    // for a mode jump `p`, the pane cycling that reaches the same modes, so a
+    // jump works wherever `p`/`n` do (QUESTIONS carries `q`, which a remote
+    // agent row allows). A command without a key is refused on a remote row.
     type Command = { label: string; key?: string; action: () => void };
+    const modeJump = (label: string, mode: PaneMode, forceRefresh = false): Command =>
+      ({ label, key: "p", action: () => this.jumpToMode(mode, forceRefresh) });
     const commands: Command[] = [
-      { label: "AGENT LOG — show agent log", action: () => this.jumpToMode("AGENT LOG") },
-      { label: "WATCHDOG LOG — show watchdog log", action: () => this.jumpToMode("WATCHDOG LOG") },
-      { label: "PROXY LOG — show sandbox proxy log", action: () => this.jumpToMode("PROXY LOG") },
-      { label: "INITIAL PROMPT — show initial prompt", action: () => this.jumpToMode("INITIAL PROMPT") },
-      { label: "DENIALS — show tool denials", action: () => this.jumpToMode("DENIALS") },
-      { label: "TREE — show full agent tree", action: () => this.jumpToMode("TREE") },
-      { label: "ERRORS — show errors", action: () => this.jumpToMode("ERRORS") },
-      { label: "DIFF — run ib diff", action: () => this.jumpToMode("DIFF", true) },
-      { label: "STATUS — run ib status", action: () => this.jumpToMode("STATUS", true) },
+      modeJump("AGENT LOG — show agent log", "AGENT LOG"),
+      modeJump("WATCHDOG LOG — show watchdog log", "WATCHDOG LOG"),
+      modeJump("PROXY LOG — show sandbox proxy log", "PROXY LOG"),
+      modeJump("INITIAL PROMPT — show initial prompt", "INITIAL PROMPT"),
+      modeJump("DENIALS — show tool denials", "DENIALS"),
+      modeJump("TREE — show full agent tree", "TREE"),
+      modeJump("ERRORS — show errors", "ERRORS"),
+      modeJump("DIFF — run ib diff", "DIFF", true),
+      modeJump("STATUS — run ib status", "STATUS", true),
       { label: "QUESTIONS — show pending questions", key: "q", action: () => this.jumpToMode("QUESTIONS") },
       { label: "send message — s", key: "s", action: () => agentActions.handleSend(this) },
       { label: "merge agent — m", key: "m", action: () => agentActions.handleMerge(this) },
@@ -2433,7 +2435,7 @@ export class DashboardComponent implements Component {
         this.closeDialog();
         const command = commands[originalIndex]!;
         // The palette is a second way to press a key: the same read-only guard.
-        if (this.refuseOnRemoteRow(command.key ?? "p")) return;
+        if (this.refuseOnRemoteRow(command.key ?? "")) return;
         command.action();
         this.tui?.requestRender();
       },
@@ -3657,7 +3659,8 @@ export class DashboardComponent implements Component {
       this.jumpToMode("DIFF", true);
       this.tui?.requestRender();
     } else if (data === "g") {
-      if (this.rightPane.mode === "QUESTIONS") {
+      // Only a list on screen: a remote-only header in QUESTIONS hides it (SPEC §20.5).
+      if (this.rightPane.mode === "QUESTIONS" && (!this.remoteSelection || this.remoteQuestionsVisible)) {
         agentActions.handleGoToQuestionAgent(this);
       } else {
         this.jumpToMode("STATUS", true);

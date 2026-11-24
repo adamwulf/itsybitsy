@@ -1093,9 +1093,10 @@ describe("watchdog", () => {
       expect(matchingCalls.length).toBeGreaterThan(0);
     });
 
-    test("@<repo-name> sentinel resolves to that repo's coordinator and sendMessage", async () => {
-      // Use a real tempdir whose basename we control so the @<coordinator-id>
-      // lookup in notifySpawner finds the registered repo.
+    test("@<coordinator id> sentinel resolves to that repo's coordinator and sendMessage", async () => {
+      // notifySpawner ignores the id in the sentinel: it finds the registered
+      // repo whose path matches spawned_by.repo_path, then that repo's
+      // coordinator by agentType. A real tempdir keeps the path match honest.
       const { join: pjoin, basename: pbasename } = await import("path");
       const parentDir = await Bun.$`mktemp -d`.text().then((s) => s.trim());
       const repoDir = pjoin(parentDir, "myrepo");

@@ -6586,8 +6586,9 @@ async function spawnAgent(
     const cwd = callerCwd;
 
     // Verified worktree and worktree:false callers share one attribution path.
-    // Per-repo coordinators retain their stable @repo sentinel so notifications
-    // survive coordinator recreation; regular shared agents use their real id.
+    // Per-repo coordinators record the stable `@<coordinator id>` sentinel so
+    // notifications survive coordinator recreation (the watchdog routes them
+    // by repo_path); regular shared agents use their real id.
     if (
       callerContext?.repoPath &&
       typeof callerContext.meta.id === "string"
@@ -6653,9 +6654,12 @@ async function spawnAgent(
     // command line won't have this variable, so they won't get auto-assigned a coordinator
     // as spawner.
     //
-    // The stored agent_id is the `@<repo-name>` sentinel (not the coordinator's
-    // actual agent_id) so the watchdog looks up the current coordinator in repo_path,
-    // which is robust to the coordinator being killed and re-created.
+    // The stored agent_id is the `@<coordinator id>` sentinel, built from the
+    // folder name with getCoordinatorAgentId rather than copied from the found
+    // coordinator (which may be a collision-suffixed or pre-sanitizing id). The
+    // `@` marks it as a sentinel, so the watchdog looks up the current
+    // coordinator in repo_path, which is robust to the coordinator being
+    // killed and re-created.
     if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
       try {
         const repos = await listRepos();
@@ -7231,7 +7235,7 @@ async function spawnAgent(
   await mkdir(agentDir, { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
-  // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are
+  // @-prefixed sentinels (e.g. @system, @<coordinator id>) and null repo_path are
   // skipped here — the spawner is not a real agent directory we can log into,
   // so logSpawn writes only to the spawnee's log.
   const spawnerAgentDir: string | null =

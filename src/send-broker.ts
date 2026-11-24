@@ -445,9 +445,9 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     let actor = command.attachmentSender ? await command.attachmentSender()
       : deferred || resolved?.remote ? await verifiedSendCaller(cwd, "remote", repos.map(repo => repo.path))
       : await localCliActor(cwd);
-    // The local display identity may be overridden by a human in this checkout.
+    // A verified human in an agent checkout sends as the user, with or without --from.
     // The already-verified attachment sender still governs access to source files.
-    if (!deferred && !resolved?.remote && command.fromAgent !== undefined && actor.kind === "agent" &&
+    if (!deferred && !resolved?.remote && actor.kind === "agent" &&
         await localHumanInCheckout(cwd, actor.caller)) {
       actor = { kind: "user" };
     }

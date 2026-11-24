@@ -261,7 +261,7 @@ Every phase uses Codex workers and gets a two-reviewer cycle. My own full `bun t
 
 ## Behaviour changes beyond M3b
 
-- **Sender identity.** Local sends, team history, team creation, questions, logs and child spawns identify the calling agent from its worktree or recorded process. An identified agent can omit the identity flags or name itself. A registered repo coordinator with a dotted ID can record its launcher PID. Rehire running agy agents after upgrading so sends from a shared checkout or scratch directory retain their identity when `ps` is denied.
+- **Sender identity.** Local sends, team history, team creation, questions, logs and child spawns identify the calling agent from its worktree or recorded process. An identified agent can omit the identity flags or name itself. A human sending from a sibling tmux window in the agent’s checkout is credited as the user. A registered repo coordinator with a dotted ID can record its launcher PID. Rehire running agy agents after upgrading so sends from a shared checkout or scratch directory retain their identity when `ps` is denied.
 - A second send to `@system` arriving during a long delivery is drained by the current inline sender, even after the second sender finishes waiting for the lock.
 - A live drainer retains its delivery lock across long messages. Reclaiming an old lock requires evidence that its owner exited or its PID was reused.
 - A sandboxed worker can send text or attachments to a unique bare agent ID in another local repo through its watchdog.

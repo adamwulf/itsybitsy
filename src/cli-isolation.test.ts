@@ -600,14 +600,22 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(result.actions).toEqual([]);
     });
 
-    test("a human shell in a sibling window of the agent session can use --from", async () => {
-      const result = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], {
-        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%2" },
-        ancestry: { ...ancestry, terminal: "tmux", tmuxSession: "ib-fixture-agent-caller", paneStartCommand: "" },
-        actions: { sendMessage: "record" },
+    test.each([
+      { pane: "sibling window", flag: [], expected: "" },
+      { pane: "sibling window", flag: ["--from", "@watchdog"], expected: "@watchdog" },
+      { pane: "agent launch pane", flag: [], expected: "agent-caller" },
+    ])("a send from the $pane with $flag queues the correct sender", async ({ pane, flag, expected }) => {
+      const sibling = pane === "sibling window";
+      await writeHeartbeat(peer);
+      const result = await cli.run(["send", ...flag, peer.id, "hello"], {
+        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: sibling ? "%2" : "%1" },
+        ancestry: { ...ancestry, terminal: "tmux", tmuxSession: "ib-fixture-agent-caller",
+          paneStartCommand: sibling ? "" : join(caller.agentDir, "start.sh") },
+        actions: { sendMessage: "real" },
       });
       expect(result.exitCode, result.stderr).toBe(0);
-      expect(result.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      const queue = Bun.file(join(cli.home, ".itsybitsy/agents", peer.id, "outbox.jsonl"));
+      expect(JSON.parse(await queue.text())).toMatchObject({ message: "hello", fromAgent: expected });
     });
 
     test.each(["ib-fixture-agent-caller", "itsybitsy-deadbeef-agent-caller"])("a managed tmux session %s retains agent attribution", async tmuxSession => {

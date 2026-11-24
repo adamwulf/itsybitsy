@@ -554,7 +554,7 @@ describe("PeerPoller", () => {
     expect(rig.poller.isRunning).toBe(false);
     expect(rig.clock.pending()).toBe(0);
     expect(rig.remote(P1).served[0]!.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "shutting down" });
-    expect(rig.state(P1)).toMatchObject({ connected: false, agents: list });
+    expect(rig.state(P1)).toMatchObject({ connected: false, connectedAt: null, agents: list });
 
     const late = await rig.connect(P2);
     hung.resolve(late);

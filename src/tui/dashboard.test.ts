@@ -12641,6 +12641,46 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("c checks the prefilled destination against the clone root it was built from, so a symlink cannot take it out", async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), "ib-dashboard-clone-")));
+    await mkdir(join(home, ".itsybitsy"));
+    setUserHome(home);
+    setCoordinatorHome(join(home, ".itsybitsy"));
+    // An earlier clone under the default root (~/Developer) tracks a link out of it.
+    const outside = join(home, "outside");
+    await mkdir(join(outside, ".config"), { recursive: true });
+    await mkdir(join(home, "Developer", "A"), { recursive: true });
+    await symlink(outside, join(home, "Developer", "A", "esc"));
+    const gitCalls: string[][] = [];
+    cloneRepoSpawnCtx.set(((cmd: string[]) => {
+      gitCalls.push(cmd);
+      return makeSpawnResult(1);
+    }) as SpawnFn);
+    try {
+      const { dashboard, service } = setup();
+      const url = "git@github.com:owner/itsybitsy.git";
+      service.set({ links: links().map((link) => link.id === PEER_B
+        ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: url, relPath: "A/esc/.config/git" }, ...repos("other-repo")] }
+        : link) });
+      selectByKey(dashboard, repoKey("itsybitsy"));
+      dashboard.handleInput("c");
+      const dialog = await waitForValue(() => dashboard.dialog?.type === "input" ? dashboard.dialog : null);
+      expect(dialog.value).toBe(join(home, "Developer", "A", "esc", ".config", "git"));
+
+      dialog.onSubmit(dialog.value);
+      await waitFor(() => dashboard.notice !== "Cloning itsybitsy…");
+      expect(dashboard.notice).toBe(`Will not clone: the destination leaves the clone root through a symlink (${join(outside, ".config", "git")})`);
+      expect(gitCalls).toEqual([]);
+      expect(await readdir(join(outside, ".config"))).toEqual([]);
+      expect(dashboard.repos).toEqual([]);
+    } finally {
+      cloneRepoSpawnCtx.reset();
+      resetCoordinatorHome();
+      resetUserHome();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("all non-allowlisted keys are refused on a remote-only header before dispatch", () => {
     const key = repoKey("itsybitsy");
     const { dashboard } = setup();

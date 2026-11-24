@@ -502,7 +502,7 @@ describe("ensureSystemCoordinator", () => {
     // The new-session command must pass `bash` as the pane command so the
     // launch line's POSIX `$(cat …)` substitution works regardless of the
     // user's default $SHELL (fish uses `(…)` and would silently misbehave).
-    const newSession = commands.find((c) => c[1] === "new-session");
+    const newSession = commands.find((c) => c.includes("new-session"));
     expect(newSession).toBeDefined();
     expect(newSession![newSession!.length - 1]).toBe("bash");
   });
@@ -524,7 +524,8 @@ describe("ensureSystemCoordinator", () => {
         if (cmd.includes("new-session")) {
           expect(cmd[0]).toBe(exe);
           expect(cmd).toContain("#{pane_id}\t#{socket_path}");
-          out = "%22\t" + socket;
+          // As from a launcher without a UTF-8 locale: tmux prints the tab as `_` unless -u precedes the command.
+          out = "%22" + (cmd.slice(0, cmd.indexOf("new-session")).includes("-u") ? "\t" : "_") + socket;
         }
         if (cmd.includes("display-message")) out = "claude";
         if (cmd.includes("@ib-system-coordinator-command")) {
@@ -643,7 +644,7 @@ describe("ensureSystemCoordinator", () => {
       let stdout = "";
       let code = 0;
       if (cmd[1] === "has-session") code = created ? 0 : 1;
-      if (cmd[1] === "new-session") {
+      if (cmd.includes("new-session")) {
         created = true;
         stdout = failure === "new-session id" ? "" : "%4";
       }
@@ -729,7 +730,7 @@ describe("ensureSystemCoordinator", () => {
     let kills = 0;
     coordinatorSpawnCtx.set(cmd => {
       let text = "";
-      if (cmd[1] === "new-session") text = `%${++panes}`;
+      if (cmd.includes("new-session")) text = `%${++panes}`;
       if (cmd[1] === "kill-session") kills++;
       if (cmd[1] === "display-message") text = "claude";
       if (cmd.includes("@ib-system-coordinator-command")) records.push(cmd[3]!);
@@ -777,7 +778,7 @@ describe("ensureSystemCoordinator", () => {
         writing.resolve();
         return { stdout: emptyStream(), stderr: mockStream("stale write"), exited: oldWrite.promise };
       }
-      const text = cmd[1] === "new-session" ? `%${++panes}` : cmd[1] === "display-message" ? "claude" : "";
+      const text = cmd.includes("new-session") ? `%${++panes}` : cmd[1] === "display-message" ? "claude" : "";
       return { stdout: mockStream(text), stderr: emptyStream(), exited: Promise.resolve(cmd[1] === "has-session" ? 1 : 0) };
     });
     tmuxSpawnCtx.set(() => {
@@ -1473,7 +1474,7 @@ describe("ensureSystemCoordinator", () => {
       if (cmdStr.includes("has-session")) {
         return { stdout: mockStream(""), stderr: emptyStream(), exited: Promise.resolve(1) };
       }
-      if (cmd[1] === "new-session") return { stdout: mockStream("%4"), stderr: emptyStream(), exited: Promise.resolve(0) };
+      if (cmd.includes("new-session")) return { stdout: mockStream("%4"), stderr: emptyStream(), exited: Promise.resolve(0) };
       if (cmd[1] === "display-message") {
         expect(cmd.slice(2)).toEqual(["-p", "-t", "%4", "#{pane_current_command}"]);
         events.push("read foreground");

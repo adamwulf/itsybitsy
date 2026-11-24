@@ -1006,8 +1006,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // brings the system coordinator to true parity.
   const coordTmuxWidth = await getTmuxWidthForAgent(true);
   const executable = Bun.which("tmux", { PATH: process.env.PATH });
+  // `-u`: without a UTF-8 locale tmux prints the tab below as `_`, the pane id
+  // never parses, and coordinatorSenderPanePid has no binding to read.
   const { exitCode, stdout: created } = await coordinatorSpawnCtx.run([
-    executable ?? "tmux", "new-session", "-P", "-F", "#{pane_id}\t#{socket_path}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
+    executable ?? "tmux", "-u", "new-session", "-P", "-F", "#{pane_id}\t#{socket_path}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
   ]);
 
   if (exitCode !== 0) {

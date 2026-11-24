@@ -36,8 +36,10 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
   const paths = new Map<string, { argument: string; source: string }>();
   const local = localRoot && canonicalizeSandboxPath(localRoot);
   const inside = (root: string | undefined, path: string) => !!root && (path === root || path.startsWith(root + "/"));
-  // The checkout's runtime directory (other agents' worktrees, logs) exists
-  // only on this machine, so nothing in it is live on the peer.
+  // A file in the checkout's runtime directory (other agents' worktrees, logs)
+  // exists only on this machine, so it is attached, not left live for the peer.
+  // A missing one stays literal: with the same checkout path on both machines
+  // it may name the peer's own runtime directory.
   const live = (path: string) => inside(local, path) && !inside(local && runtimeDir(local), path);
   for (const ref of references(text)) {
     let path = ref.path;
@@ -61,7 +63,7 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
         if (!ref.quote && /^\/[\w-]+$/.test(path)) break;
         if (relative) { if (ref.start === 0) noPassthrough = true; break; }
         const peerOnly = !inside(localRoot, absolute) && inside(remoteRoot, absolute) && inside(remoteRoot, resolve(absolute));
-        if (peerOnly || live(localPath)) {
+        if (peerOnly || inside(local, localPath)) {
           if (ref.start === 0) noPassthrough = true;
           break;
         }

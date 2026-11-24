@@ -209,6 +209,11 @@ test("a file under the local checkout's runtime directory is attached, not left 
     await writeFile(join(project, "live.ts"), "live");
     expect(await dashboardAttachmentPaths(`see ${output} and ${join(project, "live.ts")}`, "/remote/project", project))
       .toEqual({ paths: [{ argument: output, source: await realpath(output) }], noPassthrough: false });
-    await expect(dashboardAttachmentPaths(join(worktree, "missing.png"), "/remote/project", project)).rejects.toThrow("file not found");
+    // A missing runtime-directory file stays literal: with the same checkout
+    // path on both machines it can be the peer agent's own worktree file.
+    const peerFile = join(project, ".itsybitsy/agents/peer-agent/repo/src/foo.ts");
+    expect(await dashboardAttachmentPaths(`read ${peerFile}`, project, project)).toEqual({ paths: [], noPassthrough: false });
+    expect(await dashboardAttachmentPaths(`read ${join(worktree, "missing.png")}`, "/remote/project", project))
+      .toEqual({ paths: [], noPassthrough: false });
   } finally { await rm(project, { recursive: true, force: true }); }
 });

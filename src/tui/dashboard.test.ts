@@ -11315,6 +11315,33 @@ describe("Unified peer repos in the Agents tree", () => {
     } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
   });
 
+  test("two spellings of one file are one row, and checking it attaches the file with both", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ib-dashboard-one-row-"));
+    setUserHome(home);
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    const stagingRoot = spyOn(await import("../runtime-names"), "transferStagingRoot").mockReturnValue(join(home, "staging"));
+    processStartEpochSecondsCtx.set(() => 123);
+    try {
+      await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
+      const checkout = join(home, "checkout");
+      const live = join(checkout, "live.ts");
+      await Bun.write(live, "live");
+      const { dashboard, service } = setup();
+      dashboard.setRepos([{ name: "itsybitsy", path: checkout }]);
+      selectByKey(dashboard, WORKER_KEY);
+      focusEditor(dashboard);
+      const text = `Compare ./live.ts with ${live}`;
+      dashboard.handleInput(text);
+      dashboard.inputField.submit();
+      await submitPathDialog(dashboard, ["./live.ts"]);
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      const header = service.sendRemoteMessage.mock.calls[0]![1];
+      expect(header.message).toBe(text);
+      expect(header.files).toHaveLength(1);
+      expect(header.files[0]!.spellings).toEqual(expect.arrayContaining(["./live.ts", live]));
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+  });
+
   test("cancelling the path dialog sends nothing and keeps the draft", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-cancel-"));
     try {

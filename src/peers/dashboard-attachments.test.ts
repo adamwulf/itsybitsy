@@ -40,16 +40,15 @@ test("files inside and outside the checkout are offered, and a relative one reso
     await writeFile(external, "report");
     await writeFile(live, "live");
     const text = `compare ${external} with ${live} and ./live.ts`;
-    // No default check state: the path dialog opens with every path unchecked.
+    // One candidate per file: ./live.ts is a second spelling of the same file.
     expect(await peerAttachmentCandidates(text, project)).toEqual({ candidates: [
-      { argument: external, source: await realpath(external) },
-      { argument: live, source: await realpath(live) },
-      { argument: "./live.ts", source: await realpath(live) },
+      { argument: external, source: await realpath(external), spellings: [external] },
+      { argument: live, source: await realpath(live), spellings: [live, "./live.ts"] },
     ], noPassthrough: false });
     // Without a local checkout a relative reference names nothing here.
     expect(await peerAttachmentCandidates(text)).toEqual({ candidates: [
-      { argument: external, source: await realpath(external) },
-      { argument: live, source: await realpath(live) },
+      { argument: external, source: await realpath(external), spellings: [external] },
+      { argument: live, source: await realpath(live), spellings: [live] },
     ], noPassthrough: false });
     expect(await peerAttachmentCandidates("./live.ts")).toEqual({ candidates: [], noPassthrough: true });
   });
@@ -61,7 +60,7 @@ test("a /tmp file is offered, since the peer cannot read this machine's /tmp", a
     const file = join(dir, "shot.png");
     await writeFile(file, "png");
     expect(await peerAttachmentCandidates(`look at ${file}`)).toEqual({
-      candidates: [{ argument: file, source: await realpath(file) }], noPassthrough: false,
+      candidates: [{ argument: file, source: await realpath(file), spellings: [file] }], noPassthrough: false,
     });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -79,10 +78,20 @@ test("trailing punctuation is trimmed, quotes are kept, and each spelling is off
     await writeFile(file, "notes");
     const text = `read ${file}. Then "${file}" and ${file}`;
     expect(await peerAttachmentCandidates(text, project)).toEqual({
-      candidates: [{ argument: file, source: await realpath(file) }], noPassthrough: false,
+      candidates: [{ argument: file, source: await realpath(file), spellings: [file] }], noPassthrough: false,
     });
     // Inside quotes the punctuation is part of the name.
     expect(await peerAttachmentCandidates(`read "${file}."`, project)).toEqual({ candidates: [], noPassthrough: false });
+  });
+});
+
+test("two spellings of one file make one row, labelled with the first, that carries both", async () => {
+  await withProject(async (project) => {
+    const live = join(project, "live.ts");
+    await writeFile(live, "live");
+    expect(await peerAttachmentCandidates(`Compare ./live.ts with ${live}`, project)).toEqual({ candidates: [
+      { argument: "./live.ts", source: await realpath(live), spellings: ["./live.ts", live] },
+    ], noPassthrough: false });
   });
 });
 
@@ -106,10 +115,11 @@ test("staging copies the selected files and cleanup removes the outgoing directo
   await withStaging(123, async (home) => {
     const source = join(home, "notes.txt");
     await Bun.write(source, "contents");
-    const staged = await stagePeerAttachments([{ argument: source, source: await realpath(source) }]);
+    // A checked row attaches its file once with every spelling, so the peer rewrites each.
+    const staged = await stagePeerAttachments([{ argument: "~/notes.txt", source: await realpath(source), spellings: ["~/notes.txt", source] }]);
     expect(staged.files).toHaveLength(1);
     expect(staged.files[0]).toMatchObject({ name: "notes.txt", size: 8 });
-    expect(staged.files[0]!.spellings).toContain(source);
+    expect(staged.files[0]!.spellings).toEqual(expect.arrayContaining(["~/notes.txt", source]));
     expect(await Bun.file(join(staged.filesDir, "0")).text()).toBe("contents");
     await staged.cleanup();
     expect(await Bun.file(join(staged.filesDir, "0")).exists()).toBe(false);
@@ -121,7 +131,7 @@ test("a staging failure removes the outgoing directory before it rejects", async
   await withStaging(null, async (home) => {
     const source = join(home, "notes.txt");
     await Bun.write(source, "contents");
-    await expect(stagePeerAttachments([{ argument: source, source: await realpath(source) }]))
+    await expect(stagePeerAttachments([{ argument: source, source: await realpath(source), spellings: [source] }]))
       .rejects.toThrow("Cannot verify the outgoing attachment owner");
     expect(await Array.fromAsync(new Bun.Glob("staging/outgoing/*").scan({ cwd: home, onlyFiles: false }))).toEqual([]);
   });

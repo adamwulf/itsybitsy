@@ -131,12 +131,12 @@ test("dashboard stages the canonical file selected through a project symlink and
     await writeFile(external, "selected");
     await symlink(external, alias);
     const { candidates: inputs } = await peerAttachmentCandidates(alias, project);
-    expect(inputs).toEqual([{ argument: alias, source: await realpath(external) }]);
+    expect(inputs).toEqual([{ argument: alias, source: await realpath(external), spellings: [alias] }]);
     await rm(alias);
     await writeFile(alias, "different");
     // Now a live project file: offered too.
     expect(await peerAttachmentCandidates(alias, project))
-      .toEqual({ candidates: [{ argument: alias, source: await realpath(alias) }], noPassthrough: true });
+      .toEqual({ candidates: [{ argument: alias, source: await realpath(alias), spellings: [alias] }], noPassthrough: true });
     expect(await peerAttachmentCandidates("/clear", project)).toEqual({ candidates: [], noPassthrough: false });
     const entries = await buildAttachmentManifest(inputs, { home: root, cwd: project, machine: "desk" });
     try {
@@ -213,8 +213,8 @@ test("a file under the local checkout's runtime directory and a live project fil
     await writeFile(output, "png");
     await writeFile(live, "live");
     expect(await peerAttachmentCandidates(`see ${output} and ${live}`, project)).toEqual({ candidates: [
-      { argument: output, source: await realpath(output) },
-      { argument: live, source: await realpath(live) },
+      { argument: output, source: await realpath(output), spellings: [output] },
+      { argument: live, source: await realpath(live), spellings: [live] },
     ], noPassthrough: false });
     // A missing runtime-directory file stays raw text: with the same checkout
     // path on both machines it can be the peer agent's own worktree file.

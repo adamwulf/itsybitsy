@@ -6460,6 +6460,46 @@ describe("mergeAgent --keep (real git)", () => {
       expect((await readAgentTransient(agentDir))?.operation).toBeNull();
     });
 
+    test("the closing merge (no --keep) pulls too, and reports it after the close line", async () => {
+      // REAL git; tmux/pgrep mocked so the teardown touches no process (as in
+      // the closing-merge test above). The outer beforeEach's temp HOME takes
+      // the archive/seal/team writes.
+      const hybrid: SpawnFn = (cmd) => {
+        if (cmd[0] === "git") return Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" }) as SpawnResult;
+        if (cmd[0] === "tmux" && cmd.includes("has-session")) return makeSpawnResult(1);
+        if (cmd[0] === "pgrep") return makeSpawnResult(1);
+        return makeSpawnResult();
+      };
+      setMergeSpawnRunner(hybrid);
+      lifecycleSpawnCtx.set(hybrid);
+      await agentCommit("feature.txt", "one\n", "agent: one");
+      const remoteTip = await pushFromOther("remote.txt", "remote\n", "remote: new");
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toMatch(/^Closed agent: agent-abc \(merged to main at [0-9a-f]{40}\)\n✓ origin: pulled main/);
+      expect(await git("-C", tempDir, "merge-base", remoteTip, "main")).toBe(remoteTip);
+      expect(await Bun.file(join(tempDir, "remote.txt")).text()).toBe("remote\n");
+      expect(await Bun.file(join(tempDir, "feature.txt")).text()).toBe("one\n");
+      expect(await git("-C", tempDir, "branch", "--list", "agent/agent-abc")).toBe("");
+    });
+
+    test("a merge from a detached HEAD (no branch checked out) does not pull", async () => {
+      await agentCommit("feature.txt", "one\n", "agent: one");
+      const mainBefore = await git("-C", tempDir, "rev-parse", "main");
+      await git("-C", tempDir, "checkout", "-q", "--detach");
+      await pushFromOther("remote.txt", "remote\n", "remote: new");
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      // The §3.3 fallback targets main, which the merge checks out itself.
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toMatch(/^Merged agent agent-abc into main at [0-9a-f]{40} \(1 commit\(s\), agent kept running\)$/);
+      expect(await git("-C", tempDir, "rev-parse", "origin/main")).toBe(mainBefore);
+      expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc^")).toBe(mainBefore);
+    });
+
     test("a merge into a manager's branch does not pull or fetch", async () => {
       const managerWorktree = join(tempDir, ".itsybitsy", "agents", "agent-manager", "repo");
       await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-manager"), { recursive: true });

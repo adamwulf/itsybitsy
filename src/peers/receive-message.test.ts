@@ -657,7 +657,7 @@ test("a leading dashboard project reference remains literal through wire decode 
   const message = join(repo, "live.ts");
   await Bun.write(message, "live");
   const detection = await peerAttachmentCandidates(message, repo);
-  expect(detection).toMatchObject({ candidates: [{ argument: message, checked: false }], noPassthrough: true });
+  expect(detection).toEqual({ candidates: [{ argument: message, source: expect.any(String) }], noPassthrough: true });
   expect(await exchange(header({ message, noPassthrough: true }))).toMatchObject({ ok: true });
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toMatchObject([{ message, noPassthrough: true }]);
 });

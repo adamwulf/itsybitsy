@@ -11042,6 +11042,12 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(stripAnsi(during[0]!)).toStartWith("ib — sending to Laptop B/abc-nick…");
     expect(during[0]).toContain(YELLOW);
     expect(during.slice(1).map(stripAnsi)).toEqual(before.slice(1));
+    // A long alert ends in "…" and leaves the indicators on the line.
+    dashboard.setTelegramStatus("green");
+    dashboard.setNotice("x".repeat(WIDTH), "info");
+    const header = stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(header).toMatch(/…\s+● Telegram$/);
+    expect(visibleWidth(header)).toBeLessThanOrEqual(WIDTH);
     pending.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
     await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
   });

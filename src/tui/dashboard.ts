@@ -2027,7 +2027,7 @@ export class DashboardComponent implements Component {
 
   /**
    * Send `text` from the user to a remote row (SPEC §20.5), shown as a pending
-   * `sending to <target>…` row until the peer accepts it. Resolves true on
+   * `sending to <target>…` entry in the header alert until the peer accepts it. Resolves true on
    * acceptance; on failure it shows the reason and resolves false. Aborting
    * `controller` cancels the send.
    */
@@ -3859,10 +3859,12 @@ export class DashboardComponent implements Component {
     }
     if (indicators.length > 0) {
       const right = indicators.join("  ");
-      const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right) - 1);
-      lines.push(truncateToWidth(left + " ".repeat(pad) + right, width, ""));
+      // A long alert ends in "…" before the indicators rather than cutting them off.
+      const fitted = truncateToWidth(left, Math.max(0, width - visibleWidth(right) - 2), "…");
+      const pad = Math.max(1, width - visibleWidth(fitted) - visibleWidth(right) - 1);
+      lines.push(truncateToWidth(fitted + " ".repeat(pad) + right, width, ""));
     } else {
-      lines.push(truncateToWidth(left, width, ""));
+      lines.push(truncateToWidth(left, width, "…"));
     }
 
     // Compute available height for the main content area.

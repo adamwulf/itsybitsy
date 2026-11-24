@@ -243,8 +243,9 @@ export async function checkNewRepoEntry(
   const coordinatorId = coordinatorIdFromFolderName(folderName);
   const lowerCoordinatorId = coordinatorId.toLowerCase();
   for (const existing of registry.repos) {
-    if (coordinatorIdFromFolderName(await repoRootFolderName(existing.path)).toLowerCase() === lowerCoordinatorId) {
-      return `Cannot register ${resolvedPath}: its coordinator id "${coordinatorId}" (from repo root folder name "${folderName}") is already used by registered repo "${existing.name}" (${existing.path}). A repo's coordinator is named after its folder, so two registered repos cannot have folder names that give the same coordinator id.`;
+    const existingId = coordinatorIdFromFolderName(await repoRootFolderName(existing.path));
+    if (existingId.toLowerCase() === lowerCoordinatorId) {
+      return `Cannot register ${resolvedPath}: its coordinator id "${coordinatorId}" (from repo root folder name "${folderName}") matches, ignoring case, the coordinator id "${existingId}" of registered repo "${existing.name}" (${existing.path}). A repo's coordinator is named after its folder, so two registered repos cannot have folder names that give the same coordinator id.`;
     }
   }
 

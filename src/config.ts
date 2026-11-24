@@ -30,6 +30,7 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "model", type: "string", default: "claude:opus" },
   { key: "effort", type: "string", default: "xhigh" },
   { key: "createPullRequests", type: "boolean", default: false },
+  { key: "merge.pushAfterMerge", type: "boolean", default: false },
   { key: "allowAgentQuestions", type: "boolean", default: true },
   { key: "autoCompactThreshold", type: "number", default: undefined },
   { key: "externalDiffTool", type: "string", default: undefined },

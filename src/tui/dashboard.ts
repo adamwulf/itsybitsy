@@ -2128,10 +2128,18 @@ export class DashboardComponent implements Component {
     this.invalidate();
     this.tui?.requestRender();
     try {
-      const output = await service.runRemoteLifecycle(row.peerId, { ...options, id, repo });
+      const { output, pushFailure } = await service.runRemoteLifecycle(row.peerId, { ...options, id, repo });
       if (!options.checkOnly) {
         const verb = lifecyclePast[options.action];
-        this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
+        if (pushFailure) {
+          // The peer merged, then its own push failed (merge.pushAfterMerge,
+          // read from its config). A closing merge's output already ends with
+          // "push failed: …"; --keep's is the whole merge report, so name the
+          // failure on its own.
+          this.setNotice(options.keep ? `${label} ${verb} · push failed: ${pushFailure}` : `${label} ${verb}: ${output}`, "error");
+        } else {
+          this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
+        }
       }
       return output;
     } finally {

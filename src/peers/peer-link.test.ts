@@ -476,12 +476,12 @@ test("lifecycle requests run the receiver’s local commands, return merge error
   const target = { id: "worker", repo: "app" };
   try {
     const ask = (request: Parameters<typeof requestLifecycle>[1]) => requestLifecycle(side.a, request, "Laptop", side.clock.setTimer);
-    expect(await ask({ ...target, action: "merge", checkOnly: true })).toBe("Ready");
+    expect(await ask({ ...target, action: "merge", checkOnly: true })).toEqual({ output: "Ready" });
     expect(deps.mergeAgent).not.toHaveBeenCalled();
     deps.mergeAgent.mockResolvedValueOnce({ ok: false, exitCode: 1, stderr: "Merge conflict in app.ts", stdout: "" });
     await expect(ask({ ...target, action: "merge" })).rejects.toThrow("Merge conflict in app.ts");
     deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Merged one commit", stderr: "" });
-    expect(await ask({ ...target, action: "merge", keep: true, force: true })).toBe("Merged one commit");
+    expect(await ask({ ...target, action: "merge", keep: true, force: true })).toEqual({ output: "Merged one commit" });
     expect(deps.mergeAgent.mock.calls.at(-1)).toEqual([expect.objectContaining({ id: "worker" }), repo, { keep: true }]);
     await ask({ ...target, action: "resume" });
     await ask({ ...target, action: "retire" });
@@ -489,7 +489,7 @@ test("lifecycle requests run the receiver’s local commands, return merge error
     expect(deps.rehireAgent.mock.calls).toEqual([["worker", { repoPath: repo }]]);
     expect(deps.notice.mock.calls.flat()).toEqual(["merged", "resumed", "retired", "rehired"].map(verb => `Alice ${verb} worker in App`));
     deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Nothing to merge: branch is current", stderr: "" });
-    expect(await ask({ ...target, action: "merge", keep: true })).toBe("Nothing to merge: branch is current");
+    expect(await ask({ ...target, action: "merge", keep: true })).toEqual({ output: "Nothing to merge: branch is current" });
     expect(deps.notice.mock.calls.at(-1)?.[0]).toContain("Nothing to merge: branch is current");
   } finally {
     side.a.close(0, "done");

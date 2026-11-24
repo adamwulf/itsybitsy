@@ -186,6 +186,14 @@ export interface IbCommandResult {
   stderr: string;
   /** Teardown diagnostics also included in stderr for command-line callers. */
   cleanupWarnings?: string;
+  /**
+   * Set only by a successful `mergeAgent` whose push after the merge
+   * (`merge.pushAfterMerge`, SPEC.md §3.4) failed: one `<remote>: <git error>`
+   * line per remote that refused it. stdout already carries the push's status
+   * lines and a warning for command-line callers; this is for callers that
+   * show the failure as an alert.
+   */
+  pushFailure?: string;
 }
 
 /**
@@ -3644,6 +3652,55 @@ async function pullBeforeMerge(
   return { ok: true, report };
 }
 
+/**
+ * After a merge that landed at least one commit on `targetBranch`: push it to
+ * every remote the way `ib push` does, when `merge.pushAfterMerge` is on in
+ * this machine's config and the target passes {@link pullBeforeMerge}'s test
+ * (`main` or `master`, checked out in `targetDir`; SPEC.md §3.4). `report` is
+ * the push's status lines (or, for a sandboxed caller, a note that it did not
+ * push), or null when there was nothing to push. `failure` is set when the
+ * push failed, one `<remote>: <git error>` line per remote that refused it.
+ * The merge has already succeeded either way, so this never fails it.
+ */
+async function pushAfterMerge(
+  agentDir: string,
+  targetDir: string,
+  targetBranch: string,
+  targetCheckedOut: boolean,
+  repoName: string,
+): Promise<{ report: string | null; failure?: string }> {
+  if (!targetCheckedOut || (targetBranch !== "main" && targetBranch !== "master")) {
+    return { report: null };
+  }
+  const config = await readConfig();
+  if (config["merge.pushAfterMerge"]?.value !== true) return { report: null };
+  const retry = `Run \`ib push ${repoName}\` to push it.`;
+  const listed = await listRemotes(mergeSpawnCtx, targetDir);
+  if (!listed.ok) {
+    const failure = `could not list remotes: ${listed.stderr}`;
+    await logAgent(agentDir, `Push after merge failed: ${failure}`);
+    return { report: `Warning: merged, but did not push ${targetBranch}: ${failure}. ${retry}`, failure };
+  }
+  const remotes = listed.remotes;
+  if (remotes.length === 0) return { report: null };
+  // The same sandboxed caller pullBeforeMerge skips the pull for: it cannot
+  // reach its remotes, so the merge stands on the local main and says so.
+  if (isSandboxedProcess()) {
+    const note = `Did not push ${targetBranch} after merging: this process is sandboxed and cannot reach its remotes. Run \`ib push ${repoName}\` from outside the sandbox to push ${targetBranch}.`;
+    await logAgent(agentDir, note);
+    return { report: note };
+  }
+
+  await logAgent(agentDir, `Pushing ${targetBranch} to ${remotes.join(", ")} after merging...`);
+  const push = await pushBranchToRemotes(mergeSpawnCtx, targetDir, targetBranch, remotes);
+  await logAgent(agentDir, `Push ${push.failures.length === 0 ? "completed" : "failed"}:\n${push.stdout}`);
+  if (push.failures.length === 0) return { report: push.stdout };
+  return {
+    report: `${push.stdout}\nWarning: merged, but the push of ${targetBranch} failed. ${retry}`,
+    failure: push.failures.join("\n"),
+  };
+}
+
 /** Options for {@link mergeAgent}. */
 export interface MergeAgentOptions {
   /**
@@ -3680,6 +3737,9 @@ export interface MergeAgentOptions {
  * 8. Rebase agent branch onto target
  * 9. Checkout target branch
  * 10. Merge (ff-only if agent, --no-ff if user)
+ * 10b. Push the target to its remotes when `merge.pushAfterMerge` is on, it is
+ *      main/master and the merge landed a commit (pushAfterMerge). A failed
+ *      push leaves the merge successful and sets `pushFailure` on the result.
  * 11. Capture tmux output
  * 12. Kill Claude process
  * 13. Kill tmux session
@@ -3691,7 +3751,7 @@ export interface MergeAgentOptions {
  * 19. Remove agent directory
  * 20. Scan for orphaned processes
  *
- * With `options.keep` (`ib merge <id> --keep`) steps 1-10 (6b included) run exactly as
+ * With `options.keep` (`ib merge <id> --keep`) steps 1-10 (6b and 10b included) run exactly as
  * above and the function returns — steps 11-20 (the teardown) are skipped,
  * so the agent keeps running on its rebased branch.
  */
@@ -3798,9 +3858,12 @@ export async function mergeAgent(
     if (!pull.ok) {
       return { ok: false, exitCode: 1, stdout: "", stderr: pull.stderr };
     }
+    // Set by step 10b once the merge has landed; a failed push never fails the merge.
+    let push: { report: string | null; failure?: string } = { report: null };
     // Every result from here on carries the pull's report — a failure too,
-    // since a pull that succeeded has already moved the caller's main.
-    const withPullReport = (text: string) => (pull.report ? `${text}\n${pull.report}` : text);
+    // since a pull that succeeded has already moved the caller's main — and,
+    // once step 10b has run, the push's.
+    const withReports = (text: string) => [text, pull.report, push.report].filter(Boolean).join("\n");
 
     // Captured after a successful merge (commitCount > 0). Stays null when no
     // merge happens so the success message can omit the SHA in that case.
@@ -3814,7 +3877,7 @@ export async function mergeAgent(
       await logAgent(agentDir, `Pre-rebase conflict check failed - conflicts detected with ${targetBranch}`);
       return {
         ok: false, exitCode: 1, stdout: "",
-        stderr: withPullReport(`Rebase conflict detected between '${branchName}' and '${targetBranch}'`),
+        stderr: withReports(`Rebase conflict detected between '${branchName}' and '${targetBranch}'`),
       };
     }
 
@@ -3835,7 +3898,7 @@ export async function mergeAgent(
         return { ok: true as const };
       });
       if (!rebaseOk.ok) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: withPullReport(rebaseOk.stderr) };
+        return { ok: false, exitCode: 1, stdout: "", stderr: withReports(rebaseOk.stderr) };
       }
 
       // 9-10. Checkout target branch + merge
@@ -3865,7 +3928,7 @@ export async function mergeAgent(
         return { ok: true as const };
       });
       if (!mergeOk.ok) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: withPullReport(mergeOk.stderr) };
+        return { ok: false, exitCode: 1, stdout: "", stderr: withReports(mergeOk.stderr) };
       }
 
       // Capture the target branch's new HEAD (the merge commit) for the success
@@ -3875,6 +3938,13 @@ export async function mergeAgent(
       if (headResult.exitCode === 0 && headResult.stdout.trim()) {
         mergedSha = headResult.stdout.trim();
       }
+
+      // 10b. Push the merged main, before any teardown so --keep pushes too.
+      // Only a merge that landed a commit gets here, so a 0-commit merge
+      // never pushes.
+      push = await timed("merge", "git-push", () =>
+        pushAfterMerge(agentDir, targetDir, targetBranch, preflight.targetCheckedOut, agent.repoRegistryName)
+      );
     }
 
     // --keep: the rebase and merge above are the closing merge's own; stop
@@ -3887,7 +3957,7 @@ export async function mergeAgent(
         await logAgent(agentDir, `Nothing to merge (--keep): ${branchName} has no commits ahead of ${targetBranch}`);
         return {
           ok: true, exitCode: 0,
-          stdout: withPullReport(`Nothing to merge: ${branchName} has no commits ahead of ${targetBranch} (agent ${agent.id} kept running)`),
+          stdout: withReports(`Nothing to merge: ${branchName} has no commits ahead of ${targetBranch} (agent ${agent.id} kept running)`),
           stderr: "",
         };
       }
@@ -3895,8 +3965,9 @@ export async function mergeAgent(
       await logAgent(agentDir, `Merged ${commitCount} commit(s) into ${targetBranch}${at} (--keep: agent left running on ${branchName})`);
       return {
         ok: true, exitCode: 0,
-        stdout: withPullReport(`Merged agent ${agent.id} into ${targetBranch}${at} (${commitCount} commit(s), agent kept running)`),
+        stdout: withReports(`Merged agent ${agent.id} into ${targetBranch}${at} (${commitCount} commit(s), agent kept running)`),
         stderr: "",
+        ...(push.failure ? { pushFailure: push.failure } : {}),
       };
     }
 
@@ -3948,7 +4019,7 @@ export async function mergeAgent(
         ok: false,
         exitCode: 1,
         stdout: "",
-        stderr: withPullReport(`Merge completed, but sealed-record cleanup failed: ${err instanceof Error ? err.message : String(err)}`),
+        stderr: withReports(`Merge completed, but sealed-record cleanup failed: ${err instanceof Error ? err.message : String(err)}`),
       };
     }
     removeSandboxProfile(agentDir);
@@ -4009,7 +4080,10 @@ export async function mergeAgent(
     const successStdout = mergedSha
       ? `Closed agent: ${agent.id} (merged to ${targetBranch} at ${mergedSha})`
       : `Closed agent: ${agent.id}`;
-    return { ok: true, exitCode: 0, stdout: withPullReport(successStdout), stderr: archived.warnings.join("\n") };
+    return {
+      ok: true, exitCode: 0, stdout: withReports(successStdout), stderr: archived.warnings.join("\n"),
+      ...(push.failure ? { pushFailure: push.failure } : {}),
+    };
   } finally {
     // Clear the op marker on every return path. On the SUCCESS path the agent
     // dir was already removed at step 17-19, so this writes into a now-gone
@@ -9441,29 +9515,45 @@ async function listRemotes(
 export async function pushRepo(repoPath: string): Promise<IbCommandResult> {
   const target = await mainBranchAndRemotes(pushSpawnCtx, repoPath);
   if (!target.ok) return target.result;
-  const { branch, remotes } = target;
+  const { failures: _failures, ...result } = await pushBranchToRemotes(pushSpawnCtx, repoPath, target.branch, target.remotes);
+  return result;
+}
 
+/**
+ * The body of {@link pushRepo}: push `branch` from `repoPath` to each of
+ * `remotes`, with one attempt and one status line per remote. `ib merge` runs
+ * it too, through its own spawn context, after it merges into the main branch
+ * with `merge.pushAfterMerge` on (SPEC.md §3.4). `failures` holds one
+ * `<remote>: <git error>` entry per remote that refused the push.
+ */
+async function pushBranchToRemotes(
+  ctx: SpawnContext,
+  repoPath: string,
+  branch: string,
+  remotes: string[],
+): Promise<IbCommandResult & { failures: string[] }> {
   const lines: string[] = [];
-  let anyFailed = false;
+  const failures: string[] = [];
   let anySucceeded = false;
   for (const remote of remotes) {
-    const push = await pushSpawnCtx.run(["git", "-C", repoPath, "push", remote, branch]);
+    const push = await ctx.run(["git", "-C", repoPath, "push", remote, branch]);
     if (push.exitCode === 0) {
       anySucceeded = true;
       const detail = push.stderr || push.stdout;
       lines.push(`✓ ${remote}: pushed ${branch}${detail ? `\n  ${detail.replace(/\n/g, "\n  ")}` : ""}`);
     } else {
-      anyFailed = true;
       const err = push.stderr || push.stdout || `exit ${push.exitCode}`;
+      failures.push(`${remote}: ${err}`);
       lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
     }
   }
 
   return {
-    ok: anySucceeded && !anyFailed,
-    exitCode: anyFailed ? 1 : 0,
+    ok: anySucceeded && failures.length === 0,
+    exitCode: failures.length > 0 ? 1 : 0,
     stdout: lines.join("\n"),
     stderr: "",
+    failures,
   };
 }
 

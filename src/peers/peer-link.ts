@@ -1,5 +1,5 @@
 import { suggestedAddress } from "../resolve-target";
-import { AmbiguousRemoteRehire, lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleRequest } from "./remote-lifecycle";
+import { AmbiguousRemoteRehire, lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleOutcome, type RemoteLifecycleRequest } from "./remote-lifecycle";
 import { trackSendCleanup } from "../send-cleanup";
 /**
  * The trusted link between paired installs (docs/plans/iroh-peering.md,
@@ -536,8 +536,12 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
   });
 }
 
-/** Lifecycle commands use their own overall deadline. A merge may be silent for two minutes. */
-export async function requestLifecycle(conn: PairConnection, request: RemoteLifecycleRequest, machine: string, setTimer: Timer, transfer?: Pick<OutgoingTransfer, "signal" | "verifyClient">): Promise<string> {
+/**
+ * Lifecycle commands use their own overall deadline. A merge may be silent for
+ * two minutes. A reply without `pushFailure` (no failed push, or an older
+ * install) leaves it undefined.
+ */
+export async function requestLifecycle(conn: PairConnection, request: RemoteLifecycleRequest, machine: string, setTimer: Timer, transfer?: Pick<OutgoingTransfer, "signal" | "verifyClient">): Promise<RemoteLifecycleOutcome> {
   const bytes = encodeJson({ ...request, op: "lifecycle" });
   if (bytes.length > PEER_MAX_REQUEST_BYTES) throw new Error("Lifecycle request exceeds the request limit");
   const unknown = new Error(`outcome unknown — check ${machine}`);
@@ -555,8 +559,10 @@ export async function requestLifecycle(conn: PairConnection, request: RemoteLife
         }).sort();
         throw new PeerErrorReply(`${reason}; use ${addresses.join(" or ")}`);
       }
-      if (reply.ok !== true || typeof reply.output !== "string") throw new PeerProtocolError("Malformed lifecycle reply");
-      return lifecycleText(reply.output);
+      if (reply.ok !== true || typeof reply.output !== "string" ||
+          (reply.pushFailure !== undefined && typeof reply.pushFailure !== "string")) throw new PeerProtocolError("Malformed lifecycle reply");
+      const output = lifecycleText(reply.output);
+      return reply.pushFailure ? { output, pushFailure: lifecycleText(reply.pushFailure) } : { output };
     }, { ...transfer, setTimer, unknownAfterFin: unknown.message, timeout: [lifecycleTimeout(request.action), unknown] });
   } catch (err) {
     if (err instanceof TransferIdleError) throw unknown;
@@ -755,7 +761,7 @@ export interface PeerResponderDeps {
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
-  lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<string>;
+  lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<RemoteLifecycleOutcome>;
   /** The request's `repo` and `id` as received: the handler validates them. */
   acknowledgeQuestion?(repo: unknown, id: unknown, readPeerName: () => Promise<string | null>): Promise<void>;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
@@ -1073,8 +1079,8 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   } else if (request.op === "lifecycle") {
     try {
       if (!deps.lifecycle) throw new Error("Remote lifecycle commands are unavailable");
-      const output = await deps.lifecycle(parseLifecycleRequest(request), () => deps.peerName(conn.remoteId));
-      reply = encodeJson({ ok: true, output: lifecycleText(output) });
+      const { output, pushFailure } = await deps.lifecycle(parseLifecycleRequest(request), () => deps.peerName(conn.remoteId));
+      reply = encodeJson({ ok: true, output: lifecycleText(output), ...(pushFailure ? { pushFailure: lifecycleText(pushFailure) } : {}) });
     } catch (err) {
       const error = lifecycleText(errorDetail(err));
       deps.log(`peer link: lifecycle request from ${from} failed: ${singleLine(error)}`);

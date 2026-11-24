@@ -1360,7 +1360,10 @@ export function handleMerge(ctx: ActionCtx) {
         const notice = keep
           ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
           : `Merged ${agent.id}`;
-        showTeardownResult(ctx, notice, result.stderr);
+        // A failed push after the merge (merge.pushAfterMerge) leaves the
+        // merge done, but it is an alert, not an info notice.
+        if (result.pushFailure) showTeardownResult(ctx, `${notice} · push failed: ${result.pushFailure}`, result.stderr, "error");
+        else showTeardownResult(ctx, notice, result.stderr);
       } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
     });
   });

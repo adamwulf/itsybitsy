@@ -11679,7 +11679,7 @@ describe("Unified peer repos in the Agents tree", () => {
   test("remote m checks before confirming keep, x confirms retirement, and R resumes directly", async () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);
-    const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue("Ready to merge");
+    const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue({ output: "Ready to merge" });
     dashboard.handleInput("m");
     await Bun.sleep(0);
     const merge = assertDialog(dashboard.dialog, "confirm");
@@ -11687,7 +11687,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(merge.focusedButton).toBe("cancel");
     expect(run.mock.calls).toEqual([[PEER_B, { id: "worker-abc", repo: "itsybitsy", action: "merge", checkOnly: true }]]);
     merge.checkbox!.checked = true;
-    run.mockResolvedValueOnce("Nothing to merge: branch is current");
+    run.mockResolvedValueOnce({ output: "Nothing to merge: branch is current" });
     merge.onYes();
     await Bun.sleep(0);
     expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "merge", keep: true });
@@ -11697,11 +11697,11 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.closeDialog();
     expect(run).toHaveBeenCalledTimes(2);
     dashboard.handleInput("x");
-    const pending = Promise.withResolvers<string>();
+    const pending = Promise.withResolvers<{ output: string }>();
     run.mockReturnValueOnce(pending.promise);
     assertDialog(dashboard.dialog, "confirm").onYes();
     expect(dashboard.render(WIDTH).join("\n")).toContain(`retire ${WORKER_KEY}…`);
-    pending.resolve("");
+    pending.resolve({ output: "" });
     await Bun.sleep(0);
     expect(dashboard.notice).toContain("retired");
     run.mockRejectedValueOnce(new Error("Agent is already running"));

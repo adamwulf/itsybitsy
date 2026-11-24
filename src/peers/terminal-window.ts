@@ -3,13 +3,15 @@
  * running `ib peer attach` on that agent, opened in Ghostty the way `C` opens
  * a local agent's session (src/ghostty.ts).
  *
- * The session is named `ib-remote-<peer short id>-<repo>-<agent>`, outside
- * the `itsybitsy-` prefix, so orphan cleanup never takes it for an agent's. When
+ * The session is named `ib-remote-<peer short id>-<repo>-<agent>-<hash>`,
+ * outside the `itsybitsy-` prefix, so orphan cleanup never takes it for an
+ * agent's. When
  * it already exists (the window was closed but `ib peer attach` still runs)
  * `C` opens it again instead of starting a second attach. It ends when `ib
  * peer attach` exits.
  */
 
+import { createHash } from "node:crypto";
 import { openInGhostty } from "../ghostty";
 import { InjectionContext } from "../types";
 import { isValidAgentId } from "../validation";
@@ -27,10 +29,15 @@ export const terminalWindowCtx = new InjectionContext<TerminalWindowDeps>({
   openInGhostty,
 });
 
-/** Agent ids repeat across repos, so the repo is part of the name (characters outside `[\w-]` as `_`). */
+/**
+ * Agent ids repeat across repos, so the repo is part of the name (characters
+ * outside `[\w-]` as `_`, for reading). Both may contain `-`, and the
+ * replacement merges names, so a hash of the exact `<repo>/<agent>` ends it.
+ */
 export function remoteTerminalSession(peerId: string, repo: string, agent: string): string {
   const safeRepo = repo.replace(/[^\w-]/g, "_");
-  return `ib-remote-${shortPeerId(peerId)}-${safeRepo ? `${safeRepo}-` : ""}${agent}`;
+  const hash = createHash("sha256").update(`${repo}/${agent}`).digest("hex").slice(0, 8);
+  return `ib-remote-${shortPeerId(peerId)}-${safeRepo ? `${safeRepo}-` : ""}${agent}-${hash}`;
 }
 
 export interface RemoteTerminalRow {
@@ -45,7 +52,6 @@ export interface RemoteTerminalRow {
 export async function openRemoteTerminal(row: RemoteTerminalRow, deps: TerminalWindowDeps = terminalWindowCtx.fn): Promise<{ ok: boolean; message: string }> {
   // The id and repo come from the peer: the session name must match
   // openInGhostty's /^[\w-]+$/, and the target must parse as three segments.
-  // A dotted repo-coordinator id is refused too, as the Ghostty attach refuses its session name.
   if (!isValidAgentId(row.agent)) return { ok: false, message: "Invalid remote agent id" };
   const repoName = row.repo.length > 0 && !/[/\p{Cc}\p{Cf}]/u.test(row.repo) ? row.repo : "";
   const session = remoteTerminalSession(row.peerId, repoName, row.agent);

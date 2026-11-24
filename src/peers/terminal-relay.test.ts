@@ -64,6 +64,7 @@ describe("ib peer attach through the ib watch relay", () => {
   let link: { a: MemoryConnection; b: MemoryConnection };
   let spawns: Spawned[];
   let connected: boolean;
+  let denial: string | null;
   let logs: string[];
 
   beforeEach(async () => {
@@ -103,7 +104,9 @@ describe("ib peer attach through the ib watch relay", () => {
       terminal,
       log: () => {},
     });
+    denial = null;
     relay = await startTerminalRelay(socketPath, {
+      denial: () => denial,
       resolvePeer: async (target) => {
         if (target !== "laptop" && target !== REMOTE) throw new Error(`no paired peer has the name or id "${target}"`);
         return { id: REMOTE, name: "laptop" };
@@ -172,6 +175,17 @@ describe("ib peer attach through the ib watch relay", () => {
     expect(offline.errors.join("")).toContain("laptop is disconnected");
     offline.stdin.emit("data", Buffer.from("\n"));
     expect(await second).toBe(1);
+    expect(spawns.length).toBe(0);
+  });
+
+  test("while the dashboard's startup decision denies, every open is refused with it and nothing reaches the peer", async () => {
+    denial = "Remote terminals are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux";
+    const term = fakeTerminal();
+    const done = runAttach(["laptop/worker"], term.io(socketPath));
+    await waitFor(() => term.errors.join("").includes("Press Enter"), { message: "denial shown" });
+    expect(term.errors.join("")).toContain(`[remote terminal ended: ${denial}]`);
+    term.stdin.emit("data", Buffer.from("\n"));
+    expect(await done).toBe(1);
     expect(spawns.length).toBe(0);
   });
 

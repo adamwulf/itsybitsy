@@ -25,14 +25,23 @@ describe("openRemoteTerminal", () => {
   const session = remoteTerminalSession(PEER, "app", "worker-1");
 
   test("the session is outside the agent prefix, so orphan cleanup leaves it alone", () => {
-    expect(session).toBe(`ib-remote-${PEER.slice(0, 10)}-app-worker-1`);
+    expect(session).toMatch(new RegExp(`^ib-remote-${PEER.slice(0, 10)}-app-worker-1-[0-9a-f]{8}$`));
     expect(session.startsWith("itsybitsy-")).toBe(false);
   });
 
-  test("the same agent id in two repos gets two sessions, each a valid tmux name", () => {
-    expect(remoteTerminalSession(PEER, "web", "worker-1")).not.toBe(session);
-    expect(remoteTerminalSession(PEER, "my app.js", "worker-1")).toBe(`ib-remote-${PEER.slice(0, 10)}-my_app_js-worker-1`);
-    expect(remoteTerminalSession(PEER, "", "worker-1")).toBe(`ib-remote-${PEER.slice(0, 10)}-worker-1`);
+  test("distinct agents get distinct sessions, each a valid tmux name, even when the readable parts match", () => {
+    const names = [
+      remoteTerminalSession(PEER, "app", "worker-1"),
+      remoteTerminalSession(PEER, "web", "worker-1"),
+      remoteTerminalSession(PEER, "web", "api-fix"),
+      remoteTerminalSession(PEER, "web-api", "fix"),
+      remoteTerminalSession(PEER, "my.app", "w"),
+      remoteTerminalSession(PEER, "my_app", "w"),
+      remoteTerminalSession(PEER, "", "worker-1"),
+    ];
+    expect(new Set(names).size).toBe(names.length);
+    for (const name of names) expect(name).toMatch(/^[\w-]+$/);
+    expect(remoteTerminalSession(PEER, "my app.js", "w")).toStartWith(`ib-remote-${PEER.slice(0, 10)}-my_app_js-w-`);
   });
 
   test("starts ib peer attach in a new detached session, as separate arguments, and opens it", async () => {
@@ -56,7 +65,7 @@ describe("openRemoteTerminal", () => {
     const d = deps();
     await openRemoteTerminal({ ...row, repo: "a/b" }, d.fake);
     expect(d.calls[1]!.at(-1)).toBe(`${PEER}/worker-1`);
-    expect(d.calls[1]![3]).toBe(`ib-remote-${PEER.slice(0, 10)}-worker-1`);
+    expect(d.calls[1]![3]).toBe(remoteTerminalSession(PEER, "", "worker-1"));
   });
 
   test("refuses an agent id that is not safe for a session name", async () => {

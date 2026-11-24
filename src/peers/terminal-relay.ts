@@ -34,6 +34,12 @@ import {
 export const TERMINAL_OPEN_TIMEOUT_MS = 10_000;
 
 export interface TerminalRelayDeps {
+  /**
+   * Why this `ib watch` may not open remote terminals (its startup
+   * human-caller decision, as for every other outbound peer request), or
+   * null when it may.
+   */
+  denial?(): string | null;
   /** The paired peer that `target` (a name or id) names; throws with the reason to show. */
   resolvePeer(target: string): Promise<{ id: string; name: string }>;
   /** The peer's live trusted connection, or null while it is disconnected. */
@@ -112,6 +118,8 @@ async function relayClient(socket: Socket, deps: TerminalRelayDeps): Promise<voi
     const [head, ...rest] = frames;
     if (head!.type !== TERMINAL_FRAME.open) throw new TerminalProtocolError("the first frame is not an open frame");
     const { peer: target, ...open } = parseTerminalOpen(head!.payload, { allowPeer: true });
+    const denied = deps.denial?.() ?? null;
+    if (denied !== null) throw new Error(denied);
     const peer = await deps.resolvePeer(target!);
     const conn = deps.connection(peer.id);
     if (!conn) throw new Error(`${peer.name} is disconnected`);

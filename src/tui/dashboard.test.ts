@@ -35,7 +35,7 @@ import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent, RemoteQuestion } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
-import { terminalWindowCtx } from "../peers/terminal-window";
+import { remoteTerminalSession, terminalWindowCtx } from "../peers/terminal-window";
 import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
@@ -11947,7 +11947,7 @@ describe("Unified peer repos in the Agents tree", () => {
       resetNotice(dashboard);
       dashboard.handleInput("C");
       await waitFor(() => opened.length === 1, { message: "Ghostty opened" });
-      const session = `ib-remote-${PEER_B.slice(0, 10)}-itsybitsy-worker-abc`;
+      const session = remoteTerminalSession(PEER_B, "itsybitsy", "worker-abc");
       expect(calls).toEqual([
         ["has-session", "-t", `=${session}`],
         ["new-session", "-d", "-s", session, "ib", "peer", "attach", `${PEER_B}/itsybitsy/worker-abc`],
@@ -11960,6 +11960,25 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.handleInput("C");
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
       expect(calls.length).toBe(2);
+    } finally {
+      terminalWindowCtx.reset();
+    }
+  });
+
+  test("C on a remote agent shows the startup human-caller denial and starts nothing", () => {
+    const calls: string[][] = [];
+    terminalWindowCtx.set({
+      runTmux: async (args) => { calls.push(args); return 0; },
+      openInGhostty: async () => ({ ok: true, message: "Opened in Ghostty" }),
+    });
+    try {
+      const { dashboard, service } = setup();
+      service.remoteStartDenial = "Remote starts are disabled inside tmux";
+      selectByKey(dashboard, WORKER_KEY);
+      resetNotice(dashboard);
+      dashboard.handleInput("C");
+      expect(dashboard.notice).toBe("Remote terminals are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux");
+      expect(calls).toEqual([]);
     } finally {
       terminalWindowCtx.reset();
     }

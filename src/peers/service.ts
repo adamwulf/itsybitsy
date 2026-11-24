@@ -72,7 +72,7 @@ import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
 import type { SendHeader } from "./send-frame";
 import { cleanRemoteText, requestAcknowledge, requestLifecycle, requestSend } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
-import { remoteLifecycleDenial, remoteSendDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
+import { remoteLifecycleDenial, remoteSendDenial, remoteStartDenialAtStartup, remoteTerminalDenial } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
@@ -1135,6 +1135,7 @@ export class PeerService {
     if (!path) return null;
     try {
       return await startTerminalRelay(path, {
+        denial: () => this.remoteStartDenial === null ? null : remoteTerminalDenial(this.remoteStartDenial),
         resolvePeer: (target) => this.resolveTerminalPeer(target),
         connection: (id) => this.poller.connectedConnection(id),
         log: this.deps.log,

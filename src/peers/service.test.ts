@@ -284,6 +284,24 @@ describe("PeerService binding", () => {
     await expect(stat(socketPath)).rejects.toThrow();
   });
 
+  test("the attach socket refuses every open while the startup human-caller decision denies", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const socketPath = join(home, "t.sock");
+    const { service } = makeService({ terminalSocketPath: socketPath, remoteStartDenial: "Remote starts are disabled inside tmux" });
+    service.openDialog();
+    await waitFor(() => stat(socketPath).then(() => true, () => false), { message: "socket listening" });
+    const socket = connect(socketPath);
+    const chunks: Buffer[] = [];
+    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+    const closed = new Promise(resolve => socket.once("close", resolve));
+    socket.write(encodeTerminalOpen({ peer: "Laptop C", agent: "worker", cols: 80, rows: 24 }));
+    await closed;
+    const [frame] = new TerminalFrameReader().push(Buffer.concat(chunks));
+    expect(parseTerminalExit(frame!.payload).reason)
+      .toBe("Remote terminals are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux");
+    await service.shutdown();
+  });
+
   test("another live ib watch holds the lock: no bind, the dialog says who, and the id and peers still show", async () => {
     alive.add(OTHER.pid);
     starts.set(OTHER.pid, OTHER.startEpoch);

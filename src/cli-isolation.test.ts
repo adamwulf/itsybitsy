@@ -456,6 +456,49 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(JSON.parse(await queue.text())).toMatchObject({ fromAgent: actor.id, message: "from scratch" });
     });
 
+    test("an agy launch keeps its repo and sender in a shared checkout and scratch with ps denied", async () => {
+      const live = { claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000) };
+      const agent = await cli.addAgent(repo, "agy-worker", { ...live, worktree: false, model: "agy:default" });
+      const thread = crypto.randomUUID();
+      await cli.addAgent(await cli.addRepo("other"), "codex-worker", { ...live, model: "codex:test", codex_session_id: thread });
+      await writeHeartbeat(peer);
+      for (const cwd of [repo, cli.cwd]) {
+        const result = await cli.run(["send", peer.id, cwd], {
+          cwd, env: { IB_AGENT_DIR: agent.agentDir, CODEX_THREAD_ID: thread },
+          ancestry: { ...ancestry, denyProcessProbe: true }, actions: { sendMessage: "real" },
+        });
+        expect(result.exitCode, result.stderr).toBe(0);
+      }
+      const queue = await Bun.file(join(cli.home, ".itsybitsy/agents", peer.id, "outbox.jsonl")).text();
+      expect(queue.trim().split("\n").map(line => JSON.parse(line))).toMatchObject([
+        { fromAgent: agent.id, message: repo }, { fromAgent: agent.id, message: cli.cwd },
+      ]);
+    });
+
+    test("a legacy Claude session hint cannot identify a Codex agent", async () => {
+      const session = crypto.randomUUID();
+      await cli.addAgent(repo, "codex-worker", {
+        model: "codex:test", session_id: session, claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000),
+      });
+      const result = await cli.run(["send", peer.id, "notice"], {
+        env: { CLAUDE_SESSION_ID: session }, ancestry: { ...ancestry, denyProcessProbe: true }, actions: { sendMessage: "record" },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.actions[0]?.args[2]).toEqual({ fromAgent: "" });
+    });
+
+    test("an agent launch keeps its identity in a detached personal tmux process tree", async () => {
+      const agent = await cli.addAgent(repo, "nested", {
+        claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000),
+      });
+      const result = await cli.run(["send", "--from", peer.id, peer.id, "notice"], {
+        cwd: agent.sessionCwd, env: { IB_AGENT_DIR: agent.agentDir, TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" },
+        ancestry: { ...ancestry, terminal: "tmux", tmuxSession: "nested-shells" },
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("drop --from");
+    });
+
     test("a dotted coordinator can bootstrap write-pid and report to @system", async () => {
       const dotted = await cli.addAgent(await cli.addRepo("project.dev"), "project.dev", { worktree: false, agentType: "repo-coordinator" });
       const pid = await cli.run(["write-pid", dotted.id, "4242"], { cwd: dotted.repoPath });

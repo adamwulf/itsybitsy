@@ -2378,7 +2378,7 @@ ${qAbsExitScript}
       agent.meta.agentType === REPO_COORDINATOR_TYPE,
     );
     const tmuxResult = await nukeResumeSpawnCtx.run([
-      "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
+      "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-e", `IB_AGENT_DIR=${realpathSync(agentDir)}`, "-c", workPath, shellQuote(resumeScript),
     ]);
     if (tmuxResult.exitCode !== 0) {
       await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
@@ -8028,7 +8028,7 @@ ${qStartExitScript}
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session starting: -s ${tmuxSession} -x ${newTmuxWidth}`);
   const tmuxResult = await timed("new-agent", "tmux-spawn", () =>
     newAgentSpawnCtx.run([
-      "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
+      "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-e", `IB_AGENT_DIR=${realpathSync(agentDir)}`, "-c", workPath, shellQuote(absStartScript),
     ])
   );
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session -s ${tmuxSession} -x ${newTmuxWidth} → exit=${tmuxResult.exitCode}${tmuxResult.exitCode !== 0 && tmuxResult.stderr ? ` stderr="${tmuxResult.stderr.trim()}"` : ""}`);

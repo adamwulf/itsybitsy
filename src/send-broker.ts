@@ -448,7 +448,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     // The local display identity may be overridden by a human in this checkout.
     // The already-verified attachment sender still governs access to source files.
     if (!deferred && !resolved?.remote && command.fromAgent !== undefined && actor.kind === "agent" &&
-        await localHumanInCheckout(cwd, actor.caller.meta.tmux_session)) {
+        await localHumanInCheckout(cwd, actor.caller)) {
       actor = { kind: "user" };
     }
     const fromAgent = cliActorId(actor, command.fromAgent);

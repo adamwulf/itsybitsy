@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, resolve } from "path";
 import { constants } from "node:fs";
 import { open, readdir, realpath, stat } from "fs/promises";
 import { CLAUDE_PID_START_MARGIN_SECONDS, isPidAliveSinceUncached } from "./agents";
+import { isCodexBackedCli, metadataCli } from "./agent-cli";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
 import { userInfo } from "os";
@@ -63,6 +64,25 @@ function processIdentityCurrent(pid: number, epoch: number | undefined): boolean
     const start = Date.parse(result.stdout.toString().trim()) / 1_000;
     return Number.isFinite(start) && Math.abs(start - epoch) <= CLAUDE_PID_START_MARGIN_SECONDS;
   } catch { return false; }
+}
+
+/** The launch environment identifies one registered agent directory across all CLIs.
+ * Older launches may have only their CLI's own session ID. */
+export function matchesLiveLaunch(caller: NoWorktreeCaller): boolean {
+  const { IB_AGENT_DIR, CODEX_THREAD_ID, CLAUDE_SESSION_ID } = process.env;
+  const { meta } = caller;
+  if (IB_AGENT_DIR !== undefined) {
+    if (caller.agentDir !== IB_AGENT_DIR) return false;
+  } else {
+    if ((!CODEX_THREAD_ID && !CLAUDE_SESSION_ID) || (CODEX_THREAD_ID && CLAUDE_SESSION_ID)) return false;
+    const cli = metadataCli(meta.model);
+    if (CODEX_THREAD_ID) {
+      if (!cli || !isCodexBackedCli(cli) || CODEX_THREAD_ID !== meta.codex_session_id) return false;
+    } else if (cli !== "claude" || CLAUDE_SESSION_ID !== meta.session_id) return false;
+  }
+  const owner = Number(meta.claude_pid);
+  return Number.isSafeInteger(owner) && owner > 1 && typeof meta.claude_pid_epoch === "number" &&
+    isPidAliveSinceUncached(owner, meta.claude_pid_epoch);
 }
 
 async function registeredRoots(registryHome: string, strict: boolean): Promise<string[]> {
@@ -257,16 +277,7 @@ export async function resolveNoWorktreeCaller(
     before = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
   } catch (error) {
     if (!deps.allowSessionFallback) throw error;
-    // The CLIs export their session ID to child commands. SessionStart
-    // records it on the agent. A stale or ambiguous hint supplies no actor.
-    const { CODEX_THREAD_ID, CLAUDE_SESSION_ID } = process.env;
-    const matches = candidates.filter(({ meta }) => {
-      if (!(CODEX_THREAD_ID && CODEX_THREAD_ID === meta.codex_session_id) &&
-          !(CLAUDE_SESSION_ID && CLAUDE_SESSION_ID === meta.session_id)) return false;
-      const owner = Number(meta.claude_pid);
-      return Number.isSafeInteger(owner) && owner > 1 && typeof meta.claude_pid_epoch === "number" &&
-        isPidAliveSinceUncached(owner, meta.claude_pid_epoch);
-    });
+    const matches = candidates.filter(matchesLiveLaunch);
     if (matches.length === 1) return matches[0]!;
     throw error;
   }

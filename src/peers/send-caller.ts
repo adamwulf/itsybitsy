@@ -5,7 +5,7 @@ import { registeredRepoRoots } from "../hooks/agent-context";
 import { readWorktreeCaller, resolveCallerAgentContext, resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
 import { checkCoordinatorExists, IB_COORDINATOR_SESSION } from "../coordinator";
 import { isCoordinatorType } from "../coordinator-type-names";
-import { hasGitWorktreeBacklink, registeredWorktreeRecord } from "../no-worktree-caller";
+import { hasGitWorktreeBacklink, matchesLiveLaunch, registeredWorktreeRecord } from "../no-worktree-caller";
 import { metadataRealpath, orderedEntryMatches, prepareAccessTable, resolvePathsConfig, type PathsConfig } from "../sandbox";
 import { isAgentTmuxSession, matchWorktreeCaller } from "../runtime-names";
 import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
@@ -16,8 +16,8 @@ export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind:
 
 /** For local attribution, a human can use their own tmux session. Resolve the
  * invoking pane explicitly: tmux's default target can be another client. */
-export async function localHumanInCheckout(cwd: string, recordedSession: unknown): Promise<boolean> {
-  if (!matchWorktreeCaller(cwd)) return false;
+export async function localHumanInCheckout(cwd: string, caller: ResolvedCallerContext): Promise<boolean> {
+  if (!matchWorktreeCaller(cwd) || matchesLiveLaunch(caller)) return false;
   if (!process.env.TMUX) return remoteCliCaller.isHuman();
   const pane = process.env.TMUX_PANE;
   if (!pane || !/^%\d+$/.test(pane)) return false;
@@ -26,7 +26,7 @@ export async function localHumanInCheckout(cwd: string, recordedSession: unknown
       stdout: "pipe", stderr: "ignore", timeout: 2000,
     });
     const session = probe.stdout.toString().trim();
-    return probe.exitCode === 0 && session !== "" && session !== recordedSession &&
+    return probe.exitCode === 0 && session !== "" && session !== caller.meta.tmux_session &&
       session !== IB_COORDINATOR_SESSION && !isAgentTmuxSession(session) &&
       await remoteCliCaller.isHuman(undefined, "local-send");
   } catch { return false; }
@@ -46,7 +46,7 @@ export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: b
   }
   if (caller && typeof caller.meta.id === "string") {
     // A human terminal can open an agent checkout and use the local override.
-    if (options.checkHuman && await localHumanInCheckout(cwd, caller.meta.tmux_session)) {
+    if (options.checkHuman && await localHumanInCheckout(cwd, caller)) {
       return { kind: "user" };
     }
     return { kind: "agent", caller };

@@ -1744,7 +1744,7 @@ describe("fully qualified row keys", () => {
     tree.setPeerLinks([{
       id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
       repos: [{ registryName: "alpha", displayName: "alpha" }, { registryName: "zeta", displayName: "zeta" }],
-      // The widest name, under the shared (indented) alpha header; zeta is remote-only, not indented.
+      // The widest name, under the shared (indented) alpha header; zeta is remote-only, indented under Peer Only.
       agents: [remote("r1", "alpha", "the-longest-name"), remote("r2", "zeta")],
       questions: [],
     }]);
@@ -1754,6 +1754,51 @@ describe("fully qualified row keys", () => {
     const stateCols = lines.filter((line) => / (running|waiting)\b/.test(line)).map((line) => line.search(/ (running|waiting)\b/));
     expect(stateCols).toHaveLength(5);
     expect(new Set(stateCols).size).toBe(1);
+  });
+
+  test("under parent grouping, repos only on peers sit under a Peer Only header styled like a parent-directory header", () => {
+    const remote = (id: string, repo: string, state = "running") =>
+      ({ id, nickname: null, repoName: repo, repoRegistryName: repo, repoPath: `/r/${repo}`, state, agentType: "worker", manager: null });
+    const link = (zetaState = "running") => ({
+      id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
+      repos: [{ registryName: "alpha", displayName: "alpha" }, { registryName: "zeta", displayName: "zeta" }],
+      agents: [remote("r1", "alpha"), remote("r2", "zeta", zetaState)], questions: [],
+    });
+    const headers = (tree: AgentTreeComponent) =>
+      tree.visibleList.flatMap((f) => (f.kind === "parent-header" ? [f.displayName] : []));
+
+    // Without grouping the remote-only repo follows the local ones flat.
+    const flat = twoRepos().tree;
+    flat.setPeerLinks([link()]);
+    flat.maxHeight = 100;
+    expect(headers(flat)).toEqual([]);
+    expect(flat.render(60).map((line) => stripAnsi(line).trimEnd())).toContain("▾ zeta");
+
+    const { tree } = twoRepos();
+    tree.setFlatList([{ kind: "parent-header", parentDir: "/repos", displayName: "repos" }, ...tree.flatList]);
+    tree.setPeerLinks([link()]);
+    tree.maxHeight = 100;
+    expect(headers(tree)).toEqual(["repos", "Peer Only"]);
+    // The shared alpha stays in its local group; only zeta moves under Peer Only.
+    expect(tree.visibleList.slice(-3).map((f) => f.kind)).toEqual(["parent-header", "remote-repo-header", "remote-agent"]);
+    const lines = tree.render(60);
+    const plain = lines.map((line) => stripAnsi(line).trimEnd());
+    const at = plain.indexOf("Peer Only");
+    expect(lines[at]).toBe(lines[0]!.replace("repos", "Peer Only"));
+    expect(plain[at + 1]).toBe("  ▾ zeta");
+    expect(plain[at + 2]).toMatch(/^  └── r2 +running$/);
+
+    // The header is inert: j/k step over it between the last local row and zeta.
+    expect(tree.selectAgentByKey("studio/beta/dup")).toBe(true);
+    tree.moveSelection(1);
+    expect(tree.selection?.kind === "remote" && peerEntryKey(tree.selection.entry)).toBe("/zeta");
+    tree.moveSelection(-1);
+    expect(tree.selectedAgent && tree.agentKey(tree.selectedAgent)).toBe("studio/beta/dup");
+
+    // Once the V filter hides every remote-only repo, the header goes with them.
+    tree.setPeerLinks([link("stopped")]);
+    tree.setRepoFilter("running-only");
+    expect(headers(tree)).toEqual(["repos"]);
   });
 
   test("a selected remote row colors only its state word, not the state column's padding, like a local row", () => {

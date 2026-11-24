@@ -13,6 +13,7 @@ import { visibleWidth } from "@mariozechner/pi-tui";
 import { keyOf, selectById } from "./test-tree-keys";
 import { localAgentKey } from "./row-keys";
 import { peerEntryKey } from "./peer-repos";
+import { stripAnsi } from "../parse-state";
 
 function makeAgent(id: string, state: string = "running", overrides: Partial<Agent> = {}): Agent {
   return {
@@ -1574,6 +1575,13 @@ describe("agent-tree helpers", () => {
     expect(computeStateColWidth(flat)).toBeGreaterThanOrEqual(8);
   });
 
+  test("computeStateColWidth sizes a peer row for 'connecting' whatever its link status, so the tree does not shift", () => {
+    for (const linkStatus of ["connecting", "connected", "offline"] as const) {
+      const peer: FlatEntry = { kind: "remote-coordinator", peerId: "a1".repeat(32), peerName: "Laptop", state: null, linkStatus, connectedAt: null, lastOkAt: null };
+      expect(computeStateColWidth([...makeFlat([makeAgent("a", "running")]), peer])).toBe("connecting".length);
+    }
+  });
+
   test("formatAgentRow renders the id", () => {
     const row = formatAgentRow(makeAgent("agent-x"), "", false, 80, 20);
     expect(row).toContain("agent-x");
@@ -1723,6 +1731,25 @@ describe("fully qualified row keys", () => {
     }
     expect(keys).toEqual(["studio/alpha/dup", "studio/alpha/kid", "Laptop/alpha/dup", "Desk/alpha/dup", "studio/beta/dup"]);
     expect(tree.selectedAgent?.repoRegistryName).toBe("beta");
+  });
+
+  test("under parent grouping, remote rows share the local state column and their indent counts in the name column", () => {
+    const { tree } = twoRepos();
+    tree.setFlatList([{ kind: "parent-header", parentDir: "/repos", displayName: "repos" }, ...tree.flatList]);
+    const remote = (id: string, repo: string, nickname: string | null = null) =>
+      ({ id, nickname, repoName: repo, repoRegistryName: repo, repoPath: `/r/${repo}`, state: "waiting", agentType: "worker", manager: null });
+    tree.setPeerLinks([{
+      id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
+      repos: [{ registryName: "alpha", displayName: "alpha" }, { registryName: "zeta", displayName: "zeta" }],
+      // The widest name, under the shared (indented) alpha header; zeta is remote-only, not indented.
+      agents: [remote("r1", "alpha", "the-longest-name"), remote("r2", "zeta")],
+    }]);
+    tree.maxHeight = 100;
+    const lines = tree.render(60).map((line) => stripAnsi(line).trimEnd());
+    expect(lines.some((line) => line.includes("  └── the-longest-name"))).toBe(true);
+    const stateCols = lines.filter((line) => / (running|waiting)\b/.test(line)).map((line) => line.search(/ (running|waiting)\b/));
+    expect(stateCols).toHaveLength(5);
+    expect(new Set(stateCols).size).toBe(1);
   });
 
   test("a vanished local row clamps within the local rows (local keys start with this machine's name)", () => {

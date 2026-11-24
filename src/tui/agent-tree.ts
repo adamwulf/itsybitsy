@@ -60,9 +60,10 @@ export function displayState(state: string): string {
 
 /**
  * Compute state column width from the rows being displayed. A peer
- * coordinator puts its link word (`connecting`) in this column; a remote
- * agent its state, capped at MAX_REMOTE_STATE_COL_WIDTH because that is
- * the other install's text.
+ * coordinator puts its link word in this column, counted as its widest
+ * (`connecting`) so the tree does not shift when a link connects or drops;
+ * a remote agent its state, capped at MAX_REMOTE_STATE_COL_WIDTH because
+ * that is the other install's text.
  */
 export function computeStateColWidth(agents: FlatEntry[]): number {
   let maxLen = MIN_STATE_COL_WIDTH;
@@ -72,7 +73,7 @@ export function computeStateColWidth(agents: FlatEntry[]): number {
     } else if (f.kind === "system-coordinator") {
       maxLen = Math.max(maxLen, displayState(f.state).length);
     } else if (f.kind === "remote-coordinator") {
-      maxLen = Math.max(maxLen, f.linkStatus.length);
+      maxLen = Math.max(maxLen, "connecting".length);
     } else if (f.kind === "remote-agent") {
       maxLen = Math.max(maxLen, Math.min(MAX_REMOTE_STATE_COL_WIDTH, visibleWidth(displayState(f.remote.state))));
     }

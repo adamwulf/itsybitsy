@@ -182,7 +182,7 @@ export async function isAgentSendProcess(
 
 /** Use the same startup decision when the dashboard sends a message. */
 export function remoteSendDenial(reason: string): string {
-  if (reason === TMUX_START_DENIAL) return TMUX_SEND_DENIAL;
+  if (reason === TMUX_START_DENIAL) return "Remote sends are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux";
   return reason.replace(/remote starts/gi, match => match === "Remote starts" ? "Remote sends" : "remote sends")
     .replace("start an agent on another machine", "send to another machine");
 }

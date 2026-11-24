@@ -12319,7 +12319,7 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     await Bun.write(nonCoordPath, `---\nname: _non_coordinator\ndescription: Test\nspawnable: false\npermissions:\n  allow: ["Bash(worker-only-tool:*)"]\n  deny: []\n---\n`);
 
     setNewAgentSpawnRunner(mockSpawnRunner());
-    // Coordinator agent ID is derived from repo basename; --name is ignored for coordinators
+    // Coordinator agent ID is derived from the repo folder name; --name is ignored for coordinators
     const { getCoordinatorAgentId } = await import("./coordinator");
     const coordId = getCoordinatorAgentId(tempDir);
     const result = await callNewAgent("task", { type: "repo-coordinator" });
@@ -15602,18 +15602,18 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     expect(meta.spawned_by).toBeNull();
   });
 
-  test("Case 2B fires when CLAUDE_SESSION_ID is set and CWD is repo root with coordinator (uses @<basename> sentinel)", async () => {
+  test("Case 2B fires when CLAUDE_SESSION_ID is set and CWD is repo root with coordinator (uses @<coordinator-id> sentinel)", async () => {
     process.env.CLAUDE_SESSION_ID = "fake-session-id-12345";
     setNewAgentSpawnRunner(mockSpawnRunner());
 
     const result = await newAgent(tempDir, "do work", { name: "test-with-session", _cwd: tempDir });
     expect(result.ok).toBe(true);
 
-    // Read the meta.json — spawned_by must be `@<basename(cwd)>`, NOT the
+    // Read the meta.json — spawned_by must be `@<coordinator id>`, NOT the
     // registry name or any nickname. The per-repo coordinator's actual
-    // agent ID is basename(repoPath) (see getCoordinatorAgentId), and
-    // both agent-path access checks and notifySpawner routing rely on
-    // that invariant. Using a different value silently breaks access.
+    // agent ID is getCoordinatorAgentId(repoPath) (here the basename, which
+    // is already a valid id), and the agent-path ownership gate compares the
+    // sentinel with it. Using a different value silently breaks access.
     const meta = await Bun.file(join(agentsDir, "test-with-session", "meta.json")).json();
     const expectedSentinel = `@${require("path").basename(tempDir)}`;
     expect(meta.spawned_by).not.toBeNull();
@@ -15621,10 +15621,10 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     expect(meta.spawned_by.repo_path).toBe(tempDir);
   });
 
-  test("Case 2B: nickname-vs-basename regression — sentinel uses basename even when registry has a custom name", async () => {
+  test("Case 2B: nickname-vs-basename regression — sentinel uses the coordinator id even when registry has a custom name", async () => {
     // Re-seed the registry so this repo has a registry name AND a nickname
     // that both differ from the directory basename. The sentinel must
-    // ignore both and stamp @<basename(tempDir)>. This covers the bug-2
+    // ignore both and stamp @<getCoordinatorAgentId(tempDir)>. This covers the bug-2
     // regression where stamping repoDisplayName/registry-name would
     // silently break access for the per-repo coordinator.
     await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
@@ -15645,6 +15645,65 @@ describe("spawned_by Case 2 coordinator auto-detect", () => {
     expect(meta.spawned_by.agent_id).not.toBe("@custom-registry-name");
     expect(meta.spawned_by.agent_id).not.toBe("@shiny-nickname");
     expect(meta.spawned_by.repo_path).toBe(tempDir);
+  });
+
+  /** A second registered repo in a `site.me` folder, with its coordinator `site_me`. */
+  async function makeDottedCoordinatorRepo(): Promise<string> {
+    const siteRepo = join(require("fs").realpathSync(await mkdtemp(join(tmpdir(), "ib-spawner-dotted-"))), "site.me");
+    const coordDir = join(siteRepo, ".itsybitsy", "agents", "site_me");
+    await mkdir(coordDir, { recursive: true });
+    await Bun.write(join(siteRepo, ".itsybitsy", "repo-id"), "5173e0e0\n");
+    await Bun.write(join(coordDir, "meta.json"), JSON.stringify({
+      id: "site_me",
+      agentType: "repo-coordinator",
+      tmux_session: "itsybitsy-5173e0e0-site_me",
+      prompt: "coordinate",
+      manager: null,
+      worktree: false,
+      worker: false,
+      model: "claude:sonnet",
+    }));
+    await Bun.write(join(fakeHome, ".itsybitsy", "repos.json"), JSON.stringify({
+      repos: [{ path: tempDir, name: "test-repo" }, { path: siteRepo, name: "siteme" }],
+    }));
+    return siteRepo;
+  }
+
+  test("Case 2B: a coordinator in a dotted folder stamps its sanitized id, @site_me", async () => {
+    const siteRepo = await makeDottedCoordinatorRepo();
+    process.env.CLAUDE_SESSION_ID = "fake-session-id-dotted";
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    try {
+      // A cross-repo spawn from the site.me coordinator's cwd (its repo root).
+      const result = await newAgent(tempDir, "do work", { name: "test-dotted-2b", _cwd: siteRepo });
+      expect(result.ok).toBe(true);
+
+      const meta = await Bun.file(join(agentsDir, "test-dotted-2b", "meta.json")).json();
+      expect(meta.spawned_by).toEqual({ agent_id: "@site_me", repo_path: siteRepo });
+    } finally {
+      await rm(dirname(siteRepo), { recursive: true, force: true });
+    }
+  });
+
+  test("verified coordinator caller in a dotted folder stamps its sanitized id, @site_me", async () => {
+    const siteRepo = await makeDottedCoordinatorRepo();
+    const coordDir = join(siteRepo, ".itsybitsy", "agents", "site_me");
+    setNewAgentNoWorktreeCallerResolver(async () => ({
+      meta: await Bun.file(join(coordDir, "meta.json")).json(),
+      agentDir: coordDir,
+      repoPath: siteRepo,
+    }));
+    setNewAgentSpawnRunner(mockSpawnRunner());
+    try {
+      const result = await newAgent(tempDir, "do work", { name: "test-dotted-caller", _cwd: siteRepo });
+      expect(result.ok).toBe(true);
+
+      const meta = await Bun.file(join(agentsDir, "test-dotted-caller", "meta.json")).json();
+      expect(meta.spawned_by).toEqual({ agent_id: "@site_me", repo_path: siteRepo });
+    } finally {
+      setNewAgentNoWorktreeCallerResolver(async () => null);
+      await rm(dirname(siteRepo), { recursive: true, force: true });
+    }
   });
 
   test("Case 2A fires when CWD is the system coordinator home (@system sentinel, repo_path=null)", async () => {

@@ -6,6 +6,7 @@ import { join } from "path";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "../home";
+import { getCoordinatorAgentId } from "../coordinator";
 import { setSandboxedProcessOverride } from "../sandbox-detect";
 import { parseDenials } from "../agents";
 import {
@@ -1775,6 +1776,36 @@ describe("checkIbCommandAccess", () => {
     }
     // The spawner keeps its existing rights on the other manager commands.
     expect(await checkIbCommandAccess("ib retire agent-target1", "agent-spawner1", agentsDir)).toBeNull();
+  });
+
+  test("@<coordinator-id> sentinel: the coordinator of a dotted folder, site_me, passes the ownership gate", async () => {
+    const siteParent = await mkdtemp("/tmp/ib-test-ib-access-site-");
+    try {
+      const siteRepo = join(siteParent, "site.me");
+      const siteAgents = join(siteRepo, ".itsybitsy", "agents");
+      await mkdir(join(siteAgents, "site_me"), { recursive: true });
+      await Bun.write(join(siteAgents, "site_me", "meta.json"), JSON.stringify({ id: "site_me", agentType: "repo-coordinator", worktree: false }));
+      await Bun.write(join(tmpDir, "home", ".itsybitsy", "repos.json"), JSON.stringify({
+        version: 1,
+        repos: [{ path: tmpDir, name: "repo" }, { path: siteRepo, name: "siteme" }],
+      }));
+      // Workers it spawned in the other repo: no manager, only the sentinel.
+      // `merge` is not covered by the same-repo coordinator bypass.
+      await writeAgentMeta("agent-target1", {
+        manager: null,
+        spawned_by: { agent_id: `@${getCoordinatorAgentId(siteRepo)}`, repo_path: siteRepo },
+      });
+      expect(await checkIbCommandAccess("ib merge agent-target1 --force", "site_me", siteAgents)).toBeNull();
+
+      // A sentinel stamped from the raw folder name does not match its id.
+      await writeAgentMeta("agent-target2", {
+        manager: null,
+        spawned_by: { agent_id: "@site.me", repo_path: siteRepo },
+      });
+      expect((await checkIbCommandAccess("ib merge agent-target2 --force", "site_me", siteAgents))?.decision).toBe("deny");
+    } finally {
+      await rm(siteParent, { recursive: true, force: true });
+    }
   });
 
   test("bare ib ack reaches the CLI's caller and direct-child ownership checks", async () => {

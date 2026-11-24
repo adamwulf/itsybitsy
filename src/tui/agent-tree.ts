@@ -23,6 +23,8 @@ const MAX_REMOTE_STATE_COL_WIDTH = 16;
 export const AGE_COL_WIDTH = 3; // max age length: e.g. "27m"
 /** The connector of the last peer coordinator row; "├── " has the same width. */
 const PEER_BRANCH_LAST = "└── ";
+/** The parent-header over the repos registered only on peers. */
+const PEER_ONLY_GROUP_NAME = "Peer Only";
 
 /**
  * The largest useful scroll offset for `rowCount` rows in a `maxHeight`-line
@@ -243,10 +245,11 @@ export function formatRemoteRepoRow(
   selected: boolean,
   width: number,
   pinned = false,
+  indent = "",
 ): string {
   const triangle = pinned ? "⚲" : entry.agentCount ? "▾" : "▸";
-  const name = truncatePeerField(entry.repoName, width - 2);
-  return highlightRow(truncateToWidth(`${BOLD}${triangle} ${name}${RESET}`, width, ""), selected, width);
+  const name = truncatePeerField(entry.repoName, width - 2 - indent.length);
+  return highlightRow(truncateToWidth(`${indent}${BOLD}${triangle} ${name}${RESET}`, width, ""), selected, width);
 }
 
 /**
@@ -642,7 +645,11 @@ export class AgentTreeComponent implements Component {
       ? { ...r, connector: r.depth === 0 ? "└── " : "    " + r.connector } : r)];
   }
 
-  /** Insert each peer forest after its local agents. Unmatched repos follow in display order. */
+  /**
+   * Insert each peer forest after its local agents. Unmatched repos follow in
+   * display order, under a "Peer Only" parent-header when the local repos are
+   * grouped by parent directory.
+   */
   private unifiedRows(local: FlatEntry[]): FlatEntry[] {
     if (!this.peerRepos.size && !this.peerCoordinators.length) return local;
     const remaining = new Map(this.peerRepos);
@@ -671,6 +678,9 @@ export class AgentTreeComponent implements Component {
       rows.push(agents.length > 0 && !header.hasAgents ? { ...header, hasAgents: true } : header);
       while (local[i + 1]?.kind === "agent") rows.push(local[++i]!);
       for (const agent of agents) rows.push(agent);
+    }
+    if (remaining.size > 0 && local.some((row) => row.kind === "parent-header")) {
+      rows.push({ kind: "parent-header", parentDir: "", displayName: PEER_ONLY_GROUP_NAME });
     }
     for (const repo of remaining.values()) {
       rows.push(repo.header);
@@ -831,8 +841,9 @@ export class AgentTreeComponent implements Component {
    * no surviving repo-header beneath it. Parent-headers are a pure display
    * grouping — in the flat list the repos belonging to a parent-header are
    * emitted contiguously right after it, up to the next parent-header (or the
-   * end of the list). A parent-header is kept iff at least one repo-header in
-   * that span survived the first-pass filter. Entry order is preserved.
+   * end of the list). A parent-header is kept iff at least one repo header
+   * (local or remote-only) in that span survived the first-pass filter. Entry
+   * order is preserved.
    *
    * The survival decision is delegated entirely to the first pass: any
    * repo-header still present here already passed the hasAgents/
@@ -847,7 +858,7 @@ export class AgentTreeComponent implements Component {
       for (let j = i + 1; j < entries.length; j++) {
         const next = entries[j];
         if (next === undefined || next.kind === "parent-header") break;
-        if (next.kind === "repo-header") return true;
+        if (next.kind === "repo-header" || next.kind === "remote-repo-header") return true;
       }
       return false;
     });
@@ -1500,11 +1511,6 @@ export class AgentTreeComponent implements Component {
     const groupingActive = visible.some((item) => item.kind === "parent-header");
     const repoIndent = groupingActive ? "  " : "";
 
-    // Remote agents under a local repo header are indented with it; the
-    // remote-only repos after the local ones are not.
-    const remoteOnlyStart = visible.findIndex((row) => row.kind === "remote-repo-header");
-    const remoteIndent = (i: number) => remoteOnlyStart < 0 || i < remoteOnlyStart ? repoIndent : "";
-
     // Compute max name prefix width and state column width across all visible
     // agent rows, local and remote, so every row's state and age line up.
     // Under grouping, the agent connector is prefixed with repoIndent so the
@@ -1522,7 +1528,7 @@ export class AgentTreeComponent implements Component {
         maxNameWidth = Math.max(maxNameWidth, visibleWidth(PEER_BRANCH_LAST + item.peerName));
       } else if (item.kind === "remote-agent") {
         const star = favoriteStar(this.favoriteAgentIds.has(peerEntryKey(item)));
-        maxNameWidth = Math.max(maxNameWidth, visibleWidth(remoteIndent(i) + item.connector + star + remoteDisplayName(item.remote)));
+        maxNameWidth = Math.max(maxNameWidth, visibleWidth(repoIndent + item.connector + star + remoteDisplayName(item.remote)));
       }
     }
     const stateColWidth = computeStateColWidth(visible);
@@ -1541,7 +1547,7 @@ export class AgentTreeComponent implements Component {
       const item = visible[i]!;
       if (item.kind === "remote-repo-header") {
         lines.push(formatRemoteRepoRow(item, selectionActive && i === this.selectedIndex, width,
-          this.pinnedRemoteRepoNames.has(item.repoRegistryName.toLowerCase())));
+          this.pinnedRemoteRepoNames.has(item.repoRegistryName.toLowerCase()), repoIndent));
       } else if (item.kind === "remote-coordinator") {
         const branch = visible[i + 1]?.kind === "remote-coordinator" ? "├── " : PEER_BRANCH_LAST;
         lines.push(formatPeerCoordinatorRow(
@@ -1550,7 +1556,7 @@ export class AgentTreeComponent implements Component {
       } else if (item.kind === "remote-agent") {
         const key = peerEntryKey(item);
         lines.push(formatRemoteAgentRow(
-          { ...item, connector: remoteIndent(i) + item.connector }, selectionActive && i === this.selectedIndex, width,
+          { ...item, connector: repoIndent + item.connector }, selectionActive && i === this.selectedIndex, width,
           remoteNameColWidth, stateColWidth, this.favoriteAgentIds.has(key), this.questionAgentKeys.has(key),
         ));
       } else if (item.kind === "system-coordinator") {

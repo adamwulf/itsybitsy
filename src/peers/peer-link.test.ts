@@ -751,3 +751,26 @@ test.each([true, false])("the original read observes the whole writer grace (lat
     expect(reading).toHaveBeenCalledTimes(1);
   } finally { pending.resolve(); a.close(0, "done"); }
 });
+
+test("each partial header write reports a milestone with zero body bytes", async () => {
+  const { requestSend } = await import("./peer-link");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const open = a.openBi.bind(a);
+  let writes = 0;
+  spyOn(a, "openBi").mockImplementation(async () => {
+    const stream = await open(), write = stream.write.bind(stream);
+    stream.write = chunk => { writes++; return write(chunk.subarray(0, 16)); };
+    return stream;
+  });
+  const header = { op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "system" }, message: "hello" } as const;
+  const progress: number[] = [];
+  const sent = requestSend(a, { ...header, files: [] }, createFakeClock().setTimer, { onProgress: bytes => progress.push(bytes) });
+  const peer = await b.acceptBi();
+  await peer.readToEnd(4096);
+  expect(writes).toBeGreaterThan(1);
+  expect(progress).toEqual(Array(writes).fill(0));
+  await peer.writeAll(encode({ ok: true, id: header.id }));
+  await peer.finish();
+  expect(await sent).toBe(header.id);
+  a.close(0, "done");
+});

@@ -1176,7 +1176,6 @@ export function buildNewAgentFormContent(
   if (dialog.machine && dialog.machine.id !== null) {
     if (dialog.otherRemoteStartPending) lines.push(...wordWrapLines("A remote agent start is already pending", innerWidth));
     if (dialog.remoteStartDenial) lines.push(...wordWrapLines(dialog.remoteStartDenial, innerWidth));
-    lines.push(...wordWrapLines(`Attachments are not sent to ${dialog.machine.name}. Local paths stay in the prompt.`, innerWidth));
   }
   lines.push("");
 

@@ -11788,7 +11788,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const types = [...form.availableTypes];
     dashboard.handleInput(" ");
     expect(form.machine?.id).toBe(PEER_B);
-    expect(text()).toContain("Attachments are not sent to Laptop B");
+    expect(text()).not.toContain("Attachments");
     expect(form.availableTypes).toEqual(types);
     dashboard.handleInput("\x1b[D");
     expect(form.machine?.id).toBeNull();
@@ -11809,7 +11809,8 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(form.machines().map(m => m.id)).toEqual([PEER_C]);
     form.name = "builder";
     form.agentType = "worker";
-    const prompt = `Inspect ${import.meta.path}`;
+    // A missing path stays in the prompt and opens no path dialog.
+    const prompt = "Inspect /no/such/dir/report.txt";
     form.buffer.handleInput("\x1b[200~" + prompt + "\x1b[201~");
     form.focused = "create";
     const start = spyOn(service, "startRemoteAgent").mockRejectedValueOnce(new Error("Type unavailable"));
@@ -11823,8 +11824,173 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.handleInput("\r");
     dashboard.handleInput("\r");
     await waitFor(() => dashboard.dialog === null);
-    expect(start.mock.calls).toEqual(Array(2).fill([PEER_C, { repo: "itsybitsy", type: "worker", name: "builder", prompt }]));
+    expect(start.mock.calls).toEqual(Array(2).fill([PEER_C, { repo: "itsybitsy", type: "worker", name: "builder", prompt }, { signal: expect.any(AbortSignal) }]));
     expect(dashboard.notice).toBe(`Created agent ${longId.slice(0, 79)}… on Laptop C`);
+  });
+
+  /** The New Agent form on the remote-only `itsybitsy` header, whose first machine is Laptop B, with `prompt` typed. */
+  function remoteStartForm(prompt: string) {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    dashboard.handleInput("a");
+    const form = assertDialog(dashboard.dialog, "new-agent-form");
+    expect(form.machine).toEqual({ id: PEER_B, name: "Laptop B" });
+    form.agentType = "worker";
+    form.buffer.handleInput("\x1b[200~" + prompt + "\x1b[201~");
+    form.focused = "create";
+    return { dashboard, service, form };
+  }
+
+  test("a peer start asks which paths to attach and sends the checked ones as files", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ib-dashboard-start-pick-"));
+    setUserHome(home);
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    const stagingRoot = spyOn(runtimeNames, "transferStagingRoot").mockReturnValue(join(home, "staging"));
+    processStartEpochSecondsCtx.set(() => 123);
+    try {
+      await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
+      const picked = join(home, "picked.txt");
+      const left = join(home, "left.txt");
+      await Bun.write(picked, "picked");
+      await Bun.write(left, "left");
+      const prompt = `Compare ${picked} with ${left}`;
+      const { dashboard, service, form } = remoteStartForm(prompt);
+      const result = Promise.withResolvers<string>();
+      let copied: string | undefined;
+      const start = spyOn(service, "startRemoteAgent").mockImplementation(async (_peer, _request, transfer) => {
+        copied = await Bun.file(join(transfer!.filesDir!, "0")).text();
+        return result.promise;
+      });
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog?.type === "multi-select", { message: "the path dialog" });
+      const picker = assertDialog(dashboard.dialog, "multi-select");
+      expect(picker.prompt).toBe("Send as attachments to Laptop B:");
+      expect(picker.items).toEqual([picked, left]);
+      expect(picker.checked).toEqual([true, true]);
+      // The start holds the pending slot while the path dialog is open.
+      expect(dashboard.remoteStartPending).toBe(true);
+      for (const key of ["j", " ", "\r"]) dashboard.handleInput(key);
+      // The frozen form is back while the start is in flight.
+      expect(dashboard.dialog).toBe(form);
+      await waitFor(() => start.mock.calls.length === 1);
+      expect(form.inFlight).toBe("Laptop B");
+      const [peer, request, transfer] = start.mock.calls[0]!;
+      expect(peer).toBe(PEER_B);
+      expect(request).toMatchObject({ repo: "itsybitsy", type: "worker", prompt });
+      expect(request.files).toHaveLength(1);
+      expect(request.files![0]!.spellings).toContain(picked);
+      expect(request.files![0]!.spellings).not.toContain(left);
+      await waitFor(() => copied !== undefined);
+      expect(copied).toBe("picked");
+      result.resolve("builder");
+      await waitFor(() => dashboard.dialog === null);
+      expect(dashboard.notice).toBe("Created agent builder on Laptop B");
+      await waitFor(() => !dashboard.remoteStartPending);
+      expect(await Bun.file(join(transfer!.filesDir!, "0")).exists()).toBe(false);
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+  });
+
+  test("cancelling the path dialog keeps the form and its draft, and unchecked paths stay in the prompt", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-start-cancel-"));
+    try {
+      const file = join(dir, "notes.txt");
+      await Bun.write(file, "notes");
+      const prompt = `Read ${file}`;
+      const { dashboard, service, form } = remoteStartForm(prompt);
+      const start = spyOn(service, "startRemoteAgent").mockResolvedValue("builder");
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBe(form);
+      await waitFor(() => !dashboard.remoteStartPending);
+      expect(dashboard.notice).toBe("New agent cancelled");
+      expect(form.inFlight).toBeUndefined();
+      expect(form.buffer.getText()).toBe(prompt);
+      expect(start).not.toHaveBeenCalled();
+
+      // The kept draft submits again; with the path unchecked it stays raw text and no file is sent.
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      dashboard.handleInput(" ");
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog === null);
+      expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt }, { signal: expect.any(AbortSignal) }]]);
+      expect(dashboard.notice).toBe("Created agent builder on Laptop B");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test("Esc on the form restored after the path dialog dismisses it, and the start's failure is a notice", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-start-detach-"));
+    try {
+      const file = join(dir, "notes.txt");
+      await Bun.write(file, "notes");
+      const { dashboard, service, form } = remoteStartForm(`Read ${file}`);
+      const result = Promise.withResolvers<string>();
+      const start = spyOn(service, "startRemoteAgent").mockReturnValue(result.promise);
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      dashboard.handleInput(" ");
+      dashboard.handleInput("\r");
+      expect(dashboard.dialog).toBe(form);
+      await waitFor(() => start.mock.calls.length === 1);
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+      expect(dashboard.remoteStartPending).toBe(true);
+      result.reject(new Error("spawn failed"));
+      await waitFor(() => !dashboard.remoteStartPending);
+      expect(dashboard.notice).toBe("Remote start on Laptop B: spawn failed");
+      expect(dashboard.dialog).toBeNull();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test("a prompt with no attachable paths starts with the JSON request and no path dialog", async () => {
+    const prompt = "Inspect /no/such/dir/report.txt and ./relative.txt";
+    const { dashboard, service } = remoteStartForm(prompt);
+    const shown = spyOn(dashboard, "showDialog");
+    const start = spyOn(service, "startRemoteAgent").mockResolvedValue("builder");
+    dashboard.handleInput("\r");
+    await waitFor(() => dashboard.dialog === null);
+    expect(shown).not.toHaveBeenCalled();
+    expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt }, { signal: expect.any(AbortSignal) }]]);
+    expect(start.mock.calls[0]![1].files).toBeUndefined();
+  });
+
+  test("a relative path in this machine's checkout of the repo starts unchecked", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "ib-dashboard-start-local-"));
+    try {
+      await Bun.write(join(checkout, "src/app.ts"), "app");
+      const dashboard = makeDashboard();
+      dashboard.setRepos([{ name: "itsybitsy", path: checkout }]);
+      const service = new FakePeerService();
+      service.set({ links: [links()[0]!] });
+      dashboard.setPeerService(service);
+      dashboard.handleInput("a");
+      const form = assertDialog(dashboard.dialog, "new-agent-form");
+      form.machine = form.machines().find(machine => machine.id === PEER_B)!;
+      form.agentType = "worker";
+      form.buffer.handleInput("\x1b[200~Review ./src/app.ts\x1b[201~");
+      form.focused = "create";
+      const start = spyOn(service, "startRemoteAgent").mockResolvedValue("builder");
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      const picker = assertDialog(dashboard.dialog, "multi-select");
+      expect(picker.items).toEqual(["./src/app.ts"]);
+      expect(picker.checked).toEqual([false]);
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog === null);
+      expect(start.mock.calls[0]![1]).toEqual({ repo: "itsybitsy", type: "worker", prompt: "Review ./src/app.ts" });
+    } finally { await rm(checkout, { recursive: true, force: true }); }
+  });
+
+  test("dashboard shutdown aborts a pending remote start", async () => {
+    const { dashboard, service } = remoteStartForm("hello");
+    spyOn(service, "startRemoteAgent").mockImplementation((_peer, _request, transfer) =>
+      new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason))));
+    dashboard.handleInput("\r");
+    await waitFor(() => dashboard.remoteStart !== null);
+    await dashboard.stopRemoteSends();
+    expect(dashboard.remoteStartPending).toBe(false);
+    expect(dashboard.remoteStart).toBeNull();
   });
 
   test.each(["failure first", "peer update first"])("renders both the original peer failure and the new machine (%s)", async order => {
@@ -11881,6 +12047,8 @@ describe("Unified peer repos in the Agents tree", () => {
     second.onSubmit("", "worker", "another draft");
     const rendered = () => buildNewAgentFormContent(second, 70).contentLines.map(stripAnsi).join(" ");
     expect(rendered()).toContain("already pending");
+    await waitFor(() => start.mock.calls.length === 1);
+    await Bun.sleep(0);
     expect(start).toHaveBeenCalledTimes(1);
     if (outcome === "success") pending.resolve("builder");
     else pending.reject(new Error("spawn failed"));

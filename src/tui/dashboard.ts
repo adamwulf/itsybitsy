@@ -871,6 +871,8 @@ export class DashboardComponent implements Component {
    * none unless the test sets a fake, so no test can bind a real endpoint.
    */
   remoteStartPending = false;
+  /** The pending remote start (agent-actions.ts): shutdown aborts it with the pending sends. */
+  remoteStart: { controller: AbortController; done: Promise<void> } | null = null;
   peerService: PeersDialogService | null = null;
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
@@ -2100,7 +2102,7 @@ export class DashboardComponent implements Component {
   }
 
   async stopRemoteSends() {
-    const sends = [...this.pendingRemoteSends.values()];
+    const sends = [...this.pendingRemoteSends.values(), ...this.remoteStart ? [this.remoteStart] : []];
     for (const { controller } of sends) controller.abort(new Error("Dashboard shutting down"));
     await Promise.allSettled(sends.map(send => send.done));
   }

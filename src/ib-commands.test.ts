@@ -6366,12 +6366,15 @@ describe("mergeAgent --keep (real git)", () => {
       const mainBefore = await git("-C", tempDir, "rev-parse", "main");
       await pushFromOther("remote.txt", "remote\n", "remote: new");
 
-      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+      const agent = makeAgent("agent-abc", tempDir);
+      const result = await mergeAgent(agent, tempDir, { keep: true });
 
       expect(result.ok).toBe(true);
       expect(result.stdout).toMatch(
         /^Merged agent agent-abc into main at [0-9a-f]{40} \(1 commit\(s\), agent kept running\)\nDid not pull main before merging: this process is sandboxed/
       );
+      // The hint names the repo, since `ib pull` alone is a usage error.
+      expect(result.stdout).toContain(`Run \`ib pull ${agent.repoRegistryName}\` from outside the sandbox`);
       // Not fetched, and the agent landed on the local main.
       expect(await git("-C", tempDir, "rev-parse", "origin/main")).toBe(mainBefore);
       expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc^")).toBe(mainBefore);
@@ -6428,7 +6431,8 @@ describe("mergeAgent --keep (real git)", () => {
       const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
 
       expect(result.ok).toBe(false);
-      expect(result.stderr).toBe("Rebase conflict detected between 'agent/agent-abc' and 'main'");
+      // The failure still reports the pull, since main has already moved.
+      expect(result.stderr).toStartWith("Rebase conflict detected between 'agent/agent-abc' and 'main'\n✓ origin: pulled main");
       // main was pulled; the agent's branch and worktree were not touched.
       expect(await git("-C", tempDir, "rev-parse", "main")).toBe(remoteTip);
       expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(agentTip);

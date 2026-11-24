@@ -3603,14 +3603,17 @@ async function countCommitsAhead(repoPath: string, targetBranch: string, sourceB
  * `ib pull` does, when it is `main` or `master`, is checked out in
  * `targetDir`, and the repo has remotes (SPEC.md §3.4). Any other target —
  * a manager's `agent/<id>` branch, a detached HEAD, a repo with no remotes —
- * has nothing to pull. `report` is the pull's status lines, or null when it
- * did not pull; a failed pull is an error.
+ * has nothing to pull. `report` is the pull's status lines (or, for a
+ * sandboxed caller, a note that it did not pull), or null when there was
+ * nothing to pull; a failed pull is an error. `repoName` (the registry name)
+ * goes into that note's `ib pull <repo>` hint.
  */
 async function pullBeforeMerge(
   agentDir: string,
   targetDir: string,
   targetBranch: string,
   targetCheckedOut: boolean,
+  repoName: string,
 ): Promise<{ ok: true; report: string | null } | { ok: false; stderr: string }> {
   if (!targetCheckedOut || (targetBranch !== "main" && targetBranch !== "master")) {
     return { ok: true, report: null };
@@ -3626,7 +3629,7 @@ async function pullBeforeMerge(
   // its remotes: the profile denies outbound network apart from the proxy.
   // Its merge goes ahead on the local main and says so.
   if (isSandboxedProcess()) {
-    const note = `Did not pull ${targetBranch} before merging: this process is sandboxed and cannot reach its remotes. Run \`ib pull\` from outside the sandbox to update ${targetBranch}.`;
+    const note = `Did not pull ${targetBranch} before merging: this process is sandboxed and cannot reach its remotes. Run \`ib pull ${repoName}\` from outside the sandbox to update ${targetBranch}.`;
     await logAgent(agentDir, note);
     return { ok: true, report: note };
   }
@@ -3790,12 +3793,14 @@ export async function mergeAgent(
     // newest main. A failed pull stops the merge before the agent's branch
     // is touched.
     const pull = await timed("merge", "git-pull", () =>
-      pullBeforeMerge(agentDir, targetDir, targetBranch, preflight.targetCheckedOut)
+      pullBeforeMerge(agentDir, targetDir, targetBranch, preflight.targetCheckedOut, agent.repoRegistryName)
     );
     if (!pull.ok) {
       return { ok: false, exitCode: 1, stdout: "", stderr: pull.stderr };
     }
-    const withPullReport = (stdout: string) => (pull.report ? `${stdout}\n${pull.report}` : stdout);
+    // Every result from here on carries the pull's report — a failure too,
+    // since a pull that succeeded has already moved the caller's main.
+    const withPullReport = (text: string) => (pull.report ? `${text}\n${pull.report}` : text);
 
     // Captured after a successful merge (commitCount > 0). Stays null when no
     // merge happens so the success message can omit the SHA in that case.
@@ -3809,7 +3814,7 @@ export async function mergeAgent(
       await logAgent(agentDir, `Pre-rebase conflict check failed - conflicts detected with ${targetBranch}`);
       return {
         ok: false, exitCode: 1, stdout: "",
-        stderr: `Rebase conflict detected between '${branchName}' and '${targetBranch}'`,
+        stderr: withPullReport(`Rebase conflict detected between '${branchName}' and '${targetBranch}'`),
       };
     }
 
@@ -3830,7 +3835,7 @@ export async function mergeAgent(
         return { ok: true as const };
       });
       if (!rebaseOk.ok) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: rebaseOk.stderr };
+        return { ok: false, exitCode: 1, stdout: "", stderr: withPullReport(rebaseOk.stderr) };
       }
 
       // 9-10. Checkout target branch + merge
@@ -3860,7 +3865,7 @@ export async function mergeAgent(
         return { ok: true as const };
       });
       if (!mergeOk.ok) {
-        return { ok: false, exitCode: 1, stdout: "", stderr: mergeOk.stderr };
+        return { ok: false, exitCode: 1, stdout: "", stderr: withPullReport(mergeOk.stderr) };
       }
 
       // Capture the target branch's new HEAD (the merge commit) for the success
@@ -3943,7 +3948,7 @@ export async function mergeAgent(
         ok: false,
         exitCode: 1,
         stdout: "",
-        stderr: `Merge completed, but sealed-record cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+        stderr: withPullReport(`Merge completed, but sealed-record cleanup failed: ${err instanceof Error ? err.message : String(err)}`),
       };
     }
     removeSandboxProfile(agentDir);

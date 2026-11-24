@@ -1001,14 +1001,11 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // Force bash as the pane's shell so the launch line below is interpreted with predictable
   // POSIX semantics regardless of the user's default `$SHELL` (which can be fish on macOS).
   // Per-repo coordinators force bash via the `#!/bin/bash` shebang in their start.sh; this
-  // brings the system coordinator to true parity. `env` sets the same git-editor
-  // variables that per-repo agents get from their start.sh header, so a git
-  // command that would open an editor fails instead of hanging the coordinator.
+  // brings the system coordinator to true parity.
   const coordTmuxWidth = await getTmuxWidthForAgent(true);
   const executable = Bun.which("tmux", { PATH: process.env.PATH });
   const { exitCode, stdout: created } = await coordinatorSpawnCtx.run([
-    executable ?? "tmux", "new-session", "-P", "-F", "#{pane_id}\t#{socket_path}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home,
-    "env", ...runtimeNames.AGENT_GIT_EDITOR_ENV, "bash",
+    executable ?? "tmux", "new-session", "-P", "-F", "#{pane_id}\t#{socket_path}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
   ]);
 
   if (exitCode !== 0) {

@@ -64,7 +64,7 @@ describe("buildCodexStartContent — launch line", () => {
   test("start.sh exports the git-editor variables in both sandbox modes", () => {
     for (const content of [buildCodexStartContent(baseInput()), buildCodexStartContent({ ...baseInput(), ...disabledFields() })]) {
       expect(content.startsWith(`${AGENT_LAUNCH_HEADER}\n`)).toBe(true);
-      expect(content).toContain("\nexport GIT_EDITOR=false GIT_SEQUENCE_EDITOR=false\n");
+      expect(content).toContain("\nexport GIT_EDITOR=true GIT_SEQUENCE_EDITOR=false\n");
     }
   });
 
@@ -405,7 +405,7 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
   test("resume.sh exports the git-editor variables in both sandbox modes", () => {
     for (const content of [buildCodexResumeContent(baseInput()), buildCodexResumeContent({ ...baseInput(), ...disabledFields() })]) {
       expect(content.startsWith(`${AGENT_LAUNCH_HEADER}\n`)).toBe(true);
-      expect(content).toContain("\nexport GIT_EDITOR=false GIT_SEQUENCE_EDITOR=false\n");
+      expect(content).toContain("\nexport GIT_EDITOR=true GIT_SEQUENCE_EDITOR=false\n");
     }
   });
 

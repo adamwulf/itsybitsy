@@ -505,9 +505,6 @@ describe("ensureSystemCoordinator", () => {
     const newSession = commands.find((c) => c[1] === "new-session");
     expect(newSession).toBeDefined();
     expect(newSession![newSession!.length - 1]).toBe("bash");
-    // The pane shell starts under the same git-editor variables as start.sh,
-    // so a git command that would open an editor fails instead of hanging.
-    expect(newSession!.slice(-4)).toEqual(["env", "GIT_EDITOR=false", "GIT_SEQUENCE_EDITOR=false", "bash"]);
   });
 
   test("only a successful registration publishes the launch provider and a failed relaunch removes it", async () => {

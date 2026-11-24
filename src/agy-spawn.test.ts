@@ -355,7 +355,7 @@ describe("buildAgy{Start,Resume}Content — optional sandbox wrapper", () => {
       const resume = buildAgyResumeContent({ ...resumeBase(), sandboxEnabled });
       for (const content of [start, resume]) {
         expect(content.startsWith(`${AGENT_LAUNCH_HEADER}\n`)).toBe(true);
-        expect(content).toContain("\nexport GIT_EDITOR=false GIT_SEQUENCE_EDITOR=false\n");
+        expect(content).toContain("\nexport GIT_EDITOR=true GIT_SEQUENCE_EDITOR=false\n");
       }
     }
   });

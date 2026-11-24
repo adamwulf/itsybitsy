@@ -1821,7 +1821,7 @@ describe("fully qualified row keys", () => {
 
   test("under parent grouping, repos only on peers sit under a Peer Only header styled like a parent-directory header", () => {
     const remote = (id: string, repo: string, state = "running") =>
-      ({ id, nickname: null, repoName: repo, repoRegistryName: repo, repoPath: `/r/${repo}`, state, agentType: "worker", manager: null });
+      ({ id, nickname: null, repoName: repo, repoRegistryName: repo, repoPath: `/r/${repo}`, state, agentType: "worker", manager: null, createdEpoch: 1_800_000_000 });
     const link = (zetaState = "running") => ({
       id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
       repos: [{ registryName: "alpha", displayName: "alpha" }, { registryName: "zeta", displayName: "zeta" }],

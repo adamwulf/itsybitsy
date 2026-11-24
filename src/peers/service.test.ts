@@ -1,5 +1,5 @@
 import { createPeerOutboxPoll, handoffRemoteMessage, textHeader } from "./peer-outbox";
-import { isHumanSendTerminal, remoteStartDenialAtStartup } from "./remote-start-caller";
+import { humanSendTerminalDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { spyOn, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -607,7 +607,13 @@ describe("PeerService at boot", () => {
     };
     const decision = await remoteStartDenialAtStartup(input);
     // Redirected input is valid for a CLI send with a terminal on stdout.
-    expect(await isHumanSendTerminal(input)).toBe(kind === "human" || kind === "non-TTY input");
+    const sendDenial = await humanSendTerminalDenial(input);
+    expect(sendDenial === null).toBe(kind === "human" || kind === "non-TTY input");
+    if (tmux !== undefined) {
+      expect(decision).toBe("Remote starts are disabled inside tmux");
+      expect(sendDenial).toContain("run ib send from a terminal outside tmux");
+      expect(await humanSendTerminalDenial(input, "local-send")).toBeNull();
+    }
     const { service } = makeService({ remoteStartDenial: decision });
     if (reason === null) expect(decision).toBeNull();
     else expect(decision).toContain(reason);

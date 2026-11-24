@@ -1073,10 +1073,10 @@ describe("send broker", () => {
       const cwd = await linkWorktree();
       const control = new AbortController();
       const entered = Promise.withResolvers<void>();
-      const verdict = Promise.withResolvers<boolean>();
+      const verdict = Promise.withResolvers<never>();
       const failing = () => { entered.resolve(); return verdict.promise; };
       const { remoteCliCaller } = await import("./peers/peer-outbox");
-      const callerCheck = spyOn(remoteCliCaller, "isHuman").mockImplementation(check === "classification" ? failing : async () => false);
+      const callerCheck = spyOn(remoteCliCaller, "humanDenial").mockImplementation(check === "classification" ? failing : async () => "agent terminal");
       try {
         const pending = routeCliSend(command({ target: "laptop/@system" }), {
           cwd, signal: control.signal, watchdogLive: failing,

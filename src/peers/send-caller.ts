@@ -9,9 +9,9 @@ import { hasGitWorktreeBacklink, matchesLiveLaunch, registeredWorktreeRecord } f
 import { metadataRealpath, orderedEntryMatches, prepareAccessTable, resolvePathsConfig, type PathsConfig } from "../sandbox";
 import { isSandboxedProcess } from "../sandbox-detect";
 import { isAgentLaunchCommand, isAgentTmuxSession, matchWorktreeCaller } from "../runtime-names";
-import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
+import { humanSendTerminalDenial, isSystemPaneCaller, TMUX_SEND_DENIAL } from "./remote-start-caller";
 
-export const remoteCliCaller = { isHuman: isHumanSendTerminal, isSystem: isSystemPaneCaller };
+export const remoteCliCaller = { humanDenial: humanSendTerminalDenial, isSystem: isSystemPaneCaller };
 
 export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind: "agent"; caller: ResolvedCallerContext };
 
@@ -19,7 +19,7 @@ export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind:
  * invoking pane explicitly: tmux's default target can be another client. */
 export async function localHumanInCheckout(cwd: string, caller: ResolvedCallerContext): Promise<boolean> {
   if (!matchWorktreeCaller(cwd) || matchesLiveLaunch(caller)) return false;
-  if (!process.env.TMUX) return remoteCliCaller.isHuman(undefined, "local-send");
+  if (!process.env.TMUX) return await remoteCliCaller.humanDenial(undefined, "local-send") === null;
   const pane = process.env.TMUX_PANE;
   if (!pane || !/^%\d+$/.test(pane)) return false;
   try {
@@ -32,7 +32,7 @@ export async function localHumanInCheckout(cwd: string, caller: ResolvedCallerCo
     // ib launches its own pane with the absolute start.sh or resume.sh command.
     const managed = session === caller.meta.tmux_session || isAgentTmuxSession(session);
     if (managed && isAgentLaunchCommand(command)) return false;
-    return remoteCliCaller.isHuman(undefined, "local-send");
+    return await remoteCliCaller.humanDenial(undefined, "local-send") === null;
   } catch { return false; }
 }
 
@@ -96,10 +96,11 @@ async function registeredCallerRepo(roots: readonly string[], cwd: string, workt
 
 /** Only the repo coordinator needs process ancestry in a shared checkout. */
 export async function verifiedSendCaller(cwd: string, purpose: "attachments" | "remote", roots?: readonly string[]): Promise<VerifiedSendCaller> {
-  if (await remoteCliCaller.isHuman()) return { kind: "user" };
-  const refusal = purpose === "attachments"
-    ? "cannot verify the sender for attachments; send from the agent's worktree or from a terminal"
-    : "cannot verify the sender of a remote send; run it from a terminal or from the agent's worktree";
+  const humanDenial = await remoteCliCaller.humanDenial();
+  if (humanDenial === null) return { kind: "user" };
+  let refusal = "cannot verify the sender of a remote send; run it from a terminal or from the agent's worktree";
+  if (purpose === "attachments") refusal = "cannot verify the sender for attachments; send from the agent's worktree or from a terminal outside tmux";
+  else if (humanDenial === TMUX_SEND_DENIAL) refusal = humanDenial;
   const path = await realpath(cwd);
   const systemDir = join(accountHome(), ".itsybitsy");
   if (path === systemDir || path.startsWith(systemDir + "/")) {

@@ -157,10 +157,10 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
     identityCurrent: () => ancestry().identityCurrent,
   });
   const { remoteCliCaller } = await import("./peers/peer-outbox");
-  const { isHumanSendTerminal, isSystemPaneCaller } = await import("./peers/remote-start-caller");
-  remoteCliCaller.isHuman = async (_input, mode) => {
+  const { humanSendTerminalDenial, isSystemPaneCaller } = await import("./peers/remote-start-caller");
+  remoteCliCaller.humanDenial = async (_input, mode) => {
     const terminal = config.ancestry?.terminal;
-    return isHumanSendTerminal({
+    return humanSendTerminalDenial({
       pid: 300, cwd: config.cwd, stdinTTY: process.stdin.isTTY,
       stdoutTTY: terminal !== undefined && (config.ancestry?.sendTTY ?? "stdout") === "stdout",
       stderrTTY: terminal !== undefined && config.ancestry?.sendTTY === "stderr",

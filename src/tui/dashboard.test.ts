@@ -10853,7 +10853,7 @@ describe("Unified peer repos in the Agents tree", () => {
     service.remoteStartDenial = "Remote starts are disabled inside tmux";
     dashboard.inputField.submit();
     await Bun.sleep(0);
-    expect(dashboard.notice).toBe("Remote sends are disabled inside tmux");
+    expect(dashboard.notice).toBe("Remote sends from a human are disabled inside tmux; run ib send from a terminal outside tmux");
     service.remoteStartDenial = "Only a human can start an agent on another machine";
     dashboard.inputField.submit();
     await Bun.sleep(0);

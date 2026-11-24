@@ -329,7 +329,7 @@ describe("qualified agent addresses", () => {
       });
       expect((await fromHome(250)).stderr).toContain("cannot verify the sender");
       expect((await fromHome(200)).exitCode).toBe(0);
-      expect((await send(["plain tmux"], cli.cwd, "tmux")).stderr).toContain("cannot verify the sender");
+      expect((await send(["plain tmux"], cli.cwd, "tmux")).stderr.trim()).toBe("Remote sends from a human are disabled inside tmux; run ib send from a terminal outside tmux");
       expect((await send(["agent tmux"], worktree, "tmux")).exitCode).toBe(0);
       expect((await send(["moved"], cli.cwd, "agent")).stderr).toContain("cannot verify the sender");
       const fake = join(app, ".itsybitsy", "agents", "fake", "repo");

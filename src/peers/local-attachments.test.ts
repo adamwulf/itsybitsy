@@ -316,7 +316,7 @@ test.each(["claude", "agy"])("sandboxed %s sender builds its table without openi
   const path = join(cwd, "report");
   await Bun.write(path, "snapshot");
   const other = await realpath(await fixture.addRepo("unrelated"));
-  const human = spyOn(remoteCliCaller, "isHuman").mockResolvedValue(false);
+  const human = spyOn(remoteCliCaller, "humanDenial").mockResolvedValue("agent terminal");
   const files = spyOn(Bun, "file");
   const sync = spyOn(fs, "realpathSync");
   const asyncRead = spyOn(fsPromises, "realpath");

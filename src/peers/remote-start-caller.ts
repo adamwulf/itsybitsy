@@ -20,6 +20,8 @@ interface DashboardCaller {
 }
 
 const execFileAsync = promisify(execFile);
+const TMUX_START_DENIAL = "Remote starts are disabled inside tmux";
+export const TMUX_SEND_DENIAL = "Remote sends from a human are disabled inside tmux; run ib send from a terminal outside tmux";
 
 async function readProcessTable([file, ...args]: [string, ...string[]], signal: AbortSignal): Promise<string> {
   const { stdout } = await execFileAsync(file, args, { signal, maxBuffer: 4 * 1024 * 1024, env: { LC_ALL: "C" } });
@@ -87,7 +89,7 @@ async function classifyCaller(signal: AbortSignal, input: DashboardCaller | unde
     const humanSend = mode !== "start";
     const interactive = humanSend ? stdoutTTY === true || stderrTTY === true || await controllingTTY?.() : stdinTTY === true && stdoutTTY === true;
     if (!interactive) return "Remote starts require an interactive terminal";
-    if (mode !== "local-send" && env.TMUX !== undefined) return "Remote starts are disabled inside tmux";
+    if (mode !== "local-send" && env.TMUX !== undefined) return mode === "start" ? TMUX_START_DENIAL : TMUX_SEND_DENIAL;
     const ancestors = await readAncestors(pid, readTable, signal);
     if (!ancestors) return "Cannot verify dashboard process ancestry for remote starts";
     for (const { names } of ancestors.values()) {
@@ -144,8 +146,8 @@ export function remoteStartDenialAtStartup(input?: DashboardCaller, clock = star
   return terminalCallerDenial(input, clock, "start");
 }
 
-export async function isHumanSendTerminal(input?: DashboardCaller, mode: "remote-send" | "local-send" = "remote-send"): Promise<boolean> {
-  return await terminalCallerDenial(input, startupClock, mode) === null;
+export function humanSendTerminalDenial(input?: DashboardCaller, mode: "remote-send" | "local-send" = "remote-send"): Promise<string | null> {
+  return terminalCallerDenial(input, startupClock, mode);
 }
 
 /** A cwd under the coordinator home identifies @system only inside its live pane's process tree. */
@@ -180,6 +182,7 @@ export async function isAgentSendProcess(
 
 /** Use the same startup decision when the dashboard sends a message. */
 export function remoteSendDenial(reason: string): string {
+  if (reason === TMUX_START_DENIAL) return TMUX_SEND_DENIAL;
   return reason.replace(/remote starts/gi, match => match === "Remote starts" ? "Remote sends" : "remote sends")
     .replace("start an agent on another machine", "send to another machine");
 }

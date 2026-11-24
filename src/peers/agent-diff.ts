@@ -24,7 +24,11 @@ export async function captureAgentDiff(agents: readonly Agent[], repo: string, i
   if (mergeBase.exitCode !== 0) throw new Error("Could not determine merge-base with main");
   const base = mergeBase.text().trim();
   try {
-    const { stdout: patch } = await exec("git", ["diff", "--binary", base], { cwd, encoding: "buffer", maxBuffer: MAX_AGENT_DIFF_BYTES });
+    // The wire carries a Git-applicable patch independent of the sender's display settings.
+    const { stdout: patch } = await exec("git", [
+      "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "color.ui=never", "-c", "core.quotePath=true",
+      "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", base,
+    ], { cwd, encoding: "buffer", maxBuffer: MAX_AGENT_DIFF_BYTES });
     if (!patch.length) throw new Error(EMPTY_DIFF);
     return { base, patch };
   } catch (err) {

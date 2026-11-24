@@ -38,13 +38,19 @@ test("a remote diff round trip reproduces committed additions, uncommitted text 
     await Bun.write(join(worktree, "untracked"), "ignore");
     await expect(read()).rejects.toThrow(EMPTY_DIFF);
     await expect(requestAgentDiff(a, "other", "worker")).rejects.toThrow("not found");
-    await Bun.write(join(worktree, "added"), "committed\n");
-    await Bun.$`git add added`.cwd(worktree).quiet();
+    const added = "nested/雪 file.txt";
+    await Bun.write(join(worktree, added), "committed\n");
+    await Bun.$`git add -- ${added}`.cwd(worktree).quiet();
     await Bun.$`git -c user.name=test -c user.email=test@example.org commit -qm addition`.cwd(worktree).quiet();
     await Bun.write(join(worktree, "tracked"), "edited without staging\n".repeat(50_000));
     await Bun.write(join(worktree, "image"), Buffer.from([0, 4, 5, 0]));
-    const diff = await read();
     const expected = (await Bun.$`git diff --binary ${base}`.cwd(worktree).quiet()).stdout;
+    await Bun.$`git config diff.noprefix true`.cwd(worktree).quiet();
+    await Bun.$`git config diff.mnemonicPrefix true`.cwd(worktree).quiet();
+    await Bun.$`git config diff.relative true`.cwd(worktree).quiet();
+    await Bun.$`git config core.quotePath false`.cwd(worktree).quiet();
+    await Bun.$`git config color.ui always`.cwd(worktree).quiet();
+    const diff = await read();
     expect(diff.base).toBe(base);
     expect(diff.patch.length).toBeGreaterThan(1_048_576);
     expect(diff.patch.equals(expected)).toBe(true);
@@ -56,6 +62,7 @@ test("a remote diff round trip reproduces committed additions, uncommitted text 
     expect((await Bun.$`git merge-base HEAD main`.cwd(cwd).text()).trim()).toBe(base);
     expect((await Bun.$`git diff --binary ${base}`.cwd(cwd).quiet()).stdout.equals(expected)).toBe(true);
     expect(await Bun.file(join(cwd, "image")).bytes()).toEqual(Uint8Array.of(0, 4, 5, 0));
+    expect(await Bun.file(join(cwd, added)).text()).toBe("committed\n");
     expect(existsSync(join(cwd, "untracked"))).toBe(false);
     const missing = "e".repeat(40);
     await expect(prepareDiffCopy(repo, "App", "Laptop B", { ...diff, base: missing }, staging))

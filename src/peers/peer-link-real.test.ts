@@ -25,6 +25,7 @@ import type { RemoteLifecycleDeps } from "./remote-lifecycle";
 import type { RemoteSpawnDeps } from "./new-agent";
 import { captureAgentPane, readAgentPromptText } from "./agent-pane";
 import { createMessageReceiver } from "./receive-message";
+import { createAttachmentReceiver } from "./receive-attachments";
 import { captureLiveDisplayPane, spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
@@ -87,7 +88,7 @@ function makeNetwork(iroh: Iroh) {
     const id = (await inHome(home, loadOrCreateIdentity)).id;
     const logs: string[] = [];
     let snapshots = 0;
-    const receive = createMessageReceiver(line => logs.push(line), () => {}, Date.now, 4096, { tempDir: home, hasFreeSpace: async () => true });
+    const receive = createMessageReceiver(line => logs.push(line), () => {}, Date.now, 4096, createAttachmentReceiver({ tempDir: home, hasFreeSpace: async () => true }));
 
     const service = new PeerService({
       remoteStartDenial: null,

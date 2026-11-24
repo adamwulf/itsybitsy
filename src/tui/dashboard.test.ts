@@ -11452,6 +11452,7 @@ describe("Unified peer repos in the Agents tree", () => {
   test("dashboard submission and incoming admission reserve the same temporary volume", async () => {
     const { createCliFixture } = await import("../test-cli-runner");
     const { createMessageReceiver } = await import("../peers/receive-message");
+    const { createAttachmentReceiver } = await import("../peers/receive-attachments");
     const { textHeader } = await import("../peers/peer-outbox");
     const space = await import("../peers/attachment-space");
     const cli = await createCliFixture();
@@ -11462,9 +11463,9 @@ describe("Unified peer repos in the Agents tree", () => {
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const seen: number[] = [];
-    const receiver = createMessageReceiver(() => {}, () => {}, Date.now, 4096, {
+    const receiver = createMessageReceiver(() => {}, () => {}, Date.now, 4096, createAttachmentReceiver({
       tempDir: "/tmp", hasFreeSpace: async (_dir, bytes) => { seen.push(bytes); return false; },
-    });
+    }));
     const actual = space.hasFreeSpace;
     const spy = spyOn(space, "hasFreeSpace").mockImplementation(async (dir, bytes) => {
       if (!dir.startsWith(join(cli.root, "staging/outgoing") + "/")) return actual(dir, bytes);

@@ -9,6 +9,7 @@ import { makeAgent, makeSpawnResult, waitFor } from "../test-utils";
 import { spawnCtx as paneProbe } from "../tmux-poller";
 import { acquireOutboxLock, outboxPath, readOutbox } from "../outbox";
 import { createMessageReceiver } from "./receive-message";
+import { createAttachmentReceiver } from "./receive-attachments";
 import { createFakeClock, createMemoryLink } from "./test-pair-transport";
 import { requestAgents, requestSend, serveTrustedConnection } from "./peer-link";
 import { encodeSendHeader, type SendHeader } from "./send-frame";
@@ -37,7 +38,7 @@ beforeEach(async () => {
     }));
   }
   lines = [];
-  receiver = createMessageReceiver(() => {}, line => lines.push(line), Date.now, 4096, { tempDir: cli.root, hasFreeSpace: async () => true });
+  receiver = createMessageReceiver(() => {}, line => lines.push(line), Date.now, 4096, createAttachmentReceiver({ tempDir: cli.root, hasFreeSpace: async () => true }));
   setSendSpawnRunner(() => makeSpawnResult());
   paneProbe.set(() => makeSpawnResult(0, "0"));
 });
@@ -284,7 +285,7 @@ function manifestFile(data: string, name = "../nested/a.txt", spelling = "./sour
 async function receiveFixture(space = true) {
   const dir = join(cli.root, "received");
   await mkdir(dir);
-  receiver = createMessageReceiver(() => {}, line => lines.push(line), Date.now, 4096, { tempDir: dir, stagingRoot: join(cli.root, "staging"), hasFreeSpace: async () => space });
+  receiver = createMessageReceiver(() => {}, line => lines.push(line), Date.now, 4096, createAttachmentReceiver({ tempDir: dir, stagingRoot: join(cli.root, "staging"), hasFreeSpace: async () => space }));
   return dir;
 }
 
@@ -481,9 +482,9 @@ test.each(["body", "ack"])("cancelling while the %s is pending resets the exchan
 
 test("concurrent peers reserve outstanding bytes until write or failure", async () => {
   const budgets: number[] = [];
-  const receive = createMessageReceiver(() => {}, () => {}, Date.now, 4096, {
+  const receive = createMessageReceiver(() => {}, () => {}, Date.now, 4096, createAttachmentReceiver({
     tempDir: cli.root, hasFreeSpace: async (_dir, bytes) => { budgets.push(bytes); return bytes <= 4; },
-  });
+  }));
   const request = () => header({ files: [manifestFile("abc")] });
   const held = Promise.withResolvers<Uint8Array>();
   const first = receive(request(), "a", paired, { read: () => held.promise });
@@ -666,9 +667,9 @@ test("dashboard staging reserves its unwritten bytes against incoming transfers"
   const { cloneAttachments } = await import("./remote-attachments");
   const reservations = new VolumeReservations();
   const checked: number[] = [];
-  const receive = createMessageReceiver(() => {}, () => {}, Date.now, 4096, {
+  const receive = createMessageReceiver(() => {}, () => {}, Date.now, 4096, createAttachmentReceiver({
     tempDir: cli.root, hasFreeSpace: async (_dir, bytes) => { checked.push(bytes); return bytes <= 3; },
-  }, reservations);
+  }, reservations));
   const source = join(cli.root, "source");
   await Bun.write(source, "abc");
   const handle = await open(source, "r");
@@ -973,7 +974,7 @@ test("a timed-out native read that drains during reply grace keeps the connectio
 test("a stalled destination write and close retain their reservation but release the receipt slot", async () => {
   const clock = createFakeClock();
   const sizes: number[] = [];
-  receiver = createMessageReceiver(() => {}, () => {}, Date.now, 4096, { tempDir: cli.root, hasFreeSpace: async (_, size) => { sizes.push(size); return true; } });
+  receiver = createMessageReceiver(() => {}, () => {}, Date.now, 4096, createAttachmentReceiver({ tempDir: cli.root, hasFreeSpace: async (_, size) => { sizes.push(size); return true; } }));
   const writing = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
   const openFile = fs.open;
   const spy = spyOn(fs, "open").mockImplementation(async (...args) => {

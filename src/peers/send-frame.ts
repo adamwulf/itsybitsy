@@ -12,6 +12,8 @@ export type SendTarget =
   | { kind: "system" }
   | { kind: "repo-coordinator"; repo: string };
 
+export interface AttachmentEntry { name: string; size: number; sha256: string; spellings: string[] }
+
 export interface SendHeader {
   op: "send";
   id: string;
@@ -19,7 +21,17 @@ export interface SendHeader {
   target: SendTarget;
   message: string;
   noPassthrough?: true;
-  files: { name: string; size: number; sha256: string; spellings: string[] }[];
+  files: AttachmentEntry[];
+}
+
+/** A remote start with attachments (SPEC §20.4). Without files the request stays JSON. */
+export interface NewAgentHeader {
+  op: "new-agent";
+  repo: string;
+  type: string;
+  name?: string;
+  prompt: string;
+  files: AttachmentEntry[];
 }
 
 type Bytes = Uint8Array | number[];
@@ -75,7 +87,7 @@ function validTarget(value: unknown): value is SendTarget {
     default: return false;
   }
 }
-function validFile(value: unknown): value is SendHeader["files"][number] {
+function validFile(value: unknown): value is AttachmentEntry {
   return object(value) && nonempty(value.name) && typeof value.size === "number" &&
     Number.isSafeInteger(value.size) && value.size >= 0 && typeof value.sha256 === "string" &&
     /^[a-f0-9]{64}$/i.test(value.sha256) && Array.isArray(value.spellings) &&
@@ -114,15 +126,29 @@ export function parseSendHeader(value: unknown): SendHeader {
       value.op !== "send" || typeof value.id !== "string" || !UUID.test(value.id) ||
       !validFrom(value.from) || !validTarget(value.target) || typeof value.message !== "string" ||
       (value.noPassthrough !== undefined && value.noPassthrough !== true) || !Array.isArray(value.files) || !value.files.every(validFile)) throw new Error("Malformed send header");
+  const files = checkedFiles(value.files);
+  return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files, ...(value.noPassthrough === true && { noPassthrough: true }) };
+}
+
+/** Only the listed keys, at least one file, and the same file checks as a send. */
+export function parseNewAgentHeader(value: unknown): NewAgentHeader {
+  if (!object(value) || !onlyKeys(value, "op", "repo", "type", "name", "prompt", "files") || value.op !== "new-agent" ||
+      typeof value.repo !== "string" || typeof value.type !== "string" || (value.name !== undefined && typeof value.name !== "string") ||
+      typeof value.prompt !== "string" || !Array.isArray(value.files) || !value.files.length || !value.files.every(validFile)) throw new Error("Malformed new-agent header");
+  const files = checkedFiles(value.files);
+  return { op: "new-agent", repo: value.repo, type: value.type, ...(value.name !== undefined && { name: value.name }), prompt: value.prompt, files };
+}
+
+function checkedFiles(entries: AttachmentEntry[]): AttachmentEntry[] {
   let spellings = 0;
-  const files = value.files.map(file => ({ ...file, spellings: [...new Set(file.spellings)] }));
+  const files = entries.map(file => ({ ...file, spellings: [...new Set(file.spellings)] }));
   for (const file of files) {
     if (file.spellings.length > 16) throw new Error("More than 16 spellings for one attachment");
     spellings += file.spellings.length;
     if (spellings > 256) throw new Error("More than 256 attachment spellings");
   }
   verifyAttachmentSpellings(files);
-  return { op: "send", id: value.id, from: value.from, target: value.target, message: value.message, files, ...(value.noPassthrough === true && { noPassthrough: true }) };
+  return files;
 }
 
 export interface FileBodyOptions {

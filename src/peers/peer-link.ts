@@ -17,7 +17,8 @@ import { trackSendCleanup } from "../send-cleanup";
  * Each request uses its own bi stream: the dialer writes one JSON object and
  * calls `finish`; the responder reads the bounded request, writes one
  * JSON reply and calls `finish`; the dialer reads the reply with
- * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
+ * `readToEnd(1 MB)`. The send operation, and a new-agent request with
+ * attachments, use a length-prefixed header and file bodies before FIN.
  * A stream whose first byte is 1 is a long-lived remote terminal, served by
  * terminal-host.ts (SPEC §20.4 "Remote terminal").
  *
@@ -41,8 +42,8 @@ import { MAX_AGENT_DIFF_BYTES, type AgentDiff } from "./agent-diff";
 import { join } from "node:path";
 import { openStagedFile } from "./remote-attachments";
 import {
-  decodeFrameHeader, decodeSendHeader, encodeFrameHeader, encodeSendHeader, readHeaderBytes,
-  requireSendFin, sendFileBody, streamFileBody, TransferIdleError, waitForIO, type FileBodyOptions, type SendHeader,
+  decodeFrameHeader, encodeFrameHeader, encodeSendHeader, parseNewAgentHeader, parseSendHeader, readHeaderBytes, requireSendFin,
+  sendFileBody, streamFileBody, TransferIdleError, waitForIO, type AttachmentEntry, type FileBodyOptions, type NewAgentHeader, type SendHeader,
 } from "./send-frame";
 import { isStoredRepoName, repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
@@ -69,6 +70,8 @@ export interface RemoteNewAgentRequest {
   type: string;
   name?: string;
   prompt: string;
+  /** Staged attachments, numbered in `OutgoingTransfer.filesDir`. With any, the request is framed like `send`. */
+  files?: AttachmentEntry[];
 }
 /** Longest reply the dialer reads (`readToEnd` limit), and the cap on the agent list. */
 export const PEER_MAX_REPLY_BYTES = 1_048_576;
@@ -500,15 +503,35 @@ async function readDiffReply(stream: Pick<PairStream, "read">, options: FileBody
   return { base: header.base, patch };
 }
 
-export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt }: RemoteNewAgentRequest, setTimer: Timer): Promise<string> {
-  const bytes = encodeJson({ op: "new-agent", repo, type, name, prompt });
-  if (bytes.length > NEW_AGENT_MAX_REQUEST_BYTES) throw new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
+export const NEW_AGENT_UNKNOWN = "Remote start outcome unknown. Check the peer for the agent.";
+
+/**
+ * Without files, one JSON request. With files, a framed request like `send`:
+ * the 30 s deadline starts after FIN, and the transfer before it has the
+ * send's idle timeouts. After FIN a lost reply leaves the outcome unknown.
+ */
+export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt, files = [] }: RemoteNewAgentRequest, setTimer: Timer, transfer: OutgoingTransfer = {}): Promise<string> {
+  const framed = files.length > 0;
+  if (framed && !transfer.filesDir) throw new Error("Missing staged attachments");
+  const tooLong = new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
+  let bytes: Uint8Array;
+  if (!framed) {
+    bytes = encodeJson({ op: "new-agent", repo, type, name, prompt });
+    if (bytes.length > NEW_AGENT_MAX_REQUEST_BYTES) throw tooLong;
+  } else {
+    const header: NewAgentHeader = { op: "new-agent", repo, type, ...(name !== undefined && { name }), prompt, files };
+    // The frame header has the same 256 KiB cap.
+    try { bytes = encodeFrameHeader(header); } catch { throw tooLong; }
+  }
   return clientExchange(conn, bytes, payload => {
     const reply = decodeObject(payload, "reply");
     if (reply.ok === true && typeof reply.id === "string" && isValidAgentId(reply.id)) return reply.id;
-    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(framed ? sendDiagnostic(reply.reason) : cleanRemoteText(reply.reason));
     throw new PeerProtocolError("malformed new-agent reply");
-  }, { setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")] });
+  }, {
+    setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")],
+    ...framed && { ...transfer, files, timeoutAfterFin: true, unknownAfterFin: NEW_AGENT_UNKNOWN },
+  });
 }
 
 /** Lifecycle commands use their own overall deadline. A merge may be silent for two minutes. */
@@ -576,8 +599,10 @@ export interface OutgoingTransfer {
 interface ClientOptions extends OutgoingTransfer {
   setTimer: Timer;
   timeout?: [number, Error];
+  /** Arm `timeout` once FIN is sent instead of at stream open: the transfer before it has idle timeouts only. */
+  timeoutAfterFin?: boolean;
   unknownAfterFin?: string;
-  files?: SendHeader["files"];
+  files?: AttachmentEntry[];
 }
 
 type StreamReply<T> = { read(stream: Pick<PairStream, "read">, options: FileBodyOptions): Promise<T> };
@@ -586,7 +611,8 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   const { setTimer, timeout, files } = options;
   const deadline = new AbortController();
   const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
-  const clear = timeout && setTimer(timeout[0], () => deadline.abort(timeout[1]));
+  const armTimeout = () => timeout && setTimer(timeout[0], () => deadline.abort(timeout[1]));
+  let clear = options.timeoutAfterFin ? undefined : armTimeout();
   const io = <V>(operation: () => Promise<V>) => waitForIO({ setTimer, signal }, operation);
   let opening: Promise<PairStream> | undefined;
   let active: PairStream;
@@ -663,6 +689,8 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     attemptedFin = true;
     await io(() => active.finish());
     sendDone = true;
+    // An exchange that ends before FIN aborts `deadline` first, so this timer cannot outlive it.
+    if (options.timeoutAfterFin && !signal.aborted) clear = armTimeout();
     if (files) renewReplyIdle();
   }
 
@@ -709,6 +737,7 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
 // ---------------------------------------------------------------------------
 
 export interface ReceiptOptions extends FileBodyOptions { cancelStream?: () => void; admitted?: (ownsBody: boolean) => void; committing?: () => void }
+export interface StartReceiptOptions extends ReceiptOptions { setTimer: Timer }
 
 export interface PeerResponderDeps {
   /** Paired name for this id, re-read on every call. A failed read returns null. */
@@ -728,6 +757,8 @@ export interface PeerResponderDeps {
   /** The request's `repo` and `id` as received: the handler validates them. */
   acknowledgeQuestion?(repo: unknown, id: unknown, readPeerName: () => Promise<string | null>): Promise<void>;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
+  /** A framed new-agent request: validate, receive the bodies, then spawn within {@link withStartDeadline}. */
+  startAgentWithFiles?(header: NewAgentHeader, peerId: string, readPeerName: () => Promise<string | null>, body: Pick<PairStream, "read">, options: StartReceiptOptions): Promise<string>;
   /** Remote terminals (terminal-host.ts). Without it every terminal open is refused. */
   terminal?: TerminalHostDeps;
   /** watch.log in `ib watch`. */
@@ -777,25 +808,34 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
   }
 }
 
-async function startAgentWithDeadline(
-  deps: PeerResponderDeps, request: Record<string, unknown>, peerId: string,
-): Promise<string> {
-  if (!deps.startAgent) throw new Error("Remote starts are unavailable");
+/**
+ * The responder's start deadline: past it the reply says the outcome is
+ * unknown while `start` goes on. `expired` lets a pairing check refuse a spawn
+ * that nobody waits for. A framed start runs only its spawn under it.
+ */
+export async function withStartDeadline<T>(setTimer: Timer, start: (expired: () => boolean) => Promise<T>): Promise<T> {
   let expired = false;
   const deadline = Promise.withResolvers<never>();
-  const cancel = deps.setTimer(RESPONDER_START_TIMEOUT_MS, () => {
+  const cancel = setTimer(RESPONDER_START_TIMEOUT_MS, () => {
     expired = true;
     deadline.reject(new Error("Remote start outcome unknown after 25 s. Check the peer for the agent."));
   });
   try {
-    const spawn = deps.startAgent(request, async () => {
-      const name = await deps.peerName(peerId);
-      return expired ? null : name;
-    });
-    return await Promise.race([spawn, deadline.promise]);
+    return await Promise.race([start(() => expired), deadline.promise]);
   } finally {
     cancel();
   }
+}
+
+async function startAgentWithDeadline(
+  deps: PeerResponderDeps, request: Record<string, unknown>, peerId: string,
+): Promise<string> {
+  const startAgent = deps.startAgent;
+  if (!startAgent) throw new Error("Remote starts are unavailable");
+  return withStartDeadline(deps.setTimer, expired => startAgent(request, async () => {
+    const name = await deps.peerName(peerId);
+    return expired() ? null : name;
+  }));
 }
 
 /** Give the client time to consume its reply, or a reset time to acquire the native stream mutex. */
@@ -878,27 +918,42 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       };
       let reply: Uint8Array;
       let stalledRead: Promise<Uint8Array> | undefined;
+      let starting = false;
+      const readPeerName = async () => {
+        const name = await deps.peerName(conn.remoteId);
+        if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+        return name;
+      };
+      const receipt = { ...options, signal, admitted: () => deps.headerReaders?.delete(stream), cancelStream: () => {
+        stopping ??= stream.cancel().catch(() => {});
+      } };
       try {
-        const header = await decodeSendHeader(reader, options);
-        if (!header.files.length) await requireSendFin(reader, options);
-        if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
-        await deps.receiveMessage(header, conn.remoteId, async () => {
-          const name = await deps.peerName(conn.remoteId);
-          if (name === null) closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
-          return name;
-        }, reader, { ...options, signal, admitted: () => deps.headerReaders?.delete(stream), cancelStream: () => {
-          stopping ??= stream.cancel().catch(() => {});
-        } });
-        // A replay can acknowledge a previously queued attachment without
-        // consuming its duplicate body.
-        if (header.files.length) stopUnreadBody();
-        reply = encodeJson({ ok: true, id: header.id });
+        // Decode the header once, then dispatch on its op.
+        const frame = await decodeFrameHeader(reader, await readHeaderBytes(reader, 4, options), options);
+        const op = typeof frame === "object" && frame !== null && "op" in frame ? frame.op : undefined;
+        if (op === "send") {
+          const header = parseSendHeader(frame);
+          if (!header.files.length) await requireSendFin(reader, options);
+          if (!deps.receiveMessage) throw new Error("Remote sends are unavailable");
+          await deps.receiveMessage(header, conn.remoteId, readPeerName, reader, receipt);
+          // A replay can acknowledge a previously queued attachment without
+          // consuming its duplicate body.
+          if (header.files.length) stopUnreadBody();
+          reply = encodeJson({ ok: true, id: header.id });
+        } else if (op === "new-agent") {
+          starting = true;
+          const header = parseNewAgentHeader(frame);
+          if (!deps.startAgentWithFiles) throw new Error("Remote starts with attachments are unavailable");
+          reply = encodeJson({ ok: true, id: await deps.startAgentWithFiles(header, conn.remoteId, readPeerName, reader, receipt) });
+        } else throw new Error("Malformed frame header");
       } catch (err) {
         if (err instanceof TransferIdleError) stalledRead = reading;
         // STOP_SENDING is independent of the send half. The error ACK can
         // finish even if the native reader is still unwinding a stalled read.
         stopUnreadBody();
-        reply = encodeErrorReply(sendDiagnostic(errorDetail(err)));
+        const reason = sendDiagnostic(errorDetail(err));
+        if (starting) deps.log(`peer link: new-agent from ${from} failed: ${reason}`);
+        reply = encodeErrorReply(reason);
       }
       await sendReply(conn, stream, deps, reply, stopping, stalledRead);
       return;

@@ -868,8 +868,10 @@ function coordinatorTmuxPath(): string {
 export async function coordinatorSenderPanePid(): Promise<number | null> {
   const binding: CoordinatorTmux = await Bun.file(coordinatorTmuxPath()).json();
   if (!isAbsolute(binding.executable) || !isAbsolute(binding.socket) || !/^%\d+$/.test(binding.paneId)) return null;
+  // The scrubbed env leaves tmux without a UTF-8 locale, and such a client gets
+  // the tab separators back as `_`. `-u` keeps them.
   const result = await runCoordinatorCommand([
-    binding.executable, "-S", binding.socket, "display-message", "-p", "-t",
+    binding.executable, "-S", binding.socket, "-u", "display-message", "-p", "-t",
     binding.paneId, `#{session_name}\t#{pane_id}\t#{pane_dead}\t#{${COORDINATOR_PANE_ID}}\t#{pane_pid}`,
   ], 2000, cmd => coordinatorSpawnCtx.runner(cmd, { stdout: "pipe", stderr: "pipe", env: { LC_ALL: "C" } }));
   const [session, pane, dead, markedPane, pid] = result.text.trimEnd().split("\t");
@@ -1004,8 +1006,10 @@ async function ensureSystemCoordinatorImpl(retryAfterResumeFailure: boolean): Pr
   // brings the system coordinator to true parity.
   const coordTmuxWidth = await getTmuxWidthForAgent(true);
   const executable = Bun.which("tmux", { PATH: process.env.PATH });
+  // `-u`: without a UTF-8 locale tmux prints the tab below as `_`, the pane id
+  // never parses, and coordinatorSenderPanePid has no binding to read.
   const { exitCode, stdout: created } = await coordinatorSpawnCtx.run([
-    executable ?? "tmux", "new-session", "-P", "-F", "#{pane_id}\t#{socket_path}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
+    executable ?? "tmux", "-u", "new-session", "-P", "-F", "#{pane_id}\t#{socket_path}", "-d", "-x", String(coordTmuxWidth), "-s", IB_COORDINATOR_SESSION, "-c", home, "bash",
   ]);
 
   if (exitCode !== 0) {

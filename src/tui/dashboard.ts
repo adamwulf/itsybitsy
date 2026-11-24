@@ -530,7 +530,7 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.remoteSelected) {
-      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "o: diff    m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -750,7 +750,7 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
  * remote row by default.
  *
  * - navigation and focus: j/k, J/K, the arrows, Tab and Shift+Tab, `[` `]` `{` `}`;
- * - the sidebar tabs 1, 2 and 3;
+ * - the sidebar tabs 1, 2 and 3 and the tree filter V;
  * - pane cycling: p and n (and ←/→, their arrow forms);
  * - the `@` jump: it lists only local rows (handleFuzzyAgent keeps only local
  *   kinds), so it is the quick way back from a remote row;
@@ -765,7 +765,7 @@ export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
     case "j": case "k": case "J": case "K":
     case "\t": case "\x1b[Z":
     case "[": case "]": case "{": case "}":
-    case "1": case "2": case "3":
+    case "1": case "2": case "3": case "V":
     case "p": case "n":
     case "@":
     case "?": case "/": case "I":

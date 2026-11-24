@@ -10469,7 +10469,7 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    const permittedAscii = new Set([..."jkJK123@?/I;ls", "\t", "\x03"]);
+    const permittedAscii = new Set([..."jkJK123V@?/I;ls", "\t", "\x03"]);
     const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
     for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
     const refused = new Set([
@@ -10716,6 +10716,27 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ links: [{ ...links()[0]!, repos: repos("app"), agents: [remote("old", "app", { state: "stopped" })] }] });
     dashboard.agentTree.setRepoFilter("running-only");
     expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["agent"]);
+  });
+
+  test.each([
+    ["remote agent", agentKey(PEER_B, "app", "old")],
+    ["peer coordinator", PEER_B + "/@system"],
+    ["empty remote-only header", repoKey("empty")],
+  ])("V cycles the filter and keeps the selected %s", (_, key) => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    service.set({ links: [{ ...links()[0]!, repos: repos("app", "empty"), agents: [remote("old", "app", { state: "stopped" })] }] });
+    selectByKey(dashboard, key);
+
+    for (const filter of ["non-empty", "running-only", "all"] as const) {
+      dashboard.handleInput("V");
+      expect(dashboard.agentTree.repoFilter).toBe(filter);
+      expect(keyOf(dashboard)).toBe(key);
+      const visible = dashboard.agentTree.visibleList;
+      expect(visible.some(row => row.kind === "remote-agent")).toBe(filter !== "running-only" || key === agentKey(PEER_B, "app", "old"));
+      expect(visible.some(row => row.kind === "remote-repo-header" && peerEntryKey(row) === repoKey("empty")))
+        .toBe(filter === "all" || key === repoKey("empty"));
+    }
   });
 
   for (const width of [40, 80]) {
@@ -11803,7 +11824,7 @@ describe("Unified peer repos in the Agents tree", () => {
 
     selectByKey(dashboard, WORKER_KEY);
     const text = footer();
-    const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
+    const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "V: filter", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
     expect(text).toContain("s: send");
     for (const hint of ["m: merge", "x: retire", "R: resume"]) expect(text).toContain(hint);

@@ -76,8 +76,10 @@ export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, rea
   }
   if (!result.ok) throw new Error(result.stderr || result.stdout || `Remote ${action} failed`);
   if (request.checkOnly) return result.stdout || result.stderr || "(no output)";
-  const notice = `${peer} ${lifecyclePast[action]} ${agent.id} in ${agent.repoRegistryName}`;
+  const notice = request.keep && result.stdout.startsWith("Nothing to merge:")
+    ? `${peer} checked ${agent.id} in ${agent.repoRegistryName}: ${result.stdout}`
+    : `${peer} ${lifecyclePast[action]} ${agent.id} in ${agent.repoRegistryName}`;
   log(notice);
   deps.notice(notice);
-  return result.stderr;
+  return request.keep ? result.stdout : result.stderr;
 }

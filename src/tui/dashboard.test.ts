@@ -11210,9 +11210,11 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(merge.focusedButton).toBe("cancel");
     expect(run.mock.calls).toEqual([[PEER_B, { id: "worker-abc", repo: "itsybitsy", action: "merge", checkOnly: true }]]);
     merge.checkbox!.checked = true;
+    run.mockResolvedValueOnce("Nothing to merge: branch is current");
     merge.onYes();
     await Bun.sleep(0);
     expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "merge", keep: true });
+    expect(dashboard.notice).toBe(WORKER_KEY + ": Nothing to merge: branch is current");
     dashboard.handleInput("x");
     expect(assertDialog(dashboard.dialog, "confirm").focusedButton).toBe("cancel");
     dashboard.closeDialog();

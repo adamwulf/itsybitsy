@@ -304,7 +304,7 @@ describe("qualified agent addresses", () => {
     const requests: unknown[] = [];
     const timer = setInterval(() => {
       void pollPeerOutbox(async () => { throw new Error("Unexpected send"); }, () => {}, undefined, undefined,
-        async (peer, request) => { requests.push({ peer, ...request }); return ""; });
+        async (peer, request) => { requests.push({ peer, ...request }); return request.keep ? "Nothing to merge: branch is current" : ""; });
     }, 25);
     try {
       for (const [action, address, args, expected] of [
@@ -317,6 +317,7 @@ describe("qualified agent addresses", () => {
         const result = await cli.run([action, address, ...args], { ancestry: human });
         expect(result.stderr).toBe("");
         expect(result.exitCode).toBe(0);
+        if (action === "merge") expect(result.stdout.trim()).toBe("Nothing to merge: branch is current");
         expect(requests.pop()).toMatchObject({ peer: action === "rehire" ? "bb".repeat(32) : "peer-id", action, ...expected });
       }
     } finally { clearInterval(timer); }

@@ -2033,7 +2033,7 @@ export class DashboardComponent implements Component {
       const output = await service.runRemoteLifecycle(row.peerId, { ...options, id, repo });
       if (!options.checkOnly) {
         const verb = lifecyclePast[options.action];
-        this.setNotice(`${label} ${verb}${options.keep ? " (kept running)" : ""}${output ? ": " + output : ""}`, "info");
+        this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
       }
       return output;
     } finally {

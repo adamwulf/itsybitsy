@@ -88,7 +88,8 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 /** A claimed request might already have reached the other machine. Never re-submit it. */
 export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles, onProgress?: () => void, beforePublish?: () => Promise<void>, origin?: TransferOwner): Promise<IbCommandResult> {
   return handoffPeerRequest({
-    id: header.id, success: `Sent to ${targetLabel(header.target)}`, signal, onProgress, beforePublish,
+    id: header.id, signal, onProgress, beforePublish,
+    success: () => ({ stdout: `Sent to ${targetLabel(header.target)}`, stderr: "" }),
     validate: () => encodeSendHeader(parseSendHeader(header)),
     prepare: async staging => {
       if (stage) {
@@ -102,14 +103,17 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
 
 export function handoffRemoteLifecycle(peer: string, machine: string, lifecycle: RemoteLifecycleRequest, signal: AbortSignal): Promise<IbCommandResult> {
   return handoffPeerRequest({
-    signal, id: randomUUID(), success: `${machine} ${lifecyclePast[lifecycle.action]} ${lifecycle.id}`,
+    signal, id: randomUUID(),
+    success: output => lifecycle.keep
+      ? { stdout: output, stderr: "" }
+      : { stdout: `${machine} ${lifecyclePast[lifecycle.action]} ${lifecycle.id}`, stderr: output },
     lifecycle: { machine, timeout: lifecycleTimeout(lifecycle.action) },
     prepare: async () => ({ peer, lifecycle }),
   });
 }
 
 async function handoffPeerRequest(options: {
-  id: string; success: string; validate?(): void; prepare(staging: string): Promise<object>;
+  id: string; success(output: string): Pick<IbCommandResult, "stdout" | "stderr">; validate?(): void; prepare(staging: string): Promise<object>;
   signal?: AbortSignal; onProgress?: () => void; beforePublish?: () => Promise<void>;
   lifecycle?: { machine: string; timeout: number };
 }): Promise<IbCommandResult> {
@@ -161,7 +165,7 @@ async function handoffPeerRequest(options: {
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
         return result.ok === true && result.id === id
-          ? { ok: true, exitCode: 0, stdout: success, stderr: result.output ?? "" }
+          ? { ok: true, exitCode: 0, ...success(result.output ?? "") }
           : fail(result.error ?? unknown);
       } catch (err) {
         if (!missing(err)) resultDiagnostic = detail(err);

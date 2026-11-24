@@ -1997,12 +1997,14 @@ describe("DashboardComponent dialog and action handlers", () => {
       await Bun.write(join(configTempDir, "config.json"), JSON.stringify({ merge: { pushAfterMerge: true } }));
       setSandboxedProcessOverride(() => false);
       const commands: string[][] = [];
-      // Every git call is stubbed; `push` fails as an unreachable remote would.
+      // Every git call is stubbed; `push` is rejected as git reports it.
       setMergeSpawnRunner((cmd: string[]) => {
         commands.push(cmd);
         if (cmd.includes("--show-current") || cmd.includes("symbolic-ref")) return makeSpawnResult(0, "main");
         if (cmd.includes("remote") && cmd.includes("-v")) return makeSpawnResult(0, "origin\t/remotes/origin.git (fetch)\norigin\t/remotes/origin.git (push)");
-        if (cmd.includes("push")) return makeSpawnResult(1, "", "fatal: could not read from remote repository");
+        if (cmd.includes("push")) {
+          return makeSpawnResult(1, "", "To /remotes/origin.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '/remotes/origin.git'\nhint: Updates were rejected because the remote contains work that you do not");
+        }
         if (cmd.includes("log") && cmd.includes("--oneline")) return makeSpawnResult(0, "abc123 Agent change\n");
         if (cmd.includes("rev-parse") && cmd.includes("HEAD")) return makeSpawnResult(0, "a".repeat(40) + "\n");
         return makeSpawnResult();
@@ -2019,7 +2021,8 @@ describe("DashboardComponent dialog and action handlers", () => {
         }
         dashboard.handleInput("\r");
         await dashboard.flushPendingActions();
-        const notice = `${keep ? "agent-test kept running: merge complete" : "Merged agent-test"} · push failed: origin: fatal: could not read from remote repository`;
+        // The one-row notice drops git's `To <url>` and `hint:` lines, so the rejection shows.
+        const notice = `${keep ? "agent-test kept running: merge complete" : "Merged agent-test"} · push failed: origin: ! [rejected]        main -> main (fetch first) · error: failed to push some refs to '/remotes/origin.git'`;
         expect(dashboard.notice).toBe(notice);
         expect(dashboard.render(200)[0]).toContain(`${RED}${notice}`);
         expect(dashboard.dialog).toBeNull();
@@ -11762,10 +11765,11 @@ describe("Unified peer repos in the Agents tree", () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);
     const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue({ output: "Ready to merge" });
-    const pushFailure = "origin: ! [rejected] main -> main (fetch first)";
+    // git's whole error, as the peer sends it: later lines indented.
+    const pushFailure = "origin: To /remotes/origin.git\n  ! [rejected] main -> main (fetch first)\n  hint: Updates were rejected";
     const replies = {
-      // A closing merge's output already ends with the failure (remote-lifecycle.ts).
-      close: { output: `push failed: ${pushFailure}`, pushFailure },
+      // A closing merge's output repeats the failure in full (remote-lifecycle.ts).
+      close: { output: `push failed: ${pushFailure}\nRun \`ib push itsybitsy\` on Laptop B to push it.`, pushFailure },
       keep: { output: `Merged agent worker-abc into main (1 commit(s), agent kept running)\n✗ ${pushFailure}`, pushFailure },
     };
     for (const keep of [false, true]) {
@@ -11777,7 +11781,8 @@ describe("Unified peer repos in the Agents tree", () => {
       merge.onYes();
       await Bun.sleep(0);
       expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "merge", keep });
-      const notice = keep ? `${WORKER_KEY} merged · push failed: ${pushFailure}` : `${WORKER_KEY} merged: push failed: ${pushFailure}`;
+      // The one-row notice drops git's `To <url>` and `hint:` lines.
+      const notice = `${WORKER_KEY} merged · push failed: origin: ! [rejected] main -> main (fetch first)`;
       expect(dashboard.notice).toBe(notice);
       expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${notice}`);
     }
@@ -11789,6 +11794,15 @@ describe("Unified peer repos in the Agents tree", () => {
     await Bun.sleep(0);
     expect(dashboard.notice).toBe(`${WORKER_KEY} merged`);
     expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}${WORKER_KEY} merged`);
+  });
+
+  test("on the machine that ran a peer's merge, a failed push is a red notice too", () => {
+    const { dashboard } = setup();
+    const failed = "Laptop B merged worker in itsybitsy · push failed: origin: ! [rejected] main -> main (fetch first)";
+    dashboard.remoteAgentStarted(failed, "error");
+    expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${failed}`);
+    dashboard.remoteAgentStarted("Laptop B retired worker in itsybitsy");
+    expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}Laptop B retired worker in itsybitsy`);
   });
 
   test("o opens only a remote agent diff, requiring the tool, human caller and local registration", async () => {

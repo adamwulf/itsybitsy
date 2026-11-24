@@ -482,12 +482,13 @@ test("lifecycle requests run the receiver’s local commands, return merge error
     await expect(ask({ ...target, action: "merge" })).rejects.toThrow("Merge conflict in app.ts");
     deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Merged one commit", stderr: "" });
     expect(await ask({ ...target, action: "merge", keep: true, force: true })).toEqual({ output: "Merged one commit" });
-    expect(deps.mergeAgent.mock.calls.at(-1)).toEqual([expect.objectContaining({ id: "worker" }), repo, { keep: true }]);
+    // The merge names this machine, for a failed push's retry hint.
+    expect(deps.mergeAgent.mock.calls.at(-1)).toEqual([expect.objectContaining({ id: "worker" }), repo, { keep: true, _peerRequest: { machine: "Studio" } }]);
     await ask({ ...target, action: "resume" });
     await ask({ ...target, action: "retire" });
     await ask({ id: "worker", action: "rehire" });
     expect(deps.rehireAgent.mock.calls).toEqual([["worker", { repoPath: repo }]]);
-    expect(deps.notice.mock.calls.flat()).toEqual(["merged", "resumed", "retired", "rehired"].map(verb => `Alice ${verb} worker in App`));
+    expect(deps.notice.mock.calls).toEqual(["merged", "resumed", "retired", "rehired"].map(verb => [`Alice ${verb} worker in App`, "info"]));
     deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Nothing to merge: branch is current", stderr: "" });
     expect(await ask({ ...target, action: "merge", keep: true })).toEqual({ output: "Nothing to merge: branch is current" });
     expect(deps.notice.mock.calls.at(-1)?.[0]).toContain("Nothing to merge: branch is current");
@@ -500,25 +501,35 @@ test("lifecycle requests run the receiver’s local commands, return merge error
 test("a merge whose push failed on the receiver returns pushFailure beside its output", async () => {
   const repo = await mkdtemp(join(tmpdir(), "ib-peer-lifecycle-push-"));
   const deps = await lifecycleFixture(repo);
-  const side = serve({ lifecycle: (req, name) => acceptRemoteLifecycle(req, name, deps, () => {}) });
+  const logs: string[] = [];
+  const side = serve({ lifecycle: (req, name) => acceptRemoteLifecycle(req, name, deps, line => logs.push(line)) });
   const target = { id: "worker", repo: "app" };
-  const failed = { ok: true, exitCode: 0, pushFailure: "origin: ! [rejected] main -> main (fetch first)" };
-  const keptStdout = "Merged agent worker into main (1 commit(s), agent kept running)\n✗ origin: ! [rejected] main -> main (fetch first)\nWarning: merged, but the push of main failed.";
+  // git's whole error, as mergeAgent reports it: later lines indented.
+  const pushFailure = "origin: To /remotes/origin.git\n  ! [rejected] main -> main (fetch first)\n  hint: Updates were rejected";
+  const failed = { ok: true, exitCode: 0, pushFailure };
+  const keptStdout = "Merged agent worker into main (1 commit(s), agent kept running)\n✗ origin: ! [rejected] main -> main (fetch first)\nWarning: merged, but the push of main failed. Run `ib push App` on Studio to push it.";
+  const hint = "Run `ib push App` on Studio to push it.";
   try {
     const ask = (request: Parameters<typeof requestLifecycle>[1]) => requestLifecycle(side.a, request, "Laptop", side.clock.setTimer);
-    // A closing merge's output is its teardown warnings; the failure joins them.
+    // A closing merge's output is its teardown warnings; the failure and a
+    // retry hint that names this machine join them.
     deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: "Closed agent: worker", stderr: "" });
     expect(await ask({ ...target, action: "merge" })).toEqual({
-      output: `push failed: ${failed.pushFailure}`, pushFailure: failed.pushFailure,
+      output: `push failed: ${pushFailure}\n${hint}`, pushFailure,
     });
     deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: "Closed agent: worker", stderr: "Could not remove the agent directory" });
     expect(await ask({ ...target, action: "merge" })).toEqual({
-      output: `Could not remove the agent directory\npush failed: ${failed.pushFailure}`, pushFailure: failed.pushFailure,
+      output: `Could not remove the agent directory\npush failed: ${pushFailure}\n${hint}`, pushFailure,
     });
-    // --keep's output is the merge report, which already has the push lines.
+    // --keep's output is the merge report, which already has the push lines and the hint.
     deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: keptStdout, stderr: "" });
-    expect(await ask({ ...target, action: "merge", keep: true })).toEqual({ output: keptStdout, pushFailure: failed.pushFailure });
-    expect(deps.notice.mock.calls.flat()).toEqual(Array(3).fill(`Alice merged worker in App · push failed: ${failed.pushFailure}`));
+    expect(await ask({ ...target, action: "merge", keep: true })).toEqual({ output: keptStdout, pushFailure });
+    // This machine's own header alert is red, without git's To/hint lines.
+    expect(deps.notice.mock.calls).toEqual(Array(3).fill(
+      ["Alice merged worker in App · push failed: origin: ! [rejected] main -> main (fetch first)", "error"]));
+    // The log keeps the whole error, on one line.
+    expect(logs).toEqual(Array(3).fill(
+      "Alice merged worker in App · push failed: origin: To /remotes/origin.git ! [rejected] main -> main (fetch first) hint: Updates were rejected"));
   } finally {
     side.a.close(0, "done");
     await rm(repo, { recursive: true, force: true });

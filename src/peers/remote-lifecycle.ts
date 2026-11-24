@@ -4,6 +4,8 @@ import type { mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent
 import { isStoredRepoName, type listRepos } from "../registry";
 import { resolveAgentTarget } from "../resolve-target";
 import { isValidAgentId } from "../validation";
+import { pushFailureNotice, pushRetryHint } from "../push-failure";
+import { singleLine } from "./single-line";
 
 export type RemoteLifecycleAction = "merge" | "retire" | "rehire" | "resume";
 export interface RemoteLifecycleRequest {
@@ -56,7 +58,9 @@ export interface RemoteLifecycleDeps {
   rehireAgent: typeof rehireAgent;
   resumeAgent: typeof resumeAgent;
   detectAgentStates: typeof detectAgentStates;
-  notice(message: string): void;
+  /** This machine's name, as its peers know it: a failed push's retry hint names it. */
+  machine: string;
+  notice(message: string, kind: "info" | "error"): void;
 }
 
 export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>, deps: RemoteLifecycleDeps, log: (line: string) => void): Promise<RemoteLifecycleOutcome> {
@@ -76,7 +80,9 @@ export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, rea
   let result;
   switch (action) {
     case "merge":
-      result = request.checkOnly ? await deps.mergeCheckAgent(agent) : await deps.mergeAgent(agent, agent.repoPath, { keep: !!request.keep });
+      result = request.checkOnly
+        ? await deps.mergeCheckAgent(agent)
+        : await deps.mergeAgent(agent, agent.repoPath, { keep: !!request.keep, _peerRequest: { machine: deps.machine } });
       break;
     case "retire": result = await deps.retireAgent(agent); break;
     case "rehire": result = await deps.rehireAgent(agent.id, { repoPath: agent.repoPath }); break;
@@ -93,14 +99,18 @@ export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, rea
   const done = request.keep && result.stdout.startsWith("Nothing to merge:")
     ? `${peer} checked ${agent.id} in ${agent.repoRegistryName}: ${result.stdout}`
     : `${peer} ${lifecyclePast[action]} ${agent.id} in ${agent.repoRegistryName}`;
-  const notice = pushFailure ? `${done} · push failed: ${pushFailure}` : done;
-  log(notice);
-  deps.notice(notice);
+  // The log keeps git's whole error, on one line; the one-row notice drops
+  // its `To <url>` and `hint:` lines, and is an alert when the push failed.
+  log(singleLine(pushFailure ? `${done} · push failed: ${pushFailure}` : done));
+  deps.notice(pushFailure ? `${done} · push failed: ${pushFailureNotice(pushFailure)}` : done, pushFailure ? "error" : "info");
   if (!pushFailure) return { output: request.keep ? result.stdout : result.stderr };
-  // --keep's stdout already ends with the push's status lines and warning. A
-  // closing merge returns only its teardown warnings, so the failure joins
+  // --keep's stdout already ends with the push's status lines and a warning
+  // whose retry hint names this machine (_peerRequest). A closing merge
+  // returns only its teardown warnings, so the failure and the same hint join
   // them: a requester that does not read pushFailure (the CLI, an older
   // install) still shows it.
-  const output = request.keep ? result.stdout : [result.stderr, `push failed: ${pushFailure}`].filter(Boolean).join("\n");
+  const output = request.keep
+    ? result.stdout
+    : [result.stderr, `push failed: ${pushFailure}`, pushRetryHint(agent.repoRegistryName, deps.machine)].filter(Boolean).join("\n");
   return { output, pushFailure };
 }

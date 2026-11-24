@@ -1,6 +1,7 @@
 import { suggestedAddress } from "../resolve-target";
 import { AmbiguousRemoteRehire, lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleOutcome, type RemoteLifecycleRequest } from "./remote-lifecycle";
 import { trackSendCleanup } from "../send-cleanup";
+import { singleLine } from "./single-line";
 /**
  * The trusted link between paired installs (docs/plans/iroh-peering.md,
  * "Reconnection" and "First connected feature"; SPEC.md §20.4).
@@ -226,10 +227,6 @@ export class PeerErrorReply extends Error {
 export function cleanRemoteText(text: string): string {
   const flat = singleLine(text);
   return flat.length > MAX_REMOTE_TEXT ? `${flat.slice(0, MAX_REMOTE_TEXT - 1)}…` : flat;
-}
-
-function singleLine(text: string) {
-  return text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
 }
 
 function sendDiagnostic(text: string) {

@@ -20,6 +20,7 @@ export async function lifecycleFixture(repo: string) {
     rehireAgent: mock<RemoteLifecycleDeps["rehireAgent"]>(async () => { await rename(archive, active); return ok; }),
     resumeAgent: mock<RemoteLifecycleDeps["resumeAgent"]>(async () => ok),
     detectAgentStates: mock<RemoteLifecycleDeps["detectAgentStates"]>(async () => {}),
-    notice: mock((_line: string) => {}),
+    machine: "Studio",
+    notice: mock((_line: string, _kind: "info" | "error") => {}),
   } satisfies RemoteLifecycleDeps;
 }

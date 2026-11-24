@@ -3,6 +3,7 @@ import {
 } from "../peers/dashboard-attachments";
 import { repoRowKey } from "./row-keys";
 import { lifecyclePast, type RemoteLifecycleRequest } from "../peers/remote-lifecycle";
+import { pushFailureNotice } from "../push-failure";
 import { remoteLifecycleDenial, remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
@@ -1961,8 +1962,9 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
-  remoteAgentStarted(message: string): void {
-    this.setNotice(message, "info");
+  /** A peer's request ran here; `kind` is "error" for a merge whose push then failed. */
+  remoteAgentStarted(message: string, kind: "info" | "error" = "info"): void {
+    this.setNotice(message, kind);
     void this.watcher?.refresh();
   }
 
@@ -2133,10 +2135,10 @@ export class DashboardComponent implements Component {
         const verb = lifecyclePast[options.action];
         if (pushFailure) {
           // The peer merged, then its own push failed (merge.pushAfterMerge,
-          // read from its config). A closing merge's output already ends with
-          // "push failed: …"; --keep's is the whole merge report, so name the
-          // failure on its own.
-          this.setNotice(options.keep ? `${label} ${verb} · push failed: ${pushFailure}` : `${label} ${verb}: ${output}`, "error");
+          // read from its config). The output repeats the failure in full, so
+          // the one-row notice names it on its own, without git's
+          // `To <url>` and `hint:` lines.
+          this.setNotice(`${label} ${verb} · push failed: ${pushFailureNotice(pushFailure)}`, "error");
         } else {
           this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
         }
@@ -4634,7 +4636,7 @@ export async function launchDashboard(): Promise<void> {
   // that detection has not filled in yet.
   const peerDeps = defaultPeerServiceDeps(machine, logToWatchLog, () =>
     peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [], dashboard.watcher?.lastQuestions ?? [],
-      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message));
+      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), (message, kind) => dashboard.remoteAgentStarted(message, kind));
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
   peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
   peerDeps.readPrompt = (repo, id) => readAgentPromptText(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);

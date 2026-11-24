@@ -8,12 +8,15 @@ import type { SpawnResult } from "./types";
 // call goes to a stubbed runner, so nothing is pushed anywhere.
 describe("pushRepo", () => {
   const calls: string[][] = [];
+  const envs: (NodeJS.ProcessEnv | undefined)[] = [];
 
   /** A repo with `main` and the given remotes; `git push` fails for each remote in `rejects`. */
   function stubRepo(remotes: string[], rejects: string[] = []) {
     calls.length = 0;
-    setPushSpawnRunner((cmd: string[]): SpawnResult => {
+    envs.length = 0;
+    setPushSpawnRunner((cmd: string[], opts): SpawnResult => {
       calls.push(cmd);
+      envs.push(opts?.env);
       if (cmd.includes("show-ref")) return makeSpawnResult(cmd.at(-1) === "refs/heads/main" ? 0 : 1);
       if (cmd.includes("remote") && cmd.includes("-v")) {
         return makeSpawnResult(0, remotes.map((r) => `${r}\t/remotes/${r}.git (fetch)\n${r}\t/remotes/${r}.git (push)`).join("\n"));
@@ -46,6 +49,9 @@ describe("pushRepo", () => {
       ["git", "-C", "/repo", "push", "origin", "main"],
       ["git", "-C", "/repo", "push", "upstream", "main"],
     ]);
+    // Run from a terminal, `ib push` may still prompt for credentials: only
+    // the merge's push sets GIT_TERMINAL_PROMPT=0.
+    expect(envs.every((env) => env === undefined)).toBe(true);
   });
 
   test("still tries every remote when one fails, and exits non-zero", async () => {

@@ -188,7 +188,7 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = transferStagingRoot()): PeerServiceDeps {
+export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string, kind?: "info" | "error") => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = transferStagingRoot()): PeerServiceDeps {
   const poll = createPeerOutboxPoll();
   // Sends and remote starts share the busy rule and the /tmp reservation.
   const attachments = createAttachmentReceiver();
@@ -207,7 +207,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
       const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log, lines });
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
-    remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, notice },
+    remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, machine, notice },
     remoteQuestions: { listRepos, acknowledgeQuestion, notice },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice, attachments },
     writeRemoteAgents,

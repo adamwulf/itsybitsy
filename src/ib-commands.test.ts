@@ -6043,12 +6043,14 @@ describe("mergeAgent (native)", () => {
      * makeMergeMock plus what the pull and push need: `remote -v` lists
      * `remotes`, `symbolic-ref HEAD` names the checked-out branch (so the
      * pre-merge pull runs), and `git push <remote>` fails for each remote in
-     * `rejects`, succeeding otherwise.
+     * `rejects`, succeeding otherwise. Every git call's environment (undefined
+     * when it inherits) goes to `gitEnvs`, keyed by its subcommand.
      */
     function makePushMock(options: { remotes?: string[]; rejects?: string[]; currentBranch?: string; commitCount?: number } = {}) {
       const { remotes = ["origin"], rejects = [], currentBranch = "main", commitCount = 1 } = options;
       const base = makeMergeMock({ currentBranch, commitCount });
       return (cmd: string[], opts?: any): SpawnResult => {
+        if (cmd[0] === "git") gitEnvs.push([cmd[3]!, opts?.env]);
         if (cmd[0] === "git" && cmd.includes("remote") && cmd.includes("-v")) {
           spawnCalls.push(cmd);
           return makeSpawnResult(0, remotes.map((r) => `${r}\t/remotes/${r}.git (fetch)\n${r}\t/remotes/${r}.git (push)`).join("\n"));
@@ -6073,8 +6075,10 @@ describe("mergeAgent (native)", () => {
 
     const pushCalls = () => spawnCalls.filter((c) => c[0] === "git" && c.includes("push"));
     const remoteListings = () => spawnCalls.filter((c) => c[0] === "git" && c.includes("remote") && c.includes("-v"));
+    let gitEnvs: [string, NodeJS.ProcessEnv | undefined][];
 
     beforeEach(() => {
+      gitEnvs = [];
       setUserConfigPath(join(tempDir, "config.json"));
       // A sandboxed caller skips the push; pin "not sandboxed" so these tests
       // do not depend on where `bun test` runs.
@@ -6133,6 +6137,22 @@ describe("mergeAgent (native)", () => {
       const log = await Bun.file(join(agentDir, "agent.log")).text();
       expect(log).toContain("Pushing main to origin, upstream after merging...");
       expect(log).toContain("Push completed:");
+    });
+
+    test("the push runs with GIT_TERMINAL_PROMPT=0 and the rest of this process's environment; no other git call does", async () => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock());
+
+      await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      const pushEnvs = gitEnvs.filter(([sub]) => sub === "push").map(([, env]) => env);
+      expect(pushEnvs).toHaveLength(1);
+      expect(pushEnvs[0]?.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(pushEnvs[0]?.PATH).toBe(process.env.PATH);
+      // The pre-merge pull's fetch, and every other git call, inherit as before.
+      expect(gitEnvs.some(([sub]) => sub === "fetch")).toBe(true);
+      expect(gitEnvs.filter(([sub]) => sub !== "push").every(([, env]) => env === undefined)).toBe(true);
     });
 
     test("a closing merge pushes before the teardown and reports the push after the close line", async () => {
@@ -6238,7 +6258,8 @@ describe("mergeAgent (native)", () => {
 
       expect(result.ok).toBe(true);
       expect(result.exitCode).toBe(0);
-      expect(result.pushFailure).toBe(`origin: ${REJECTED}`);
+      // The ✗ line's text: git's later lines indented two spaces.
+      expect(result.pushFailure).toBe(`origin: ${REJECTED.replace(/\n/g, "\n  ")}`);
       // Every remote is still attempted, and stdout ends with the push lines and a warning.
       expect(pushCalls()).toEqual([
         ["git", "-C", tempDir, "push", "origin", "main"],
@@ -6262,11 +6283,25 @@ describe("mergeAgent (native)", () => {
 
       expect(result.ok).toBe(true);
       expect(result.exitCode).toBe(0);
-      expect(result.pushFailure).toBe(`origin: ${REJECTED}`);
+      expect(result.pushFailure).toBe(`origin: ${REJECTED.replace(/\n/g, "\n  ")}`);
       expect(result.stdout).toContain("✗ origin: ");
       expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
       const log = await Bun.file(join(agentDir, "agent.log")).text();
       expect(log).toContain("Push failed:\n✗ origin: ");
+    });
+
+    test("a merge a paired machine asked for names this machine in the retry hint", async () => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock({ rejects: ["origin"] }));
+      const agent = makeAgent("agent-abc", tempDir);
+
+      const result = await mergeAgent(agent, tempDir, { keep: true, _peerRequest: { machine: "Studio" } });
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout.split("\n").at(-1)).toBe(
+        `Warning: merged, but the push of main failed. Run \`ib push ${agent.repoRegistryName}\` on Studio to push it.`,
+      );
     });
   });
 });

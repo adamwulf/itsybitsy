@@ -78,6 +78,7 @@ import {
   type RetiredAgentArchive,
 } from "./agent-lifecycle";
 import { readConfig } from "./config";
+import { pushFailureEntry, pushRetryHint } from "./push-failure";
 import { listTmuxSessions } from "./tmux-poller";
 import { logToWatchLog, logWarning } from "./watch-log";
 import { SpawnContext, InjectionContext } from "./types";
@@ -189,7 +190,8 @@ export interface IbCommandResult {
   /**
    * Set only by a successful `mergeAgent` whose push after the merge
    * (`merge.pushAfterMerge`, SPEC.md §3.4) failed: one `<remote>: <git error>`
-   * line per remote that refused it. stdout already carries the push's status
+   * entry per remote that refused it, later lines indented two spaces
+   * (src/push-failure.ts). stdout already carries the push's status
    * lines and a warning for command-line callers; this is for callers that
    * show the failure as an alert.
    */
@@ -3659,8 +3661,15 @@ async function pullBeforeMerge(
  * (`main` or `master`, checked out in `targetDir`; SPEC.md §3.4). `report` is
  * the push's status lines (or, for a sandboxed caller, a note that it did not
  * push), or null when there was nothing to push. `failure` is set when the
- * push failed, one `<remote>: <git error>` line per remote that refused it.
+ * push failed, one {@link pushFailureEntry} per remote that refused it.
  * The merge has already succeeded either way, so this never fails it.
+ * `peerMachine` is this machine's name when a paired machine asked for the
+ * merge, so the retry hint says where to run `ib push`.
+ *
+ * The push runs with GIT_TERMINAL_PROMPT=0: inside `ib watch`, or for a
+ * paired machine, a credential prompt would wait on a tty nobody answers and
+ * hold the merge in `merging`. Without stored credentials it fails at once
+ * and is reported as a failed push.
  */
 async function pushAfterMerge(
   agentDir: string,
@@ -3668,13 +3677,14 @@ async function pushAfterMerge(
   targetBranch: string,
   targetCheckedOut: boolean,
   repoName: string,
+  peerMachine: string | undefined,
 ): Promise<{ report: string | null; failure?: string }> {
   if (!targetCheckedOut || (targetBranch !== "main" && targetBranch !== "master")) {
     return { report: null };
   }
   const config = await readConfig();
   if (config["merge.pushAfterMerge"]?.value !== true) return { report: null };
-  const retry = `Run \`ib push ${repoName}\` to push it.`;
+  const retry = pushRetryHint(repoName, peerMachine);
   const listed = await listRemotes(mergeSpawnCtx, targetDir);
   if (!listed.ok) {
     const failure = `could not list remotes: ${listed.stderr}`;
@@ -3692,7 +3702,8 @@ async function pushAfterMerge(
   }
 
   await logAgent(agentDir, `Pushing ${targetBranch} to ${remotes.join(", ")} after merging...`);
-  const push = await pushBranchToRemotes(mergeSpawnCtx, targetDir, targetBranch, remotes);
+  const push = await pushBranchToRemotes(mergeSpawnCtx, targetDir, targetBranch, remotes,
+    { ...process.env, GIT_TERMINAL_PROMPT: "0" });
   await logAgent(agentDir, `Push ${push.failures.length === 0 ? "completed" : "failed"}:\n${push.stdout}`);
   if (push.failures.length === 0) return { report: push.stdout };
   return {
@@ -3720,6 +3731,12 @@ export interface MergeAgentOptions {
    * as an agent (a `--ff-only` merge) without the cwd / tmux probe.
    */
   _brokeredCaller?: { cwd: string };
+  /**
+   * Set ONLY by acceptRemoteLifecycle (src/peers/remote-lifecycle.ts), for a
+   * merge a paired machine asked for. The output goes back to that machine,
+   * so a failed push's retry hint names this one: `machine`.
+   */
+  _peerRequest?: { machine: string };
 }
 
 /**
@@ -3943,7 +3960,7 @@ export async function mergeAgent(
       // Only a merge that landed a commit gets here, so a 0-commit merge
       // never pushes.
       push = await timed("merge", "git-push", () =>
-        pushAfterMerge(agentDir, targetDir, targetBranch, preflight.targetCheckedOut, agent.repoRegistryName)
+        pushAfterMerge(agentDir, targetDir, targetBranch, preflight.targetCheckedOut, agent.repoRegistryName, options._peerRequest?.machine)
       );
     }
 
@@ -9524,27 +9541,29 @@ export async function pushRepo(repoPath: string): Promise<IbCommandResult> {
  * `remotes`, with one attempt and one status line per remote. `ib merge` runs
  * it too, through its own spawn context, after it merges into the main branch
  * with `merge.pushAfterMerge` on (SPEC.md §3.4). `failures` holds one
- * `<remote>: <git error>` entry per remote that refused the push.
+ * {@link pushFailureEntry} per remote that refused the push. `env`, when
+ * given, is each `git push`'s whole environment.
  */
 async function pushBranchToRemotes(
   ctx: SpawnContext,
   repoPath: string,
   branch: string,
   remotes: string[],
+  env?: NodeJS.ProcessEnv,
 ): Promise<IbCommandResult & { failures: string[] }> {
   const lines: string[] = [];
   const failures: string[] = [];
   let anySucceeded = false;
   for (const remote of remotes) {
-    const push = await ctx.run(["git", "-C", repoPath, "push", remote, branch]);
+    const push = await ctx.run(["git", "-C", repoPath, "push", remote, branch], env);
     if (push.exitCode === 0) {
       anySucceeded = true;
       const detail = push.stderr || push.stdout;
       lines.push(`✓ ${remote}: pushed ${branch}${detail ? `\n  ${detail.replace(/\n/g, "\n  ")}` : ""}`);
     } else {
-      const err = push.stderr || push.stdout || `exit ${push.exitCode}`;
-      failures.push(`${remote}: ${err}`);
-      lines.push(`✗ ${remote}: ${err.replace(/\n/g, "\n  ")}`);
+      const entry = pushFailureEntry(remote, push.stderr || push.stdout || `exit ${push.exitCode}`);
+      failures.push(entry);
+      lines.push(`✗ ${entry}`);
     }
   }
 

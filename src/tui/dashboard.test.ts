@@ -10376,8 +10376,9 @@ describe("Unified peer repos in the Agents tree", () => {
       // More status lines than the main area holds (a `/` menu on the peer)
       // still fill the terminal exactly, with the editor kept on screen.
       const menu = Array.from({ length: 60 }, (_, i) => `  /command-${i}`);
-      service.fetchCoordinatorPane.mockResolvedValue({ state: "running", text: ["peer reply", sep, "❯ /", sep, ...menu].join("\n") });
-      (dashboard as any).remotePane.poll(PEER_B);
+      service.fetchPane.mockResolvedValue({ state: "running", text: ["peer reply", sep, "❯ /", sep, ...menu].join("\n") });
+      const pane = (dashboard as any).remotePane;
+      pane.poll(pane.active);
       await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("/command-0"));
       const lines = dashboard.render(180);
       expect(lines).toHaveLength(process.stdout.rows);

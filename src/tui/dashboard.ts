@@ -79,7 +79,7 @@ import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
 import type { DialogState } from "./dialog-handler";
 import {
-  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH,
+  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH, MULTI_SELECT_WIDTH,
   handleDialogInput, syncNewAgentMachine, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
   PEERS_TAB, buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
@@ -2248,7 +2248,8 @@ export class DashboardComponent implements Component {
     this.syncRemotePane();
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
-        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor" || dialog.type === "multi-select") ? 70
+        : dialog.type === "multi-select" ? MULTI_SELECT_WIDTH
+        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
         : DIALOG_WIDTH);
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       this.overlayHandle.hide();

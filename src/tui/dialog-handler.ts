@@ -17,6 +17,8 @@ export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
 /** Width of a dialog whose type has no width of its own (input, confirm, ...). */
 export const DIALOG_WIDTH = 80;
+/** Width of the multi-select dialog. */
+export const MULTI_SELECT_WIDTH = 70;
 
 /**
  * Widest title a `width`-column dialog can draw. The overlay draws the title

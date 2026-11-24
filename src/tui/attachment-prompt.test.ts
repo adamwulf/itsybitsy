@@ -4,14 +4,63 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   checkCandidateFile,
+  choosePaths,
   findCandidateAttachments,
   isTmpPath,
+  peerAttachmentPrompt,
   promptAndStageAttachmentsIfNeeded,
   resolveCandidatePath,
   stageSelectedAttachments,
 } from "./attachment-prompt";
 import { setUserHome, resetUserHome } from "../home";
-import type { DialogState } from "./dialog-handler";
+import { dialogTitleMaxWidth, MULTI_SELECT_WIDTH, type DialogState } from "./dialog-handler";
+import { visibleWidth } from "@mariozechner/pi-tui";
+
+describe("choosePaths", () => {
+  function open(paths: string[], checked?: boolean[]) {
+    const events: string[] = [];
+    let dialog: Extract<NonNullable<DialogState>, { type: "multi-select" }> | undefined;
+    const result = choosePaths({
+      paths, checked, prompt: "Pick:",
+      showDialog: (d) => { events.push("show"); dialog = d as typeof dialog; },
+      closeDialog: () => { events.push("close"); },
+    });
+    return { result, events, dialog: dialog! };
+  }
+
+  test("offers each path once with its initial checked state", () => {
+    const { dialog } = open(["/a", "/b", "/a", "/c"], [true, false, false, true]);
+    expect(dialog.prompt).toBe("Pick:");
+    expect(dialog.items).toEqual(["/a", "/b", "/c"]);
+    expect(dialog.checked).toEqual([true, false, true]);
+  });
+
+  test("leaves every path unchecked without an initial state", () => {
+    expect(open(["/a", "/b"]).dialog.checked).toEqual([false, false]);
+  });
+
+  test("closes the dialog, then resolves the checked paths", async () => {
+    const { dialog, events, result } = open(["/a", "/b", "/c"]);
+    dialog.onSubmit([0, 2]);
+    expect(events).toEqual(["show", "close"]);
+    expect(await result).toEqual(new Set(["/a", "/c"]));
+  });
+
+  test("closes the dialog, then resolves null on cancel", async () => {
+    const { dialog, events, result } = open(["/a"]);
+    dialog.onCancel!();
+    expect(events).toEqual(["show", "close"]);
+    expect(await result).toBeNull();
+  });
+});
+
+test("the peer path dialog's title fits its border, cutting a long machine name", () => {
+  expect(peerAttachmentPrompt("Laptop B")).toBe("Send as attachments to Laptop B:");
+  const long = peerAttachmentPrompt("x".repeat(100));
+  expect(long).toStartWith("Send as attachments to xxx");
+  expect(long).toEndWith("…:");
+  expect(visibleWidth(long)).toBe(dialogTitleMaxWidth(MULTI_SELECT_WIDTH));
+});
 
 describe("attachment-prompt", () => {
   let testDir: string;

@@ -11042,9 +11042,12 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(stripAnsi(during[0]!)).toStartWith("ib — sending to Laptop B/abc-nick…");
     expect(during[0]).toContain(YELLOW);
     expect(during.slice(1).map(stripAnsi)).toEqual(before.slice(1));
-    // A long alert ends in "…" and leaves the indicators on the line.
-    dashboard.setTelegramStatus("green");
+    // A long alert ends in "…", and leaves any indicators on the line.
     dashboard.setNotice("x".repeat(WIDTH), "info");
+    const bare = stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(bare).toEndWith("…");
+    expect(visibleWidth(bare)).toBeLessThanOrEqual(WIDTH);
+    dashboard.setTelegramStatus("green");
     const header = stripAnsi(dashboard.render(WIDTH)[0]!);
     expect(header).toMatch(/…\s+● Telegram$/);
     expect(visibleWidth(header)).toBeLessThanOrEqual(WIDTH);
@@ -11298,6 +11301,25 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(header()).toStartWith("ib — › receiving Laptop → worker  3 / 12 bytes  Esc: cancel");
     dashboard.handleInput("\x1b");
     expect(service.cancelReceipt.mock.calls).toEqual([["first"]]);
+  });
+
+  test("a Ctrl-T-selected receipt leads the header alert ahead of a pending send", async () => {
+    const { dashboard, service } = setup();
+    const pending = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("s");
+    assertDialog(dashboard.dialog, "textarea").onSubmit("hello");
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+    dashboard.closeDialog();
+    service.set({ incoming: [{ id: "first", label: "Laptop → worker", bytes: 3, total: 12 }] });
+    const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(header()).toStartWith("ib — sending to Laptop B/abc-nick…  Esc: cancel  ·  receiving Laptop → worker");
+    dashboard.handleInput("\x14");
+    expect(header()).toStartWith("ib — › receiving Laptop → worker  3 / 12 bytes  Esc: cancel  ·  sending to Laptop B/abc-nick…");
+    expect(header().match(/Esc: cancel/g)).toHaveLength(1);
+    pending.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+    await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
   });
 
   test("incoming notices and overlapping completions leave each pending send visible", async () => {

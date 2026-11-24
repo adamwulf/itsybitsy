@@ -19,6 +19,8 @@ import { loadIroh, type Iroh } from "./iroh";
 import { listeningOrThrow } from "./test-pair-transport";
 import { generatePairCode } from "./pair-code";
 import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer-link";
+import { lifecycleFixture } from "./test-remote-lifecycle";
+import type { RemoteLifecycleDeps } from "./remote-lifecycle";
 import type { RemoteSpawnDeps } from "./new-agent";
 import { captureAgentPane } from "./agent-pane";
 import { createMessageReceiver } from "./receive-message";
@@ -78,7 +80,7 @@ interface Side {
 /** Direct addresses by endpoint id, so a dial by id can reach another loopback endpoint. */
 function makeNetwork(iroh: Iroh) {
   const addresses = new Map<string, string[]>();
-  async function makeSide(label: string, agents: Agent[], remoteSpawn?: RemoteSpawnDeps): Promise<Side> {
+  async function makeSide(label: string, agents: Agent[], remoteSpawn?: RemoteSpawnDeps, remoteLifecycle?: RemoteLifecycleDeps): Promise<Side> {
     const home = await mkdtemp(join(tmpdir(), `ib-peer-link-real-${label}-`));
     homes.push(home);
     const id = (await inHome(home, loadOrCreateIdentity)).id;
@@ -88,7 +90,7 @@ function makeNetwork(iroh: Iroh) {
 
     const service = new PeerService({
       remoteStartDenial: null,
-      remoteSpawn,
+      remoteSpawn, remoteLifecycle,
       receiveMessage: (header, peerId, _peerName, body, options) => inHome(home, () =>
         receive(header, peerId, async () => (await readPeers()).find(p => p.id === peerId)?.name ?? null, body, options)),
 
@@ -241,6 +243,23 @@ test("a trusted loopback new-agent stream starts the stubbed agent and returns i
   expect(newAgent.mock.calls).toEqual([["/b/app", prompt, { type, name: undefined }]]);
   expect(b.logs).toContain("A started agent worker-23 in App");
   expect(notice.mock.calls).toEqual([["A started agent worker-23 in App"]]);
+});
+
+test("a trusted loopback peer retires and rehires an archived agent on the other machine", async () => {
+  const net = makeNetwork(await loadIroh());
+  const repo = await mkdtemp(join(tmpdir(), "ib-peer-real-lifecycle-"));
+  homes.push(repo);
+  const deps = await lifecycleFixture(repo);
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", [], undefined, deps);
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  await a.service.runRemoteLifecycle(b.id, { action: "retire", repo: "app", id: "worker" });
+  await a.service.runRemoteLifecycle(b.id, { action: "rehire", id: "worker" });
+  expect(deps.retireAgent.mock.calls[0]?.[0]).toMatchObject({ repoPath: repo, id: "worker" });
+  expect(deps.rehireAgent.mock.calls).toEqual([["worker", { repoPath: repo }]]);
+  expect(deps.notice.mock.calls).toEqual([["A retired worker in App"], ["A rehired worker in App"]]);
 });
 
 test("reads the paired machine's system coordinator over a real loopback connection", async () => {

@@ -9211,6 +9211,7 @@ class FakePeerService implements PeersDialogService {
   sendRemoteMessage = mock<PeersDialogService["sendRemoteMessage"]>(async (_id, header) => header.id);
   fetchPane = mock(async (_peerId: string, _target: import("../peers/peer-link").PeerPaneTarget, _lines: number) => ({ state: "running", text: "peer capture" }));
   remoteStartDenial: string | null = null;
+  runRemoteLifecycle: PeersDialogService["runRemoteLifecycle"] = async () => { throw new Error("Unexpected lifecycle request"); };
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
   state: PeerServiceView = {
     status: { kind: "listening" },
@@ -11198,6 +11199,40 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(content()).not.toContain("sending to Laptop B/");
   });
 
+  test("remote m checks before confirming keep, x confirms retirement, and R resumes directly", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue("Ready to merge");
+    dashboard.handleInput("m");
+    await Bun.sleep(0);
+    const merge = assertDialog(dashboard.dialog, "confirm");
+    expect(merge.prompt).toContain("Ready to merge");
+    expect(merge.focusedButton).toBe("cancel");
+    expect(run.mock.calls).toEqual([[PEER_B, { id: "worker-abc", repo: "itsybitsy", action: "merge", checkOnly: true }]]);
+    merge.checkbox!.checked = true;
+    merge.onYes();
+    await Bun.sleep(0);
+    expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "merge", keep: true });
+    dashboard.handleInput("x");
+    expect(assertDialog(dashboard.dialog, "confirm").focusedButton).toBe("cancel");
+    dashboard.closeDialog();
+    expect(run).toHaveBeenCalledTimes(2);
+    dashboard.handleInput("x");
+    const pending = Promise.withResolvers<string>();
+    run.mockReturnValueOnce(pending.promise);
+    assertDialog(dashboard.dialog, "confirm").onYes();
+    expect(dashboard.render(WIDTH).join("\n")).toContain(`retire ${WORKER_KEY}…`);
+    pending.resolve("");
+    await Bun.sleep(0);
+    expect(dashboard.notice).toContain("retired");
+    run.mockRejectedValueOnce(new Error("Agent is already running"));
+    dashboard.handleInput("R");
+    await Bun.sleep(0);
+    expect(dashboard.dialog).toBeNull();
+    expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "resume" });
+    expect(dashboard.notice).toContain("Agent is already running");
+  });
+
   test("the guard refuses action keys on a remote row with the notice, and none of their handlers run", () => {
     const { dashboard } = setup();
     selectByKey(dashboard, WORKER_KEY);
@@ -11206,7 +11241,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["x", "m", "R", "a", ".", "t", "!", "S", "o"]) {
+      for (const key of ["a", ".", "t", "!", "S", "o"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -11541,7 +11576,8 @@ describe("Unified peer repos in the Agents tree", () => {
     const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
     expect(text).toContain("s: send");
-    for (const hint of ["m: merge", "x: retire", "a: new agent", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
+    for (const hint of ["m: merge", "x: retire", "R: resume"]) expect(text).toContain(hint);
+    for (const hint of ["a: new agent", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
     // Every key the remote footer names is one the guard allows.
@@ -11672,8 +11708,7 @@ describe("Unified peer repos in the Agents tree", () => {
       };
       resetNotice(dashboard);
       pick("retire agent — x");
-      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
-      expect(retire).not.toHaveBeenCalled();
+      expect(retire).toHaveBeenCalledTimes(1);
       resetNotice(dashboard);
       pick("DIFF — run ib diff");
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);

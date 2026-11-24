@@ -180,6 +180,7 @@ export interface ActionCtx {
   refuseOnRemoteRow(key: string): boolean;
   peerService: PeersDialogService | null;
   remoteSelection: RemoteEntry | null;
+  runRemoteRowCommand(row: Extract<RemoteEntry, { kind: "remote-agent" }>, options: Pick<import("../peers/remote-lifecycle").RemoteLifecycleRequest, "action" | "checkOnly" | "keep">): Promise<string>;
   agentTree: {
     selectedAgent: Agent | null;
     selectedRepoHeader: string | null;
@@ -334,6 +335,11 @@ export interface ActionCtx {
 }
 
 export function handleRetire(ctx: ActionCtx) {
+  const row = ctx.remoteSelection;
+  if (row?.kind === "remote-agent") {
+    retireDialog(ctx, remoteAgentLabel(row), () => ctx.runRemoteRowCommand(row, { action: "retire" }));
+    return;
+  }
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
@@ -360,20 +366,28 @@ function showCoordinatorResetResult(ctx: ActionCtx, agent: Agent, result: IbComm
  * by `x` on an agent (`handleRetire`) and the "Retire" row of the team-member
  * picker (`handleManageTeamMember`).
  */
+function remoteAgentLabel(row: Extract<RemoteEntry, { kind: "remote-agent" }>) {
+  return `${row.peerName}/${row.remote.repoRegistryName}/${row.remote.id}`;
+}
+
 function confirmRetire(ctx: ActionCtx, agent: Agent) {
+  retireDialog(ctx, agent.id, async () => {
+    const result = await retireAgent(agent);
+    if (result.ok) showTeardownResult(ctx, `Retired ${agent.id}`, result.stderr);
+    else ctx.setNotice(`Retire failed: ${result.stderr || result.stdout}`, "error");
+  });
+}
+
+function retireDialog(ctx: ActionCtx, label: string, retire: () => Promise<unknown>) {
   ctx.showDialog({
     type: "confirm",
-    prompt: `Retire agent ${agent.id}?`,
+    prompt: `Retire agent ${label}?`,
     confirmLabel: "Retire",
     focusedButton: "cancel",
     confirmColor: RED,
     onYes: () => {
       ctx.closeDialog();
-      ctx.executeAndRefresh(async () => {
-        const result = await retireAgent(agent);
-        if (result.ok) showTeardownResult(ctx, `Retired ${agent.id}`, result.stderr);
-        else ctx.setNotice(`Retire failed: ${result.stderr || result.stdout}`, "error");
-      });
+      ctx.executeAndRefresh(async () => { await retire(); });
     },
   });
 }
@@ -508,6 +522,11 @@ export function handleNukeAll(ctx: ActionCtx) {
 }
 
 export function handleResume(ctx: ActionCtx) {
+  const row = ctx.remoteSelection;
+  if (row?.kind === "remote-agent") {
+    ctx.executeAndRefresh(async () => { await ctx.runRemoteRowCommand(row, { action: "resume" }); });
+    return;
+  }
   if (ctx.agentTree.isSystemCoordinatorSelected) {
     handleRestartSystemCoordinator(ctx);
     return;
@@ -1294,6 +1313,17 @@ export function handleDisbandTeam(ctx: ActionCtx, teamName: string) {
 }
 
 export function handleMerge(ctx: ActionCtx) {
+  const row = ctx.remoteSelection;
+  if (row?.kind === "remote-agent") {
+    ctx.executeAndRefresh(async () => {
+      const output = await ctx.runRemoteRowCommand(row, { action: "merge", checkOnly: true });
+      const selected = ctx.remoteSelection;
+      if (ctx.dialog || selected?.kind !== "remote-agent" || row.peerId !== selected.peerId ||
+          row.remote.id !== selected.remote.id || row.remote.repoRegistryName !== selected.remote.repoRegistryName) return;
+      mergeDialog(ctx, remoteAgentLabel(row), output, keep => ctx.runRemoteRowCommand(row, { action: "merge", keep }));
+    });
+    return;
+  }
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
@@ -1311,27 +1341,30 @@ export function handleMerge(ctx: ActionCtx) {
       ctx.setNotice(`Merge-check failed for ${agent.id}: ${checkOutput}`, "error");
       return;
     }
-    const checkbox = { label: "Keep agent after merge", checked: false };
-    ctx.showDialog({
-      type: "confirm",
-      prompt: `Merge ${agent.id}?\n${checkOutput}`,
-      confirmLabel: "Merge",
-      focusedButton: "cancel",
-      checkbox,
-      onYes: () => {
-        const keep = checkbox.checked;
-        ctx.closeDialog();
-        ctx.executeAndRefresh(async () => {
-          const result = await mergeAgent(agent, agent.repoPath, { keep });
-          if (result.ok) {
-            const notice = keep
-              ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
-              : `Merged ${agent.id}`;
-            showTeardownResult(ctx, notice, result.stderr);
-          } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
-        });
-      },
+    mergeDialog(ctx, agent.id, checkOutput, async keep => {
+      const result = await mergeAgent(agent, agent.repoPath, { keep });
+      if (result.ok) {
+        const notice = keep
+          ? `${agent.id} kept running: ${result.stdout.startsWith("Nothing to merge:") ? "nothing to merge" : "merge complete"}`
+          : `Merged ${agent.id}`;
+        showTeardownResult(ctx, notice, result.stderr);
+      } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
     });
+  });
+}
+
+function mergeDialog(ctx: ActionCtx, label: string, output: string, merge: (keep: boolean) => Promise<unknown>) {
+  const checkbox = { label: "Keep agent after merge", checked: false };
+  ctx.showDialog({
+    type: "confirm",
+    prompt: `Merge ${label}?\n${output}`,
+    confirmLabel: "Merge",
+    focusedButton: "cancel",
+    checkbox,
+    onYes: () => {
+      ctx.closeDialog();
+      ctx.executeAndRefresh(async () => { await merge(checkbox.checked); });
+    },
   });
 }
 

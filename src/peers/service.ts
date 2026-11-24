@@ -65,9 +65,9 @@ import { finishRecovery, sweepOutgoingDirectories } from "./transfer-owner";
 
 import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
 import type { SendHeader } from "./send-frame";
-import { cleanRemoteText, requestSend } from "./peer-link";
+import { cleanRemoteText, requestLifecycle, requestSend } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
-import { remoteSendDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
+import { remoteLifecycleDenial, remoteSendDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
@@ -89,7 +89,9 @@ import {
   type PairStream,
 } from "./pairing";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
-import { newAgent } from "../ib-commands";
+import { acceptRemoteLifecycle, type RemoteLifecycleRequest, type RemoteLifecycleDeps } from "./remote-lifecycle";
+import { detectAgentStates } from "../agents";
+import { newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
 import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerPane, type PeerPaneTarget, type PeerResponderDeps, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
@@ -145,6 +147,7 @@ export interface PeerServiceDeps {
   captureCoordinator?: PeerResponderDeps["captureCoordinator"];
   captureAgent?: PeerResponderDeps["captureAgent"];
   remoteStartDenial: string | null | Promise<string | null>;
+  remoteLifecycle?: RemoteLifecycleDeps;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[], generation: string): void;
   renewLease?(): Promise<void>;
@@ -185,6 +188,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
       const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log, lines });
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
+    remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, notice },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
@@ -761,6 +765,15 @@ export class PeerService {
     return id;
   }
 
+  async runRemoteLifecycle(peerId: string, request: RemoteLifecycleRequest, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
+    if (source === "dashboard" && this.remoteStartDenial !== null) throw new Error(remoteLifecycleDenial(this.remoteStartDenial, request.action));
+    const machine = await this.peerName(peerId);
+    if (machine === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error(`${machine} is disconnected`);
+    return requestLifecycle(conn, request, machine, this.deps.setTimer, transfer);
+  }
+
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
     if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
@@ -963,7 +976,8 @@ export class PeerService {
         const dispatchFinished = () => { dispatches.delete(dispatch); };
         const work = poll((peer, header, transfer) => this.sendRemoteMessage(peer, header, "handoff", {
           ...transfer, signal: transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal,
-        }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown, dispatchFinished)
+        }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown, dispatchFinished,
+          (peer, request, transfer) => this.runRemoteLifecycle(peer, request, "handoff", transfer))
           .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`))
           .finally(() => { dispatchFinished(); this.outboxPolls.delete(work); });
         this.outboxPolls.add(work);
@@ -1026,6 +1040,8 @@ export class PeerService {
         await serveTrustedConnection(toPairConnection(conn), {
           setTimer: this.deps.setTimer,
           peerName: (id) => this.peerName(id),
+          lifecycle: this.deps.remoteLifecycle && ((request, readPeerName) =>
+            acceptRemoteLifecycle(request, readPeerName, this.deps.remoteLifecycle!, this.deps.log)),
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
           receiveMessage: this.deps.receiveMessage && ((...args) => this.receiveTracked(...args)),

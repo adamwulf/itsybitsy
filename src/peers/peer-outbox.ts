@@ -1,3 +1,4 @@
+import { parseLifecycleRequest, lifecycleTimeout, lifecyclePast, type RemoteLifecycleRequest } from "./remote-lifecycle";
 import { requestLookup } from "../request-lookup";
 import { transferOwnerState, type TransferOwner, finishRecovery, inspectTransferDirectory, reclaimTransfer, safeTransferParent, sweepEntries, sweepTransferDirectory, transferDirectoryBatch, writeTransferOwner, stagingOwnerStart } from "./transfer-owner";
 import { cancellationPoll, cancellationMarkerExists, trackSendCleanup, warnSendCleanup } from "../send-cleanup";
@@ -86,16 +87,44 @@ export function textHeader(target: SendTarget, message: string, from: SendHeader
 
 /** A claimed request might already have reached the other machine. Never re-submit it. */
 export async function handoffRemoteMessage(peer: string, header: SendHeader, signal?: AbortSignal, stage?: StageRemoteFiles, onProgress?: () => void, beforePublish?: () => Promise<void>, origin?: TransferOwner): Promise<IbCommandResult> {
+  return handoffPeerRequest({
+    id: header.id, success: `Sent to ${targetLabel(header.target)}`, signal, onProgress, beforePublish,
+    validate: () => encodeSendHeader(parseSendHeader(header)),
+    prepare: async staging => {
+      if (stage) {
+        header = { ...header, files: await stage(join(staging, "files")) };
+        encodeSendHeader(parseSendHeader(header));
+      }
+      return { peer, header, origin };
+    },
+  });
+}
+
+export function handoffRemoteLifecycle(peer: string, machine: string, lifecycle: RemoteLifecycleRequest): Promise<IbCommandResult> {
+  return handoffPeerRequest({
+    id: randomUUID(), success: `${machine} ${lifecyclePast[lifecycle.action]} ${lifecycle.id}`,
+    lifecycle: { machine, timeout: lifecycleTimeout(lifecycle.action) },
+    prepare: async () => ({ peer, lifecycle }),
+  });
+}
+
+async function handoffPeerRequest(options: {
+  id: string; success: string; validate?(): void; prepare(staging: string): Promise<object>;
+  signal?: AbortSignal; onProgress?: () => void; beforePublish?: () => Promise<void>;
+  lifecycle?: { machine: string; timeout: number };
+}): Promise<IbCommandResult> {
+  const { id, success, signal, onProgress, beforePublish, lifecycle } = options;
+  const unknown = lifecycle ? `outcome unknown — check ${lifecycle.machine}` : SEND_UNKNOWN;
   let published = false;
   try {
     if (signal?.aborted) return interruptedSend("unpublished");
-    encodeSendHeader(parseSendHeader(header));
+    options.validate?.();
     const live = await hasLivePeerWatcher();
     if (signal?.aborted) return interruptedSend("unpublished");
-    if (!live) return fail("remote sends need ib watch running on this machine");
+    if (!live) return fail(lifecycle ? "Remote lifecycle commands need ib watch running on this machine" : "remote sends need ib watch running on this machine");
     const base = peerOutboxDir();
-    const dir = join(base, header.id);
-    const staging = join(base, ".staging", header.id + "." + process.pid);
+    const dir = join(base, id);
+    const staging = join(base, ".staging", id + "." + process.pid);
     let claimed: string | undefined;
     await mkdir(join(base, ".staging"), { mode: 0o700, recursive: true });
     await mkdir(staging, { mode: 0o700 });
@@ -104,11 +133,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       const start = stagingOwnerStart(process.pid);
       if (start === null) throw new Error("Cannot verify the peer-outbox owner");
       await writeTransferOwner(staging, { pid: process.pid, start });
-      if (stage) {
-        header = { ...header, files: await stage(join(staging, "files")) };
-        encodeSendHeader(parseSendHeader(header));
-      }
-      await writeJson(staging, "request.json", { peer, header, origin });
+      await writeJson(staging, "request.json", await options.prepare(staging));
       await beforePublish?.();
       signal?.throwIfAborted();
       await rename(staging, dir);
@@ -118,7 +143,8 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       if (signal?.aborted) return interruptedSend("unpublished");
       throw err;
     }
-    let deadline = performance.now() + 10_000; // M2 claim window. Transfer progress uses the wire idle interval.
+    const publishedAt = performance.now();
+    let deadline = publishedAt + 10_000; // M2 claim window. Transfer progress uses the wire idle interval.
     let claimedSeen = false;
     let lastSequence = 0;
     let warnedProgress = false;
@@ -129,14 +155,14 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
     const readResult = requestLookup(async (): Promise<IbCommandResult | undefined> => {
       if (!claimed) {
         try { await access(dir); return; } catch (err) { if (!missing(err)) throw err; }
-        claimed = await findClaim(base, header.id);
+        claimed = await findClaim(base, id);
       }
       if (!claimed) return;
       try {
         const result = JSON.parse(await readFile(join(claimed, "result.json"), "utf8"));
-        return result.ok === true && result.id === header.id
-          ? { ok: true, exitCode: 0, stdout: `Sent to ${targetLabel(header.target)}`, stderr: "" }
-          : fail(result.error ?? SEND_UNKNOWN);
+        return result.ok === true && result.id === id
+          ? { ok: true, exitCode: 0, stdout: success, stderr: result.output ?? "" }
+          : fail(result.error ?? unknown);
       } catch (err) {
         if (!missing(err)) resultDiagnostic = detail(err);
       }
@@ -147,7 +173,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       return result;
     }
     async function readProgress() {
-      if (!claimed) return;
+      if (!claimed || lifecycle) return;
       try {
         const { sequence } = JSON.parse(await readFile(join(claimed, "progress"), "utf8"));
         if (polling && Number.isSafeInteger(sequence) && sequence > lastSequence) {
@@ -168,7 +194,7 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       if (signal?.aborted) break;
       if (!claimedSeen && claimed) {
         claimedSeen = true;
-        deadline = performance.now() + IDLE_TIMEOUT_MS;
+        deadline = lifecycle ? publishedAt + lifecycle.timeout : performance.now() + IDLE_TIMEOUT_MS;
       }
       progressRead ??= readProgress().finally(() => { progressRead = undefined; });
       if (performance.now() >= deadline) break;
@@ -185,16 +211,20 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
       }
       if (claimed) await writeFile(join(claimed, signal?.aborted ? "cancel" : "timeout"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
+      if (lifecycle) return fail(unknown);
       if (!signal?.aborted) {
         const last = await readResult(150, signal);
         if (last && !signal?.aborted) return consume(last);
       }
       if (resultDiagnostic && !signal?.aborted) return fail(`outcome unknown — check the recipient (${resultDiagnostic})`);
     }
+    if (lifecycle) return fail(unknown);
     if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
-  } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(published ? `outcome unknown — check the recipient (${detail(err)})` : detail(err)); }
+  } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(published ? `${lifecycle ? unknown : "outcome unknown — check the recipient"} (${detail(err)})` : detail(err)); }
 }
+
+type Lifecycle = (peer: string, request: RemoteLifecycleRequest, transfer: OutgoingTransfer) => Promise<string>;
 
 type Send = (peer: string, header: SendHeader, transfer: OutgoingTransfer) => Promise<string>;
 
@@ -219,7 +249,7 @@ async function readRequest(path: string) {
 
 export function createPeerOutboxPoll(now = () => performance.now()) {
   const active = new Set<string>();
-  type DeliveryResult = { ok: true; id: string } | { ok: false; error: string };
+  type DeliveryResult = { ok: true; id: string; output?: string } | { ok: false; error: string };
   let workers = 0;
 
   async function releaseBodies(dir: string, log: (line: string) => void, delay = 250): Promise<void> {
@@ -283,7 +313,7 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
     await finishRecovery([sweep(base), sweepEntries(claimed, id => recoverClaim(claimed, id)), sweep(join(base, ".staging"), true)]);
   }
 
-  async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true, dispatchFinished?: () => void): Promise<void> {
+  async function poll(send: Send, log: (line: string) => void, ownsEndpoint = () => true, dispatchFinished?: () => void, runLifecycle?: Lifecycle): Promise<void> {
     const base = peerOutboxDir();
     const claimed = join(base, ".claimed");
     if (!ownsEndpoint()) return;
@@ -318,9 +348,9 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
           try {
             const submitter = await inspectTransferDirectory(dir);
             if (submitter.state !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
-            const { peer, header: raw, origin } = await readRequest(join(dir, "request.json"));
-            const header = parseSendHeader(raw);
-            if (header.id !== id || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
+            const { peer, header: raw, origin, lifecycle } = await readRequest(join(dir, "request.json"));
+            const header = lifecycle === undefined ? parseSendHeader(raw) : undefined;
+            if ((header && header.id !== id) || typeof peer !== "string") throw new Error("Invalid peer-outbox request");
             if (transferOwnerState(owner, 0) !== "verified-live") throw new Error("Cannot verify the peer-outbox worker");
             const verifyClient = () => {
               if (transferOwnerState(submitter.owner, 0) !== "verified-live") throw new Error("Cannot verify the peer-outbox client");
@@ -348,9 +378,15 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
             tick();
             const timer = setInterval(tick, 250);
             try {
-              result = { ok: true, id: await send(peer, header, {
-                verifyClient, filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; sequence++; },
-              }) };
+              if (header) {
+                const sent = await send(peer, header, {
+                  verifyClient, filesDir: join(dir, "files"), signal: controller.signal, onProgress: n => { bytes = n; sequence++; },
+                });
+                result = { ok: true, id: sent };
+              } else {
+                if (!runLifecycle) throw new Error("Remote lifecycle commands are unavailable");
+                result = { ok: true, id, output: await runLifecycle(peer, parseLifecycleRequest(lifecycle), { verifyClient, signal: controller.signal }) };
+              }
               tick();
             } finally { clearInterval(timer); }
           } catch (err) { result = { ok: false, error: detail(err) }; }
@@ -366,5 +402,5 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
   return Object.assign(poll, { recover });
 }
 
-export type PeerOutboxPoll = (send: Send, log: (line: string) => void, ownsEndpoint?: () => boolean, dispatchFinished?: () => void) => Promise<void>;
+export type PeerOutboxPoll = (send: Send, log: (line: string) => void, ownsEndpoint?: () => boolean, dispatchFinished?: () => void, runLifecycle?: Lifecycle) => Promise<void>;
 export const pollPeerOutbox: PeerOutboxPoll = createPeerOutboxPoll();

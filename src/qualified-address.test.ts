@@ -282,20 +282,54 @@ describe("qualified agent addresses", () => {
     expect(result.exitCode).toBe(1);
   });
 
-  test("remote agent and coordinator addresses resolve for sends only", async () => {
+  test("remote sends resolve qualified targets while bare lifecycle targets stay local", async () => {
     await peer();
     for (const address of ["remote-id", "LAPTOP-B/foo", "laptop-B/ReMoTe/foo"]) {
       expect((await resolveSendTarget(address, [], cli.cwd)).remote)
         .toEqual({ peer: "peer-id", target: { kind: "agent", repo: "remote", agent: "remote-id" } });
-      expect((await retire(address)).stderr.trim()).toBe("remote agents are read-only");
+      if (!address.includes("/")) expect((await retire(address)).stderr.trim()).toBe("remote agents are read-only");
     }
     for (const [target, shape] of [["@system", { kind: "system" }], ["@photos", { kind: "repo-coordinator", repo: "photos" }]] as const) {
       expect((await resolveSendTarget("laptop-b/" + target, [], cli.cwd)).remote?.target).toEqual(shape);
-      expect((await retire("laptop-b/" + target)).stderr.trim()).toBe("remote agents are read-only");
+      expect((await cli.run(["retire", "laptop-b/" + target], { ancestry: human })).stderr.trim()).toBe("Select a remote agent");
     }
     for (const kind of hookKinds) {
       expect(await dispatchHook(kind, "mgr", "ib send laptop-b/remote/remote-id hi", worktree)).toMatchObject({ decision: "allow" });
     }
+  });
+
+  test("qualified lifecycle CLI hands resolved requests to the watcher, including archived ids absent from the snapshot", async () => {
+    await peer();
+    await Bun.write(join(cli.home, ".itsybitsy", "peer", "peers.json"), JSON.stringify([{ name: "laptop-b", id: "bb".repeat(32) }]));
+    const requests: unknown[] = [];
+    const timer = setInterval(() => {
+      void pollPeerOutbox(async () => { throw new Error("Unexpected send"); }, () => {}, undefined, undefined,
+        async (peer, request) => { requests.push({ peer, ...request }); return ""; });
+    }, 25);
+    try {
+      for (const [action, address, args, expected] of [
+        ["merge", "LAPTOP-B/foo", ["--force", "--keep"], { id: "remote-id", repo: "remote", keep: true, force: true }],
+        ["retire", "laptop-b/REMOTE/foo", ["--force"], { id: "remote-id", repo: "remote", force: true }],
+        ["resume", "laptop-b/remote-id", [], { id: "remote-id", repo: "remote" }],
+        ["rehire", "laptop-b/former", [], { id: "former", repo: undefined }],
+        ["rehire", "laptop-b/app/former", [], { id: "former", repo: "app" }],
+      ] as const) {
+        const result = await cli.run([action, address, ...args], { ancestry: human });
+        expect(result.stderr).toBe("");
+        expect(result.exitCode).toBe(0);
+        expect(requests.pop()).toMatchObject({ peer: action === "rehire" ? "bb".repeat(32) : "peer-id", action, ...expected });
+      }
+    } finally { clearInterval(timer); }
+  });
+
+  test("an agent and a human inside tmux are refused before any lifecycle handoff", async () => {
+    for (const action of ["retire", "rehire", "resume", "merge"]) {
+      const result = await cli.run([action, "laptop-b/remote-id"], { ancestry: agentAncestry, cwd: worktree });
+      expect(result.stderr).toContain(`Remote ${action} is disabled under codex`);
+      expect(result.actions).toEqual([]);
+    }
+    expect((await cli.run(["retire", "laptop-b/worker"], { ancestry: { ...human, terminal: "tmux" } })).stderr).toContain("outside tmux");
+    expect(await readdir(join(cli.home, ".itsybitsy", "peer-outbox")).catch(() => [])).toEqual([]);
   });
 
   test("remote CLI hands the verified sender to the watcher and prints the acknowledgement", async () => {
@@ -813,7 +847,7 @@ describe("qualified agent addresses", () => {
     for (const address of ["laptop-a/Wed/OnlyWeb", "laptop-a/web/onlyweb", "laptop-a/Application/foo", "missing"]) {
       expect((await retire(address)).stderr.trim()).toBe(`Agent not found: ${address}`);
     }
-    expect((await retire("unknown/foo")).stderr.trim()).toBe("Unknown machine: unknown");
+    expect((await cli.run(["retire", "unknown/foo"], { ancestry: human })).stderr.trim()).toBe("Unknown machine: unknown");
   });
 
   test("qualified rehire passes the archived id and repo through the CLI and ownership gate", async () => {

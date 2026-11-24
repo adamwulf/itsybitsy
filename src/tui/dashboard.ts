@@ -5,7 +5,8 @@ import { rm } from "node:fs/promises";
 import { dashboardAttachmentPaths } from "../peers/dashboard-attachments";
 import { remoteAttachmentStage } from "../peers/remote-attachments";
 import { repoRowKey } from "./row-keys";
-import { remoteSendDenial } from "../peers/remote-start-caller";
+import { lifecyclePast, type RemoteLifecycleRequest } from "../peers/remote-lifecycle";
+import { remoteLifecycleDenial, remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
  * Composes AgentTree, TmuxPane, RightPane, StatusBar, and dialog system.
@@ -515,6 +516,7 @@ class StatusBarComponent implements Component {
   remoteSelected = false;
   remoteCoordinatorVisible = false;
   remoteRepoSelected = false;
+  remoteAgentSelected = false;
   hasResolvableWarnings = false;
 
   invalidate(): void {}
@@ -540,7 +542,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -767,7 +769,8 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
  *
  * The footer's remote hints (StatusBarComponent.remoteSelected) list these keys.
  */
-export function isRemoteAllowedKey(data: string): boolean {
+export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
+  if (data === "m" || data === "x" || data === "R") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
   switch (data) {
     case "j": case "k": case "J": case "K":
     case "\t": case "\x1b[Z":
@@ -887,6 +890,7 @@ export class DashboardComponent implements Component {
     return repoPath && this.watcher ? this.watcher.healthReports.get(repoPath) : undefined;
   }
   private selectedReceipt: string | undefined;
+  private pendingLifecycle = new Map<string, string>();
   private pendingRemoteSends = new Map<string, { id: string; peerId: string; target: SendTarget; label: string; bytes: number; total?: number; controller: AbortController; done: Promise<void> }>();
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
@@ -2015,6 +2019,30 @@ export class DashboardComponent implements Component {
     } finally { clearTimeout(timer); }
   }
 
+  async runRemoteRowCommand(row: Extract<RemoteEntry, { kind: "remote-agent" }>, options: Pick<RemoteLifecycleRequest, "action" | "checkOnly" | "keep">) {
+    const service = this.peerService;
+    if (!service) throw new Error("Remote lifecycle commands are unavailable");
+    if (service.remoteStartDenial !== null) throw new Error(remoteLifecycleDenial(service.remoteStartDenial, options.action));
+    const { id, repoRegistryName: repo } = row.remote;
+    const label = `${row.peerName}/${repo}/${id}`;
+    if (this.pendingLifecycle.has(label)) throw new Error(`A remote command is already pending for ${label}`);
+    this.pendingLifecycle.set(label, `${options.checkOnly ? "merge-check" : options.action} ${label}…`);
+    this.invalidate();
+    this.tui?.requestRender();
+    try {
+      const output = await service.runRemoteLifecycle(row.peerId, { ...options, id, repo });
+      if (!options.checkOnly) {
+        const verb = lifecyclePast[options.action];
+        this.setNotice(`${label} ${verb}${options.keep ? " (kept running)" : ""}${output ? ": " + output : ""}`, "info");
+      }
+      return output;
+    } finally {
+      this.pendingLifecycle.delete(label);
+      this.invalidate();
+      this.tui?.requestRender();
+    }
+  }
+
   private async submitRemoteMessage(remote: Exclude<RemoteEntry, { kind: "remote-repo-header" }>, target: SendTarget, text: string): Promise<boolean> {
     const service = this.peerService;
     const header = textHeader(target, text, { kind: "user" });
@@ -2081,7 +2109,7 @@ export class DashboardComponent implements Component {
       return true;
     }
     if (key === "s" && remoteMessageTarget(remote)) return false;
-    if (remote === null || isRemoteAllowedKey(key)) return false;
+    if (remote === null || isRemoteAllowedKey(key, remote)) return false;
     if (remote.kind !== "remote-repo-header" && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
@@ -2503,6 +2531,7 @@ export class DashboardComponent implements Component {
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
     this.statusBar.remoteSelected = remote !== null;
+    this.statusBar.remoteAgentSelected = remote?.kind === "remote-agent" && remote.remote.agentType !== REPO_COORDINATOR_TYPE;
     this.statusBar.remoteRepoSelected = remote?.kind === "remote-repo-header";
 
     // Wire info panel
@@ -3579,7 +3608,9 @@ export class DashboardComponent implements Component {
       const teamsActive = this.activeSelectionSource === "teams";
       const teamSel = teamsActive ? this.teamsTree.selection : null;
       const memberRow = this.teamMemberRowForX();
-      if (teamSel?.kind === "team") {
+      if (this.remoteSelection?.kind === "remote-agent") {
+        agentActions.handleRetire(this);
+      } else if (teamSel?.kind === "team") {
         agentActions.handleManageTeam(this, teamSel.teamName);
       } else if (memberRow) {
         agentActions.handleManageTeamMember(this, memberRow.teamName, memberRow.agent);
@@ -3756,7 +3787,7 @@ export class DashboardComponent implements Component {
 
 
   private availableMainHeight(receipts = this.peerService?.view().incoming?.length ?? 0): number {
-    const chromeLines = 5 + this.pendingRemoteSends.size + receipts;
+    const chromeLines = 5 + this.pendingLifecycle.size + this.pendingRemoteSends.size + receipts;
     return Math.max(5, (process.stdout.rows || 24) - chromeLines);
   }
 
@@ -3833,6 +3864,7 @@ export class DashboardComponent implements Component {
     // Compute available height for the main content area.
     // Chrome lines: header(1) + main title separator(1) +
     //               bottom separator(1) + status bar(2) = 5.
+    for (const notice of this.pendingLifecycle.values()) lines.push(truncateToWidth(notice, width, "…"));
     const cancellableSend = this.escapeSend();
     for (const send of this.pendingRemoteSends.values()) {
       const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;

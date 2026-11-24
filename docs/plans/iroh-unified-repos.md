@@ -319,7 +319,7 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
    - It should appear once in the tree.
    - Its remote agents should be drawn in italic below the local ones.
 4. **Remote-only repo.** A repo registered only on B should show a header on A with only italic rows.
-5. **Remote agent actions.** On A, select a running agent on B. Its info panel should show `Machine: <B> · connected`. Press `s` to open its message editor. Both the dashboard and `ib send` can send to it (step 10). Try retire and merge on the row. A should refuse each with a notice and the agent should stay running on B.
+5. **Remote agent actions.** On A, select a running agent on B. Its info panel should show `Machine: <B> · connected`. Press `s` to open its message editor. Both the dashboard and `ib send` can send to it (step 10). The row allows retire and merge. Press `x` and cancel the retire confirmation, then press `m`, inspect the merge check and cancel. Verify the agent is still on B.
 6. **Remote start.**
    - On A, press `a` on the shared repo.
    - Set Machine to B, pick a type and type a prompt.
@@ -351,6 +351,9 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
 16. **Sender identity.** Have A’s agent run `ib send --from <other-agent> B/<agent> "identity probe"`. A should report `agents can only act as themselves; drop --from`, and B should receive nothing. From a human terminal outside tmux in that same agent checkout, run `ib send B/<agent> "human probe"`. B should see the user label from step 10.
 17. **Retention.** After several more sends from A, reopen B’s saved paths from step 11. Both files should still contain A’s originals. ib never deletes delivered files from `/tmp`.
 18. **Remote agent screen.** On A, highlight a running agent on B with more than 200 lines of output. Compare the latest lines with B’s local view. Use `;` to reach output older than 200 lines, wait for a refresh, then use `l` to return toward the latest output. Switch to another agent and verify that its screen replaces the first one.
+19. **Remote lifecycle.** Start A’s dashboard from a human terminal outside tmux. Select a stopped test agent on B and press `R` to resume it. Use `m` to check and merge a commit with **Keep agent after merge** checked. Then press `x` and confirm retirement. Check the pending and completion notices on A, the action notices on B, and that the retired row disappears.
+    - In a human terminal outside tmux on A, run `ib rehire B/<agent>` after the row disappears. Check that the agent returns on B. Pause it on B, then run `ib resume B/<repo>/<agent>`, `ib merge B/<agent> --keep --force`, `ib retire B/<repo>/<agent> --force` and `ib rehire B/<repo>/<agent>`. Verify each result on both machines.
+    - Ask an agent on A to run `ib retire B/<agent> --force`. Check that it receives a refusal and B’s agent is still present.
 
 ## Cross-cutting checklist
 

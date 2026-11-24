@@ -157,11 +157,11 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
     identityCurrent: () => ancestry().identityCurrent,
   });
   const { remoteCliCaller } = await import("./peers/peer-outbox");
-  const { humanSendTerminalDenial, isSystemPaneCaller } = await import("./peers/remote-start-caller");
-  remoteCliCaller.humanDenial = async (_input, mode) => {
+  const { humanSendTerminalDenial, remoteStartDenialAtStartup, isSystemPaneCaller } = await import("./peers/remote-start-caller");
+  const terminalInput = (): NonNullable<Parameters<typeof humanSendTerminalDenial>[0]> => {
     const terminal = config.ancestry?.terminal;
-    return humanSendTerminalDenial({
-      pid: 300, cwd: config.cwd, stdinTTY: process.stdin.isTTY,
+    return {
+      pid: 300, cwd: config.cwd, stdinTTY: terminal !== undefined,
       stdoutTTY: terminal !== undefined && (config.ancestry?.sendTTY ?? "stdout") === "stdout",
       stderrTTY: terminal !== undefined && config.ancestry?.sendTTY === "stderr",
       hasControllingTerminal: async () => terminal !== undefined && config.ancestry?.sendTTY === "controlling",
@@ -172,8 +172,11 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
         "  1    0 Sat Nov 21 12:01:00 2026 init   /sbin/launchd",
       ].join("\n"),
       resolveCaller: (cwd, ancestors, options) => resolveDashboardCaller(cwd, ancestors, { ...options, registryHome: config.accountHome ?? config.home }),
-    }, mode);
+    };
   };
+  remoteCliCaller.humanDenial = (_input, mode) => humanSendTerminalDenial(terminalInput(), mode);
+  const { lifecycleCliCaller } = await import("./peers/cli-lifecycle");
+  lifecycleCliCaller.denial = () => remoteStartDenialAtStartup(terminalInput());
   remoteCliCaller.isSystem = async () => !!config.ancestry?.systemPanePid && isSystemPaneCaller(ancestry().pid, async () => ancestry().systemPanePid ?? null, async () => [
     "PID PPID STARTED                  KERNEL COMMAND",
     ...ancestry().parents.map(([pid, parent]) => `${String(pid).padStart(3)} ${String(parent).padStart(4)} Sat Nov 21 12:01:00 2026 bash   bash`),

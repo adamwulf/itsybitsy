@@ -161,6 +161,7 @@ function makeMockCtx(overrides?: {
     remoteStartPending: false,
     focusRemoteMessage() {},
     refuseOnRemoteRow: () => false,
+    runRemoteRowCommand: async () => { throw new Error("Unexpected remote command"); },
     get dialog() { return currentDialog; },
     peerService: null,
     remoteSelection: null,

@@ -96,7 +96,7 @@ export async function resolveAgentTarget(
   target: string,
   repos: RepoEntry[],
   cwd: string = process.cwd(),
-  purpose: "send" | "agent" | "rehire" = "agent",
+  purpose: "send" | "agent" | "rehire" | "lifecycle" = "agent",
   inboundPeer = false,
   requirePeerVisibility = false,
 ): Promise<TargetResult> {
@@ -112,7 +112,7 @@ export async function resolveAgentTarget(
   }
 
   function matchesInRepo(name: string, agents: Agent[]): Agent[] {
-    if (inboundPeer) return agents.filter(agent => agent.id === name);
+    if (inboundPeer && purpose !== "rehire") return agents.filter(agent => agent.id === name);
     const first = matchAgentById(name, agents);
     if (!first) return [];
     if (purpose !== "rehire" || first.id === name) return [first];
@@ -247,6 +247,7 @@ export async function resolveAgentTarget(
     return failure(`Unknown machine: ${parts[0]}`);
   }
   if (!includesLocal && parts.length === 2 && name.startsWith("@") && name.length > 1) {
+    if (purpose === "lifecycle") return failure("Select a remote agent");
     if (purpose !== "send") return failure("remote agents are read-only");
     if (peers.length !== 1) return failure(`Ambiguous machine: ${parts[0]}`);
     return { agent: null, isSystemCoordinator: false, remote: {
@@ -308,7 +309,7 @@ export async function resolveAgentTarget(
   }
   const agent = matches[0]!.agent;
   if (agent) return local(agent);
-  if (purpose === "send") return { agent: null, isSystemCoordinator: false, remote: matches[0]!.remote };
+  if (purpose === "send" || (machine && purpose === "lifecycle")) return { agent: null, isSystemCoordinator: false, remote: matches[0]!.remote };
   return failure("remote agents are read-only");
 }
 

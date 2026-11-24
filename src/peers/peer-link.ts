@@ -1,3 +1,4 @@
+import { lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleRequest } from "./remote-lifecycle";
 import { trackSendCleanup } from "../send-cleanup";
 /**
  * The trusted link between paired installs (docs/plans/iroh-peering.md,
@@ -17,7 +18,7 @@ import { trackSendCleanup } from "../send-cleanup";
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
  *
- * SPEC §20.4 defines the wire shapes for agents, pane reads, new-agent and send.
+ * SPEC §20.4 defines the wire shapes for agents, pane reads, new-agent, lifecycle and send.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -394,6 +395,28 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
   }, { setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")] });
 }
 
+/** Lifecycle commands use their own overall deadline. A merge may be silent for two minutes. */
+export async function requestLifecycle(conn: PairConnection, request: RemoteLifecycleRequest, machine: string, setTimer: Timer, transfer?: Pick<OutgoingTransfer, "signal" | "verifyClient">): Promise<string> {
+  const bytes = encodeJson({ ...request, op: "lifecycle" });
+  if (bytes.length > PEER_MAX_REQUEST_BYTES) throw new Error("Lifecycle request exceeds the request limit");
+  const unknown = new Error(`outcome unknown — check ${machine}`);
+  try {
+    return await clientExchange(conn, bytes, payload => {
+      const reply = decodeObject(payload, "reply");
+      if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(lifecycleText(reply.reason));
+      if (reply.ok !== true || typeof reply.output !== "string") throw new PeerProtocolError("Malformed lifecycle reply");
+      return lifecycleText(reply.output);
+    }, { ...transfer, setTimer, timeout: [lifecycleTimeout(request.action), unknown] });
+  } catch (err) {
+    if (err instanceof TransferIdleError) throw unknown;
+    throw err;
+  }
+}
+
+function lifecycleText(text: string): string {
+  return stripAnsi(text).split("\n").map(line => line.replace(/[\p{Cc}\p{Cf}]/gu, " ")).join("\n").slice(0, 32_768);
+}
+
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
 
 async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal, milestone?: () => void) {
@@ -484,7 +507,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     attemptedFin = true;
     await io(() => active.finish());
     sendDone = true;
-    renewReplyIdle();
+    if (files) renewReplyIdle();
   }
 
   type Outcome = { ok: true; value: T } | { ok: false; error: unknown };
@@ -543,6 +566,7 @@ export interface PeerResponderDeps {
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
+  lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<string>;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** watch.log in `ib watch`. */
   log(line: string): void;
@@ -785,6 +809,16 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     } catch (err) {
       const error = cleanRemoteText(errorDetail(err));
       deps.log(`peer link: new-agent from ${from} failed: ${error}`);
+      reply = encodeErrorReply(error);
+    }
+  } else if (request.op === "lifecycle") {
+    try {
+      if (!deps.lifecycle) throw new Error("Remote lifecycle commands are unavailable");
+      const output = await deps.lifecycle(parseLifecycleRequest(request), () => deps.peerName(conn.remoteId));
+      reply = encodeJson({ ok: true, output: lifecycleText(output) });
+    } catch (err) {
+      const error = lifecycleText(errorDetail(err));
+      deps.log(`peer link: lifecycle request from ${from} failed: ${singleLine(error)}`);
       reply = encodeErrorReply(error);
     }
   } else {

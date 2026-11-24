@@ -131,7 +131,7 @@ describe("ib peer (CLI)", () => {
   test("ib peer without a known subcommand prints usage and fails", async () => {
     const bare = await cli.run(["peer"]);
     expect(bare.exitCode).toBe(1);
-    expect(bare.stderr).toContain("Usage: ib peer <id|list|remove>");
+    expect(bare.stderr).toContain("Usage: ib peer <id|list|remove|attach>");
 
     const unknown = await cli.run(["peer", "add", ID_A]);
     expect(unknown.exitCode).toBe(1);

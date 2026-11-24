@@ -183,6 +183,12 @@ From a human terminal outside tmux, `ib merge`, `ib retire`, `ib resume` and `ib
 
 To inspect a remote agent’s changes in your configured `externalDiffTool`, select its row in `ib watch` and press `o`. Register the repo under the same name on both machines and fetch or pull if your copy lacks the remote merge base. The tool opens in a temporary local checkout and shows committed and uncommitted tracked changes, including binary changes. The patch limit is 64 MiB.
 
+### Remote terminals on paired machines
+
+Press `C` on a remote agent in `ib watch` to open its tmux session in a new Ghostty window, attached over the peer link with full input. Start the dashboard from a human terminal outside tmux, as for remote sends. The dashboard starts a local tmux session, `ib-remote-<peer id>-<repo>-<agent>-<hash>`, running `ib peer attach <machine>/[<repo>/]<agent>`; you can also run that command in any terminal while `ib watch` owns this machine’s peer endpoint. The remote window takes your window’s size while attached and goes back to its fixed width when you leave. Leave with the remote tmux’s detach key: inside the local tmux window, press the prefix twice so it reaches the remote one. Closing the Ghostty window leaves the local session, and the remote attach, running, so the remote agent’s window keeps your size; `C` reopens it, and detaching ends it.
+
+A paired machine gets a full tmux client on your agents’ sessions, and tmux commands can open a shell outside the agent sandbox. Pair only installs you control. The reverse also holds: a local agent that can reach your tmux server (a spawning type, or an unsandboxed agent allowed to run `tmux`) can type into an open remote terminal or start one, and so reach the peer’s shell. `ib peer remove` ends that peer’s live terminals within 5 s.
+
 ### Models
 
 Models are selected as `<cli>:<model>` — for example `claude:opus` or `codex:gpt-5-codex` — so one flag picks both the CLI and the model. `ib list-models` shows the known selectors. Reasoning effort is threaded the same way: `--effort low|medium|high|xhigh|max` (Codex has no `xhigh`/`max`; both map to its `high`). Defaults live in config and in the agent-type files.
@@ -228,7 +234,7 @@ Press `?` in the dashboard for this list.
 | | `V` | Cycle filter: all / non-empty / running-only |
 | | `.` | Pin repo (on a repo header; stays visible under `V`) |
 | Open | `w` / `o` / `O` | Worktree in Finder / external diff / diff vs manager |
-| | `G` / `C` | Ghostty: repo worktree / agent's tmux session |
+| | `G` / `C` | Ghostty: repo worktree / agent's tmux session (on a remote agent, `C` attaches over the peer link) |
 | | `S` | Save debug snapshot |
 | App | `h` | Open setup (Hooks, Config, Peers) |
 | | `I` | Open setup on Peers to see this install's id, check link states, or pair with another install |

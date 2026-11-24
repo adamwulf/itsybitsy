@@ -72,6 +72,12 @@ paths:
     # `ib peer` (human-only) and `ib watch` use it. An installed _all.md gets
     # this line by hand; there is no migration.
     - "~/.itsybitsy/peer/secret.key"
+    # The endpoint owner's `ib peer attach` socket (SPEC §20.4 "Remote
+    # terminal"): a connect types into a paired peer's agent sessions. The
+    # kernel blocks the connect with a network-outbound deny on the peer dir;
+    # this entry lets the hooks refuse its spellings for unsandboxed agents.
+    # An installed _all.md gets this line by hand; there is no migration.
+    - "~/.itsybitsy/peer/terminal.sock"
     # Only the trusted CLI and the unsandboxed watchdog publish peer requests.
     - "~/.itsybitsy/peer-outbox"
 sandbox:

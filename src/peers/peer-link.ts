@@ -18,6 +18,8 @@ import { trackSendCleanup } from "../send-cleanup";
  * calls `finish`; the responder reads the bounded request, writes one
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
+ * A stream whose first byte is 1 is a long-lived remote terminal, served by
+ * terminal-host.ts (SPEC §20.4 "Remote terminal").
  *
  * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle, acknowledge and send.
  *
@@ -51,6 +53,8 @@ import { shortPeerId } from "./store";
 import { keepAllowedLinks, linkifyMessageUrls } from "../hyperlinks";
 import { expandTabs } from "../tmux-poller";
 import { stripAnsi } from "../parse-state";
+import { TERMINAL_FRAME } from "./terminal-frame";
+import { TERMINALS_UNAVAILABLE, serveTerminal, type TerminalHostDeps } from "./terminal-host";
 
 export const PEER_ALPN = "itsybitsy/peer/1";
 /** Unframed JSON requests except new-agent. */
@@ -718,6 +722,8 @@ export interface PeerResponderDeps {
   /** The request's `repo` and `id` as received: the handler validates them. */
   acknowledgeQuestion?(repo: unknown, id: unknown, readPeerName: () => Promise<string | null>): Promise<void>;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
+  /** Remote terminals (terminal-host.ts). Without it every terminal open is refused. */
+  terminal?: TerminalHostDeps;
   /** watch.log in `ib watch`. */
   log(line: string): void;
 }
@@ -839,6 +845,17 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     // Other ops begin with JSON. Peek one byte without waiting for FIN.
     const options = { setTimer: deps.setTimer };
     const first = await waitForIO(options, () => read(1));
+    if (first[0] === TERMINAL_FRAME.open) {
+      // A long-lived session: it holds no header-reader slot.
+      deps.headerReaders?.delete(stream);
+      await serveTerminal(conn.remoteId, stream, first, from, {
+        ...(deps.terminal ?? TERMINALS_UNAVAILABLE),
+        peerName: deps.peerName, setTimer: deps.setTimer, log: deps.log,
+        closeNotPeer: () => closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer"),
+        closeError: (reason) => closeQuietly(conn, PEER_CLOSE.error, reason),
+      });
+      return;
+    }
     if (first[0] === 0) {
       let prefix: Uint8Array | undefined = first;
       let receivedFin = false;

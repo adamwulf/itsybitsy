@@ -81,9 +81,15 @@ test("shipped floor denies the peering secret key despite the ~/.itsybitsy read 
     expect(resolvePathAccess(key, "write", table)).toBe("deny");
     expect(resolvePathAccess(peers, "read", table)).toBe("allow");
     expect(resolvePathAccess(peers, "write", table)).toBe("deny");
+    // The `ib peer attach` socket: the hooks refuse its spellings, and the
+    // kernel refuses the connect (a file deny alone would not).
+    const sock = `${home}/.itsybitsy/peer/terminal.sock`;
+    expect(resolvePathAccess(sock, "read", table)).toBe("deny");
+    expect(resolvePathAccess(sock, "write", table)).toBe("deny");
     // Kernel layer.
     const tag = newSandboxTag();
     const profile = generateProfile({ enabled: true, rawAllow: [], domains: [] }, paths, params, tag);
+    expect(profile).toContain(`(deny network-outbound (remote unix-socket (subpath "${home}/.itsybitsy/peer")) (with message "${tag}"))`);
     const { deliveredAttachmentPattern, transferStagingPaths } = await import("./runtime-names");
     for (const op of ["file-write*", "file-link"]) {
       expect(profile).toContain(`(deny ${op} (regex #"${deliveredAttachmentPattern}") (with message "${tag}"))`);

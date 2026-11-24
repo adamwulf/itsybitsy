@@ -979,6 +979,18 @@ network deny lands, while a unix socket outside the dir still connects). The
 socket dir is derived the way tmux resolves it (`resolveTmuxSocketDir`): the
 directory of `$TMUX`'s first field if set, else `${TMUX_TMPDIR:-/tmp}/tmux-<uid>`.
 
+The same form denies the peer directory's sockets in every profile, spawners
+included:
+`(deny network-outbound (remote unix-socket (subpath "<home>/.itsybitsy/peer")))`,
+emitted after `rawAllow` next to that directory's write and link denies. The
+endpoint-owning `ib watch` listens there for `ib peer attach`
+(`terminal.sock`, SPEC §20.4 "Remote terminal"), and a connect to it types into
+a paired peer's agent sessions. This closes the socket only for non-spawners. A
+spawner keeps the tmux socket above, so through the unsandboxed tmux server it
+can still run `ib peer attach` or type into an open `ib-remote-*` session.
+Verified live with `sandbox-exec`: under a blanket unix-socket allow, a connect
+to a socket in the directory succeeds without the rule and fails with it.
+
 ✅ **Trust boundary CLOSED for non-spawners by the SEALED RECORD (A4 G3).**
 `AGENTDIR` is a kernel write root because the agent-session hooks write
 `meta.json` there (`writeAgentState`), so `meta.canSpawnChildren` and

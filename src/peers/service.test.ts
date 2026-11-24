@@ -35,7 +35,9 @@ import {
   type ServiceStream,
 } from "./service";
 import { addPeer, readPeers, type Peer } from "./store";
+import { TerminalFrameReader, encodeTerminalOpen, parseTerminalExit } from "./terminal-frame";
 import { createFakeClock, createMemoryLink, type FakeClock, type MemoryConnection } from "./test-pair-transport";
+import { connect } from "node:net";
 
 const ID_REMOTE = "c3".repeat(32);
 
@@ -252,6 +254,51 @@ describe("PeerService binding", () => {
     service.openDialog();
     await Bun.sleep(10);
     expect(binds.length).toBe(1);
+    await service.shutdown();
+  });
+
+  test("while bound it serves the ib peer attach socket, naming peers by name or id, and removes it on shutdown", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const socketPath = join(home, "t.sock");
+    const { service } = makeService({ terminalSocketPath: socketPath });
+    service.openDialog();
+    await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
+    await waitFor(() => stat(socketPath).then(() => true, () => false), { message: "socket listening" });
+    expect((await stat(socketPath)).mode & 0o777).toBe(0o600);
+
+    const attach = async (peer: string) => {
+      const socket = connect(socketPath);
+      const chunks: Buffer[] = [];
+      socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+      const closed = new Promise(resolve => socket.once("close", resolve));
+      socket.write(encodeTerminalOpen({ peer, agent: "worker", cols: 80, rows: 24 }));
+      await closed;
+      const [frame] = new TerminalFrameReader().push(Buffer.concat(chunks));
+      return parseTerminalExit(frame!.payload).reason;
+    };
+    expect(await attach("laptop c")).toBe("Laptop C is disconnected");
+    expect(await attach(ID_REMOTE.toUpperCase())).toBe("Laptop C is disconnected");
+    expect(await attach("nobody")).toBe('no paired peer has the name or id "nobody"');
+
+    await service.shutdown();
+    await expect(stat(socketPath)).rejects.toThrow();
+  });
+
+  test("the attach socket refuses every open while the startup human-caller decision denies", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const socketPath = join(home, "t.sock");
+    const { service } = makeService({ terminalSocketPath: socketPath, remoteStartDenial: "Remote starts are disabled inside tmux" });
+    service.openDialog();
+    await waitFor(() => stat(socketPath).then(() => true, () => false), { message: "socket listening" });
+    const socket = connect(socketPath);
+    const chunks: Buffer[] = [];
+    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+    const closed = new Promise(resolve => socket.once("close", resolve));
+    socket.write(encodeTerminalOpen({ peer: "Laptop C", agent: "worker", cols: 80, rows: 24 }));
+    await closed;
+    const [frame] = new TerminalFrameReader().push(Buffer.concat(chunks));
+    expect(parseTerminalExit(frame!.payload).reason)
+      .toBe("Remote terminals are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux");
     await service.shutdown();
   });
 

@@ -1,4 +1,4 @@
-import { cliActorId, localCliActor, verifiedSendCaller } from "./peers/send-caller";
+import { cliActorId, localCliActor, localHumanInCheckout, verifiedSendCaller } from "./peers/send-caller";
 import { isCoordinatorType } from "./coordinator-type-names";
 import { isAgentSendProcess } from "./peers/remote-start-caller";
 import type { LocalQueueGuard } from "./outbox";
@@ -442,9 +442,15 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       deferred = !!worktree && !!resolved.incompleteVisibility;
     }
     if (deps.signal?.aborted) return cancelled();
-    const actor = command.attachmentSender ? await command.attachmentSender()
+    let actor = command.attachmentSender ? await command.attachmentSender()
       : deferred || resolved?.remote ? await verifiedSendCaller(cwd, "remote", repos.map(repo => repo.path))
-      : await localCliActor(cwd, { checkHuman: command.fromAgent !== undefined });
+      : await localCliActor(cwd);
+    // The local display identity may be overridden by a human in this checkout.
+    // The already-verified attachment sender still governs access to source files.
+    if (!deferred && !resolved?.remote && command.fromAgent !== undefined && actor.kind === "agent" &&
+        await localHumanInCheckout(cwd, actor.caller.meta.tmux_session)) {
+      actor = { kind: "user" };
+    }
     const fromAgent = cliActorId(actor, command.fromAgent);
     const localDeps = { ...deps, resolveCaller: async () => actor.kind === "agent" ? actor.caller : null };
     if (deferred || resolved?.remote) {
@@ -478,7 +484,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       }
     }
     if (resolved?.error) return { result: brokerFail(resolved.error) };
-    const brokered = await routeSendThroughWatchdog(command, localDeps);
+    const brokered = actor.kind === "user" ? null : await routeSendThroughWatchdog(command, localDeps);
     if (brokered) return { result: brokered };
     resolved ??= await resolveAddress(target, repos, cwd);
     if (deps.signal?.aborted) return cancelled();

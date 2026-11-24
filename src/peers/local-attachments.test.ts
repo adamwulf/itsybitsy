@@ -52,6 +52,18 @@ test("a human sends a local attachment with redirected stdin and a terminal on s
   expect(await Bun.file(path).text()).toBe("attachment");
 });
 
+test("a human tmux pane in an agent checkout can set --from on a local attachment", async () => {
+  const checkout = await fixture.addAgent(recipient.repoPath, "checkout", { sandbox: { enabled: false } });
+  await Bun.write(join(checkout.sessionCwd, "report"), "contents");
+  const result = await fixture.run(["send", "reader", "--from", "operator", "--attach", "./report", "read"], {
+    cwd: checkout.sessionCwd, env: { TMUX: "/tmp/test,1,0", TMUX_PANE: "%1" },
+    ancestry: { ...human, terminal: "tmux", tmuxSession: "personal" }, actions: { sendMessage: "real" },
+    allowedProcesses: [["git", "rev-parse", "--git-common-dir"]],
+  });
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(JSON.parse(await queue().text())).toMatchObject({ fromAgent: "operator", noPassthrough: true });
+});
+
 test.each([1, 2])("queues %i verified private snapshots, rewriting all spellings", async count => {
   const first = join(fixture.cwd, "one");
   const bytes = Buffer.alloc(180_021, "abc");

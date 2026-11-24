@@ -16,7 +16,8 @@ export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind:
 
 /** For local attribution, a human can use their own tmux session. Resolve the
  * invoking pane explicitly: tmux's default target can be another client. */
-async function localHumanInCheckout(recordedSession: unknown): Promise<boolean> {
+export async function localHumanInCheckout(cwd: string, recordedSession: unknown): Promise<boolean> {
+  if (!matchWorktreeCaller(cwd)) return false;
   if (!process.env.TMUX) return remoteCliCaller.isHuman();
   const pane = process.env.TMUX_PANE;
   if (!pane || !/^%\d+$/.test(pane)) return false;
@@ -44,7 +45,7 @@ export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: b
   }
   if (caller && typeof caller.meta.id === "string") {
     // A human terminal can open an agent checkout and use the local override.
-    if (options.checkHuman && matchWorktreeCaller(cwd) && await localHumanInCheckout(caller.meta.tmux_session)) {
+    if (options.checkHuman && await localHumanInCheckout(cwd, caller.meta.tmux_session)) {
       return { kind: "user" };
     }
     return { kind: "agent", caller };

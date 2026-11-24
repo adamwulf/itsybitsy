@@ -81,6 +81,15 @@ describe("readConfig", () => {
     expect(raw).toEqual({ tree: { groupByParent: true } });
   });
 
+  test("merge.pushAfterMerge defaults to false, is stored under merge.*, and ignores a non-boolean", async () => {
+    expect((await readConfig(opts()))["merge.pushAfterMerge"]).toEqual({ value: false, source: "default" });
+    await writeConfig(userCfgPath, "merge.pushAfterMerge", true);
+    expect(await Bun.file(userCfgPath).json()).toEqual({ merge: { pushAfterMerge: true } });
+    expect((await readConfig(opts()))["merge.pushAfterMerge"]).toEqual({ value: true, source: "user" });
+    await Bun.write(userCfgPath, JSON.stringify({ merge: { pushAfterMerge: "yes" } }));
+    expect((await readConfig(opts()))["merge.pushAfterMerge"]).toEqual({ value: false, source: "default" });
+  });
+
   test("reads user config values", async () => {
     await Bun.write(userCfgPath, JSON.stringify({ model: "opus", maxAgents: 5 }));
 

@@ -4,6 +4,8 @@ import type { mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent
 import { isStoredRepoName, type listRepos } from "../registry";
 import { resolveAgentTarget } from "../resolve-target";
 import { isValidAgentId } from "../validation";
+import { pushFailedNotice } from "../push-failure";
+import { singleLine } from "./single-line";
 
 export type RemoteLifecycleAction = "merge" | "retire" | "rehire" | "resume";
 export interface RemoteLifecycleRequest {
@@ -14,6 +16,23 @@ export interface RemoteLifecycleRequest {
   force?: boolean;
   keep?: boolean;
   checkOnly?: boolean;
+}
+
+/** What a lifecycle command reports to the machine that asked for it (SPEC §20.4). */
+export interface RemoteLifecycleOutcome {
+  output: string;
+  /**
+   * A merge whose push after merging (`merge.pushAfterMerge`, SPEC.md §3.4)
+   * failed on the machine that ran it: one `<remote>: <git error>` entry per
+   * remote (src/push-failure.ts). The merge itself succeeded.
+   */
+  pushFailure?: string;
+  /**
+   * A closing merge's teardown warnings, sent apart only with `pushFailure`:
+   * `output` then also carries the merge report, so the requester cannot
+   * tell the two apart. Without `pushFailure`, `output` is the warnings.
+   */
+  warnings?: string;
 }
 
 export const lifecyclePast = { merge: "merged", retire: "retired", rehire: "rehired", resume: "resumed" } as const;
@@ -45,10 +64,12 @@ export interface RemoteLifecycleDeps {
   rehireAgent: typeof rehireAgent;
   resumeAgent: typeof resumeAgent;
   detectAgentStates: typeof detectAgentStates;
-  notice(message: string): void;
+  /** This machine's name, as its peers know it: a failed push's retry hint names it. */
+  machine: string;
+  notice(message: string, kind: "info" | "error"): void;
 }
 
-export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>, deps: RemoteLifecycleDeps, log: (line: string) => void): Promise<string> {
+export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>, deps: RemoteLifecycleDeps, log: (line: string) => void): Promise<RemoteLifecycleOutcome> {
   const { action, repo, id } = request;
   let repos = await deps.listRepos();
   if (repo !== undefined) {
@@ -65,7 +86,9 @@ export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, rea
   let result;
   switch (action) {
     case "merge":
-      result = request.checkOnly ? await deps.mergeCheckAgent(agent) : await deps.mergeAgent(agent, agent.repoPath, { keep: !!request.keep });
+      result = request.checkOnly
+        ? await deps.mergeCheckAgent(agent)
+        : await deps.mergeAgent(agent, agent.repoPath, { keep: !!request.keep, _peerRequest: { machine: deps.machine } });
       break;
     case "retire": result = await deps.retireAgent(agent); break;
     case "rehire": result = await deps.rehireAgent(agent.id, { repoPath: agent.repoPath }); break;
@@ -75,11 +98,25 @@ export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, rea
       break;
   }
   if (!result.ok) throw new Error(result.stderr || result.stdout || `Remote ${action} failed`);
-  if (request.checkOnly) return result.stdout || result.stderr || "(no output)";
-  const notice = request.keep && result.stdout.startsWith("Nothing to merge:")
+  if (request.checkOnly) return { output: result.stdout || result.stderr || "(no output)" };
+  // This machine's own push after the merge, read from its own config; the
+  // requester never says whether to push.
+  const pushFailure = result.pushFailure;
+  const done = request.keep && result.stdout.startsWith("Nothing to merge:")
     ? `${peer} checked ${agent.id} in ${agent.repoRegistryName}: ${result.stdout}`
     : `${peer} ${lifecyclePast[action]} ${agent.id} in ${agent.repoRegistryName}`;
-  log(notice);
-  deps.notice(notice);
-  return request.keep ? result.stdout : result.stderr;
+  // The log keeps git's whole error, on one line; the one-row notice drops
+  // its `To <url>` and `hint:` lines, and is an alert when the push failed.
+  log(singleLine(pushFailure ? `${done} · push failed: ${pushFailure}` : done));
+  deps.notice(pushFailure ? pushFailedNotice(done, pushFailure) : done, pushFailure ? "error" : "info");
+  if (!pushFailure) return { output: request.keep ? result.stdout : result.stderr };
+  // mergeAgent's stdout ends with the push's status lines and a warning whose
+  // retry hint names this machine (_peerRequest). --keep's output is that
+  // stdout already. A closing merge's output is its teardown warnings, so the
+  // stdout joins them, for a requester that does not read pushFailure (the
+  // CLI, an older install); the warnings also go apart, for the requesting
+  // dashboard's cleanup-warnings dialog.
+  if (request.keep) return { output: result.stdout, pushFailure };
+  const output = [result.stderr, result.stdout].filter(Boolean).join("\n");
+  return { output, pushFailure, ...(result.stderr ? { warnings: result.stderr } : {}) };
 }

@@ -263,7 +263,7 @@ test("a trusted loopback peer retires and rehires an archived agent on the other
   await a.service.runRemoteLifecycle(b.id, { action: "rehire", id: "worker" });
   expect(deps.retireAgent.mock.calls[0]?.[0]).toMatchObject({ repoPath: repo, id: "worker" });
   expect(deps.rehireAgent.mock.calls).toEqual([["worker", { repoPath: repo }]]);
-  expect(deps.notice.mock.calls).toEqual([["A retired worker in App"], ["A rehired worker in App"]]);
+  expect(deps.notice.mock.calls).toEqual([["A retired worker in App", "info"], ["A rehired worker in App", "info"]]);
 });
 
 test("reads the paired machine's system coordinator over a real loopback connection", async () => {

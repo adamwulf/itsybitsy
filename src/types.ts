@@ -52,9 +52,11 @@ export type FetchLike = (input: string | URL | Request, init?: RequestInit) => P
  */
 export async function runCmd(
   spawnFn: SpawnFn,
-  cmd: string[]
+  cmd: string[],
+  /** The child's whole environment; omitted, it inherits this process's. */
+  env?: NodeJS.ProcessEnv,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = spawnFn(cmd, { stdout: "pipe", stderr: "pipe" });
+  const proc = spawnFn(cmd, env ? { stdout: "pipe", stderr: "pipe", env } : { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -120,8 +122,8 @@ export class SpawnContext extends InjectionContext<SpawnFn> {
     return this.fn;
   }
 
-  /** Convenience: run a command using this context's spawn runner. */
-  async run(cmd: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    return runCmd(this.fn, cmd);
+  /** Convenience: run a command using this context's spawn runner, optionally with `env` as its whole environment. */
+  async run(cmd: string[], env?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    return runCmd(this.fn, cmd, env);
   }
 }

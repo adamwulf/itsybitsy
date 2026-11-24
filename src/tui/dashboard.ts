@@ -3,6 +3,7 @@ import {
 } from "../peers/dashboard-attachments";
 import { repoRowKey } from "./row-keys";
 import { lifecyclePast, type RemoteLifecycleRequest } from "../peers/remote-lifecycle";
+import { pushFailedNotice } from "../push-failure";
 import { remoteLifecycleDenial, remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
@@ -1961,8 +1962,9 @@ export class DashboardComponent implements Component {
     this.tui?.requestRender();
   }
 
-  remoteAgentStarted(message: string): void {
-    this.setNotice(message, "info");
+  /** A peer's request ran here; `kind` is "error" for a merge whose push then failed. */
+  remoteAgentStarted(message: string, kind: "info" | "error" = "info"): void {
+    this.setNotice(message, kind);
     void this.watcher?.refresh();
   }
 
@@ -2128,10 +2130,20 @@ export class DashboardComponent implements Component {
     this.invalidate();
     this.tui?.requestRender();
     try {
-      const output = await service.runRemoteLifecycle(row.peerId, { ...options, id, repo });
+      const { output, pushFailure, warnings } = await service.runRemoteLifecycle(row.peerId, { ...options, id, repo });
       if (!options.checkOnly) {
         const verb = lifecyclePast[options.action];
-        this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
+        if (pushFailure) {
+          // The peer merged, then its own push failed (merge.pushAfterMerge,
+          // read from its config). As for a local merge: a red notice that
+          // names the failure, and the teardown warnings, if any, in their
+          // own dialog. The output repeats the merge report in full.
+          const notice = pushFailedNotice(`${label} ${verb}`, pushFailure);
+          this.setNotice(notice, "error");
+          if (warnings) this.showDialog({ type: "cleanup-warnings", text: `${notice}\n\n${warnings}`, offset: 0 });
+        } else {
+          this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
+        }
       }
       return output;
     } finally {
@@ -4626,7 +4638,7 @@ export async function launchDashboard(): Promise<void> {
   // that detection has not filled in yet.
   const peerDeps = defaultPeerServiceDeps(machine, logToWatchLog, () =>
     peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [], dashboard.watcher?.lastQuestions ?? [],
-      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message));
+      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), (message, kind) => dashboard.remoteAgentStarted(message, kind));
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
   peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
   peerDeps.readPrompt = (repo, id) => readAgentPromptText(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);

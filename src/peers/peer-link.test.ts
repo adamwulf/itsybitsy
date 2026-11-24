@@ -476,25 +476,81 @@ test("lifecycle requests run the receiver’s local commands, return merge error
   const target = { id: "worker", repo: "app" };
   try {
     const ask = (request: Parameters<typeof requestLifecycle>[1]) => requestLifecycle(side.a, request, "Laptop", side.clock.setTimer);
-    expect(await ask({ ...target, action: "merge", checkOnly: true })).toBe("Ready");
+    expect(await ask({ ...target, action: "merge", checkOnly: true })).toEqual({ output: "Ready" });
     expect(deps.mergeAgent).not.toHaveBeenCalled();
     deps.mergeAgent.mockResolvedValueOnce({ ok: false, exitCode: 1, stderr: "Merge conflict in app.ts", stdout: "" });
     await expect(ask({ ...target, action: "merge" })).rejects.toThrow("Merge conflict in app.ts");
     deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Merged one commit", stderr: "" });
-    expect(await ask({ ...target, action: "merge", keep: true, force: true })).toBe("Merged one commit");
-    expect(deps.mergeAgent.mock.calls.at(-1)).toEqual([expect.objectContaining({ id: "worker" }), repo, { keep: true }]);
+    expect(await ask({ ...target, action: "merge", keep: true, force: true })).toEqual({ output: "Merged one commit" });
+    // The merge names this machine, for a failed push's retry hint.
+    expect(deps.mergeAgent.mock.calls.at(-1)).toEqual([expect.objectContaining({ id: "worker" }), repo, { keep: true, _peerRequest: { machine: "Studio" } }]);
     await ask({ ...target, action: "resume" });
     await ask({ ...target, action: "retire" });
     await ask({ id: "worker", action: "rehire" });
     expect(deps.rehireAgent.mock.calls).toEqual([["worker", { repoPath: repo }]]);
-    expect(deps.notice.mock.calls.flat()).toEqual(["merged", "resumed", "retired", "rehired"].map(verb => `Alice ${verb} worker in App`));
+    expect(deps.notice.mock.calls).toEqual(["merged", "resumed", "retired", "rehired"].map(verb => [`Alice ${verb} worker in App`, "info"]));
     deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Nothing to merge: branch is current", stderr: "" });
-    expect(await ask({ ...target, action: "merge", keep: true })).toBe("Nothing to merge: branch is current");
+    expect(await ask({ ...target, action: "merge", keep: true })).toEqual({ output: "Nothing to merge: branch is current" });
     expect(deps.notice.mock.calls.at(-1)?.[0]).toContain("Nothing to merge: branch is current");
   } finally {
     side.a.close(0, "done");
     await rm(repo, { recursive: true, force: true });
   }
+});
+
+test("a merge whose push failed on the receiver returns pushFailure beside its output", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "ib-peer-lifecycle-push-"));
+  const deps = await lifecycleFixture(repo);
+  const logs: string[] = [];
+  const side = serve({ lifecycle: (req, name) => acceptRemoteLifecycle(req, name, deps, line => logs.push(line)) });
+  const target = { id: "worker", repo: "app" };
+  // git's whole error, as mergeAgent reports it: later lines indented.
+  const pushFailure = "origin: To /remotes/origin.git\n  ! [rejected] main -> main (fetch first)\n  hint: Updates were rejected";
+  const failed = { ok: true, exitCode: 0, pushFailure };
+  // mergeAgent's stdout: the push's ✗ lines, then the warning whose hint names
+  // this machine (from _peerRequest). Nothing else adds a hint.
+  const report = "✗ origin: ! [rejected] main -> main (fetch first)\nWarning: merged, but the push of main failed. Run `ib push App` on Studio to push it.";
+  const keptStdout = `Merged agent worker into main (1 commit(s), agent kept running)\n${report}`;
+  const closedStdout = `Closed agent: worker (merged to main at abc)\n${report}`;
+  try {
+    const ask = (request: Parameters<typeof requestLifecycle>[1]) => requestLifecycle(side.a, request, "Laptop", side.clock.setTimer);
+    // A closing merge's output is its teardown warnings, then its stdout. The
+    // warnings also go apart, only when there are some.
+    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: closedStdout, stderr: "" });
+    expect(await ask({ ...target, action: "merge" })).toEqual({ output: closedStdout, pushFailure });
+    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: closedStdout, stderr: "Could not remove the agent directory" });
+    expect(await ask({ ...target, action: "merge" })).toEqual({
+      output: `Could not remove the agent directory\n${closedStdout}`, pushFailure, warnings: "Could not remove the agent directory",
+    });
+    // --keep's output is the merge report, which already has the push lines and the hint.
+    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: keptStdout, stderr: "" });
+    expect(await ask({ ...target, action: "merge", keep: true })).toEqual({ output: keptStdout, pushFailure });
+    // This machine's own header alert is red, without git's To/hint lines.
+    expect(deps.notice.mock.calls).toEqual(Array(3).fill(
+      ["Alice merged worker in App · push failed: origin: ! [rejected] main -> main (fetch first)", "error"]));
+    // The log keeps the whole error, on one line.
+    expect(logs).toEqual(Array(3).fill(
+      "Alice merged worker in App · push failed: origin: To /remotes/origin.git ! [rejected] main -> main (fetch first) hint: Updates were rejected"));
+  } finally {
+    side.a.close(0, "done");
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test.each(["pushFailure", "warnings"])("a lifecycle reply with a non-string %s is malformed, so the outcome is unknown", async field => {
+  const link = createMemoryLink(ID_A, ID_B);
+  const clock = createFakeClock();
+  const result = requestLifecycle(link.a, { action: "merge", repo: "app", id: "worker" }, "Laptop B", clock.setTimer)
+    .catch((err: Error) => err);
+  const stream = await link.b.acceptBi();
+  await stream.readToEnd(4096);
+  await stream.writeAll(encode({ ok: true, output: "", [field]: 7 }));
+  await stream.finish();
+  const error = await result;
+  // As for any malformed lifecycle reply: the request was already sent.
+  expect(error).toHaveProperty("message", "outcome unknown — check Laptop B");
+  expect((error as Error).cause).toBeInstanceOf(PeerProtocolError);
+  link.a.close(0, "done");
 });
 
 test("ambiguous retired nicknames suggest addresses on the paired machine", async () => {

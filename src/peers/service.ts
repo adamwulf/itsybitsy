@@ -95,7 +95,7 @@ import {
   type PairStream,
 } from "./pairing";
 import { acceptRemoteAgent, acceptRemoteAgentWithFiles, type RemoteSpawnDeps } from "./new-agent";
-import { acceptRemoteLifecycle, type RemoteLifecycleRequest, type RemoteLifecycleDeps } from "./remote-lifecycle";
+import { acceptRemoteLifecycle, type RemoteLifecycleOutcome, type RemoteLifecycleRequest, type RemoteLifecycleDeps } from "./remote-lifecycle";
 import { acceptRemoteAcknowledge, type RemoteQuestionDeps } from "./remote-questions";
 import { detectAgentStates } from "../agents";
 import { acknowledgeQuestion, newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
@@ -188,7 +188,7 @@ export interface PeerServiceDeps {
  * The real dependencies: the endpoint lock, ~/.itsybitsy/peer, the addon with
  * the n0 preset, and `agents` (the watcher's last fully detected agents in `ib watch`).
  */
-export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = transferStagingRoot()): PeerServiceDeps {
+export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string, kind?: "info" | "error") => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = transferStagingRoot()): PeerServiceDeps {
   const poll = createPeerOutboxPoll();
   // Sends and remote starts share the busy rule and the /tmp reservation.
   const attachments = createAttachmentReceiver();
@@ -207,7 +207,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
       const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log, lines });
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
-    remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, notice },
+    remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, machine, notice },
     remoteQuestions: { listRepos, acknowledgeQuestion, notice },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice, attachments },
     writeRemoteAgents,
@@ -809,7 +809,7 @@ export class PeerService {
     return id;
   }
 
-  async runRemoteLifecycle(peerId: string, request: RemoteLifecycleRequest, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
+  async runRemoteLifecycle(peerId: string, request: RemoteLifecycleRequest, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<RemoteLifecycleOutcome> {
     if (source === "dashboard" && this.remoteStartDenial !== null) throw new Error(remoteLifecycleDenial(this.remoteStartDenial, request.action));
     const machine = await this.peerName(peerId);
     if (machine === null) throw new Error("Machine is no longer paired");
@@ -1040,7 +1040,8 @@ export class PeerService {
         const work = poll((peer, header, transfer) => this.sendRemoteMessage(peer, header, "handoff", {
           ...transfer, signal: transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal,
         }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown, dispatchFinished,
-          (peer, request, transfer) => this.runRemoteLifecycle(peer, request, "handoff", transfer))
+          // The CLI prints the output, which already names a failed push.
+          (peer, request, transfer) => this.runRemoteLifecycle(peer, request, "handoff", transfer).then(outcome => outcome.output))
           .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`))
           .finally(() => { dispatchFinished(); this.outboxPolls.delete(work); });
         this.outboxPolls.add(work);

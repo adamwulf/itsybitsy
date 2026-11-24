@@ -40,6 +40,7 @@ import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { MIN_TERMINAL_WIDTH, REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
 import { BOLD, DIM, GREEN, ITALIC, RED, RESET, REVERSE, YELLOW } from "./colors";
+import { setSandboxedProcessOverride } from "../sandbox-detect";
 import { getStateColors } from "./color-scheme";
 import * as settings from "../config";
 import * as agentActions from "./agent-actions";
@@ -1983,6 +1984,54 @@ describe("DashboardComponent dialog and action handlers", () => {
       expect(commands.some(cmd => cmd.includes("merge"))).toBe(true);
       expect(commands.some(cmd => cmd.includes("kill-session"))).toBe(!keep);
       expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(keep);
+    });
+  }
+
+  // merge.pushAfterMerge (SPEC.md §3.4): a push that fails after the merge
+  // leaves the merge done, and the header shows the failure as an alert.
+  for (const keep of [false, true]) {
+    test(`a ${keep ? "--keep" : "closing"} merge whose push fails shows the failure in red`, async () => {
+      await setupDashboardWithAgent();
+      const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
+      await mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(join(configTempDir, "config.json"), JSON.stringify({ merge: { pushAfterMerge: true } }));
+      setSandboxedProcessOverride(() => false);
+      const commands: string[][] = [];
+      // Every git call is stubbed; `push` is rejected as git reports it.
+      setMergeSpawnRunner((cmd: string[]) => {
+        commands.push(cmd);
+        if (cmd.includes("--show-current") || cmd.includes("symbolic-ref")) return makeSpawnResult(0, "main");
+        if (cmd.includes("remote") && cmd.includes("-v")) return makeSpawnResult(0, "origin\t/remotes/origin.git (fetch)\norigin\t/remotes/origin.git (push)");
+        if (cmd.includes("push")) {
+          return makeSpawnResult(1, "", "To /remotes/origin.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '/remotes/origin.git'\nhint: Updates were rejected because the remote contains work that you do not");
+        }
+        if (cmd.includes("log") && cmd.includes("--oneline")) return makeSpawnResult(0, "abc123 Agent change\n");
+        if (cmd.includes("rev-parse") && cmd.includes("HEAD")) return makeSpawnResult(0, "a".repeat(40) + "\n");
+        return makeSpawnResult();
+      });
+      try {
+        dashboard.handleInput("m");
+        await dashboard.flushPendingActions();
+        if (keep) {
+          dashboard.handleInput("\x1b[Z");
+          dashboard.handleInput(" ");
+          dashboard.handleInput("\x1b[Z");
+        } else {
+          dashboard.handleInput("\t");
+        }
+        dashboard.handleInput("\r");
+        await dashboard.flushPendingActions();
+        // The one-row notice drops git's `To <url>` and `hint:` lines, so the rejection shows.
+        const notice = `${keep ? "agent-test kept running: merge complete" : "Merged agent-test"} · push failed: origin: ! [rejected]        main -> main (fetch first) · error: failed to push some refs to '/remotes/origin.git'`;
+        expect(dashboard.notice).toBe(notice);
+        expect(dashboard.render(200)[0]).toContain(`${RED}${notice}`);
+        expect(dashboard.dialog).toBeNull();
+        expect(commands).toContainEqual(["git", "-C", actionTempDir!, "push", "origin", "main"]);
+        // The merge itself went ahead: a closing merge still closed the agent.
+        expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(keep);
+      } finally {
+        setSandboxedProcessOverride(null);
+      }
     });
   }
 
@@ -11679,7 +11728,7 @@ describe("Unified peer repos in the Agents tree", () => {
   test("remote m checks before confirming keep, x confirms retirement, and R resumes directly", async () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);
-    const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue("Ready to merge");
+    const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue({ output: "Ready to merge" });
     dashboard.handleInput("m");
     await Bun.sleep(0);
     const merge = assertDialog(dashboard.dialog, "confirm");
@@ -11687,7 +11736,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(merge.focusedButton).toBe("cancel");
     expect(run.mock.calls).toEqual([[PEER_B, { id: "worker-abc", repo: "itsybitsy", action: "merge", checkOnly: true }]]);
     merge.checkbox!.checked = true;
-    run.mockResolvedValueOnce("Nothing to merge: branch is current");
+    run.mockResolvedValueOnce({ output: "Nothing to merge: branch is current" });
     merge.onYes();
     await Bun.sleep(0);
     expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "merge", keep: true });
@@ -11697,11 +11746,11 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.closeDialog();
     expect(run).toHaveBeenCalledTimes(2);
     dashboard.handleInput("x");
-    const pending = Promise.withResolvers<string>();
+    const pending = Promise.withResolvers<{ output: string }>();
     run.mockReturnValueOnce(pending.promise);
     assertDialog(dashboard.dialog, "confirm").onYes();
     expect(dashboard.render(WIDTH).join("\n")).toContain(`retire ${WORKER_KEY}…`);
-    pending.resolve("");
+    pending.resolve({ output: "" });
     await Bun.sleep(0);
     expect(dashboard.notice).toContain("retired");
     run.mockRejectedValueOnce(new Error("Agent is already running"));
@@ -11710,6 +11759,61 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.dialog).toBeNull();
     expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "resume" });
     expect(dashboard.notice).toContain("Agent is already running");
+  });
+
+  test("a remote merge whose push failed on the peer shows the failure in red", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue({ output: "Ready to merge" });
+    // git's whole error, as the peer sends it: later lines indented.
+    const pushFailure = "origin: To /remotes/origin.git\n  ! [rejected] main -> main (fetch first)\n  hint: Updates were rejected";
+    const report = `✗ ${pushFailure}\nWarning: merged, but the push of main failed. Run \`ib push itsybitsy\` on Laptop B to push it.`;
+    const warnings = "Could not remove the agent directory";
+    // The peer's replies (remote-lifecycle.ts): a closing merge's output is its
+    // teardown warnings plus its merge report, with the warnings also apart.
+    const cases = [
+      { keep: false, reply: { output: `Closed agent: worker-abc\n${report}`, pushFailure } },
+      { keep: false, reply: { output: `${warnings}\nClosed agent: worker-abc\n${report}`, pushFailure, warnings } },
+      { keep: true, reply: { output: `Merged agent worker-abc into main (1 commit(s), agent kept running)\n${report}`, pushFailure } },
+    ];
+    for (const { keep, reply } of cases) {
+      dashboard.handleInput("m");
+      await Bun.sleep(0);
+      const merge = assertDialog(dashboard.dialog, "confirm");
+      merge.checkbox!.checked = keep;
+      run.mockResolvedValueOnce(reply);
+      merge.onYes();
+      await Bun.sleep(0);
+      expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "merge", keep });
+      // The one-row notice drops git's `To <url>` and `hint:` lines.
+      const notice = `${WORKER_KEY} merged · push failed: origin: ! [rejected] main -> main (fetch first)`;
+      expect(dashboard.notice).toBe(notice);
+      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${notice}`);
+      // As for a local merge, teardown warnings open the cleanup-warnings dialog.
+      if (reply.warnings) {
+        expect(assertDialog(dashboard.dialog, "cleanup-warnings").text).toBe(`${notice}\n\n${warnings}`);
+        dashboard.closeDialog();
+      } else {
+        expect(dashboard.dialog).toBeNull();
+      }
+    }
+    // Without a push failure the same merge is an info notice, as before.
+    dashboard.handleInput("m");
+    await Bun.sleep(0);
+    run.mockResolvedValueOnce({ output: "" });
+    assertDialog(dashboard.dialog, "confirm").onYes();
+    await Bun.sleep(0);
+    expect(dashboard.notice).toBe(`${WORKER_KEY} merged`);
+    expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}${WORKER_KEY} merged`);
+  });
+
+  test("on the machine that ran a peer's merge, a failed push is a red notice too", () => {
+    const { dashboard } = setup();
+    const failed = "Laptop B merged worker in itsybitsy · push failed: origin: ! [rejected] main -> main (fetch first)";
+    dashboard.remoteAgentStarted(failed, "error");
+    expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${failed}`);
+    dashboard.remoteAgentStarted("Laptop B retired worker in itsybitsy");
+    expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}Laptop B retired worker in itsybitsy`);
   });
 
   test("o opens only a remote agent diff, requiring the tool, human caller and local registration", async () => {

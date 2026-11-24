@@ -329,6 +329,7 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 | `allowAgentQuestions` | `true` | Let agents ask the user questions |
 | `externalDiffTool` | — | Enables `o`/`O` (e.g. `"code --diff"`) |
 | `createPullRequests` | `false` | Tell top-level agents to open a PR when done (needs `gh` + a remote) |
+| `merge.pushAfterMerge` | `false` | After a merge into `main`/`master`, push it to every remote (as `ib push`); a failed push leaves the merge done and shows a red notice |
 | `notifications.sayOnQuestion` | `true` | Speak when an agent asks a question |
 | `tree.groupByParent` | `false` | Group repos under their parent directory |
 | `hooks.injectStatus` / `hooks.statusVisible` | `true` | Agents-status injection in the main session |

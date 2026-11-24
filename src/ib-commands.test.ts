@@ -6017,6 +6017,295 @@ describe("mergeAgent (native)", () => {
       await expectSelfMergeRefused(KEEP);
     });
   });
+
+  // SPEC.md §3.4 step 4: with merge.pushAfterMerge on, a merge that lands a
+  // commit on a checked-out main/master pushes it to every remote. Every git
+  // call here, `push` included, goes to the stubbed runner: nothing is pushed.
+  describe("push after merge (merge.pushAfterMerge)", () => {
+    const PUSHED = "To /remotes/origin.git\n   1111111..2222222  main -> main";
+    // runCmd trims git's output, so neither starts with whitespace.
+    const REJECTED = "! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '/remotes/origin.git'";
+
+    async function setPushAfterMerge(value: boolean | undefined) {
+      await Bun.write(join(tempDir, "config.json"), JSON.stringify(value === undefined ? {} : { merge: { pushAfterMerge: value } }));
+    }
+
+    async function makePushAgentDir(): Promise<string> {
+      const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
+      await mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
+        id: "agent-abc", tmux_session: "tmux-agent-abc", state: "running",
+      }));
+      return agentDir;
+    }
+
+    /**
+     * makeMergeMock plus what the pull and push need: `remote -v` lists
+     * `remotes`, `symbolic-ref HEAD` names the checked-out branch (so the
+     * pre-merge pull runs), and `git push <remote>` fails for each remote in
+     * `rejects`, succeeding otherwise. Every git call's environment (undefined
+     * when it inherits) goes to `gitEnvs`, keyed by its subcommand.
+     */
+    function makePushMock(options: { remotes?: string[]; rejects?: string[]; currentBranch?: string; commitCount?: number } = {}) {
+      const { remotes = ["origin"], rejects = [], currentBranch = "main", commitCount = 1 } = options;
+      const base = makeMergeMock({ currentBranch, commitCount });
+      return (cmd: string[], opts?: any): SpawnResult => {
+        if (cmd[0] === "git") gitEnvs.push([cmd[3]!, opts?.env]);
+        if (cmd[0] === "git" && cmd.includes("remote") && cmd.includes("-v")) {
+          spawnCalls.push(cmd);
+          return makeSpawnResult(0, remotes.map((r) => `${r}\t/remotes/${r}.git (fetch)\n${r}\t/remotes/${r}.git (push)`).join("\n"));
+        }
+        if (cmd[0] === "git" && cmd.includes("symbolic-ref")) {
+          spawnCalls.push(cmd);
+          return makeSpawnResult(0, currentBranch);
+        }
+        if (cmd[0] === "git" && cmd.includes("push")) {
+          spawnCalls.push(cmd);
+          const remote = cmd[cmd.indexOf("push") + 1]!;
+          return rejects.includes(remote) ? makeSpawnResult(1, "", REJECTED) : makeSpawnResult(0, "", PUSHED);
+        }
+        return base(cmd, opts);
+      };
+    }
+
+    function useRunner(runner: (cmd: string[], opts?: any) => SpawnResult) {
+      lifecycleSpawnCtx.set(runner);
+      setMergeSpawnRunner(runner);
+    }
+
+    const pushCalls = () => spawnCalls.filter((c) => c[0] === "git" && c.includes("push"));
+    const remoteListings = () => spawnCalls.filter((c) => c[0] === "git" && c.includes("remote") && c.includes("-v"));
+    let gitEnvs: [string, NodeJS.ProcessEnv | undefined][];
+
+    beforeEach(() => {
+      gitEnvs = [];
+      setUserConfigPath(join(tempDir, "config.json"));
+      // A sandboxed caller skips the push; pin "not sandboxed" so these tests
+      // do not depend on where `bun test` runs.
+      setSandboxedProcessOverride(() => false);
+    });
+
+    afterEach(() => {
+      setSandboxedProcessOverride(null);
+      resetUserConfigPath();
+    });
+
+    test.each([
+      ["no config file", null],
+      ["the key unset", undefined],
+      ["the key false", false],
+    ] as const)("off with %s: the merge runs exactly as before, with no push and no extra git call", async (_label, value) => {
+      if (value !== null) await setPushAfterMerge(value);
+      await makePushAgentDir();
+      useRunner(makePushMock());
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result).toEqual({
+        ok: true, exitCode: 0, stderr: "",
+        stdout: `Merged agent agent-abc into main at ${MERGE_HEAD_SHA} (1 commit(s), agent kept running)\n✓ origin: pulled main`,
+      });
+      expect(pushCalls()).toEqual([]);
+      // Only the pre-merge pull lists remotes.
+      expect(remoteListings()).toHaveLength(1);
+    });
+
+    test("--keep into main pushes main to every remote and reports each one", async () => {
+      await setPushAfterMerge(true);
+      const agentDir = await makePushAgentDir();
+      useRunner(makePushMock({ remotes: ["origin", "upstream"] }));
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.pushFailure).toBeUndefined();
+      expect(result.stdout).toBe([
+        `Merged agent agent-abc into main at ${MERGE_HEAD_SHA} (1 commit(s), agent kept running)`,
+        "✓ origin: pulled main",
+        "✓ upstream: pulled main",
+        `✓ origin: pushed main\n  ${PUSHED.replace(/\n/g, "\n  ")}`,
+        `✓ upstream: pushed main\n  ${PUSHED.replace(/\n/g, "\n  ")}`,
+      ].join("\n"));
+      expect(pushCalls()).toEqual([
+        ["git", "-C", tempDir, "push", "origin", "main"],
+        ["git", "-C", tempDir, "push", "upstream", "main"],
+      ]);
+      // The push uses the remotes the pre-merge pull listed: one `remote -v`.
+      expect(remoteListings()).toHaveLength(1);
+      // After the merge into main.
+      const merge = spawnCalls.findIndex((c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff")) && c.includes("agent/agent-abc"));
+      expect(merge).toBeGreaterThan(-1);
+      expect(spawnCalls.indexOf(pushCalls()[0]!)).toBeGreaterThan(merge);
+      const log = await Bun.file(join(agentDir, "agent.log")).text();
+      expect(log).toContain("Pushing main to origin, upstream after merging...");
+      expect(log).toContain("Push completed:");
+    });
+
+    test("the push runs with GIT_TERMINAL_PROMPT=0 and the rest of this process's environment; no other git call does", async () => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock());
+
+      await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      const pushEnvs = gitEnvs.filter(([sub]) => sub === "push").map(([, env]) => env);
+      expect(pushEnvs).toHaveLength(1);
+      expect(pushEnvs[0]?.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(pushEnvs[0]?.PATH).toBe(process.env.PATH);
+      // The pre-merge pull's fetch, and every other git call, inherit as before.
+      expect(gitEnvs.some(([sub]) => sub === "fetch")).toBe(true);
+      expect(gitEnvs.filter(([sub]) => sub !== "push").every(([, env]) => env === undefined)).toBe(true);
+    });
+
+    test("a closing merge pushes before the teardown and reports the push after the close line", async () => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock());
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
+
+      expect(result.ok).toBe(true);
+      expect(result.pushFailure).toBeUndefined();
+      expect(result.stdout).toBe(
+        `Closed agent: agent-abc (merged to main at ${MERGE_HEAD_SHA})\n✓ origin: pulled main\n✓ origin: pushed main\n  ${PUSHED.replace(/\n/g, "\n  ")}`,
+      );
+      const push = spawnCalls.indexOf(pushCalls()[0]!);
+      const teardown = spawnCalls.findIndex((c) => c.includes("has-session"));
+      expect(push).toBeGreaterThan(-1);
+      expect(teardown).toBeGreaterThan(push);
+      expect(await Bun.file(join(tempDir, ".itsybitsy", "agents", "agent-abc", "meta.json")).exists()).toBe(false);
+    });
+
+    test("a merge into master pushes master", async () => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock({ currentBranch: "master" }));
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(pushCalls()).toEqual([["git", "-C", tempDir, "push", "origin", "master"]]);
+    });
+
+    test.each([
+      ["a manager's agent branch", "agent/agent-manager"],
+      ["a detached HEAD (no branch checked out)", ""],
+    ])("a merge into %s never pushes", async (_label, currentBranch) => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock({ currentBranch }));
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout).not.toContain("push");
+      expect(pushCalls()).toEqual([]);
+      expect(remoteListings()).toEqual([]);
+    });
+
+    test.each([
+      ["--keep", { keep: true }],
+      ["a closing merge", {}],
+    ] as const)("%s with no commits to merge does not push", async (_label, options) => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock({ commitCount: 0 }));
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, options);
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout).not.toContain("push");
+      expect(pushCalls()).toEqual([]);
+      // Only the pre-merge pull lists remotes.
+      expect(remoteListings()).toHaveLength(1);
+    });
+
+    test("a repo with no remotes merges without pushing", async () => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock({ remotes: [] }));
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toBe(`Merged agent agent-abc into main at ${MERGE_HEAD_SHA} (1 commit(s), agent kept running)`);
+      expect(pushCalls()).toEqual([]);
+    });
+
+    test("a sandboxed caller (a per-repo coordinator) skips the push and says how to push", async () => {
+      setSandboxedProcessOverride(() => true);
+      await setPushAfterMerge(true);
+      const agentDir = await makePushAgentDir();
+      useRunner(makePushMock());
+      const agent = makeAgent("agent-abc", tempDir);
+
+      const result = await mergeAgent(agent, tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.pushFailure).toBeUndefined();
+      expect(result.stdout.split("\n").at(-1)).toBe(
+        `Did not push main after merging: this process is sandboxed and cannot reach its remotes. Run \`ib push ${agent.repoRegistryName}\` from outside the sandbox to push main.`,
+      );
+      expect(pushCalls()).toEqual([]);
+      expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("Did not push main after merging: this process is sandboxed");
+    });
+
+    test("a failed push leaves the merge successful (exit 0), still closes the agent, and names the failure", async () => {
+      await setPushAfterMerge(true);
+      const agentDir = await makePushAgentDir();
+      useRunner(makePushMock({ remotes: ["origin", "upstream"], rejects: ["origin"] }));
+      const agent = makeAgent("agent-abc", tempDir);
+
+      const result = await mergeAgent(agent, tempDir);
+
+      expect(result.ok).toBe(true);
+      expect(result.exitCode).toBe(0);
+      // The ✗ line's text: git's later lines indented two spaces.
+      expect(result.pushFailure).toBe(`origin: ${REJECTED.replace(/\n/g, "\n  ")}`);
+      // Every remote is still attempted, and stdout ends with the push lines and a warning.
+      expect(pushCalls()).toEqual([
+        ["git", "-C", tempDir, "push", "origin", "main"],
+        ["git", "-C", tempDir, "push", "upstream", "main"],
+      ]);
+      expect(result.stdout).toEndWith([
+        `✗ origin: ${REJECTED.replace(/\n/g, "\n  ")}`,
+        `✓ upstream: pushed main\n  ${PUSHED.replace(/\n/g, "\n  ")}`,
+        `Warning: merged, but the push of main failed. Run \`ib push ${agent.repoRegistryName}\` to push it.`,
+      ].join("\n"));
+      expect(result.stdout).toStartWith(`Closed agent: agent-abc (merged to main at ${MERGE_HEAD_SHA})`);
+      expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
+    });
+
+    test("a failed push on --keep is reported the same way and leaves the agent running", async () => {
+      await setPushAfterMerge(true);
+      const agentDir = await makePushAgentDir();
+      useRunner(makePushMock({ rejects: ["origin"] }));
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.exitCode).toBe(0);
+      expect(result.pushFailure).toBe(`origin: ${REJECTED.replace(/\n/g, "\n  ")}`);
+      expect(result.stdout).toContain("✗ origin: ");
+      expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
+      const log = await Bun.file(join(agentDir, "agent.log")).text();
+      expect(log).toContain("Push failed:\n✗ origin: ");
+    });
+
+    test("a merge a paired machine asked for names this machine in the retry hint", async () => {
+      await setPushAfterMerge(true);
+      await makePushAgentDir();
+      useRunner(makePushMock({ rejects: ["origin"] }));
+      const agent = makeAgent("agent-abc", tempDir);
+
+      const result = await mergeAgent(agent, tempDir, { keep: true, _peerRequest: { machine: "Studio" } });
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout.split("\n").at(-1)).toBe(
+        `Warning: merged, but the push of main failed. Run \`ib push ${agent.repoRegistryName}\` on Studio to push it.`,
+      );
+    });
+  });
 });
 
 // ── mergeAgent --keep against real git ───────────────────────────────────────
@@ -6483,6 +6772,23 @@ describe("mergeAgent --keep (real git)", () => {
       expect(await Bun.file(join(tempDir, "remote.txt")).text()).toBe("remote\n");
       expect(await Bun.file(join(tempDir, "feature.txt")).text()).toBe("one\n");
       expect(await git("-C", tempDir, "branch", "--list", "agent/agent-abc")).toBe("");
+    });
+
+    test("with merge.pushAfterMerge on, the pulled-and-merged main reaches origin (a temp bare repo)", async () => {
+      await Bun.write(join(homeDir, ".itsybitsy", "config.json"), JSON.stringify({ merge: { pushAfterMerge: true } }));
+      await agentCommit("feature.txt", "one\n", "agent: one");
+      const remoteTip = await pushFromOther("remote.txt", "remote\n", "remote: new");
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.pushFailure).toBeUndefined();
+      // The pull's lines (with git's detail) come first, then the push's.
+      expect(result.stdout).toMatch(/\n✓ origin: pulled main\n(  .*\n)*✓ origin: pushed main\n  To /);
+      // origin now has the merge, on top of the commit it already had.
+      const mainHead = await git("-C", tempDir, "rev-parse", "main");
+      expect(await git("--git-dir", origin, "rev-parse", "main")).toBe(mainHead);
+      expect(await git("-C", tempDir, "merge-base", remoteTip, "main")).toBe(remoteTip);
     });
 
     test("a merge from a detached HEAD (no branch checked out) does not pull", async () => {

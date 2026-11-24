@@ -32,7 +32,7 @@ export interface PeersDialogService {
   cancelReceipt?(id: string): void;
   sendRemoteMessage: import("../peers/service").PeerService["sendRemoteMessage"];
   fetchPane(peerId: string, target: PeerPaneTarget, lines: number): Promise<PeerPane>;
-  runRemoteLifecycle(peerId: string, request: import("../peers/remote-lifecycle").RemoteLifecycleRequest): Promise<string>;
+  runRemoteLifecycle(peerId: string, request: import("../peers/remote-lifecycle").RemoteLifecycleRequest): Promise<import("../peers/remote-lifecycle").RemoteLifecycleOutcome>;
   acknowledgeRemoteQuestion(peerId: string, repo: string, questionId: string): Promise<void>;
   fetchAgentDiff: import("../peers/service").PeerService["fetchAgentDiff"];
   fetchAgentPrompt: import("../peers/service").PeerService["fetchAgentPrompt"];

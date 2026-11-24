@@ -1,6 +1,7 @@
 import { suggestedAddress } from "../resolve-target";
-import { AmbiguousRemoteRehire, lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleRequest } from "./remote-lifecycle";
+import { AmbiguousRemoteRehire, lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleOutcome, type RemoteLifecycleRequest } from "./remote-lifecycle";
 import { trackSendCleanup } from "../send-cleanup";
+import { singleLine } from "./single-line";
 /**
  * The trusted link between paired installs (docs/plans/iroh-peering.md,
  * "Reconnection" and "First connected feature"; SPEC.md §20.4).
@@ -226,10 +227,6 @@ export class PeerErrorReply extends Error {
 export function cleanRemoteText(text: string): string {
   const flat = singleLine(text);
   return flat.length > MAX_REMOTE_TEXT ? `${flat.slice(0, MAX_REMOTE_TEXT - 1)}…` : flat;
-}
-
-function singleLine(text: string) {
-  return text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
 }
 
 function sendDiagnostic(text: string) {
@@ -536,8 +533,12 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
   });
 }
 
-/** Lifecycle commands use their own overall deadline. A merge may be silent for two minutes. */
-export async function requestLifecycle(conn: PairConnection, request: RemoteLifecycleRequest, machine: string, setTimer: Timer, transfer?: Pick<OutgoingTransfer, "signal" | "verifyClient">): Promise<string> {
+/**
+ * Lifecycle commands use their own overall deadline. A merge may be silent for
+ * two minutes. A reply without `pushFailure` or `warnings` (no failed push,
+ * or an older install) leaves them undefined.
+ */
+export async function requestLifecycle(conn: PairConnection, request: RemoteLifecycleRequest, machine: string, setTimer: Timer, transfer?: Pick<OutgoingTransfer, "signal" | "verifyClient">): Promise<RemoteLifecycleOutcome> {
   const bytes = encodeJson({ ...request, op: "lifecycle" });
   if (bytes.length > PEER_MAX_REQUEST_BYTES) throw new Error("Lifecycle request exceeds the request limit");
   const unknown = new Error(`outcome unknown — check ${machine}`);
@@ -555,8 +556,14 @@ export async function requestLifecycle(conn: PairConnection, request: RemoteLife
         }).sort();
         throw new PeerErrorReply(`${reason}; use ${addresses.join(" or ")}`);
       }
-      if (reply.ok !== true || typeof reply.output !== "string") throw new PeerProtocolError("Malformed lifecycle reply");
-      return lifecycleText(reply.output);
+      if (reply.ok !== true || typeof reply.output !== "string" ||
+          (reply.pushFailure !== undefined && typeof reply.pushFailure !== "string") ||
+          (reply.warnings !== undefined && typeof reply.warnings !== "string")) throw new PeerProtocolError("Malformed lifecycle reply");
+      return {
+        output: lifecycleText(reply.output),
+        ...(reply.pushFailure ? { pushFailure: lifecycleText(reply.pushFailure) } : {}),
+        ...(reply.warnings ? { warnings: lifecycleText(reply.warnings) } : {}),
+      };
     }, { ...transfer, setTimer, unknownAfterFin: unknown.message, timeout: [lifecycleTimeout(request.action), unknown] });
   } catch (err) {
     if (err instanceof TransferIdleError) throw unknown;
@@ -755,7 +762,7 @@ export interface PeerResponderDeps {
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
-  lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<string>;
+  lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<RemoteLifecycleOutcome>;
   /** The request's `repo` and `id` as received: the handler validates them. */
   acknowledgeQuestion?(repo: unknown, id: unknown, readPeerName: () => Promise<string | null>): Promise<void>;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
@@ -1073,8 +1080,12 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   } else if (request.op === "lifecycle") {
     try {
       if (!deps.lifecycle) throw new Error("Remote lifecycle commands are unavailable");
-      const output = await deps.lifecycle(parseLifecycleRequest(request), () => deps.peerName(conn.remoteId));
-      reply = encodeJson({ ok: true, output: lifecycleText(output) });
+      const { output, pushFailure, warnings } = await deps.lifecycle(parseLifecycleRequest(request), () => deps.peerName(conn.remoteId));
+      reply = encodeJson({
+        ok: true, output: lifecycleText(output),
+        ...(pushFailure ? { pushFailure: lifecycleText(pushFailure) } : {}),
+        ...(warnings ? { warnings: lifecycleText(warnings) } : {}),
+      });
     } catch (err) {
       const error = lifecycleText(errorDetail(err));
       deps.log(`peer link: lifecycle request from ${from} failed: ${singleLine(error)}`);

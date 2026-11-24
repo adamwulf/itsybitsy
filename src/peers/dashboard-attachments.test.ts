@@ -33,34 +33,35 @@ test("a leading missing slash-command name still passes through unless quoted", 
   expect(await peerAttachmentCandidates("/no/such/command")).toEqual({ candidates: [], noPassthrough: true });
 });
 
-test("files outside the checkout start checked; live and relative ones start unchecked", async () => {
+test("files inside and outside the checkout are offered, and a relative one resolves against it", async () => {
   await withProject(async (project, outside) => {
     const external = join(outside, "report.txt");
     const live = join(project, "live.ts");
     await writeFile(external, "report");
     await writeFile(live, "live");
     const text = `compare ${external} with ${live} and ./live.ts`;
+    // No default check state: the path dialog opens with every path unchecked.
     expect(await peerAttachmentCandidates(text, project)).toEqual({ candidates: [
-      { argument: external, source: await realpath(external), checked: true },
-      { argument: live, source: await realpath(live), checked: false },
-      { argument: "./live.ts", source: await realpath(live), checked: false },
+      { argument: external, source: await realpath(external) },
+      { argument: live, source: await realpath(live) },
+      { argument: "./live.ts", source: await realpath(live) },
     ], noPassthrough: false });
     // Without a local checkout a relative reference names nothing here.
     expect(await peerAttachmentCandidates(text)).toEqual({ candidates: [
-      { argument: external, source: await realpath(external), checked: true },
-      { argument: live, source: await realpath(live), checked: true },
+      { argument: external, source: await realpath(external) },
+      { argument: live, source: await realpath(live) },
     ], noPassthrough: false });
     expect(await peerAttachmentCandidates("./live.ts")).toEqual({ candidates: [], noPassthrough: true });
   });
 });
 
-test("a /tmp file is offered checked, since the peer cannot read this machine's /tmp", async () => {
+test("a /tmp file is offered, since the peer cannot read this machine's /tmp", async () => {
   const dir = await mkdtemp("/tmp/ib-peer-candidate-");
   try {
     const file = join(dir, "shot.png");
     await writeFile(file, "png");
     expect(await peerAttachmentCandidates(`look at ${file}`)).toEqual({
-      candidates: [{ argument: file, source: await realpath(file), checked: true }], noPassthrough: false,
+      candidates: [{ argument: file, source: await realpath(file) }], noPassthrough: false,
     });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -78,7 +79,7 @@ test("trailing punctuation is trimmed, quotes are kept, and each spelling is off
     await writeFile(file, "notes");
     const text = `read ${file}. Then "${file}" and ${file}`;
     expect(await peerAttachmentCandidates(text, project)).toEqual({
-      candidates: [{ argument: file, source: await realpath(file), checked: true }], noPassthrough: false,
+      candidates: [{ argument: file, source: await realpath(file) }], noPassthrough: false,
     });
     // Inside quotes the punctuation is part of the name.
     expect(await peerAttachmentCandidates(`read "${file}."`, project)).toEqual({ candidates: [], noPassthrough: false });

@@ -2204,16 +2204,14 @@ export class DashboardComponent implements Component {
   }
 
   /**
-   * The path dialog of a send to `peerName` (SPEC §20.5), checked as
-   * {@link peerAttachmentCandidates} suggests. The checked paths, or null when
-   * the user cancels. It takes the place of the open dialog (the frozen send
+   * The path dialog of a send to `peerName` (SPEC §20.5), every path
+   * unchecked at first. The checked paths, or null when the user cancels. It takes the place of the open dialog (the frozen send
    * dialog), which comes back when it closes.
    */
   private choosePeerAttachments(candidates: readonly PeerAttachmentCandidate[], peerName: string): Promise<Set<string> | null> {
     const previous = this._dialog;
     return choosePaths({
       paths: candidates.map(candidate => candidate.argument),
-      checked: candidates.map(candidate => candidate.checked),
       prompt: peerAttachmentPrompt(peerName),
       showDialog: dialog => this.showDialog(dialog),
       closeDialog: () => {

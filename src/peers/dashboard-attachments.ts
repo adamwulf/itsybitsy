@@ -7,16 +7,12 @@ import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { references } from "../message-attachments";
 import { userHome } from "../home";
-import { runtimeDir } from "../runtime-names";
-import { canonicalizeSandboxPath } from "../sandbox";
 
 export interface PeerAttachmentCandidate {
   /** The reference as the message spells it, trailing punctuation trimmed. */
   argument: string;
   /** Its canonical path on this machine. */
   source: string;
-  /** Checked when the path dialog opens. */
-  checked: boolean;
 }
 
 function missing(err: unknown) {
@@ -29,20 +25,15 @@ function missing(err: unknown) {
  * the input field's parser: each names an existing regular file on this
  * machine, /tmp included, since a peer cannot read this machine's /tmp. Every
  * other reference (a directory, a missing path, a relative one without
- * `localRoot`) stays raw text and is not offered.
+ * `localRoot`) stays raw text and is not offered. `localRoot` is this
+ * machine's checkout of the target's repository: a relative reference
+ * resolves against it.
  *
- * `localRoot` is this machine's checkout of the target's repository. A file
- * inside it is live on the peer's own checkout, so it starts unchecked, as
- * does a relative reference, which resolves against it. A file in the
- * checkout's runtime directory (other agents' worktrees, logs) exists only on
- * this machine and starts checked, as does any file outside the checkout.
+ * Every candidate starts unchecked in the path dialog, as in a local send.
  */
 export async function peerAttachmentCandidates(text: string, localRoot?: string) {
   let noPassthrough = false;
   const candidates = new Map<string, PeerAttachmentCandidate>();
-  const local = localRoot && canonicalizeSandboxPath(localRoot);
-  const inside = (root: string | undefined, path: string) => !!root && (path === root || path.startsWith(root + "/"));
-  const live = (path: string) => inside(local, path) && !inside(local && runtimeDir(local), path);
   for (const ref of references(text)) {
     let path = ref.path;
     const relative = !path.startsWith("/") && !path.startsWith("~/");
@@ -65,7 +56,7 @@ export async function peerAttachmentCandidates(text: string, localRoot?: string)
       if (ref.start === 0) noPassthrough = true;
       const info = await stat(source).catch(err => { if (!missing(err)) throw err; });
       if (info?.isFile() && !candidates.has(path)) {
-        candidates.set(path, { argument: path, source, checked: !relative && !live(source) });
+        candidates.set(path, { argument: path, source });
       }
       break;
     }

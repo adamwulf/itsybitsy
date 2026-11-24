@@ -2070,16 +2070,14 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
 }
 
 /**
- * The path dialog of a remote start (SPEC §20.5), checked as
- * {@link peerAttachmentCandidates} suggests. It takes the frozen form's place,
- * and the form comes back with its draft when it closes. The checked paths, or
- * null when the user cancels.
+ * The path dialog of a remote start (SPEC §20.5), every path unchecked at
+ * first. It takes the frozen form's place, and the form comes back with its
+ * draft when it closes. The checked paths, or null when the user cancels.
  */
 function choosePeerStartPaths(ctx: ActionCtx, candidates: readonly PeerAttachmentCandidate[], peerName: string): Promise<Set<string> | null> {
   const previous = ctx.dialog;
   return choosePaths({
     paths: candidates.map(candidate => candidate.argument),
-    checked: candidates.map(candidate => candidate.checked),
     prompt: peerAttachmentPrompt(peerName),
     showDialog: dialog => ctx.showDialog(dialog),
     closeDialog: () => {

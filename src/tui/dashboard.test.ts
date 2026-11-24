@@ -10112,12 +10112,17 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(inEditor()).toBe(true);
   }
 
-  /** Wait for a send's path dialog, expect its items and checked state, and submit it with Enter. */
-  async function submitPathDialog(dashboard: DashboardComponent, expected: Record<string, boolean>) {
+  /** Wait for a send's path dialog, expect its `items` all unchecked, check the ones in `attach`, and submit it with Enter. */
+  async function submitPathDialog(dashboard: DashboardComponent, items: readonly string[], attach: readonly string[] = items) {
     await waitFor(() => dashboard.dialog?.type === "multi-select", { message: "the path dialog" });
     const picker = assertDialog(dashboard.dialog, "multi-select");
     expect(picker.prompt).toBe("Send as attachments to Laptop B:");
-    expect(Object.fromEntries(picker.items.map((item, i) => [item, picker.checked[i]]))).toEqual(expected);
+    expect(picker.items).toEqual([...items]);
+    expect(picker.checked).toEqual(items.map(() => false));
+    for (const [index, item] of items.entries()) {
+      if (index) dashboard.handleInput("j");
+      if (attach.includes(item)) dashboard.handleInput(" ");
+    }
     dashboard.handleInput("\r");
   }
 
@@ -11209,7 +11214,7 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(`Read ${source} and ./live.ts`);
       dashboard.inputField.submit();
-      await submitPathDialog(dashboard, { [source]: true });
+      await submitPathDialog(dashboard, [source]);
       await entered.promise;
       expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 8 bytes");
       if (action === "Esc") dashboard.handleInput("\x1b");
@@ -11235,27 +11240,26 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(path);
       dashboard.inputField.submit();
-      await submitPathDialog(dashboard, { [path]: true });
+      await submitPathDialog(dashboard, [path]);
       await waitFor(() => dashboard.notice === "Cannot verify the outgoing attachment owner");
       expect(service.sendRemoteMessage).not.toHaveBeenCalled();
       await dashboard.stopRemoteSends();
     } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
   });
 
-  test("a mixed-case local registry root keeps its dashboard file live on the peer", async () => {
+  test("a mixed-case local registry root resolves a relative reference for the peer", async () => {
     const project = await mkdtemp(join(tmpdir(), "ib-project-case-"));
     try {
-      const path = join(project, "file");
-      await Bun.write(path, "live");
+      await Bun.write(join(project, "file"), "live");
       const { dashboard, service } = setup();
       dashboard.setRepos([{ name: "ITSYBITSY", path: project }]);
       selectByKey(dashboard, WORKER_KEY);
       focusEditor(dashboard);
-      dashboard.handleInput(path);
+      dashboard.handleInput("./file");
       dashboard.inputField.submit();
-      await submitPathDialog(dashboard, { [path]: false });
+      await submitPathDialog(dashboard, ["./file"], []);
       await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
-      expect(service.sendRemoteMessage.mock.calls[0]![1]).toMatchObject({ files: [], message: path, noPassthrough: true });
+      expect(service.sendRemoteMessage.mock.calls[0]![1]).toMatchObject({ files: [], message: "./file", noPassthrough: true });
     } finally { await rm(project, { recursive: true, force: true }); }
   });
 
@@ -11298,8 +11302,8 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.dialog?.type === "multi-select");
       const picker = assertDialog(dashboard.dialog, "multi-select");
       expect(picker.items).toEqual([picked, left]);
-      expect(picker.checked).toEqual([true, true]);
-      for (const key of ["j", " ", "\r"]) dashboard.handleInput(key);
+      expect(picker.checked).toEqual([false, false]);
+      for (const key of [" ", "\r"]) dashboard.handleInput(key);
       await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
       const header = service.sendRemoteMessage.mock.calls[0]![1];
       expect(header.message).toBe(text);
@@ -11335,7 +11339,6 @@ describe("Unified peer repos in the Agents tree", () => {
       // The kept draft sends on the next submit, here with the path unchecked.
       dashboard.inputField.submit();
       await waitFor(() => dashboard.dialog?.type === "multi-select");
-      dashboard.handleInput(" ");
       dashboard.handleInput("\r");
       await waitFor(() => dashboard.inputField.getText() === "");
       expect(service.sendRemoteMessage.mock.calls.map(call => call[1])).toMatchObject([{ message: draft, files: [] }]);
@@ -11373,7 +11376,6 @@ describe("Unified peer repos in the Agents tree", () => {
       service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) =>
         new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason))));
       await submit();
-      dashboard.handleInput(" ");
       dashboard.handleInput("\r");
       expect(dashboard.dialog).toBe(send);
       await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
@@ -11388,7 +11390,6 @@ describe("Unified peer repos in the Agents tree", () => {
 
       // Acceptance closes the s dialog, not some other one.
       await submit();
-      dashboard.handleInput(" ");
       dashboard.handleInput("\r");
       await waitFor(() => dashboard.dialog === null);
       expect(dashboard.notice).toBe("Sent to Laptop B/abc-nick");
@@ -11483,7 +11484,7 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(source);
       dashboard.inputField.submit();
-      await submitPathDialog(dashboard, { [source]: true });
+      await submitPathDialog(dashboard, [source]);
       await entered.promise;
       const header = textHeader({ kind: "agent", agent: "worker" }, "read", { kind: "user" });
       header.files = [{ name: "file", size: 4, sha256: "0".repeat(64), spellings: ["file"] }];
@@ -11536,7 +11537,7 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(source);
       dashboard.inputField.submit();
-      await submitPathDialog(dashboard, { [source]: true });
+      await submitPathDialog(dashboard, [source]);
       await started.promise;
       await dashboard.shutdownPeerTransfers(new PeerService(deps));
       expect(b.closeInfo()?.reason).toBe("send reset stalled");
@@ -11866,10 +11867,10 @@ describe("Unified peer repos in the Agents tree", () => {
       const picker = assertDialog(dashboard.dialog, "multi-select");
       expect(picker.prompt).toBe("Send as attachments to Laptop B:");
       expect(picker.items).toEqual([picked, left]);
-      expect(picker.checked).toEqual([true, true]);
+      expect(picker.checked).toEqual([false, false]);
       // The start holds the pending slot while the path dialog is open.
       expect(dashboard.remoteStartPending).toBe(true);
-      for (const key of ["j", " ", "\r"]) dashboard.handleInput(key);
+      for (const key of [" ", "\r"]) dashboard.handleInput(key);
       // The frozen form is back while the start is in flight.
       expect(dashboard.dialog).toBe(form);
       await waitFor(() => start.mock.calls.length === 1);
@@ -11911,7 +11912,6 @@ describe("Unified peer repos in the Agents tree", () => {
       // The kept draft submits again; with the path unchecked it stays raw text and no file is sent.
       dashboard.handleInput("\r");
       await waitFor(() => dashboard.dialog?.type === "multi-select");
-      dashboard.handleInput(" ");
       dashboard.handleInput("\r");
       await waitFor(() => dashboard.dialog === null);
       expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt }, { signal: expect.any(AbortSignal) }]]);
@@ -11929,7 +11929,6 @@ describe("Unified peer repos in the Agents tree", () => {
       const start = spyOn(service, "startRemoteAgent").mockReturnValue(result.promise);
       dashboard.handleInput("\r");
       await waitFor(() => dashboard.dialog?.type === "multi-select");
-      dashboard.handleInput(" ");
       dashboard.handleInput("\r");
       expect(dashboard.dialog).toBe(form);
       await waitFor(() => start.mock.calls.length === 1);
@@ -12915,7 +12914,6 @@ describe("Unified peer repos in the Agents tree", () => {
 
         dialog.onSubmit(answer);
         await waitFor(() => dashboard.dialog?.type === "multi-select");
-        dashboard.handleInput(" ");
         dashboard.handleInput("\r");
         expect(dashboard.dialog).toBe(dialog);
         await waitFor(() => dashboard.dialog === null);

@@ -111,6 +111,21 @@ export function favoriteRemoteAgents(repo: PeerRepo, favorites: ReadonlySet<stri
   return shown;
 }
 
+/**
+ * Each agent's tree root's spawn time, even when a filter hides that root:
+ * what its rows sort by beside the local agents.
+ */
+export function rootSpawnEpochs(repo: PeerRepo): Map<RemoteAgent, number> {
+  const epochs: number[] = [];
+  const byAgent = new Map<RemoteAgent, number>();
+  for (const { row, parent } of repo.nodes) {
+    const epoch = parent < 0 ? row.remote.createdEpoch : epochs[parent]!;
+    epochs.push(epoch);
+    byAgent.set(row.remote, epoch);
+  }
+  return byAgent;
+}
+
 /** Resolve hidden parents in preorder, then draw connectors across all peers. */
 export function visibleRemoteAgents(repo: PeerRepo, keep: (row: AgentRow) => boolean): AgentRow[] {
   const nearest: number[] = [];

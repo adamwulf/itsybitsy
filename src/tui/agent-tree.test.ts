@@ -1774,6 +1774,31 @@ describe("fully qualified row keys", () => {
     ]);
   });
 
+  test("a peer agent moved up past its hidden manager keeps its tree's place, so the last root still ends the branch", () => {
+    const tree = new AgentTreeComponent();
+    tree.machineName = "studio";
+    const old = makeAgent("old", "running", { repoName: "alpha", repoPath: "/repos/alpha" });
+    old.meta = { ...old.meta, created_epoch: 50 };
+    tree.setFlatList(flattenAgentTree(buildAgentTree([old]), ["alpha", "beta"].map((name) => ({ name, path: `/repos/${name}` }))));
+    const remote = (id: string, manager: string | null, createdEpoch: number, state = "running") =>
+      ({ id, nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/r/alpha", state, agentType: "worker", manager, createdEpoch });
+    // The manager is older than "other"; its worker is newer.
+    tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
+      repos: [{ registryName: "alpha", displayName: "alpha" }], questions: [],
+      agents: [remote("mgr", null, 100, "stopped"), remote("kid", "mgr", 500), remote("kid-kid", "kid", 600), remote("other", null, 300)] }]);
+    const drawn = () => tree.visibleList.map((f) => f.kind === "agent" ? `${f.connector}${tree.agentKey(f.agent)}`
+      : f.kind === "remote-agent" ? `${f.connector}${peerEntryKey(f)}` : f.kind === "repo-header" ? `[${f.repoName}]` : f.kind);
+    const expected = ["[alpha]", "├── studio/alpha/old", "├── Laptop/alpha/kid", "│   └── Laptop/alpha/kid-kid", "└── Laptop/alpha/other"];
+
+    tree.setRepoFilter("running-only");
+    expect(drawn().slice(0, 5)).toEqual(expected);
+
+    tree.setRepoFilter("all");
+    for (const key of ["studio/alpha/old", "Laptop/alpha/kid", "Laptop/alpha/other"]) tree.toggleFavorite(key);
+    tree.setFavoritesOnly(true);
+    expect(drawn()).toEqual(expected);
+  });
+
   test("under parent grouping, remote rows share the local state column and their indent counts in the name column", () => {
     const { tree } = twoRepos();
     tree.setFlatList([{ kind: "parent-header", parentDir: "/repos", displayName: "repos" }, ...tree.flatList]);

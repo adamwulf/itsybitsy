@@ -538,7 +538,7 @@ class StatusBarComponent implements Component {
     let row2Left: string;
     if (this.remoteSelected) {
       const markHint = this.remoteRepoSelected ? "    .: pin" : this.remoteAgentSelected ? "    .: favorite" : "";
-      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${this.remoteAgentSelected ? `${qLabel}    ` : ""}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "o: diff    m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${markHint}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -763,12 +763,15 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
  * - the `@` jump: it lists only local rows (handleFuzzyAgent keeps only local
  *   kinds), so it is the quick way back from a remote row;
  * - help `?`, the command palette `/` (whose commands pass this same guard) and Peers `I`;
- * - quit (Ctrl+C, which the TUI's input listener handles before the dashboard).
+ * - quit (Ctrl+C, which the TUI's input listener handles before the dashboard);
+ * - on a remote agent, `q` for its questions (refuseOnRemoteRow then allows
+ *   Enter, Esc and `g` while they are shown).
  *
  * The footer's remote hints (StatusBarComponent.remoteSelected) list these keys.
  */
 export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
   if (data === ".") return row?.kind === "remote-agent" || row?.kind === "remote-repo-header" || row?.kind === "remote-coordinator";
+  if (data === "q") return row?.kind === "remote-agent";
   if (data === "o" || data === "m" || data === "x" || data === "R") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
   switch (data) {
     case "j": case "k": case "J": case "K":
@@ -854,6 +857,15 @@ export class DashboardComponent implements Component {
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
   private pairedPeers: PeerServiceView["peers"] = [];
+  /** The watcher's questions from its last update, and their agents' keys (the red names). */
+  private localQuestions: PendingQuestion[] = [];
+  private localQuestionKeys = new Set<string>();
+  /**
+   * `<peer id>\0<question id>` of each peer question acknowledged from here: it
+   * leaves the list at once, not at the next poll, and is forgotten once no
+   * snapshot lists it.
+   */
+  private readonly acknowledgedPeerQuestions = new Set<string>();
   private readonly remotePane = new RemotePane(
     (peerId, target, lines) => this.peerService!.fetchPane(peerId, target, lines),
     () => this.tui?.requestRender(),
@@ -879,7 +891,7 @@ export class DashboardComponent implements Component {
         target: row.kind === "remote-agent"
           ? { op: "agent-pane", repo: row.remote.repoRegistryName, id: row.remote.id }
           : { op: "coordinator-pane" },
-      }, this.peerService.remoteStartDenial, visible);
+      }, this.peerService.remoteStartDenial, visible && !this.remoteQuestionsVisible);
     } else {
       this.remotePane.select(null);
     }
@@ -1966,7 +1978,7 @@ export class DashboardComponent implements Component {
     if (samePeers && links.length === this.peerLinks.length && links.every((link, i) => {
       const old = this.peerLinks[i]!;
       return link.id === old.id && link.name === old.name && link.repos === old.repos && link.agents === old.agents
-        && peerLinkStatus(link) === peerLinkStatus(old) && link.coordinator?.state === old.coordinator?.state
+        && link.questions === old.questions && peerLinkStatus(link) === peerLinkStatus(old) && link.coordinator?.state === old.coordinator?.state
         && link.connectedAt === old.connectedAt && (link.connected || link.lastOkAt === old.lastOkAt);
     })) return false;
     this.peerLinks = links;
@@ -1976,15 +1988,69 @@ export class DashboardComponent implements Component {
     const before = treeVisible ? this.agentTree.render(width) : [];
     const previous = this.remoteSelection;
     this.agentTree.setPeerLinks(links, peers);
+    const questionsChanged = this.syncQuestions();
     const selected = this.remoteSelection;
     // The connector can change when another root appears. Only the tree displays it.
     const details = (entry: RemoteEntry | null) => entry?.kind === "remote-agent"
       ? [entry.peerName, entry.remote, entry.linkStatus] : entry;
     const selectionChanged = JSON.stringify(details(previous)) !== JSON.stringify(details(selected));
     if (selectionChanged) this.syncSelectedAgent();
-    if (selectionChanged || !treeVisible) return selectionChanged;
+    else if (questionsChanged) this.rightPane.updateContent();
+    if (selectionChanged || questionsChanged || !treeVisible) return selectionChanged || questionsChanged;
     const after = this.agentTree.render(width);
     return before.length !== after.length || before.some((line, i) => line !== after[i]);
+  }
+
+  /**
+   * The QUESTIONS list (SPEC §20.5): the local questions, then each connected
+   * peer's in peers.json order, only for an agent with a remote row and not
+   * acknowledged from here. Also the footer count and the red names. Returns
+   * whether the list changed.
+   */
+  private syncQuestions(): boolean {
+    const listed = new Set<string>();
+    const peerQuestions: PendingQuestion[] = [];
+    const askers = new Set(this.localQuestionKeys);
+    for (const link of this.peerLinks) {
+      for (const q of link.questions ?? []) {
+        const key = `${link.id}\0${q.id}`;
+        listed.add(key);
+        const row = link.connected && !this.acknowledgedPeerQuestions.has(key)
+          ? this.agentTree.remoteAgentRow(link.id, q.repoRegistryName, q.agent) : null;
+        if (!row) continue;
+        peerQuestions.push({
+          id: q.id, agent: q.agent, question: q.question, timestamp: q.timestamp, status: "pending",
+          repoPath: row.remote.repoPath, peer: { id: link.id, name: link.name, repo: q.repoRegistryName },
+        });
+        askers.add(peerEntryKey(row));
+      }
+    }
+    for (const key of this.acknowledgedPeerQuestions) if (!listed.has(key)) this.acknowledgedPeerQuestions.delete(key);
+    const questions = [...this.localQuestions, ...peerQuestions];
+    const changed = JSON.stringify(questions) !== JSON.stringify(this.rightPane.questions);
+    this.rightPane.questions = questions;
+    this.statusBar.pendingQuestions = questions.length;
+    this.agentTree.questionAgentKeys = askers;
+    const filtered = this.rightPane.filteredQuestions;
+    if (this.rightPane.questionsSelectedIndex >= filtered.length) {
+      this.rightPane.questionsSelectedIndex = Math.max(0, filtered.length - 1);
+    }
+    return changed;
+  }
+
+  /** A remote agent's QUESTIONS replace its split view with the normal full-width pane (SPEC §20.5). */
+  private get remoteQuestionsVisible(): boolean {
+    return this.remoteSelection?.kind === "remote-agent" && this.rightPane.mode === "QUESTIONS";
+  }
+
+  /** Acknowledge a peer question on the machine that owns it. It leaves the list and the red name at once. */
+  async acknowledgePeerQuestion(peer: NonNullable<PendingQuestion["peer"]>, id: string): Promise<void> {
+    if (!this.peerService) throw new Error("Remote questions are unavailable");
+    await this.peerService.acknowledgeRemoteQuestion(peer.id, peer.repo, id);
+    this.acknowledgedPeerQuestions.add(`${peer.id}\0${id}`);
+    this.syncQuestions();
+    this.rightPane.updateContent();
+    this.tui?.requestRender();
   }
 
   private get teamChannelVisible(): boolean {
@@ -2126,6 +2192,8 @@ export class DashboardComponent implements Component {
       return true;
     }
     if (key === "s" && remoteMessageTarget(remote)) return false;
+    // A remote agent's QUESTIONS: answer, acknowledge, go to the agent.
+    if (this.remoteQuestionsVisible && (key === "g" || matchesKey(key, Key.enter) || matchesKey(key, Key.escape))) return false;
     if (remote === null || isRemoteAllowedKey(key, remote)) return false;
     if (remote.kind !== "remote-repo-header" && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
@@ -2380,11 +2448,9 @@ export class DashboardComponent implements Component {
       this.hasAutoSelectedFirstAgent = true;
     }
     this.systemDashboard.flatList = flatList;
-    this.rightPane.questions = questions;
     this.rightPane.allAgents = flatList;
     this.rightPane.favoriteAgentIds = this.agentTree.favoriteAgentIds;
     this.rightPane.orphanedTmuxSessions = orphanedTmuxSessions;
-    this.statusBar.pendingQuestions = questions.length;
     this.statusBar.errorCount = this.rightPane.errors.length + orphanedTmuxSessions.length;
 
     // §17.2: rebuild the Teams tree's flat list from the already-state-detected
@@ -2425,12 +2491,10 @@ export class DashboardComponent implements Component {
     for (const agent of agents) {
       if (askers.has(`${agent.repoPath}\0${agent.id}`)) qKeys.add(this.agentTree.agentKey(agent));
     }
-    this.agentTree.questionAgentKeys = qKeys;
-
-    const filtered = this.rightPane.filteredQuestions;
-    if (this.rightPane.questionsSelectedIndex >= filtered.length) {
-      this.rightPane.questionsSelectedIndex = Math.max(0, filtered.length - 1);
-    }
+    this.localQuestions = questions;
+    this.localQuestionKeys = qKeys;
+    // Peer questions follow the local ones (SPEC §20.5).
+    this.syncQuestions();
 
     // Auto-select newly created agent if pending
     if (this.pendingSelectNewestInRepo) {
@@ -2550,7 +2614,7 @@ export class DashboardComponent implements Component {
     }
 
     this.rightPane.agent = selected;
-    this.rightPane.remoteAgent = remote?.kind === "remote-agent";
+    this.rightPane.remoteAgent = remote?.kind === "remote-agent" ? remote : null;
     this.rightPane.selectedRepo = repo;
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
@@ -2755,8 +2819,8 @@ export class DashboardComponent implements Component {
     }
 
     // On a remote row the right pane is a placeholder, so j/k must move the
-    // tree, never a hidden QUESTIONS cursor.
-    if (remote) this.setQuestionsFocused(false);
+    // tree, never a hidden QUESTIONS cursor. A remote agent's QUESTIONS are shown.
+    if (remote && !this.remoteQuestionsVisible) this.setQuestionsFocused(false);
 
     this.rightPane.updateContent();
     triggerAsyncLoadIfNeeded(this);
@@ -3846,9 +3910,10 @@ export class DashboardComponent implements Component {
     // A selected remote row (SPEC §20.5) draws its peer content in the
     // split layout, whatever the right-pane mode, except TREE: that mode draws
     // the tree itself in the main area (the sidebar hides its own), and it must
-    // stay on screen while j/k move through the tree.
+    // stay on screen while j/k move through the tree. A remote agent's
+    // QUESTIONS use the normal full-width pane too.
     const remote = this.remoteSelection;
-    const remoteView = remote !== null && !isTreeMode;
+    const remoteView = remote !== null && !isTreeMode && !this.remoteQuestionsVisible;
     const remoteCoordinator = remoteView && remote.kind === "remote-coordinator" ? remote : null;
     const isFullWidth = remoteCoordinator !== null || (!remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode)));
 

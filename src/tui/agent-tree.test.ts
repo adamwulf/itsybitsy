@@ -1785,6 +1785,25 @@ describe("fully qualified row keys", () => {
     expect(coloredRun(localLine, "running")).toBe("running");
   });
 
+  test("a remote row in questionAgentKeys renders its name red, and selectAgentByKey selects it", () => {
+    const { tree } = twoRepos();
+    const remote = (id: string) => ({ id, nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/r/alpha", state: "waiting", agentType: "worker", manager: null });
+    tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
+      repos: [{ registryName: "alpha", displayName: "alpha" }], agents: [remote("asker"), remote("quiet")], questions: [] }]);
+    tree.questionAgentKeys = new Set(["Laptop/alpha/asker"]);
+    tree.maxHeight = 100;
+    const line = (id: string) => tree.render(60).find((row) => stripAnsi(row).includes(id))!;
+    expect(line("asker")).toContain(`${RED}asker${RESET}`);
+    expect(line("quiet")).not.toContain(RED);
+    expect(tree.remoteAgentRow("a1".repeat(32), "alpha", "asker")).toMatchObject({ kind: "remote-agent", peerName: "Laptop" });
+    expect(tree.remoteAgentRow("a1".repeat(32), "alpha", "nobody")).toBeNull();
+    expect(tree.selectAgentByKey("Laptop/alpha/asker")).toBe(true);
+    expect(tree.selection?.kind === "remote" && peerEntryKey(tree.selection.entry)).toBe("Laptop/alpha/asker");
+    expect(line("asker").startsWith(REVERSE)).toBe(true);
+    expect(tree.selectAgentByKey("Laptop/alpha/nobody")).toBe(false);
+    expect(tree.selection?.kind === "remote" && peerEntryKey(tree.selection.entry)).toBe("Laptop/alpha/asker");
+  });
+
   test("a vanished local row clamps within the local rows (local keys start with this machine's name)", () => {
     const { tree, betaDup } = twoRepos();
     const remote = { id: "x", nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null };

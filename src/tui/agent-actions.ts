@@ -47,7 +47,7 @@ import { attachmentSettingKey, TRANSFER_SETTING_BOUNDS } from "../peers/transfer
 import type { ConfigResult } from "../config";
 import { PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
-import { remoteTitle, type RemoteMessageEntry } from "./peer-repos";
+import { peerEntryKey, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 import { fullyQualifiedAgentId } from "./row-keys";
 import type { PaneMode, TailLogMode } from "./pane-manager";
 import { isTailLogMode } from "./pane-manager";
@@ -184,6 +184,8 @@ export interface ActionCtx {
   peerService: PeersDialogService | null;
   remoteSelection: RemoteEntry | null;
   runRemoteRowCommand(row: Extract<RemoteEntry, { kind: "remote-agent" }>, options: Pick<import("../peers/remote-lifecycle").RemoteLifecycleRequest, "action" | "checkOnly" | "keep">): Promise<string>;
+  /** Acknowledge a peer question on its machine (SPEC §20.5); it leaves the list at once. */
+  acknowledgePeerQuestion(peer: NonNullable<PendingQuestion["peer"]>, id: string): Promise<void>;
   agentTree: {
     selectedAgent: Agent | null;
     selectedRepoHeader: string | null;
@@ -194,8 +196,10 @@ export interface ActionCtx {
     /** This machine's name: the first segment of a local agent's fully qualified id (SPEC §17.1). */
     machineName: string;
     selectAgent(agent: Agent): boolean;
+    selectAgentByKey(key: string): boolean;
     selectByRepoPath(repoPath: string): boolean;
     selectSystemCoordinator(): boolean;
+    remoteAgentRow(peerId: string, repo: string, id: string): Extract<RemoteEntry, { kind: "remote-agent" }> | null;
   };
   /**
    * §17.3a / §17.3: handlers that need to gate on the FOCUSED PANEL (the
@@ -2024,14 +2028,65 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
 }
 
 /**
- * The agent that asked `q`: the tree's agent with the question's id in the
- * question's repo (an id is unique only per repo, SPEC §17.1), or null.
+ * The local agent that asked `q`: the tree's agent with the question's id in
+ * the question's repo (an id is unique only per repo, SPEC §17.1), or null. A
+ * peer's question has none, even when this machine has the same path and id.
  */
 function questionAgent(ctx: ActionCtx, q: PendingQuestion): Agent | null {
+  if (q.peer) return null;
   const entry = ctx.agentTree.flatList.find(
     (f) => f.kind === "agent" && f.agent.id === q.agent && f.agent.repoPath === q.repoPath,
   );
   return entry?.kind === "agent" ? entry.agent : null;
+}
+
+/**
+ * SPEC §20.5: answer a paired machine's question with the remote send
+ * (submitRemoteMessage: the caller gate, attachments, the pending-send entry,
+ * the notice), then acknowledge it on that machine. As for a local question
+ * the dialog is frozen while in flight, keeps the draft when the send fails
+ * and never resends an accepted answer, so a retry after a failed acknowledge
+ * only acknowledges. As for a remote send, Esc while the send waits cancels it.
+ */
+function answerPeerQuestion(ctx: ActionCtx, q: PendingQuestion, peer: NonNullable<PendingQuestion["peer"]>) {
+  const label = `${peer.name}/${q.agent}`;
+  const row = ctx.agentTree.remoteAgentRow(peer.id, peer.repo, q.agent);
+  if (!row) { ctx.setNotice(`Agent ${label} not found`, "error"); return; }
+  let answered = false;
+  const dialog: Extract<NonNullable<DialogState>, { type: "textarea" }> = {
+    type: "textarea",
+    prompt: `Answer ${label}'s question:`,
+    buffer: new TextBuffer(),
+    focusedButton: "text",
+    onSubmit: (answer: string) => {
+      if (dialog.inFlight) return;
+      const trimmed = answer.trim();
+      if (!trimmed) { ctx.closeDialog(); ctx.setNotice("Answer cancelled", "info"); return; }
+      dialog.inFlight = true;
+      void ctx.executeAndRefresh(async () => {
+        if (!answered) {
+          const controller = new AbortController();
+          dialog.onCancelInFlight = () => controller.abort(new Error("Send cancelled"));
+          if (!await ctx.submitRemoteMessage(row, trimmed, controller)) return;
+          answered = true;
+          dialog.onCancelInFlight = undefined;
+        }
+        try {
+          await ctx.acknowledgePeerQuestion(peer, q.id);
+        } catch (err) {
+          ctx.setNotice(`Answered ${label}, but acknowledge failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+          return;
+        }
+        ctx.closeDialog();
+        ctx.setNotice(`Answered ${label}`, "info");
+      }).finally(() => {
+        dialog.inFlight = false;
+        dialog.onCancelInFlight = undefined;
+        ctx.tui?.requestRender();
+      });
+    },
+  };
+  ctx.showDialog(dialog);
 }
 
 export function handleAnswerQuestion(ctx: ActionCtx) {
@@ -2039,6 +2094,7 @@ export function handleAnswerQuestion(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
+  if (q.peer) { answerPeerQuestion(ctx, q, q.peer); return; }
   const answerAgent = questionAgent(ctx, q);
   if (!answerAgent) { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   // The dialog is frozen while a send is in flight (no re-submit, no cancel) and
@@ -2096,6 +2152,19 @@ export function handleAcknowledgeQuestion(ctx: ActionCtx) {
   const idx = ctx.rightPane.questionsSelectedIndex;
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
+  const peer = q.peer;
+  if (peer) {
+    // On the machine that owns the question (SPEC §20.5).
+    ctx.executeAndRefresh(async () => {
+      try {
+        await ctx.acknowledgePeerQuestion(peer, q.id);
+        ctx.setNotice(`Acknowledged ${q.id}`, "info");
+      } catch (err) {
+        ctx.setNotice(`Acknowledge failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    });
+    return;
+  }
   const asker = questionAgent(ctx, q);
   if (!asker) { ctx.setNotice(`Agent ${q.agent} not found`, "error"); return; }
   ctx.executeAndRefresh(async () => {
@@ -2111,7 +2180,9 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
   if (idx < 0 || idx >= questions.length) return;
   const q = questions[idx]!;
   const asker = questionAgent(ctx, q);
-  if (asker && ctx.agentTree.selectAgent(asker)) {
+  // A peer's question goes to its remote agent row (SPEC §20.5).
+  const remote = q.peer && ctx.agentTree.remoteAgentRow(q.peer.id, q.peer.repo, q.agent);
+  if (remote ? ctx.agentTree.selectAgentByKey(peerEntryKey(remote)) : asker && ctx.agentTree.selectAgent(asker)) {
     // §17.1 Phase 2: jumping from the QUESTIONS pane to an agent is an
     // Agents-panel operation — make the Agents tree the active source and
     // ensure the sidebar shows it (parallel to the @-fuzzy jump). The
@@ -2123,7 +2194,7 @@ export function handleGoToQuestionAgent(ctx: ActionCtx) {
     ctx.jumpToMode("AGENT LOG");
     ctx.tui?.requestRender();
   } else {
-    ctx.setNotice(`Agent ${q.agent} not found in tree`, "error");
+    ctx.setNotice(`Agent ${q.peer ? `${q.peer.name}/${q.agent}` : q.agent} not found in tree`, "error");
   }
 }
 

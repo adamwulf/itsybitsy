@@ -6,7 +6,7 @@
 import type { Component } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { InputFieldComponent } from "./input-field";
-import type { Agent, FlatEntry, PendingQuestion, DenialEntry } from "../agents";
+import type { Agent, FlatEntry, PendingQuestion, DenialEntry, RemoteEntry } from "../agents";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings } from "../health-check";
 import { readAgentLog, readAgentFileWindow, statAgentLogSize, statAgentFileSize, readAgentPrompt, parseDenials, resolveAgentIcon } from "../agents";
@@ -186,8 +186,6 @@ export class RightPaneComponent implements Component {
   loadedProxyLogWindow: LoadedLogWindow | null = null;
   proxyLogLoading = false;
   promptContent: string[] | null = null;
-  /** A remote agent is selected (`agent` is null): the dashboard fills `promptContent` from the peer (SPEC §20.5). */
-  remoteAgent = false;
   denialsContent: DenialEntry[] | null = null;
   denialsLoading = false;
   loadedDenialsLog: { agentKey: string; fileSize: number } | null = null;
@@ -247,13 +245,26 @@ export class RightPaneComponent implements Component {
   private content: string[] = [];
 
   /**
+   * The selected remote agent row (SPEC §20.5); `agent` is then null. The
+   * dashboard fills `promptContent` from the peer, and QUESTIONS lists its questions.
+   */
+  remoteAgent: Extract<RemoteEntry, { kind: "remote-agent" }> | null = null;
+
+  /**
    * Return questions filtered by the currently selected agent (by repo and id:
-   * the same id in another repo is another agent). If no agent, return all.
+   * the same id in another repo is another agent). A local agent never gets a
+   * peer's question, even with the same path and id; a remote agent gets its
+   * own peer's. If no agent, return all.
    */
   get filteredQuestions(): PendingQuestion[] {
     const agent = this.agent;
+    const remote = this.remoteAgent;
+    if (remote) {
+      return this.questions.filter((q) => q.peer?.id === remote.peerId
+        && q.peer.repo === remote.remote.repoRegistryName && q.agent === remote.remote.id);
+    }
     if (!agent) return this.questions;
-    return this.questions.filter((q) => q.agent === agent.id && q.repoPath === agent.repoPath);
+    return this.questions.filter((q) => !q.peer && q.agent === agent.id && q.repoPath === agent.repoPath);
   }
 
   /**
@@ -487,9 +498,12 @@ export class RightPaneComponent implements Component {
       case "QUESTIONS": {
         const filtered = this.filteredQuestions;
         if (filtered.length === 0) {
-          const label = this.agent
-            ? `${DIM}No pending questions for ${this.agent.id}${RESET}`
-            : `${DIM}No pending questions${RESET}`;
+          const remote = this.remoteAgent;
+          const label = remote
+            ? `${DIM}No pending questions for ${remote.peerName}/${remote.remote.id}${RESET}`
+            : this.agent
+              ? `${DIM}No pending questions for ${this.agent.id}${RESET}`
+              : `${DIM}No pending questions${RESET}`;
           this.content = [label];
         } else {
           this.content = [];
@@ -499,9 +513,11 @@ export class RightPaneComponent implements Component {
             const showHighlight = isSel && this.questionsFocused;
             const sel = isSel ? (showHighlight ? `${REVERSE}> ` : `${GREEN}> `) : "  ";
             const selEnd = isSel ? RESET : "";
+            // A peer's question names its machine too (SPEC §20.5).
+            const asker = q.peer ? `${q.peer.name}/${q.agent}` : q.agent;
             const prefix = showHighlight
-              ? `${sel}${BOLD}${q.agent}:${RESET}${REVERSE} `
-              : `${sel}${BOLD}${q.agent}:${RESET} `;
+              ? `${sel}${BOLD}${asker}:${RESET}${REVERSE} `
+              : `${sel}${BOLD}${asker}:${RESET} `;
             const indent = "    ";
             const selStart = showHighlight ? REVERSE : (isSel ? GREEN : "");
             const fullText = `${prefix}${q.question}${selEnd}`;

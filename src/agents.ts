@@ -208,8 +208,15 @@ export interface PendingQuestion {
    * The repo whose user-questions.json the question was read from. Set by the
    * reader (readPendingQuestions / readAllQuestions), never stored in the file.
    * With `agent` it names the asking agent: an agent id is unique only per repo.
+   * On a peer question, the peer agent's path, which can also exist here.
    */
   repoPath: string;
+  /**
+   * Set only on a question from a paired machine (SPEC §20.5): the peer's id,
+   * its paired name and the repo's registry name there. Local-only paths,
+   * which match on `repoPath` and `agent`, skip such a question.
+   */
+  peer?: { id: string; name: string; repo: string };
 }
 
 /** Grace period for newly created agents before treating missing tmux as "stopped" (ms) */

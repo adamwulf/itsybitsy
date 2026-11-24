@@ -40,6 +40,7 @@ export type CliActionMode = "record" | "real";
 export interface CliAncestry {
   systemPanePid?: number;
   tmuxSession?: string;
+  paneStartCommand?: string;
   denyProcessProbe?: boolean;
   terminal?: "human" | "tmux" | "agent";
   sendTTY?: "stdout" | "stderr" | "controlling";
@@ -115,9 +116,9 @@ function installExternalGuards(config: CliDriverConfig, block: (violation: CliVi
     spawnSync: (...spawnArgs: unknown[]) => {
       const argv = argvOf(spawnArgs[0]);
       if (argv.length === 6 && argv[0] === "tmux" && argv[1] === "display-message" && argv[2] === "-p" &&
-          argv[3] === "-t" && argv[4] === process.env.TMUX_PANE && argv[5] === "#{session_name}") {
+          argv[3] === "-t" && argv[4] === process.env.TMUX_PANE && argv[5] === "#{session_name}\t#{pane_start_command}") {
         const name = config.ancestry?.tmuxSession;
-        return { exitCode: name ? 0 : 1, stdout: Buffer.from(name ?? "") };
+        return { exitCode: name ? 0 : 1, stdout: Buffer.from(name ? name + "\t" + (config.ancestry?.paneStartCommand ?? "/repo/.itsybitsy/agents/caller/start.sh") + "\n" : "") };
       }
       if (!allowed(argv)) block({ kind: "process", detail: { argv } });
       return realSpawnSync(...spawnArgs);

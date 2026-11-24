@@ -2267,7 +2267,7 @@ export async function resumeAgent(
       const qMetaJson = shellQuote(join(agentDir, "meta.json"));
       const qAgentLog = shellQuote(join(agentDir, "agent.log"));
       const qResumeStderrLog = shellQuote(join(agentDir, "claude.stderr.log"));
-      const resumeContent = `#!/bin/bash
+      const resumeContent = `${runtimeNames.AGENT_LAUNCH_HEADER}
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 # Suppress the "How is Claude doing?" feedback survey for spawned agents
@@ -2378,7 +2378,7 @@ ${qAbsExitScript}
       agent.meta.agentType === REPO_COORDINATOR_TYPE,
     );
     const tmuxResult = await nukeResumeSpawnCtx.run([
-      "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-e", `IB_AGENT_DIR=${realpathSync(agentDir)}`, "-c", workPath, shellQuote(resumeScript),
+      "tmux", "new-session", "-d", "-x", String(resumeTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(resumeScript),
     ]);
     if (tmuxResult.exitCode !== 0) {
       await logAgent(agentDir, `[resume] tmux new-session failed: exit=${tmuxResult.exitCode} stderr=${tmuxResult.stderr}`);
@@ -7908,7 +7908,7 @@ echo ""
     const claudeLaunchCommand = usesClaudePidBootstrap
       ? buildClaudePidBootstrapCommand(id, claudeCommand, trustedClaudeIbCommand!)
       : claudeCommand;
-    startContent = `#!/bin/bash
+    startContent = `${runtimeNames.AGENT_LAUNCH_HEADER}
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 # Suppress the "How is Claude doing?" feedback survey for spawned agents
@@ -8028,7 +8028,7 @@ ${qStartExitScript}
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session starting: -s ${tmuxSession} -x ${newTmuxWidth}`);
   const tmuxResult = await timed("new-agent", "tmux-spawn", () =>
     newAgentSpawnCtx.run([
-      "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-e", `IB_AGENT_DIR=${realpathSync(agentDir)}`, "-c", workPath, shellQuote(absStartScript),
+      "tmux", "new-session", "-d", "-x", String(newTmuxWidth), "-s", tmuxSession, "-c", workPath, shellQuote(absStartScript),
     ])
   );
   await logSpawn(agentDir, spawnerAgentDir, id, `tmux new-session -s ${tmuxSession} -x ${newTmuxWidth} → exit=${tmuxResult.exitCode}${tmuxResult.exitCode !== 0 && tmuxResult.stderr ? ` stderr="${tmuxResult.stderr.trim()}"` : ""}`);

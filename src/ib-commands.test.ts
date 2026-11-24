@@ -4414,7 +4414,8 @@ describe("resumeAgent (native)", () => {
     const newSessionCall = spawnCalls.find(c => c[0] === "tmux" && c[1] === "new-session");
     expect(newSessionCall).toBeDefined();
     expect(newSessionCall!.some(arg => arg.includes("resume.sh"))).toBe(true);
-    expect(newSessionCall).toContain(`IB_AGENT_DIR=${realpathSync(agentDir)}`);
+    expect(newSessionCall!.join(" ")).not.toContain("IB_AGENT_DIR");
+    expect(resumeScript).toContain("export IB_AGENT_DIR=");
 
     // dispatcher precheck must have run (3 events) — calls go through
     // dispatcherDryRunSpawnCtx, NOT the resume spawn runner, so we read from
@@ -10770,7 +10771,8 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     const tmuxNewSession = spawnCalls.find(c => c.includes("new-session"));
     expect(tmuxNewSession).toBeDefined();
     expect(tmuxNewSession).toContain("-d");
-    expect(tmuxNewSession).toContain(`IB_AGENT_DIR=${realpathSync(join(agentsDir, "test-tmux"))}`);
+    expect(tmuxNewSession!.join(" ")).not.toContain("IB_AGENT_DIR");
+    expect(await Bun.file(join(agentsDir, "test-tmux", "start.sh")).text()).toContain("export IB_AGENT_DIR=");
     expect(tmuxNewSession).toContain("-x");
     // Width comes from saved layout.json (or DEFAULT_TMUX_WIDTH if none)
     const xIndex = tmuxNewSession!.indexOf("-x");

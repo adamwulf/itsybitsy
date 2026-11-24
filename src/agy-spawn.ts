@@ -201,7 +201,7 @@ export function buildAgyStartContent(input: BuildAgyStartContentInput): string {
   const launch =
     `agy${nativeApprovalOverrides}${modelAndEffort} --log-file ${qAgyLog} -i "$(cat ${qAbsPromptFile})"`;
 
-  return `#!/bin/bash
+  return `${runtimeNames.AGENT_LAUNCH_HEADER}
 # Clear Claude Code nesting detection so agents can start their own agy process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
@@ -364,7 +364,7 @@ export function buildAgyResumeContent(input: BuildAgyResumeContentInput): string
   const launch =
     `agy${nativeApprovalOverrides}${modelAndEffort} --log-file ${qAgyLog} --conversation ${qConversation}`;
 
-  return `#!/bin/bash
+  return `${runtimeNames.AGENT_LAUNCH_HEADER}
 # Clear Claude Code nesting detection so agents can start their own agy process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 

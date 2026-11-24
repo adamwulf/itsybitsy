@@ -10,6 +10,9 @@ export const STATUS_TAG = "itsybitsy-status";
 export const AGY_HOOK_KEY = "itsybitsy";
 export const AGY_RULE_FILE = ".agents/rules/itsybitsy-agent.md";
 
+// tmux invokes start.sh and resume.sh by absolute path. Export only in that script's process tree.
+export const AGENT_LAUNCH_HEADER = '#!/bin/bash\nexport IB_AGENT_DIR="$(cd -- "${0%/*}" && pwd -P)"';
+
 export const runtimeDir = (repo: string): string => join(repo, RUNTIME_DIR_NAME);
 export const agentsDir = (repo: string): string => join(runtimeDir(repo), "agents");
 export const agentDir = (repo: string, id: string): string => join(agentsDir(repo), id);

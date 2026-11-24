@@ -23,13 +23,16 @@ export async function localHumanInCheckout(cwd: string, caller: ResolvedCallerCo
   const pane = process.env.TMUX_PANE;
   if (!pane || !/^%\d+$/.test(pane)) return false;
   try {
-    const probe = Bun.spawnSync(["tmux", "display-message", "-p", "-t", pane, "#{session_name}"], {
+    const probe = Bun.spawnSync(["tmux", "display-message", "-p", "-t", pane, "#{session_name}\t#{pane_start_command}"], {
       stdout: "pipe", stderr: "ignore", timeout: 2000,
     });
-    const session = probe.stdout.toString().trim();
-    return probe.exitCode === 0 && session !== "" && session !== caller.meta.tmux_session &&
-      session !== IB_COORDINATOR_SESSION && !isAgentTmuxSession(session) &&
-      await remoteCliCaller.isHuman(undefined, "local-send");
+    const [session, command] = probe.stdout.toString().replace(/\n$/, "").split("\t");
+    if (probe.exitCode !== 0 || !session || command === undefined || session === IB_COORDINATOR_SESSION) return false;
+    // A managed session can also contain the operator's shell in another window.
+    // ib launches its own pane with the absolute start.sh or resume.sh command.
+    const managed = session === caller.meta.tmux_session || isAgentTmuxSession(session);
+    if (managed && /\.itsybitsy\/agents\/[^/]+\/(?:start|resume)\.sh\b/.test(command)) return false;
+    return remoteCliCaller.isHuman(undefined, "local-send");
   } catch { return false; }
 }
 

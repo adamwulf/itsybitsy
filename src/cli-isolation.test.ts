@@ -600,6 +600,16 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(result.actions).toEqual([]);
     });
 
+    test("a human shell in a sibling window of the agent session can use --from", async () => {
+      const result = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], {
+        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%2" },
+        ancestry: { ...ancestry, terminal: "tmux", tmuxSession: "ib-fixture-agent-caller", paneStartCommand: "" },
+        actions: { sendMessage: "record" },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+    });
+
     test.each(["ib-fixture-agent-caller", "itsybitsy-deadbeef-agent-caller"])("a managed tmux session %s retains agent attribution", async tmuxSession => {
       const deny = await cli.run(["log", "--id", peer.id, "note"], {
         cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" }, ancestry: { ...ancestry, terminal: "tmux", tmuxSession },

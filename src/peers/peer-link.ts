@@ -17,7 +17,7 @@ import { trackSendCleanup } from "../send-cleanup";
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
  *
- * SPEC §20.4 defines the wire shapes for agents, coordinator-pane, new-agent and send.
+ * SPEC §20.4 defines the wire shapes for agents, pane reads, new-agent and send.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -103,7 +103,13 @@ export interface PeerSnapshot {
   agents: RemoteAgent[];
 }
 
-export interface CoordinatorPane {
+export type PeerPaneTarget = { op: "coordinator-pane" } | { op: "agent-pane"; repo: string; id: string };
+
+export function clampPaneLines(lines: number): number {
+  return Math.min(5000, Math.max(200, Math.trunc(lines)));
+}
+
+export interface PeerPane {
   state: string;
   text: string;
 }
@@ -113,9 +119,9 @@ function sanitizePane(text: string): string {
 }
 
 /** Budget the encoded JSON (including escaped newlines, link escapes and UTF-8). */
-function encodeCoordinatorPane(pane: CoordinatorPane): Uint8Array {
+function encodePane(op: PeerPaneTarget["op"], pane: PeerPane): Uint8Array {
   const state = cleanRemoteText(pane.state);
-  const encode = (text: string) => encodeJson({ op: "coordinator-pane", state, text });
+  const encode = (text: string) => encodeJson({ op, state, text });
   const text = sanitizePane(pane.text);
   const reply = encode(text);
   if (reply.length <= PEER_MAX_REPLY_BYTES) return reply;
@@ -366,15 +372,15 @@ export function requestAgents(conn: PairConnection, setTimer = realTimer, timeou
   return clientExchange(conn, encodePeerRequest("agents"), decodeAgentsReply, { setTimer, timeout: [15_000, timeoutError] });
 }
 
-export function requestCoordinatorPane(conn: PairConnection, signal?: AbortSignal, setTimer = realTimer): Promise<CoordinatorPane> {
-  return clientExchange(conn, encodePeerRequest("coordinator-pane"), bytes => {
+export function requestPane(conn: PairConnection, target: PeerPaneTarget, lines: number, setTimer = realTimer): Promise<PeerPane> {
+  return clientExchange(conn, encodeJson({ ...target, lines: clampPaneLines(lines) }), bytes => {
     const reply = decodeObject(bytes, "reply");
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
-    if (reply.op !== "coordinator-pane" || typeof reply.state !== "string" || typeof reply.text !== "string") {
-      throw new PeerProtocolError("malformed coordinator-pane reply");
+    if (reply.op !== target.op || typeof reply.state !== "string" || typeof reply.text !== "string") {
+      throw new PeerProtocolError(`malformed ${target.op} reply`);
     }
     return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
-  }, { signal, setTimer, timeout: [15_000, new Error("Coordinator pane request timed out")] });
+  }, { setTimer, timeout: [15_000, new Error(target.op === "agent-pane" ? "Agent pane request timed out" : "Coordinator pane request timed out")] });
 }
 
 export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt }: RemoteNewAgentRequest, setTimer: Timer): Promise<string> {
@@ -531,7 +537,8 @@ export interface PeerResponderDeps {
   /** The agent list to send: built from the watcher's last fully detected snapshot, with no IO. */
   snapshot(): PeerSnapshot;
   receiveMessage?(header: SendHeader, peerId: string, readPeerName: () => Promise<string | null>, body?: Pick<PairStream, "read">, options?: ReceiptOptions): Promise<void>;
-  captureCoordinator?(): Promise<CoordinatorPane | null>;
+  captureCoordinator?(lines: number): Promise<PeerPane | null>;
+  captureAgent?(repo: string, id: string, lines: number): Promise<PeerPane>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
@@ -738,7 +745,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   }
 
   let reply: Uint8Array;
-  let capturedPane = false;
+  let capturedCoordinator = false;
   if (request.op === "agents") {
     try {
       reply = encodeAgentsReply(deps.snapshot());
@@ -746,12 +753,22 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       deps.log(`peer link: could not build the agent list for ${from}: ${errorDetail(err)}`);
       reply = encodeErrorReply("internal error");
     }
-  } else if (request.op === "coordinator-pane") {
+  } else if (request.op === "coordinator-pane" || request.op === "agent-pane") {
     try {
-      const pane = await deps.captureCoordinator?.();
-      if (!pane) throw new Error("No system coordinator");
-      reply = encodeCoordinatorPane(pane);
-      capturedPane = true;
+      const count = request.lines === undefined && request.op === "coordinator-pane" ? 200 : request.lines;
+      if (typeof count !== "number" || !Number.isInteger(count)) throw new Error("Expected an integer line count");
+      const lines = clampPaneLines(count);
+      let pane;
+      if (request.op === "agent-pane") {
+        if (typeof request.repo !== "string" || typeof request.id !== "string") throw new Error("Expected repo and agent id");
+        pane = await deps.captureAgent?.(request.repo, request.id, lines);
+        if (!pane) throw new Error("Agent pane unavailable");
+      } else {
+        pane = await deps.captureCoordinator?.(lines);
+        if (!pane) throw new Error("No system coordinator");
+      }
+      reply = encodePane(request.op, pane);
+      capturedCoordinator = request.op === "coordinator-pane";
     } catch (err) {
       reply = encodeErrorReply(cleanRemoteText(errorDetail(err)));
     }
@@ -774,7 +791,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);
   }
   const delivered = await sendReply(conn, stream, deps, reply);
-  if (delivered && capturedPane && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
+  if (delivered && capturedCoordinator && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
     deps.paneReaders.add(conn.remoteId);
     deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
   }

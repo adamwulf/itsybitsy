@@ -20,8 +20,9 @@ import { listeningOrThrow } from "./test-pair-transport";
 import { generatePairCode } from "./pair-code";
 import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer-link";
 import type { RemoteSpawnDeps } from "./new-agent";
+import { captureAgentPane } from "./agent-pane";
 import { createMessageReceiver } from "./receive-message";
-import { spawnCtx as paneProbe } from "../tmux-poller";
+import { captureLiveDisplayPane, spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
 import { setSendSpawnRunner, resetSendSpawnRunner } from "../ib-commands";
 import { makeSpawnResult } from "../test-utils";
@@ -91,6 +92,7 @@ function makeNetwork(iroh: Iroh) {
       receiveMessage: (header, peerId, _peerName, body, options) => inHome(home, () =>
         receive(header, peerId, async () => (await readPeers()).find(p => p.id === peerId)?.name ?? null, body, options)),
 
+      captureAgent: (repo, id, lines) => captureAgentPane(agents, repo, id, lines),
       captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
@@ -248,8 +250,39 @@ test("reads the paired machine's system coordinator over a real loopback connect
   await pairBoth(a, b);
   await bootPair(a, b);
   await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
-  expect(await a.service.fetchCoordinatorPane(b.id)).toEqual({ state: "running", text: "b coordinator" });
+  expect(await a.service.fetchPane(b.id, { op: "coordinator-pane" }, 200)).toEqual({ state: "running", text: "b coordinator" });
   expect(b.logs.some(line => line.includes("read the system coordinator pane"))).toBe(true);
+});
+
+test.skipIf(!Bun.which("tmux"))("reads a registered agent's tmux history over loopback", async () => {
+  const net = makeNetwork(await loadIroh());
+  const target = { op: "agent-pane", repo: "app", id: "worker" } as const;
+  const a = await net.makeSide("a", [localAgent("worker", { tmux_session: "a-worker" })]);
+  const b = await net.makeSide("b", [localAgent("worker", { tmux_session: "b-worker" })]);
+  const dir = await mkdtemp("/tmp/ib-agent-pane-");
+  paneProbe.set((cmd, opts) => {
+    const proc = Bun.spawn(["tmux", "-f", "/dev/null", "-S", join(dir, "sock"), ...cmd.slice(1)], opts);
+    return { stdout: proc.stdout, stderr: proc.stderr, exited: proc.exited, kill: () => proc.kill("SIGKILL") };
+  });
+  try {
+    const session = await paneProbe.run(["tmux", "new-session", "-d", "-s", "b-worker",
+      `awk 'BEGIN { for (i=1; i<=600; i++) print "history-", i }'; exec sleep 60`]);
+    expect(session.exitCode).toBe(0);
+    await waitFor(async () => (await captureLiveDisplayPane("b-worker", 650))?.includes("history- 600") === true);
+    await pairBoth(a, b);
+    await bootPair(a, b);
+    await waitFor(() => link(a)?.connected === true);
+    const latest = await a.service.fetchPane(b.id, target, 200);
+    expect(latest.text).toContain("history- 600");
+    expect(latest.text).not.toMatch(/history- 10\b/);
+    const history = await a.service.fetchPane(b.id, target, 650);
+    expect(history.state).toBe("running");
+    expect(history.text).toMatch(/history- 10\b/);
+  } finally {
+    await paneProbe.run(["tmux", "kill-server"]);
+    paneProbe.reset();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("agents send text and two files in both directions over real paired endpoints", async () => {
@@ -313,7 +346,7 @@ test("a refusal preserves the shared connection for the next exchange", async ()
   const file = { name: "one", size: 1, sha256: new Bun.CryptoHasher("sha256").update("a").digest("hex"), spellings: ["./one"] };
   await expect(a.service.sendRemoteMessage(b.id, { op: "send", id: crypto.randomUUID(), from: { kind: "user" },
     target: { kind: "agent", agent: "missing" }, message: "hello", files: [file] }, "handoff", { filesDir })).rejects.toThrow("not found");
-  expect(await a.service.fetchCoordinatorPane(b.id)).toMatchObject({ text: "b coordinator" });
+  expect(await a.service.fetchPane(b.id, { op: "coordinator-pane" }, 200)).toMatchObject({ text: "b coordinator" });
   expect(a.service["poller"].connectedConnection(b.id)).toBe(connection);
 });
 

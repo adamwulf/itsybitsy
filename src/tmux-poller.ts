@@ -81,12 +81,21 @@ function displayCaptureArgs(target: string, lines: number): string[] {
   return ["capture-pane", "-t", target, "-p", "-e", "-J", "-S", `-${lines}`, "-E", "-"];
 }
 
+/** Read the same exact session as the local dashboard. Check pane_dead in the
+ * same tmux command queue so a remain-on-exit pane is reported as unavailable. */
+export async function captureLiveDisplayPane(session: string, lines: number): Promise<string | null> {
+  const target = tmuxSessionTarget(session);
+  const result = await runCoordinatorCommand(["tmux", "display-message", "-p", "-t", target, "#{pane_dead}",
+    ";", ...displayCaptureArgs(target, lines)], 5_000, spawnCtx.runner, "Agent capture timed out");
+  return result.code === 0 && result.text.startsWith("0\n") ? result.text.slice(2) : null;
+}
+
 export const COORDINATOR_PANE_ID = "@ib-system-coordinator-pane-id";
 export const COORDINATOR_PANE_COMMAND = "@ib-system-coordinator-command";
 
 /** Capture the launch pane only while its recorded CLI is still in the foreground. */
 export async function captureMarkedCoordinatorPane(
-  session: string, machine: string, { timeoutMs = 5_000, log = logToWatchLog } = {},
+  session: string, machine: string, { timeoutMs = 5_000, lines = 200, log = logToWatchLog } = {},
 ): Promise<string | null> {
   const failed = (detail: unknown) => {
     log(`[coordinator] Peer pane capture failed: ${detail instanceof Error ? detail.message : detail}`);
@@ -107,7 +116,7 @@ export async function captureMarkedCoordinatorPane(
   const recordedCommand = `#{${COORDINATOR_PANE_COMMAND}}`;
   const matches = `#{==:#{pane_id}:#{pane_dead}:#{pane_current_command},#{${COORDINATOR_PANE_ID}}:0:${recordedCommand}}`;
   const capture = await run(["tmux", "if-shell", "-F", "-t", id,
-    `#{&&:#{!=:${recordedCommand},},${matches}}`, displayCaptureArgs(id, 200).join(" ")]);
+    `#{&&:#{!=:${recordedCommand},},${matches}}`, displayCaptureArgs(id, lines).join(" ")]);
   if (capture.code !== 0 && !/^can't find pane:/i.test(capture.error.trim())) {
     throw failed(capture.error.trim() || `capture-pane exited ${capture.code}`);
   }

@@ -13,14 +13,16 @@ import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
-import { makeAgent, waitFor } from "../test-utils";
+import { captureAgentPane } from "./agent-pane";
+import { spawnCtx as paneCapture } from "../tmux-poller";
+import { makeAgent, makeSpawnResult, waitFor } from "../test-utils";
 import { irohAddonLoaderCtx } from "./iroh";
 import {
   PEER_CLOSE,
   PEER_MAX_REPLY_BYTES,
   NEW_AGENT_MAX_REQUEST_BYTES,
   requestNewAgent,
-  requestCoordinatorPane,
+  requestPane,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
   PeerProtocolError,
@@ -67,7 +69,7 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { readerId?: string; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+function serve(options: { readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
   const readerId = options.readerId ?? ID_A;
   const link = createMemoryLink(readerId, ID_B);
   const peers = options.peers ?? new Set([readerId]);
@@ -79,6 +81,7 @@ function serve(options: { readerId?: string; captureCoordinator?: PeerResponderD
     setTimer: clock.setTimer,
     startAgent: options.startAgent,
     captureCoordinator: options.captureCoordinator,
+    captureAgent: options.captureAgent,
     paneReaders: options.paneReaders ?? new Set(),
     peerName: async (id) => {
       checks++;
@@ -536,11 +539,52 @@ describe("trusted new-agent responder", () => {
   });
 });
 
+describe("agent-pane", () => {
+  const target = { op: "agent-pane", repo: "App", id: "reader" } as const;
+
+  test("resolves the registered repo and exact id, then returns sanitized text and state", async () => {
+    const agent = fullAgent("reader", { tmux_session: "receiver-session" });
+    const other = { ...agent, repoRegistryName: "another", meta: { ...agent.meta, tmux_session: "other-session" } };
+    const capture = mock(() => makeSpawnResult(0, "0\n\x1b[31mready\x1b[0m"));
+    paneCapture.set(capture);
+    const side = serve({ captureAgent: (repo, id, lines) => captureAgentPane([other, agent], repo, id, lines) });
+    try {
+      expect(await requestPane(side.a, target, 701)).toEqual({ text: "ready", state: "running" });
+      expect(capture).toHaveBeenCalledWith(["tmux", "display-message", "-p", "-t", "=receiver-session:", "#{pane_dead}",
+        ";", "capture-pane", "-t", "=receiver-session:", "-p", "-e", "-J", "-S", "-701", "-E", "-"], expect.anything());
+      await expect(requestPane(side.a, { ...target, id: "missing" }, 200)).rejects.toThrow("Agent not found");
+      await expect(requestPane(side.a, { ...target, repo: "elsewhere" }, 200)).rejects.toThrow("Agent not found");
+      expect(capture).toHaveBeenCalledTimes(1);
+      capture.mockReturnValueOnce(makeSpawnResult(1, "", "can't find session"));
+      await expect(requestPane(side.a, target, 200)).rejects.toThrow("Agent session is unavailable");
+      capture.mockReturnValueOnce(makeSpawnResult(0, "1\ndead pane"));
+      await expect(requestPane(side.a, target, 200)).rejects.toThrow("Agent session is unavailable");
+    } finally {
+      paneCapture.reset();
+      side.a.close(0, "done");
+    }
+  });
+
+  test.each([[-1, 200], [813, 813], [5001, 5000]])("clamps both incoming pane requests at %i lines", async (lines, expected) => {
+    const pane = { state: "idle", text: "output" };
+    const captureAgent = mock(async (_repo: string, _id: string, _lines: number) => pane);
+    const captureCoordinator = mock(async (_lines: number) => pane);
+    const side = serve({ captureAgent, captureCoordinator });
+    try {
+      for (const requested of [target, { op: "coordinator-pane" }]) {
+        expect(decodeText(await rawRequest(side.a, encode({ ...requested, lines })))).toEqual({ op: requested.op, ...pane });
+      }
+      expect(captureAgent.mock.calls).toEqual([["App", "reader", expected]]);
+      expect(captureCoordinator.mock.calls).toEqual([[expected]]);
+    } finally { side.a.close(0, "done"); }
+  });
+});
+
 describe("coordinator-pane", () => {
   const text = "\x1b[31mred\x1b[0m\t\x1b]8;;file:/private\x07label\x1b]8;;\x07\x07\u009b\r\n\x1b]8;;https://example.com\x07site\x1b]8;;\x07";
   const pane = { state: "running", text };
   test("serves only its own sanitized capture and logs the first read across connections", async () => {
-    const captureCoordinator = mock(async () => pane);
+    const captureCoordinator = mock(async (_lines: number) => pane);
     const paneReaders = new Set<string>();
     const sides = [serve({ captureCoordinator, paneReaders }), serve({ captureCoordinator, paneReaders })];
     for (const side of sides) {
@@ -549,7 +593,7 @@ describe("coordinator-pane", () => {
       side.a.close(0, "done");
     }
     expect(sides.flatMap(side => side.logs).filter(line => line.includes("read the system coordinator pane"))).toHaveLength(1);
-    expect(captureCoordinator.mock.calls).toEqual([[], []]);
+    expect(captureCoordinator.mock.calls).toEqual([[200], [200]]);
   });
 
   test("audits each peer once after a successful finish, including a failed first delivery", async () => {
@@ -569,7 +613,7 @@ describe("coordinator-pane", () => {
       };
       return stream;
     });
-    const read = requestCoordinatorPane(failed.a);
+    const read = requestPane(failed.a, { op: "coordinator-pane" }, 200);
     await finishing.promise;
     expect(paneReaders.size).toBe(0);
     release.resolve();
@@ -578,7 +622,7 @@ describe("coordinator-pane", () => {
     const deliveries = [];
     for (const readerId of [ID_A, "cd".repeat(32), ID_A, "cd".repeat(32)]) {
       const side = serve({ ...options, readerId });
-      await requestCoordinatorPane(side.a);
+      await requestPane(side.a, { op: "coordinator-pane" }, 200);
       side.a.close(0, "done");
       await side.done;
       deliveries.push(...side.logs.filter(line => line.includes("read the system coordinator pane")));
@@ -589,7 +633,7 @@ describe("coordinator-pane", () => {
 
   test("returns an error when there is no coordinator", async () => {
     const side = serve({ captureCoordinator: async () => null });
-    await expect(requestCoordinatorPane(side.a)).rejects.toThrow("No system coordinator");
+    await expect(requestPane(side.a, { op: "coordinator-pane" }, 200)).rejects.toThrow("No system coordinator");
     expect(side.logs.join(" ")).not.toContain("read the system coordinator pane");
     side.a.close(0, "done");
   });
@@ -598,10 +642,10 @@ describe("coordinator-pane", () => {
     const pending = Promise.withResolvers<typeof pane>();
     const captureCoordinator = mock(() => pending.promise);
     const refused = serve({ peers: new Set(), captureCoordinator });
-    await expect(requestCoordinatorPane(refused.a)).rejects.toThrow();
+    await expect(requestPane(refused.a, { op: "coordinator-pane" }, 200)).rejects.toThrow();
     expect(captureCoordinator).not.toHaveBeenCalled();
     const side = serve({ captureCoordinator });
-    const read = requestCoordinatorPane(side.a);
+    const read = requestPane(side.a, { op: "coordinator-pane" }, 200);
     await waitFor(() => captureCoordinator.mock.calls.length === 1);
     side.peers.clear();
     if (outcome === "resolve") pending.resolve(pane);
@@ -613,7 +657,7 @@ describe("coordinator-pane", () => {
 
   test("dialer filters an untrusted raw reply before rendering", async () => {
     const { a, b } = createMemoryLink(ID_A, ID_B);
-    const read = requestCoordinatorPane(a);
+    const read = requestPane(a, { op: "coordinator-pane" }, 200);
     const stream = await b.acceptBi();
     await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
     const link = "\x1b]8;;https://example.org\x07site\x1b]8;;\x07";

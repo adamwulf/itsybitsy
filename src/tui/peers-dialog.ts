@@ -14,7 +14,7 @@
 import { matchesKey, Key, visibleWidth } from "@mariozechner/pi-tui";
 import { describePairFailure } from "../peers/pairing";
 import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peers/pair-code";
-import type { CoordinatorPane, RemoteNewAgentRequest } from "../peers/peer-link";
+import type { PeerPane, PeerPaneTarget, RemoteNewAgentRequest } from "../peers/peer-link";
 import { peerLinkStatus, type PeerLinkStatus } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
 import { peerNameProblem, shortPeerId, SHORT_ID_LENGTH } from "../peers/store";
@@ -31,7 +31,7 @@ export interface PeersDialogService {
   view(): PeerServiceView;
   cancelReceipt?(id: string): void;
   sendRemoteMessage: import("../peers/service").PeerService["sendRemoteMessage"];
-  fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane>;
+  fetchPane(peerId: string, target: PeerPaneTarget, lines: number): Promise<PeerPane>;
   startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;
   openDialog(): void;
   closeDialog(): void;

@@ -56,7 +56,7 @@ import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
 import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
-import { RemoteCoordinatorPane } from "./remote-coordinator-pane";
+import { RemotePane } from "./remote-pane";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
@@ -118,6 +118,7 @@ import {
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
+import { captureAgentPane } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { remoteDisplayName } from "./peer-repos";
@@ -433,18 +434,6 @@ function padToWidth(str: string, width: number): string {
 /** The right pane's text for a selected remote row, in every mode (SPEC §20.5). */
 export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 
-/** The center pane's text for a selected remote row (SPEC §20.5). */
-export function remoteCenterText(entry: RemoteEntry): string {
-  switch (entry.kind) {
-    case "remote-coordinator":
-      return `System coordinator on ${entry.peerName} (output pane is read-only)`;
-    case "remote-agent":
-      return `Remote agent on ${entry.peerName} (output pane is read-only)`;
-    case "remote-repo-header":
-      return `Remote repo on ${entry.peerName} (read-only)`;
-  }
-}
-
 /** The main-area title for a selected remote row: `<peer>/<agent or repo>`, or the peer. */
 function remoteMessageTarget(entry: RemoteEntry | null): SendTarget | undefined {
   if (entry?.kind === "remote-coordinator") return { kind: "system" };
@@ -463,17 +452,17 @@ function remoteTitle(entry: RemoteEntry): string {
 }
 
 /**
- * The main area for a selected remote row (SPEC §20.5): the center
- * placeholder and the right pane's "not available" placeholder, side by side
+ * The selected remote agent's capture (or a repo header's placeholder)
+ * and the right pane's "not available" placeholder, side by side
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
  */
-function renderRemotePanes(entry: RemoteEntry, mainWidth: number, leftPaneW: number, height: number): string[] {
+function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
   const placeholder = (text: string, width: number) =>
     padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), height);
-  const center = placeholder(remoteCenterText(entry), lw);
+  const center = entry.kind === "remote-repo-header" ? placeholder(`Remote repo on ${entry.peerName} (read-only)`, lw) : pane.render(lw, height);
   const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw);
   const sep = `${DIM_GRAY}│${RESET}`;
   return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
@@ -550,7 +539,7 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.remoteSelected) {
-      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteCoordinatorVisible ? ";/l: scroll" : "p/n: pane"}    1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}1/2/3: tab${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -863,15 +852,21 @@ export class DashboardComponent implements Component {
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
   private pairedPeers: PeerServiceView["peers"] = [];
-  private readonly remotePane = new RemoteCoordinatorPane(
-    id => this.peerService!.fetchCoordinatorPane(id),
+  private readonly remotePane = new RemotePane(
+    (peerId, target, lines) => this.peerService!.fetchPane(peerId, target, lines),
     () => this.tui?.requestRender(),
   );
 
   private syncRemotePane(): void {
     const row = this.remoteSelection;
-    if (row?.kind === "remote-coordinator" && this.tmuxPoller.isRunning() && this.peerService) {
-      this.remotePane.select(row.peerId, this.peerService.remoteStartDenial, this._dialog === null);
+    if (row && row.kind !== "remote-repo-header" && this.tmuxPoller.isRunning() && this.peerService) {
+      this.remotePane.displayHeight = Math.max(0, this.availableMainHeight() - this.inputField.getHeight(this.getMainWidth()));
+      this.remotePane.select({
+        peerId: row.peerId,
+        target: row.kind === "remote-agent"
+          ? { op: "agent-pane", repo: row.remote.repoRegistryName, id: row.remote.id }
+          : { op: "coordinator-pane" },
+      }, this.peerService.remoteStartDenial, this._dialog === null && !this.expandedAgentsTreeVisible);
     } else {
       this.remotePane.select(null);
     }
@@ -1404,7 +1399,6 @@ export class DashboardComponent implements Component {
     // tmux pane in normal mode (and the coordinator session when the system
     // coordinator is selected, via setAgent in syncSelectedAgent).
     this.tmuxPoller.start();
-    this.syncRemotePane();
     // The coordinator and repo-coordinator pollers only spawn `tmux capture-pane`
     // when their panes are actually visible. updatePaneVisibility() starts the
     // ones that should be live now and leaves the rest stopped (saves a tmux
@@ -1508,6 +1502,7 @@ export class DashboardComponent implements Component {
    * stale for up to 1s. The always-on selected-agent `tmuxPoller` is untouched.
    */
   private updatePaneVisibility() {
+    this.syncRemotePane();
     const peerCoordinator = this.remoteSelection?.kind === "remote-coordinator";
     this.statusBar.remoteCoordinatorVisible = peerCoordinator;
     if (peerCoordinator) {
@@ -2087,14 +2082,14 @@ export class DashboardComponent implements Component {
     }
     if (key === "s" && remoteMessageTarget(remote)) return false;
     if (remote === null || isRemoteAllowedKey(key)) return false;
-    if (remote.kind === "remote-coordinator" && (key === ";" || key === "l")) return false;
+    if (remote.kind !== "remote-repo-header" && (key === ";" || key === "l")) return false;
     if (remote.kind === "remote-repo-header" && key === "a") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
 
   private scrollOutput(up: boolean): void {
-    if (this.remoteSelection?.kind === "remote-coordinator") {
+    if (remoteMessageTarget(this.remoteSelection)) {
       this.remotePane.scroll(up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP);
     } else if (up) agentActions.handleScrollUp(this);
     else agentActions.handleScrollDown(this);
@@ -2475,12 +2470,12 @@ export class DashboardComponent implements Component {
     const remote = this.remoteSelection;
     const peerCoordinator = remote?.kind === "remote-coordinator";
     const leftPeerCoordinator = !peerCoordinator && this.infoPanel.remote?.kind === "remote-coordinator";
-    const enteredFromTree = peerCoordinator && this.rightPane.mode === "TREE";
-    if (peerCoordinator && this.modeIndex !== DEFAULT_MODE_INDEX) {
+    const remoteDraft = remote?.kind === "remote-agent" ? `${remote.peerId}/${remote.remote.repoRegistryName}/${remote.remote.id}`
+      : peerCoordinator ? remote.peerId + "/@system" : null;
+    const enteredFromTree = this.rightPane.mode === "TREE" && (peerCoordinator || (remoteDraft !== null && remoteDraft !== this.currentAgentKey));
+    if (enteredFromTree || (peerCoordinator && this.modeIndex !== DEFAULT_MODE_INDEX)) {
       jumpToMode(this, PANE_MODES[DEFAULT_MODE_INDEX]!);
     }
-
-    this.syncRemotePane();
 
     // Update focus cycling for coordinator mode
     this.focusManager.coordinatorMode = isCoordinator;
@@ -2655,8 +2650,6 @@ export class DashboardComponent implements Component {
 
     // Determine the effective key for change detection: the agent's fully
     // qualified id, so the same bare id in another repo is a change too.
-    const remoteDraft = remote?.kind === "remote-agent" ? `${remote.peerId}/${remote.remote.repoRegistryName}/${remote.remote.id}`
-      : peerCoordinator ? remote.peerId + "/@system" : null;
     const newKey = remoteDraft ?? (isCoordinator ? "__coordinator__" : (selected ? this.agentTree.agentKey(selected) : null));
     if (newKey !== this.currentAgentKey) {
       this.currentAgentKey = newKey;
@@ -3762,6 +3755,11 @@ export class DashboardComponent implements Component {
   // --- Rendering ---
 
 
+  private availableMainHeight(receipts = this.peerService?.view().incoming?.length ?? 0): number {
+    const chromeLines = 5 + this.pendingRemoteSends.size + receipts;
+    return Math.max(5, (process.stdout.rows || 24) - chromeLines);
+  }
+
   invalidate(): void {
     this.agentTree.invalidate();
     this.splitPane.invalidate();
@@ -3777,7 +3775,6 @@ export class DashboardComponent implements Component {
     }
 
     const lines: string[] = [];
-    const terminalRows = process.stdout.rows || 24;
     // §17.1 Phase 2: a leftover system-coordinator selection in the (inactive)
     // Agents tree must NOT bleed into the team-active render path. When the
     // Teams tree owns the global selection the main area renders the team
@@ -3787,7 +3784,7 @@ export class DashboardComponent implements Component {
     const isCoordinatorView =
       this.activeSelectionSource === "agents" && this.agentTree.isSystemCoordinatorSelected;
     const isTreeMode = this.expandedAgentsTreeVisible;
-    // A selected remote row (SPEC §20.5) draws two placeholders in the
+    // A selected remote row (SPEC §20.5) draws its peer content in the
     // split layout, whatever the right-pane mode, except TREE: that mode draws
     // the tree itself in the main area (the sidebar hides its own), and it must
     // stay on screen while j/k move through the tree.
@@ -3846,8 +3843,7 @@ export class DashboardComponent implements Component {
       const selected = row.id === this.selectedReceipt;
       lines.push(truncateToWidth(`${selected ? "›" : " "} receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${selected ? "Esc: cancel" : "Ctrl-T: select"}`, width, "…"));
     }
-    const chromeLines = 5 + this.pendingRemoteSends.size + incoming.length;
-    const availableHeight = Math.max(5, terminalRows - chromeLines);
+    const availableHeight = this.availableMainHeight(incoming.length);
 
     // Width math comes from the widths module — never inline.
     const renderLayout = this.liveLayout(width);
@@ -3983,7 +3979,7 @@ export class DashboardComponent implements Component {
       const input = acceptsText ? this.inputField.render(mainWidth) : [];
       const height = Math.max(0, availableHeight - input.length);
       const body = remoteCoordinator ? this.remotePane.render(mainWidth, height)
-        : renderRemotePanes(remote, mainWidth, leftPaneW, height);
+        : renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, height);
       mainLines = [mainTitleSep, ...body, ...input];
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
@@ -4424,9 +4420,11 @@ export async function launchDashboard(): Promise<void> {
   // The trusted link answers peers from the watcher's last fully detected
   // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
   // and never carries a state that detection has not filled in yet.
-  const peerService = new PeerService(defaultPeerServiceDeps(machine, logToWatchLog, () =>
+  const peerDeps = defaultPeerServiceDeps(machine, logToWatchLog, () =>
     peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [],
-      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message)));
+      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message));
+  peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
+  const peerService = new PeerService(peerDeps);
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:
   // - the shared sandbox denial collector: lock probes and a heartbeat read

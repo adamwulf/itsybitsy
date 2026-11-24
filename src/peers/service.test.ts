@@ -707,11 +707,11 @@ describe("PeerService at boot", () => {
       await service.bootIfPaired();
       await waitFor(() => service.view().links[0]?.connected === true);
       const open = spyOn(connections[0]!.peer, "openBi");
-      await expect(service.fetchCoordinatorPane(ID_REMOTE)).rejects.toThrow("checking whether remote starts are allowed");
+      await expect(service.fetchPane(ID_REMOTE, { op: "coordinator-pane" }, 200)).rejects.toThrow("checking whether remote starts are allowed");
       decision.resolve(scenario === "caller denied" ? "Dashboard inside tmux" : null);
       await flushMicrotasks();
       if (scenario === "local removal") await writeFile(peersFile(), "[]");
-      await expect(service.fetchCoordinatorPane(ID_REMOTE)).rejects.toThrow(
+      await expect(service.fetchPane(ID_REMOTE, { op: "agent-pane", repo: "app", id: "worker" }, 200)).rejects.toThrow(
         scenario === "caller denied" ? "Dashboard inside tmux" : "Machine is no longer paired",
       );
       expect(open).not.toHaveBeenCalled();

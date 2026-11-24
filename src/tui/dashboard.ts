@@ -2161,6 +2161,7 @@ export class DashboardComponent implements Component {
       const local = repo && this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo.repoRegistryName));
       const { candidates, noPassthrough } = await peerAttachmentCandidates(text, local?.path);
       if (noPassthrough) header.noPassthrough = true;
+      controller.signal.throwIfAborted();
       let paths: PeerAttachmentCandidate[] = [];
       if (candidates.length) {
         const selected = await this.choosePeerAttachments(candidates, remote.peerName);
@@ -2173,7 +2174,6 @@ export class DashboardComponent implements Component {
       this.pendingRemoteSends.set(header.id, pending);
       this.invalidate();
       this.tui?.requestRender();
-      controller.signal.throwIfAborted();
       if (paths.length) {
         staged = await stagePeerAttachments(paths, {
           signal: controller.signal, onCleanupError: err => this.addError(`Outgoing attachment cleanup failed: ${err}`),

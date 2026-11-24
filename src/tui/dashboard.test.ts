@@ -11306,8 +11306,8 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(header.files).toHaveLength(1);
       expect(header.files[0]!.spellings).toContain(picked);
       expect(header.files[0]!.spellings).not.toContain(left);
-      expect(copied).toBe("picked");
       await waitFor(() => dashboard.inputField.getText() === "");
+      expect(copied).toBe("picked");
     } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
   });
 
@@ -11332,11 +11332,13 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(service.sendRemoteMessage).not.toHaveBeenCalled();
       expect(dashboard.inputField.getText()).toBe(draft);
 
-      // The kept draft sends on the next submit.
+      // The kept draft sends on the next submit, here with the path unchecked.
       dashboard.inputField.submit();
-      await submitPathDialog(dashboard, { [file]: true });
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      dashboard.handleInput(" ");
+      dashboard.handleInput("\r");
       await waitFor(() => dashboard.inputField.getText() === "");
-      expect(service.sendRemoteMessage).toHaveBeenCalledTimes(1);
+      expect(service.sendRemoteMessage.mock.calls.map(call => call[1])).toMatchObject([{ message: draft, files: [] }]);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
@@ -11391,6 +11393,28 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.dialog === null);
       expect(dashboard.notice).toBe("Sent to Laptop B/abc-nick");
       expect(service.sendRemoteMessage).toHaveBeenCalledTimes(2);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test("Esc on the s dialog while its paths are looked up cancels before any path dialog", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-early-esc-"));
+    try {
+      const file = join(dir, "notes.txt");
+      await Bun.write(file, "notes");
+      const { dashboard, service } = setup();
+      const shown = spyOn(dashboard, "showDialog");
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      const send = assertDialog(dashboard.dialog, "textarea");
+      for (const ch of `Read ${file}`) dashboard.handleInput(ch);
+      dashboard.handleInput("\x1b[Z");
+      dashboard.handleInput("\r");
+      dashboard.handleInput("\x1b");
+      await waitFor(() => !send.inFlight);
+      expect(dashboard.notice).toBe("Send cancelled");
+      expect(dashboard.dialog).toBe(send);
+      expect(shown).toHaveBeenCalledTimes(1);
+      expect(service.sendRemoteMessage).not.toHaveBeenCalled();
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 

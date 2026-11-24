@@ -140,7 +140,7 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
   const { setNewAgentNoWorktreeCallerResolver } = await import("./ib-commands");
   const { setBoundNoWorktreeCallerResolver, setNoWorktreeRepoRootsLoader } = await import("./hooks/agent-context");
 
-  if (!config.sandboxed) {
+  if (!config.sandboxed || config.ancestry?.denyProcessProbe) {
     const { processStartEpochSecondsCtx } = await import("./agents");
     processStartEpochSecondsCtx.set(pid => pid === process.pid ? fixtureProcessStart(pid) : null);
   }

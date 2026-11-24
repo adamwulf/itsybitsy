@@ -7,6 +7,7 @@ import { checkCoordinatorExists, IB_COORDINATOR_SESSION } from "../coordinator";
 import { isCoordinatorType } from "../coordinator-type-names";
 import { hasGitWorktreeBacklink, matchesLiveLaunch, registeredWorktreeRecord } from "../no-worktree-caller";
 import { metadataRealpath, orderedEntryMatches, prepareAccessTable, resolvePathsConfig, type PathsConfig } from "../sandbox";
+import { isSandboxedProcess } from "../sandbox-detect";
 import { isAgentTmuxSession, matchWorktreeCaller } from "../runtime-names";
 import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
 
@@ -37,7 +38,9 @@ export async function localHumanInCheckout(cwd: string, caller: ResolvedCallerCo
 export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: boolean; checkHuman?: boolean } = {}): Promise<VerifiedSendCaller> {
   let caller: ResolvedCallerContext | null;
   try {
-    caller = await resolveCallerAgentContext(cwd, { includeWorktreePids: true, allowSessionFallback: !options.forSpawn });
+    // A sandboxed spawn only selects the watchdog. It verifies the requester and spawn permission.
+    const allowSessionFallback = !options.forSpawn || isSandboxedProcess();
+    caller = await resolveCallerAgentContext(cwd, { includeWorktreePids: true, allowSessionFallback });
   } catch (error) {
     if (options.forSpawn) throw error;
     // A restricted process table can still leave the caller's own worktree

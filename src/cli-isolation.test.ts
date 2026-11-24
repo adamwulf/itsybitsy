@@ -436,6 +436,21 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(spawn.actions[0]?.args).toMatchObject([repo, "task", { _trustedCaller: { repoPath: repo, meta: { id: actor.id } } }]);
     });
 
+    test("a sandboxed Codex manager spawning from scratch with ps denied reaches its own watchdog", async () => {
+      const manager = await cli.addAgent(repo, "codex-manager", {
+        model: "codex:test", canSpawnChildren: true, claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000),
+      });
+      const result = await withFixtureWatchdog(manager, fakeWatchdogDeps(calls, repo), () =>
+        cli.run(["new-agent", "child task"], {
+          cwd: cli.cwd, sandboxed: true, env: { IB_AGENT_DIR: manager.agentDir }, ancestry: { ...ancestry, denyProcessProbe: true },
+        }));
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.actions).toEqual([]);
+      expect(calls).toMatchObject([{ op: "newAgent", args: [repo, "child task", {
+        _trustedCaller: { repoPath: repo, agentDir: manager.agentDir, meta: { id: manager.id, canSpawnChildren: true } },
+      }] }]);
+    });
+
     test("a worktree agent that moved to a scratch cwd retains its sender id", async () => {
       const actor = await cli.addAgent(repo, "scratch-worker", processMeta);
       const result = await cli.run(["send", peer.id, "hi"], { ancestry, actions: { sendMessage: "record" } });

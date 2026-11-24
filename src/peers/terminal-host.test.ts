@@ -20,7 +20,6 @@ import {
   MAX_TERMINAL_BACKLOG,
   MAX_TERMINAL_SESSIONS,
   TERMINAL_PAIRING_CHECK_MS,
-  TERMINAL_PAUSE_BYTES,
   findAgentSession,
   serveTerminal,
   spawnPtyProcess,
@@ -48,14 +47,10 @@ function fakeProcess(onData: (bytes: Uint8Array) => void) {
     input: [] as string[],
     sizes: [] as TerminalSize[],
     kills: 0,
-    pauses: 0,
-    resumes: 0,
     output: (value: string) => onData(new TextEncoder().encode(value)),
     exit: (code: number | null) => done.resolve(code),
     write: (bytes: Uint8Array) => { proc.input.push(text(bytes)); },
     resize: (size: TerminalSize) => { proc.sizes.push(size); },
-    pause: () => { proc.pauses++; },
-    resume: () => { proc.resumes++; },
     kill: () => { proc.kills++; done.resolve(129); },
     exited: done.promise,
   };
@@ -224,7 +219,7 @@ describe("remote terminal host", () => {
   });
 });
 
-describe("remote terminal flow control", () => {
+describe("remote terminal output backlog", () => {
   /** A stream whose writes wait until the test releases them: a link slower than the PTY. */
   function slowStream() {
     const gates: Array<() => void> = [];
@@ -273,26 +268,20 @@ describe("remote terminal flow control", () => {
     return { ...link, logs, done, proc: () => proc!, burst };
   }
 
-  test(`output queued past ${TERMINAL_PAUSE_BYTES} bytes pauses the tmux client until it drains`, async () => {
+  test("output queued below the limit waits for a slow link and is all delivered", async () => {
     const s = await serveSlow();
-    s.burst(TERMINAL_PAUSE_BYTES - 64 * 1024);
-    expect(s.proc().pauses).toBe(0);
-    s.burst(2 * 64 * 1024);
-    expect(s.proc().pauses).toBe(1);
-    s.burst(4 * 64 * 1024); // still paused: no second pause
-    expect(s.proc().pauses).toBe(1);
-
-    await s.drain();
-    expect(s.proc().resumes).toBe(1);
+    s.burst(MAX_TERMINAL_BACKLOG - 2 * 64 * 1024);
     expect(s.proc().kills).toBe(0);
+    await s.drain();
     s.proc().exit(0);
     await s.drain();
     await s.done;
     const frames = new TerminalFrameReader().push(Buffer.concat(s.written));
+    expect(outputOf(frames).length).toBe(MAX_TERMINAL_BACKLOG - 2 * 64 * 1024);
     expect(exitOf(frames)).toEqual({ code: 0, reason: "exited" });
   });
 
-  test(`output still queued past ${MAX_TERMINAL_BACKLOG} bytes ends the session as outrunning the link`, async () => {
+  test(`output queued past ${MAX_TERMINAL_BACKLOG} bytes ends the session as outrunning the link`, async () => {
     const s = await serveSlow();
     s.burst(MAX_TERMINAL_BACKLOG + 64 * 1024);
     expect(s.proc().kills).toBe(1);
@@ -347,23 +336,6 @@ describe("spawnPtyProcess", () => {
     expect(output).toContain("got:hi");
   });
 
-  test("pause stops its output, resume continues it, and kill ends it while paused", async () => {
-    let ticks = 0;
-    const proc = spawnPtyProcess(["sh", "-c", "while :; do echo tick; sleep 0.02; done"], { cols: 80, rows: 24 },
-      bytes => { ticks += text(bytes).split("tick").length - 1; });
-    await waitFor(() => ticks >= 2, { message: "first ticks" });
-    proc.pause();
-    await Bun.sleep(60); // let a tick already in flight arrive
-    const pausedAt = ticks;
-    await Bun.sleep(150);
-    expect(ticks).toBe(pausedAt);
-    proc.resume();
-    await waitFor(() => ticks > pausedAt, { message: "ticks after resume" });
-    proc.pause();
-    proc.kill();
-    expect(await proc.exited).not.toBe(0);
-  });
-
   test("kill ends the process", async () => {
     const proc = spawnPtyProcess(["sh", "-c", "sleep 30"], { cols: 80, rows: 24 }, () => {});
     proc.kill();
@@ -380,7 +352,7 @@ describe("spawnTmuxAttach", () => {
       hasClients: async (session) => { calls.push(["has-clients", session]); return otherClients; },
       spawnPty: (argv, size) => {
         calls.push([...argv, `${size.cols}x${size.rows}`]);
-        return { write: () => {}, resize: () => {}, pause: () => {}, resume: () => {}, kill: () => {}, exited: exited.promise };
+        return { write: () => {}, resize: () => {}, kill: () => {}, exited: exited.promise };
       },
     });
     return { calls, proc, exited };

@@ -90,8 +90,6 @@ describe("ib peer attach through the ib watch relay", () => {
         return {
           write: (bytes) => { spawned.input.push(text(bytes)); },
           resize: ({ cols, rows }) => { spawned.sizes.push(`${cols}x${rows}`); },
-          pause: () => {},
-          resume: () => {},
           kill: () => { spawned.kills++; done.resolve(129); },
           exited: done.promise,
         };

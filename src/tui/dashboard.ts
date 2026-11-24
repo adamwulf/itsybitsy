@@ -4501,10 +4501,11 @@ export async function launchDashboard(): Promise<void> {
   // the UI once, for about a third of a second: the dynamic import in
   // src/peers/iroh.ts evaluates the napi addon synchronously on the event loop.
   // The trusted link answers peers from the watcher's last fully detected
-  // agents (lastDetectedAgents, what the tree shows), so an answer costs no IO
-  // and never carries a state that detection has not filled in yet.
+  // agents (lastDetectedAgents, what the tree shows) and the pending questions
+  // of the same refresh, so an answer costs no IO and never carries a state
+  // that detection has not filled in yet.
   const peerDeps = defaultPeerServiceDeps(machine, logToWatchLog, () =>
-    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [],
+    peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [], dashboard.watcher?.lastQuestions ?? [],
       dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message));
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
   peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);

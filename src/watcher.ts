@@ -99,6 +99,7 @@ export class AgentWatcher {
   private hasCompletedInitialRefresh = false;
   private _lastAgents: Agent[] = [];
   private _lastDetectedAgents: Agent[] = [];
+  private _lastQuestions: PendingQuestion[] = [];
   private _lastLiveTmuxSessions: Set<string> = new Set();
   /** Cached coordinator tmux session_created epoch — immutable for the session
    * lifetime, so we query tmux display-message once and reuse. Cleared when
@@ -137,6 +138,11 @@ export class AgentWatcher {
    */
   get lastDetectedAgents(): Agent[] {
     return this._lastDetectedAgents;
+  }
+
+  /** The pending questions passed to onUpdate with {@link lastDetectedAgents}, from the same refresh. */
+  get lastQuestions(): PendingQuestion[] {
+    return this._lastQuestions;
   }
 
   /** Public read-only access to the most recent live tmux session set. */
@@ -472,6 +478,7 @@ export class AgentWatcher {
 
       if (!this.running) return;
       this._lastDetectedAgents = agents;
+      this._lastQuestions = questions;
       this.events.onUpdate(agents, flatList, questions, orphanedTmuxSessions);
     } catch (err) {
       this.events.onError?.(err instanceof Error ? err : new Error(String(err)));

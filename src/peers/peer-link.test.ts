@@ -13,7 +13,7 @@ import { acceptRemoteLifecycle } from "./remote-lifecycle";
 import { lifecycleFixture } from "./test-remote-lifecycle";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { listSpawnableTypeNamesSync } from "../agent-types";
-import { readRepoAgents, type Agent } from "../agents";
+import { readRepoAgents, type Agent, type PendingQuestion } from "../agents";
 import { logAgent } from "../agent-lifecycle";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { captureAgentPane, readAgentPromptText } from "./agent-pane";
@@ -28,6 +28,7 @@ import {
   requestPane,
   requestAgentPrompt,
   requestLifecycle,
+  requestAcknowledge,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
   PeerProtocolError,
@@ -74,7 +75,7 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; readPrompt?: PeerResponderDeps["readPrompt"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; acknowledgeQuestion?: PeerResponderDeps["acknowledgeQuestion"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; readPrompt?: PeerResponderDeps["readPrompt"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
   const readerId = options.readerId ?? ID_A;
   const link = createMemoryLink(readerId, ID_B);
   const peers = options.peers ?? new Set([readerId]);
@@ -86,6 +87,7 @@ function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; readerId?:
     setTimer: clock.setTimer,
     startAgent: options.startAgent,
     lifecycle: options.lifecycle,
+    acknowledgeQuestion: options.acknowledgeQuestion,
     captureCoordinator: options.captureCoordinator,
     captureAgent: options.captureAgent,
     readPrompt: options.readPrompt,
@@ -96,7 +98,7 @@ function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; readerId?:
     },
     snapshot: () => {
       snapshots++;
-      return options.snapshot ? options.snapshot() : { coordinator: null, repos: [], agents: [] };
+      return options.snapshot ? options.snapshot() : { coordinator: null, repos: [], agents: [], questions: [] };
     },
     log: (line) => logs.push(line),
   });
@@ -145,7 +147,7 @@ describe("toRemoteAgents", () => {
       for (let refresh = 0; refresh < 2; refresh++) {
         const { agents } = await readRepoAgents(repo, "app", false);
         expect(agents.find(a => a.id === "placeholder")?.state).toBe("creating");
-        const reply = decodeAgentsReply(encodeAgentsReply(peerSnapshot([], agents, undefined)));
+        const reply = decodeAgentsReply(encodeAgentsReply(peerSnapshot([], agents, [], undefined)));
         expect(reply.agents.map(a => a.id).sort()).toEqual(["active", "starting"]);
       }
       if (process.getuid?.() !== 0) {
@@ -178,7 +180,7 @@ describe("decodeAgentsReply", () => {
   test("rebuilds each entry from the allowed fields only, and strips control characters", () => {
     const { repos, agents } = decodeAgentsReply(
       encode({
-        op: "agents", coordinator: { state: "running" },
+        op: "agents", coordinator: { state: "running" }, questions: [],
         repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
         agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoRegistryName: "app\x1b[31m", repoPath: "/r", state: "running", prompt: "leak", extra: { x: 1 } }],
       }),
@@ -194,7 +196,7 @@ describe("decodeAgentsReply", () => {
     const cf = "‮⁦​‍﻿­";
     const { agents: [agent] } = decodeAgentsReply(
       encode({
-        op: "agents", coordinator: { state: "running" },
+        op: "agents", coordinator: { state: "running" }, questions: [],
         repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
         agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoRegistryName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}` }],
       }),
@@ -231,9 +233,57 @@ describe("decodeAgentsReply", () => {
 
   test("a list over 1 MB is sent as an error reply", () => {
     const big: RemoteAgent[] = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
-    expect(() => decodeAgentsReply(encodeAgentsReply({ coordinator: null, repos: [], agents: big }))).toThrow(
+    expect(() => decodeAgentsReply(encodeAgentsReply({ coordinator: null, repos: [], agents: big, questions: [] }))).toThrow(
       new PeerErrorReply(`the other side reported: the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`),
     );
+  });
+});
+
+describe("questions in the agents reply", () => {
+  const question = (agent: string, repoPath: string, id = `q-${agent}`): PendingQuestion =>
+    ({ id, agent, question: "Proceed?", timestamp: "2026-11-24T10:00:00Z", status: "pending", repoPath });
+  const wire = (agent: string, extra: Record<string, unknown> = {}) =>
+    ({ id: `q-${agent}`, agent, repoRegistryName: "app", question: "Proceed?", timestamp: "2026-11-24T10:00:00Z", ...extra });
+  const reply = (questions: unknown) => encode({
+    op: "agents", coordinator: null, repos: [{ registryName: "app", displayName: "App" }], questions,
+    agents: [{ id: "agent-1", repoName: "App", repoRegistryName: "app", repoPath: "/repos/app", state: "waiting" }],
+  });
+
+  test("peerSnapshot sends only the questions of agents it sends, named by their repo registry name", () => {
+    const worker = makeAgent({ id: "agent-1", repoName: "library", repoRegistryName: "lib", repoPath: "/repos/lib", state: "waiting" });
+    const system = fullAgent("agent-sys", { agentType: SYSTEM_COORDINATOR_TYPE });
+    const snapshot = peerSnapshot([], [worker, system], [
+      question("agent-1", "/repos/lib"),
+      question("agent-1", "/repos/other"), // the same id in a repo the reply has no agent for
+      question("agent-sys", "/repos/app"),
+      question("agent-gone", "/repos/lib"),
+    ], undefined);
+    expect(snapshot.questions).toEqual([
+      { id: "q-agent-1", agent: "agent-1", repoRegistryName: "lib", question: "Proceed?", timestamp: "2026-11-24T10:00:00Z" },
+    ]);
+    expect(decodeAgentsReply(encodeAgentsReply(snapshot)).questions).toEqual(snapshot.questions);
+  });
+
+  test("the dialer requires the list and every field, drops extra fields and unknown askers, and cleans the text", () => {
+    const { questions } = decodeAgentsReply(reply([
+      wire("agent-1", { id: "q-1‮", question: "Line one\tx\nLine​ two\x1b[31m\r", timestamp: "2026\n-11", status: "pending", prompt: "leak" }),
+      wire("agent-2"),
+      wire("agent-1", { repoRegistryName: "other" }),
+    ]));
+    expect(questions).toEqual([
+      { id: "q-1", agent: "agent-1", repoRegistryName: "app", question: "Line one   x\nLine two[31m", timestamp: "2026-11" },
+    ]);
+    expect(() => decodeAgentsReply(encode({ op: "agents", coordinator: null, repos: [], agents: [] }))).toThrow(
+      new PeerProtocolError("reply has no question list"),
+    );
+    for (const key of ["id", "agent", "repoRegistryName", "question", "timestamp"]) {
+      expect(() => decodeAgentsReply(reply([wire("agent-1"), wire("agent-1", { [key]: undefined })]))).toThrow(
+        new PeerProtocolError("question 1 in the reply is malformed"),
+      );
+      expect(() => decodeAgentsReply(reply([wire("agent-1", { [key]: 7 })]))).toThrow("question 0 in the reply is malformed");
+    }
+    expect(() => decodeAgentsReply(reply([null]))).toThrow("question 0 in the reply is malformed");
+    expect(() => decodeAgentsReply(reply({}))).toThrow("reply has no question list");
   });
 });
 
@@ -258,7 +308,7 @@ describe("serveTrustedConnection", () => {
   const snapshot = () => peerSnapshot([
     { name: "app", path: "/repos/app" },
     { name: "empty", nickname: "No agents", path: "/repos/empty" },
-  ], [fullAgent("agent-1")], "waiting");
+  ], [fullAgent("agent-1")], [], "waiting");
 
   test("answers a peer's agents requests, each on its own stream, over one connection", async () => {
     const side = serve({ snapshot });
@@ -484,6 +534,36 @@ test.each([["merge", 120000], ["retire", 30000], ["rehire", 30000], ["resume", 3
     expect(await pending).toBe("outcome unknown — check Laptop");
   });
 
+describe("acknowledge", () => {
+  test("runs the receiver's handler as the paired peer, and an error reply surfaces its reason", async () => {
+    const calls: unknown[][] = [];
+    const side = serve({ acknowledgeQuestion: async (repo, id, readPeerName) => {
+      calls.push([repo, id, await readPeerName()]);
+      if (id === "q-gone") throw new Error("Question 'q-gone' not found");
+    } });
+    try {
+      await requestAcknowledge(side.a, "app", "q-1", side.clock.setTimer);
+      expect(calls).toEqual([["app", "q-1", "Alice"]]);
+      await expect(requestAcknowledge(side.a, "app", "q-gone", side.clock.setTimer))
+        .rejects.toThrow(new PeerErrorReply("Question 'q-gone' not found"));
+      expect(side.logs).toContain(`peer link: acknowledge from ${ID_A.slice(0, 10)} failed: Question 'q-gone' not found`);
+      expect(side.a.closeInfo()).toBeNull();
+    } finally {
+      side.a.close(0, "done");
+      await side.done;
+    }
+  });
+
+  test("an unpaired caller is refused and the handler never runs", async () => {
+    const acknowledgeQuestion = mock(async () => {});
+    const side = serve({ peers: new Set(), acknowledgeQuestion });
+    await expect(requestAcknowledge(side.a, "app", "q-1", side.clock.setTimer)).rejects.toThrow();
+    expect(side.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.notPeer, reason: "not a peer" });
+    expect(acknowledgeQuestion).not.toHaveBeenCalled();
+    await side.done;
+  });
+});
+
 test("a new-agent stream without a reply times out at 30 s", async () => {
   const link = createMemoryLink(ID_A, ID_B);
   const clock = createFakeClock();
@@ -607,10 +687,10 @@ describe("trusted new-agent responder", () => {
     spawn.mockImplementation(() => new Promise(() => {}));
     const pending = rawRequest(side.a, encode(request));
     await waitFor(() => spawn.mock.calls.length === 1);
-    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [], questions: [] });
     side.clock.advance(25_000);
     expect(decodeText(await pending)).toEqual({ op: "error", reason: expect.stringContaining("outcome unknown") });
-    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [], questions: [] });
     side.a.close(0, "done");
   });
 
@@ -618,7 +698,7 @@ describe("trusted new-agent responder", () => {
     const { side, spawn } = receiver();
     spawn.mockRejectedValue(new Error("spawn failed"));
     expect(decodeText(await rawRequest(side.a, encode(request)))).toEqual({ op: "error", reason: "spawn failed" });
-    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [] });
+    expect(await requestAgents(side.a)).toEqual({ coordinator: null, repos: [], agents: [], questions: [] });
     side.a.close(0, "done");
   });
 

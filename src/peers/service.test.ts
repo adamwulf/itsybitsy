@@ -201,7 +201,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
     now: clock.now,
     setTimer: clock.setTimer,
     log: (line) => logs.push(line),
-    snapshot: () => ({ coordinator: null, repos: [], agents: [] }),
+    snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
     ...overrides,
   });
   return { service, endpoint, logs, binds, clock, calls };
@@ -365,7 +365,7 @@ describe("PeerService binding", () => {
   test("the real defaults are never reached: the addon loader throws in this file", async () => {
     // Guard for the tests above: they inject bindEndpoint, so the addon is never needed.
     const { defaultPeerServiceDeps } = await import("./service");
-    const deps = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null);
+    const deps = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, null);
     await expect(deps.bindEndpoint(new Uint8Array(32), [PAIR_ALPN])).rejects.toThrow("a service test loaded the iroh addon");
   });
 });
@@ -535,7 +535,7 @@ function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: stri
   endpoint.connectImpl = async (id) => {
     const link = createMemoryLink("00".repeat(32), id);
     served.push(link.b);
-    void serveTrustedConnection(link.b, { setTimer: createFakeClock().setTimer, peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents }), log: () => {} });
+    void serveTrustedConnection(link.b, { setTimer: createFakeClock().setTimer, peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents, questions: [] }), log: () => {} });
     const conn = serviceConnection(link.a, PEER_ALPN);
     return {
       ...conn,
@@ -649,7 +649,7 @@ describe("PeerService at boot", () => {
         return "no-agent";
       },
     }, clock);
-    const service = new PeerService(defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, decision, home));
+    const service = new PeerService(defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, decision, home));
     try {
       const observed = await reading.promise;
       await service.bootIfPaired();
@@ -749,7 +749,7 @@ describe("PeerService at boot", () => {
       const link = createMemoryLink("00".repeat(32), id);
       void serveTrustedConnection(link.b, {
         setTimer: createFakeClock().setTimer, peerName: async () => "paired",
-        snapshot: () => ({ coordinator: null, repos: [], agents: [] }), log() {},
+        snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }), log() {},
         receiveMessage: async message => { received.push(message.id); },
       });
       return serviceConnection(link.a, PEER_ALPN);
@@ -785,7 +785,7 @@ describe("PeerService at boot", () => {
       const link = createMemoryLink("00".repeat(32), id);
       void serveTrustedConnection(link.b, {
         setTimer: createFakeClock().setTimer,
-        peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents: [] }), log: () => {},
+        peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }), log: () => {},
         startAgent: async request => { starts.push(request); return "my-agent"; },
       });
       return serviceConnection(link.a, PEER_ALPN);
@@ -805,9 +805,37 @@ describe("PeerService at boot", () => {
     }
   });
 
+  test("acknowledgeRemoteQuestion waits for the startup human decision, needs the connected link, then asks the peer", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const decision = gate<string | null>();
+    const { service, endpoint } = makeService({ remoteStartDenial: decision.promise });
+    const acks: unknown[][] = [];
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer,
+        peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }), log: () => {},
+        acknowledgeQuestion: async (repo, questionId) => { acks.push([repo, questionId]); },
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    try {
+      await expect(service.acknowledgeRemoteQuestion(ID_REMOTE, "app", "q-1")).rejects.toThrow("checking whether remote acknowledge is allowed");
+      decision.resolve(null);
+      await flushMicrotasks();
+      await expect(service.acknowledgeRemoteQuestion(ID_REMOTE, "app", "q-1")).rejects.toThrow("Laptop C is disconnected");
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      await service.acknowledgeRemoteQuestion(ID_REMOTE, "app", "q-1");
+      expect(acks).toEqual([["app", "q-1"]]);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   test("the owning watch renews the lease each poll and replaces the snapshot only on visible changes", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
-    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null);
+    const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, null);
     const { service, endpoint, clock } = makeService({ writeRemoteAgents, renewLease });
     answerDials(endpoint, [{ ...REMOTE_AGENTS[0]!, repoName: "display only" }]);
     await service.bootIfPaired();
@@ -859,7 +887,7 @@ describe("PeerService at boot", () => {
 
     await waitFor(() => service.view().links[0]?.connected === true, { message: "peer polled" });
     expect(service.view().links).toEqual([
-      { id: ID_REMOTE, name: "Laptop C", connected: true, connectedAt: expect.any(Number), lastOkAt: expect.any(Number), lastError: null, coordinator: null, repos: [], agents: REMOTE_AGENTS },
+      { id: ID_REMOTE, name: "Laptop C", connected: true, connectedAt: expect.any(Number), lastOkAt: expect.any(Number), lastError: null, coordinator: null, repos: [], agents: REMOTE_AGENTS, questions: [] },
     ]);
     expect(endpoint.connects).toEqual([ID_REMOTE]);
 
@@ -875,7 +903,7 @@ describe("PeerService at boot", () => {
       loads++;
       throw new Error("loaded");
     });
-    const realBind = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [] }), () => {}, null).bindEndpoint;
+    const realBind = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, null).bindEndpoint;
     for (const setup of [async () => {}, async () => {
       await mkdir(peerDir(), { recursive: true });
       await writeFile(peersFile(), "[]\n");
@@ -1714,7 +1742,7 @@ describe("PeerService trusted ALPN", () => {
     const { service, endpoint } = makeService({
       snapshot: () => {
         snapshots++;
-        return { coordinator: null, repos: [], agents: toRemoteAgents([local]) };
+        return { coordinator: null, repos: [], agents: toRemoteAgents([local]), questions: [] };
       },
     });
     endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
@@ -1723,7 +1751,7 @@ describe("PeerService trusted ALPN", () => {
 
     const listed = incomingFrom(endpoint, selfId, PEER_ALPN);
     const reply = await requestAgents(listed);
-    expect(reply).toEqual({ coordinator: null, repos: [], agents: toRemoteAgents([local]) });
+    expect(reply).toEqual({ coordinator: null, repos: [], agents: toRemoteAgents([local]), questions: [] });
     expect(JSON.stringify(reply)).not.toContain("SECRET");
     expect(snapshots).toBe(1);
 
@@ -1807,7 +1835,7 @@ describe("endpoint owner peer-outbox polling", () => {
     await mkdir(dir, { recursive: true });
     const { writeTransferOwner } = await import("./transfer-owner");
     await writeTransferOwner(dir, { pid: OTHER.pid, start: OTHER.startEpoch });
-    const deps = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, agents: [], repos: [] }), () => {}, null, home);
+    const deps = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, agents: [], repos: [], questions: [] }), () => {}, null, home);
     const locked = new PeerService({ ...deps, acquireLock: async () => ({ acquired: false, ownerPid: 42 }) });
     const owner = new PeerService(deps);
     try {

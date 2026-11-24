@@ -671,6 +671,22 @@ describe("AgentWatcher", () => {
       watcher.stop();
     });
 
+    test("lastQuestions is the question list passed to onUpdate with lastDetectedAgents", async () => {
+      mockReadAllAgents.mockResolvedValue(readResult({ agents: [makeAgent("agent-1")] }));
+      mockDetectAgentStates.mockImplementation(async () => {});
+      mockBuildAgentTree.mockImplementation((agents) => agents);
+      mockFlattenAgentTree.mockImplementation((roots) => roots.map((a) => makeFlatAgent(a)));
+      const question: PendingQuestion = { id: "q-1", agent: "agent-1", question: "Ship?", timestamp: "2026-11-24T10:00:00Z", status: "pending", repoPath: tempDir };
+      mockReadPendingQuestions.mockResolvedValue([question]);
+      const updates: PendingQuestion[][] = [];
+      const watcher = new AgentWatcher([{ path: tempDir, name: "test" }], { onUpdate: (_agents, _flat, questions) => updates.push(questions) });
+      expect(watcher.lastQuestions).toEqual([]);
+      await watcher.start();
+      expect(watcher.lastQuestions).toEqual([question]);
+      expect(updates.at(-1)).toBe(watcher.lastQuestions);
+      watcher.stop();
+    });
+
     test("detectAgentStates changes state between refreshes", async () => {
       const agent1 = makeAgent("agent-1");
 

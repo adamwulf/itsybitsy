@@ -478,6 +478,33 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(JSON.parse(history.at(-1)!)).toMatchObject({ fromAgent: actor.id, message: "hello" });
     });
 
+    test.each([false, true])("a human in an agent checkout can attribute commands and create a team (tmux=%s)", async tmux => {
+      const opts = {
+        cwd: caller.sessionCwd,
+        env: tmux ? { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" } : undefined,
+        ancestry: { ...ancestry, terminal: tmux ? "tmux" as const : "human" as const, tmuxSession: tmux ? "my-shells" : undefined },
+      };
+      const send = await cli.run(["send", peer.id, "--from", "@watchdog", "notice"], { ...opts, actions: { sendMessage: "record" } });
+      expect(send.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      const ask = await cli.run(["ask", "--id", peer.id, "question"], { ...opts, actions: { askQuestion: "record" } });
+      expect(ask.actions[0]?.args).toEqual([repo, peer.id, "question"]);
+      const log = await cli.run(["log", "--id", peer.id, "human note"], opts);
+      expect(log.exitCode, log.stderr).toBe(0);
+      expect(await Bun.file(join(peer.agentDir, "agent.log")).text()).toContain("human note");
+      const spawn = await cli.run(["new-agent", "--spawned-by", peer.id, "task"], { ...opts, actions: { newAgent: "record" } });
+      expect(spawn.actions[0]?.args[2]).toMatchObject({ _trustedCaller: null, spawnedBy: { agent_id: peer.id } });
+      const team = await cli.run(["team", "create", "room"], opts);
+      expect(team.exitCode, team.stderr).toBe(0);
+      expect(await Bun.file(join(cli.home, ".itsybitsy/teams/room.log")).text()).toContain("team created by user");
+    });
+
+    test.each(["ib-fixture-agent-caller", "itsybitsy-deadbeef-agent-caller"])("a managed tmux session %s retains agent attribution", async tmuxSession => {
+      const deny = await cli.run(["log", "--id", peer.id, "note"], {
+        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" }, ancestry: { ...ancestry, terminal: "tmux", tmuxSession },
+      });
+      expect(deny.stderr).toContain("drop --id");
+    });
+
     test("a human terminal keeps local --from and the system pane keeps its own label", async () => {
       const actions = { sendMessage: "record" as const };
       const human = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], { actions, ancestry: { ...ancestry, terminal: "human" } });

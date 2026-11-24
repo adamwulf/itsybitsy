@@ -3,20 +3,36 @@ import { dirname, join } from "node:path";
 import { accountHome } from "../home";
 import { registeredRepoRoots } from "../hooks/agent-context";
 import { readWorktreeCaller, resolveCallerAgentContext, resolveRemoteSharedCaller, type ResolvedCallerContext } from "../ib-commands";
-import { checkCoordinatorExists } from "../coordinator";
+import { checkCoordinatorExists, IB_COORDINATOR_SESSION } from "../coordinator";
 import { isCoordinatorType } from "../coordinator-type-names";
 import { hasGitWorktreeBacklink, registeredWorktreeRecord } from "../no-worktree-caller";
 import { metadataRealpath, orderedEntryMatches, prepareAccessTable, resolvePathsConfig, type PathsConfig } from "../sandbox";
-import { matchWorktreeCaller } from "../runtime-names";
+import { isAgentTmuxSession, matchWorktreeCaller } from "../runtime-names";
 import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
 
 export const remoteCliCaller = { isHuman: isHumanSendTerminal, isSystem: isSystemPaneCaller };
 
 export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind: "agent"; caller: ResolvedCallerContext };
 
+/** For local attribution, a human can use their own tmux session. Resolve the
+ * invoking pane explicitly: tmux's default target can be another client. */
+async function localHumanInCheckout(recordedSession: unknown): Promise<boolean> {
+  if (!process.env.TMUX) return remoteCliCaller.isHuman();
+  const pane = process.env.TMUX_PANE;
+  if (!pane || !/^%\d+$/.test(pane)) return false;
+  try {
+    const probe = Bun.spawnSync(["tmux", "display-message", "-p", "-t", pane, "#{session_name}"], {
+      stdout: "pipe", stderr: "ignore", timeout: 2000,
+    });
+    const session = probe.stdout.toString().trim();
+    return probe.exitCode === 0 && session !== "" && session !== recordedSession &&
+      session !== IB_COORDINATOR_SESSION && !isAgentTmuxSession(session);
+  } catch { return false; }
+}
+
 /** Local commands accept an explicit actor when the caller cannot be identified.
  * Spawning keeps its existing fail-closed caller permission gate. */
-export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: boolean; from?: string } = {}): Promise<VerifiedSendCaller> {
+export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: boolean; checkHuman?: boolean } = {}): Promise<VerifiedSendCaller> {
   let caller: ResolvedCallerContext | null;
   try {
     caller = await resolveCallerAgentContext(cwd, { includeWorktreePids: true, allowSessionFallback: !options.forSpawn });
@@ -28,7 +44,7 @@ export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: b
   }
   if (caller && typeof caller.meta.id === "string") {
     // A human terminal can open an agent checkout and use the local override.
-    if (options.from !== undefined && options.from !== caller.meta.id && matchWorktreeCaller(cwd) && await remoteCliCaller.isHuman()) {
+    if (options.checkHuman && matchWorktreeCaller(cwd) && await localHumanInCheckout(caller.meta.tmux_session)) {
       return { kind: "user" };
     }
     return { kind: "agent", caller };

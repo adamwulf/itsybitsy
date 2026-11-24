@@ -444,7 +444,7 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
     if (deps.signal?.aborted) return cancelled();
     const actor = command.attachmentSender ? await command.attachmentSender()
       : deferred || resolved?.remote ? await verifiedSendCaller(cwd, "remote", repos.map(repo => repo.path))
-      : await localCliActor(cwd, { from: command.fromAgent });
+      : await localCliActor(cwd, { checkHuman: command.fromAgent !== undefined });
     const fromAgent = cliActorId(actor, command.fromAgent);
     const localDeps = { ...deps, resolveCaller: async () => actor.kind === "agent" ? actor.caller : null };
     if (deferred || resolved?.remote) {

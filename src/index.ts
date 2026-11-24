@@ -2502,7 +2502,7 @@ export async function main() {
         process.exit(1);
       }
       const { localCliActor, cliActorId } = await import("./peers/send-caller");
-      const actor = await localCliActor(process.cwd(), { forSpawn: true });
+      const actor = await localCliActor(process.cwd(), { forSpawn: true, checkHuman: spawnedByAgentId !== undefined });
       cliActorId(actor, spawnedByAgentId, "--spawned-by");
       const caller = actor.kind === "agent" ? actor.caller : null;
       opts._trustedCaller = caller;
@@ -2623,7 +2623,7 @@ export async function main() {
       }
 
       const { cliActorId, localCliActor } = await import("./peers/send-caller");
-      const actor = await localCliActor();
+      const actor = await localCliActor(process.cwd(), { checkHuman: askAgentId !== undefined });
       const caller = actor.kind === "agent" ? actor.caller : null;
       if (caller) askAgentId = cliActorId(actor, askAgentId, "--id");
       askAgentId ??= process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
@@ -2671,7 +2671,7 @@ export async function main() {
       const logMessage = logMessageParts.join(" ");
 
       const { cliActorId, localCliActor } = await import("./peers/send-caller");
-      const actor = await localCliActor();
+      const actor = await localCliActor(process.cwd(), { checkHuman: logAgentId !== undefined });
       if (actor.kind === "agent") logAgentId = cliActorId(actor, logAgentId, "--id");
       logAgentId ??= process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
 
@@ -3160,7 +3160,7 @@ export async function main() {
           }
           // createdBy is left "" for human CLI creation (§16 DETAIL 7).
           const { cliActorId, localCliActor } = await import("./peers/send-caller");
-          await printAndExit(await teamCreate(name, { createdBy: cliActorId(await localCliActor()) }));
+          await printAndExit(await teamCreate(name, { createdBy: cliActorId(await localCliActor(process.cwd(), { checkHuman: true })) }));
           break;
         }
         case "add": {

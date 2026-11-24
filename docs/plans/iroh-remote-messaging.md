@@ -1,6 +1,6 @@
 # iroh peering: messages and file attachments across machines
 
-Status: APPROVED on 2026-11-23, with Adam's answers recorded under "Decisions (Adam, 2026-11-23)" below. M1–M4 are in progress. This plan supersedes feature B of [iroh-remote-coordinator-and-send.md](iroh-remote-coordinator-and-send.md); the decisions recorded there still apply. It follows [iroh-unified-repos.md](iroh-unified-repos.md).
+Status: APPROVED on 2026-11-23, with Adam's answers recorded under "Decisions (Adam, 2026-11-23)" below. M1 is merged. M2 text messaging is implemented on the phase branch, pending integration and full-suite verification outside the sandbox. M3 attachments and M4 acceptance remain pending. This plan supersedes feature B of [iroh-remote-coordinator-and-send.md](iroh-remote-coordinator-and-send.md); the decisions recorded there still apply. It follows [iroh-unified-repos.md](iroh-unified-repos.md).
 
 ## Goal (Adam, 2026-11-22 and 2026-11-23)
 
@@ -71,7 +71,7 @@ There is no new ALPN. A new op `send` runs on the trusted ALPN `itsybitsy/peer/1
 
 The next five bytes are `68 65 6c 6c 6f` (ASCII `hello`). The sender then issues a single FIN. For multiple files, their raw bodies follow in manifest order and the FIN follows the last body. For zero files, the FIN immediately follows the header.
 
-An agent sender uses `{"kind":"agent","id":"desk/photos/worker-1"}` in `from`. An agent target can omit `repo` to use the receiver’s normal resolver. The other target forms are `{"kind":"system"}` for the system coordinator and `{"kind":"repo-coordinator","repo":"photos"}` for a repo coordinator.
+The sending system coordinator uses `{"kind":"system"}` with no id. The receiver derives its `<peer>/@system` attribution from the authenticated pairing. An agent sender uses `{"kind":"agent","id":"desk/photos/worker-1"}` in `from`. An agent target can omit `repo` to use the receiver’s normal resolver. The other target forms are `{"kind":"system"}` for the system coordinator and `{"kind":"repo-coordinator","repo":"photos"}` for a repo coordinator.
 
 **Reply:** `{"ok":true,"id":"<uuid>"}` or `{"ok":false,"error":"<message>"}`.
 

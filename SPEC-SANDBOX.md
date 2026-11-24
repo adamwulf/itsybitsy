@@ -1522,6 +1522,8 @@ broker's. `src/send-broker.ts` adds:
   sandbox that would let an agent copy any file the watchdog can read (a
   `.env`, say) to where it can read it. A path in a brokered message is sent
   as text.
+- **Remote text targets.** For a remote match the watchdog submits the message to the local endpoint owner via `peer-outbox` (SPEC §20.4). It qualifies the verified requester with this machine’s name and the repo’s registry name or `~<repoId>`. The broker returns the watcher’s queue acknowledgement or error. The sandboxed client still supplies only the target and text. It needs its watchdog to submit a remote request.
+
 - **Never to the requester itself.** `sendMessage` takes the recipient's tmux
   session from its `meta.json` and decides an inline drain from its
   `meta.transient.json`; the seal covers neither, and every agent can write

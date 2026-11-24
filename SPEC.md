@@ -656,7 +656,7 @@ Cross-cutting impact: agent lifecycle and metadata policy are unchanged; hooks u
 
 `ib ask "question"` allows top-level managers to ask the user questions. Both bash and TypeScript implement this command.
 
-1. **Identify the asking agent** using the local caller rules in §4.1. Both `ib ask` and `ib log` use the caller’s own record. An identified agent may omit `--id` or name itself. A human can still supply an explicit ID.
+1. **Identify the asking agent** using the local caller rules in §4.1. Both `ib ask` and `ib log` use the caller’s own record. An identified agent may omit `--id` or use its own ID, nickname, or qualified local address. The resolved repo and ID must both match. A human can still supply an explicit ID.
 2. **Top-level check**: Only agents with no manager (or whose manager has been merged/retired) can ask. Others are told to use `ib send` to communicate with their manager.
 3. **Config check**: `allowAgentQuestions` must be `true` (default)
 4. **Question storage**: Stale questions from agents whose directories no longer exist are cleaned up. New questions are appended to `.itsybitsy/user-questions.json`

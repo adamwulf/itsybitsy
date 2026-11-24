@@ -12,7 +12,7 @@ import { userHome } from "./home";
 import { addRepo, removeRepo, listRepos, repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { resolveAgentIcon } from "./agents";
-import type { PeerEnqueueOptions } from "./ib-commands";
+import type { PeerEnqueueOptions, ResolvedCallerContext } from "./ib-commands";
 import type { Agent, AgentMeta, FlatEntry } from "./agents";
 import { kernelSandboxStatus } from "./agent-cli";
 import { resolvePathsConfig } from "./sandbox";
@@ -453,6 +453,19 @@ export async function requireAgent(idArg: string | undefined, repos: RepoEntry[]
     process.exit(1);
   }
   return agent;
+}
+
+/** The exact caller ID needs no registry lookup. Resolve other --id spellings
+ * the same way as ordinary CLI addresses, including their repository scope. */
+async function requireActingAgent(id: string, caller: ResolvedCallerContext | null) {
+  if (caller && id === caller.meta.id) return { id, repoPath: caller.repoPath, agentDir: caller.agentDir };
+  const agent = await requireAgent(id, await listRepos());
+  if (caller && (agent.id !== caller.meta.id || !sameRepoPath(agent.repoPath, caller.repoPath))) {
+    console.error("Error: agents can only act as themselves; drop --id");
+    process.exit(1);
+  }
+  const agentDir = agent.storageDir ?? join(runtimeNames.runtimeDir(agent.repoPath), agent.archived ? "archive" : "agents", agent.id);
+  return { id: agent.id, repoPath: agent.repoPath, agentDir };
 }
 
 /**
@@ -2622,11 +2635,10 @@ export async function main() {
         askQuestionText = await readStdinIfPiped();
       }
 
-      const { cliActorId, localCliActor } = await import("./peers/send-caller");
+      const { localCliActor } = await import("./peers/send-caller");
       const actor = await localCliActor(process.cwd(), { checkHuman: askAgentId !== undefined });
       const caller = actor.kind === "agent" ? actor.caller : null;
-      if (caller) askAgentId = cliActorId(actor, askAgentId, "--id");
-      askAgentId ??= process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
+      askAgentId ??= caller ? String(caller.meta.id) : process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
 
       if (!askAgentId) {
         console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id <agent-id>.");
@@ -2637,7 +2649,7 @@ export async function main() {
         process.exit(1);
       }
 
-      const askAgent = caller ? { id: askAgentId, repoPath: caller.repoPath } : await requireAgent(askAgentId, await listRepos());
+      const askAgent = await requireActingAgent(askAgentId, caller);
       // A sandboxed WORKTREE agent cannot record a question itself
       // (`<repo>/.itsybitsy/user-questions.json` is outside its write roots), so
       // it asks its own — unsandboxed — watchdog to do it. Null for every other
@@ -2652,7 +2664,6 @@ export async function main() {
       break;
     }
     case "log": {
-      const repos = await listRepos();
       // Parse --id and --quiet flags
       const logArgs = args.slice(1);
       let logAgentId: string | undefined;
@@ -2670,10 +2681,10 @@ export async function main() {
       }
       const logMessage = logMessageParts.join(" ");
 
-      const { cliActorId, localCliActor } = await import("./peers/send-caller");
+      const { localCliActor } = await import("./peers/send-caller");
       const actor = await localCliActor(process.cwd(), { checkHuman: logAgentId !== undefined });
-      if (actor.kind === "agent") logAgentId = cliActorId(actor, logAgentId, "--id");
-      logAgentId ??= process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
+      const caller = actor.kind === "agent" ? actor.caller : null;
+      logAgentId ??= caller ? String(caller.meta.id) : process.cwd().match(runtimeNames.AGENT_CWD_PATTERN)?.[1];
 
       if (!logAgentId) {
         console.error("Error: Could not detect agent ID. Run from an agent worktree or use --id.");
@@ -2685,12 +2696,7 @@ export async function main() {
       }
 
       const { logAgent } = await import("./agent-lifecycle");
-      let agentDir: string;
-      if (actor.kind === "agent") agentDir = actor.caller.agentDir;
-      else {
-        const agent = await requireAgent(logAgentId, repos);
-        agentDir = join(runtimeNames.runtimeDir(agent.repoPath), agent.archived ? "archive" : "agents", agent.id);
-      }
+      const { agentDir } = await requireActingAgent(logAgentId, caller);
       await logAgent(agentDir, logMessage);
 
       if (!logQuiet) {

@@ -478,6 +478,25 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(JSON.parse(history.at(-1)!)).toMatchObject({ fromAgent: actor.id, message: "hello" });
     });
 
+    test("ask and log accept self nicknames and qualified addresses and reject another repo's same ID", async () => {
+      const self = await cli.addAgent(repo, "manager", { nickname: "captain" });
+      const other = await cli.addRepo("other");
+      await cli.addAgent(other, self.id);
+      const opts = { cwd: self.sessionCwd, actions: { askQuestion: "record" as const } };
+      for (const id of ["captain", "@caller-repo/manager"]) {
+        const ask = await cli.run(["ask", "--id", id, "question"], opts);
+        expect(ask.actions[0]?.args).toEqual([repo, self.id, "question"]);
+        const log = await cli.run(["log", "--id", id, id], opts);
+        expect(log.exitCode, log.stderr).toBe(0);
+        expect(await Bun.file(join(self.agentDir, "agent.log")).text()).toContain(id);
+      }
+      for (const cmd of ["ask", "log"]) {
+        const denied = await cli.run([cmd, "--id", "@other/manager", "wrong repo"], opts);
+        expect(denied.exitCode).toBe(1);
+        expect(denied.stderr).toContain("drop --id");
+      }
+    });
+
     test.each([false, true])("a human in an agent checkout can attribute commands and create a team (tmux=%s)", async tmux => {
       const opts = {
         cwd: caller.sessionCwd,

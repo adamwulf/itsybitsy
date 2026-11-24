@@ -9469,9 +9469,9 @@ describe("setup Peers tab", () => {
         { id: E, name: "E", pairedAt: "x" },
       ],
       links: [
-        { id: OTHER, name: "Laptop B", connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] },
-        { id: C, name: "C", connected: false, lastOkAt: Date.now(), coordinator: null, lastError: "closed by the other side", repos: [], agents: [] },
-        { id: D, name: "D", connected: false, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
+        { id: OTHER, name: "Laptop B", connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] },
+        { id: C, name: "C", connected: false, connectedAt: null, lastOkAt: Date.now(), coordinator: null, lastError: "closed by the other side", repos: [], agents: [] },
+        { id: D, name: "D", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
       ],
     });
     function expectRow(id: string, word: string, color: string, error?: string) {
@@ -9486,7 +9486,7 @@ describe("setup Peers tab", () => {
     expectRow(C, "offline", RED, "closed by the other side");
     expectRow(D, "offline", RED, "timed out");
     expectRow(E, "connecting", YELLOW); // newly paired, before the poller lists it
-    service.set({ links: [{ id: E, name: "E", connected: false, lastOkAt: null, coordinator: null, lastError: null, repos: null, agents: null }] });
+    service.set({ links: [{ id: E, name: "E", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: null, repos: null, agents: null }] });
     expectRow(E, "connecting", YELLOW); // first dial in progress
   });
 
@@ -9512,13 +9512,13 @@ describe("setup Peers tab", () => {
     } as unknown as TUI);
     const service = new FakePeerService();
     dashboard.setPeerService(service);
-    const link = { id: OTHER, name: "B", connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] };
+    const link = { id: OTHER, name: "B", connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] };
     // The Teams tab draws only its local tree.
     dashboard.setSidebarMode("teams");
 
     // Closed: the poller's background changes draw nothing.
     service.set({ links: [link] });
-    service.set({ links: [{ ...link, connected: false, coordinator: null, lastError: "timed out" }] });
+    service.set({ links: [{ ...link, connected: false, connectedAt: null, coordinator: null, lastError: "timed out" }] });
     expect(counter.renders()).toBe(0);
 
     dashboard.handleInput("I");
@@ -9539,7 +9539,7 @@ describe("setup Peers tab", () => {
     expect(counter.renders()).toBe(reopened + 1);
     dashboard.handleInput("\x1b");
     const closed = counter.renders();
-    service.set({ links: [{ ...link, connected: false }] });
+    service.set({ links: [{ ...link, connected: false, connectedAt: null }] });
     expect(counter.renders()).toBe(closed);
   });
 
@@ -9779,7 +9779,7 @@ describe("setup Peers tab", () => {
       dashboard.setTui(tui);
       const service = new FakePeerService();
       const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
-      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, connectedAt: null, lastOkAt: null,
         coordinator: null, lastError: "connection refused", repos: null, agents: null })) });
       dashboard.setPeerService(service);
       dashboard.handleInput("I");
@@ -9808,7 +9808,7 @@ describe("setup Peers tab", () => {
       dashboard.setTui(tui);
       const service = new FakePeerService();
       const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
-      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, connectedAt: null, lastOkAt: null,
         coordinator: null, lastError: "connection refused while trying to reach the other endpoint during the most recent polling attempt", repos: null, agents: null })) });
       dashboard.setPeerService(service);
       dashboard.handleInput("I");
@@ -9847,7 +9847,7 @@ describe("setup Peers tab", () => {
       dashboard.setTui(tui);
       const service = new FakePeerService();
       const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: "N".repeat(32), pairedAt: "x" }));
-      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, lastOkAt: null,
+      service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, connectedAt: null, lastOkAt: null,
         coordinator: null, lastError: "connection refused", repos: null, agents: null })) });
       dashboard.setPeerService(service);
       dashboard.handleInput("I");
@@ -9878,7 +9878,7 @@ describe("setup Peers tab", () => {
     const { dashboard, service } = open();
     service.set({
       peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }],
-      links: [{ id: OTHER, name: "N".repeat(32), connected: false, lastOkAt: Date.now() - 50 * 3_600_000, coordinator: null, lastError: "e".repeat(160), repos: null, agents: null }],
+      links: [{ id: OTHER, name: "N".repeat(32), connected: false, connectedAt: null, lastOkAt: Date.now() - 50 * 3_600_000, coordinator: null, lastError: "e".repeat(160), repos: null, agents: null }],
     });
     const stages: PairStage[] = [
       { stage: "connecting" },
@@ -9948,7 +9948,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const now = Date.now();
     return [
       {
-        id: PEER_B, name: "Laptop B", connected: true, lastOkAt: now, coordinator: null, lastError: null,
+        id: PEER_B, name: "Laptop B", connected: true, connectedAt: now - 300_000, lastOkAt: now, coordinator: null, lastError: null,
         repos: repos("itsybitsy", "other-repo"),
         agents: [
           remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
@@ -9956,8 +9956,8 @@ describe("Unified peer repos in the Agents tree", () => {
           remote("agent-1", "other-repo", { state: "complete" }),
         ],
       },
-      { id: PEER_C, name: "Laptop C", connected: false, lastOkAt: now - 125_000, coordinator: null, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
-      { id: PEER_D, name: "Laptop D", connected: false, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
+      { id: PEER_C, name: "Laptop C", connected: false, connectedAt: null, lastOkAt: now - 125_000, coordinator: null, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
+      { id: PEER_D, name: "Laptop D", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
     ];
   }
 
@@ -10260,9 +10260,13 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(rows[1]).toContain(ITALIC + "Laptop B");
     expect(rows[1]).toContain(GREEN + "connected" + RESET);
     expect(rows[2]).toContain(RED + "offline" + RESET);
-    expect(stripAnsi(rows[1]!)).toContain("compacting");
+    // Connected: the link word and how long it has been up, without the coordinator's state.
+    expect(stripAnsi(rows[1]!).trimEnd()).toEndWith("Laptop B  connected  5m");
+    expect(stripAnsi(rows[2]!)).toContain("compacting");
     expect(rows[2]).toContain(DIM);
     expect(stripAnsi(rows[2]!)).toContain("2m ago");
+    selectByKey(dashboard, PEER_B + "/@system");
+    expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("State: compacting");
     selectByKey(dashboard, PEER_C + "/@system");
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
@@ -10296,8 +10300,18 @@ describe("Unified peer repos in the Agents tree", () => {
     }
     expect(dashboard.agentTree.selectedAgent).toBeNull();
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
-    service.set({ peers: [{ ...b!, pairedAt: "x" }], links: [{ ...b!, connected: false, lastError: null, lastOkAt: null }] });
+    service.set({ peers: [{ ...b!, pairedAt: "x" }], links: [{ ...b!, connected: false, connectedAt: null, lastError: null, lastOkAt: null }] });
     expect(treeRows(dashboard)[1]).toContain(YELLOW + "connecting" + RESET);
+  });
+
+  test("a connected peer with no coordinator row says unavailable in the info panel, not the tree", () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const [b] = links();
+    service.set({ peers: [{ ...b!, pairedAt: "x" }], links: [b!] });
+    expect(stripAnsi(treeRows(dashboard)[1]!).trimEnd()).toEndWith("Laptop B  connected  5m");
+    selectByKey(dashboard, PEER_B + "/@system");
+    expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("State: unavailable");
   });
 
   test("remote-only repos follow local rows in display order, with italic agents and dim stale rows", () => {
@@ -10514,7 +10528,7 @@ describe("Unified peer repos in the Agents tree", () => {
       };
       expect(stripAnsi(machine()).trimEnd()).toBe(expectedLine("connected"));
       expect(machine()).toContain(`${GREEN}connected${RESET}`);
-      service.set({ links: [{ ...peer, connected: false, lastOkAt: Date.now() - 125_000 }] });
+      service.set({ links: [{ ...peer, connected: false, connectedAt: null, lastOkAt: Date.now() - 125_000 }] });
       assertStyle(true, true);
       expect(stripAnsi(machine()).trimEnd()).toBe(expectedLine("offline"));
       expect(machine()).toContain(`${RED}offline${RESET}`);
@@ -10526,7 +10540,7 @@ describe("Unified peer repos in the Agents tree", () => {
       const { dashboard, service } = setup();
       const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
       const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
-      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, lastOkAt: Date.now(), coordinator: null, lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
+      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
       const rows = treeRows(dashboard, width);
       expect(rows.filter((r) => visibleWidth(r) > width)).toEqual([]);
       const text = rows.map(stripAnsi);
@@ -10546,7 +10560,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const name = local.repoRegistryName;
     dashboard.setRepos([{ name, path: local.repoPath }]);
     const peer = (base: PeerLinkState, state: string): PeerLinkState => ({
-      ...base, connected: true, coordinator: null, lastError: null, repos: repos(name), agents: [remote(local.id, name, { state })],
+      ...base, connected: true, connectedAt: Date.now(), coordinator: null, lastError: null, repos: repos(name), agents: [remote(local.id, name, { state })],
     });
     const [first, second] = links();
     const b = peer(first!, "waiting");
@@ -10576,7 +10590,7 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ links: [b, c] });
     expect(index()).toBe(originalIndex);
     checkSelection("connected");
-    service.set({ links: [b, { ...c, connected: false, lastOkAt: Date.now() - 125_000 }] });
+    service.set({ links: [b, { ...c, connected: false, connectedAt: null, lastOkAt: Date.now() - 125_000 }] });
     checkSelection("offline");
   });
 

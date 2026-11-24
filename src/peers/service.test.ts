@@ -791,7 +791,7 @@ describe("PeerService at boot", () => {
 
     await waitFor(() => service.view().links[0]?.connected === true, { message: "peer polled" });
     expect(service.view().links).toEqual([
-      { id: ID_REMOTE, name: "Laptop C", connected: true, lastOkAt: expect.any(Number), lastError: null, coordinator: null, repos: [], agents: REMOTE_AGENTS },
+      { id: ID_REMOTE, name: "Laptop C", connected: true, connectedAt: expect.any(Number), lastOkAt: expect.any(Number), lastError: null, coordinator: null, repos: [], agents: REMOTE_AGENTS },
     ]);
     expect(endpoint.connects).toEqual([ID_REMOTE]);
 

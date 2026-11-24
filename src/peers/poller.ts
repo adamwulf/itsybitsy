@@ -18,7 +18,7 @@
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
  *   "request timed out", and the next tick redials. Closing the connection is
  *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
- * - The poller tracks per-peer state: connected or not, `lastOkAt`,
+ * - The poller tracks per-peer state: connected or not (and since when), `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
  *   keeps disconnected agents dimmed and shows the peer’s link status in their info panel.
  * - {@link PeerPoller.onChange} fires when what a reader can see changes:
@@ -70,6 +70,8 @@ export interface PeerLinkState {
   name: string;
   /** The last request succeeded and its connection is still open. */
   connected: boolean;
+  /** When `connected` last became true (epoch ms); null while not connected. */
+  connectedAt: number | null;
   /** When the last request succeeded (epoch ms), or null if none has. */
   lastOkAt: number | null;
   /** Why the last dial or request failed, or the connection closed; null once a request succeeds. */
@@ -107,6 +109,7 @@ interface Link {
   name: string;
   conn: PairConnection | null;
   connected: boolean;
+  connectedAt: number | null;
   lastOkAt: number | null;
   lastError: string | null;
   coordinator: PeerSnapshot["coordinator"];
@@ -165,6 +168,7 @@ export class PeerPoller {
       id: link.id,
       name: link.name,
       connected: link.connected,
+      connectedAt: link.connectedAt,
       lastOkAt: link.lastOkAt,
       lastError: link.lastError,
       coordinator: link.coordinator,
@@ -221,6 +225,7 @@ export class PeerPoller {
       const conn = link.conn;
       link.conn = null;
       link.connected = false;
+      link.connectedAt = null;
       if (conn !== null) closeQuietly(conn, PEER_CLOSE.done, "shutting down");
     }
     this.notify();
@@ -274,6 +279,7 @@ export class PeerPoller {
           name: peer.name,
           conn: null,
           connected: false,
+          connectedAt: null,
           lastOkAt: null,
           lastError: null,
           coordinator: null,
@@ -403,7 +409,10 @@ export class PeerPoller {
     link.lastOkAt = this.deps.now();
     const key = JSON.stringify(snapshot);
     const changed = !link.connected || link.lastError !== null || key !== link.snapshotKey;
-    if (!link.connected) this.deps.log(`peer link: connected to ${link.name} (${shortPeerId(link.id)})`);
+    if (!link.connected) {
+      this.deps.log(`peer link: connected to ${link.name} (${shortPeerId(link.id)})`);
+      link.connectedAt = link.lastOkAt;
+    }
     link.connected = true;
     link.lastError = null;
     if (key !== link.snapshotKey) {
@@ -419,6 +428,7 @@ export class PeerPoller {
     if (!link.connected && link.lastError === message) return;
     if (link.lastError !== message) this.deps.log(`peer link: ${link.name} (${shortPeerId(link.id)}): ${message}`);
     link.connected = false;
+    link.connectedAt = null;
     link.lastError = message;
     this.notify();
   }

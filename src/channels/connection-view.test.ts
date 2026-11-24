@@ -149,6 +149,9 @@ describe("formatAgo", () => {
     expect(formatAgo(60_000)).toBe("1m ago");
     expect(formatAgo(59 * 60_000 + 59_000)).toBe("59m ago");
     expect(formatAgo(3_600_000)).toBe("1h ago");
+    expect(formatAgo(24 * 3_600_000 - 1)).toBe("23h ago");
+    expect(formatAgo(24 * 3_600_000)).toBe("1d ago");
+    expect(formatAgo(50 * 3_600_000)).toBe("2d ago");
     expect(formatAgo(-5_000)).toBe("0s ago");
   });
 });

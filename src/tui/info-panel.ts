@@ -262,6 +262,7 @@ export class InfoPanelComponent implements Component {
         title("System coordinator");
         field("Machine", `${truncatePeerField(entry.peerName, width - visibleWidth(`Machine:  · ${entry.linkStatus}`))} · ${connection}`);
         if (entry.state !== null) field("State", entry.state);
+        else if (entry.linkStatus === "connected") field("State", "unavailable");
         break;
       }
       case "remote-agent": {

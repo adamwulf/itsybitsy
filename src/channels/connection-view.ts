@@ -145,13 +145,15 @@ export function telegramHelpDetail(view: TelegramConnectionView, now: number): s
   return wrapWords(text, HELP_DETAIL_WIDTH);
 }
 
-/** `40s ago`, `5m ago`, `2h ago`. A negative age (clock skew) reads `0s`. */
+/** `40s ago`, `5m ago`, `2h ago`, `3d ago`. A negative age (clock skew) reads `0s`. */
 export function formatAgo(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1_000));
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
-  return `${Math.floor(minutes / 60)}h ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 /** Greedy word wrap. A word longer than `width` gets a line of its own. */

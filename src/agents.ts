@@ -2124,7 +2124,7 @@ export type FlatEntry =
 /** Read-only dashboard rows. A local repo always keeps its local header. */
 export type RemoteEntry =
   | { kind: "remote-coordinator"; peerId: string; peerName: string; state: string | null;
-      linkStatus: import("./peers/poller").PeerLinkStatus; lastOkAt: number | null }
+      linkStatus: import("./peers/poller").PeerLinkStatus; connectedAt: number | null; lastOkAt: number | null }
   | { kind: "remote-repo-header"; peerName: string; repoName: string; repoRegistryName: string; agentCount: number }
   | { kind: "remote-agent"; peerId: string; peerName: string; remote: RemoteAgent; connector: string; linkStatus: PeerLinkStatus };
 

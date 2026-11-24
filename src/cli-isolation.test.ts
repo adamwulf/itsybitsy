@@ -612,7 +612,7 @@ describe("CLI routing cannot reach a live agent", () => {
 
     test.each(["ib-fixture-agent-caller", "itsybitsy-deadbeef-agent-caller"])("a managed tmux session %s retains agent attribution", async tmuxSession => {
       const deny = await cli.run(["log", "--id", peer.id, "note"], {
-        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" }, ancestry: { ...ancestry, terminal: "tmux", tmuxSession },
+        cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" }, ancestry: { ...ancestry, terminal: "tmux", tmuxSession, paneStartCommand: join(caller.agentDir, "start.sh") },
       });
       expect(deny.stderr).toContain("drop --id");
     });

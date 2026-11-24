@@ -45,6 +45,7 @@ export const isRetiredHeadRef = (ref: unknown, key: string): ref is string => re
 // Keep the individual callers' first/last, prefix/exact and capture semantics.
 export const AGENT_CWD_PATTERN = /\/\.itsybitsy\/agents\/([^/]+)\/repo(\/|$)/;
 export const AGENT_WORKTREE_PATTERN = /\/\.itsybitsy\/agents\/[^/]+\/repo(\/|$)/;
+export const isAgentLaunchCommand = (command: string): boolean => /\.itsybitsy\/agents\/[^/]+\/(?:start|resume)\.sh\b/.test(command);
 export const matchWorktreePath = (path: string): RegExpMatchArray | null => path.match(AGENT_CWD_PATTERN);
 export const matchExactWorktree = (path: string): RegExpMatchArray | null => path.match(/\/\.itsybitsy\/agents\/[^/]+\/repo$/);
 export const matchWorktreeRepo = (path: string): RegExpMatchArray | null => path.match(/^(.+?)\/\.itsybitsy\/agents\/[^/]+\/repo(?:\/|$)/);

@@ -118,7 +118,7 @@ function installExternalGuards(config: CliDriverConfig, block: (violation: CliVi
       if (argv.length === 6 && argv[0] === "tmux" && argv[1] === "display-message" && argv[2] === "-p" &&
           argv[3] === "-t" && argv[4] === process.env.TMUX_PANE && argv[5] === "#{session_name}\t#{pane_start_command}") {
         const name = config.ancestry?.tmuxSession;
-        return { exitCode: name ? 0 : 1, stdout: Buffer.from(name ? name + "\t" + (config.ancestry?.paneStartCommand ?? "/repo/.itsybitsy/agents/caller/start.sh") + "\n" : "") };
+        return { exitCode: name ? 0 : 1, stdout: Buffer.from(name ? name + "\t" + (config.ancestry?.paneStartCommand ?? "") + "\n" : "") };
       }
       if (!allowed(argv)) block({ kind: "process", detail: { argv } });
       return realSpawnSync(...spawnArgs);

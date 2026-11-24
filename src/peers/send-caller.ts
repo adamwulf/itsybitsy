@@ -8,7 +8,7 @@ import { isCoordinatorType } from "../coordinator-type-names";
 import { hasGitWorktreeBacklink, matchesLiveLaunch, registeredWorktreeRecord } from "../no-worktree-caller";
 import { metadataRealpath, orderedEntryMatches, prepareAccessTable, resolvePathsConfig, type PathsConfig } from "../sandbox";
 import { isSandboxedProcess } from "../sandbox-detect";
-import { isAgentTmuxSession, matchWorktreeCaller } from "../runtime-names";
+import { isAgentLaunchCommand, isAgentTmuxSession, matchWorktreeCaller } from "../runtime-names";
 import { isHumanSendTerminal, isSystemPaneCaller } from "./remote-start-caller";
 
 export const remoteCliCaller = { isHuman: isHumanSendTerminal, isSystem: isSystemPaneCaller };
@@ -31,7 +31,7 @@ export async function localHumanInCheckout(cwd: string, caller: ResolvedCallerCo
     // A managed session can also contain the operator's shell in another window.
     // ib launches its own pane with the absolute start.sh or resume.sh command.
     const managed = session === caller.meta.tmux_session || isAgentTmuxSession(session);
-    if (managed && /\.itsybitsy\/agents\/[^/]+\/(?:start|resume)\.sh\b/.test(command)) return false;
+    if (managed && isAgentLaunchCommand(command)) return false;
     return remoteCliCaller.isHuman(undefined, "local-send");
   } catch { return false; }
 }

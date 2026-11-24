@@ -622,8 +622,9 @@ ${askSection}
 
 function generateWorkerInstructions(ctx: SessionContext): string {
   // Workers send messages to their manager by agent ID.
-  // Per-repo coordinators are now named with the repo basename (e.g., "muse-ios"),
-  // so `ib send muse-ios` routes correctly to the per-repo coordinator.
+  // Per-repo coordinators are named after the repo folder (e.g., "muse-ios";
+  // see getCoordinatorAgentId), so `ib send muse-ios` routes correctly to the
+  // per-repo coordinator.
   const managerSendTarget = ctx.agentManager;
 
   const spawnerInfo = ctx.spawnedBy ? formatSpawnerInfo(ctx.spawnedBy) : "";

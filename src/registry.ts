@@ -2,7 +2,7 @@ import { join, resolve, basename, isAbsolute } from "path";
 import { userHome } from "./home";
 import { mkdir, open, realpath, rename, stat, unlink } from "fs/promises";
 import { resolveGitRoot } from "./agent-lifecycle";
-import { getCoordinatorAgentId } from "./coordinator";
+import { coordinatorIdFromFolderName } from "./coordinator";
 // teams.ts imports listRepos/repoDisplayName FROM this module, so a static
 // `import { getTeam } from "./teams"` forms an import cycle. It is SAFE here
 // because we only dereference `getTeam`/`normalizeTeamName` INSIDE the async
@@ -193,8 +193,8 @@ export const ADD_NAME_HINT = "use ib add <path> <name>";
 /** The way forward from a taken name for [ New Repo ], which names the repo after the folder it creates. */
 export const NEW_REPO_NAME_HINT = "choose another folder name";
 
-async function coordinatorFolderName(path: string): Promise<string> {
-  return getCoordinatorAgentId((await resolveGitRoot(path, AbortSignal.timeout(2_000))) || path);
+async function repoRootFolderName(path: string): Promise<string> {
+  return basename((await resolveGitRoot(path, AbortSignal.timeout(2_000))) || path);
 }
 
 /**
@@ -237,11 +237,14 @@ export async function checkNewRepoEntry(
     return `Already registered: ${resolvedPath}`;
   }
 
-  const folderName = await coordinatorFolderName(resolvedPath);
-  const lowerFolderName = folderName.toLowerCase();
+  // Two folders that differ only in case or in the characters the coordinator
+  // ID replaces ("a.b" and "a_b") give the same ID, so they clash too.
+  const folderName = await repoRootFolderName(resolvedPath);
+  const coordinatorId = coordinatorIdFromFolderName(folderName);
+  const lowerCoordinatorId = coordinatorId.toLowerCase();
   for (const existing of registry.repos) {
-    if ((await coordinatorFolderName(existing.path)).toLowerCase() === lowerFolderName) {
-      return `Cannot register ${resolvedPath}: its repo root folder name "${folderName}" is already used by registered repo "${existing.name}" (${existing.path}). A repo's coordinator is named after its folder, so two registered repos cannot share a folder name.`;
+    if (coordinatorIdFromFolderName(await repoRootFolderName(existing.path)).toLowerCase() === lowerCoordinatorId) {
+      return `Cannot register ${resolvedPath}: its coordinator id "${coordinatorId}" (from repo root folder name "${folderName}") is already used by registered repo "${existing.name}" (${existing.path}). A repo's coordinator is named after its folder, so two registered repos cannot have folder names that give the same coordinator id.`;
     }
   }
 

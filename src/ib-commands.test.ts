@@ -35,6 +35,7 @@ import {
 } from "./agents";
 import { matchAgentById } from "./index";
 import { saveRegistry } from "./registry";
+import { isValidAgentId, isValidTmuxSession } from "./validation";
 import { makeAgent as _makeAgent, makeSpawnResult, waitFor } from "./test-utils";
 import {
   retireAgent,
@@ -12714,6 +12715,41 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(result.ok).toBe(true);
 
     await rm(coordRepoDir, { recursive: true, force: true });
+  });
+
+  test("H8: coordinator of a dotted repo folder gets a valid id and tmux session name", async () => {
+    const coordRepoDir = await mkdtemp(join(tmpdir(), "ib-coord-dot-"));
+    const coordRepo = join(coordRepoDir, "adamwulf.me");
+    await mkdir(join(coordRepo, ".itsybitsy", "agents"), { recursive: true });
+    await Bun.write(join(coordRepo, ".itsybitsy", "repo-id"), "c00d0005\n");
+
+    const userConfigPath = join(coordRepo, "config.json");
+    setUserConfigPath(userConfigPath);
+    await Bun.write(userConfigPath, JSON.stringify({ model: "sonnet" }, null, 2));
+
+    lifecycleSpawnCtx.set((cmd: string[], _opts?: { stdout: "pipe"; stderr: "pipe" }): SpawnResult => {
+      const cmdStr = cmd.join(" ");
+      if (cmdStr.includes("--git-common-dir --git-dir --show-toplevel")) return makeSpawnResult(`.git\n.git\n${coordRepo}`, 0);
+      return makeSpawnResult("", 0);
+    });
+
+    setNewAgentSpawnRunner(mockSpawnRunner());
+
+    try {
+      const result = await newAgent(coordRepo, "start coordinator", { type: "repo-coordinator", _cwd: coordRepo });
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toBe("adamwulf_me");
+
+      const meta = await Bun.file(join(coordRepo, ".itsybitsy", "agents", "adamwulf_me", "meta.json")).json();
+      expect(meta.id).toBe("adamwulf_me");
+      expect(meta.tmux_session).toBe("itsybitsy-c00d0005-adamwulf_me");
+      expect(isValidAgentId(meta.id)).toBe(true);
+      expect(isValidTmuxSession(meta.tmux_session)).toBe(true);
+      const newSession = spawnCalls.find((c) => c[0] === "tmux" && c[1] === "new-session")!;
+      expect(newSession[newSession.indexOf("-s") + 1]).toBe("itsybitsy-c00d0005-adamwulf_me");
+    } finally {
+      await rm(coordRepoDir, { recursive: true, force: true });
+    }
   });
 
   // --- Group K: repo name collision enforcement ---

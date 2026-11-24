@@ -1742,9 +1742,9 @@ export async function checkManagerCommandAccess(
    *
    * `meta.spawned_by.agent_id` may be a real agent ID, or an `@`-prefixed
    * sentinel. The `@<repo-name>` sentinel is owned by that repo's per-repo
-   * coordinator, whose actual agent ID is the repo basename — so we grant
-   * access when the caller's ID matches the repo basename and the caller is
-   * a coordinator. The `@system` sentinel is never a same-agent caller (the
+   * coordinator and carries its agent ID (getCoordinatorAgentId) — so we
+   * grant access when the caller's ID matches it and the caller is a
+   * coordinator. The `@system` sentinel is never a same-agent caller (the
    * system coordinator runs from `~/.itsybitsy/`, outside any registered
    * repo), so it is ignored here.
    */
@@ -1775,8 +1775,8 @@ export async function checkManagerCommandAccess(
     // repo. We require all of:
     //   1. repo_path is a string and resolves to the caller's own repo root
     //   2. caller's meta.agentType === REPO_COORDINATOR_TYPE
-    //   3. caller's agent ID matches the repo name (per-repo coordinators
-    //      use the repo basename as their ID — see getCoordinatorAgentId)
+    //   3. caller's agent ID matches the sentinel (per-repo coordinators
+    //      take their ID from the repo folder name — see getCoordinatorAgentId)
     if (sb.agent_id !== SYSTEM_AGENT_ID) {
       const repoName = sb.agent_id.slice(1);
       if (typeof sb.repo_path !== "string") return false;

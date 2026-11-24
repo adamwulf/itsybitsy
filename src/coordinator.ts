@@ -1556,22 +1556,32 @@ export function perRepoCoordinatorPrompt(repoName: string): string {
 }
 
 /**
- * Determine the coordinator agent ID for a repo.
- * Uses the repo basename (e.g., "muse-ios" for /Users/adam/Developer/muse-ios).
- * This enables `ib send muse-ios "message"` for consistent messaging.
+ * The coordinator agent ID a repo folder name gives: every character outside
+ * `[A-Za-z0-9_-]` becomes `_`, case kept ("adamwulf.me" → "adamwulf_me",
+ * "My Repo" → "My_Repo"). A name that is already a valid agent ID is returned
+ * unchanged. tmux makes the same `.` → `_` change to a session name itself.
+ */
+export function coordinatorIdFromFolderName(folderName: string): string {
+  return folderName.replace(/[^A-Za-z0-9_-]/gu, "_");
+}
+
+/**
+ * Determine the coordinator agent ID for a repo: its folder name through
+ * {@link coordinatorIdFromFolderName} (e.g., "muse-ios" for
+ * /Users/adam/Developer/muse-ios). This enables `ib send muse-ios "message"`.
  */
 export function getCoordinatorAgentId(repoPath: string): string {
-  return basename(repoPath);
+  return coordinatorIdFromFolderName(basename(repoPath));
 }
 
 /**
  * Check if a coordinator already exists for a repo.
  * Scans all agents in the repo for one whose meta.json agentType is REPO_COORDINATOR_TYPE.
- * Also checks whether a non-coordinator agent with the repo basename already exists (collision).
+ * Also checks whether a non-coordinator agent already has the repo's coordinator ID (collision).
  *
  * Returns:
  *   { exists: true, isCoordinator: true, agentId: string } — coordinator found
- *   { exists: false, collision: true } — no coordinator, but basename-named non-coordinator agent exists
+ *   { exists: false, collision: true } — no coordinator, but a non-coordinator agent has its ID
  *   { exists: false, collision: false } — no coordinator and no collision
  */
 export async function checkCoordinatorExists(repoPath: string): Promise<
@@ -1584,7 +1594,7 @@ export async function checkCoordinatorExists(repoPath: string): Promise<
     return { exists: false, collision: false };
   }
 
-  const repoBasename = basename(repoPath);
+  const coordinatorId = getCoordinatorAgentId(repoPath);
   let hasCollision = false;
 
   try {
@@ -1600,13 +1610,13 @@ export async function checkCoordinatorExists(repoPath: string): Promise<
         if (meta.agentType === REPO_COORDINATOR_TYPE) {
           return { exists: true, isCoordinator: true, agentId: entry.name };
         }
-        // Check for name collision with repo basename
-        if (entry.name === repoBasename) {
+        // Check for name collision with the coordinator ID
+        if (entry.name === coordinatorId) {
           hasCollision = true;
         }
       } catch {
         // Can't parse — check name collision only
-        if (entry.name === repoBasename) {
+        if (entry.name === coordinatorId) {
           hasCollision = true;
         }
       }

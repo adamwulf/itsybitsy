@@ -34,8 +34,8 @@ export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopp
  * sentinel that resolves through `resolveTarget`:
  *   - `@system` — system coordinator (notifications routed via
  *     sendToSystemCoordinator → tmux send-keys to the ib-coordinator session)
- *   - `@<repo-name>` — that repo's per-repo coordinator (basename-based; see
- *     getCoordinatorAgentId)
+ *   - `@<repo-name>` — that repo's per-repo coordinator (named after the
+ *     coordinator's agent ID; see getCoordinatorAgentId)
  *   - `@telegram` — Phase 5 inbound dispatcher. Never appears as an actual
  *     spawner (the dispatcher does not own agents); it is used purely as
  *     `sendMessage`'s `fromAgent` label for coordinator-bound messages. The

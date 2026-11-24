@@ -4236,8 +4236,11 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
   const CHUNK_SIZE = 500;
   const INTER_CHUNK_SLEEP_MS = 50;
   const interChunkSleepMs = sendDelayOverrideMs !== null ? sendDelayOverrideMs : INTER_CHUNK_SLEEP_MS;
-  for (let i = 0; i < fullMessage.length; i += CHUNK_SIZE) {
-    const chunk = fullMessage.slice(i, i + CHUNK_SIZE);
+  for (let i = 0, end = 0; i < fullMessage.length; i = end) {
+    end = Math.min(i + CHUNK_SIZE, fullMessage.length);
+    // Keep a surrogate pair in one chunk: a lone half reaches tmux as U+FFFD.
+    if (end < fullMessage.length && /[\uD800-\uDBFF]/.test(fullMessage[end - 1]!)) end--;
+    const chunk = fullMessage.slice(i, end);
     // `--` stops tmux flag parsing so a chunk that begins with `-` (e.g. YAML
     // frontmatter `---`) isn't mistaken for an option.
     const chunkProc = sendSpawnCtx.runner(
@@ -4249,7 +4252,7 @@ export async function deliverMessage(agent: Agent, queued: OutboxMessage): Promi
     if (chunkExit !== 0) {
       return { ok: false, exitCode: chunkExit, stdout: "", stderr: chunkStderr.trim() };
     }
-    const isLastChunk = i + CHUNK_SIZE >= fullMessage.length;
+    const isLastChunk = end >= fullMessage.length;
     if (!isLastChunk && interChunkSleepMs > 0) await Bun.sleep(interChunkSleepMs);
   }
 

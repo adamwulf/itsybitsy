@@ -33,7 +33,7 @@ import { constants } from "node:fs";
 import { join } from "path";
 import { rename, unlink, stat, lstat, readFile, writeFile, open, type FileHandle, rm, rmdir } from "fs/promises";
 import type { RepoEntry } from "./registry";
-import type { AgentMeta } from "./agents";
+import { isPidAliveSinceUncached, selfProcessStartEpochSeconds, type AgentMeta } from "./agents";
 import { getCoordinatorHome } from "./coordinator";
 import { isValidAgentId } from "./validation";
 
@@ -357,7 +357,7 @@ export interface AcquireLockOpts {
   /** Backoff between attempts, in ms. Default 25. */
   backoffMs?: number;
   /**
-   * If true and the held lock looks stale (mtime older than `staleMs`), steal
+   * If true and the held lock is old enough and its owner is dead, steal
    * it. The inline fallback sets this so a crashed holder can't wedge delivery
    * forever; the watchdog leaves it false (it just retries next tick).
    */
@@ -389,7 +389,7 @@ function tokenFromBody(body: string): string {
  * lock handle on success, or null on timeout.
  *
  * Stealing: when `steal` is set and the existing lock's mtime is older than
- * `staleMs`, the stale lock is removed and re-created. This is the inline
+ * `staleMs`, the lock is reclaimed only if its recorded process is gone. This is the inline
  * fallback's safety valve against a crashed holder. The token (verified on
  * release) ensures a stolen-from holder never deletes the thief's lock.
  */
@@ -405,7 +405,7 @@ export async function acquireOutboxLock(dir: string, opts?: AcquireLockOpts): Pr
   // First attempt is unconditional; subsequent attempts are gated on the
   // deadline so a timeoutMs of 0 still tries exactly once.
   for (;;) {
-    const token = crypto.randomUUID();
+    const token = `${selfProcessStartEpochSeconds() ?? ""}:${crypto.randomUUID()}`;
     try {
       const state = await withQueueMutation(dir, false, undefined, async parent => {
         const entry = outboxLockPath(parent);
@@ -416,6 +416,11 @@ export async function acquireOutboxLock(dir: string, opts?: AcquireLockOpts): Pr
           const held = await openVerifiedRecord(entry, constants.O_RDONLY);
           try {
             if (opts?.steal && now() - (await held.stat()).mtimeMs > staleMs) {
+              // Older locks have only pid:uuid. With no start time, a live
+              // numeric PID still owns the lock.
+              const [pidText, startText] = (await held.readFile("utf8")).split(":");
+              const pid = Number(pidText);
+              if (!Number.isSafeInteger(pid) || pid <= 0 || isPidAliveSinceUncached(pid, Number(startText))) return "held";
               await unlink(entry);
               return "retry";
             }

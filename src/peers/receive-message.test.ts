@@ -212,6 +212,7 @@ test("remote @system acknowledges enqueue and the local inline drainer steals an
   const dir = join(cli.home, ".itsybitsy");
   const abandoned = await acquireOutboxLock(dir);
   if (!abandoned) throw new Error("fixture could not acquire coordinator lock");
+  await Bun.write(abandoned.path, `2147483647:${abandoned.token}`);
   const old = new Date(Date.now() - 31_000);
   await utimes(abandoned.path, old, old);
   const release = Promise.withResolvers<number>();

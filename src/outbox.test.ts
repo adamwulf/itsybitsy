@@ -275,7 +275,7 @@ describe("outbox lock", () => {
   test("steal removes a stale lock (mtime older than staleMs)", async () => {
     // Hold the lock with a "stale" mtime by writing the file directly, then
     // forcing the staleness check via injected now().
-    await writeFile(outboxLockPath(dir), "99999");
+    await writeFile(outboxLockPath(dir), "2147483647");
     const lockStat = await stat(outboxLockPath(dir));
 
     // now() far in the future so the existing lock looks stale.
@@ -294,7 +294,7 @@ describe("outbox lock", () => {
   });
 
   test("steal does NOT remove a fresh lock", async () => {
-    await writeFile(outboxLockPath(dir), "99999");
+    await writeFile(outboxLockPath(dir), "2147483647");
     const lockStat = await stat(outboxLockPath(dir));
 
     // now() barely after the lock — within staleMs, so not stealable.
@@ -307,7 +307,7 @@ describe("outbox lock", () => {
     });
     expect(lock).toBeNull();
     // Original holder pid untouched.
-    expect(await readFile(outboxLockPath(dir), "utf-8")).toBe("99999");
+    expect(await readFile(outboxLockPath(dir), "utf-8")).toBe("2147483647");
   });
 
   test("release after a steal does NOT delete the thief's lock (ownership token)", async () => {
@@ -319,7 +319,8 @@ describe("outbox lock", () => {
     expect(a).not.toBeNull();
     const aStat = await stat(outboxLockPath(dir));
 
-    // B steals A's (now-stale) lock.
+    // Simulate A's death before B attempts to reclaim its generation.
+    await writeFile(outboxLockPath(dir), `2147483647:${a!.token}`);
     const b = await acquireOutboxLock(dir, {
       steal: true,
       staleMs: 30_000,

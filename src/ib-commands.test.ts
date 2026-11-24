@@ -981,6 +981,49 @@ describe("sendMessage outbox integration", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+  test.each([
+    { label: "the inline owner drains a second @system send after its lock wait expires", ageLock: false },
+    { label: "a live @system delivery older than 30 seconds is never typed twice", ageLock: true },
+  ])("$label", async ({ ageLock }) => {
+    const { sendToSystemCoordinator, setSystemCoordinatorHasSessionFn, resetSystemCoordinatorHasSessionFn } = await import("./index");
+    const { getCoordinatorHome } = await import("./coordinator");
+    const { outboxLockPath, readOutbox } = await import("./outbox");
+    const typing = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<number>();
+    const chunks: string[] = [];
+    setSystemCoordinatorHasSessionFn(async () => true);
+    setSendSpawnRunner(cmd => {
+      const result = makeSpawnResult();
+      if (cmd[1] === "send-keys" && cmd.includes("-l")) {
+        chunks.push(cmd.at(-1)!);
+        if (chunks.length === 1) {
+          typing.resolve();
+          return { ...result, exited: resume.promise };
+        }
+      }
+      return result;
+    });
+    const opts = { cwd: tempDir, raw: true };
+    const long = "a".repeat(701);
+    const first = sendToSystemCoordinator(long, opts);
+    try {
+      await typing.promise;
+      if (ageLock) {
+        const old = new Date(Date.now() - 60_000);
+        await fsPromises.utimes(outboxLockPath(getCoordinatorHome()), old, old);
+      }
+      const second = await sendToSystemCoordinator("next", opts);
+      expect(second.ok).toBe(true);
+      expect(chunks).toEqual([long.slice(0, 500)]);
+    } finally {
+      resume.resolve(0);
+      await first;
+      resetSystemCoordinatorHasSessionFn();
+    }
+    expect(chunks).toEqual([long.slice(0, 500), long.slice(500), "next"]);
+    expect(await readOutbox(getCoordinatorHome())).toEqual([]);
+  }, 12_000);
+
   test("defers to a live watchdog: enqueues but does NOT deliver inline", async () => {
     // A fresh transient file with a live watchdog pid means a watchdog will
     // drain — sendMessage must enqueue and return without typing into tmux.

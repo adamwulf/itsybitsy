@@ -4329,26 +4329,23 @@ export async function drainOutbox(
     return { ok: true, exitCode: 0, stdout: `Sent to ${agent.id}`, stderr: "" };
   }
 
-  const delivered = new Set<string>();
   let firstResult: IbCommandResult | null = null;
   try {
-    const batch = await readOutbox(dir);
-    for (let i = 0; i < batch.length; i++) {
-      const queued = batch[i]!;
-      const settleGap = sendDelayOverrideMs !== null ? sendDelayOverrideMs : DRAIN_SETTLE_GAP_MS;
-      if (i > 0 && settleGap > 0) await Bun.sleep(settleGap);
+    do {
+      const batch = await readOutbox(dir);
+      if (!batch.length) break;
+      for (const queued of batch) {
+        const settleGap = sendDelayOverrideMs ?? DRAIN_SETTLE_GAP_MS;
+        if (firstResult && settleGap > 0) await Bun.sleep(settleGap);
 
-      const result = await deliverMessage(agent, queued);
-      if (firstResult === null) firstResult = result;
-      if (!result.ok) {
-        // Stop the drain — leave this message (and the rest) enqueued.
-        break;
+        const result = await deliverMessage(agent, queued);
+        firstResult ??= result;
+        if (!result.ok) return firstResult;
+        await rewriteOutboxRemoving(dir, new Set([queued.id]));
       }
-      delivered.add(queued.id);
-      // Remove just-delivered messages now, before delivering the next one, so
-      // a crash mid-batch never redelivers an already-sent message.
-      await rewriteOutboxRemoving(dir, delivered);
-    }
+      // An inline contender may already have timed out waiting for us.
+      // Watchdogs have a next tick; inline-only queues need us to recheck.
+    } while (lockOpts?.steal);
   } finally {
     await releaseOutboxLock(lock);
   }

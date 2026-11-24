@@ -31,11 +31,17 @@ export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopp
 /** Cross-repo spawner provenance — records which agent created this one.
  *
  * `agent_id` may be a real agent ID (e.g. "agent-1234abcd") or an `@`-prefixed
- * sentinel that resolves through `resolveTarget`:
+ * sentinel:
  *   - `@system` — system coordinator (notifications routed via
  *     sendToSystemCoordinator → tmux send-keys to the ib-coordinator session)
- *   - `@<repo-name>` — that repo's per-repo coordinator (named after the
- *     coordinator's agent ID; see getCoordinatorAgentId)
+ *   - `@<coordinator-id>` — the per-repo coordinator of `repo_path`, named by
+ *     its agent ID (getCoordinatorAgentId). This is NOT an `ib send @<repo>`
+ *     address: `@<name>` resolves registry names and nicknames, which differ
+ *     from the ID for a dotted folder (`adamwulf_me` vs repo `adamwulfme`).
+ *     Its readers: the watchdog's notifySpawner sends to the current
+ *     coordinator of `repo_path`; the session-start hook prints the
+ *     `@<registry name>` of `repo_path`; the agent-path ownership gate checks
+ *     `repo_path` and compares the ID with the caller's.
  *   - `@telegram` — Phase 5 inbound dispatcher. Never appears as an actual
  *     spawner (the dispatcher does not own agents); it is used purely as
  *     `sendMessage`'s `fromAgent` label for coordinator-bound messages. The
@@ -51,7 +57,7 @@ export type MetaState = "creating" | "running" | "waiting" | "complete" | "stopp
  * apply to `@telegram` if it ever appeared here.)
  *
  * KNOWN MAINTENANCE FOOTGUN: this is a conceptually N-way union (real ID |
- * @system | @<repo-name> | @telegram for sendMessage labels) packed into a
+ * @system | @<coordinator-id> | @telegram for sendMessage labels) packed into a
  * single string. A future caller that does `findAgent(spawned_by.agent_id)`
  * directly will silently no-op for any sentinel. If you add a new reader,
  * route through the watchdog notify path (or build a discriminated union)

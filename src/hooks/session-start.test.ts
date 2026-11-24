@@ -6,7 +6,8 @@ import { mkdtemp, rm, mkdir } from "fs/promises";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
+import { setCoordinatorHome, resetCoordinatorHome, getCoordinatorAgentId } from "../coordinator";
+import { saveRegistry } from "../registry";
 import { ensureAgentTypesDir } from "../agent-types";
 import { createTeam, addMember } from "../teams";
 import { setUserHome, resetUserHome } from "../home";
@@ -283,10 +284,11 @@ describe("session-start", () => {
     expect(instructions).not.toContain("Those are blocked");
   });
 
-  test("worker under coordinator uses repo basename for messaging (SPEC §12.2.6)", async () => {
+  test("worker under coordinator uses the coordinator id for messaging (SPEC §12.2.6)", async () => {
     const cwd = "/Users/me/muse-ios/.itsybitsy/agents/agent-abc12345/repo";
-    // After the rename, per-repo coordinators are named by repo basename,
-    // so the worker's manager field is "muse-ios" (not "coordinator").
+    // A per-repo coordinator's id comes from its repo folder name
+    // (getCoordinatorAgentId; "muse-ios" stays "muse-ios"), so the worker's
+    // manager field is "muse-ios" (not "coordinator").
     const ctx = detectRole(cwd, {
       id: "agent-abc12345",
       manager: "muse-ios",
@@ -295,9 +297,36 @@ describe("session-start", () => {
     expect(ctx.role).toBe("worker");
     expect(ctx.agentManager).toBe("muse-ios");
     const instructions = await generateInstructions(ctx);
-    // Worker should send to manager using the repo basename
+    // Worker should send to manager using the coordinator id
     expect(instructions).toContain('ib send muse-ios "msg"');
     expect(instructions).toContain('ib send muse-ios "message"');
+  });
+
+  test("a dotted repo's coordinator spawner is addressed by its registry name, else its bare id", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "ib-session-dotted-"));
+    const repoPath = join(parent, "adamwulf.me");
+    await mkdir(repoPath);
+    const cwd = join(parent, "other", ".itsybitsy", "agents", "agent-abc12345", "repo");
+    const meta = {
+      id: "agent-abc12345",
+      manager: "agent-mgr",
+      worker: true,
+      spawned_by: { agent_id: `@${getCoordinatorAgentId(repoPath)}`, repo_path: repoPath },
+    };
+    try {
+      // Unregistered: `@adamwulf_me` names no repo, so the bare coordinator id.
+      let instructions = await generateInstructions(detectRole(cwd, meta));
+      expect(instructions).toContain("spawned by the per-repo coordinator `adamwulf_me`");
+      expect(instructions).toContain('ib send adamwulf_me "message"');
+
+      await saveRegistry({ repos: [{ path: repoPath, name: "adamwulfme" }] });
+      instructions = await generateInstructions(detectRole(cwd, meta));
+      expect(instructions).toContain('ib send @adamwulfme "message"');
+      expect(instructions).not.toContain("ib send @adamwulf_me");
+    } finally {
+      await saveRegistry({ repos: [] });
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 
   test("detectRole includes agentType from meta.json", () => {

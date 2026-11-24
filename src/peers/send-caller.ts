@@ -19,7 +19,7 @@ export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind:
  * invoking pane explicitly: tmux's default target can be another client. */
 export async function localHumanInCheckout(cwd: string, caller: ResolvedCallerContext): Promise<boolean> {
   if (!matchWorktreeCaller(cwd) || matchesLiveLaunch(caller)) return false;
-  if (!process.env.TMUX) return remoteCliCaller.isHuman();
+  if (!process.env.TMUX) return remoteCliCaller.isHuman(undefined, "local-send");
   const pane = process.env.TMUX_PANE;
   if (!pane || !/^%\d+$/.test(pane)) return false;
   try {

@@ -98,6 +98,7 @@ async function classifyCaller(signal: AbortSignal, input: DashboardCaller | unde
     // running the ordinary caller resolver's synchronous ps probes.
     const caller = await resolveCaller(cwd, new Set(ancestors.keys()), {
       ...(humanSend && { humanSend }),
+      ...(mode === "local-send" && { localCheckout: true }),
       identityCurrent: (pid, epoch) => {
         const ancestor = ancestors.get(pid);
         return ancestor !== undefined && epoch !== undefined

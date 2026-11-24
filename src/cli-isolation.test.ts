@@ -575,6 +575,21 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(await Bun.file(join(cli.home, ".itsybitsy/teams/room.log")).text()).toContain("team created by user");
     });
 
+    test("a human in a personal tmux session can use --from when another registered repo is unreadable", async () => {
+      const other = await cli.addRepo("unreadable");
+      await chmod(other, 0);
+      try {
+        const result = await cli.run(["send", "--from", "@watchdog", peer.id, "notice"], {
+          cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" },
+          ancestry: { ...ancestry, terminal: "tmux", tmuxSession: "personal" }, actions: { sendMessage: "record" },
+        });
+        expect(result.exitCode, result.stderr).toBe(0);
+        expect(result.actions[0]?.args[2]).toEqual({ fromAgent: "@watchdog" });
+      } finally {
+        await chmod(other, 0o700);
+      }
+    });
+
     test.each([false, true])("a nested personal tmux session cannot unlock an agent's --from (ps denied=%s)", async denyProcessProbe => {
       const result = await cli.run(["send", "--from", peer.id, peer.id, "notice"], {
         cwd: caller.sessionCwd, env: { TMUX: "/tmp/fixture,1,0", TMUX_PANE: "%1" },

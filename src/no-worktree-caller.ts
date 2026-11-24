@@ -306,7 +306,7 @@ export async function resolveNoWorktreeCaller(
 export async function resolveDashboardCaller(
   cwd: string,
   ancestry: ReadonlySet<number>,
-  deps: Pick<CallerDeps, "registryHome" | "identityCurrent"> & { humanSend?: boolean } = {},
+  deps: Pick<CallerDeps, "registryHome" | "identityCurrent"> & { humanSend?: boolean; localCheckout?: boolean } = {},
 ): Promise<"agent" | "no-agent" | "unverifiable"> {
   try {
     const path = await realpath(cwd);
@@ -318,8 +318,10 @@ export async function resolveDashboardCaller(
       if (!deps.humanSend) return "agent";
       // A human terminal can open a running agent's checkout. For sends,
       // attribute the process tree first, preserving the stricter start gate.
-      roots = await registeredRoots(deps.registryHome ?? userInfo().homedir, true);
+      roots = await registeredRoots(deps.registryHome ?? userInfo().homedir, !deps.localCheckout);
       if (!roots.includes(worktree[1]!)) return "unverifiable";
+      // The local override concerns this checkout. An unrelated repo may be unreadable.
+      if (deps.localCheckout) roots = [worktree[1]!];
       if (meta.claude_pid !== "") {
         const pid = Number(meta.claude_pid);
         if (!Number.isSafeInteger(pid) || pid <= 1) return "unverifiable";

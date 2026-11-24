@@ -2,7 +2,7 @@ import * as runtimeNames from "./runtime-names";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { constants } from "node:fs";
 import { open, readdir, realpath, stat } from "fs/promises";
-import { CLAUDE_PID_START_MARGIN_SECONDS } from "./agents";
+import { CLAUDE_PID_START_MARGIN_SECONDS, isPidAliveSinceUncached } from "./agents";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
 import { userInfo } from "os";
@@ -13,9 +13,14 @@ export interface NoWorktreeCaller {
   repoPath: string;
 }
 
-interface CallerDeps {
-  coordinatorId?: string;
+export interface CallerLookupOptions {
   includeWorktreePids?: boolean;
+  /** Session hints are for local attribution when ps is unavailable. */
+  allowSessionFallback?: boolean;
+}
+
+interface CallerDeps extends CallerLookupOptions {
+  coordinatorId?: string;
   /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
   dashboardAncestry?: ReadonlySet<number>;
   registryHome?: string;
@@ -247,7 +252,24 @@ export async function resolveNoWorktreeCaller(
   const readParents = deps.readParents ?? readParentPids;
   const identityCurrent = deps.identityCurrent ?? processIdentityCurrent;
   const pid = deps.pid ?? process.pid;
-  const before = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
+  let before: ReadonlySet<number>;
+  try {
+    before = deps.dashboardAncestry ?? ancestorPids(pid, readParents());
+  } catch (error) {
+    if (!deps.allowSessionFallback) throw error;
+    // The CLIs export their session ID to child commands. SessionStart
+    // records it on the agent. A stale or ambiguous hint supplies no actor.
+    const { CODEX_THREAD_ID, CLAUDE_SESSION_ID } = process.env;
+    const matches = candidates.filter(({ meta }) => {
+      if (!(CODEX_THREAD_ID && CODEX_THREAD_ID === meta.codex_session_id) &&
+          !(CLAUDE_SESSION_ID && CLAUDE_SESSION_ID === meta.session_id)) return false;
+      const owner = Number(meta.claude_pid);
+      return Number.isSafeInteger(owner) && owner > 1 && typeof meta.claude_pid_epoch === "number" &&
+        isPidAliveSinceUncached(owner, meta.claude_pid_epoch);
+    });
+    if (matches.length === 1) return matches[0]!;
+    throw error;
+  }
   const matches = candidates.filter(({ meta }) => {
     const rawPid = meta.claude_pid;
     if (typeof rawPid !== "string" || !/^\d+$/.test(rawPid)) return false;

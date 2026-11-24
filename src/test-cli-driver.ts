@@ -39,6 +39,7 @@ export type CliActionMode = "record" | "real";
 
 export interface CliAncestry {
   systemPanePid?: number;
+  denyProcessProbe?: boolean;
   terminal?: "human" | "tmux" | "agent";
   sendTTY?: "stdout" | "stderr" | "controlling";
   /** The pid the caller check starts from. */
@@ -142,7 +143,10 @@ async function installFixtureCallerEvidence(config: CliDriverConfig, block: (vio
     ...options,
     registryHome: config.accountHome ?? config.home,
     pid: config.ancestry?.pid,
-    readParents: () => new Map(ancestry().parents),
+    readParents: () => {
+      if (ancestry().denyProcessProbe) throw new Error("fixture denied ps");
+      return new Map(ancestry().parents);
+    },
     identityCurrent: () => ancestry().identityCurrent,
   });
   const { remoteCliCaller } = await import("./peers/peer-outbox");

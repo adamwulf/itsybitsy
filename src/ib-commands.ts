@@ -100,7 +100,7 @@ import {
   resolveUserStatusLine,
 } from "./settings-builder";
 import { listRepos, readRegistryStrict, repoDisplayName, type RepoEntry } from "./registry";
-import { resolveNoWorktreeCaller, type NoWorktreeCaller } from "./no-worktree-caller";
+import { resolveNoWorktreeCaller, type CallerLookupOptions, type NoWorktreeCaller } from "./no-worktree-caller";
 import {
   type Team,
   normalizeTeamName,
@@ -5277,7 +5277,7 @@ export function setAgyVersionProbeTimeoutMs(ms: number | null): void {
 
 /** Type for readCallerMetaFromCwd override in tests */
 export type CallerMetaReaderFn = (cwd: string) => Promise<Record<string, unknown> | null> | Record<string, unknown> | null;
-export type NoWorktreeCallerResolverFn = (cwd: string, options?: { coordinatorId?: string; roots?: string[]; includeWorktreePids?: boolean }) => Promise<NoWorktreeCaller | null>;
+export type NoWorktreeCallerResolverFn = (cwd: string, options?: CallerLookupOptions & { coordinatorId?: string; roots?: string[] }) => Promise<NoWorktreeCaller | null>;
 
 let callerMetaReaderOverride: CallerMetaReaderFn | null = null;
 let noWorktreeCallerResolverOverride: NoWorktreeCallerResolverFn | null = null;
@@ -6225,11 +6225,11 @@ export function resolveRemoteSharedCaller(cwd: string, repoPath: string, coordin
   return (noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller)(cwd, { roots: [repoPath], coordinatorId });
 }
 
-export async function resolveCallerAgentContext(cwd: string, includeWorktreePids = false): Promise<ResolvedCallerContext | null> {
-  return readCallerMetaFromCwd(cwd, includeWorktreePids);
+export async function resolveCallerAgentContext(cwd: string, options?: CallerLookupOptions): Promise<ResolvedCallerContext | null> {
+  return readCallerMetaFromCwd(cwd, options);
 }
 
-async function readCallerMetaFromCwd(cwd: string, includeWorktreePids = false): Promise<ResolvedCallerContext | null> {
+async function readCallerMetaFromCwd(cwd: string, options?: CallerLookupOptions): Promise<ResolvedCallerContext | null> {
   if (callerMetaReaderOverride !== null) {
     const meta = await callerMetaReaderOverride(cwd);
     if (!meta) return null;
@@ -6241,7 +6241,7 @@ async function readCallerMetaFromCwd(cwd: string, includeWorktreePids = false): 
   // need ancestry verification so a forged worktree cannot upgrade a leaf.
   const noWorktreeCaller = await (
     noWorktreeCallerResolverOverride ?? resolveNoWorktreeCaller
-  )(cwd, { includeWorktreePids });
+  )(cwd, options);
   return noWorktreeCaller ?? readWorktreeCaller(cwd);
 }
 

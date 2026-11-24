@@ -19,7 +19,7 @@ export type VerifiedSendCaller = { kind: "user" } | { kind: "system" } | { kind:
 export async function localCliActor(cwd = process.cwd(), options: { forSpawn?: boolean; from?: string } = {}): Promise<VerifiedSendCaller> {
   let caller: ResolvedCallerContext | null;
   try {
-    caller = await resolveCallerAgentContext(cwd, true);
+    caller = await resolveCallerAgentContext(cwd, { includeWorktreePids: true, allowSessionFallback: !options.forSpawn });
   } catch (error) {
     if (options.forSpawn) throw error;
     // A restricted process table can still leave the caller's own worktree

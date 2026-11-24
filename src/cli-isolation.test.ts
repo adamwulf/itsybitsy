@@ -442,6 +442,20 @@ describe("CLI routing cannot reach a live agent", () => {
       expect(result.actions[0]?.args[2]).toEqual({ fromAgent: actor.id });
     });
 
+    test("a Codex agent sending from scratch with ps denied retains its queue attribution", async () => {
+      const sessionId = crypto.randomUUID();
+      const actor = await cli.addAgent(repo, "codex-worker", {
+        model: "codex:test", codex_session_id: sessionId, claude_pid: String(process.pid), claude_pid_epoch: Math.floor(Date.now() / 1000),
+      });
+      await writeHeartbeat(peer);
+      const result = await cli.run(["send", peer.id, "from scratch"], {
+        env: { CODEX_THREAD_ID: sessionId }, ancestry: { ...ancestry, denyProcessProbe: true }, actions: { sendMessage: "real" },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      const queue = Bun.file(join(cli.home, ".itsybitsy/agents", peer.id, "outbox.jsonl"));
+      expect(JSON.parse(await queue.text())).toMatchObject({ fromAgent: actor.id, message: "from scratch" });
+    });
+
     test("a dotted coordinator can bootstrap write-pid and report to @system", async () => {
       const dotted = await cli.addAgent(await cli.addRepo("project.dev"), "project.dev", { worktree: false, agentType: "repo-coordinator" });
       const pid = await cli.run(["write-pid", dotted.id, "4242"], { cwd: dotted.repoPath });

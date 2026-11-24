@@ -2277,7 +2277,10 @@ export class DashboardComponent implements Component {
 
   setNotice(text: string, kind: "info" | "error") {
     const id = ++this.noticeCounter;
-    this.lastSentNotice = text;
+    // The notice shares the header's single row; a newline (multi-line git
+    // output, such as a failed pull before `ib merge`) would spill onto the
+    // next row and shift the layout, so the lines are joined.
+    this.lastSentNotice = text.trim().replace(/\s*\n\s*/g, " · ");
     this.lastSentNoticeKind = kind;
     this.invalidate();
     this.tui?.requestRender();

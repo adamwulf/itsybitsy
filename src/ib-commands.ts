@@ -160,6 +160,7 @@ import {
 import type { CodexGitRoots } from "./codex-config";
 import { sandboxDenialScriptPreamble, sandboxDenialExecPrefix } from "./sandbox-log-launch";
 import { removeSandboxProfile, sandboxProfilePath } from "./sandbox-log-paths";
+import { isSandboxedProcess } from "./sandbox-detect";
 import {
   writeSealRecordDirect,
   readSealRecordStrict,
@@ -3620,6 +3621,15 @@ async function pullBeforeMerge(
   }
   const remotes = listed.remotes;
   if (remotes.length === 0) return { ok: true, report: null };
+  // A sandboxed caller that merges directly into main — a per-repo
+  // coordinator (worktree:false, so its merge is not brokered) — cannot reach
+  // its remotes: the profile denies outbound network apart from the proxy.
+  // Its merge goes ahead on the local main and says so.
+  if (isSandboxedProcess()) {
+    const note = `Did not pull ${targetBranch} before merging: this process is sandboxed and cannot reach its remotes. Run \`ib pull\` from outside the sandbox to update ${targetBranch}.`;
+    await logAgent(agentDir, note);
+    return { ok: true, report: note };
+  }
 
   await logAgent(agentDir, `Pulling ${targetBranch} from ${remotes.join(", ")} before merging...`);
   const pull = await pullBranchFromRemotes(mergeSpawnCtx, targetDir, targetBranch, remotes, false);

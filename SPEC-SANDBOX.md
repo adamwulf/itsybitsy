@@ -1201,7 +1201,10 @@ broker's. `src/lifecycle-broker.ts` adds:
   - a `worktree:false` agent (per-repo coordinator, Claude `--no-worktree`).
     Its profile grants the repo root (its `WORKTREE`), so the direct path works;
     and its per-agent watchdog leaves its loop at once because there is no
-    `<agentDir>/repo`, so it has no heartbeat and nobody to serve a request;
+    `<agentDir>/repo`, so it has no heartbeat and nobody to serve a request.
+    Its profile does not reach the repo's remotes, so its merge into main
+    skips the pull that SPEC.md §3.4 step 0 does first and says so in the
+    result;
   - an agent whose itsybitsy sandbox is off (`meta.sandbox.enabled === false`).
     `isSandboxedProcess()` is still true for a codex agent in that mode — it
     sits in codex's own sandbox (the `itsybitsy_agent` permission profile),

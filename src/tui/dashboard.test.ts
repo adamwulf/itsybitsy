@@ -11162,6 +11162,17 @@ describe("Unified peer repos in the Agents tree", () => {
     await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
   });
 
+  test("a multi-line notice is joined onto the header's one row", () => {
+    const { dashboard } = setup();
+    const before = dashboard.render(WIDTH);
+    // The shape of a failed pull before `ib merge` (status lines with indented detail).
+    dashboard.setNotice("Merge failed: Pull of main failed, so nothing was merged:\n✗ origin: fatal: no repo\n  fatal: Could not read\n", "error");
+    expect(dashboard.notice).toBe("Merge failed: Pull of main failed, so nothing was merged: · ✗ origin: fatal: no repo · fatal: Could not read");
+    const after = dashboard.render(WIDTH);
+    expect(after).toHaveLength(before.length);
+    expect(stripAnsi(after[0]!)).toStartWith("ib — Merge failed: Pull of main failed");
+  });
+
   test.each(["Esc", "shutdown"])("remote row detects files, shows progress and cleans staging on %s", async action => {
     const home = await mkdtemp(join(tmpdir(), "ib-dashboard-transfer-"));
     setUserHome(home);

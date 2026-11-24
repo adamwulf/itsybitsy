@@ -18,6 +18,7 @@ import {
 import { tmpdir } from "os";
 import { chmodSync, existsSync, renameSync, writeFileSync, realpathSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
+import { setSandboxedProcessOverride } from "./sandbox-detect";
 import {
   isPidAliveCtx,
   nowMsCtx,
@@ -6337,6 +6338,9 @@ describe("mergeAgent --keep (real git)", () => {
     let other: string;
 
     beforeEach(async () => {
+      // A sandboxed caller skips the pull; pin "not sandboxed" so these tests
+      // do not depend on where `bun test` runs.
+      setSandboxedProcessOverride(() => false);
       // Outside tempDir, so the primary checkout's status stays clean.
       remotesDir = await mkdtemp(join(tmpdir(), "merge-pull-remotes-"));
       origin = join(remotesDir, "origin.git");
@@ -6352,7 +6356,26 @@ describe("mergeAgent --keep (real git)", () => {
     });
 
     afterEach(async () => {
+      setSandboxedProcessOverride(null);
       await rm(remotesDir, { recursive: true, force: true });
+    });
+
+    test("a sandboxed caller (a per-repo coordinator) merges on the local main and says it did not pull", async () => {
+      setSandboxedProcessOverride(() => true);
+      await agentCommit("feature.txt", "one\n", "agent: one");
+      const mainBefore = await git("-C", tempDir, "rev-parse", "main");
+      await pushFromOther("remote.txt", "remote\n", "remote: new");
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toMatch(
+        /^Merged agent agent-abc into main at [0-9a-f]{40} \(1 commit\(s\), agent kept running\)\nDid not pull main before merging: this process is sandboxed/
+      );
+      // Not fetched, and the agent landed on the local main.
+      expect(await git("-C", tempDir, "rev-parse", "origin/main")).toBe(mainBefore);
+      expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc^")).toBe(mainBefore);
+      expect(await Bun.file(join(tempDir, "remote.txt")).exists()).toBe(false);
     });
 
     test("a repo whose only remote is a URL-less config entry merges without pulling", async () => {
@@ -6393,6 +6416,26 @@ describe("mergeAgent --keep (real git)", () => {
       expect(await Bun.file(join(tempDir, "feature.txt")).text()).toBe("one\n");
       expect(await git("-C", tempDir, "status", "--porcelain")).toBe("");
       expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("Pulling main from origin before merging...");
+    });
+
+    test("work that conflicts only with the pulled commit fails the conflict check, not the in-worktree rebase", async () => {
+      // The agent and the remote change the same line; the local main has not
+      // seen the remote's change, so only a pull before the conflict check
+      // catches the conflict before the agent's worktree is rebased.
+      const agentTip = await agentCommit("tracked.txt", "agent\n", "agent: edit tracked");
+      const remoteTip = await pushFromOther("tracked.txt", "remote\n", "remote: edit tracked");
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toBe("Rebase conflict detected between 'agent/agent-abc' and 'main'");
+      // main was pulled; the agent's branch and worktree were not touched.
+      expect(await git("-C", tempDir, "rev-parse", "main")).toBe(remoteTip);
+      expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(agentTip);
+      expect(await git("-C", worktree, "branch", "--show-current")).toBe("agent/agent-abc");
+      expect(await git("-C", worktree, "status", "--porcelain")).toBe("");
+      expect(existsSync(await git("-C", worktree, "rev-parse", "--absolute-git-dir") + "/rebase-merge")).toBe(false);
+      expect(await Bun.file(join(worktree, "tracked.txt")).text()).toBe("agent\n");
     });
 
     test("a failed pull stops the merge before the agent's branch or main is touched", async () => {

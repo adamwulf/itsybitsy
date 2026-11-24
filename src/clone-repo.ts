@@ -378,7 +378,7 @@ async function cloneRootRefusal(typed: string, target: string, cloneRoot: string
   if (rel === "" || rel === ".." || rel.startsWith("../")) {
     return `Will not clone: the destination leaves the clone root through a symlink (${target})`;
   }
-  return isSafeCloneRelPath(rel) ? null : `Will not clone: the destination resolves into a .git or .itsybitsy folder (${target})`;
+  return isSafeCloneRelPath(rel) ? null : `Will not clone: the destination resolves into a .git or ${RUNTIME_DIR_NAME} folder (${target})`;
 }
 
 /** addRepo, with `done` naming what happened on success and `onDisk` on a failure. */

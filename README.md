@@ -157,7 +157,7 @@ Run `ib watch` on both machines. For human remote sends, launch the dashboard or
 
 In `ib watch`, highlight a paired machine’s agent or its `@system` row to see its live, read-only screen. Press `;` to scroll back through up to 5,000 lines of history and `l` to return toward the latest output. Press `s` to message the selected agent or coordinator.
 
-A paired machine’s agent with a pending `ib ask` question shows its name in red, and its questions appear in the `q` list after your local ones. There, Enter answers the question and Esc acknowledges it on that machine.
+A paired machine’s agent with a pending `ib ask` question shows its name in red. Select it and press `q` to see its questions; Enter answers one and Esc acknowledges it on that machine.
 
 Ordinary messages from a human shell or the dashboard carry the same user label as local sends. An agent can only send as itself and appears as `[sent by agent <machine>/<repo>/<id>]`. A successful send confirms that the receiver queued the message. Delivery to the recipient follows.
 

@@ -1516,7 +1516,9 @@ describe("AgentWatcher registry names", () => {
     const other = join(base, "other");
     for (const repo of [web, other]) await mkdir(join(repo, ".itsybitsy", "agents"), { recursive: true });
     await mkdir(join(web, ".itsybitsy", "agents", "agent-1"));
-    await writeFile(join(web, ".itsybitsy", "agents", "agent-1", "meta.json"), JSON.stringify({ id: "agent-1", created_epoch: 1, model: "claude:sonnet", prompt: "x", manager: null }));
+    await writeFile(join(web, ".itsybitsy", "agents", "agent-1", "meta.json"), JSON.stringify({
+      id: "agent-1", created_epoch: 1, model: "claude:sonnet", prompt: "x", manager: null, worktree: true, claude_pid: "",
+    }));
 
     let seen: { agents: Agent[]; flat: FlatEntry[] } | null = null;
     const repos: RepoEntry[] = [{ path: web, name: "web", nickname: "Website" }, { path: other, name: "other" }];

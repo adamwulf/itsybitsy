@@ -209,15 +209,27 @@ describe("layout persistence", () => {
     expect(loaded!.repoCoordinatorHeightOffset).toBe(2);
   });
 
-  test("pinnedRepoPaths round-trips through save then load", async () => {
+  test("local path pins and remote registry-name pins round-trip independently", async () => {
     const withPins: LayoutState = {
       ...sampleLayout,
       pinnedRepoPaths: ["/repos/alpha", "/repos/beta"],
+      pinnedRemoteRepoNames: ["gamma"],
     };
     await saveLayout(withPins);
     const loaded = await loadLayout();
     expect(loaded).not.toBeNull();
     expect(loaded!.pinnedRepoPaths).toEqual(["/repos/alpha", "/repos/beta"]);
+    expect(loaded!.pinnedRemoteRepoNames).toEqual(["gamma"]);
+  });
+
+  test("a malformed remote pin list drops only that list", async () => {
+    for (const invalid of ["alpha", ["beta", 42]]) {
+      const layout = { ...sampleLayout, pinnedRepoPaths: ["/repos/local"], favoriteAgentIds: ["peer/app/worker"] };
+      await Bun.write(join(tmpDir, "layout.json"), JSON.stringify({ ...layout, pinnedRemoteRepoNames: invalid }));
+      const loaded = await loadLayout();
+      expect(loaded).toMatchObject(layout);
+      expect(loaded!.pinnedRemoteRepoNames).toBeUndefined();
+    }
   });
 
   test("loadLayout tolerates a MISSING pinnedRepoPaths (rest of layout preserved)", async () => {

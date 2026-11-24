@@ -5106,6 +5106,27 @@ describe("mergeAgent (native)", () => {
     expect(MERGE_HEAD_SHA).toHaveLength(40);
   });
 
+  test.each(["merge", "retire"])("%s reports the directory and reason when final removal fails", async command => {
+    const { agent, agentDir } = await makeFixtureAgent(tempDir);
+    agent.meta.worktree = command === "merge";
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify(agent.meta));
+    const runner = makeMergeMock();
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+    const remove = fsPromises.rm;
+    const removal = spyOn(fsPromises, "rm").mockImplementation(async (path, options) => {
+      if (path === agentDir) throw new Error("ENOTEMPTY: directory not empty");
+      return remove(path, options);
+    });
+    try {
+      const result = command === "merge" ? await mergeAgent(agent, tempDir) : await retireAgent(agent);
+      expect(result.ok).toBe(command === "merge");
+      expect(result.stderr).toContain(`Warning: could not remove agent directory ${agentDir}: ENOTEMPTY`);
+    } finally {
+      removal.mockRestore();
+    }
+  });
+
   test("merge reports checked seal cleanup failure before removing agent state", async () => {
     const sealHome = join(tempDir, "seal-home");
     await useFixtureRepo(tempDir, sealHome);

@@ -811,6 +811,15 @@ export async function archiveAgent(
 
 // ── teardownAgent ────────────────────────────────────────────────────────────
 
+/** Surface cleanup failures after the agent's artifacts have been archived. */
+export async function removeArchivedAgentDirectory(agentDir: string): Promise<string | undefined> {
+  try {
+    await rm(agentDir, { recursive: true, force: true });
+  } catch (err) {
+    return `Warning: could not remove agent directory ${agentDir}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 export interface TeardownMeta {
   tmux_session: string;
   claude_pid?: string;
@@ -951,12 +960,9 @@ export async function teardownAgent(
   if (beforeRemove) await beforeRemove();
 
   // 10. Remove agent directory
-  try {
-    await rm(agentDir, { recursive: true, force: true });
-    return { ok: true, prunedTeams, warnings };
-  } catch {
-    return { ok: false, prunedTeams, warnings };
-  }
+  const removalWarning = await removeArchivedAgentDirectory(agentDir);
+  if (removalWarning) warnings.push(removalWarning);
+  return { ok: !removalWarning, prunedTeams, warnings };
 }
 
 // ── scanAndKillOrphans ───────────────────────────────────────────────────────

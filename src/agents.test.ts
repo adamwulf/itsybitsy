@@ -1,6 +1,7 @@
 import { resetUserHome, setUserHome } from "./home";
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
+import { rmSync } from "fs";
 import { mkdtemp, rm, mkdir, readdir, unlink, utimes, writeFile, open, chmod } from "fs/promises";
 import { tmpdir } from "os";
 import {
@@ -6539,6 +6540,16 @@ describe("updateAgentTransient / setAgentOperation / clearAgentOperation", () =>
     // Should not throw — best-effort.
     await updateAgentTransient(missing, (cur) => ({ ...cur, watchdog_pid: 1 }));
     expect(await readAgentTransient(missing)).toBeNull();
+  });
+
+  test("a watchdog write cannot recreate an agent removed after the metadata read", async () => {
+    const agentDir = join(tempDir, "agent-1");
+    await mkdir(agentDir);
+    await updateAgentTransient(agentDir, cur => {
+      rmSync(agentDir, { recursive: true });
+      return { ...cur, watchdog_pid: 1 };
+    });
+    expect(await readdir(tempDir)).toEqual([]);
   });
 
   test("setAgentOperation writes the operation field, preserving other fields", async () => {

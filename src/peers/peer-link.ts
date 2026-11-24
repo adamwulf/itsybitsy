@@ -213,7 +213,7 @@ function sendDiagnostic(text: string) {
  */
 export function toRemoteAgents(agents: readonly Agent[]): RemoteAgent[] {
   return agents
-    .filter((a) => a.meta.agentType !== SYSTEM_COORDINATOR_TYPE)
+    .filter((a) => !a.metadataError && a.meta.agentType !== SYSTEM_COORDINATOR_TYPE)
     .map((a) => ({
       id: a.id,
       nickname: a.meta.nickname ?? null,

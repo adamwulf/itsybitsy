@@ -14,6 +14,7 @@ import { sameRepoPath } from "./repo-identity";
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { watch, type FSWatcher } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { readRepoAgents, readAgentsOfRepos, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient, mutateAgentMeta, readAgentAck, agentStorageDir } from "./agents";
 import type { Agent, AgentAck } from "./agents";
 import {
@@ -853,6 +854,14 @@ async function handleUnknown(agent: Agent, tracker: AgentTracker, getAllAgents: 
   }
 }
 
+/** Create only the debug subdirectory. Teardown can remove its parent during a capture. */
+async function writeDebugCapture(agentDir: string, filename: string, output: string): Promise<void> {
+  const debugDir = join(agentDir, "debug-logs");
+  try { await mkdir(debugDir); }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
+  await writeFile(join(debugDir, filename), output);
+}
+
 /**
  * Save tmux output to a debug log file when an agent transitions to unknown state.
  * Matches bash behavior: saves to `debug-logs/watchdog-<timestamp>-unknown.txt`
@@ -871,12 +880,8 @@ async function saveUnknownDebugLog(agent: Agent): Promise<void> {
     if (output === null) return;
 
     const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
-    const debugDir = join(agentDir, "debug-logs");
-    mkdirSync(debugDir, { recursive: true });
-
     const timestamp = Math.floor(nowFn() / 1000);
-    const debugFile = join(debugDir, `watchdog-${timestamp}-unknown.txt`);
-    await Bun.write(debugFile, output);
+    await writeDebugCapture(agentDir, `watchdog-${timestamp}-unknown.txt`, output);
 
     await logAgent(agentDir, `[watchdog] Debug log saved: debug-logs/watchdog-${timestamp}-unknown.txt`);
   } catch { /* best-effort — don't crash watchdog */ }
@@ -1796,11 +1801,8 @@ async function captureAndLogDeadPane(agentId: string, agentDir: string, tmuxSess
     const captureOutput = await new Response(captureProc.stdout).text();
 
     // Write to debug-logs/
-    const debugLogsDir = join(agentDir, "debug-logs");
-    mkdirSync(debugLogsDir, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const outFile = join(debugLogsDir, `watchdog-${timestamp}-exit.txt`);
-    await Bun.write(outFile, captureOutput);
+    await writeDebugCapture(agentDir, `watchdog-${timestamp}-exit.txt`, captureOutput);
 
     const relPath = `debug-logs/watchdog-${timestamp}-exit.txt`;
     await logAgent(agentDir, `[watchdog] Captured dead pane output → ${relPath}`);

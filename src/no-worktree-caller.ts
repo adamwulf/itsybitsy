@@ -2,11 +2,12 @@ import * as runtimeNames from "./runtime-names";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { constants } from "node:fs";
 import { open, readdir, realpath, stat } from "fs/promises";
-import { CLAUDE_PID_START_MARGIN_SECONDS, isPidAliveSinceUncached } from "./agents";
+import { agentIdentityError, CLAUDE_PID_START_MARGIN_SECONDS, isPidAliveSinceUncached } from "./agents";
 import { isCodexBackedCli, metadataCli } from "./agent-cli";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { isValidAgentId, isValidPeerSenderIdSegment } from "./validation";
 import { userInfo } from "os";
+import { logToWatchLog } from "./watch-log";
 
 export interface NoWorktreeCaller {
   meta: Record<string, unknown>;
@@ -22,7 +23,7 @@ export interface CallerLookupOptions {
 
 interface CallerDeps extends CallerLookupOptions {
   coordinatorId?: string;
-  /** The dashboard already observed the complete process chain. Its scan must fail closed on unreadable records. */
+  /** The dashboard already observed the complete process chain. */
   dashboardAncestry?: ReadonlySet<number>;
   registryHome?: string;
   /**
@@ -107,7 +108,8 @@ async function registeredRoots(registryHome: string, strict: boolean): Promise<s
     try {
       roots.add(await realpath(entry.path));
     } catch (error) {
-      if (!isSkippableRepoError(error, strict)) throw error;
+      if (!isSkippableRepoError(error)) throw error;
+      if (strict) logCallerSkip(entry.path, error);
     }
   }
   return [...roots];
@@ -123,9 +125,35 @@ async function registeredRoots(registryHome: string, strict: boolean): Promise<s
  * it can read, so the record that identifies it is never the one skipped.
  * Malformed registry data and every other I/O error still throw (fail closed).
  */
-function isSkippableRepoError(error: unknown, strict: boolean): boolean {
+function isSkippableRepoError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return code === "ENOENT" || (!strict && (code === "EPERM" || code === "EACCES"));
+  return code === "ENOENT" || code === "EPERM" || code === "EACCES";
+}
+
+const loggedCallerSkips = new Set<string>();
+
+function logCallerSkip(path: string, reason: unknown): void {
+  if (loggedCallerSkips.has(path)) return;
+  loggedCallerSkips.add(path);
+  logToWatchLog(`[caller] skipping ${path}: ${reason}`);
+}
+
+async function readCallerRecord(agentDir: string, id: string, strict: boolean): Promise<Record<string, unknown> | null> {
+  const path = join(agentDir, "meta.json");
+  try {
+    const meta = await Bun.file(path).json();
+    if (strict) {
+      const error = agentIdentityError(meta, id);
+      if (error) {
+        logCallerSkip(path, error);
+        return null;
+      }
+    }
+    return meta?.id === id ? meta : null;
+  } catch (error) {
+    if (strict) logCallerSkip(path, error);
+    return null;
+  }
 }
 
 function ancestorPids(pid: number, parents: Map<number, number>): Set<number> {
@@ -235,7 +263,10 @@ export async function resolveNoWorktreeCaller(
   for (const repoPath of roots) {
     const agentsDir = runtimeNames.agentsDir(repoPath);
     const entries = await readdir(agentsDir, { withFileTypes: true }).catch((error) => {
-      if ((!strict && error.code === "ENOTDIR") || isSkippableRepoError(error, strict)) return [];
+      if ((!strict && error.code === "ENOTDIR") || isSkippableRepoError(error)) {
+        if (strict) logCallerSkip(agentsDir, error);
+        return [];
+      }
       throw error;
     });
     for (const entry of entries) {
@@ -243,27 +274,12 @@ export async function resolveNoWorktreeCaller(
       const dottedCoordinator = entry.name.includes(".") && isValidPeerSenderIdSegment(entry.name);
       if (!entry.isDirectory() || (!isValidAgentId(entry.name) && !dottedCoordinator)) continue;
       const agentDir = join(agentsDir, entry.name);
-      let meta: Record<string, unknown>;
-      try {
-        meta = await Bun.file(join(agentDir, "meta.json")).json();
-      } catch (err) {
-        if (strict) throw err;
-        continue;
-      }
-      if (!meta || Array.isArray(meta) || meta.id !== entry.name || (strict && typeof meta.worktree !== "boolean")) {
-        if (strict) throw new Error("Invalid agent metadata");
-        continue;
-      }
+      const meta = await readCallerRecord(agentDir, entry.name, strict);
+      if (!meta) continue;
       if (dottedCoordinator && (meta.worktree !== false || meta.agentType !== REPO_COORDINATOR_TYPE)) continue;
       if (meta.worktree !== false && !deps.includeWorktreePids) continue;
       if (deps.coordinatorId !== undefined && meta.agentType !== REPO_COORDINATOR_TYPE) continue;
       if (deps.includeWorktreePids && !meta.claude_pid) continue;
-      if (strict && meta.claude_pid !== "") {
-        const pid = Number(meta.claude_pid);
-        if (typeof meta.claude_pid !== "string" || !/^\d+$/.test(meta.claude_pid) || !Number.isSafeInteger(pid) || pid <= 1) {
-          throw new Error("Invalid agent process identity");
-        }
-      }
       candidates.push({ meta, agentDir, repoPath });
     }
   }
@@ -312,21 +328,17 @@ export async function resolveDashboardCaller(
     const path = await realpath(cwd);
     const worktree = runtimeNames.matchWorktreeCaller(path);
     let roots: string[] | undefined;
-    if (worktree) {
-      const meta = await Bun.file(join(runtimeNames.worktreeAgentDir(path), "meta.json")).json();
-      if (meta?.id !== worktree[2] || meta.worktree !== true) return "unverifiable";
+    const meta = worktree && await readCallerRecord(runtimeNames.worktreeAgentDir(path), worktree[2]!, true);
+    if (worktree && meta) {
+      if (meta.worktree !== true) return "unverifiable";
       if (!deps.humanSend) return "agent";
       // A human terminal can open a running agent's checkout. For sends,
       // attribute the process tree first, preserving the stricter start gate.
-      roots = await registeredRoots(deps.registryHome ?? userInfo().homedir, !deps.localCheckout);
+      roots = await registeredRoots(deps.registryHome ?? userInfo().homedir, true);
       if (!roots.includes(worktree[1]!)) return "unverifiable";
       // The local override concerns this checkout. An unrelated repo may be unreadable.
       if (deps.localCheckout) roots = [worktree[1]!];
-      if (meta.claude_pid !== "") {
-        const pid = Number(meta.claude_pid);
-        if (!Number.isSafeInteger(pid) || pid <= 1) return "unverifiable";
-        if (ancestry.has(pid)) return "agent";
-      }
+      if (meta.claude_pid !== "" && ancestry.has(Number(meta.claude_pid))) return "agent";
     }
     const caller = await resolveNoWorktreeCaller(path, { ...deps, roots, dashboardAncestry: ancestry });
     return caller === null ? "no-agent" : "agent";

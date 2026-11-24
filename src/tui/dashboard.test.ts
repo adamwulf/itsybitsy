@@ -11922,6 +11922,11 @@ describe("Unified peer repos in the Agents tree", () => {
     // The global dialogs come last on the row, after the row's own actions.
     const wide = ((dashboard as any).statusBar.render(240) as string[]).map(stripAnsi).join("\n");
     expect(wide).toMatch(/\.: favorite +a: new agent +h: setup/);
+    // A global hint that does not fit whole is left out, never cut in half.
+    for (const cols of [MIN_TERMINAL_WIDTH, 150, 158]) {
+      const row2 = stripAnsi(((dashboard as any).statusBar.render(cols) as string[])[1]!).trimEnd();
+      expect(row2).toMatch(/(\.: favorite|a: new agent|h: setup)$/);
+    }
     for (const hint of ["A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }

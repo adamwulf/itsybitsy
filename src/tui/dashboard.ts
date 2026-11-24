@@ -441,14 +441,19 @@ export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
  * and the right pane's "not available" placeholder, side by side
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
+ * `input` renders the message editor at the center pane's width; it sits at
+ * the bottom of the center pane, as on a local agent's tmux pane.
  */
-function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number): string[] {
+function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number, input?: (width: number) => string[]): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
-  const placeholder = (text: string, width: number) =>
-    padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), height);
-  const center = entry.kind === "remote-repo-header" ? placeholder(`Remote repo on ${entry.peerName} (read-only)`, lw) : pane.render(lw, height);
-  const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw);
+  const editor = input?.(lw) ?? [];
+  const placeholder = (text: string, width: number, rows: number) =>
+    padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), rows);
+  const bodyHeight = Math.max(0, height - editor.length);
+  const body = entry.kind === "remote-repo-header" ? placeholder(`Remote repo on ${entry.peerName} (read-only)`, lw, bodyHeight) : pane.render(lw, bodyHeight);
+  const center = [...body, ...editor];
+  const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw, height);
   const sep = `${DIM_GRAY}│${RESET}`;
   return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
 }
@@ -3806,7 +3811,7 @@ export class DashboardComponent implements Component {
     const remoteCoordinator = remoteView && remote.kind === "remote-coordinator" ? remote : null;
     const isFullWidth = remoteCoordinator !== null || (!remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode)));
 
-    // Header. Its alert shows the transient notice, else the peer transfers in
+    // Header. Its alert shows the transient notice, then each peer transfer in
     // flight (SPEC §20.5), so a transfer never adds a row and shifts the layout.
     const cancellableSend = this.escapeSend();
     const incoming = this.peerService?.view().incoming ?? [];
@@ -3820,10 +3825,13 @@ export class DashboardComponent implements Component {
         return `${selected ? "› " : ""}receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${selected ? "Esc: cancel" : "Ctrl-T: select"}`;
       }),
     ];
-    const alert = this.lastSentNotice ?? (transfers.length > 0 ? transfers.join("  ·  ") : null);
-    const noticeColor = this.lastSentNotice !== null && this.lastSentNoticeKind === "error" ? RED : YELLOW;
-    const subtitle = alert
-      ? `${DIM}—${RESET} ${noticeColor}${alert}${RESET}`
+    const noticeColor = this.lastSentNoticeKind === "error" ? RED : YELLOW;
+    const alerts = [
+      ...(this.lastSentNotice ? [`${noticeColor}${this.lastSentNotice}${RESET}`] : []),
+      ...transfers.map((transfer) => `${YELLOW}${transfer}${RESET}`),
+    ];
+    const subtitle = alerts.length > 0
+      ? `${DIM}—${RESET} ${alerts.join(`${DIM}  ·  ${RESET}`)}`
       : `${DIM}— agent dashboard${RESET}`;
     const left = `${BOLD}ib${RESET} ${subtitle}`;
     const indicators: string[] = [];
@@ -3994,11 +4002,14 @@ export class DashboardComponent implements Component {
       const focused = this.focusManager.current() === "active-agent";
       this.inputField.active = acceptsText && focused && this.focusManager.subFocus !== "pane";
       this.inputField.setFocusState(this.focusManager.subFocus === "send" ? "send" : "text");
-      const input = acceptsText ? this.inputField.render(mainWidth) : [];
-      const height = Math.max(0, availableHeight - input.length);
-      const body = remoteCoordinator ? this.remotePane.render(mainWidth, height)
-        : renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, height);
-      mainLines = [mainTitleSep, ...body, ...input];
+      if (remoteCoordinator) {
+        // Full width, like the local coordinator's TMUX view and its input.
+        const input = this.inputField.render(mainWidth);
+        mainLines = [mainTitleSep, ...this.remotePane.render(mainWidth, Math.max(0, availableHeight - input.length)), ...input];
+      } else {
+        const input = acceptsText ? (width: number) => this.inputField.render(width) : undefined;
+        mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight, input)];
+      }
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its
       // tree in this mode (sidebar.hideTree), so this tall maxHeight stays set

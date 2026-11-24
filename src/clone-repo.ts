@@ -59,20 +59,34 @@ export function cloneDestination(cloneRoot: string, registryName: string, relPat
  * no user). Everything else is refused: `ext::` and every other
  * `<transport>::` form, `file://` and any other `scheme://`, local paths,
  * anything starting with `-`, and any whitespace, backslash or control
- * character. Neither the authority of an ssh/https URL (userinfo included)
- * nor a host may start with `-`, and an scp-style host has no `/` or `@`.
+ * character.
+ *
+ * Git unwraps a bracketed `[host]`, and url-decodes a `scheme://` URL's host,
+ * before it builds the ssh command line, so: no host may start with `-` or
+ * `[-`; an ssh:// authority may not start with `-` (a user may not either),
+ * may hold at most one `@`, and may not contain `%`; an https:// URL may
+ * carry no userinfo at all (the sender strips credentials, so a real peer
+ * never sends one, and `https://github.com@evil.example/` would read as
+ * github.com); an scp-style host has no `/` or `@`.
  */
 export function isAllowedCloneUrl(url: string): boolean {
   if (url === "" || url.startsWith("-") || /[\s\\\p{Cc}]/u.test(url)) return false;
-  for (const scheme of ["ssh://", "https://"]) {
-    if (!url.startsWith(scheme)) continue;
-    const authority = url.slice(scheme.length).split("/")[0]!;
-    const host = authority.replace(/^[^@]*@/, "");
-    return host !== "" && !authority.startsWith("-") && !host.startsWith("-");
+  const dashHost = (host: string) => host.startsWith("-") || host.startsWith("[-");
+  const authorityOf = (scheme: string) => url.slice(scheme.length).split("/")[0]!;
+  if (url.startsWith("ssh://")) {
+    const authority = authorityOf("ssh://");
+    const parts = authority.split("@");
+    const host = parts.at(-1)!;
+    return parts.length <= 2 && !authority.includes("%") && !authority.startsWith("-") && host !== "" && !dashHost(host);
+  }
+  if (url.startsWith("https://")) {
+    const host = authorityOf("https://");
+    return host !== "" && !host.includes("@") && !dashHost(host);
   }
   // Any other scheme:// is a URL git would not read as scp-style.
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return false;
-  return /^(?:[^@:/]+@)?[^@:/-][^@:/]*:(?!:).+$/.test(url);
+  const scp = /^(?:[^@:/]+@)?([^@:/]+):(?!:).+$/.exec(url);
+  return scp !== null && !dashHost(scp[1]!);
 }
 
 /** Why `url` will not be cloned, or null when {@link isAllowedCloneUrl} allows it. */

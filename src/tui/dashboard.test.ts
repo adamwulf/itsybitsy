@@ -12451,6 +12451,13 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(prompt).toEndWith("…) from Laptop B into:");
     expect(prompt).not.toContain("\x1b");
     expect(clonePrompt("app", "gh-work:o/app.git", "Desk")).toBe("Clone app (gh-work:o/app.git) from Desk into:");
+
+    // A name and peer so long that not even 12 columns are left for the URL:
+    // the whole title is cut at its end instead.
+    const name = "n".repeat(64);
+    const whole = clonePrompt(name, "git@github.com:owner/app.git", "Laptop B");
+    expect(visibleWidth(whole)).toBe(dialogTitleMaxWidth());
+    expect(whole).toBe(`Clone ${name} (gi…`);
   });
 
   test("c on a remote-only header with a remote URL clones into the peer's folders under the clone root, and the header turns local", async () => {

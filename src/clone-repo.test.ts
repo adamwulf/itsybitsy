@@ -46,12 +46,14 @@ describe("isAllowedCloneUrl", () => {
     "user@host.example:path/to/repo",
     "ssh://git@github.com/owner/repo.git",
     "ssh://host.example:2222/srv/repo",
+    "ssh://git@[::1]:2222/srv/repo",
     "https://github.com/owner/repo.git",
-    "https://token@github.com/owner/repo",
+    "https://github.com:8443/owner/repo.git",
     // User-less scp-style: an SSH-config alias, or a host with the user in ~/.ssh/config.
     "gh-work:org/repo.git",
     "host.example:path/to/repo",
     "localhost:/srv/repo.git",
+    "[host.example]:repo",
   ])("allows %p", (url) => {
     expect(isAllowedCloneUrl(url)).toBe(true);
   });
@@ -76,6 +78,20 @@ describe("isAllowedCloneUrl", () => {
     // The authority, userinfo included, may not start with "-" either.
     "ssh://-oProxyCommand=x@host/repo",
     "https://-x@host/repo",
+    // Git unwraps [host] and url-decodes a scheme:// host before building the ssh command.
+    "[-oProxyCommand=x]:repo",
+    "git@[-oProxyCommand=x]:repo",
+    "ssh://[-oProxyCommand=x]/repo",
+    "ssh://git@[-oProxyCommand=x]/repo",
+    "ssh://%2DoProxyCommand=x/repo",
+    "ssh://git@%2Dhost/repo",
+    "ssh://%2Doops@host/repo",
+    "https://[-x]/repo",
+    // A host the title could misread: https userinfo, a second "@" in an ssh authority.
+    "https://token@github.com/owner/repo",
+    "https://github.com@evil.example/owner/repo",
+    "https://github.com?@evil.example/owner/repo",
+    "ssh://git@github.com@evil.example/owner/repo",
     "ssh://",
     "https:///path",
     "git@-host:path",

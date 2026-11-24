@@ -1,47 +1,49 @@
-import { realpathArgument } from "./attachment-manifest";
-import { lstat } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { realpathArgument, type AttachmentArgument } from "./attachment-manifest";
+import { watcherTmpReservations } from "./attachment-space";
+import { remoteAttachmentStage } from "./remote-attachments";
+import type { SendHeader } from "./send-frame";
+import { inspectTransferDirectory, makeOutgoingDirectory } from "./transfer-owner";
+import { rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { references } from "../message-attachments";
 import { userHome } from "../home";
-import { runtimeDir } from "../runtime-names";
-import { canonicalizeSandboxPath } from "../sandbox";
 
-async function resolveMissingReference(path: string) {
-  const suffix: string[] = [];
-  let prefix = path;
-  for (;;) {
-    try {
-      const existing = await realpathArgument(prefix);
-      const firstMissing = suffix.at(-1);
-      if (firstMissing) {
-        const leaf = await lstat(join(existing, firstMissing)).catch(err => {
-          if (err.code !== "ENOENT") throw err;
-        });
-        if (leaf?.isSymbolicLink()) throw new Error(`Unresolved attachment: ${path}`);
-      }
-      return resolve(existing, ...suffix.reverse());
-    }
-    catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT" || prefix === "/") throw err;
-      suffix.push(basename(prefix));
-      prefix = dirname(prefix);
-    }
-  }
+/** One file the message names: one row in the path dialog, however many ways the message spells it. */
+export interface PeerAttachmentCandidate {
+  /** The file's first spelling in the message, trailing punctuation trimmed: the dialog row. */
+  argument: string;
+  /** Its canonical path on this machine. */
+  source: string;
+  /** Every spelling of the file in message order, `argument` first. An attached file is rewritten in all of them. */
+  spellings: string[];
 }
 
-/** Use the input field's parser. A peer's repo path is a display string:
- * compare its spelling, but never look it up on the local filesystem. */
-export async function dashboardAttachmentPaths(text: string, remoteRoot?: string, localRoot?: string) {
+function missing(err: unknown) {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/**
+ * The references in `text` the user may send to a peer as attachments, using
+ * the input field's parser: each names an existing regular file on this
+ * machine, /tmp included, since a peer cannot read this machine's /tmp. Every
+ * other reference (a directory, a missing path, a relative one without
+ * `localRoot`) stays raw text and is not offered. `localRoot` is this
+ * machine's checkout of the target's repository: a relative reference
+ * resolves against it.
+ *
+ * Spellings that resolve to the same file make one candidate, so checking it
+ * attaches the file and rewrites each of them. Every candidate starts
+ * unchecked in the path dialog, as in a local send.
+ */
+export async function peerAttachmentCandidates(text: string, localRoot?: string) {
   let noPassthrough = false;
-  const paths = new Map<string, { argument: string; source: string }>();
-  const local = localRoot && canonicalizeSandboxPath(localRoot);
-  const inside = (root: string | undefined, path: string) => !!root && (path === root || path.startsWith(root + "/"));
-  // A file in the checkout's runtime directory (other agents' worktrees, logs)
-  // exists only on this machine, so it is attached, not left live for the peer.
-  // A missing one stays literal: with the same checkout path on both machines
-  // it may name the peer's own runtime directory.
-  const live = (path: string) => inside(local, path) && !inside(local && runtimeDir(local), path);
-  for (const ref of references(text)) {
+  const candidates = new Map<string, PeerAttachmentCandidate>();
+  let refs: ReturnType<typeof references>;
+  // Text the parser cannot read (an unclosed quote) is sent unchanged, as a local send does.
+  try { refs = references(text); }
+  catch { return { candidates: [], noPassthrough }; }
+  for (const ref of refs) {
     let path = ref.path;
     const relative = !path.startsWith("/") && !path.startsWith("~/");
     if (relative && !localRoot) {
@@ -50,26 +52,61 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
     }
     for (;;) {
       const absolute = path.startsWith("~/") ? userHome() + path.slice(1) : relative ? localRoot + "/" + path : path;
+      let source: string;
       try {
-        const source = await realpathArgument(absolute);
-        if (ref.start === 0) noPassthrough = true;
-        if (relative || live(source)) break;
-        paths.set(path, { argument: path, source });
-        break;
+        source = await realpathArgument(absolute);
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        if (!missing(err)) throw err;
         if (!ref.quote && /[.,;:!\)\]}]$/.test(path)) { path = path.slice(0, -1); continue; }
-        const localPath = await resolveMissingReference(absolute);
-        if (!ref.quote && /^\/[\w-]+$/.test(path)) break;
-        if (relative) { if (ref.start === 0) noPassthrough = true; break; }
-        const peerOnly = !inside(localRoot, absolute) && inside(remoteRoot, absolute) && inside(remoteRoot, resolve(absolute));
-        if (peerOnly || inside(local, localPath)) {
-          if (ref.start === 0) noPassthrough = true;
-          break;
-        }
-        throw new Error(`Cannot stage attachment ${JSON.stringify(path)}: file not found`);
+        // A missing slash-command name stays a slash command.
+        if (ref.start === 0 && (ref.quote || !/^\/[\w-]+$/.test(path))) noPassthrough = true;
+        break;
       }
+      if (ref.start === 0) noPassthrough = true;
+      const info = await stat(source).catch(err => { if (!missing(err)) throw err; });
+      if (info?.isFile()) {
+        const known = candidates.get(source);
+        if (!known) candidates.set(source, { argument: path, source, spellings: [path] });
+        else if (!known.spellings.includes(path)) known.spellings.push(path);
+      }
+      break;
     }
   }
-  return { paths: [...paths.values()], noPassthrough };
+  return { candidates: [...candidates.values()], noPassthrough };
+}
+
+export interface StagedPeerAttachments {
+  /** The staged files, for the transfer's `filesDir`. */
+  filesDir: string;
+  /** The header's `files`. */
+  files: SendHeader["files"];
+  /** Remove the staging directory. A failure goes to `onCleanupError`. */
+  cleanup: () => Promise<void>;
+}
+
+/**
+ * Stage the files the user checked for a transfer to a peer in a new outgoing
+ * directory that this process owns, each with all of its spellings. A failure
+ * removes the directory before it rejects.
+ */
+export async function stagePeerAttachments(
+  chosen: readonly PeerAttachmentCandidate[],
+  { signal, onCleanupError }: { signal?: AbortSignal; onCleanupError?: (err: unknown) => void } = {},
+): Promise<StagedPeerAttachments> {
+  const staging = await makeOutgoingDirectory();
+  const cleanup = async () => {
+    try { await rm(staging, { recursive: true, force: true }); }
+    catch (err) { onCleanupError?.(err); }
+  };
+  try {
+    const filesDir = join(staging, "files");
+    const paths: AttachmentArgument[] = chosen.flatMap(({ source, spellings }) => spellings.map(argument => ({ argument, source })));
+    const files = await remoteAttachmentStage(paths, { kind: "user" }, signal, undefined, watcherTmpReservations)(filesDir);
+    const { owner, state } = await inspectTransferDirectory(staging);
+    if (state !== "verified-live" || owner?.pid !== process.pid) throw new Error("Cannot verify the outgoing attachment owner");
+    return { filesDir, files, cleanup };
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
 }

@@ -2,7 +2,8 @@ import { copyFile, mkdtemp, mkdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { userHome } from "../home";
-import type { DialogState } from "./dialog-handler";
+import { truncateToWidth } from "@mariozechner/pi-tui";
+import { dialogTitleMaxWidth, MULTI_SELECT_WIDTH, type DialogState } from "./dialog-handler";
 import { references, spellPath, type PathReference } from "../message-attachments";
 
 export interface CandidateAttachment {
@@ -159,6 +160,88 @@ export interface AttachmentPromptOptions {
   onCancel?: () => void;
 }
 
+export interface PathDialogOptions {
+  /** Paths in message order. A path listed more than once is offered once. */
+  paths: readonly string[];
+  /** Initial checked state, parallel to `paths`. Unchecked when omitted. */
+  checked?: readonly boolean[];
+  prompt: string;
+  showDialog: (dialog: NonNullable<DialogState>) => void;
+  closeDialog: () => void;
+}
+
+/**
+ * Show the multi-select path dialog. It closes (`closeDialog`) before
+ * `onCancel` or `onSubmit` runs; the dialog's own onSubmit returns the
+ * promise `onSubmit` returns.
+ */
+export function showPathDialog(opts: PathDialogOptions & {
+  onCancel: () => void;
+  onSubmit: (selected: Set<string>) => void | Promise<void>;
+}): void {
+  const items: string[] = [];
+  const checked: boolean[] = [];
+  opts.paths.forEach((path, i) => {
+    if (items.includes(path)) return;
+    items.push(path);
+    checked.push(opts.checked?.[i] ?? false);
+  });
+  opts.showDialog({
+    type: "multi-select",
+    prompt: opts.prompt,
+    items,
+    checked,
+    selectedIndex: 0,
+    onCancel: () => {
+      opts.closeDialog();
+      opts.onCancel();
+    },
+    onSubmit: (checkedIndices: number[]) => {
+      opts.closeDialog();
+      const selected = new Set<string>();
+      for (const idx of checkedIndices) {
+        if (items[idx] !== undefined) selected.add(items[idx]!);
+      }
+      return opts.onSubmit(selected);
+    },
+  });
+}
+
+/**
+ * {@link showPathDialog} as a promise: the checked paths, or null on cancel.
+ * Aborting `signal` resolves null too, closing the dialog when `openDialog`
+ * (the host's open dialog) still shows it, so a caller waiting on its own
+ * shutdown never waits on a key press.
+ */
+export function choosePaths(opts: PathDialogOptions & { signal?: AbortSignal; openDialog?: () => DialogState }): Promise<Set<string> | null> {
+  return new Promise((resolvePromise) => {
+    const { signal } = opts;
+    if (signal?.aborted) { resolvePromise(null); return; }
+    let shown: DialogState = null;
+    const settle = (selected: Set<string> | null) => {
+      signal?.removeEventListener("abort", abort);
+      resolvePromise(selected);
+    };
+    const abort = () => {
+      if (shown && (!opts.openDialog || opts.openDialog() === shown)) opts.closeDialog();
+      settle(null);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    showPathDialog({
+      ...opts, showDialog: dialog => { shown = dialog; opts.showDialog(dialog); },
+      onCancel: () => settle(null), onSubmit: settle,
+    });
+  });
+}
+
+/** Title of the path dialog for a send to a peer, cut to fit the dialog's border. */
+export function peerAttachmentPrompt(peerName: string): string {
+  const prefix = "Send as attachments to ";
+  const suffix = ":";
+  const room = dialogTitleMaxWidth(MULTI_SELECT_WIDTH) - prefix.length - suffix.length;
+  return `${prefix}${truncateToWidth(peerName, room, "…")}${suffix}`;
+}
+
 export function hasPossibleCandidates(text: string): boolean {
   try {
     const refs = references(text);
@@ -193,35 +276,17 @@ export async function promptAndStageAttachmentsIfNeeded(
     return res ?? true;
   }
 
-  const uniquePaths: string[] = [];
-  const seen = new Set<string>();
-  for (const c of candidates) {
-    if (!seen.has(c.path)) {
-      seen.add(c.path);
-      uniquePaths.push(c.path);
-    }
-  }
-
   return new Promise<boolean>((resolvePromise) => {
-    showDialog({
-      type: "multi-select",
+    showPathDialog({
+      paths: candidates.map((c) => c.path),
       prompt: prompt ?? "Copy paths to /tmp:",
-      items: uniquePaths,
-      checked: uniquePaths.map(() => false),
-      selectedIndex: 0,
+      showDialog,
+      closeDialog,
       onCancel: () => {
-        closeDialog();
         onCancel?.();
         resolvePromise(false);
       },
-      onSubmit: async (checkedIndices: number[]) => {
-        closeDialog();
-        const selectedPaths = new Set<string>();
-        for (const idx of checkedIndices) {
-          if (uniquePaths[idx] !== undefined) {
-            selectedPaths.add(uniquePaths[idx]!);
-          }
-        }
+      onSubmit: async (selectedPaths) => {
         try {
           const processedText = await stageSelectedAttachments(text, selectedPaths, candidates);
           const res = await onConfirm(processedText);

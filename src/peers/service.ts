@@ -69,9 +69,10 @@ import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./tra
  */
 
 import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
-import type { SendHeader } from "./send-frame";
+import type { AttachmentEntry, SendHeader } from "./send-frame";
 import { cleanRemoteText, requestAcknowledge, requestLifecycle, requestSend } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
+import { createAttachmentReceiver, totalBytes } from "./receive-attachments";
 import { remoteLifecycleDenial, remoteSendDenial, remoteStartDenialAtStartup, remoteTerminalDenial } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
@@ -93,7 +94,7 @@ import {
   type PairStage,
   type PairStream,
 } from "./pairing";
-import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
+import { acceptRemoteAgent, acceptRemoteAgentWithFiles, type RemoteSpawnDeps } from "./new-agent";
 import { acceptRemoteLifecycle, type RemoteLifecycleRequest, type RemoteLifecycleDeps } from "./remote-lifecycle";
 import { acceptRemoteAcknowledge, type RemoteQuestionDeps } from "./remote-questions";
 import { detectAgentStates } from "../agents";
@@ -189,6 +190,8 @@ export interface PeerServiceDeps {
  */
 export function defaultPeerServiceDeps(machine: string, log: (line: string) => void, snapshot: () => PeerSnapshot, notice: (message: string) => void, remoteStartDenial: PeerServiceDeps["remoteStartDenial"] = remoteStartDenialAtStartup(), recoveryRoot = transferStagingRoot()): PeerServiceDeps {
   const poll = createPeerOutboxPoll();
+  // Sends and remote starts share the busy rule and the /tmp reservation.
+  const attachments = createAttachmentReceiver();
   let diffCleanup: Promise<void> | undefined;
   return {
     notice,
@@ -198,7 +201,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
       diffCleanup ??= sweepDiffCopies(recoveryRoot).catch(err => { diffCleanup = undefined; throw err; });
       await finishRecovery([diffCleanup, sweepOutgoingDirectories(recoveryRoot), poll.recover()]);
     },
-    receiveMessage: createMessageReceiver(log, notice),
+    receiveMessage: createMessageReceiver(log, notice, () => performance.now(), 4096, attachments),
     remoteStartDenial,
     captureCoordinator: async lines => {
       const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log, lines });
@@ -206,7 +209,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     },
     remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, notice },
     remoteQuestions: { listRepos, acknowledgeQuestion, notice },
-    remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
+    remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice, attachments },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
     acquireLock: () => acquireEndpointLock(),
@@ -748,27 +751,32 @@ export class PeerService {
 
   async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
     const [header, peer, name, body, options] = args;
-    if (this.shuttingDown) throw new Error("Watcher shutting down");
     const receive = this.deps.receiveMessage!;
+    await this.trackReceipt(peer, targetLabel(header.target), header.files, options ?? {}, tracked => receive(header, peer, name, body, tracked));
+  }
+
+  /** An inbound receipt (a send or a framed remote start): its row while it owns a body, Esc until commit, and shutdown. */
+  private async trackReceipt<O extends import("./peer-link").ReceiptOptions, T>(peer: string, target: string, files: readonly AttachmentEntry[], options: O, receive: (options: O) => Promise<T>): Promise<T> {
+    if (this.shuttingDown) throw new Error("Watcher shutting down");
     const id = crypto.randomUUID();
     const controller = new AbortController();
     const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
-    const row = { id, label: cleanRemoteText(label + " → " + targetLabel(header.target)), bytes: 0, total: header.files.reduce((sum, f) => sum + f.size, 0) };
+    const row = { id, label: cleanRemoteText(label + " → " + target), bytes: 0, total: totalBytes(files) };
     const done = Promise.withResolvers<void>();
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await receive(header, peer, name, body, { ...options, signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal, admitted: ownsBody => {
+      return await receive({ ...options, signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal, admitted: ownsBody => {
         if (this.shuttingDown) throw new Error("Watcher shutting down");
         this.receipts.set(id, { row: ownsBody ? row : undefined, controller, done: done.promise });
         if (ownsBody) {
-          if (options?.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
+          if (options.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
           this.notify();
         }
-        options?.admitted?.(ownsBody);
+        options.admitted?.(ownsBody);
       }, committing: () => {
         const receipt = this.receipts.get(id);
         if (receipt?.row) { receipt.row = undefined; this.notify(); }
-        options?.committing?.();
+        options.committing?.();
       }, onProgress: bytes => {
         row.bytes = bytes;
         progressTimer ??= setTimeout(() => {
@@ -820,12 +828,13 @@ export class PeerService {
     await requestAcknowledge(conn, repo, questionId, this.deps.setTimer);
   }
 
-  async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
+  /** With `request.files`, `transfer.filesDir` holds the staged bodies, numbered as in {@link sendRemoteMessage}. */
+  async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest, transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
-    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    if (await waitForIO({ setTimer: this.deps.setTimer, signal: transfer?.signal }, () => this.peerName(peerId)) === null) throw new Error("Machine is no longer paired");
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
-    return requestNewAgent(conn, request, this.deps.setTimer);
+    return requestNewAgent(conn, request, this.deps.setTimer, transfer);
   }
 
   /** The code typed at A's prompt. */
@@ -1100,6 +1109,9 @@ export class PeerService {
             acceptRemoteAcknowledge(repo, id, readPeerName, this.deps.remoteQuestions!, this.deps.log)),
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
+          startAgentWithFiles: remoteSpawn && ((header, peer, readPeerName, body, options) =>
+            this.trackReceipt(peer, `new agent in ${header.repo}`, header.files, options, tracked =>
+              acceptRemoteAgentWithFiles(header, peer, readPeerName, body, { ...options, ...tracked }, remoteSpawn, this.deps.log))),
           receiveMessage: this.deps.receiveMessage && ((...args) => this.receiveTracked(...args)),
           snapshot: this.deps.snapshot,
           captureCoordinator: this.deps.captureCoordinator,

@@ -42,7 +42,8 @@ import { cleanRemoteText } from "../peers/peer-link";
 import { newPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
-import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
+import { choosePaths, peerAttachmentPrompt, promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
+import { peerAttachmentCandidates, stagePeerAttachments, type PeerAttachmentCandidate, type StagedPeerAttachments } from "../peers/dashboard-attachments";
 import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import { attachmentSettingKey, TRANSFER_SETTING_BOUNDS } from "../peers/transfer-limits";
@@ -182,6 +183,10 @@ export interface ActionCtx {
   /** Send to a remote row (SPEC §20.5); true once the peer accepts. Aborting `controller` cancels. */
   submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller?: AbortController): Promise<boolean>;
   remoteStartPending: boolean;
+  /** The pending remote start, which may carry attachments: dashboard shutdown aborts it and waits for its cleanup. */
+  remoteStart?: { controller: AbortController; done: Promise<void> } | null;
+  /** Add a line to the errors list. */
+  addError?(message: string): void;
   peerService: PeersDialogService | null;
   remoteSelection: RemoteEntry | null;
   runRemoteRowCommand(row: Extract<RemoteEntry, { kind: "remote-agent" }>, options: Pick<import("../peers/remote-lifecycle").RemoteLifecycleRequest, "action" | "checkOnly" | "keep">): Promise<string>;
@@ -1978,14 +1983,37 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
       if (target.id !== null && service) {
         if (form.remoteStartDenial !== null) return;
         if (ctx.remoteStartPending) return;
+        // Held through the path dialog, so no other start slips in while it is open.
         ctx.remoteStartPending = true;
         form.inFlight = target.name;
         form.error = undefined;
         ctx.tui?.requestRender();
+        const controller = new AbortController();
+        const done = Promise.withResolvers<void>();
+        ctx.remoteStart = { controller, done: done.promise };
+        let staged: StagedPeerAttachments | undefined;
         try {
+          // This machine's checkout of the same registry name, if any (SPEC §20.5).
+          const { candidates } = await peerAttachmentCandidates(prompt, repo?.path);
+          controller.signal.throwIfAborted();
+          let paths: PeerAttachmentCandidate[] = [];
+          if (candidates.length) {
+            // A form dismissed while the paths were found has nothing to come back to.
+            const selected = ctx.dialog === form ? await choosePeerStartPaths(ctx, candidates, target.name, controller.signal) : null;
+            if (!selected) {
+              ctx.setNotice("New agent cancelled", "info");
+              return;
+            }
+            paths = candidates.filter(candidate => selected.has(candidate.argument));
+          }
+          if (paths.length) {
+            staged = await stagePeerAttachments(paths, {
+              signal: controller.signal, onCleanupError: err => ctx.addError?.(`Outgoing attachment cleanup failed: ${err}`),
+            });
+          }
           const id = await service.startRemoteAgent(target.id, {
-            repo: registryName, type: agentType, name: name.trim() || undefined, prompt,
-          });
+            repo: registryName, type: agentType, name: name.trim() || undefined, prompt, files: staged?.files,
+          }, { filesDir: staged?.filesDir, signal: controller.signal });
           if (ctx.dialog === form) ctx.closeDialog();
           ctx.setNotice(`Created agent ${cleanRemoteText(id)} on ${target.name}`, "info");
         } catch (err) {
@@ -1994,9 +2022,14 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
           if (ctx.dialog === form) form.error = message;
           else ctx.setNotice(message, "error");
         } finally {
-          ctx.remoteStartPending = false;
-          form.inFlight = undefined;
-          ctx.tui?.requestRender();
+          try { await staged?.cleanup(); }
+          finally {
+            ctx.remoteStart = null;
+            done.resolve();
+            ctx.remoteStartPending = false;
+            form.inFlight = undefined;
+            ctx.tui?.requestRender();
+          }
         }
         return;
       }
@@ -2035,6 +2068,26 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
     },
   };
   ctx.showDialog(form);
+}
+
+/**
+ * The path dialog of a remote start (SPEC §20.5), every path unchecked at
+ * first. It takes the frozen form's place, and the form comes back with its
+ * draft when it closes. The checked paths, or null when the user cancels or
+ * `signal` (the start's, which dashboard shutdown aborts) is aborted.
+ */
+function choosePeerStartPaths(ctx: ActionCtx, candidates: readonly PeerAttachmentCandidate[], peerName: string, signal: AbortSignal): Promise<Set<string> | null> {
+  const previous = ctx.dialog;
+  return choosePaths({
+    paths: candidates.map(candidate => candidate.argument),
+    prompt: peerAttachmentPrompt(peerName),
+    signal, openDialog: () => ctx.dialog,
+    showDialog: dialog => ctx.showDialog(dialog),
+    closeDialog: () => {
+      ctx.closeDialog();
+      if (previous) ctx.showDialog(previous);
+    },
+  });
 }
 
 /**

@@ -17,6 +17,8 @@ export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
 /** Width of a dialog whose type has no width of its own (input, confirm, ...). */
 export const DIALOG_WIDTH = 80;
+/** Width of the multi-select dialog. */
+export const MULTI_SELECT_WIDTH = 70;
 
 /**
  * Widest title a `width`-column dialog can draw. The overlay draws the title
@@ -1174,7 +1176,6 @@ export function buildNewAgentFormContent(
   if (dialog.machine && dialog.machine.id !== null) {
     if (dialog.otherRemoteStartPending) lines.push(...wordWrapLines("A remote agent start is already pending", innerWidth));
     if (dialog.remoteStartDenial) lines.push(...wordWrapLines(dialog.remoteStartDenial, innerWidth));
-    lines.push(...wordWrapLines(`Attachments are not sent to ${dialog.machine.name}. Local paths stay in the prompt.`, innerWidth));
   }
   lines.push("");
 

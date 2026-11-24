@@ -1,9 +1,6 @@
-import { inspectTransferDirectory, makeOutgoingDirectory } from "../peers/transfer-owner";
-import { watcherTmpReservations } from "../peers/attachment-space";
-import { join } from "node:path";
-import { rm } from "node:fs/promises";
-import { dashboardAttachmentPaths } from "../peers/dashboard-attachments";
-import { remoteAttachmentStage } from "../peers/remote-attachments";
+import {
+  peerAttachmentCandidates, stagePeerAttachments, type PeerAttachmentCandidate, type StagedPeerAttachments,
+} from "../peers/dashboard-attachments";
 import { repoRowKey } from "./row-keys";
 import { lifecyclePast, type RemoteLifecycleRequest } from "../peers/remote-lifecycle";
 import { remoteLifecycleDenial, remoteSendDenial } from "../peers/remote-start-caller";
@@ -79,7 +76,7 @@ import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
 import type { DialogState } from "./dialog-handler";
 import {
-  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH,
+  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH, MULTI_SELECT_WIDTH,
   handleDialogInput, syncNewAgentMachine, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
   PEERS_TAB, buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
@@ -110,7 +107,7 @@ import { InputFieldComponent } from "./input-field";
 import { pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
-import { promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
+import { choosePaths, peerAttachmentPrompt, promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
 import { getResolvableWarnings } from "../health-check";
 import { logToWatchLog, logWarning, setWatchRunning } from "../watch-log";
 import { sandboxCollectorHealth, type CollectorHealth } from "../sandbox-collector-light";
@@ -874,6 +871,8 @@ export class DashboardComponent implements Component {
    * none unless the test sets a fake, so no test can bind a real endpoint.
    */
   remoteStartPending = false;
+  /** The pending remote start (agent-actions.ts): shutdown aborts it with the pending sends. */
+  remoteStart: { controller: AbortController; done: Promise<void> } | null = null;
   peerService: PeersDialogService | null = null;
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
@@ -2103,7 +2102,7 @@ export class DashboardComponent implements Component {
   }
 
   async stopRemoteSends() {
-    const sends = [...this.pendingRemoteSends.values()];
+    const sends = [...this.pendingRemoteSends.values(), ...this.remoteStart ? [this.remoteStart] : []];
     for (const { controller } of sends) controller.abort(new Error("Dashboard shutting down"));
     await Promise.allSettled(sends.map(send => send.done));
   }
@@ -2146,7 +2145,9 @@ export class DashboardComponent implements Component {
    * Send `text` from the user to a remote row (SPEC §20.5), shown as a pending
    * `sending to <target>…` entry in the header alert until the peer accepts it. Resolves true on
    * acceptance; on failure it shows the reason and resolves false. Aborting
-   * `controller` cancels the send.
+   * `controller` cancels the send. When `text` names files the peer can take
+   * as attachments, the path dialog asks which to attach first; cancelling it
+   * sends nothing and resolves false.
    */
   async submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller = new AbortController()): Promise<boolean> {
     const service = this.peerService;
@@ -2154,29 +2155,36 @@ export class DashboardComponent implements Component {
     const label = remoteTitle(remote);
     const done = Promise.withResolvers<void>();
     const pending = { id: header.id, peerId: remote.peerId, target: header.target, label, controller, done: done.promise, bytes: 0, total: undefined as number | undefined };
-    let staging: string | undefined;
+    let staged: StagedPeerAttachments | undefined;
     try {
       if (!service) throw new Error("Remote messaging is unavailable");
       if (service.remoteStartDenial !== null) throw new Error(remoteSendDenial(service.remoteStartDenial));
+      const repo = remote.kind === "remote-agent" ? remote.remote : undefined;
+      const local = repo && this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo.repoRegistryName));
+      const { candidates, noPassthrough } = await peerAttachmentCandidates(text, local?.path);
+      if (noPassthrough) header.noPassthrough = true;
+      controller.signal.throwIfAborted();
+      let paths: PeerAttachmentCandidate[] = [];
+      if (candidates.length) {
+        const selected = await this.choosePeerAttachments(candidates, remote.peerName);
+        if (!selected) {
+          this.setNotice("Send cancelled", "info");
+          return false;
+        }
+        paths = candidates.filter(candidate => selected.has(candidate.argument));
+      }
       this.pendingRemoteSends.set(header.id, pending);
       this.invalidate();
       this.tui?.requestRender();
-      const repo = remote.kind === "remote-agent" ? remote.remote : undefined;
-      const local = repo && this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo.repoRegistryName));
-      const { paths, noPassthrough } = await dashboardAttachmentPaths(text, repo?.repoPath, local?.path);
-      if (noPassthrough) header.noPassthrough = true;
-      controller.signal.throwIfAborted();
-      let filesDir: string | undefined;
       if (paths.length) {
-        staging = await makeOutgoingDirectory();
-        filesDir = join(staging, "files");
-        header.files = await remoteAttachmentStage(paths, { kind: "user" }, controller.signal, undefined, watcherTmpReservations)(filesDir);
+        staged = await stagePeerAttachments(paths, {
+          signal: controller.signal, onCleanupError: err => this.addError(`Outgoing attachment cleanup failed: ${err}`),
+        });
+        header.files = staged.files;
         pending.total = header.files.reduce((sum, file) => sum + file.size, 0);
-        const { owner, state } = await inspectTransferDirectory(staging);
-        if (state !== "verified-live" || owner?.pid !== process.pid) throw new Error("Cannot verify the outgoing attachment owner");
       }
       await service.sendRemoteMessage(remote.peerId, header, "dashboard", {
-        filesDir, signal: controller.signal, onProgress: bytes => {
+        filesDir: staged?.filesDir, signal: controller.signal, onProgress: bytes => {
           pending.bytes = bytes;
           this.invalidate();
           this.tui?.requestRender();
@@ -2188,12 +2196,29 @@ export class DashboardComponent implements Component {
       this.setNotice(err instanceof Error ? err.message : String(err), "error");
       return false;
     } finally {
-      try { if (staging) await rm(staging, { recursive: true, force: true }); }
-      catch (err) { this.addError(`Outgoing attachment cleanup failed: ${err}`); }
+      try { await staged?.cleanup(); }
       finally { this.pendingRemoteSends.delete(header.id); done.resolve(); }
       this.invalidate();
       this.tui?.requestRender();
     }
+  }
+
+  /**
+   * The path dialog of a send to `peerName` (SPEC §20.5), every path
+   * unchecked at first. The checked paths, or null when the user cancels. It takes the place of the open dialog (the frozen send
+   * dialog), which comes back when it closes.
+   */
+  private choosePeerAttachments(candidates: readonly PeerAttachmentCandidate[], peerName: string): Promise<Set<string> | null> {
+    const previous = this._dialog;
+    return choosePaths({
+      paths: candidates.map(candidate => candidate.argument),
+      prompt: peerAttachmentPrompt(peerName),
+      showDialog: dialog => this.showDialog(dialog),
+      closeDialog: () => {
+        this.closeDialog();
+        if (previous) this.showDialog(previous);
+      },
+    });
   }
 
   /**
@@ -2248,7 +2273,8 @@ export class DashboardComponent implements Component {
     this.syncRemotePane();
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
-        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor" || dialog.type === "multi-select") ? 70
+        : dialog.type === "multi-select" ? MULTI_SELECT_WIDTH
+        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
         : DIALOG_WIDTH);
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       this.overlayHandle.hide();

@@ -14,7 +14,7 @@
 import { matchesKey, Key, visibleWidth } from "@mariozechner/pi-tui";
 import { describePairFailure } from "../peers/pairing";
 import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peers/pair-code";
-import type { PeerPane, PeerPaneTarget, RemoteNewAgentRequest } from "../peers/peer-link";
+import type { OutgoingTransfer, PeerPane, PeerPaneTarget, RemoteNewAgentRequest } from "../peers/peer-link";
 import { peerLinkStatus, type PeerLinkStatus } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
 import { peerNameProblem, shortPeerId, SHORT_ID_LENGTH } from "../peers/store";
@@ -36,7 +36,7 @@ export interface PeersDialogService {
   acknowledgeRemoteQuestion(peerId: string, repo: string, questionId: string): Promise<void>;
   fetchAgentDiff: import("../peers/service").PeerService["fetchAgentDiff"];
   fetchAgentPrompt: import("../peers/service").PeerService["fetchAgentPrompt"];
-  startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string>;
+  startRemoteAgent(peerId: string, request: RemoteNewAgentRequest, transfer?: OutgoingTransfer): Promise<string>;
   openDialog(): void;
   closeDialog(): void;
   /** Start pairing with the typed id; returns the inline error, or null once started. */

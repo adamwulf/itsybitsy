@@ -14,7 +14,7 @@ import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { makeSpawnResult, waitFor } from "../test-utils";
 import { spawnCtx as paneProbe } from "../tmux-poller";
 import { acceptRemoteAgentWithFiles, type RemoteSpawnDeps } from "./new-agent";
-import { NEW_AGENT_UNKNOWN, requestNewAgent, serveTrustedConnection, type PeerResponderDeps } from "./peer-link";
+import { NEW_AGENT_UNKNOWN, PEER_CLOSE, requestNewAgent, serveTrustedConnection, type PeerResponderDeps } from "./peer-link";
 import { createAttachmentReceiver, type AttachmentReceiver } from "./receive-attachments";
 import { createMessageReceiver } from "./receive-message";
 import { encodeFrameHeader, type AttachmentEntry, type SendHeader } from "./send-frame";
@@ -252,6 +252,29 @@ test("a start releases its transfer slot at commit, so the same peer's attachmen
     pending.resolve({ ok: true, exitCode: 0, stdout: "agent-123", stderr: "" });
     expect(await starting).toBe("agent-123");
   } finally { pending.resolve({ ok: false, exitCode: 1, stdout: "", stderr: "" }); await side.close(); }
+});
+
+test("removing the pairing while the body is received refuses the start before commit and leaves no snapshot", async () => {
+  let paired = true;
+  const side = serve(createFakeClock(), { peerName: async () => paired ? "Alice" : null });
+  try {
+    const stream = await side.a.openBi();
+    await stream.writeAll(encodeFrameHeader({ op: "new-agent", repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")] }));
+    await stream.writeAll(Buffer.from("a"));
+    await waitFor(async () => {
+      const partial = (await entries(join(staging, "incoming"))).find(name => name.endsWith(".partial"));
+      return !!partial && (await entries(join(staging, "incoming", partial, "0"))).length === 1;
+    }, { message: "the body has started" });
+    paired = false;
+    await stream.writeAll(Buffer.from("bc"));
+    await stream.finish();
+    await expect(stream.readToEnd(4096)).rejects.toThrow();
+    expect(side.a.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.notPeer });
+    await waitFor(noPartials);
+    expect(await readdir(received)).toEqual([]);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+  } finally { await side.close(); }
 });
 
 test("a start without files is still the JSON request", async () => {

@@ -10257,6 +10257,7 @@ describe("Unified peer repos in the Agents tree", () => {
       ]);
     }
     const rows = treeRows(dashboard);
+    expect(stripAnsi(rows[0]!)).toContain("running");
     expect(rows[1]).toContain(ITALIC + "Laptop B");
     expect(rows[1]).toContain(GREEN + "connected" + RESET);
     expect(rows[2]).toContain(RED + "offline" + RESET);

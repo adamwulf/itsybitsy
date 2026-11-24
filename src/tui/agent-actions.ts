@@ -3335,7 +3335,11 @@ export function newRepoPrompt(parentPath: string): string {
 
 /** A name this wide or narrower is never cut; a longer one keeps at least three characters and "…". */
 const MIN_NAME = 4;
-/** A host this wide or narrower is never cut at the floor; a longer one keeps at least "…" and its last 23 characters. */
+/**
+ * The host's floor: a host this wide or narrower is not cut at the floor, and
+ * when the floor fits a longer one keeps at least "…" and its last 23
+ * characters. Without room for the floor the host can be cut further.
+ */
 const MIN_HOST_TAIL = 24;
 
 /**
@@ -3356,9 +3360,10 @@ const MIN_HOST_TAIL = 24;
  * ` via <peer>`, which is shown whole or not at all. So whenever the floor
  * fits, the owner shows and an original and a fork with another owner get
  * different titles. When it does not, the owner is left out and the host
- * gets whatever is left beside the floor name and ` into:`, then the name;
- * only below that is the title cut at its end. The result is never wider
- * than `max`.
+ * gets whatever is left beside the floor name and ` into:` (so it can keep
+ * fewer than 23 characters), then the name; only when that leaves the host
+ * fewer than 2 columns is the whole title cut at its end. The result is
+ * never wider than `max`.
  */
 export function clonePrompt(name: string, path: string, host: string, peer: string, max: number): string {
   const width = visibleWidth;

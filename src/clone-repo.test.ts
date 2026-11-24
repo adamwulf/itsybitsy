@@ -520,14 +520,15 @@ describe("with a temp home", () => {
   });
 
   test("a failed clone reports git's stderr on one line and registers nothing", async () => {
+    // What `git clone --quiet` prints: no "Cloning into ..." line, only the error.
     cloneRepoSpawnCtx.set(fakeGit(() => ({
       exitCode: 128,
-      stderr: "Cloning into '/x'...\nHost key verification failed.\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\n",
+      stderr: "Host key verification failed.\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\n",
     })));
     const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest: join(root, "foo"), registryName: "foo" });
     expect(result).toEqual({
       ok: false,
-      message: "git clone failed: Cloning into '/x'... Host key verification failed. fatal: Could not read from remote repository. Please make sure you have the correct access rights",
+      message: "git clone failed: Host key verification failed. fatal: Could not read from remote repository. Please make sure you have the correct access rights",
     });
     expect((await loadRegistry()).repos).toEqual([]);
   });

@@ -12509,6 +12509,21 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(title(cols, NAME, FORK, host)).toBe(fork);
   });
 
+  test("the Clone here title measures wide characters by their columns, not their length", () => {
+    // A CJK owner: 3 characters but 6 columns, so the floor is 41 columns wide.
+    expect(clonePrompt("app", "日本語/app.git", "github.com", "Laptop B", 41)).toBe("Clone app from github.com (日本語…) into:");
+    expect(clonePrompt("app", "日本語/app.git", "github.com", "Laptop B", 42)).toBe("Clone app from github.com (日本語/…) into:");
+    // One column short of the floor: the owner is left out, not cut to "日…".
+    expect(clonePrompt("app", "日本語/app.git", "github.com", "Laptop B", 40)).toBe("Clone app from github.com into:");
+    // A CJK peer: " via 東京のMac" is 11 characters but 14 columns.
+    for (const max of [55, 56]) {
+      expect(clonePrompt("foo", "o/foo.git", "github.com", "東京のMac", max)).toBe("Clone foo from github.com (o/foo.git) into:");
+    }
+    const withPeer = clonePrompt("foo", "o/foo.git", "github.com", "東京のMac", 57);
+    expect(withPeer).toBe("Clone foo from github.com (o/foo.git) via 東京のMac into:");
+    expect(visibleWidth(withPeer)).toBe(57);
+  });
+
   test.each([
     // No room for the owner: the host takes what is beside the 3-character name, and keeps its end.
     [45, "Clone app from …l.company-name.com into:"],
@@ -12522,11 +12537,13 @@ describe("Unified peer repos in the Agents tree", () => {
     const longHost = `${"a".repeat(30)}.${"b".repeat(30)}.${"c".repeat(20)}.evil.example`;
     const hosts = ["github.com", "gitlab.example.com", "gitlab.internal.example.com", "git.internal.company-name.com", longHost];
     const names = ["app", "itsybitsy", NAME, "n".repeat(64)];
-    const pairs = [[ORIGINAL, FORK], ["team/app.git", "teamx/app.git"], ["o/r.git", "averylongownername/r.git"]] as const;
+    const pairs = [[ORIGINAL, FORK], ["team/app.git", "teamx/app.git"], ["o/r.git", "averylongownername/r.git"],
+      // Wide owners: their columns, not their length, decide the floor.
+      ["日本語/app.git", "中文组织/app.git"]] as const;
     const ownerOf = (path: string) => path.split("/")[0]!;
-    // The floor, as clonePrompt's doc defines it.
+    // The floor, as clonePrompt's doc defines it, in columns.
     const floorFits = (max: number, name: string, path: string, host: string) =>
-      21 + Math.min(name.length, 4) + Math.min(host.length, 24) + Math.min(path.length, ownerOf(path).length + 1) <= max;
+      21 + Math.min(name.length, 4) + Math.min(host.length, 24) + Math.min(visibleWidth(path), visibleWidth(ownerOf(path)) + 1) <= max;
     for (let cols = 10; cols <= 100; cols++) {
       const max = dialogTitleMaxWidth(cols);
       for (const host of hosts) for (const name of names) for (const [original, fork] of pairs) {

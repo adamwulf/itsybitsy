@@ -209,8 +209,8 @@ describe("decodeAgentsReply", () => {
     const absent = decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo" }] }));
     expect(absent.repos).toEqual([{ registryName: "foo", displayName: "Foo", remoteUrl: null, relPath: null }]);
     // A URL that is empty or carries a control or format character is dropped,
-    // not cleaned into another URL. Anything else is kept as sent: the
-    // allowlist checks it only at clone time.
+    // not cleaned into another URL. Anything else is kept as sent:
+    // checkCloneUrl checks it when `c` is pressed and again in cloneRepo.
     const urlOf = (remoteUrl: string) =>
       decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", remoteUrl }] })).repos[0]!.remoteUrl;
     for (const dropped of ["", "ext::sh\x1b[31m", "git@host:o/r\n", "git@host:o/r\0", "https://h/o/\u202er", "git@host:o/\u200br"]) {

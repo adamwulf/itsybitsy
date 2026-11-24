@@ -399,6 +399,25 @@ test("lifecycle requests run the receiver’s local commands, return merge error
   }
 });
 
+test("ambiguous retired nicknames suggest addresses on the paired machine", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "ib-peer-ambiguous-rehire-"));
+  const deps = await lifecycleFixture(repo);
+  const side = serve({ lifecycle: (req, name) => acceptRemoteLifecycle(req, name, deps, () => {}) });
+  try {
+    for (const id of ["first", "second"]) {
+      await Bun.write(join(repo, ".itsybitsy", "archive", id, "meta.json"), JSON.stringify({ id, nickname: "reviewer" }));
+    }
+    for (const scope of [{}, { repo: "app" }]) {
+      await expect(requestLifecycle(side.a, { ...scope, action: "rehire", id: "reviewer" }, "Laptop B", side.clock.setTimer))
+        .rejects.toThrow("'reviewer' matches several agents; use 'Laptop B/App/first' or 'Laptop B/App/second'");
+    }
+    expect(deps.rehireAgent).not.toHaveBeenCalled();
+  } finally {
+    side.a.close(0, "done");
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
 test.each([["merge", 120000], ["retire", 30000], ["rehire", 30000], ["resume", 30000]] as const)(
   "%s waits for its own deadline and reports the machine to check", async (action, ms) => {
     const link = createMemoryLink(ID_A, ID_B);

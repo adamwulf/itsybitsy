@@ -33,6 +33,10 @@ export function parseLifecycleRequest(raw: Record<string, unknown>): RemoteLifec
   return { action, id, repo, keep, checkOnly, force };
 }
 
+export class AmbiguousRemoteRehire extends Error {
+  constructor(reason: string, readonly candidates: { repo: string; id: string }[]) { super(reason); }
+}
+
 export interface RemoteLifecycleDeps {
   listRepos: typeof listRepos;
   mergeAgent: typeof mergeAgent;
@@ -51,7 +55,8 @@ export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, rea
     repos = repos.filter(entry => entry.name.toLowerCase() === repo.toLowerCase());
     if (repos.length !== 1) throw new Error("Repo is not uniquely registered on this machine");
   }
-  const { agent, error } = await resolveAgentTarget(id, repos, "/", action === "rehire" ? "rehire" : "agent", true);
+  const { agent, error, candidates } = await resolveAgentTarget(id, repos, "/", action === "rehire" ? "rehire" : "agent", true);
+  if (candidates && error) throw new AmbiguousRemoteRehire(error, candidates);
   if (!agent) throw new Error(error ?? `Agent not found: ${id}`);
   if (isCoordinatorType(agent.meta.agentType)) throw new Error("Remote coordinators are read-only");
   const peer = await readPeerName();

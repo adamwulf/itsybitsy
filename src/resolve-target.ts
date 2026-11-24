@@ -69,6 +69,7 @@ export function findOwnRepo(cwd: string, repos: RepoEntry[]): RepoEntry | undefi
 type TargetResult = ResolvedSendTarget & {
   error?: string;
   incompleteVisibility?: { unreadableDirs: string[] };
+  candidates?: { repo: string; id: string }[];
 };
 
 function failure(error: string, unreadableDirs: string[] = []): TargetResult {
@@ -87,7 +88,7 @@ async function readAddressMachineName(): Promise<string | TargetResult> {
   }
 }
 
-function suggestedAddress(address: string): string {
+export function suggestedAddress(address: string): string {
   return /^[a-zA-Z0-9_@./-]+$/.test(address) ? address : shellQuote(address);
 }
 
@@ -225,7 +226,7 @@ export async function resolveAgentTarget(
   const repoName = parts.length === 3 ? parts[1]!.toLowerCase() : undefined;
 
   // A bare name first searches the caller's repo, including its worktrees.
-  const ownRepo = machine ? undefined : findOwnRepo(cwd, repos);
+  const ownRepo = machine || (inboundPeer && purpose === "rehire") ? undefined : findOwnRepo(cwd, repos);
   let searched = repos;
   let ownErrors: AgentReadError[] = [];
   if (ownRepo) {
@@ -286,6 +287,11 @@ export async function resolveAgentTarget(
     return failure(`Agent not found: ${target}${note}`, unreadable);
   }
   if (matches.length > 1) {
+    if (inboundPeer && purpose === "rehire") {
+      // The caller owns the pairing name, so only it can build usable addresses.
+      return { ...failure(`'${name}' matches several agents`),
+        candidates: matches.map(m => ({ repo: m.repo, id: m.agent!.id })) };
+    }
     if (!machine && matches.some((m) => m.agent)) {
       const localName = await readAddressMachineName();
       if (typeof localName === "string") {

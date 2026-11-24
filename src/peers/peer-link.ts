@@ -1,4 +1,5 @@
-import { lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleRequest } from "./remote-lifecycle";
+import { suggestedAddress } from "../resolve-target";
+import { AmbiguousRemoteRehire, lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleRequest } from "./remote-lifecycle";
 import { trackSendCleanup } from "../send-cleanup";
 /**
  * The trusted link between paired installs (docs/plans/iroh-peering.md,
@@ -35,7 +36,7 @@ import { CHUNK_BYTES, IDLE_TIMEOUT_MS } from "./transfer-limits";
 import { join } from "node:path";
 import { openStagedFile } from "./remote-attachments";
 import { sendFileBody, type FileBodyOptions, encodeSendHeader, TransferIdleError, decodeSendHeader, requireSendFin, waitForIO, type SendHeader } from "./send-frame";
-import { repoDisplayName, type RepoEntry } from "../registry";
+import { isStoredRepoName, repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
 import type { Agent } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
@@ -403,7 +404,17 @@ export async function requestLifecycle(conn: PairConnection, request: RemoteLife
   try {
     return await clientExchange(conn, bytes, payload => {
       const reply = decodeObject(payload, "reply");
-      if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(lifecycleText(reply.reason));
+      if (reply.op === "error" && typeof reply.reason === "string") {
+        const reason = lifecycleText(reply.reason);
+        if (!Array.isArray(reply.candidates)) throw new PeerErrorReply(reason);
+        const addresses = reply.candidates.map(candidate => {
+          if (!isStoredRepoName(candidate?.repo) || typeof candidate.id !== "string" || !isValidAgentId(candidate.id)) {
+            throw new PeerProtocolError("Malformed rehire candidate");
+          }
+          return suggestedAddress(`${machine}/${candidate.repo}/${candidate.id}`);
+        }).sort();
+        throw new PeerErrorReply(`${reason}; use ${addresses.join(" or ")}`);
+      }
       if (reply.ok !== true || typeof reply.output !== "string") throw new PeerProtocolError("Malformed lifecycle reply");
       return lifecycleText(reply.output);
     }, { ...transfer, setTimer, timeout: [lifecycleTimeout(request.action), unknown] });
@@ -819,7 +830,8 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     } catch (err) {
       const error = lifecycleText(errorDetail(err));
       deps.log(`peer link: lifecycle request from ${from} failed: ${singleLine(error)}`);
-      reply = encodeErrorReply(error);
+      reply = err instanceof AmbiguousRemoteRehire
+        ? encodeJson({ op: "error", reason: error, candidates: err.candidates }) : encodeErrorReply(error);
     }
   } else {
     reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);

@@ -82,18 +82,20 @@ export async function acceptRemoteAgentWithFiles(
   const peerName = await waitForIO(options, readPeerName);
   if (peerName === null) throw new Error("Machine is no longer paired");
   const start = await waitForIO(options, () => validateRemoteAgent(header, deps));
-  return attachments(peerId, header.files, { peerName, log, notice: deps.notice }, async receive => {
+  // The transfer slot and reservation last until the snapshot is committed, not through the spawn.
+  const staged = await attachments(peerId, header.files, { peerName, log, notice: deps.notice }, async receive => {
     options.admitted?.(true);
-    const staged = await receive(start.prompt, body, options);
+    const received = await receive(start.prompt, body, options);
     if (await waitForIO(options, readPeerName) === null) throw new Error("Machine is no longer paired");
     options.signal?.throwIfAborted();
     options.committing?.();
-    await staged.commit();
-    return withStartDeadline(options.setTimer, async () => {
-      const spawn = spawnRemoteAgent(start, staged.text, peerName, deps, log, fileSummary(header.files));
-      // Past the deadline the spawn may still succeed and use the files: only its own failure discards them.
-      spawn.catch(() => staged.discard().catch(err => log(`peer link: could not remove unused attachments: ${err}`)));
-      return spawn;
-    });
+    await received.commit();
+    return received;
+  });
+  return withStartDeadline(options.setTimer, async () => {
+    const spawn = spawnRemoteAgent(start, staged.text, peerName, deps, log, fileSummary(header.files));
+    // Past the deadline the spawn may still succeed and use the files: only its own failure discards them.
+    spawn.catch(() => staged.discard().catch(err => log(`peer link: could not remove unused attachments: ${err}`)));
+    return spawn;
   });
 }

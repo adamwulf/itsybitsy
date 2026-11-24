@@ -230,6 +230,30 @@ test("the responder's 25 s deadline covers the spawn, not the transfer, and keep
   } finally { pending.resolve({ ok: false, exitCode: 1, stdout: "", stderr: "" }); await side.close(); }
 });
 
+test("a start releases its transfer slot at commit, so the same peer's attachment send is admitted during the spawn", async () => {
+  const pending = Promise.withResolvers<Awaited<ReturnType<RemoteSpawnDeps["newAgent"]>>>();
+  spawn.mockImplementation(() => pending.promise);
+  const receiveMessage = createMessageReceiver(() => {}, () => {}, Date.now, 4096, attachments);
+  const side = serve();
+  try {
+    const starting = requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")] },
+      side.clock.setTimer, { filesDir: await stage("abc") });
+    await waitFor(() => spawn.mock.calls.length === 1);
+    let admitted = false;
+    const send: SendHeader = { op: "send", id: crypto.randomUUID(), from: { kind: "user" }, target: { kind: "agent", agent: "worker" },
+      message: "see ./a.txt", files: [file("x")] };
+    const sending = receiveMessage(send, "dialer", async () => "Alice", { read: async () => new Uint8Array() }, {
+      admitted: () => { admitted = true; },
+    }).catch(err => err);
+    expect(admitted).toBe(false);
+    await waitFor(() => admitted, { message: "the send passes the busy rule" });
+    // It fails later, on this test's missing target, never as busy.
+    expect(String(await sending)).not.toContain("busy");
+    pending.resolve({ ok: true, exitCode: 0, stdout: "agent-123", stderr: "" });
+    expect(await starting).toBe("agent-123");
+  } finally { pending.resolve({ ok: false, exitCode: 1, stdout: "", stderr: "" }); await side.close(); }
+});
+
 test("a start without files is still the JSON request", async () => {
   const link = createMemoryLink("dialer", "receiver");
   const reply = requestNewAgent(link.a, { repo: "app", type: "worker", prompt: "hello", files: [] }, createFakeClock().setTimer);

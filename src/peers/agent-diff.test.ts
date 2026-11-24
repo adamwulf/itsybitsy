@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeAgent } from "../test-utils";
@@ -8,7 +8,7 @@ import { captureAgentDiff, EMPTY_DIFF, MAX_AGENT_DIFF_BYTES, prepareDiffCopy } f
 import { requestAgentDiff, serveTrustedConnection } from "./peer-link";
 import { encodeFrameHeader } from "./send-frame";
 import { createFakeClock, createMemoryLink } from "./test-pair-transport";
-import { OWNER_EXPIRY_MS, stagingArea, stagingOwnerStart, sweepDiffCopies, writeTransferOwner } from "./transfer-owner";
+import { stagingArea, sweepDiffCopies } from "./transfer-owner";
 
 let root: string;
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "ib-agent-diff-")); });
@@ -57,7 +57,7 @@ test("a remote diff round trip reproduces committed additions, uncommitted text 
     expect(diff.patch.toString()).toContain("GIT binary patch");
 
     const staging = join(root, "staging");
-    const { cwd } = await prepareDiffCopy(repo, "App", "Laptop B", diff, staging);
+    const cwd = await prepareDiffCopy(repo, "App", "Laptop B", diff, staging);
     expect((await Bun.$`git rev-parse HEAD`.cwd(cwd).text()).trim()).toBe(base);
     expect((await Bun.$`git merge-base HEAD main`.cwd(cwd).text()).trim()).toBe(base);
     expect((await Bun.$`git diff --binary ${base}`.cwd(cwd).quiet()).stdout.equals(expected)).toBe(true);
@@ -89,18 +89,14 @@ test.each([[1, "hash mismatch"], [MAX_AGENT_DIFF_BYTES + 1, "Malformed agent-dif
     } finally { a.close(0, "done"); }
   });
 
-test("pruning requires a copy older than a day and a dead owner", async () => {
+test("startup keeps a seven-day-old diff copy and removes an eight-day-old copy", async () => {
   const staging = join(root, "staging");
   const area = await stagingArea(staging, "diffs");
-  const dead = await mkdtemp(join(area, "copy-"));
-  const live = await mkdtemp(join(area, "copy-"));
-  const unknown = await mkdtemp(join(area, "copy-"));
-  await writeTransferOwner(dead, { pid: 2147483647, start: null });
-  await writeTransferOwner(live, { pid: process.pid, start: stagingOwnerStart(process.pid) });
-  await sweepDiffCopies(staging);
-  expect(existsSync(dead)).toBe(true);
-  await sweepDiffCopies(staging, Date.now() + OWNER_EXPIRY_MS + 1000);
-  expect(existsSync(dead)).toBe(false);
-  expect(existsSync(live)).toBe(true);
-  expect(existsSync(unknown)).toBe(true);
+  const copy = await mkdtemp(join(area, "copy-"));
+  const created = (await lstat(copy)).birthtimeMs;
+  const day = 24 * 60 * 60 * 1000;
+  await sweepDiffCopies(staging, created + 7 * day);
+  expect(existsSync(copy)).toBe(true);
+  await sweepDiffCopies(staging, created + 8 * day);
+  expect(existsSync(copy)).toBe(false);
 });

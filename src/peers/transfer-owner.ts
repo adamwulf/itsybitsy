@@ -202,14 +202,15 @@ export async function sweepOutgoingDirectories(root = transferStagingRoot(), now
   ]);
 }
 
-/** Diff tools can outlive the watcher. Keep even a dead owner's copy for a day. */
+const DIFF_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** A GUI can keep reading a copy after its launcher exits. Keep it for a week. */
 export async function sweepDiffCopies(root = transferStagingRoot(), now = Date.now()) {
   const area = await stagingArea(root, "diffs");
   for (const entry of await readdir(area, { withFileTypes: true })) {
     if (!entry.isDirectory() || !/^copy-[a-zA-Z0-9]{6}$/.test(entry.name)) continue;
     const dir = join(area, entry.name);
-    if (now - (await lstat(dir)).birthtimeMs <= OWNER_EXPIRY_MS) continue;
-    if ((await inspectTransferDirectory(dir)).state === "proven-dead") await rm(dir, { recursive: true, force: true });
+    if (now - (await lstat(dir)).birthtimeMs > DIFF_RETENTION_MS) await rm(dir, { recursive: true, force: true });
   }
 }
 

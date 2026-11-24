@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { agentWorktreePath, type Agent } from "../agents";
 import { isCoordinatorType } from "../coordinator-type-names";
 import { transferStagingRoot } from "../runtime-names";
-import { stagingArea, stagingOwnerStart, writeTransferOwner } from "./transfer-owner";
+import { stagingArea } from "./transfer-owner";
 
 export const MAX_AGENT_DIFF_BYTES = 64 * 1024 * 1024;
 export const EMPTY_DIFF = "No changes to show — diff is empty";
@@ -47,7 +47,6 @@ export async function prepareDiffCopy(repoPath: string, repo: string, machine: s
   const dir = await mkdtemp(join(await stagingArea(root, "diffs"), "copy-"));
   const cwd = join(dir, "repo");
   try {
-    await writeTransferOwner(dir, { pid: process.pid, start: stagingOwnerStart(process.pid) });
     await runGit(dir, ["clone", "--shared", "--no-checkout", "--", repoPath, cwd]);
     const check = await Bun.$`git cat-file -e ${base + "^{commit}"}`.cwd(cwd).quiet().nothrow();
     if (check.exitCode) throw new Error(`Fetch or pull ${repo} first: commit ${base} from ${machine} is not in your copy`);
@@ -56,7 +55,7 @@ export async function prepareDiffCopy(repoPath: string, repo: string, machine: s
     await runGit(cwd, ["branch", "-f", "main", base]);
     // Track new files too, so git diff <base> includes them in the tool.
     await runGit(cwd, ["apply", "--index", "--binary", "--whitespace=nowarn"], patch);
-    return { dir, cwd };
+    return cwd;
   } catch (err) {
     await rm(dir, { recursive: true, force: true });
     throw err;

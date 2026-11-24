@@ -45,6 +45,7 @@ import * as agentActions from "./agent-actions";
 import * as ghostty from "../ghostty";
 import * as paneManager from "./pane-manager";
 import * as runtimeNames from "../runtime-names";
+import { sweepDiffCopies } from "../peers/transfer-owner";
 
 // Many tests below simulate resize keystrokes, which call persistLayout() and
 // schedule debounced layout saves. Route them to a temp file so a test run can
@@ -11259,7 +11260,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.refuseOnRemoteRow("o")).toBe(true);
   });
 
-  test("remote o runs the configured tool in its owned checkout with the merge base as its argument", async () => {
+  test("remote o passes the merge base to the tool and retains its fresh checkout after the launcher exits", async () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);
     const root = await mkdtemp(join(tmpdir(), "remote-tool-"));
@@ -11279,16 +11280,15 @@ describe("Unified peer repos in the Agents tree", () => {
       service.fetchAgentDiff.mockResolvedValue({ base, patch });
       dashboard.repos = [{ name: "itsybitsy", path: repo }];
       const tool = join(root, "tool");
-      await writeFile(tool, '#!/bin/bash\nprintf "%s\\n" "$1" "$$" > ../launched\nexec sleep 60\n', { mode: 0o700 });
+      await writeFile(tool, '#!/bin/bash\nprintf "%s\\n" "$1" > ../launched\n', { mode: 0o700 });
       dashboard.diffTool = tool;
       dashboard.handleInput("o");
       await waitFor(() => dashboard.notice === `Opened diff vs merge-base with main in ${tool}` && !agentActions.getDiffToolLaunching());
       const [name] = await readdir(join(staging, "diffs"));
       const dir = join(staging, "diffs", name!);
-      await waitFor(() => Bun.file(join(dir, "launched")).exists());
-      const owner = await Bun.file(join(dir, "owner.json")).json();
-      expect((await Bun.file(join(dir, "launched")).text()).trim().split("\n")).toEqual([base, String(owner.pid)]);
-      expect(owner.pid).toBe(agentActions.getActiveDiffProc()?.proc.pid);
+      await waitFor(() => agentActions.getActiveDiffProc() === null);
+      await sweepDiffCopies(staging);
+      expect((await Bun.file(join(dir, "launched")).text()).trim()).toBe(base);
       expect(await Bun.file(join(dir, "repo/tracked")).text()).toBe("after\n");
       expect(await Bun.file(join(repo, "tracked")).text()).toBe("before\n");
     } finally {

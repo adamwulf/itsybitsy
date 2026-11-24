@@ -34,7 +34,6 @@ import { buildFolderItems } from "./folder-browser";
 import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { EMPTY_DIFF, prepareDiffCopy } from "../peers/agent-diff";
-import { stagingOwnerStart, writeTransferOwner } from "../peers/transfer-owner";
 import { resolveDefaultAgentType } from "./default-agent-type";
 import type { DialogState, SetupItem, ConfigDialogItem } from "./dialog-handler";
 import { cleanRemoteText } from "../peers/peer-link";
@@ -2304,10 +2303,8 @@ async function openDiffTool(
       const local = ctx.repos.find(r => r.name.toLowerCase() === repo.toLowerCase());
       if (!local) throw new Error(`Open diff needs ${repo} on this machine`);
       const diff = await service.fetchAgentDiff(remote.peerId, repo, id);
-      const copy = await prepareDiffCopy(local.path, repo, remote.peerName, diff);
-      const proc = launchDiffTool(ctx, copy.cwd, tool, id);
-      // bash execs the tool, so this PID owns the copy even if watch exits.
-      await writeTransferOwner(copy.dir, { pid: proc.pid, start: stagingOwnerStart(proc.pid) });
+      const cwd = await prepareDiffCopy(local.path, repo, remote.peerName, diff);
+      launchDiffTool(ctx, cwd, tool, id);
       return;
     }
     const cwd = agentWorktreePath(agent!);
@@ -2359,7 +2356,6 @@ function launchDiffTool(ctx: ActionCtx, cwd: string, tool: string, agentId: stri
       ctx.setNotice(`Diff tool error: ${msg}`, "error");
     }
   })();
-  return proc;
 }
 
 export function handleHelp(ctx: ActionCtx) {

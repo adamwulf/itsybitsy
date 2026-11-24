@@ -3616,7 +3616,9 @@ async function countCommitsAhead(repoPath: string, targetBranch: string, sourceB
  * has nothing to pull. `report` is the pull's status lines (or, for a
  * sandboxed caller, a note that it did not pull), or null when there was
  * nothing to pull; a failed pull is an error. `repoName` (the registry name)
- * goes into that note's `ib pull <repo>` hint.
+ * goes into that note's `ib pull <repo>` hint. `remotes` are the remotes it
+ * pulled from (or, sandboxed, would have), empty for any other target, and
+ * are the ones {@link pushAfterMerge} pushes to.
  */
 async function pullBeforeMerge(
   agentDir: string,
@@ -3624,16 +3626,16 @@ async function pullBeforeMerge(
   targetBranch: string,
   targetCheckedOut: boolean,
   repoName: string,
-): Promise<{ ok: true; report: string | null } | { ok: false; stderr: string }> {
+): Promise<{ ok: true; report: string | null; remotes: string[] } | { ok: false; stderr: string }> {
   if (!targetCheckedOut || (targetBranch !== "main" && targetBranch !== "master")) {
-    return { ok: true, report: null };
+    return { ok: true, report: null, remotes: [] };
   }
   const listed = await listRemotes(mergeSpawnCtx, targetDir);
   if (!listed.ok) {
     return { ok: false, stderr: `Could not list remotes to pull ${targetBranch} before merging: ${listed.stderr}` };
   }
   const remotes = listed.remotes;
-  if (remotes.length === 0) return { ok: true, report: null };
+  if (remotes.length === 0) return { ok: true, report: null, remotes };
   // A sandboxed caller that merges directly into main — a per-repo
   // coordinator (worktree:false, so its merge is not brokered) — cannot reach
   // its remotes: the profile denies outbound network apart from the proxy.
@@ -3641,7 +3643,7 @@ async function pullBeforeMerge(
   if (isSandboxedProcess()) {
     const note = `Did not pull ${targetBranch} before merging: this process is sandboxed and cannot reach its remotes. Run \`ib pull ${repoName}\` from outside the sandbox to update ${targetBranch}.`;
     await logAgent(agentDir, note);
-    return { ok: true, report: note };
+    return { ok: true, report: note, remotes };
   }
 
   await logAgent(agentDir, `Pulling ${targetBranch} from ${remotes.join(", ")} before merging...`);
@@ -3651,48 +3653,43 @@ async function pullBeforeMerge(
   if (!pull.ok) {
     return { ok: false, stderr: `Pull of ${targetBranch} failed, so nothing was merged:\n${report}` };
   }
-  return { ok: true, report };
+  return { ok: true, report, remotes };
 }
 
 /**
  * After a merge that landed at least one commit on `targetBranch`: push it to
- * every remote the way `ib push` does, when `merge.pushAfterMerge` is on in
- * this machine's config and the target passes {@link pullBeforeMerge}'s test
- * (`main` or `master`, checked out in `targetDir`; SPEC.md §3.4). `report` is
- * the push's status lines (or, for a sandboxed caller, a note that it did not
- * push), or null when there was nothing to push. `failure` is set when the
- * push failed, one {@link pushFailureEntry} per remote that refused it.
- * The merge has already succeeded either way, so this never fails it.
- * `peerMachine` is this machine's name when a paired machine asked for the
- * merge, so the retry hint says where to run `ib push`.
+ * `remotes` the way `ib push` does, when `merge.pushAfterMerge` is on in this
+ * machine's config (SPEC.md §3.4). `remotes` are the ones
+ * {@link pullBeforeMerge} returned, so they are empty unless the target is
+ * `main` or `master`, checked out in `targetDir`, in a repo with remotes; and
+ * with none this reads no config and runs no git. `report` is the push's
+ * status lines (or, for a sandboxed caller, a note that it did not push), or
+ * null when there was nothing to push. `failure` is set when the push failed,
+ * one {@link pushFailureEntry} per remote that refused it. The merge has
+ * already succeeded either way, so this never fails it. `peerMachine` is
+ * this machine's name when a paired machine asked for the merge, so the
+ * retry hint says where to run `ib push`.
  *
  * The push runs with GIT_TERMINAL_PROMPT=0: inside `ib watch`, or for a
- * paired machine, a credential prompt would wait on a tty nobody answers and
- * hold the merge in `merging`. Without stored credentials it fails at once
- * and is reported as a failed push.
+ * paired machine, git's HTTPS credential prompt would wait on a tty nobody
+ * answers and hold the merge in `merging`; without stored credentials an
+ * HTTPS push fails at once and is reported as a failed push. That variable
+ * does not reach ssh, which can still prompt on the tty (a key passphrase
+ * that is not in ssh-agent or the keychain, an unknown host key), so ssh
+ * remotes rely on ssh-agent / the keychain. The pre-merge fetch reaches the
+ * same host with the same key first.
  */
 async function pushAfterMerge(
   agentDir: string,
   targetDir: string,
   targetBranch: string,
-  targetCheckedOut: boolean,
+  remotes: string[],
   repoName: string,
   peerMachine: string | undefined,
 ): Promise<{ report: string | null; failure?: string }> {
-  if (!targetCheckedOut || (targetBranch !== "main" && targetBranch !== "master")) {
-    return { report: null };
-  }
+  if (remotes.length === 0) return { report: null };
   const config = await readConfig();
   if (config["merge.pushAfterMerge"]?.value !== true) return { report: null };
-  const retry = pushRetryHint(repoName, peerMachine);
-  const listed = await listRemotes(mergeSpawnCtx, targetDir);
-  if (!listed.ok) {
-    const failure = `could not list remotes: ${listed.stderr}`;
-    await logAgent(agentDir, `Push after merge failed: ${failure}`);
-    return { report: `Warning: merged, but did not push ${targetBranch}: ${failure}. ${retry}`, failure };
-  }
-  const remotes = listed.remotes;
-  if (remotes.length === 0) return { report: null };
   // The same sandboxed caller pullBeforeMerge skips the pull for: it cannot
   // reach its remotes, so the merge stands on the local main and says so.
   if (isSandboxedProcess()) {
@@ -3707,7 +3704,7 @@ async function pushAfterMerge(
   await logAgent(agentDir, `Push ${push.failures.length === 0 ? "completed" : "failed"}:\n${push.stdout}`);
   if (push.failures.length === 0) return { report: push.stdout };
   return {
-    report: `${push.stdout}\nWarning: merged, but the push of ${targetBranch} failed. ${retry}`,
+    report: `${push.stdout}\nWarning: merged, but the push of ${targetBranch} failed. ${pushRetryHint(repoName, peerMachine)}`,
     failure: push.failures.join("\n"),
   };
 }
@@ -3960,7 +3957,7 @@ export async function mergeAgent(
       // Only a merge that landed a commit gets here, so a 0-commit merge
       // never pushes.
       push = await timed("merge", "git-push", () =>
-        pushAfterMerge(agentDir, targetDir, targetBranch, preflight.targetCheckedOut, agent.repoRegistryName, options._peerRequest?.machine)
+        pushAfterMerge(agentDir, targetDir, targetBranch, pull.remotes, agent.repoRegistryName, options._peerRequest?.machine)
       );
     }
 

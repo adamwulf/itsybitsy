@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { pushFailureEntry, pushFailureNotice, pushRetryHint } from "./push-failure";
+import { pushFailedNotice, pushFailureEntry, pushFailureNotice, pushRetryHint } from "./push-failure";
 
 const REJECTED = [
   "To /remotes/origin.git",
@@ -45,6 +45,14 @@ describe("pushFailureNotice", () => {
   });
 
   test("leaves a one-line failure as it is", () => {
-    expect(pushFailureNotice("origin: could not list remotes: boom")).toBe("origin: could not list remotes: boom");
+    expect(pushFailureNotice("origin: fatal: could not read from remote repository")).toBe("origin: fatal: could not read from remote repository");
+  });
+});
+
+describe("pushFailedNotice", () => {
+  test("puts the summary first and the shortened failure after it", () => {
+    expect(pushFailedNotice("Merged agent-abc", pushFailureEntry("origin", REJECTED))).toBe(
+      "Merged agent-abc · push failed: origin: ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '/remotes/origin.git'",
+    );
   });
 });

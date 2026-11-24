@@ -3,7 +3,7 @@ import {
 } from "../peers/dashboard-attachments";
 import { repoRowKey } from "./row-keys";
 import { lifecyclePast, type RemoteLifecycleRequest } from "../peers/remote-lifecycle";
-import { pushFailureNotice } from "../push-failure";
+import { pushFailedNotice } from "../push-failure";
 import { remoteLifecycleDenial, remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
@@ -2130,15 +2130,17 @@ export class DashboardComponent implements Component {
     this.invalidate();
     this.tui?.requestRender();
     try {
-      const { output, pushFailure } = await service.runRemoteLifecycle(row.peerId, { ...options, id, repo });
+      const { output, pushFailure, warnings } = await service.runRemoteLifecycle(row.peerId, { ...options, id, repo });
       if (!options.checkOnly) {
         const verb = lifecyclePast[options.action];
         if (pushFailure) {
           // The peer merged, then its own push failed (merge.pushAfterMerge,
-          // read from its config). The output repeats the failure in full, so
-          // the one-row notice names it on its own, without git's
-          // `To <url>` and `hint:` lines.
-          this.setNotice(`${label} ${verb} · push failed: ${pushFailureNotice(pushFailure)}`, "error");
+          // read from its config). As for a local merge: a red notice that
+          // names the failure, and the teardown warnings, if any, in their
+          // own dialog. The output repeats the merge report in full.
+          const notice = pushFailedNotice(`${label} ${verb}`, pushFailure);
+          this.setNotice(notice, "error");
+          if (warnings) this.showDialog({ type: "cleanup-warnings", text: `${notice}\n\n${warnings}`, offset: 0 });
         } else {
           this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
         }

@@ -535,8 +535,8 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
 
 /**
  * Lifecycle commands use their own overall deadline. A merge may be silent for
- * two minutes. A reply without `pushFailure` (no failed push, or an older
- * install) leaves it undefined.
+ * two minutes. A reply without `pushFailure` or `warnings` (no failed push,
+ * or an older install) leaves them undefined.
  */
 export async function requestLifecycle(conn: PairConnection, request: RemoteLifecycleRequest, machine: string, setTimer: Timer, transfer?: Pick<OutgoingTransfer, "signal" | "verifyClient">): Promise<RemoteLifecycleOutcome> {
   const bytes = encodeJson({ ...request, op: "lifecycle" });
@@ -557,9 +557,13 @@ export async function requestLifecycle(conn: PairConnection, request: RemoteLife
         throw new PeerErrorReply(`${reason}; use ${addresses.join(" or ")}`);
       }
       if (reply.ok !== true || typeof reply.output !== "string" ||
-          (reply.pushFailure !== undefined && typeof reply.pushFailure !== "string")) throw new PeerProtocolError("Malformed lifecycle reply");
-      const output = lifecycleText(reply.output);
-      return reply.pushFailure ? { output, pushFailure: lifecycleText(reply.pushFailure) } : { output };
+          (reply.pushFailure !== undefined && typeof reply.pushFailure !== "string") ||
+          (reply.warnings !== undefined && typeof reply.warnings !== "string")) throw new PeerProtocolError("Malformed lifecycle reply");
+      return {
+        output: lifecycleText(reply.output),
+        ...(reply.pushFailure ? { pushFailure: lifecycleText(reply.pushFailure) } : {}),
+        ...(reply.warnings ? { warnings: lifecycleText(reply.warnings) } : {}),
+      };
     }, { ...transfer, setTimer, unknownAfterFin: unknown.message, timeout: [lifecycleTimeout(request.action), unknown] });
   } catch (err) {
     if (err instanceof TransferIdleError) throw unknown;
@@ -1076,8 +1080,12 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   } else if (request.op === "lifecycle") {
     try {
       if (!deps.lifecycle) throw new Error("Remote lifecycle commands are unavailable");
-      const { output, pushFailure } = await deps.lifecycle(parseLifecycleRequest(request), () => deps.peerName(conn.remoteId));
-      reply = encodeJson({ ok: true, output: lifecycleText(output), ...(pushFailure ? { pushFailure: lifecycleText(pushFailure) } : {}) });
+      const { output, pushFailure, warnings } = await deps.lifecycle(parseLifecycleRequest(request), () => deps.peerName(conn.remoteId));
+      reply = encodeJson({
+        ok: true, output: lifecycleText(output),
+        ...(pushFailure ? { pushFailure: lifecycleText(pushFailure) } : {}),
+        ...(warnings ? { warnings: lifecycleText(warnings) } : {}),
+      });
     } catch (err) {
       const error = lifecycleText(errorDetail(err));
       deps.log(`peer link: lifecycle request from ${from} failed: ${singleLine(error)}`);

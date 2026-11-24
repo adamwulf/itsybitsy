@@ -24,6 +24,16 @@ export function pushRetryHint(repoName: string, machine?: string): string {
 }
 
 /**
+ * The `ib watch` header notice for a merge whose push failed:
+ * `<summary> · push failed: <errors>`, with `<errors>` from
+ * {@link pushFailureNotice}. Every notice for a failed push (a local merge,
+ * the machine that ran a peer's merge, and the requesting dashboard) uses it.
+ */
+export function pushFailedNotice(summary: string, pushFailure: string): string {
+  return `${summary} · push failed: ${pushFailureNotice(pushFailure)}`;
+}
+
+/**
  * The push failure as the one-row `ib watch` header notice shows it: one entry
  * per remote, without git's `To <url>` and `hint:` lines, so the
  * `! [rejected] …` line is what shows. An entry with nothing else keeps its

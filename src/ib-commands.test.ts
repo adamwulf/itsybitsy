@@ -6130,6 +6130,8 @@ describe("mergeAgent (native)", () => {
         ["git", "-C", tempDir, "push", "origin", "main"],
         ["git", "-C", tempDir, "push", "upstream", "main"],
       ]);
+      // The push uses the remotes the pre-merge pull listed: one `remote -v`.
+      expect(remoteListings()).toHaveLength(1);
       // After the merge into main.
       const merge = spawnCalls.findIndex((c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff")) && c.includes("agent/agent-abc"));
       expect(merge).toBeGreaterThan(-1);

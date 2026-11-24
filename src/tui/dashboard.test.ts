@@ -11767,17 +11767,21 @@ describe("Unified peer repos in the Agents tree", () => {
     const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue({ output: "Ready to merge" });
     // git's whole error, as the peer sends it: later lines indented.
     const pushFailure = "origin: To /remotes/origin.git\n  ! [rejected] main -> main (fetch first)\n  hint: Updates were rejected";
-    const replies = {
-      // A closing merge's output repeats the failure in full (remote-lifecycle.ts).
-      close: { output: `push failed: ${pushFailure}\nRun \`ib push itsybitsy\` on Laptop B to push it.`, pushFailure },
-      keep: { output: `Merged agent worker-abc into main (1 commit(s), agent kept running)\n✗ ${pushFailure}`, pushFailure },
-    };
-    for (const keep of [false, true]) {
+    const report = `✗ ${pushFailure}\nWarning: merged, but the push of main failed. Run \`ib push itsybitsy\` on Laptop B to push it.`;
+    const warnings = "Could not remove the agent directory";
+    // The peer's replies (remote-lifecycle.ts): a closing merge's output is its
+    // teardown warnings plus its merge report, with the warnings also apart.
+    const cases = [
+      { keep: false, reply: { output: `Closed agent: worker-abc\n${report}`, pushFailure } },
+      { keep: false, reply: { output: `${warnings}\nClosed agent: worker-abc\n${report}`, pushFailure, warnings } },
+      { keep: true, reply: { output: `Merged agent worker-abc into main (1 commit(s), agent kept running)\n${report}`, pushFailure } },
+    ];
+    for (const { keep, reply } of cases) {
       dashboard.handleInput("m");
       await Bun.sleep(0);
       const merge = assertDialog(dashboard.dialog, "confirm");
       merge.checkbox!.checked = keep;
-      run.mockResolvedValueOnce(keep ? replies.keep : replies.close);
+      run.mockResolvedValueOnce(reply);
       merge.onYes();
       await Bun.sleep(0);
       expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "merge", keep });
@@ -11785,6 +11789,13 @@ describe("Unified peer repos in the Agents tree", () => {
       const notice = `${WORKER_KEY} merged · push failed: origin: ! [rejected] main -> main (fetch first)`;
       expect(dashboard.notice).toBe(notice);
       expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${notice}`);
+      // As for a local merge, teardown warnings open the cleanup-warnings dialog.
+      if (reply.warnings) {
+        expect(assertDialog(dashboard.dialog, "cleanup-warnings").text).toBe(`${notice}\n\n${warnings}`);
+        dashboard.closeDialog();
+      } else {
+        expect(dashboard.dialog).toBeNull();
+      }
     }
     // Without a push failure the same merge is an info notice, as before.
     dashboard.handleInput("m");

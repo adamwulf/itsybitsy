@@ -507,19 +507,20 @@ test("a merge whose push failed on the receiver returns pushFailure beside its o
   // git's whole error, as mergeAgent reports it: later lines indented.
   const pushFailure = "origin: To /remotes/origin.git\n  ! [rejected] main -> main (fetch first)\n  hint: Updates were rejected";
   const failed = { ok: true, exitCode: 0, pushFailure };
-  const keptStdout = "Merged agent worker into main (1 commit(s), agent kept running)\n✗ origin: ! [rejected] main -> main (fetch first)\nWarning: merged, but the push of main failed. Run `ib push App` on Studio to push it.";
-  const hint = "Run `ib push App` on Studio to push it.";
+  // mergeAgent's stdout: the push's ✗ lines, then the warning whose hint names
+  // this machine (from _peerRequest). Nothing else adds a hint.
+  const report = "✗ origin: ! [rejected] main -> main (fetch first)\nWarning: merged, but the push of main failed. Run `ib push App` on Studio to push it.";
+  const keptStdout = `Merged agent worker into main (1 commit(s), agent kept running)\n${report}`;
+  const closedStdout = `Closed agent: worker (merged to main at abc)\n${report}`;
   try {
     const ask = (request: Parameters<typeof requestLifecycle>[1]) => requestLifecycle(side.a, request, "Laptop", side.clock.setTimer);
-    // A closing merge's output is its teardown warnings; the failure and a
-    // retry hint that names this machine join them.
-    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: "Closed agent: worker", stderr: "" });
+    // A closing merge's output is its teardown warnings, then its stdout. The
+    // warnings also go apart, only when there are some.
+    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: closedStdout, stderr: "" });
+    expect(await ask({ ...target, action: "merge" })).toEqual({ output: closedStdout, pushFailure });
+    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: closedStdout, stderr: "Could not remove the agent directory" });
     expect(await ask({ ...target, action: "merge" })).toEqual({
-      output: `push failed: ${pushFailure}\n${hint}`, pushFailure,
-    });
-    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: "Closed agent: worker", stderr: "Could not remove the agent directory" });
-    expect(await ask({ ...target, action: "merge" })).toEqual({
-      output: `Could not remove the agent directory\npush failed: ${pushFailure}\n${hint}`, pushFailure,
+      output: `Could not remove the agent directory\n${closedStdout}`, pushFailure, warnings: "Could not remove the agent directory",
     });
     // --keep's output is the merge report, which already has the push lines and the hint.
     deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: keptStdout, stderr: "" });
@@ -536,14 +537,14 @@ test("a merge whose push failed on the receiver returns pushFailure beside its o
   }
 });
 
-test("a lifecycle reply with a non-string pushFailure is malformed, so the outcome is unknown", async () => {
+test.each(["pushFailure", "warnings"])("a lifecycle reply with a non-string %s is malformed, so the outcome is unknown", async field => {
   const link = createMemoryLink(ID_A, ID_B);
   const clock = createFakeClock();
   const result = requestLifecycle(link.a, { action: "merge", repo: "app", id: "worker" }, "Laptop B", clock.setTimer)
     .catch((err: Error) => err);
   const stream = await link.b.acceptBi();
   await stream.readToEnd(4096);
-  await stream.writeAll(encode({ ok: true, output: "", pushFailure: 7 }));
+  await stream.writeAll(encode({ ok: true, output: "", [field]: 7 }));
   await stream.finish();
   const error = await result;
   // As for any malformed lifecycle reply: the request was already sent.

@@ -25,7 +25,7 @@ import {
 } from "../ib-commands";
 import { sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
-import { pushFailureNotice } from "../push-failure";
+import { pushFailedNotice } from "../push-failure";
 import { captureTmuxOutput, killTmuxSession, sendTmuxEscape, expandTabs } from "../tmux-poller";
 import { parseStateForCli } from "../parse-state";
 import { parseModel } from "../agent-cli";
@@ -1364,7 +1364,7 @@ export function handleMerge(ctx: ActionCtx) {
         // A failed push after the merge (merge.pushAfterMerge) leaves the
         // merge done, but it is an alert, not an info notice. The one-row
         // notice drops git's `To <url>` and `hint:` lines.
-        if (result.pushFailure) showTeardownResult(ctx, `${notice} · push failed: ${pushFailureNotice(result.pushFailure)}`, result.stderr, "error");
+        if (result.pushFailure) showTeardownResult(ctx, pushFailedNotice(notice, result.pushFailure), result.stderr, "error");
         else showTeardownResult(ctx, notice, result.stderr);
       } else ctx.setNotice(`Merge failed: ${result.stderr || result.stdout}`, "error");
     });

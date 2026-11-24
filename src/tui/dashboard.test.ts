@@ -10661,6 +10661,9 @@ describe("Unified peer repos in the Agents tree", () => {
         expect(atState).toContain(ITALIC);
         expect(atState.includes(DIM)).toBe(stale);
         expect(atState.includes("\x1b[7m")).toBe(selected);
+        // The styling ends at the state word, not after the state column's
+        // padding: under REVERSE a style left on paints the padding cells.
+        expect(line).toContain("waiting\x1b[0m");
         // No styling stays open past the row: nothing follows its last reset
         // but padding (an unselected row resets after the state word, before
         // the state column's padding, as a local row does).

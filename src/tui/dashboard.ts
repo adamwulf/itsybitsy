@@ -1853,14 +1853,16 @@ export class DashboardComponent implements Component {
   }
 
   /**
-   * ActionCtx hook: the 'h' settings-menu boolean toggle calls this after a
-   * successful writeConfig so display-only config keys take effect live. Only
-   * `tree.groupByParent` currently needs live wiring; other keys are read at
-   * their own use sites.
+   * ActionCtx hook: the 'h' settings menu calls this after a successful
+   * writeConfig so config keys take effect live. `tree.groupByParent`
+   * re-flattens the tree; `repos.cloneRoot` re-reads each repo's `relPath`
+   * for the peer snapshot. Other keys are read at their own use sites.
    */
   onConfigChange(key: string, value: unknown): void {
     if (key === "tree.groupByParent") {
       this.setGroupByParent(value === true);
+    } else if (key === "repos.cloneRoot") {
+      void this.refreshRepoCloneInfo();
     }
   }
 

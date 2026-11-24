@@ -14,7 +14,8 @@ import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { createRepo } from "../create-repo";
-import { cloneDestination, cloneRepo, resolveCloneRoot } from "../clone-repo";
+import { cloneDestination, cloneRepo, cloneUrlRefusal, resolveCloneRoot } from "../clone-repo";
+import { visibleWidth } from "@mariozechner/pi-tui";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
@@ -2865,6 +2866,8 @@ function handleConfigItemAction(
             if (item.key === "externalDiffTool") {
               ctx.diffTool = typeof parsed === "string" && parsed ? parsed : undefined;
             }
+            // As for the boolean toggle: e.g. repos.cloneRoot re-reads the peer snapshot's clone info.
+            ctx.onConfigChange?.(item.key, parsed);
             ctx.setNotice(`${item.key} updated`, "info");
             // Re-open setup dialog on the same tab
             handleSetup(ctx, tab);
@@ -3330,6 +3333,19 @@ export function newRepoPrompt(parentPath: string): string {
   return `${prefix}${elideLeft(parentPath, room)}${suffix}`;
 }
 
+/**
+ * Title of the Clone here dialog. It names the URL, since that is untrusted
+ * peer data (a fork or a stale remote), and cuts the URL's end to keep the
+ * title inside the box, or the whole title when even a short URL cannot fit.
+ */
+export function clonePrompt(name: string, url: string, peer: string): string {
+  const prefix = `Clone ${name} (`;
+  const suffix = `) from ${peer} into:`;
+  const room = dialogTitleMaxWidth() - visibleWidth(prefix) - visibleWidth(suffix);
+  if (room >= 12) return `${prefix}${truncatePeerField(url, room)}${suffix}`;
+  return truncatePeerField(`${prefix}${url}${suffix}`, dialogTitleMaxWidth());
+}
+
 /** Registry names, lowercased, with a "Clone here" in flight: one clone per name at a time. */
 const clonesInFlight = new Set<string>();
 
@@ -3351,6 +3367,11 @@ export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
     ctx.setNotice(`${header.peerName} reports no remote for ${header.repoName}`, "error");
     return;
   }
+  const refusal = cloneUrlRefusal(url);
+  if (refusal) {
+    ctx.setNotice(refusal, "error");
+    return;
+  }
   const key = name.toLowerCase();
   if (clonesInFlight.has(key)) {
     ctx.setNotice(`Already cloning ${name}`, "info");
@@ -3359,7 +3380,7 @@ export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
   const root = await resolveCloneRoot();
   ctx.showDialog({
     type: "input",
-    prompt: truncatePeerField(`Clone ${name} from ${header.remoteUrlPeer ?? header.peerName} into:`, dialogTitleMaxWidth()),
+    prompt: clonePrompt(name, url, header.remoteUrlPeer ?? header.peerName),
     value: cloneDestination(root, name, header.relPath),
     onSubmit: (dest: string) => {
       ctx.closeDialog();

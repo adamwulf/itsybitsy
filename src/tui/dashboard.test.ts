@@ -22,13 +22,14 @@ import { IB_COORDINATOR_SESSION, setCoordinatorHome, resetCoordinatorHome } from
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
 import { cloneRepoSpawnCtx } from "../clone-repo";
+import * as cloneRepoModule from "../clone-repo";
 import type { SpawnFn, SpawnResult } from "../types";
 import type { TeamFlatEntry } from "./teams-tree";
 import { PANE_MODES, FULL_WIDTH_MODES, type PaneMode } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
-import { DIALOG_WIDTH, buildNewAgentFormContent } from "./dialog-handler";
-import { newRepoPrompt } from "./agent-actions";
+import { DIALOG_WIDTH, buildNewAgentFormContent, dialogTitleMaxWidth } from "./dialog-handler";
+import { clonePrompt, newRepoPrompt } from "./agent-actions";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
@@ -9484,6 +9485,33 @@ describe("setup Peers tab", () => {
     }
   });
 
+  test("saving repos.cloneRoot in Config re-reads the relPath each repo sends to peers", async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "ib-clone-root-config-")));
+    const repoPath = join(dir, "work", "app");
+    await mkdir(repoPath, { recursive: true });
+    setUserConfigPath(join(dir, "config.json"));
+    const dashboard = makeDashboard();
+    try {
+      dashboard.setRepos([{ name: "app", path: repoPath }]);
+      // Under the default ~/Developer root, the repo has no relPath.
+      await waitFor(() => dashboard.repoCloneInfo.has(repoPath));
+      expect(dashboard.repoCloneInfo.get(repoPath)).toEqual({ remoteUrl: null, relPath: null });
+
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+      const setup = assertDialog(dashboard.dialog, "setup");
+      setup.configSelectedIndex = setup.configItems!.findIndex(item => item.key === "repos.cloneRoot");
+      dashboard.handleInput("\r");
+      assertDialog(dashboard.dialog, "input").onSubmit(dir);
+      await waitFor(() => dashboard.repoCloneInfo.get(repoPath)?.relPath === "work/app");
+      expect((await Bun.file(join(dir, "config.json")).json()).repos).toEqual({ cloneRoot: dir });
+    } finally {
+      resetUserConfigPath();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("Config shows a stored 512 MB message limit that conflicts with the default file limit", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ib-config-repair-"));
     const path = join(dir, "config.json");
@@ -12395,21 +12423,54 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("c on a header whose remote URL the allowlist refuses shows the refusal and opens no dialog", async () => {
+    const { dashboard, service } = setup();
+    const clone = spyOn(cloneRepoModule, "cloneRepo");
+    try {
+      for (const remoteUrl of ["file:///tmp/evil", "ext::sh -c id", "ssh://-oProxyCommand=x@host/repo"]) {
+        service.set({ links: links().map((link) => link.id === PEER_B
+          ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl, relPath: null }, ...repos("other-repo")] }
+          : link) });
+        selectByKey(dashboard, repoKey("itsybitsy"));
+        resetNotice(dashboard);
+        await agentActions.handleCloneHere(dashboard);
+        expect(dashboard.dialog).toBeNull();
+        expect(dashboard.notice).toBe(`Will not clone ${JSON.stringify(remoteUrl)}: only ssh://, https:// and [user@]host:path URLs are allowed`);
+      }
+      expect(clone).not.toHaveBeenCalled();
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  test("the Clone here title cuts a long URL to fit and keeps the peer", () => {
+    const long = `git@github.com:owner/${"x".repeat(120)}.git`;
+    const prompt = clonePrompt("app", long, "Laptop B");
+    expect(visibleWidth(prompt)).toBeLessThanOrEqual(dialogTitleMaxWidth());
+    expect(prompt).toStartWith("Clone app (git@github.com:owner/xxx");
+    expect(prompt).toEndWith("…) from Laptop B into:");
+    expect(prompt).not.toContain("\x1b");
+    expect(clonePrompt("app", "gh-work:o/app.git", "Desk")).toBe("Clone app (gh-work:o/app.git) from Desk into:");
+  });
+
   test("c on a remote-only header with a remote URL clones into the peer's folders under the clone root, and the header turns local", async () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), "ib-dashboard-clone-")));
     await mkdir(join(home, ".itsybitsy"));
     setUserHome(home);
     setCoordinatorHome(join(home, ".itsybitsy"));
     const clones: string[][] = [];
+    const url = "git@github.com:owner/itsybitsy.git";
     cloneRepoSpawnCtx.set(((cmd: string[]) => {
-      if (cmd[1] !== "clone") return makeSpawnResult(1); // no origin to read
-      clones.push(cmd);
-      mkdirSync(join(cmd[4]!, ".git"), { recursive: true });
-      return makeSpawnResult(0);
+      if (cmd[1] === "clone") {
+        clones.push(cmd);
+        mkdirSync(join(cmd[4]!, ".git"), { recursive: true });
+        return makeSpawnResult(0);
+      }
+      // A repo's origin (the clone's, once registered); no core.sshCommand (read from "/").
+      return cmd.at(-1) === "remote.origin.url" ? makeSpawnResult(0, url) : makeSpawnResult(1);
     }) as SpawnFn);
     try {
       const { dashboard, service } = setup();
-      const url = "git@github.com:owner/itsybitsy.git";
       // Laptop C reports a URL for itsybitsy too, but Laptop B is first.
       service.set({ links: links().map((link) => link.id === PEER_B
         ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: url, relPath: "bun/itsybitsy" }, ...repos("other-repo")] }
@@ -12419,7 +12480,8 @@ describe("Unified peer repos in the Agents tree", () => {
       selectByKey(dashboard, repoKey("itsybitsy"));
       dashboard.handleInput("c");
       const dialog = await waitForValue(() => dashboard.dialog?.type === "input" ? dashboard.dialog : null);
-      expect(dialog.prompt).toBe("Clone itsybitsy from Laptop B into:");
+      // The title names the URL: untrusted peer data, which may be a fork or a stale remote.
+      expect(dialog.prompt).toBe(`Clone itsybitsy (${url}) from Laptop B into:`);
       const dest = join(home, "Developer", "bun", "itsybitsy");
       expect(dialog.value).toBe(dest);
 
@@ -12433,6 +12495,9 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.notice).toBe(`Cloned and added: itsybitsy (${dest})`);
       expect(clones).toEqual([["git", "clone", "--", url, dest]]);
       expect(dashboard.repos).toEqual([{ path: dest, name: "itsybitsy" }]);
+      // The reload went through setRepos: the peer snapshot's cache now has the clone.
+      await waitFor(() => dashboard.repoCloneInfo.has(dest));
+      expect(dashboard.repoCloneInfo.get(dest)).toEqual({ remoteUrl: url, relPath: "bun/itsybitsy" });
 
       // The watcher's next list carries the new local header under the same key:
       // the selection stays on it, now a shared local header.

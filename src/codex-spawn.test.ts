@@ -23,6 +23,7 @@ import { stripItsybitsyWrapper, buildSkillsSection } from "./agent-instructions-
 import { CODEX_REGISTERED_EVENTS } from "./codex-config";
 import { setUserHome, resetUserHome } from "./home";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
+import { AGENT_LAUNCH_HEADER } from "./runtime-names";
 
 // Enabled-mode wrapper fixtures. Builders require the complete pair only when
 // sandboxEnabled is true and ignore both when it is false.
@@ -58,6 +59,13 @@ describe("buildCodexStartContent — launch line", () => {
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
     ...sandboxFields(),
+  });
+
+  test("start.sh exports the git-editor variables in both sandbox modes", () => {
+    for (const content of [buildCodexStartContent(baseInput()), buildCodexStartContent({ ...baseInput(), ...disabledFields() })]) {
+      expect(content.startsWith(`${AGENT_LAUNCH_HEADER}\n`)).toBe(true);
+      expect(content).toContain("\nexport GIT_EDITOR=false GIT_SEQUENCE_EDITOR=false\n");
+    }
   });
 
   test("enabled mode disables Codex native protections beneath the shared Seatbelt wrapper", () => {
@@ -392,6 +400,13 @@ describe("buildCodexResumeContent — launch line (SPEC §5.8 + §6 Phase 7)", (
     absAgentLog: "/tmp/test/agent.log",
     absStderrLog: "/tmp/test/claude.stderr.log",
     ...sandboxFields(),
+  });
+
+  test("resume.sh exports the git-editor variables in both sandbox modes", () => {
+    for (const content of [buildCodexResumeContent(baseInput()), buildCodexResumeContent({ ...baseInput(), ...disabledFields() })]) {
+      expect(content.startsWith(`${AGENT_LAUNCH_HEADER}\n`)).toBe(true);
+      expect(content).toContain("\nexport GIT_EDITOR=false GIT_SEQUENCE_EDITOR=false\n");
+    }
   });
 
   test("launches `codex resume <UUID>` (subcommand form, not the --resume flag)", () => {

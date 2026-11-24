@@ -1,5 +1,6 @@
 #!/bin/bash
 export IB_AGENT_DIR="$(cd -- "${0%/*}" && pwd -P)"
+export GIT_EDITOR=false GIT_SEQUENCE_EDITOR=false
 # Clear Claude Code nesting detection so agents can start their own claude process
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 # Suppress the "How is Claude doing?" feedback survey for spawned agents

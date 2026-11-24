@@ -24,6 +24,7 @@ import {
 import { agySettingsPath } from "./agy-config";
 import type { SessionContext } from "./hooks/session-start";
 import { setUserHome, resetUserHome } from "./home";
+import { AGENT_LAUNCH_HEADER } from "./runtime-names";
 
 // Enabled-mode wrapper fixtures. Builders require the complete pair only when
 // sandboxEnabled is true and ignore both when it is false.
@@ -345,6 +346,17 @@ describe("buildAgy{Start,Resume}Content — optional sandbox wrapper", () => {
       expect(content).not.toContain("sandbox-proxy-launch");
       expect(content).not.toContain("sandbox-collector");
       expect(content).not.toContain("export http_proxy=");
+    }
+  });
+
+  test("start and resume export the git-editor variables in both sandbox modes", () => {
+    for (const sandboxEnabled of [true, false]) {
+      const start = buildAgyStartContent({ ...startBase(), sandboxEnabled });
+      const resume = buildAgyResumeContent({ ...resumeBase(), sandboxEnabled });
+      for (const content of [start, resume]) {
+        expect(content.startsWith(`${AGENT_LAUNCH_HEADER}\n`)).toBe(true);
+        expect(content).toContain("\nexport GIT_EDITOR=false GIT_SEQUENCE_EDITOR=false\n");
+      }
     }
   });
 

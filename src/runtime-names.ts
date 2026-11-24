@@ -10,8 +10,18 @@ export const STATUS_TAG = "itsybitsy-status";
 export const AGY_HOOK_KEY = "itsybitsy";
 export const AGY_RULE_FILE = ".agents/rules/itsybitsy-agent.md";
 
+// Agents have no one to drive an interactive editor, so a git command that opens
+// one (vim by default) hangs the agent's shell. `false` makes it fail at once with
+// git's "Please supply the message using either -m or -F option", so the agent
+// passes -m/-F/--no-edit instead. GIT_EDITOR outranks core.editor, VISUAL and
+// EDITOR (and `git -c core.editor=...`); GIT_SEQUENCE_EDITOR also covers
+// `git rebase -i` when the user's config sets sequence.editor. VISUAL and EDITOR
+// stay untouched: this is about git only, not the CLI's own editor features.
+export const AGENT_GIT_EDITOR_ENV = ["GIT_EDITOR=false", "GIT_SEQUENCE_EDITOR=false"] as const;
+
 // tmux invokes start.sh and resume.sh by absolute path. Export only in that script's process tree.
-export const AGENT_LAUNCH_HEADER = '#!/bin/bash\nexport IB_AGENT_DIR="$(cd -- "${0%/*}" && pwd -P)"';
+export const AGENT_LAUNCH_HEADER = '#!/bin/bash\nexport IB_AGENT_DIR="$(cd -- "${0%/*}" && pwd -P)"\nexport ' +
+  AGENT_GIT_EDITOR_ENV.join(" ");
 
 export const runtimeDir = (repo: string): string => join(repo, RUNTIME_DIR_NAME);
 export const agentsDir = (repo: string): string => join(runtimeDir(repo), "agents");

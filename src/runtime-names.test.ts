@@ -1,7 +1,72 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as names from "./runtime-names";
 import { resolveAgentFromCwd } from "./hooks/shared";
 import { setUserHome, resetUserHome } from "./home";
+
+describe("agent launch header disables git's interactive editor", () => {
+  test("exports GIT_EDITOR and GIT_SEQUENCE_EDITOR as false", () => {
+    expect(names.AGENT_GIT_EDITOR_ENV).toEqual(["GIT_EDITOR=false", "GIT_SEQUENCE_EDITOR=false"]);
+    expect(names.AGENT_LAUNCH_HEADER.split("\n")).toEqual([
+      "#!/bin/bash",
+      'export IB_AGENT_DIR="$(cd -- "${0%/*}" && pwd -P)"',
+      "export GIT_EDITOR=false GIT_SEQUENCE_EDITOR=false",
+    ]);
+  });
+
+  // Runs the real header the way tmux runs start.sh: a script file invoked by
+  // path. The inherited GIT_EDITOR is a command that would hang, standing in for
+  // vim (git runs it as `sh -c 'sleep 10 # "$@"'`, so the `#` drops the file
+  // name it appends); the header must override it so `git commit` without -m
+  // fails at once rather than hitting the spawn timeout.
+  test("a git commit without -m fails fast instead of waiting on an editor", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "launch-header-git-"));
+    try {
+      const repo = join(dir, "repo");
+      const script = join(dir, "start.sh");
+      await Bun.write(script, `${names.AGENT_LAUNCH_HEADER}
+set -e
+git init -q -b main ${JSON.stringify(repo)}
+cd ${JSON.stringify(repo)}
+echo base > f.txt
+git add f.txt
+git commit -q -m base
+echo more >> f.txt
+git add f.txt
+git commit
+`);
+      const proc = Bun.spawn(["bash", script], {
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: dir,
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid",
+          GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
+          GIT_EDITOR: "sleep 10 #",
+          GIT_SEQUENCE_EDITOR: "sleep 10 #",
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 4_000,
+      });
+      // Check the exit before reading stderr: a killed script leaves the hung
+      // editor holding the pipe open, so reading it first would wait it out.
+      const exitCode = await proc.exited;
+      expect(proc.signalCode).toBeNull();
+      expect(exitCode).toBe(1);
+      const stderr = await new Response(proc.stderr).text();
+      // Older git capitalizes "There was a problem".
+      expect(stderr).toMatch(/problem with the editor 'false'/i);
+      expect(stderr).toContain("Please supply the message using either -m or -F option.");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+});
 
 test("all runtime path builders", () => {
   const repo = "/repos/ittybitty project";

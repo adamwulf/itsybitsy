@@ -3597,6 +3597,40 @@ async function countCommitsAhead(repoPath: string, targetBranch: string, sourceB
   return lines ? lines.split("\n").length : 0;
 }
 
+/**
+ * Before a merge into `targetBranch`: pull it from every remote the way
+ * `ib pull` does, when it is `main` or `master`, is checked out in
+ * `targetDir`, and the repo has remotes (SPEC.md §3.4). Any other target —
+ * a manager's `agent/<id>` branch, a detached HEAD, a repo with no remotes —
+ * has nothing to pull. `report` is the pull's status lines, or null when it
+ * did not pull; a failed pull is an error.
+ */
+async function pullBeforeMerge(
+  agentDir: string,
+  targetDir: string,
+  targetBranch: string,
+  targetCheckedOut: boolean,
+): Promise<{ ok: true; report: string | null } | { ok: false; stderr: string }> {
+  if (!targetCheckedOut || (targetBranch !== "main" && targetBranch !== "master")) {
+    return { ok: true, report: null };
+  }
+  const listed = await listRemotes(mergeSpawnCtx, targetDir);
+  if (!listed.ok) {
+    return { ok: false, stderr: `Could not list remotes to pull ${targetBranch} before merging: ${listed.stderr}` };
+  }
+  const remotes = listed.remotes;
+  if (remotes.length === 0) return { ok: true, report: null };
+
+  await logAgent(agentDir, `Pulling ${targetBranch} from ${remotes.join(", ")} before merging...`);
+  const pull = await pullBranchFromRemotes(mergeSpawnCtx, targetDir, targetBranch, remotes, false);
+  const report = [pull.stdout, pull.stderr].filter(Boolean).join("\n");
+  await logAgent(agentDir, `Pull ${pull.ok ? "completed" : "failed"}:\n${report}`);
+  if (!pull.ok) {
+    return { ok: false, stderr: `Pull of ${targetBranch} failed, so nothing was merged:\n${report}` };
+  }
+  return { ok: true, report };
+}
+
 /** Options for {@link mergeAgent}. */
 export interface MergeAgentOptions {
   /**
@@ -3628,6 +3662,7 @@ export interface MergeAgentOptions {
  * 4. Detect target branch (current branch → main → master → error)
  * 5. Verify agent branch exists
  * 6. Check current dir has no uncommitted changes
+ * 6b. Pull the target from its remotes when it is main/master (pullBeforeMerge)
  * 7. Pre-rebase conflict check
  * 8. Rebase agent branch onto target
  * 9. Checkout target branch
@@ -3643,7 +3678,7 @@ export interface MergeAgentOptions {
  * 19. Remove agent directory
  * 20. Scan for orphaned processes
  *
- * With `options.keep` (`ib merge <id> --keep`) steps 1-10 run exactly as
+ * With `options.keep` (`ib merge <id> --keep`) steps 1-10 (6b included) run exactly as
  * above and the function returns — steps 11-20 (the teardown) are skipped,
  * so the agent keeps running on its rebased branch.
  */
@@ -3704,6 +3739,7 @@ export async function mergeAgent(
       if (currentBranch.exitCode === 0 && currentBranch.stdout.trim()) {
         targetBranch = currentBranch.stdout.trim();
       }
+      const targetCheckedOut = targetBranch !== "";
       if (!targetBranch) {
         // These two run in the caller's cwd; a brokered merge names it.
         const inCallerCwd = brokered ? ["-C", brokered.cwd] : [];
@@ -3732,12 +3768,24 @@ export async function mergeAgent(
         return { ok: false as const, stderr: "Target directory has uncommitted changes" };
       }
 
-      return { ok: true as const, targetBranch };
+      return { ok: true as const, targetBranch, targetCheckedOut };
     });
     if (!preflight.ok) {
       return { ok: false, exitCode: 1, stdout: "", stderr: preflight.stderr };
     }
     const targetBranch = preflight.targetBranch;
+
+    // 6b. Pull the target first when it is the main branch, so the conflict
+    // check, the rebase and the merge below all run against the remotes'
+    // newest main. A failed pull stops the merge before the agent's branch
+    // is touched.
+    const pull = await timed("merge", "git-pull", () =>
+      pullBeforeMerge(agentDir, targetDir, targetBranch, preflight.targetCheckedOut)
+    );
+    if (!pull.ok) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: pull.stderr };
+    }
+    const withPullReport = (stdout: string) => (pull.report ? `${stdout}\n${pull.report}` : stdout);
 
     // Captured after a successful merge (commitCount > 0). Stays null when no
     // merge happens so the success message can omit the SHA in that case.
@@ -3824,7 +3872,7 @@ export async function mergeAgent(
         await logAgent(agentDir, `Nothing to merge (--keep): ${branchName} has no commits ahead of ${targetBranch}`);
         return {
           ok: true, exitCode: 0,
-          stdout: `Nothing to merge: ${branchName} has no commits ahead of ${targetBranch} (agent ${agent.id} kept running)`,
+          stdout: withPullReport(`Nothing to merge: ${branchName} has no commits ahead of ${targetBranch} (agent ${agent.id} kept running)`),
           stderr: "",
         };
       }
@@ -3832,7 +3880,7 @@ export async function mergeAgent(
       await logAgent(agentDir, `Merged ${commitCount} commit(s) into ${targetBranch}${at} (--keep: agent left running on ${branchName})`);
       return {
         ok: true, exitCode: 0,
-        stdout: `Merged agent ${agent.id} into ${targetBranch}${at} (${commitCount} commit(s), agent kept running)`,
+        stdout: withPullReport(`Merged agent ${agent.id} into ${targetBranch}${at} (${commitCount} commit(s), agent kept running)`),
         stderr: "",
       };
     }
@@ -3946,7 +3994,7 @@ export async function mergeAgent(
     const successStdout = mergedSha
       ? `Closed agent: ${agent.id} (merged to ${targetBranch} at ${mergedSha})`
       : `Closed agent: ${agent.id}`;
-    return { ok: true, exitCode: 0, stdout: successStdout, stderr: archived.warnings.join("\n") };
+    return { ok: true, exitCode: 0, stdout: withPullReport(successStdout), stderr: archived.warnings.join("\n") };
   } finally {
     // Clear the op marker on every return path. On the SUCCESS path the agent
     // dir was already removed at step 17-19, so this writes into a now-gone
@@ -9336,15 +9384,37 @@ async function mainBranchAndRemotes(
     branch = "master";
   }
 
-  const remotesResult = await ctx.run(["git", "-C", repoPath, "remote"]);
-  if (remotesResult.exitCode !== 0) {
-    return { ok: false, result: { ok: false, exitCode: remotesResult.exitCode, stdout: "", stderr: `Failed to list remotes: ${remotesResult.stderr}` } };
+  const listed = await listRemotes(ctx, repoPath);
+  if (!listed.ok) {
+    return { ok: false, result: { ok: false, exitCode: 1, stdout: "", stderr: `Failed to list remotes: ${listed.stderr}` } };
   }
-  const remotes = remotesResult.stdout.split("\n").map((r) => r.trim()).filter(Boolean);
-  if (remotes.length === 0) {
+  if (listed.remotes.length === 0) {
     return { ok: false, result: { ok: false, exitCode: 1, stdout: "", stderr: `No remotes configured in ${repoPath}` } };
   }
-  return { ok: true, branch, remotes };
+  return { ok: true, branch, remotes: listed.remotes };
+}
+
+/**
+ * The repo's remotes that have a URL, in `git remote -v` order. Plain
+ * `git remote` also names a remote that only some config setting mentions:
+ * a global `remote.origin.tagopt` or `remote.origin.prune` makes every repo
+ * list an "origin" that cannot be fetched or pushed. `git remote -v` prints
+ * such a remote with no URL and no "(fetch)"/"(push)", so it is left out.
+ */
+async function listRemotes(
+  ctx: SpawnContext,
+  repoPath: string,
+): Promise<{ ok: true; remotes: string[] } | { ok: false; stderr: string }> {
+  const result = await ctx.run(["git", "-C", repoPath, "remote", "-v"]);
+  if (result.exitCode !== 0) {
+    return { ok: false, stderr: result.stderr || result.stdout || `exit ${result.exitCode}` };
+  }
+  const remotes: string[] = [];
+  for (const line of result.stdout.split("\n")) {
+    const name = /^([^\t]+)\t.+ \((?:fetch|push)\)$/.exec(line)?.[1];
+    if (name && !remotes.includes(name)) remotes.push(name);
+  }
+  return { ok: true, remotes };
 }
 
 /**
@@ -9402,8 +9472,23 @@ export const pullSpawnCtx = new SpawnContext();
 export async function pullRepo(repoPath: string, interactive = false): Promise<IbCommandResult> {
   const target = await mainBranchAndRemotes(pullSpawnCtx, repoPath);
   if (!target.ok) return target.result;
-  const { branch, remotes } = target;
-  const git = (...args: string[]) => pullSpawnCtx.run(["git", "-C", repoPath, ...args]);
+  return pullBranchFromRemotes(pullSpawnCtx, repoPath, target.branch, target.remotes, interactive);
+}
+
+/**
+ * The body of {@link pullRepo}: bring `branch`, which must be checked out in
+ * `repoPath`, up to date with each of `remotes`. `ib merge` runs it too,
+ * through its own spawn context, before it merges into the main branch
+ * (SPEC.md §3.4).
+ */
+async function pullBranchFromRemotes(
+  ctx: SpawnContext,
+  repoPath: string,
+  branch: string,
+  remotes: string[],
+  interactive: boolean,
+): Promise<IbCommandResult> {
+  const git = (...args: string[]) => ctx.run(["git", "-C", repoPath, ...args]);
 
   const head = await git("symbolic-ref", "--quiet", "--short", "HEAD");
   if (head.exitCode !== 0 || head.stdout !== branch) {

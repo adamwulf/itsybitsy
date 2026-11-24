@@ -6329,6 +6329,107 @@ describe("mergeAgent --keep (real git)", () => {
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(false);
     expect(await readdir(join(tempDir, ".itsybitsy", "archive"))).toHaveLength(1);
   });
+
+  // SPEC.md §3.4 step 0: a merge into main pulls main from its remotes first.
+  describe("pulls main before merging", () => {
+    let remotesDir: string;
+    let origin: string;
+    let other: string;
+
+    beforeEach(async () => {
+      // Outside tempDir, so the primary checkout's status stays clean.
+      remotesDir = await mkdtemp(join(tmpdir(), "merge-pull-remotes-"));
+      origin = join(remotesDir, "origin.git");
+      other = join(remotesDir, "other");
+      await git("init", "-q", "--bare", "-b", "main", origin);
+      await git("-C", tempDir, "remote", "add", "origin", origin);
+      await git("-C", tempDir, "push", "-q", "origin", "main");
+      // "other" stands in for whoever else pushes to origin.
+      await git("clone", "-q", origin, other);
+      await git("-C", other, "config", "user.email", "test@example.com");
+      await git("-C", other, "config", "user.name", "Test User");
+      await git("-C", other, "config", "commit.gpgsign", "false");
+    });
+
+    afterEach(async () => {
+      await rm(remotesDir, { recursive: true, force: true });
+    });
+
+    test("a repo whose only remote is a URL-less config entry merges without pulling", async () => {
+      // Drop the real origin, then name one in config alone, as a global
+      // `remote.origin.tagopt` does in every repo.
+      await git("-C", tempDir, "remote", "remove", "origin");
+      await git("-C", tempDir, "config", "remote.origin.tagopt", "--tags");
+      await agentCommit("feature.txt", "one\n", "agent: one");
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toMatch(/^Merged agent agent-abc into main at [0-9a-f]{40} \(1 commit\(s\), agent kept running\)$/);
+      expect(await Bun.file(join(tempDir, "feature.txt")).text()).toBe("one\n");
+    });
+
+    /** Commit in "other" and push it, so origin's main is ahead of the local main. */
+    async function pushFromOther(file: string, content: string, msg: string): Promise<string> {
+      const sha = await commitIn(other, file, content, msg);
+      await git("-C", other, "push", "-q", "origin", "main");
+      return sha;
+    }
+
+    test("the agent's work lands on top of the commit the remote has and the local main did not", async () => {
+      await agentCommit("feature.txt", "one\n", "agent: one");
+      const remoteTip = await pushFromOther("remote.txt", "remote\n", "remote: new");
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toMatch(
+        /^Merged agent agent-abc into main at [0-9a-f]{40} \(1 commit\(s\), agent kept running\)\n✓ origin: pulled main/
+      );
+      // The agent branch was rebased onto the pulled main, and main has both.
+      expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc^")).toBe(remoteTip);
+      expect(await git("-C", tempDir, "merge-base", remoteTip, "main")).toBe(remoteTip);
+      expect(await Bun.file(join(tempDir, "remote.txt")).text()).toBe("remote\n");
+      expect(await Bun.file(join(tempDir, "feature.txt")).text()).toBe("one\n");
+      expect(await git("-C", tempDir, "status", "--porcelain")).toBe("");
+      expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("Pulling main from origin before merging...");
+    });
+
+    test("a failed pull stops the merge before the agent's branch or main is touched", async () => {
+      const agentTip = await agentCommit("feature.txt", "one\n", "agent: one");
+      const mainBefore = await git("-C", tempDir, "rev-parse", "main");
+      // An unreachable remote, as when offline.
+      await git("-C", tempDir, "remote", "set-url", "origin", join(remotesDir, "missing.git"));
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+      expect(result.ok).toBe(false);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toStartWith("Pull of main failed, so nothing was merged:\n✗ origin: ");
+      expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
+      expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(agentTip);
+      expect(await git("-C", tempDir, "status", "--porcelain")).toBe("");
+      expect(await Bun.file(join(tempDir, "feature.txt")).exists()).toBe(false);
+      expect((await readAgentTransient(agentDir))?.operation).toBeNull();
+    });
+
+    test("a merge into a manager's branch does not pull or fetch", async () => {
+      const managerWorktree = join(tempDir, ".itsybitsy", "agents", "agent-manager", "repo");
+      await mkdir(join(tempDir, ".itsybitsy", "agents", "agent-manager"), { recursive: true });
+      await git("-C", tempDir, "worktree", "add", "-q", "-b", "agent/agent-manager", managerWorktree, "main");
+      await agentCommit("feature.txt", "one\n", "agent: one");
+      const mainBefore = await git("-C", tempDir, "rev-parse", "main");
+      await pushFromOther("remote.txt", "remote\n", "remote: new");
+
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), managerWorktree, { keep: true });
+
+      expect(result.ok).toBe(true);
+      expect(result.stdout).toMatch(/^Merged agent agent-abc into agent\/agent-manager at [0-9a-f]{40} \(1 commit\(s\), agent kept running\)$/);
+      expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
+      // Not even fetched: the remote-tracking ref is where the setup's push left it.
+      expect(await git("-C", tempDir, "rev-parse", "origin/main")).toBe(mainBefore);
+    });
+  });
 });
 
 // ── newAgent (native) tests ──────────────────────────────────────────────────

@@ -18,6 +18,8 @@ import { trackSendCleanup } from "../send-cleanup";
  * calls `finish`; the responder reads the bounded request, writes one
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
+ * A stream whose first byte is 1 is a long-lived remote terminal, served by
+ * terminal-host.ts (SPEC §20.4 "Remote terminal").
  *
  * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle, acknowledge and send.
  *

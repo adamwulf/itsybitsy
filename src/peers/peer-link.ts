@@ -19,12 +19,13 @@ import { trackSendCleanup } from "../send-cleanup";
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
  *
- * SPEC §20.4 defines the wire shapes for agents, pane reads, new-agent, lifecycle and send.
+ * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle and send.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
  * reason. The agent list carries only the fields of {@link RemoteAgent} (SPEC §20.4), never
- * logs or tmux output, and never the system coordinator.
+ * prompts, logs or tmux output, and never the system coordinator. A prompt is read
+ * on its own request, only while the other side shows it.
  *
  * The transport is the pair protocol's seam ({@link PairConnection}):
  * service.ts adapts the iroh wrapper with `toPairConnection`, and the tests use
@@ -97,8 +98,6 @@ export interface RemoteAgent {
   agentType: string | null;
   /** The id of the agent's manager, so the receiving side can nest it. */
   manager: string | null;
-  /** The prompt the agent was started with (`meta.prompt`), for the INITIAL PROMPT pane. */
-  prompt: string;
 }
 
 export interface RemoteRepo {
@@ -208,7 +207,7 @@ function sendDiagnostic(text: string) {
 
 /**
  * The reply's agent list, from the watcher's last fully detected snapshot
- * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the nine
+ * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the eight
  * allowed fields of each agent, and no system coordinator. (The system
  * coordinator has no agent directory, so the watcher never lists it; the
  * filter keeps it out even if that changes.)
@@ -225,7 +224,6 @@ export function toRemoteAgents(agents: readonly Agent[]): RemoteAgent[] {
       state: a.state,
       agentType: a.meta.agentType ?? null,
       manager: a.meta.manager ?? null,
-      prompt: a.meta.prompt,
     }));
 }
 
@@ -289,10 +287,10 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
   const malformed = () => new PeerProtocolError(`agent ${index} in the reply is malformed`);
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw malformed();
   const e = entry as Record<string, unknown>;
-  const required = (key: string, clean = cleanField): string => {
+  const required = (key: string): string => {
     const value = e[key];
     if (typeof value !== "string") throw malformed();
-    return clean(value);
+    return cleanField(value);
   };
   const optional = (key: string): string | null => {
     const value = e[key];
@@ -311,7 +309,6 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
     state: required("state"),
     agentType: optional("agentType"),
     manager: optional("manager"),
-    prompt: required("prompt", cleanLines),
   };
 }
 
@@ -394,6 +391,16 @@ export function requestPane(conn: PairConnection, target: PeerPaneTarget, lines:
     }
     return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
   }, { setTimer, timeout: [15_000, new Error(target.op === "agent-pane" ? "Agent pane request timed out" : "Coordinator pane request timed out")] });
+}
+
+/** The agent's prompt as its own INITIAL PROMPT pane shows it, safe to draw. */
+export function requestAgentPrompt(conn: PairConnection, repo: string, id: string, setTimer = realTimer): Promise<string> {
+  return clientExchange(conn, encodeJson({ op: "agent-prompt", repo, id }), bytes => {
+    const reply = decodeObject(bytes, "reply");
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
+    if (reply.op !== "agent-prompt" || typeof reply.prompt !== "string") throw new PeerProtocolError("malformed agent-prompt reply");
+    return cleanLines(reply.prompt);
+  }, { setTimer, timeout: [15_000, new Error("Agent prompt request timed out")] });
 }
 
 export function requestAgentDiff(conn: PairConnection, repo: string, id: string, setTimer = realTimer): Promise<AgentDiff> {
@@ -644,6 +651,7 @@ export interface PeerResponderDeps {
   captureCoordinator?(lines: number): Promise<PeerPane | null>;
   captureAgent?(repo: string, id: string, lines: number): Promise<PeerPane>;
   captureDiff?(repo: string, id: string): Promise<AgentDiff>;
+  readPrompt?(repo: string, id: string): Promise<string>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
@@ -895,6 +903,20 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     } catch (err) {
       reply = encodeErrorReply(sendDiagnostic(errorDetail(err)));
     }
+    if (await deps.peerName(conn.remoteId) === null) {
+      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+      return;
+    }
+  } else if (request.op === "agent-prompt") {
+    try {
+      if (typeof request.repo !== "string" || typeof request.id !== "string") throw new Error("Expected repo and agent id");
+      if (!deps.readPrompt) throw new Error("Remote prompts are unavailable");
+      reply = encodeJson({ op: "agent-prompt", prompt: await deps.readPrompt(request.repo, request.id) });
+      if (reply.length > PEER_MAX_REPLY_BYTES) throw new Error(`The prompt is over ${PEER_MAX_REPLY_BYTES} bytes`);
+    } catch (err) {
+      reply = encodeErrorReply(cleanRemoteText(errorDetail(err)));
+    }
+    // Reading prompt.txt is asynchronous, as a capture is.
     if (await deps.peerName(conn.remoteId) === null) {
       closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
       return;

@@ -23,7 +23,7 @@ import { PEER_ALPN, PEER_CLOSE, encodePeerRequest, toRemoteAgents } from "./peer
 import { lifecycleFixture } from "./test-remote-lifecycle";
 import type { RemoteLifecycleDeps } from "./remote-lifecycle";
 import type { RemoteSpawnDeps } from "./new-agent";
-import { captureAgentPane } from "./agent-pane";
+import { captureAgentPane, readAgentPromptText } from "./agent-pane";
 import { createMessageReceiver } from "./receive-message";
 import { captureLiveDisplayPane, spawnCtx as paneProbe } from "../tmux-poller";
 import { readOutbox } from "../outbox";
@@ -32,7 +32,7 @@ import { makeSpawnResult } from "../test-utils";
 import { PeerService } from "./service";
 import { addPeer, readPeers, removePeer, shortPeerId } from "./store";
 
-const ALLOWED_KEYS = ["agentType", "id", "manager", "nickname", "prompt", "repoName", "repoPath", "repoRegistryName", "state"];
+const ALLOWED_KEYS = ["agentType", "id", "manager", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
 
 const homes: string[] = [];
 const services: PeerService[] = [];
@@ -62,10 +62,10 @@ function inHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** A local agent with a multi-line prompt, and a summary that must never cross the wire. */
+/** A local agent with fields that must never cross the wire. */
 function localAgent(id: string, meta: Partial<Agent["meta"]> = {}): Agent {
   const agent = makeAgent({ id, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running" });
-  Object.assign(agent.meta, { prompt: "Build it\nthen test it", summary: "SECRET SUMMARY", agentType: "worker", ...meta });
+  Object.assign(agent.meta, { prompt: "SECRET PROMPT", summary: "SECRET SUMMARY", agentType: "worker", ...meta });
   return agent;
 }
 
@@ -98,6 +98,7 @@ function makeNetwork(iroh: Iroh) {
       captureAgent: (repo, id, lines) => captureAgentPane(agents, repo, id, lines),
       captureCoordinator: async () => ({ state: "running", text: label + " coordinator" }),
       captureDiff: (repo, id) => captureAgentDiff(agents, repo, id),
+      readPrompt: (repo, id) => readAgentPromptText(agents, repo, id),
       acquireLock: async () => ({ acquired: true }),
       releaseLock: async () => true,
       loadIdentity: () => inHome(home, loadOrCreateIdentity),
@@ -165,8 +166,8 @@ test("each side binds at boot and its poller fetches the other's snapshot, with 
   const seenByA = link(a)!.agents!;
   expect(seenByA).toEqual(toRemoteAgents(bAgents));
   expect(seenByA).toEqual([
-    { id: "agent-b1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, prompt: "Build it\nthen test it" },
-    { id: "agent-b2", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-b1", prompt: "Build it\nthen test it" },
+    { id: "agent-b1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null },
+    { id: "agent-b2", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-b1" },
   ]);
   for (const entry of seenByA) expect(Object.keys(entry).sort()).toEqual(ALLOWED_KEYS);
   // B sees A's agents without A's system coordinator.
@@ -326,6 +327,22 @@ test("opens an agent diff larger than the JSON reply limit over a paired loopbac
   expect(reply.patch.length).toBeGreaterThan(1_048_576);
   expect(reply.patch.equals((await Bun.$`git diff --binary ${base}`.cwd(b.home).quiet()).stdout)).toBe(true);
   expect(await a.service.fetchPane(b.id, { op: "coordinator-pane" }, 200)).toMatchObject({ text: "b coordinator" });
+});
+
+test("reads a registered agent's prompt.txt over a paired loopback connection", async () => {
+  const net = makeNetwork(await loadIroh());
+  const agent = localAgent("worker");
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", [agent]);
+  agent.storageDir = join(b.home, "worker");
+  await Bun.write(join(agent.storageDir, "prompt.txt"), "Build it\nthen test it");
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => !!link(a)?.connected);
+  expect(await a.service.fetchAgentPrompt(b.id, "app", "worker")).toBe("Build it\nthen test it");
+  await expect(a.service.fetchAgentPrompt(b.id, "app", "missing")).rejects.toThrow("Agent not found");
+  // The periodic agent list still carries no prompt.
+  expect(JSON.stringify(link(a)!.agents)).not.toContain("Build it");
 });
 
 test("agents send text and two files in both directions over real paired endpoints", async () => {

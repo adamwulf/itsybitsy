@@ -59,6 +59,7 @@ import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
 import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import { RemotePane } from "./remote-pane";
+import { RemotePrompt } from "./remote-prompt";
 import { closeOsc8 } from "../hyperlinks";
 import type { ChromeSlice } from "./wrap";
 import { codexUsageResult, fetchGeminiUsage, newerCodexReading, passedCodexResets, readCodexLogUsage } from "../usage";
@@ -120,7 +121,7 @@ import {
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
-import { captureAgentPane } from "../peers/agent-pane";
+import { captureAgentPane, readAgentPromptText } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { peerEntryKey, remoteDisplayName, remoteMessageTarget, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
@@ -435,6 +436,11 @@ function padToWidth(str: string, width: number): string {
 
 /** The right pane's text for a selected remote row, in every mode but INITIAL PROMPT on an agent (SPEC §20.5). */
 export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
+
+/** A remote agent's key: `currentAgentKey` and its draft while it is selected. */
+function remoteAgentKey(row: Extract<RemoteEntry, { kind: "remote-agent" }>): string {
+  return `${row.peerId}/${row.remote.repoRegistryName}/${row.remote.id}`;
+}
 
 /**
  * The selected remote agent's capture (or a repo header's placeholder)
@@ -852,9 +858,20 @@ export class DashboardComponent implements Component {
     (peerId, target, lines) => this.peerService!.fetchPane(peerId, target, lines),
     () => this.tui?.requestRender(),
   );
+  private readonly remotePrompt = new RemotePrompt(
+    (peerId, repo, id) => this.peerService!.fetchAgentPrompt(peerId, repo, id),
+    (key, lines) => {
+      // As in loadAgentPrompt: a read for an agent no longer selected is only cached.
+      if (key !== this.currentAgentKey) return;
+      this.rightPane.promptContent = lines;
+      this.rightPane.updateContent();
+      this.tui?.requestRender();
+    },
+  );
 
   private syncRemotePane(): void {
     const row = this.remoteSelection;
+    const visible = this._dialog === null && !this.expandedAgentsTreeVisible;
     if (row && row.kind !== "remote-repo-header" && this.tmuxPoller.isRunning() && this.peerService) {
       this.remotePane.displayHeight = Math.max(0, this.availableMainHeight() - this.inputField.getHeight(this.getMainWidth()));
       this.remotePane.select({
@@ -862,10 +879,15 @@ export class DashboardComponent implements Component {
         target: row.kind === "remote-agent"
           ? { op: "agent-pane", repo: row.remote.repoRegistryName, id: row.remote.id }
           : { op: "coordinator-pane" },
-      }, this.peerService.remoteStartDenial, this._dialog === null && !this.expandedAgentsTreeVisible);
+      }, this.peerService.remoteStartDenial, visible);
     } else {
       this.remotePane.select(null);
     }
+    // Read a remote agent's prompt only while INITIAL PROMPT shows it.
+    this.remotePrompt.select(row?.kind === "remote-agent" && this.rightPane.mode === "INITIAL PROMPT" && visible
+      && this.tmuxPoller.isRunning() && this.peerService
+      ? { key: remoteAgentKey(row), peerId: row.peerId, repo: row.remote.repoRegistryName, id: row.remote.id }
+      : null);
   }
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
@@ -1445,6 +1467,7 @@ export class DashboardComponent implements Component {
   stopPolling() {
     this.tmuxPoller.stop();
     this.remotePane.select(null);
+    this.remotePrompt.select(null);
     this.coordinatorPoller.stop();
     this.repoCoordinatorPoller.stop();
     if (this.usageTimer) {
@@ -2494,11 +2517,11 @@ export class DashboardComponent implements Component {
     // `isCoordinator` and the repo header are all empty for it, so every local
     // path below (tmux pollers, git probe, right-pane loaders, the per-repo
     // coordinator) sees no selection. Only the info panel, render() and the
-    // INITIAL PROMPT content (set from the agent list below) use it.
+    // remote pane and prompt readers (syncRemotePane) use it.
     const remote = this.remoteSelection;
     const peerCoordinator = remote?.kind === "remote-coordinator";
     const leftPeerCoordinator = !peerCoordinator && this.infoPanel.remote?.kind === "remote-coordinator";
-    const remoteDraft = remote?.kind === "remote-agent" ? `${remote.peerId}/${remote.remote.repoRegistryName}/${remote.remote.id}`
+    const remoteDraft = remote?.kind === "remote-agent" ? remoteAgentKey(remote)
       : peerCoordinator ? remote.peerId + "/@system" : null;
     const enteredFromTree = this.rightPane.mode === "TREE" && (peerCoordinator || (remoteDraft !== null && remoteDraft !== this.currentAgentKey));
     if (enteredFromTree || (peerCoordinator && this.modeIndex !== DEFAULT_MODE_INDEX)) {
@@ -2527,6 +2550,7 @@ export class DashboardComponent implements Component {
     }
 
     this.rightPane.agent = selected;
+    this.rightPane.remoteAgent = remote?.kind === "remote-agent";
     this.rightPane.selectedRepo = repo;
     this.tmuxPane.agent = selected;
     this.statusBar.repoHeaderSelected = !selected && !isCoordinator && selectedRepoHeader !== null;
@@ -2704,9 +2728,6 @@ export class DashboardComponent implements Component {
       if (selected) {
         loadAgentLog(this, selected);
         loadAgentPrompt(this, selected);
-      } else if (remote?.kind === "remote-agent") {
-        // The peer's agent list carries the prompt, so there is nothing to load.
-        this.rightPane.promptContent = remote.remote.prompt ? remote.remote.prompt.split("\n") : ["No prompt available"];
       }
 
       // "Git Status" stoplight (§11.4): drop the previous agent's answer so the
@@ -4487,6 +4508,7 @@ export async function launchDashboard(): Promise<void> {
       dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), message => dashboard.remoteAgentStarted(message));
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
   peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
+  peerDeps.readPrompt = (repo, id) => readAgentPromptText(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
   const peerService = new PeerService(peerDeps);
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:

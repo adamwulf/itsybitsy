@@ -94,7 +94,7 @@ import { detectAgentStates } from "../agents";
 import { newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
-import { PEER_ALPN, requestAgentDiff, requestNewAgent, serveTrustedConnection, type PeerPane, type PeerPaneTarget, type PeerResponderDeps, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
+import { PEER_ALPN, requestAgentDiff, requestAgentPrompt, requestNewAgent, serveTrustedConnection, type PeerPane, type PeerPaneTarget, type PeerResponderDeps, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
 import { captureMarkedCoordinatorPane } from "../tmux-poller";
 import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator";
 import { stripAnsi } from "../parse-state";
@@ -147,6 +147,7 @@ export interface PeerServiceDeps {
   captureCoordinator?: PeerResponderDeps["captureCoordinator"];
   captureAgent?: PeerResponderDeps["captureAgent"];
   captureDiff?: PeerResponderDeps["captureDiff"];
+  readPrompt?: PeerResponderDeps["readPrompt"];
   remoteStartDenial: string | null | Promise<string | null>;
   remoteLifecycle?: RemoteLifecycleDeps;
   remoteSpawn?: RemoteSpawnDeps;
@@ -722,6 +723,14 @@ export class PeerService {
     return requestAgentDiff(conn, repo, id, this.deps.setTimer);
   }
 
+  async fetchAgentPrompt(peerId: string, repo: string, id: string): Promise<string> {
+    if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
+    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    return requestAgentPrompt(conn, repo, id, this.deps.setTimer);
+  }
+
   async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
     const [header, peer, name, body, options] = args;
     if (this.shuttingDown) throw new Error("Watcher shutting down");
@@ -1061,6 +1070,7 @@ export class PeerService {
           captureCoordinator: this.deps.captureCoordinator,
           captureAgent: this.deps.captureAgent,
           captureDiff: this.deps.captureDiff,
+          readPrompt: this.deps.readPrompt,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           log: this.deps.log,
         });

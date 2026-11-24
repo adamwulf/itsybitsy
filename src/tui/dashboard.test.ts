@@ -9213,6 +9213,7 @@ class FakePeerService implements PeersDialogService {
   sendRemoteMessage = mock<PeersDialogService["sendRemoteMessage"]>(async (_id, header) => header.id);
   fetchPane = mock(async (_peerId: string, _target: import("../peers/peer-link").PeerPaneTarget, _lines: number) => ({ state: "running", text: "peer capture" }));
   fetchAgentDiff = mock<PeersDialogService["fetchAgentDiff"]>(async () => { throw new Error("No changes to show — diff is empty"); });
+  fetchAgentPrompt = mock<PeersDialogService["fetchAgentPrompt"]>(async (_peerId, _repo, id) => `Prompt for ${id}\nsecond line`);
   remoteStartDenial: string | null = null;
   runRemoteLifecycle: PeersDialogService["runRemoteLifecycle"] = async () => { throw new Error("Unexpected lifecycle request"); };
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
@@ -10057,7 +10058,7 @@ describe("Unified peer repos in the Agents tree", () => {
   });
 
   function remote(id: string, repoName: string, overrides: Partial<RemoteAgent> = {}): RemoteAgent {
-    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, prompt: "", ...overrides };
+    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
   }
 
   /** Laptop B connected; Laptop C unreachable, offline; Laptop D never answered. */
@@ -10068,7 +10069,7 @@ describe("Unified peer repos in the Agents tree", () => {
         id: PEER_B, name: "Laptop B", connected: true, connectedAt: now - 300_000, lastOkAt: now, coordinator: null, lastError: null,
         repos: repos("itsybitsy", "other-repo"),
         agents: [
-          remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick", prompt: "Fix the parser\nthen add a test" }),
+          remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
           remote("manager-def", "itsybitsy", { state: "waiting", agentType: "manager" }),
           remote("agent-1", "other-repo", { state: "complete" }),
         ],
@@ -10861,16 +10862,20 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(service.fetchPane.mock.calls.at(-1)).toEqual([PEER_B, { op: "agent-pane", repo: "itsybitsy", id: "worker-abc" }, 200]);
       for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
         dashboard.jumpToMode(mode);
+        // INITIAL PROMPT shows the agent's prompt, read from the peer, instead of the placeholder.
+        const prompt = mode === "INITIAL PROMPT";
+        if (prompt) await waitFor(() => paneText(dashboard.render(WIDTH), 1).startsWith("Prompt:"));
         const lines = dashboard.render(WIDTH);
         // The message editor sits at the bottom of the center pane, under the
         // capture, as on a local agent's tmux pane, and never spans the right pane.
         expect(paneText(lines, 2)).toMatch(/^peer capture ─+ ❯ ─+ \[Send\] ─+$/);
         // The right pane is narrow at this width: the placeholder wraps rather than being cut.
-        // INITIAL PROMPT shows the prompt from the peer's agent list instead.
-        expect(paneText(lines, 1)).toBe(mode === "INITIAL PROMPT" ? "Prompt: Fix the parser then add a test" : REMOTE_RIGHT_PANE_TEXT);
+        expect(paneText(lines, 1)).toBe(prompt ? "Prompt: Prompt for worker-abc second line" : REMOTE_RIGHT_PANE_TEXT);
         expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
         expect(stripAnsi(lines[1]!)).toContain(` ${mode} `);
       }
+      // Read once, while INITIAL PROMPT showed the agent; never in the other modes.
+      expect(service.fetchAgentPrompt.mock.calls).toEqual([[PEER_B, "itsybitsy", "worker-abc"]]);
       dashboard.infoPanel.displayHeight = 20;
       const info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd()).filter((r) => r !== "");
       expect(info).toEqual([
@@ -10901,29 +10906,60 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
-  test("INITIAL PROMPT shows a remote agent's prompt from the agent list, scrolls with ; and l, and follows the selection", () => {
+  test("INITIAL PROMPT reads a remote agent's prompt while it shows the agent, caches it per agent, and scrolls it with ; and l", async () => {
     const { dashboard, service } = setup();
-    const prompt = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
-    const [b, ...rest] = links();
-    service.set({ links: [{ ...b!, agents: b!.agents!.map((a) => a.id === "worker-abc" ? { ...a, prompt } : a) }, ...rest] });
-    selectByKey(dashboard, WORKER_KEY);
-    dashboard.jumpToMode("INITIAL PROMPT");
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const replies = new Map<string, PromiseWithResolvers<string>>();
+    service.fetchAgentPrompt.mockImplementation((_peerId, _repo, id) => {
+      const reply = Promise.withResolvers<string>();
+      replies.set(id, reply);
+      return reply.promise;
+    });
     const right = () => paneText(dashboard.render(WIDTH), 1);
-    // Anchored at the bottom, as for a local agent's prompt.
-    expect(right()).toEndWith("line 99 line 100");
-    expect(right()).not.toContain("Prompt:");
-    for (let i = 0; i < 40; i++) dashboard.handleInput(";");
-    expect(right()).toStartWith("Prompt: line 1 line 2 ");
-    for (let i = 0; i < 40; i++) dashboard.handleInput("l");
-    expect(right()).toEndWith("line 99 line 100");
+    const ids = () => service.fetchAgentPrompt.mock.calls.map((call) => call[2]);
+    try {
+      selectByKey(dashboard, WORKER_KEY);
+      expect(ids()).toEqual([]);
+      dashboard.jumpToMode("INITIAL PROMPT");
+      expect(right()).toBe("Loading prompt.txt...");
+      replies.get("worker-abc")!.resolve(Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n"));
+      // Anchored at the bottom, as a local agent's prompt is.
+      await waitFor(() => right().endsWith("line 99 line 100"));
+      for (let i = 0; i < 40; i++) dashboard.handleInput(";");
+      expect(right()).toStartWith("Prompt: line 1 line 2 ");
+      for (let i = 0; i < 40; i++) dashboard.handleInput("l");
+      expect(right()).toEndWith("line 99 line 100");
 
-    // The manager has no prompt: the local fallback text.
-    dashboard.handleInput("k");
-    expect(keyOf(dashboard)).toBe(agentKey(PEER_B, "itsybitsy", "manager-def"));
-    expect(right()).toBe("Prompt: No prompt available");
-    // A remote repo header keeps the placeholder.
-    selectByKey(dashboard, repoKey("itsybitsy"));
-    expect(right()).toBe(REMOTE_RIGHT_PANE_TEXT);
+      // A failed read shows its reason, as a local read failure does.
+      dashboard.handleInput("k");
+      expect(keyOf(dashboard)).toBe(agentKey(PEER_B, "itsybitsy", "manager-def"));
+      expect(right()).toBe("Loading prompt.txt...");
+      replies.get("manager-def")!.reject(new Error("Machine is disconnected"));
+      await waitFor(() => right() === "Prompt: Machine is disconnected");
+
+      // Back on the worker, its cached prompt shows at once while it is read again.
+      dashboard.handleInput("j");
+      expect(right()).toEndWith("line 99 line 100");
+      expect(ids()).toEqual(["worker-abc", "manager-def", "worker-abc"]);
+      // That read finishes after the selection moved: it is cached, not shown.
+      dashboard.handleInput("k");
+      replies.get("worker-abc")!.resolve("a changed prompt");
+      await Bun.sleep(0);
+      expect(right()).toBe("Loading prompt.txt...");
+      dashboard.handleInput("j");
+      expect(right()).toBe("Prompt: a changed prompt");
+
+      // Passing the manager starts no second read while its last one is pending.
+      // A remote repo header keeps the placeholder and reads nothing.
+      dashboard.handleInput("k");
+      dashboard.handleInput("k");
+      expect(keyOf(dashboard)).toBe(repoKey("itsybitsy"));
+      expect(right()).toBe(REMOTE_RIGHT_PANE_TEXT);
+      expect(ids()).toEqual(["worker-abc", "manager-def", "worker-abc", "manager-def", "worker-abc"]);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
   });
 
   test("a remote-only header keeps the repo placeholder, and a stale agent shows its last contact", () => {

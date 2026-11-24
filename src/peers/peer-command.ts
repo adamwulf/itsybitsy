@@ -1,24 +1,29 @@
 /**
- * `ib peer id|list|remove` (docs/plans/iroh-peering.md, "CLI (v1)").
+ * `ib peer id|list|remove|attach` (docs/plans/iroh-peering.md, "CLI (v1)";
+ * SPEC.md §20.4 for attach).
  *
  * None of these load the iroh addon: `id` derives the public key with
- * node:crypto (identity.ts), and `list`/`remove` only read and write
- * peers.json (store.ts). peer-command.test.ts makes the addon loader throw to
- * prove it. Pairing happens only in `ib watch`; there is no `ib peer add`.
+ * node:crypto (identity.ts), `list`/`remove` only read and write
+ * peers.json (store.ts), and `attach` talks to the endpoint-owning `ib watch`
+ * over its local socket (attach-command.ts). peer-command.test.ts makes the
+ * addon loader throw to prove it. Pairing happens only in `ib watch`; there
+ * is no `ib peer add`.
  *
  * Every `ib peer` subcommand is human-only: the PreToolUse hook
  * (checkIbCommandAccess in src/hooks/agent-path.ts) denies `ib peer` to every
  * agent session.
  */
 
+import { ATTACH_USAGE, runAttach } from "./attach-command";
 import { loadOrCreatePeerId } from "./identity";
 import { readPeers, removePeer, type Peer } from "./store";
 
 export const PEER_USAGE =
-  "Usage: ib peer <id|list|remove> ...\n" +
+  "Usage: ib peer <id|list|remove|attach> ...\n" +
   "  ib peer id\n" +
   "  ib peer list\n" +
-  "  ib peer remove <name|id>";
+  "  ib peer remove <name|id>\n" +
+  `  ${ATTACH_USAGE.replace("Usage: ", "")}`;
 
 function pad(text: string, width: number): string {
   return text + " ".repeat(Math.max(0, width - Bun.stringWidth(text)));
@@ -77,6 +82,8 @@ export async function runPeerCommand(args: string[]): Promise<number> {
         return 0;
       case "remove":
         return await runRemove(args.slice(1));
+      case "attach":
+        return await runAttach(args.slice(1));
       default:
         if (sub !== undefined) console.error(`Error: unknown peer subcommand '${sub}'`);
         console.error(PEER_USAGE);

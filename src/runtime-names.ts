@@ -49,6 +49,8 @@ export const peerDir = (home = userHome()): string => join(runtimeDir(home), "pe
 export const peerSecretKeyFile = (): string => join(peerDir(), "secret.key");
 export const peersFile = (): string => join(peerDir(), "peers.json");
 export const peerEndpointLockFile = (): string => join(peerDir(), "endpoint.lock");
+// The endpoint owner's local socket for `ib peer attach` (src/peers/terminal-relay.ts).
+export const peerTerminalSocket = (): string => join(peerDir(), "terminal.sock");
 
 // This machine's name (src/machine-name.ts): the first segment of every local
 // row key in `ib watch` (SPEC §17.1). Set once, then always read from here.

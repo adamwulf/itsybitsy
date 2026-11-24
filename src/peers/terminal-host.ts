@@ -254,6 +254,15 @@ async function runSession(
   if (protocolError !== null) deps.closeError(protocolError);
 }
 
+/** The real host: `agents` is the watcher's last fully detected list (`lastDetectedAgents`). */
+export function localTerminalHost(agents: () => readonly Agent[]): TerminalHostDeps {
+  return {
+    findSession: (agent, repo) => findAgentSession(agents(), agent, repo),
+    spawn: (session, size, onData) => spawnTmuxAttach(session, size, onData),
+    sessions: new Set(),
+  };
+}
+
 /**
  * The tmux session of local agent `agent` (in registry repo `repo`, ignoring
  * case, when given) among the watcher's agents. Never the system coordinator.

@@ -1,5 +1,7 @@
 import { waitForIO } from "./send-frame";
-import { transferStagingRoot } from "../runtime-names";
+import { peerTerminalSocket, transferStagingRoot } from "../runtime-names";
+import type { TerminalHostDeps } from "./terminal-host";
+import { startTerminalRelay, type TerminalRelay } from "./terminal-relay";
 import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./transfer-owner";
 /**
  * The iroh endpoint inside `ib watch` (docs/plans/iroh-peering.md, "Process
@@ -46,6 +48,9 @@ import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./tra
  *   peer in `peers.json` for its agents every 5 s; the trusted ALPN answers
  *   from the injected `agents()` snapshot (the watcher's last fully detected
  *   agents).
+ * - While bound, it also listens on the `ib peer attach` socket
+ *   (terminal-relay.ts), which relays remote terminals over the poller's
+ *   connections; closing the endpoint closes the socket first.
  * - Once bound, the endpoint stays up until `ib watch` exits (`shutdown()`)
  *   or until the accept loop fails. Either way the poller stops, then the
  *   endpoint is closed (which resolves a pending `acceptNext`, which otherwise
@@ -101,7 +106,7 @@ import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator
 import { stripAnsi } from "../parse-state";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
-import { addPeer, readPeers, shortPeerId, type Peer } from "./store";
+import { addPeer, normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
 
 // ---------------------------------------------------------------------------
 // What the service needs from a bound endpoint. The wrapper's IrohEndpoint,
@@ -160,6 +165,10 @@ export interface PeerServiceDeps {
   loadIdentity(): Promise<PeerIdentity>;
   /** Load the addon and bind an endpoint with this key, accepting these ALPNs. */
   bindEndpoint(secretKey: Uint8Array, alpns: string[]): Promise<ServiceEndpoint>;
+  /** Hosting remote terminals on this install's agents (terminal-host.ts). Without it, opens are refused. */
+  terminal?: TerminalHostDeps;
+  /** Where `ib peer attach` reaches this endpoint (terminal-relay.ts); no socket without it. */
+  terminalSocketPath?: string;
   readPeers(): Promise<Peer[]>;
   addPeer(peer: { id: string; name: string; pairedAt?: string }): Promise<Peer>;
   generateCode(): string;
@@ -204,6 +213,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     releaseLock: () => releaseEndpointLock(),
     loadIdentity: loadOrCreateIdentity,
     bindEndpoint: async (secretKey, alpns) => (await loadIroh()).Endpoint.bind({ secretKey, alpns, preset: { kind: "n0" } }),
+    terminalSocketPath: peerTerminalSocket(),
     readPeers,
     addPeer,
     generateCode: () => generatePairCode(),
@@ -383,6 +393,8 @@ export class PeerService {
   }
 
   private readonly headerReaders = new Set<import("./pairing").PairStream>();
+  /** The `ib peer attach` socket, from a successful bind until closeEndpoint. */
+  private terminalRelay: Promise<TerminalRelay | null> | null = null;
   private readonly paneReaders = new Set<string>();
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
@@ -886,6 +898,13 @@ export class PeerService {
     this.poller.stop();
     const ep = this.endpoint;
     this.endpoint = null;
+    const relay = this.terminalRelay;
+    this.terminalRelay = null;
+    try {
+      await (await relay)?.close();
+    } catch (err) {
+      this.deps.log(`peering: closing the terminal socket failed: ${errorDetail(err)}`);
+    }
     try {
       if (ep !== null) await ep.close();
     } catch (err) {
@@ -999,6 +1018,7 @@ export class PeerService {
     this.setStatus({ kind: "listening" });
     this.acceptLoopDone = this.acceptLoop(ep);
     this.poller.start();
+    this.terminalRelay = this.startRelay();
     const poll = this.deps.pollOutbox;
     if (poll) {
       const owner = this.outboxOwner = new AbortController();
@@ -1086,6 +1106,7 @@ export class PeerService {
           captureAgent: this.deps.captureAgent,
           captureDiff: this.deps.captureDiff,
           readPrompt: this.deps.readPrompt,
+          terminal: this.deps.terminal,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           log: this.deps.log,
         });
@@ -1106,6 +1127,34 @@ export class PeerService {
       this.deps.log(`peer link: could not read peers.json, so refusing: ${errorDetail(err)}`);
       return null;
     }
+  }
+
+  /** Listen for `ib peer attach` while this endpoint is up. A failure only costs the socket. */
+  private async startRelay(): Promise<TerminalRelay | null> {
+    const path = this.deps.terminalSocketPath;
+    if (!path) return null;
+    try {
+      return await startTerminalRelay(path, {
+        resolvePeer: (target) => this.resolveTerminalPeer(target),
+        connection: (id) => this.poller.connectedConnection(id),
+        log: this.deps.log,
+      });
+    } catch (err) {
+      this.deps.log(`peering: no terminal socket at ${path}: ${errorDetail(err)}`);
+      return null;
+    }
+  }
+
+  /** The peer `ib peer attach` names: its full id, or its name ignoring case. */
+  private async resolveTerminalPeer(target: string): Promise<Peer> {
+    const peers = await this.deps.readPeers();
+    const id = normalizePeerId(target);
+    const byId = id === null ? undefined : peers.find((peer) => peer.id === id);
+    if (byId) return byId;
+    const named = peers.filter((peer) => peer.name.toLowerCase() === target.toLowerCase());
+    if (named.length === 1) return named[0]!;
+    if (named.length > 1) throw new Error(`${named.length} peers are named ${JSON.stringify(target)}; use the full id`);
+    throw new Error(`no paired peer has the name or id ${JSON.stringify(target)}`);
   }
 
   /** The poller's dial: the trusted ALPN, on the bound endpoint. */

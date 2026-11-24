@@ -834,6 +834,8 @@ const COMMAND_HELP: Record<string, string> = {
     "  id                 Print this install's peer id\n" +
     "  list               List paired peers\n" +
     "  remove <name|id>   Remove a paired peer\n" +
+    "  attach <peer>/[<repo>/]<agent>\n" +
+    "                     Open a paired peer's agent tmux session in this terminal\n" +
     "  Pairing happens in ib watch. Agents cannot run ib peer.",
   "peer id":
     "Usage: ib peer id\n" +
@@ -847,6 +849,15 @@ const COMMAND_HELP: Record<string, string> = {
     "  Remove a paired peer by its exact full id or exact name. A name that\n" +
     "  several peers share removes nothing; their ids are listed instead.\n" +
     "  Removal is one-sided: the other install keeps this one until it removes it.",
+  "peer attach":
+    "Usage: ib peer attach <peer>/[<repo>/]<agent>\n" +
+    "  Attach this terminal to an agent's tmux session on a paired peer, with\n" +
+    "  full input: anything you type reaches that tmux client. <peer> is the\n" +
+    "  peer's name or full id; name <repo> when two agents share the id.\n" +
+    "  Goes through the ib watch that owns the peer endpoint, which must be\n" +
+    "  connected to the peer. Leave with the remote tmux's detach key (inside a\n" +
+    "  local tmux window, press the prefix twice). In ib watch, C on a remote\n" +
+    "  agent opens this in a new tmux session.",
   push:
     "Usage: ib push <repo-id>\n" +
     "  Push the repo's main (or master) branch to every configured remote.\n" +

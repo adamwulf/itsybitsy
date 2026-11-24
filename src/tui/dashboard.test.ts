@@ -10473,13 +10473,13 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    const permittedAscii = new Set([..."jkJK123V@?/I;ls.", "\t", "\x03"]);
+    const permittedAscii = new Set([..."jkJK123V@?/I;ls.ahATEH", "\t", "\x03"]);
     const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
     for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
     const refused = new Set([
       ...ascii.filter(key => !permittedAscii.has(key)),
-      "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "a", "N",
-      "d", "o", "O", "G", "C", "h", "E", "\x1b[200~pasted text\x1b[201~",
+      "i", " ", "\r", "edit these notes", "x", "!", "R", "P", "r", "m", "N",
+      "d", "o", "O", "G", "C", "\x1b[200~pasted text\x1b[201~",
     ]);
     const handlers = [
       ...Object.keys(agentActions).filter(name => typeof (agentActions as Record<string, unknown>)[name] === "function")
@@ -10492,7 +10492,7 @@ describe("Unified peer repos in the Agents tree", () => {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         const notice = ["[", "]", "{", "}"].includes(key) ? "resize from a local row"
-          : ["p", "n"].includes(key) ? "view mode is fixed for remote coordinators" : REMOTE_READ_ONLY_NOTICE;
+          : ["p", "n", "d", "e", "g"].includes(key) ? "view mode is fixed for remote coordinators" : REMOTE_READ_ONLY_NOTICE;
         expect(dashboard.notice).toBe(notice);
         expect(dashboard.dialog).toBeNull();
       }
@@ -11579,7 +11579,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["a", "t", "!", "S", "O"]) {
+      for (const key of ["t", "!", "S", "O", "b"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -11843,7 +11843,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
       const header = dashboard.agentTree.selectedRemote!;
-      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => k !== "a" && !isRemoteAllowedKey(k, header))) {
+      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => !isRemoteAllowedKey(k, header))) {
         resetNotice(dashboard);
         dashboard.handleInput(k);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -11919,11 +11919,31 @@ describe("Unified peer repos in the Agents tree", () => {
     for (const hint of ["C: terminal", ".: favorite", "s: send"]) expect(narrow).toContain(hint);
     expect(text).toContain("s: send");
     for (const hint of [".: favorite", "o: diff", "m: merge", "x: retire", "R: resume", "q: questions"]) expect(text).toContain(hint);
-    for (const hint of ["a: new agent", "h: setup", "A: add repo", "f: fix"]) {
+    // The global dialogs come last on the row, after the row's own actions.
+    const wide = ((dashboard as any).statusBar.render(240) as string[]).map(stripAnsi).join("\n");
+    expect(wide).toMatch(/\.: favorite +a: new agent +h: setup/);
+    // A global hint that does not fit whole is left out, never cut in half.
+    for (const cols of [MIN_TERMINAL_WIDTH, 150, 158]) {
+      const row2 = stripAnsi(((dashboard as any).statusBar.render(cols) as string[])[1]!).trimEnd();
+      expect(row2).toMatch(/(\.: favorite|a: new agent|h: setup)$/);
+    }
+    // Nor does one push the version on the right out of the row.
+    (dashboard as any).statusBar.version = "0.1.0";
+    let shownWithVersion = 0;
+    for (let cols = MIN_TERMINAL_WIDTH; cols <= 200; cols++) {
+      const row2 = stripAnsi(((dashboard as any).statusBar.render(cols) as string[])[1]!).trimEnd();
+      if (row2.includes("a: new agent")) {
+        expect(row2).toEndWith("v0.1.0");
+        shownWithVersion++;
+      }
+    }
+    expect(shownWithVersion).toBeGreaterThan(0);
+    (dashboard as any).statusBar.version = "";
+    for (const hint of ["A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
     // Every key the remote footer names is one the guard allows.
-    for (const key of ["j", "k", "J", "K", "p", "n", "1", "2", "3", "[", "]", "{", "}", "@", "/", "?", "I"]) {
+    for (const key of ["j", "k", "J", "K", "p", "n", "1", "2", "3", "[", "]", "{", "}", "@", "/", "?", "I", "a", "h"]) {
       expect(isRemoteAllowedKey(key)).toBe(true);
     }
     expect(isRemoteAllowedKey("q", dashboard.agentTree.selectedRemote!)).toBe(true);
@@ -12069,10 +12089,16 @@ describe("Unified peer repos in the Agents tree", () => {
     }
     notRefused(d);
 
-    // ? / / / I open their dialogs; Ctrl+C (handled before the dashboard) is never refused.
+    // a opens the New Agent form (its peer has the repo).
+    d = onRemote();
+    d.handleInput("a");
+    expect(d.dialog?.type).toBe("new-agent-form");
+    notRefused(d);
+
+    // ? / / / I / h open their dialogs; Ctrl+C (handled before the dashboard) is never refused.
     d = onRemote();
     d.setPeerService(new FakePeerService());
-    for (const [key, type] of [["?", "help"], ["/", "fuzzy"], ["I", "setup"]] as const) {
+    for (const [key, type] of [["?", "help"], ["/", "fuzzy"], ["I", "setup"], ["h", "setup"]] as const) {
       d.handleInput(key);
       expect(d.dialog?.type).toBe(type);
       d.closeDialog();
@@ -12081,17 +12107,80 @@ describe("Unified peer repos in the Agents tree", () => {
     notRefused(d);
   });
 
-  test("a remote row can open Peers but cannot reach Hooks or Config through it", () => {
-    const { dashboard, service } = setup();
-    selectByKey(dashboard, WORKER_KEY);
-    dashboard.handleInput("I");
-    for (const key of ["\t", "\x1b[Z"]) {
-      resetNotice(dashboard);
-      dashboard.handleInput(key);
-      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
-      expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
-      expect(service.calls).toEqual(["open"]);
+  test("the global actions A, T, E and H reach their handlers on a remote agent and a remote-only header", () => {
+    const { dashboard } = setup();
+    const spies = {
+      A: spyOn(agentActions, "handleAddRepo").mockImplementation(async () => {}),
+      T: spyOn(agentActions, "handleCreateTeam").mockImplementation(() => {}),
+      E: spyOn(agentActions, "handleCrossRepoSend").mockImplementation(() => {}),
+    };
+    const recheck = mock(() => {});
+    (dashboard as any).watcher = { recheckHealth: recheck };
+    try {
+      for (const key of [WORKER_KEY, repoKey("other-repo")]) {
+        selectByKey(dashboard, key);
+        for (const [k, spy] of Object.entries(spies)) {
+          const before = spy.mock.calls.length;
+          resetNotice(dashboard);
+          dashboard.handleInput(k);
+          expect(dashboard.notice).not.toBe(REMOTE_READ_ONLY_NOTICE);
+          expect(spy.mock.calls.length).toBe(before + 1);
+          dashboard.closeDialog();
+        }
+        const checks = recheck.mock.calls.length;
+        dashboard.handleInput("H");
+        expect(dashboard.notice).toBe("Re-checking repo health...");
+        expect(recheck.mock.calls.length).toBe(checks + 1);
+      }
+    } finally {
+      for (const spy of Object.values(spies)) spy.mockRestore();
     }
+  });
+
+  test("a remote row opens Setup with h, and Tab reaches Hooks and Config from Peers", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    resetNotice(dashboard);
+    dashboard.handleInput("h");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+    dashboard.closeDialog();
+    dashboard.handleInput("I");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
+    dashboard.handleInput("\t");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+    dashboard.handleInput("\x1b[Z");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
+    dashboard.handleInput("\x1b[Z");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(1);
+    expect(dashboard.notice).not.toBe(REMOTE_READ_ONLY_NOTICE);
+  });
+
+  test("a on a remote agent opens the New Agent form for that agent's repo", () => {
+    const { dashboard } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    // Not registered here: the form names the remote repo and offers only its peer.
+    dashboard.repos = [{ name: "local", path: "/repos/local" }];
+    dashboard.handleInput("a");
+    let form = assertDialog(dashboard.dialog, "new-agent-form");
+    expect(form.repoName).toBe("itsybitsy");
+    expect(form.machines()).toEqual([{ id: PEER_B, name: "Laptop B" }]);
+    expect(form.machine).toEqual({ id: PEER_B, name: "Laptop B" });
+    dashboard.closeDialog();
+
+    // Registered here under another case: this machine comes first, under its display name.
+    dashboard.repos = [{ name: "local", path: "/repos/local" }, { name: "ItsyBitsy", path: "/repos/itsy", nickname: "Itsy" }];
+    dashboard.handleInput("a");
+    form = assertDialog(dashboard.dialog, "new-agent-form");
+    expect(form.repoName).toBe("Itsy");
+    expect(form.machines()).toEqual([{ id: null, name: "This machine" }, { id: PEER_B, name: "Laptop B" }]);
+    dashboard.closeDialog();
+
+    // An offline peer's agent, its repo registered nowhere else: the form's no-host notice.
+    selectByKey(dashboard, agentKey(PEER_C, "app", "agent-1"));
+    resetNotice(dashboard);
+    dashboard.handleInput("a");
+    expect(dashboard.dialog).toBeNull();
+    expect(dashboard.notice).toBe("No connected machine has app");
   });
 
   test("the command palette goes through the same guard", () => {
@@ -12108,14 +12197,50 @@ describe("Unified peer repos in the Agents tree", () => {
       pick("retire agent — x");
       expect(retire).toHaveBeenCalledTimes(1);
       resetNotice(dashboard);
-      pick("DIFF — run ib diff");
+      pick("force kill agent — !");
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
-      expect(dashboard.currentMode).not.toBe("DIFF");
+      expect(dashboard.dialog).toBeNull();
       pick("setup: Peers tab — I");
       expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
       expect(service.calls).toContain("open");
     } finally {
       retire.mockRestore();
+    }
+  });
+
+  test("palette mode jumps and d/e/g work on a remote agent; a peer coordinator keeps its fixed view", () => {
+    const pick = (dashboard: DashboardComponent, label: string) => {
+      dashboard.handleInput("/");
+      const palette = assertDialog(dashboard.dialog, "fuzzy");
+      palette.onSelect(palette.allItems.findIndex((item) => item.startsWith(label + " —")));
+    };
+    const { dashboard } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    for (const mode of ["AGENT LOG", "INITIAL PROMPT", "WATCHDOG LOG", "PROXY LOG", "DENIALS", "DIFF", "STATUS", "ERRORS", "TREE"] as const) {
+      resetNotice(dashboard);
+      pick(dashboard, mode);
+      expect(dashboard.notice).toBeNull();
+      expect(dashboard.currentMode).toBe(mode);
+    }
+    for (const [key, mode] of [["d", "DIFF"], ["e", "ERRORS"], ["g", "STATUS"]] as const) {
+      resetNotice(dashboard);
+      dashboard.handleInput(key);
+      expect(dashboard.notice).toBeNull();
+      expect(dashboard.currentMode).toBe(mode);
+    }
+    expect(keyOf(dashboard)).toBe(WORKER_KEY);
+
+    const { dashboard: coordinator, service } = setup();
+    coordinator.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const [b] = links();
+    service.set({ peers: [{ ...b!, pairedAt: "x" }], links: [b!] });
+    selectByKey(coordinator, PEER_B + "/@system");
+    const mode = coordinator.currentMode;
+    for (const press of [() => pick(coordinator, "AGENT LOG"), () => coordinator.handleInput("d")]) {
+      resetNotice(coordinator);
+      press();
+      expect(coordinator.notice).toBe("view mode is fixed for remote coordinators");
+      expect(coordinator.currentMode).toBe(mode);
     }
   });
 
@@ -12326,6 +12451,19 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(listed(dashboard)).toEqual([]);
       expect(footer(dashboard)).not.toContain("q: questions (");
       expect(dashboard.agentTree.questionAgentKeys.size).toBe(0);
+    });
+
+    test("g on a remote-only header left in QUESTIONS jumps to STATUS, not to a question it hides", () => {
+      const { dashboard } = setupQuestions();
+      dashboard.handleInput("q");
+      selectByKey(dashboard, repoKey("other-repo"));
+      expect(dashboard.currentMode).toBe("QUESTIONS");
+      expect(dashboard.rightPane.filteredQuestions.length).toBeGreaterThan(0);
+      resetNotice(dashboard);
+      dashboard.handleInput("g");
+      expect(keyOf(dashboard)).toBe(repoKey("other-repo"));
+      expect(dashboard.currentMode).toBe("STATUS");
+      expect(dashboard.notice).toBeNull();
     });
 
     test("with no agent selected every question is listed, a peer's under its machine, and g selects its remote row", () => {

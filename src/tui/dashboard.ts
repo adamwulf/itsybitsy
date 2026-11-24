@@ -542,7 +542,17 @@ class StatusBarComponent implements Component {
       // `q` works on every remote agent row, whatever its type (isRemoteAllowedKey).
       const questionsHint = this.remoteRepoSelected || this.remoteCoordinatorVisible ? "" : `${qLabel}    `;
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${questionsHint}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${this.remoteAgentSelected ? "    C: terminal" : ""}${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "o: diff    m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${markHint}${RESET}`;
+      let row2 = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab${this.remoteAgentSelected ? "    o: diff    m: merge    x: retire    R: resume" : ""}${this.remoteRepoSelected ? "" : "    s: send"}${markHint}`;
+      // `a` and `h` come last, and only whole: on a narrow terminal the row's
+      // own actions and the usage/version on the right matter more than the
+      // two global dialogs, and a hint cut in half is noise. The room kept
+      // for the right text is composeLine's minimum: a 2-column gap plus 1.
+      const rightRoom = row2Right ? visibleWidth(row2Right) + 3 : 0;
+      for (const hint of ["a: new agent", "h: setup"]) {
+        if (visibleWidth(`${row2}    ${hint}`) + rightRoom > width) break;
+        row2 += `    ${hint}`;
+      }
+      row2Left = `${row2}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -762,10 +772,15 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
  *
  * - navigation and focus: j/k, J/K, the arrows, Tab and Shift+Tab, `[` `]` `{` `}`;
  * - the sidebar tabs 1, 2 and 3 and the tree filter V;
- * - pane cycling: p and n (and ←/→, their arrow forms);
+ * - pane cycling: p and n (and ←/→, their arrow forms), and the direct
+ *   jumps d, e and g to modes that cycling reaches (the palette's mode jumps
+ *   pass as `p`);
  * - the `@` jump: it lists only local rows (handleFuzzyAgent keeps only local
  *   kinds), so it is the quick way back from a remote row;
  * - help `?`, the command palette `/` (whose commands pass this same guard) and Peers `I`;
+ * - the dialogs and actions that do not act on the selected row: new agent `a`
+ *   (handleNewAgent picks the remote row's repo), setup `h`, add repo `A`,
+ *   create team `T`, cross-repo send `E` and the repo health re-check `H`;
  * - quit (Ctrl+C, which the TUI's input listener handles before the dashboard);
  * - on a remote agent, `q` for its questions (refuseOnRemoteRow then allows
  *   Enter, Esc and `g` while they are shown).
@@ -783,9 +798,10 @@ export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
     case "\t": case "\x1b[Z":
     case "[": case "]": case "{": case "}":
     case "1": case "2": case "3": case "V":
-    case "p": case "n":
+    case "p": case "n": case "d": case "e": case "g":
     case "@":
     case "?": case "/": case "I":
+    case "a": case "h": case "A": case "T": case "E": case "H":
       return true;
   }
   return matchesKey(data, Key.up) || matchesKey(data, Key.down)
@@ -2192,7 +2208,7 @@ export class DashboardComponent implements Component {
       this.setNotice("resize from a local row", "info");
       return true;
     }
-    if (remote?.kind === "remote-coordinator" && (key === "p" || key === "n" || matchesKey(key, Key.left) || matchesKey(key, Key.right))) {
+    if (remote?.kind === "remote-coordinator" && (["p", "n", "d", "e", "g"].includes(key) || matchesKey(key, Key.left) || matchesKey(key, Key.right))) {
       this.setNotice("view mode is fixed for remote coordinators", "info");
       return true;
     }
@@ -2201,7 +2217,6 @@ export class DashboardComponent implements Component {
     if (this.remoteQuestionsVisible && (key === "g" || matchesKey(key, Key.enter) || matchesKey(key, Key.escape))) return false;
     if (remote === null || isRemoteAllowedKey(key, remote)) return false;
     if (remote.kind !== "remote-repo-header" && (key === ";" || key === "l")) return false;
-    if (remote.kind === "remote-repo-header" && key === "a") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
@@ -2372,20 +2387,23 @@ export class DashboardComponent implements Component {
   // --- Command palette ---
 
   private handleCommandPalette() {
-    // `key` is the command's own key, which the read-only guard checks (a
-    // mode jump has none and is refused on a remote row, as `d`/`e` are;
-    // QUESTIONS carries `q`, which a remote agent row allows).
+    // `key` is the key the read-only guard checks: the command's own key, and
+    // for a mode jump `p`, the pane cycling that reaches the same modes, so a
+    // jump works wherever `p`/`n` do (QUESTIONS carries `q`, which a remote
+    // agent row allows). A command without a key is refused on a remote row.
     type Command = { label: string; key?: string; action: () => void };
+    const modeJump = (label: string, mode: PaneMode, forceRefresh = false): Command =>
+      ({ label, key: "p", action: () => this.jumpToMode(mode, forceRefresh) });
     const commands: Command[] = [
-      { label: "AGENT LOG — show agent log", action: () => this.jumpToMode("AGENT LOG") },
-      { label: "WATCHDOG LOG — show watchdog log", action: () => this.jumpToMode("WATCHDOG LOG") },
-      { label: "PROXY LOG — show sandbox proxy log", action: () => this.jumpToMode("PROXY LOG") },
-      { label: "INITIAL PROMPT — show initial prompt", action: () => this.jumpToMode("INITIAL PROMPT") },
-      { label: "DENIALS — show tool denials", action: () => this.jumpToMode("DENIALS") },
-      { label: "TREE — show full agent tree", action: () => this.jumpToMode("TREE") },
-      { label: "ERRORS — show errors", action: () => this.jumpToMode("ERRORS") },
-      { label: "DIFF — run ib diff", action: () => this.jumpToMode("DIFF", true) },
-      { label: "STATUS — run ib status", action: () => this.jumpToMode("STATUS", true) },
+      modeJump("AGENT LOG — show agent log", "AGENT LOG"),
+      modeJump("WATCHDOG LOG — show watchdog log", "WATCHDOG LOG"),
+      modeJump("PROXY LOG — show sandbox proxy log", "PROXY LOG"),
+      modeJump("INITIAL PROMPT — show initial prompt", "INITIAL PROMPT"),
+      modeJump("DENIALS — show tool denials", "DENIALS"),
+      modeJump("TREE — show full agent tree", "TREE"),
+      modeJump("ERRORS — show errors", "ERRORS"),
+      modeJump("DIFF — run ib diff", "DIFF", true),
+      modeJump("STATUS — run ib status", "STATUS", true),
       { label: "QUESTIONS — show pending questions", key: "q", action: () => this.jumpToMode("QUESTIONS") },
       { label: "send message — s", key: "s", action: () => agentActions.handleSend(this) },
       { label: "merge agent — m", key: "m", action: () => agentActions.handleMerge(this) },
@@ -3649,7 +3667,8 @@ export class DashboardComponent implements Component {
       this.jumpToMode("DIFF", true);
       this.tui?.requestRender();
     } else if (data === "g") {
-      if (this.rightPane.mode === "QUESTIONS") {
+      // Only a list on screen: a remote-only header in QUESTIONS hides it (SPEC §20.5).
+      if (this.rightPane.mode === "QUESTIONS" && (!this.remoteSelection || this.remoteQuestionsVisible)) {
         agentActions.handleGoToQuestionAgent(this);
       } else {
         this.jumpToMode("STATUS", true);

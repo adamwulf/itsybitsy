@@ -32,7 +32,7 @@ import { makeSpawnResult } from "../test-utils";
 import { PeerService } from "./service";
 import { addPeer, readPeers, removePeer, shortPeerId } from "./store";
 
-const ALLOWED_KEYS = ["agentType", "id", "manager", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
+const ALLOWED_KEYS = ["agentType", "createdEpoch", "id", "manager", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
 
 const homes: string[] = [];
 const services: PeerService[] = [];
@@ -153,7 +153,7 @@ const link = (side: Side) => side.service.view().links[0];
 test("each side binds at boot and its poller fetches the other's snapshot, with exactly the allowed fields", async () => {
   const net = makeNetwork(await loadIroh());
   const aAgents = [localAgent("agent-a1"), localAgent("agent-sys", { agentType: SYSTEM_COORDINATOR_TYPE })];
-  const bAgents = [localAgent("agent-b1", { nickname: "builder" }), localAgent("agent-b2", { manager: "agent-b1" })];
+  const bAgents = [localAgent("agent-b1", { nickname: "builder", created_epoch: 1_700_000_000 }), localAgent("agent-b2", { manager: "agent-b1", created_epoch: 1_700_000_060 })];
   const a = await net.makeSide("a", aAgents);
   const b = await net.makeSide("b", bAgents);
   await pairBoth(a, b);
@@ -166,8 +166,8 @@ test("each side binds at boot and its poller fetches the other's snapshot, with 
   const seenByA = link(a)!.agents!;
   expect(seenByA).toEqual(toRemoteAgents(bAgents));
   expect(seenByA).toEqual([
-    { id: "agent-b1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null },
-    { id: "agent-b2", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-b1" },
+    { id: "agent-b1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, createdEpoch: 1_700_000_000 },
+    { id: "agent-b2", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-b1", createdEpoch: 1_700_000_060 },
   ]);
   for (const entry of seenByA) expect(Object.keys(entry).sort()).toEqual(ALLOWED_KEYS);
   // B sees A's agents without A's system coordinator.

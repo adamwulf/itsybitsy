@@ -102,6 +102,8 @@ export interface RemoteAgent {
   agentType: string | null;
   /** The id of the agent's manager, so the receiving side can nest it. */
   manager: string | null;
+  /** The agent's `meta.created_epoch` (seconds), so the receiving side can sort it in spawn order. */
+  createdEpoch: number;
 }
 
 export interface RemoteRepo {
@@ -236,7 +238,7 @@ function sendDiagnostic(text: string) {
 
 /**
  * The reply's agent list, from the watcher's last fully detected snapshot
- * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the eight
+ * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the nine
  * allowed fields of each agent, and no system coordinator. (The system
  * coordinator has no agent directory, so the watcher never lists it; the
  * filter keeps it out even if that changes.)
@@ -253,6 +255,7 @@ export function toRemoteAgents(agents: readonly Agent[]): RemoteAgent[] {
       state: a.state,
       agentType: a.meta.agentType ?? null,
       manager: a.meta.manager ?? null,
+      createdEpoch: a.meta.created_epoch,
     }));
 }
 
@@ -327,6 +330,8 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
     if (typeof value !== "string") throw malformed();
     return cleanField(value);
   };
+  const { createdEpoch } = e;
+  if (typeof createdEpoch !== "number" || !Number.isFinite(createdEpoch)) throw malformed();
   // A new object with only the allowed fields: anything else the other side
   // sent is dropped here.
   return {
@@ -338,6 +343,7 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
     state: required("state"),
     agentType: optional("agentType"),
     manager: optional("manager"),
+    createdEpoch,
   };
 }
 

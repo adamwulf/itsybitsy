@@ -46,7 +46,7 @@ import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test
 
 const ID_A = "a1".repeat(32);
 const ID_B = "b2".repeat(32);
-const ALLOWED_KEYS = ["agentType", "id", "manager", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
+const ALLOWED_KEYS = ["agentType", "createdEpoch", "id", "manager", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
 
 beforeEach(() => {
   irohAddonLoaderCtx.set(async () => {
@@ -160,15 +160,16 @@ describe("toRemoteAgents", () => {
     }
   });
 
-  test("keeps exactly the eight allowed fields and leaves out the system coordinator", () => {
-    const worker = fullAgent("agent-1");
+  test("keeps exactly the nine allowed fields and leaves out the system coordinator", () => {
+    const worker = fullAgent("agent-1", { created_epoch: 1_700_000_000 });
     // A nicknamed repo: shown as "library", keyed by its registry name "lib".
     const bare = makeAgent({ id: "agent-2", repoName: "library", repoRegistryName: "lib", repoPath: "/repos/lib", state: "waiting" });
+    bare.meta.created_epoch = 1_700_000_060;
     const system = fullAgent("agent-sys", { agentType: SYSTEM_COORDINATOR_TYPE });
     const out = toRemoteAgents([worker, system, bare]);
     expect(out).toEqual([
-      { id: "agent-1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-mgr" },
-      { id: "agent-2", nickname: null, repoName: "library", repoRegistryName: "lib", repoPath: "/repos/lib", state: "waiting", agentType: null, manager: null },
+      { id: "agent-1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-mgr", createdEpoch: 1_700_000_000 },
+      { id: "agent-2", nickname: null, repoName: "library", repoRegistryName: "lib", repoPath: "/repos/lib", state: "waiting", agentType: null, manager: null, createdEpoch: 1_700_000_060 },
     ]);
     for (const entry of out) expect(Object.keys(entry).sort()).toEqual(ALLOWED_KEYS);
     expect(JSON.stringify(out)).not.toContain("SECRET");
@@ -182,12 +183,21 @@ describe("decodeAgentsReply", () => {
       encode({
         op: "agents", coordinator: { state: "running" }, questions: [],
         repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
-        agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoRegistryName: "app\x1b[31m", repoPath: "/r", state: "running", prompt: "leak", extra: { x: 1 } }],
+        agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoRegistryName: "app\x1b[31m", repoPath: "/r", state: "running", createdEpoch: 1_700_000_000, prompt: "leak", extra: { x: 1 } }],
       }),
     );
     expect(repos).toEqual([{ registryName: "app", displayName: "App" }]);
-    expect(agents).toEqual([{ id: "agent-1", nickname: null, repoName: "app[31m", repoRegistryName: "app[31m", repoPath: "/r", state: "running", agentType: null, manager: null }]);
+    expect(agents).toEqual([{ id: "agent-1", nickname: null, repoName: "app[31m", repoRegistryName: "app[31m", repoPath: "/r", state: "running", agentType: null, manager: null, createdEpoch: 1_700_000_000 }]);
     expect(Object.keys(agents[0]!).sort()).toEqual(ALLOWED_KEYS);
+  });
+
+  test("createdEpoch is required and must be a number: the tree sorts by it", () => {
+    const reply = (extra: Record<string, unknown>) => encode({ op: "agents", coordinator: null, questions: [], repos: [],
+      agents: [{ id: "a", repoName: "app", repoRegistryName: "app", repoPath: "/r", state: "running", ...extra }] });
+    expect(decodeAgentsReply(reply({ createdEpoch: 1_700_000_000 })).agents[0]!.createdEpoch).toBe(1_700_000_000);
+    for (const bad of [{}, { createdEpoch: null }, { createdEpoch: "1700000000" }, { createdEpoch: true }]) {
+      expect(() => decodeAgentsReply(reply(bad))).toThrow(new PeerProtocolError("agent 0 in the reply is malformed"));
+    }
   });
 
   test("strips format characters too: bidi overrides and isolates, zero-width marks, the BOM", () => {
@@ -198,11 +208,11 @@ describe("decodeAgentsReply", () => {
       encode({
         op: "agents", coordinator: { state: "running" }, questions: [],
         repos: [{ registryName: "ap\u202ep", displayName: "App\n", path: "/private" }],
-        agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoRegistryName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}` }],
+        agents: [{ id: `agent${cf}-1`, nickname: `nick${cf}`, repoName: `app${cf}`, repoRegistryName: `app${cf}`, repoPath: `/r${cf}`, state: `run${cf}ning`, agentType: `w${cf}`, manager: `m${cf}`, createdEpoch: 1_700_000_000 }],
       }),
     );
-    expect(agent).toEqual({ id: "agent-1", nickname: "nick", repoName: "app", repoRegistryName: "app", repoPath: "/r", state: "running", agentType: "w", manager: "m" });
-    for (const value of Object.values(agent!)) expect(value).not.toMatch(/\p{Cf}/u);
+    expect(agent).toEqual({ id: "agent-1", nickname: "nick", repoName: "app", repoRegistryName: "app", repoPath: "/r", state: "running", agentType: "w", manager: "m", createdEpoch: 1_700_000_000 });
+    for (const value of Object.values(agent!)) if (typeof value === "string") expect(value).not.toMatch(/\p{Cf}/u);
     // An error reply's reason is cleaned the same way.
     expect(() => decodeAgentsReply(encode({ op: "error", reason: `bad‮reason` }))).toThrow(
       new PeerErrorReply("the other side reported: badreason"),
@@ -232,7 +242,7 @@ describe("decodeAgentsReply", () => {
   });
 
   test("a list over 1 MB is sent as an error reply", () => {
-    const big: RemoteAgent[] = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null }];
+    const big: RemoteAgent[] = [{ id: "x".repeat(PEER_MAX_REPLY_BYTES), nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null, createdEpoch: 0 }];
     expect(() => decodeAgentsReply(encodeAgentsReply({ coordinator: null, repos: [], agents: big, questions: [] }))).toThrow(
       new PeerErrorReply(`the other side reported: the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`),
     );
@@ -246,7 +256,7 @@ describe("questions in the agents reply", () => {
     ({ id: `q-${agent}`, agent, repoRegistryName: "app", question: "Proceed?", timestamp: "2026-11-24T10:00:00Z", ...extra });
   const reply = (questions: unknown) => encode({
     op: "agents", coordinator: null, repos: [{ registryName: "app", displayName: "App" }], questions,
-    agents: [{ id: "agent-1", repoName: "App", repoRegistryName: "app", repoPath: "/repos/app", state: "waiting" }],
+    agents: [{ id: "agent-1", repoName: "App", repoRegistryName: "app", repoPath: "/repos/app", state: "waiting", createdEpoch: 1_700_000_000 }],
   });
 
   test("peerSnapshot sends only the questions of agents it sends, named by their repo registry name", () => {

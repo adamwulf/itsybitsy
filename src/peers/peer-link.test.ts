@@ -497,6 +497,50 @@ test("lifecycle requests run the receiver’s local commands, return merge error
   }
 });
 
+test("a merge whose push failed on the receiver returns pushFailure beside its output", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "ib-peer-lifecycle-push-"));
+  const deps = await lifecycleFixture(repo);
+  const side = serve({ lifecycle: (req, name) => acceptRemoteLifecycle(req, name, deps, () => {}) });
+  const target = { id: "worker", repo: "app" };
+  const failed = { ok: true, exitCode: 0, pushFailure: "origin: ! [rejected] main -> main (fetch first)" };
+  const keptStdout = "Merged agent worker into main (1 commit(s), agent kept running)\n✗ origin: ! [rejected] main -> main (fetch first)\nWarning: merged, but the push of main failed.";
+  try {
+    const ask = (request: Parameters<typeof requestLifecycle>[1]) => requestLifecycle(side.a, request, "Laptop", side.clock.setTimer);
+    // A closing merge's output is its teardown warnings; the failure joins them.
+    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: "Closed agent: worker", stderr: "" });
+    expect(await ask({ ...target, action: "merge" })).toEqual({
+      output: `push failed: ${failed.pushFailure}`, pushFailure: failed.pushFailure,
+    });
+    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: "Closed agent: worker", stderr: "Could not remove the agent directory" });
+    expect(await ask({ ...target, action: "merge" })).toEqual({
+      output: `Could not remove the agent directory\npush failed: ${failed.pushFailure}`, pushFailure: failed.pushFailure,
+    });
+    // --keep's output is the merge report, which already has the push lines.
+    deps.mergeAgent.mockResolvedValueOnce({ ...failed, stdout: keptStdout, stderr: "" });
+    expect(await ask({ ...target, action: "merge", keep: true })).toEqual({ output: keptStdout, pushFailure: failed.pushFailure });
+    expect(deps.notice.mock.calls.flat()).toEqual(Array(3).fill(`Alice merged worker in App · push failed: ${failed.pushFailure}`));
+  } finally {
+    side.a.close(0, "done");
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("a lifecycle reply with a non-string pushFailure is malformed, so the outcome is unknown", async () => {
+  const link = createMemoryLink(ID_A, ID_B);
+  const clock = createFakeClock();
+  const result = requestLifecycle(link.a, { action: "merge", repo: "app", id: "worker" }, "Laptop B", clock.setTimer)
+    .catch((err: Error) => err);
+  const stream = await link.b.acceptBi();
+  await stream.readToEnd(4096);
+  await stream.writeAll(encode({ ok: true, output: "", pushFailure: 7 }));
+  await stream.finish();
+  const error = await result;
+  // As for any malformed lifecycle reply: the request was already sent.
+  expect(error).toHaveProperty("message", "outcome unknown — check Laptop B");
+  expect((error as Error).cause).toBeInstanceOf(PeerProtocolError);
+  link.a.close(0, "done");
+});
+
 test("ambiguous retired nicknames suggest addresses on the paired machine", async () => {
   const repo = await mkdtemp(join(tmpdir(), "ib-peer-ambiguous-rehire-"));
   const deps = await lifecycleFixture(repo);

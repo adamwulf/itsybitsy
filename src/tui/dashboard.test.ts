@@ -40,6 +40,7 @@ import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { MIN_TERMINAL_WIDTH, REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
 import { BOLD, DIM, GREEN, ITALIC, RED, RESET, REVERSE, YELLOW } from "./colors";
+import { setSandboxedProcessOverride } from "../sandbox-detect";
 import { getStateColors } from "./color-scheme";
 import * as settings from "../config";
 import * as agentActions from "./agent-actions";
@@ -1983,6 +1984,51 @@ describe("DashboardComponent dialog and action handlers", () => {
       expect(commands.some(cmd => cmd.includes("merge"))).toBe(true);
       expect(commands.some(cmd => cmd.includes("kill-session"))).toBe(!keep);
       expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(keep);
+    });
+  }
+
+  // merge.pushAfterMerge (SPEC.md §3.4): a push that fails after the merge
+  // leaves the merge done, and the header shows the failure as an alert.
+  for (const keep of [false, true]) {
+    test(`a ${keep ? "--keep" : "closing"} merge whose push fails shows the failure in red`, async () => {
+      await setupDashboardWithAgent();
+      const agentDir = join(actionTempDir!, ".itsybitsy", "agents", "agent-test");
+      await mkdir(join(agentDir, "repo"), { recursive: true });
+      await Bun.write(join(configTempDir, "config.json"), JSON.stringify({ merge: { pushAfterMerge: true } }));
+      setSandboxedProcessOverride(() => false);
+      const commands: string[][] = [];
+      // Every git call is stubbed; `push` fails as an unreachable remote would.
+      setMergeSpawnRunner((cmd: string[]) => {
+        commands.push(cmd);
+        if (cmd.includes("--show-current") || cmd.includes("symbolic-ref")) return makeSpawnResult(0, "main");
+        if (cmd.includes("remote") && cmd.includes("-v")) return makeSpawnResult(0, "origin\t/remotes/origin.git (fetch)\norigin\t/remotes/origin.git (push)");
+        if (cmd.includes("push")) return makeSpawnResult(1, "", "fatal: could not read from remote repository");
+        if (cmd.includes("log") && cmd.includes("--oneline")) return makeSpawnResult(0, "abc123 Agent change\n");
+        if (cmd.includes("rev-parse") && cmd.includes("HEAD")) return makeSpawnResult(0, "a".repeat(40) + "\n");
+        return makeSpawnResult();
+      });
+      try {
+        dashboard.handleInput("m");
+        await dashboard.flushPendingActions();
+        if (keep) {
+          dashboard.handleInput("\x1b[Z");
+          dashboard.handleInput(" ");
+          dashboard.handleInput("\x1b[Z");
+        } else {
+          dashboard.handleInput("\t");
+        }
+        dashboard.handleInput("\r");
+        await dashboard.flushPendingActions();
+        const notice = `${keep ? "agent-test kept running: merge complete" : "Merged agent-test"} · push failed: origin: fatal: could not read from remote repository`;
+        expect(dashboard.notice).toBe(notice);
+        expect(dashboard.render(200)[0]).toContain(`${RED}${notice}`);
+        expect(dashboard.dialog).toBeNull();
+        expect(commands).toContainEqual(["git", "-C", actionTempDir!, "push", "origin", "main"]);
+        // The merge itself went ahead: a closing merge still closed the agent.
+        expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(keep);
+      } finally {
+        setSandboxedProcessOverride(null);
+      }
     });
   }
 
@@ -11710,6 +11756,39 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.dialog).toBeNull();
     expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "resume" });
     expect(dashboard.notice).toContain("Agent is already running");
+  });
+
+  test("a remote merge whose push failed on the peer shows the failure in red", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue({ output: "Ready to merge" });
+    const pushFailure = "origin: ! [rejected] main -> main (fetch first)";
+    const replies = {
+      // A closing merge's output already ends with the failure (remote-lifecycle.ts).
+      close: { output: `push failed: ${pushFailure}`, pushFailure },
+      keep: { output: `Merged agent worker-abc into main (1 commit(s), agent kept running)\n✗ ${pushFailure}`, pushFailure },
+    };
+    for (const keep of [false, true]) {
+      dashboard.handleInput("m");
+      await Bun.sleep(0);
+      const merge = assertDialog(dashboard.dialog, "confirm");
+      merge.checkbox!.checked = keep;
+      run.mockResolvedValueOnce(keep ? replies.keep : replies.close);
+      merge.onYes();
+      await Bun.sleep(0);
+      expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ action: "merge", keep });
+      const notice = keep ? `${WORKER_KEY} merged · push failed: ${pushFailure}` : `${WORKER_KEY} merged: push failed: ${pushFailure}`;
+      expect(dashboard.notice).toBe(notice);
+      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${notice}`);
+    }
+    // Without a push failure the same merge is an info notice, as before.
+    dashboard.handleInput("m");
+    await Bun.sleep(0);
+    run.mockResolvedValueOnce({ output: "" });
+    assertDialog(dashboard.dialog, "confirm").onYes();
+    await Bun.sleep(0);
+    expect(dashboard.notice).toBe(`${WORKER_KEY} merged`);
+    expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}${WORKER_KEY} merged`);
   });
 
   test("o opens only a remote agent diff, requiring the tool, human caller and local registration", async () => {

@@ -652,11 +652,11 @@ test("a committing receipt no longer accepts dashboard cancellation", async () =
 });
 
 test("a leading dashboard project reference remains literal through wire decode and enqueue", async () => {
-  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+  const { peerAttachmentCandidates } = await import("./dashboard-attachments");
   const message = join(repo, "live.ts");
   await Bun.write(message, "live");
-  const detection = await dashboardAttachmentPaths(message, "/remote/repo", repo);
-  expect(detection).toEqual({ paths: [], noPassthrough: true });
+  const detection = await peerAttachmentCandidates(message, repo);
+  expect(detection).toMatchObject({ candidates: [{ argument: message, checked: false }], noPassthrough: true });
   expect(await exchange(header({ message, noPassthrough: true }))).toMatchObject({ ok: true });
   expect(await readOutbox(join(cli.home, ".itsybitsy/agents/worker"))).toMatchObject([{ message, noPassthrough: true }]);
 });

@@ -120,7 +120,7 @@ test.each([null, 129])("reclaim staging only after owner mismatch or expiry (obs
 });
 
 test("dashboard stages the canonical file selected through a project symlink and keeps its spelling", async () => {
-  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+  const { peerAttachmentCandidates } = await import("./dashboard-attachments");
   const { buildAttachmentManifest } = await import("./attachment-manifest");
   const root = await mkdtemp(join(tmpdir(), "ib-dashboard-select-"));
   try {
@@ -130,11 +130,14 @@ test("dashboard stages the canonical file selected through a project symlink and
     await mkdir(project);
     await writeFile(external, "selected");
     await symlink(external, alias);
-    const { paths: inputs } = await dashboardAttachmentPaths(alias, project, project);
+    const { candidates: inputs } = await peerAttachmentCandidates(alias, project);
+    expect(inputs.map(input => input.checked)).toEqual([true]);
     await rm(alias);
     await writeFile(alias, "different");
-    expect(await dashboardAttachmentPaths(alias, project, project)).toEqual({ paths: [], noPassthrough: true });
-    expect(await dashboardAttachmentPaths("/clear", project, project)).toEqual({ paths: [], noPassthrough: false });
+    // Now a live project file: offered, but unchecked.
+    expect(await peerAttachmentCandidates(alias, project))
+      .toEqual({ candidates: [{ argument: alias, source: await realpath(alias), checked: false }], noPassthrough: true });
+    expect(await peerAttachmentCandidates("/clear", project)).toEqual({ candidates: [], noPassthrough: false });
     const entries = await buildAttachmentManifest(inputs, { home: root, cwd: project, machine: "desk" });
     try {
       expect(entries).toHaveLength(1);
@@ -173,8 +176,8 @@ test("a successful clone skips source reads and the fallback stops within one ca
   } finally { await handle.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("a missing suffix after a symlink and parent step uses the physical parent", async () => {
-  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+test("a missing reference through a symlink and parent step stays raw text", async () => {
+  const { peerAttachmentCandidates } = await import("./dashboard-attachments");
   const root = await mkdtemp(join(tmpdir(), "ib-missing-reference-"));
   try {
     const project = join(root, "project");
@@ -183,37 +186,41 @@ test("a missing suffix after a symlink and parent step uses the physical parent"
     await mkdir(outside, { recursive: true });
     await symlink(outside, join(project, "alias"));
     const reference = project + "/alias/../missing";
-    await expect(dashboardAttachmentPaths(reference, project, project)).rejects.toThrow("file not found");
+    expect(await peerAttachmentCandidates(reference, project)).toEqual({ candidates: [], noPassthrough: true });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("a dangling project symlink refuses absolute, relative and nested references", async () => {
-  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+test("a dangling project symlink stays raw text in absolute, relative and nested references", async () => {
+  const { peerAttachmentCandidates } = await import("./dashboard-attachments");
   const project = await mkdtemp(join(tmpdir(), "ib-dangling-"));
   try {
     await symlink(join(project, "missing"), join(project, "link"));
-    for (const reference of [join(project, "link"), "./link", "see ./link.", join(project, "link/file")]) {
-      await expect(dashboardAttachmentPaths(reference, project, project)).rejects.toThrow("Unresolved attachment");
+    for (const reference of [join(project, "link"), "./link", join(project, "link/file")]) {
+      expect(await peerAttachmentCandidates(reference, project)).toEqual({ candidates: [], noPassthrough: true });
     }
+    expect(await peerAttachmentCandidates("see ./link.", project)).toEqual({ candidates: [], noPassthrough: false });
   } finally { await rm(project, { recursive: true, force: true }); }
 });
 
-test("a file under the local checkout's runtime directory is attached, not left live for the peer", async () => {
-  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+test("a file under the local checkout's runtime directory is checked, a live project file is not", async () => {
+  const { peerAttachmentCandidates } = await import("./dashboard-attachments");
   const project = await mkdtemp(join(tmpdir(), "ib-dashboard-runtime-"));
   try {
     const worktree = join(project, ".itsybitsy/agents/agent-x/repo");
     await mkdir(worktree, { recursive: true });
     const output = join(worktree, "out.png");
+    const live = join(project, "live.ts");
     await writeFile(output, "png");
-    await writeFile(join(project, "live.ts"), "live");
-    expect(await dashboardAttachmentPaths(`see ${output} and ${join(project, "live.ts")}`, "/remote/project", project))
-      .toEqual({ paths: [{ argument: output, source: await realpath(output) }], noPassthrough: false });
-    // A missing runtime-directory file stays literal: with the same checkout
+    await writeFile(live, "live");
+    expect(await peerAttachmentCandidates(`see ${output} and ${live}`, project)).toEqual({ candidates: [
+      { argument: output, source: await realpath(output), checked: true },
+      { argument: live, source: await realpath(live), checked: false },
+    ], noPassthrough: false });
+    // A missing runtime-directory file stays raw text: with the same checkout
     // path on both machines it can be the peer agent's own worktree file.
     const peerFile = join(project, ".itsybitsy/agents/peer-agent/repo/src/foo.ts");
-    expect(await dashboardAttachmentPaths(`read ${peerFile}`, project, project)).toEqual({ paths: [], noPassthrough: false });
-    expect(await dashboardAttachmentPaths(`read ${join(worktree, "missing.png")}`, "/remote/project", project))
-      .toEqual({ paths: [], noPassthrough: false });
+    expect(await peerAttachmentCandidates(`read ${peerFile}`, project)).toEqual({ candidates: [], noPassthrough: false });
+    expect(await peerAttachmentCandidates(`read ${join(worktree, "missing.png")}`, project))
+      .toEqual({ candidates: [], noPassthrough: false });
   } finally { await rm(project, { recursive: true, force: true }); }
 });

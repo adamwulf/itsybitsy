@@ -10112,6 +10112,15 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(inEditor()).toBe(true);
   }
 
+  /** Wait for a send's path dialog, expect its items and checked state, and submit it with Enter. */
+  async function submitPathDialog(dashboard: DashboardComponent, expected: Record<string, boolean>) {
+    await waitFor(() => dashboard.dialog?.type === "multi-select", { message: "the path dialog" });
+    const picker = assertDialog(dashboard.dialog, "multi-select");
+    expect(picker.prompt).toBe("Send as attachments to Laptop B:");
+    expect(Object.fromEntries(picker.items.map((item, i) => [item, picker.checked[i]]))).toEqual(expected);
+    dashboard.handleInput("\r");
+  }
+
   /** Every row of the Agents tree at `width`, uncut by the sidebar's height. */
   function treeRows(dashboard: DashboardComponent, width = 60): string[] {
     dashboard.agentTree.maxHeight = 100;
@@ -11200,6 +11209,7 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(`Read ${source} and ./live.ts`);
       dashboard.inputField.submit();
+      await submitPathDialog(dashboard, { [source]: true });
       await entered.promise;
       expect(stripAnsi(dashboard.render(WIDTH).join("\n"))).toContain("3 / 8 bytes");
       if (action === "Esc") dashboard.handleInput("\x1b");
@@ -11225,6 +11235,7 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(path);
       dashboard.inputField.submit();
+      await submitPathDialog(dashboard, { [path]: true });
       await waitFor(() => dashboard.notice === "Cannot verify the outgoing attachment owner");
       expect(service.sendRemoteMessage).not.toHaveBeenCalled();
       await dashboard.stopRemoteSends();
@@ -11242,9 +11253,145 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(path);
       dashboard.inputField.submit();
+      await submitPathDialog(dashboard, { [path]: false });
       await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
       expect(service.sendRemoteMessage.mock.calls[0]![1]).toMatchObject({ files: [], message: path, noPassthrough: true });
     } finally { await rm(project, { recursive: true, force: true }); }
+  });
+
+  test("a missing path is sent as raw text without a path dialog", async () => {
+    const { dashboard, service } = setup();
+    const shown = spyOn(dashboard, "showDialog");
+    selectByKey(dashboard, WORKER_KEY);
+    focusEditor(dashboard);
+    dashboard.handleInput("/nonexistent/fake.png is gone");
+    dashboard.inputField.submit();
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+    expect(service.sendRemoteMessage.mock.calls[0]![1]).toMatchObject({ files: [], message: "/nonexistent/fake.png is gone", noPassthrough: true });
+    expect(shown).not.toHaveBeenCalled();
+    await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
+  });
+
+  test("checked paths are attached and unchecked ones are sent as raw text", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ib-dashboard-pick-"));
+    setUserHome(home);
+    const { processStartEpochSecondsCtx } = await import("../agents");
+    const stagingRoot = spyOn(await import("../runtime-names"), "transferStagingRoot").mockReturnValue(join(home, "staging"));
+    processStartEpochSecondsCtx.set(() => 123);
+    try {
+      await Bun.write(join(home, ".itsybitsy/machine-name"), "sender");
+      const picked = join(home, "picked.txt");
+      const left = join(home, "left.txt");
+      await Bun.write(picked, "picked");
+      await Bun.write(left, "left");
+      const { dashboard, service } = setup();
+      let copied: string | undefined;
+      service.sendRemoteMessage.mockImplementationOnce(async (_peer, header, _source, transfer) => {
+        copied = await Bun.file(join(transfer!.filesDir!, "0")).text();
+        return header.id;
+      });
+      selectByKey(dashboard, WORKER_KEY);
+      focusEditor(dashboard);
+      const text = `Compare ${picked} with ${left}`;
+      dashboard.handleInput(text);
+      dashboard.inputField.submit();
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      const picker = assertDialog(dashboard.dialog, "multi-select");
+      expect(picker.items).toEqual([picked, left]);
+      expect(picker.checked).toEqual([true, true]);
+      for (const key of ["j", " ", "\r"]) dashboard.handleInput(key);
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      const header = service.sendRemoteMessage.mock.calls[0]![1];
+      expect(header.message).toBe(text);
+      expect(header.files).toHaveLength(1);
+      expect(header.files[0]!.spellings).toContain(picked);
+      expect(header.files[0]!.spellings).not.toContain(left);
+      expect(copied).toBe("picked");
+      await waitFor(() => dashboard.inputField.getText() === "");
+    } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
+  });
+
+  test("cancelling the path dialog sends nothing and keeps the draft", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-cancel-"));
+    try {
+      const file = join(dir, "notes.txt");
+      await Bun.write(file, "notes");
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      focusEditor(dashboard);
+      const draft = `Read ${file}`;
+      dashboard.handleInput(draft);
+      dashboard.inputField.submit();
+      await waitFor(() => dashboard.dialog?.type === "multi-select");
+      // The dialog asks before the send is pending.
+      expect(stripAnsi(dashboard.render(WIDTH)[0]!)).not.toContain("sending to");
+      dashboard.handleInput("\x1b");
+      await waitFor(() => dashboard.notice === "Send cancelled");
+      await Bun.sleep(0);
+      expect(dashboard.dialog).toBeNull();
+      expect(service.sendRemoteMessage).not.toHaveBeenCalled();
+      expect(dashboard.inputField.getText()).toBe(draft);
+
+      // The kept draft sends on the next submit.
+      dashboard.inputField.submit();
+      await submitPathDialog(dashboard, { [file]: true });
+      await waitFor(() => dashboard.inputField.getText() === "");
+      expect(service.sendRemoteMessage).toHaveBeenCalledTimes(1);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  test("the s dialog comes back when the path dialog closes, frozen while the send waits", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-restore-"));
+    try {
+      const file = join(dir, "notes.txt");
+      await Bun.write(file, "notes");
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("s");
+      const send = assertDialog(dashboard.dialog, "textarea");
+      const draft = `Read ${file}`;
+      for (const ch of draft) dashboard.handleInput(ch);
+      dashboard.handleInput("\x1b[Z");
+      const submit = async () => {
+        dashboard.handleInput("\r");
+        await waitFor(() => dashboard.dialog?.type === "multi-select");
+        expect(send.inFlight).toBe(true);
+      };
+
+      // Esc on the path dialog: the s dialog is back with its draft, editable.
+      await submit();
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBe(send);
+      await waitFor(() => !send.inFlight);
+      expect(dashboard.notice).toBe("Send cancelled");
+      expect(send.buffer.getText()).toBe(draft);
+      expect(service.sendRemoteMessage).not.toHaveBeenCalled();
+
+      // Unchecked and submitted: the s dialog is back, frozen, and Esc cancels the send.
+      service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) =>
+        new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason))));
+      await submit();
+      dashboard.handleInput(" ");
+      dashboard.handleInput("\r");
+      expect(dashboard.dialog).toBe(send);
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      expect(service.sendRemoteMessage.mock.calls[0]![1]).toMatchObject({ message: draft, files: [] });
+      const overlay = () => stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
+      expect(overlay()).toContain("Sending… Esc: cancel");
+      dashboard.handleInput("\x1b");
+      await waitFor(() => !send.inFlight);
+      expect(dashboard.dialog).toBe(send);
+      expect(dashboard.notice).toBe("Send cancelled");
+      expect(send.buffer.getText()).toBe(draft);
+
+      // Acceptance closes the s dialog, not some other one.
+      await submit();
+      dashboard.handleInput(" ");
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog === null);
+      expect(dashboard.notice).toBe("Sent to Laptop B/abc-nick");
+      expect(service.sendRemoteMessage).toHaveBeenCalledTimes(2);
+    } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
   test("a local editor keeps Escape while remote requests have duplicate display labels", async () => {
@@ -11311,6 +11458,7 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(source);
       dashboard.inputField.submit();
+      await submitPathDialog(dashboard, { [source]: true });
       await entered.promise;
       const header = textHeader({ kind: "agent", agent: "worker" }, "read", { kind: "user" });
       header.files = [{ name: "file", size: 4, sha256: "0".repeat(64), spellings: ["file"] }];
@@ -11363,6 +11511,7 @@ describe("Unified peer repos in the Agents tree", () => {
       focusEditor(dashboard);
       dashboard.handleInput(source);
       dashboard.inputField.submit();
+      await submitPathDialog(dashboard, { [source]: true });
       await started.promise;
       await dashboard.shutdownPeerTransfers(new PeerService(deps));
       expect(b.closeInfo()?.reason).toBe("send reset stalled");
@@ -11456,6 +11605,7 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.handleInput("hello");
       dashboard.inputField.submit();
     }
+    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 2);
     const content = () => stripAnsi(dashboard.render(WIDTH).join("\n"));
     dashboard.setNotice("Incoming peer message", "info");
     // The notice comes first, then each send; the one Esc cancels leads.
@@ -12548,6 +12698,38 @@ describe("Unified peer repos in the Agents tree", () => {
       ]);
       expect(dashboard.notice).toBe("Answered Laptop B/worker-abc");
       expect(listed(dashboard)).toEqual(["local:agent-1"]);
+    });
+
+    test("an answer naming a file asks for attachments over the answer dialog, which comes back until the acknowledge", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-answer-"));
+      try {
+        const file = join(dir, "log.txt");
+        await Bun.write(file, "log");
+        const { dashboard, service } = setupQuestions();
+        selectByKey(dashboard, WORKER_KEY);
+        dashboard.handleInput("q");
+        dashboard.handleInput("\r");
+        const dialog = assertDialog(dashboard.dialog, "textarea");
+        const answer = `See ${file}`;
+        dialog.onSubmit(answer);
+        await waitFor(() => dashboard.dialog?.type === "multi-select");
+        dashboard.handleInput("\x1b");
+        expect(dashboard.dialog).toBe(dialog);
+        await waitFor(() => !dialog.inFlight);
+        expect(dashboard.notice).toBe("Send cancelled");
+        expect(service.sendRemoteMessage).not.toHaveBeenCalled();
+        expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+
+        dialog.onSubmit(answer);
+        await waitFor(() => dashboard.dialog?.type === "multi-select");
+        dashboard.handleInput(" ");
+        dashboard.handleInput("\r");
+        expect(dashboard.dialog).toBe(dialog);
+        await waitFor(() => dashboard.dialog === null);
+        expect(service.sendRemoteMessage.mock.calls.map(call => call[1])).toMatchObject([{ message: answer, files: [] }]);
+        expect(service.acknowledgeRemoteQuestion).toHaveBeenCalledTimes(1);
+        expect(dashboard.notice).toBe("Answered Laptop B/worker-abc");
+      } finally { await rm(dir, { recursive: true, force: true }); }
     });
 
     test("Esc cancels a pending send first, then acknowledges, and the question leaves at once until a poll drops it", async () => {

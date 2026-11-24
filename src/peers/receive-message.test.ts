@@ -51,7 +51,7 @@ afterEach(async () => {
 async function exchange(request: SendHeader, name: () => Promise<string | null> = paired, revoked = false, data?: Uint8Array) {
   const { a, b } = createMemoryLink("authenticated", "destination");
   const serving = serveTrustedConnection(b, {
-    peerName: name, receiveMessage: receiver, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    peerName: name, receiveMessage: receiver, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     log() {}, setTimer(ms, fn) { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); },
   });
   try {
@@ -150,7 +150,7 @@ test.each(["header", "FIN"])("stalled %s stops the receive half and returns the 
   const close = spyOn(b, "close");
   const accept = b.acceptBi.bind(b);
   b.acceptBi = async () => { b.acceptBi = accept; return response; };
-  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     log() {}, receiveMessage: receiver, setTimer: clock.setTimer });
   try {
     await stream.writeAll(stage === "header" ? Uint8Array.of(0) : encodeSendHeader(header()));
@@ -259,7 +259,7 @@ test.each(["write", "finish"] as const)("a stalled acknowledgement %s cancels it
   b.acceptBi = async () => { b.acceptBi = accept; return server; };
   const clock = createFakeClock();
   const serving = serveTrustedConnection(b, {
-    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     log() {}, receiveMessage: receiver, setTimer: clock.setTimer,
   });
   try {
@@ -393,7 +393,7 @@ test("multi-megabyte send streams through the receiver with bounded reads and cu
   let bodyReads = 0;
   const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); };
   const serving = serveTrustedConnection(b, {
-    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: timer,
+    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }), log() {}, setTimer: timer,
     receiveMessage: (header, peer, name, body, options) => receiver(header, peer, name, {
       read: limit => { maxRead = Math.max(maxRead, limit); bodyReads++; return body!.read(limit); },
     }, options),
@@ -434,7 +434,7 @@ test("a read half that rejects stop after FIN still delivers the attachment ackn
   };
   const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); };
   const serving = serveTrustedConnection(b, { peerName: paired, receiveMessage: receiver,
-    snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: timer });
+    snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }), log() {}, setTimer: timer });
   const filesDir = join(cli.root, "staged");
   await Bun.write(join(filesDir, "0"), "hello");
   const request = header({ files: [manifestFile("hello")] });
@@ -503,7 +503,7 @@ test("pending replay and framed header readers have independent watcher-wide cei
   await expect(receiver(req, "a", paired)).rejects.toThrow("busy");
   body.resolve(Buffer.alloc(0));
   expect((await done).every(r => r.status === "rejected")).toBe(true);
-  const deps = { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+  const deps = { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     headerReaders: new Set<import("./pairing").PairStream>(), setTimer: createFakeClock().setTimer, log() {} };
   const links = [createMemoryLink("a", "local"), createMemoryLink("b", "local")];
   const serving = links.map(link => serveTrustedConnection(link.b, deps));
@@ -543,7 +543,7 @@ test("a stuck sender reset closes the connection and releases a partial receipt"
   const controller = new AbortController();
   const timer = (ms: number, fn: () => void) => { const t = setTimeout(fn, ms === 5000 ? 5 : ms); return () => clearTimeout(t); };
   const handler = Promise.withResolvers<void>();
-  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     setTimer: timer, log() {}, receiveMessage: async (...args) => {
       try { await receiver(...args); } finally { handler.resolve(); }
     } });
@@ -563,7 +563,7 @@ test("a stuck sender reset closes the connection and releases a partial receipt"
 test.each(["shutdown", "cancel"])("%s cleans a tracked receipt after its first byte", async action => {
   const dir = await receiveFixture();
   const { PeerService, defaultPeerServiceDeps } = await import("./service");
-  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null), receiveMessage: receiver });
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null, questions: [] }), () => {}, null), receiveMessage: receiver });
   let started = false;
   const receipt = service.receiveTracked(header({ files: [manifestFile("abc")] }), "peer", paired, {
     read: () => { if (started) return new Promise(() => {}); started = true; return Promise.resolve(Buffer.from("a")); },
@@ -582,7 +582,7 @@ test("requestSend retains the machine, key and value of a long file limit error"
   const { a, b } = createMemoryLink("sender", "local");
   const timer = createFakeClock().setTimer;
   const req = header();
-  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: timer,
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }), log() {}, setTimer: timer,
     receiveMessage: async () => { throw Error("File " + "x".repeat(900) + " exceeds the limit on laptop (peering.attachments.maxFileMB = 1)"); },
   });
   try {
@@ -636,7 +636,7 @@ test("a near-limit spelling header with an empty message cannot allocate an over
 test("a committing receipt no longer accepts dashboard cancellation", async () => {
   await receiveFixture();
   const { PeerService, defaultPeerServiceDeps } = await import("./service");
-  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null), receiveMessage: receiver });
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null, questions: [] }), () => {}, null), receiveMessage: receiver });
   let id = "";
   let reset = false;
   await service.receiveTracked(header({ files: [manifestFile("")] }), "peer", paired, { read: async () => Buffer.alloc(0) }, {
@@ -691,7 +691,7 @@ test("dashboard staging reserves its unwritten bytes against incoming transfers"
 test("pending replays share their receipt without creating extra cancel targets", async () => {
   await receiveFixture();
   const { PeerService, defaultPeerServiceDeps } = await import("./service");
-  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null), receiveMessage: receiver });
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null, questions: [] }), () => {}, null), receiveMessage: receiver });
   const req = header({ files: [manifestFile("abc")] });
   const first = service.receiveTracked(req, "peer", paired, { read: () => new Promise(() => {}) });
   const admitted = Promise.withResolvers<void>();
@@ -720,7 +720,7 @@ test("a stalled non-framed request releases the watcher header slot", async () =
     return stream;
   };
   const serving = serveTrustedConnection(b, { peerName: paired, headerReaders: readers,
-    snapshot: () => ({ agents: [], repos: [], coordinator: null }), setTimer: clock.setTimer, log() {} });
+    snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }), setTimer: clock.setTimer, log() {} });
   try {
     await (await a.openBi()).writeAll(Buffer.from("{"));
     await reading.promise;
@@ -735,7 +735,7 @@ test("a stalled non-framed request releases the watcher header slot", async () =
 
 test("shutdown waits for an admitted text-only receipt and prevents its queue append", async () => {
   const { PeerService, defaultPeerServiceDeps } = await import("./service");
-  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null), receiveMessage: receiver });
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null, questions: [] }), () => {}, null), receiveMessage: receiver });
   const checking = Promise.withResolvers<void>();
   const allow = Promise.withResolvers<string>();
   let reads = 0;
@@ -763,7 +763,7 @@ test("closing a replay connection frees its waiter while the original body is pe
   const waiters = Array.from({ length: 8 }, () => {
     const link = createMemoryLink("peer", "local");
     const entered = Promise.withResolvers<void>();
-    const serving = serveTrustedConnection(link.b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+    const serving = serveTrustedConnection(link.b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
       log() {}, setTimer: createFakeClock().setTimer, receiveMessage: (h, p, name, body, options) =>
         receiver(h, p, name, body, { ...options, admitted: owns => { options?.admitted?.(owns); entered.resolve(); } }) });
     return { link, serving, entered };
@@ -810,7 +810,7 @@ test("a pending replay expires independently while the body is still being recei
 
 test("shutdown during the dedupe read prevents the queue append", async () => {
   const { PeerService, defaultPeerServiceDeps } = await import("./service");
-  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null, cli.root), receiveMessage: receiver });
+  const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null, questions: [] }), () => {}, null, cli.root), receiveMessage: receiver });
   const dir = join(cli.home, ".itsybitsy", "agents", "worker");
   const open = fs.open;
   const entered = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
@@ -848,7 +848,7 @@ test("a replay of another stream's idle failure keeps its connection for the nex
   const { a, b } = createMemoryLink("peer", "local");
   const waiting = Promise.withResolvers<void>();
   const serving = serveTrustedConnection(b, {
-    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: clock.setTimer,
+    peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }), log() {}, setTimer: clock.setTimer,
     receiveMessage: (h, p, name, body, options) => receiver(h, p, name, body, { ...options,
       admitted: owns => { options?.admitted?.(owns); waiting.resolve(); } }),
   });
@@ -879,7 +879,7 @@ test("a stalled framed read with a pending error reply closes once at the whole-
   const accept = b.acceptBi.bind(b);
   b.acceptBi = async () => { b.acceptBi = accept; return server; };
   const close = spyOn(b, "close");
-  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     log() {}, receiveMessage: receiver, setTimer: clock.setTimer });
   try {
     await client.writeAll(Uint8Array.of(0));
@@ -936,7 +936,7 @@ test("a settled reply write rejection leaves other requests on the same connecti
   const cancel = spyOn(server, "cancel");
   const accept = b.acceptBi.bind(b);
   b.acceptBi = async () => { b.acceptBi = accept; return server; };
-  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     log() {}, setTimer: createFakeClock().setTimer });
   try {
     await client.writeAll(Buffer.from('{"op":"agents"}'));
@@ -956,7 +956,7 @@ test("a timed-out native read that drains during reply grace keeps the connectio
   server.stopReceiving = async () => {};
   const accept = b.acceptBi.bind(b);
   b.acceptBi = async () => { b.acceptBi = accept; return server; };
-  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+  const serving = serveTrustedConnection(b, { peerName: paired, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     log() {}, setTimer: clock.setTimer });
   try {
     await stream.writeAll(Uint8Array.of(0));
@@ -986,7 +986,7 @@ test("a stalled destination write and close retain their reservation but release
     return file;
   });
   const { a, b } = createMemoryLink("authenticated", "destination");
-  const serving = serveTrustedConnection(b, { peerName: paired, receiveMessage: receiver, snapshot: () => ({ agents: [], repos: [], coordinator: null }), log() {}, setTimer: clock.setTimer });
+  const serving = serveTrustedConnection(b, { peerName: paired, receiveMessage: receiver, snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }), log() {}, setTimer: clock.setTimer });
   const incoming = join(cli.root, "staging/incoming");
   try {
     const wire = await a.openBi();

@@ -9,7 +9,7 @@ function agent(id: string, manager: string | null = null): RemoteAgent {
 
 function rows(agents: RemoteAgent[], keep = (_: RemoteAgent) => true) {
   const repos = collectPeerRepos([{ id: "peer", name: "Desk", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
-    repos: [{ registryName: "APP", displayName: "Remote App" }], agents }]);
+    repos: [{ registryName: "APP", displayName: "Remote App" }], agents, questions: [] }]);
   return visibleRemoteAgents(repos.get("/app")!, (row) => keep(row.remote));
 }
 

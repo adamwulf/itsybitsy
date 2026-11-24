@@ -19,7 +19,7 @@ import { trackSendCleanup } from "../send-cleanup";
  * JSON reply and calls `finish`; the dialer reads the reply with
  * `readToEnd(1 MB)`. The send operation uses a length-prefixed header before FIN.
  *
- * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle and send.
+ * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle, acknowledge and send.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -44,7 +44,7 @@ import {
 } from "./send-frame";
 import { isStoredRepoName, repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
-import type { Agent } from "../agents";
+import type { Agent, PendingQuestion } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { PairProtocolError, type PairCloseInfo, type PairConnection, type PairStream } from "./pairing";
 import { shortPeerId } from "./store";
@@ -105,10 +105,23 @@ export interface RemoteRepo {
   displayName: string;
 }
 
+/** A pending `ib ask` question of an agent in the same reply (SPEC §20.4). Exactly these fields cross the wire. */
+export interface RemoteQuestion {
+  id: string;
+  /** The asking agent's id. */
+  agent: string;
+  /** The asking agent's repo registry name on the other install. */
+  repoRegistryName: string;
+  /** Multi-line: newlines are kept. */
+  question: string;
+  timestamp: string;
+}
+
 export interface PeerSnapshot {
   coordinator: { state: string } | null;
   repos: RemoteRepo[];
   agents: RemoteAgent[];
+  questions: RemoteQuestion[];
 }
 
 export type PeerPaneTarget = { op: "coordinator-pane" } | { op: "agent-pane"; repo: string; id: string };
@@ -160,11 +173,23 @@ function encodePane(op: PeerPaneTarget["op"], pane: PeerPane): Uint8Array {
   return encode(chars.slice(start).join("") + (first < lines.length ? "\n" : "") + tail);
 }
 
-export function peerSnapshot(repos: readonly RepoEntry[], agents: readonly Agent[], coordinatorState: string | undefined): PeerSnapshot {
+/**
+ * The `agents` reply. `questions` are the watcher's pending questions from the
+ * same refresh as `agents`: only those of an agent the reply sends, each named
+ * by that agent's repo registry name.
+ */
+export function peerSnapshot(repos: readonly RepoEntry[], agents: readonly Agent[], questions: readonly PendingQuestion[], coordinatorState: string | undefined): PeerSnapshot {
+  const sent = toRemoteAgents(agents);
+  const registryNames = new Map(sent.map((agent) => [`${agent.repoPath}\0${agent.id}`, agent.repoRegistryName]));
   return {
     coordinator: coordinatorState === undefined ? null : { state: coordinatorState },
     repos: repos.map((repo) => ({ registryName: repo.name, displayName: repoDisplayName(repo) })),
-    agents: toRemoteAgents(agents),
+    agents: sent,
+    questions: questions.flatMap((q) => {
+      const repoRegistryName = registryNames.get(`${q.repoPath}\0${q.agent}`);
+      return repoRegistryName === undefined ? []
+        : [{ id: q.id, agent: q.agent, repoRegistryName, question: q.question, timestamp: q.timestamp }];
+    }),
   };
 }
 
@@ -240,8 +265,8 @@ function encodeErrorReply(reason: string): Uint8Array {
 }
 
 /** The `agents` reply, or an error reply when the list is over {@link PEER_MAX_REPLY_BYTES}. */
-export function encodeAgentsReply({ repos, agents, coordinator }: PeerSnapshot): Uint8Array {
-  const bytes = encodeJson({ op: "agents", repos, agents, coordinator });
+export function encodeAgentsReply({ repos, agents, coordinator, questions }: PeerSnapshot): Uint8Array {
+  const bytes = encodeJson({ op: "agents", repos, agents, coordinator, questions });
   if (bytes.length > PEER_MAX_REPLY_BYTES) return encodeErrorReply(`the agent list is over ${PEER_MAX_REPLY_BYTES} bytes`);
   return bytes;
 }
@@ -312,6 +337,24 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
   };
 }
 
+function parseRemoteQuestion(entry: unknown, index: number): RemoteQuestion {
+  const malformed = () => new PeerProtocolError(`question ${index} in the reply is malformed`);
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw malformed();
+  const e = entry as Record<string, unknown>;
+  const required = (key: string): string => {
+    const value = e[key];
+    if (typeof value !== "string") throw malformed();
+    return value;
+  };
+  return {
+    id: cleanField(required("id")),
+    agent: cleanField(required("agent")),
+    repoRegistryName: cleanField(required("repoRegistryName")),
+    question: cleanLines(required("question")),
+    timestamp: cleanField(required("timestamp")),
+  };
+}
+
 /**
  * Parse an `agents` reply. Throws {@link PeerErrorReply} for an error reply
  * and {@link PeerProtocolError} for anything malformed.
@@ -333,12 +376,17 @@ export function decodeAgentsReply(bytes: Uint8Array): PeerSnapshot {
     return { registryName: cleanField(entry.registryName), displayName: cleanField(entry.displayName) };
   });
   const agents = message.agents.map(parseRemoteAgent);
+  if (!Array.isArray(message.questions)) throw new PeerProtocolError("reply has no question list");
+  // Only the questions of an agent in this reply: the receiving tree has a row for nothing else.
+  const askers = new Set(agents.map((agent) => `${agent.repoRegistryName}\0${agent.id}`));
+  const questions = message.questions.map(parseRemoteQuestion)
+    .filter((q) => askers.has(`${q.repoRegistryName}\0${q.agent}`));
   const coordinator = message.coordinator;
-  if (coordinator === null) return { repos, agents, coordinator };
+  if (coordinator === null) return { repos, agents, coordinator, questions };
   if (!coordinator || typeof coordinator !== "object" || !("state" in coordinator) || typeof coordinator.state !== "string") {
     throw new PeerProtocolError("reply has malformed coordinator state");
   }
-  return { repos, agents, coordinator: { state: cleanRemoteText(coordinator.state) } };
+  return { repos, agents, coordinator: { state: cleanRemoteText(coordinator.state) }, questions };
 }
 
 /** What a close of the trusted connection means, as the poller shows it. */
@@ -483,6 +531,16 @@ export async function requestLifecycle(conn: PairConnection, request: RemoteLife
 
 function lifecycleText(text: string): string {
   return stripAnsi(text).split("\n").map(line => line.replace(/[\p{Cc}\p{Cf}]/gu, " ")).join("\n").slice(0, 32_768);
+}
+
+/** Acknowledge one of the other install's pending questions (SPEC §20.4). */
+export function requestAcknowledge(conn: PairConnection, repo: string, id: string, setTimer: Timer): Promise<void> {
+  return clientExchange(conn, encodeJson({ op: "acknowledge", repo, id }), payload => {
+    const reply = decodeObject(payload, "reply");
+    if (reply.ok === true) return;
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
+    throw new PeerProtocolError("malformed acknowledge reply");
+  }, { setTimer, timeout: [15_000, new Error("Acknowledge request timed out")] });
 }
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
@@ -657,6 +715,8 @@ export interface PeerResponderDeps {
   headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
   lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<string>;
+  /** The request's `repo` and `id` as received: the handler validates them. */
+  acknowledgeQuestion?(repo: unknown, id: unknown, readPeerName: () => Promise<string | null>): Promise<void>;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** watch.log in `ib watch`. */
   log(line: string): void;
@@ -940,6 +1000,16 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       deps.log(`peer link: lifecycle request from ${from} failed: ${singleLine(error)}`);
       reply = err instanceof AmbiguousRemoteRehire
         ? encodeJson({ op: "error", reason: error, candidates: err.candidates }) : encodeErrorReply(error);
+    }
+  } else if (request.op === "acknowledge") {
+    try {
+      if (!deps.acknowledgeQuestion) throw new Error("Remote acknowledgements are unavailable");
+      await deps.acknowledgeQuestion(request.repo, request.id, () => deps.peerName(conn.remoteId));
+      reply = encodeJson({ ok: true });
+    } catch (err) {
+      const error = cleanRemoteText(errorDetail(err));
+      deps.log(`peer link: acknowledge from ${from} failed: ${error}`);
+      reply = encodeErrorReply(error);
     }
   } else {
     reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);

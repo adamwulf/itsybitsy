@@ -255,7 +255,8 @@ export function formatRemoteRepoRow(
  * the state lines up with the local rows' state. The caller caps
  * nameColWidth to the width, and the name and the state are cut to their
  * columns, so a long remote value cannot push the state off the row. Dimmed
- * while the peer is not connected.
+ * while the peer is not connected. The name is red while the agent has a
+ * pending question, as on a local row.
  */
 export function formatRemoteAgentRow(
   entry: Extract<RemoteEntry, { kind: "remote-agent" }>,
@@ -264,6 +265,7 @@ export function formatRemoteAgentRow(
   nameColWidth: number,
   stateColWidth: number,
   isFavorite = false,
+  hasQuestion = false,
 ): string {
   const offline = entry.linkStatus !== "connected";
   const style = offline ? ITALIC + DIM : ITALIC;
@@ -277,7 +279,8 @@ export function formatRemoteAgentRow(
   // under a selected row's REVERSE the state color becomes the background, so
   // a color left on through the padding would paint past the word.
   const stateColor = offline ? "" : remoteStateColor(fullState);
-  const line = `${style}${prefix}${name}${namePad}  ${stateColor}${state}${RESET}${statePad}`;
+  const coloredName = hasQuestion ? `${RED}${name}${RESET}${style}` : name;
+  const line = `${style}${prefix}${coloredName}${namePad}  ${stateColor}${state}${RESET}${statePad}`;
   return highlightRow(truncateToWidth(line, width, ""), selected, width);
 }
 
@@ -460,7 +463,10 @@ export class AgentTreeComponent implements Component {
    * returns null and no row renders in reverse video.
    */
   private hasSelection = false;
-  /** Fully qualified ids (agentKey) of the agents with a pending question: their names render red. */
+  /**
+   * Fully qualified ids of the agents with a pending question: their names
+   * render red. A local agent's is its agentKey, a remote agent's its peerEntryKey.
+   */
   questionAgentKeys: Set<string> = new Set();
   healthReports: Map<string, RepoHealthReport> = new Map();
   suppressSelection = false;
@@ -1032,12 +1038,25 @@ export class AgentTreeComponent implements Component {
   }
 
   /**
-   * Select the local agent row with this fully qualified id (agentKey).
-   * Returns true if found. Force-selects (§17.1/§17.3).
+   * Select the agent row with this fully qualified id: a local agent's
+   * agentKey, or a remote agent's peerEntryKey (SPEC §20.5), which the
+   * selected-row carve-out keeps visible under every filter. Returns true if
+   * found. Force-selects (§17.1/§17.3).
    */
   selectAgentByKey(key: string): boolean {
     const row = this._flatList.find((f) => f.kind === "agent" && this.agentKey(f.agent) === key);
-    return row?.kind === "agent" ? this.selectAgentRow(key, row.agent.repoPath) : false;
+    if (row?.kind === "agent") return this.selectAgentRow(key, row.agent.repoPath);
+    const remote = [...this.peerRepos.values()].some((repo) => repo.nodes.some((node) => peerEntryKey(node.row) === key));
+    return remote && this.selectAgentRow(key, null);
+  }
+
+  /** The remote agent row of this peer's agent (SPEC §20.5), shown or not, or null. */
+  remoteAgentRow(peerId: string, repo: string, id: string): Extract<RemoteEntry, { kind: "remote-agent" }> | null {
+    for (const peerRepo of this.peerRepos.values()) {
+      const node = peerRepo.nodes.find(({ row }) => row.peerId === peerId && row.remote.repoRegistryName === repo && row.remote.id === id);
+      if (node) return node.row;
+    }
+    return null;
   }
 
   /** Select this local agent's row (its fully qualified id, in its own repo). Returns true if found. */
@@ -1045,14 +1064,14 @@ export class AgentTreeComponent implements Component {
     return this.selectAgentRow(this.agentKey(agent), agent.repoPath);
   }
 
-  /** Select the agent row with this key in the repo at `repoPath`. */
-  private selectAgentRow(key: string, repoPath: string): boolean {
+  /** Select the agent row with this key in the repo at `repoPath`, or the remote agent row with it (null). */
+  private selectAgentRow(key: string, repoPath: string | null): boolean {
     // An agent's repo by definition has agents, so sticky-reveal clears when
     // landing on one. Update selectedId+hasSelection first, then refresh sticky,
     // then re-find the index against the post-sticky visibleList — same
     // ordering used by updateSelectedId so the cursor never drifts.
-    const isRow = (f: FlatEntry) => f.kind === "agent" && f.agent.repoPath === repoPath && this.agentKey(f.agent) === key;
-    if (!this._flatList.some(isRow)) return false;
+    const isRow = (f: FlatEntry) => this.rowKey(f) === key && AgentTreeComponent.rowRepoPath(f) === repoPath;
+    if (repoPath !== null && !this._flatList.some(isRow)) return false;
     this.selectedId = key;
     this.selectedRowRepo = repoPath;
     this.hasSelection = true;
@@ -1529,9 +1548,10 @@ export class AgentTreeComponent implements Component {
           item, branch, selectionActive && i === this.selectedIndex, width, peerNameColWidth, stateColWidth,
         ));
       } else if (item.kind === "remote-agent") {
+        const key = peerEntryKey(item);
         lines.push(formatRemoteAgentRow(
           { ...item, connector: remoteIndent(i) + item.connector }, selectionActive && i === this.selectedIndex, width,
-          remoteNameColWidth, stateColWidth, this.favoriteAgentIds.has(peerEntryKey(item)),
+          remoteNameColWidth, stateColWidth, this.favoriteAgentIds.has(key), this.questionAgentKeys.has(key),
         ));
       } else if (item.kind === "system-coordinator") {
         lines.push(formatCoordinatorRow(

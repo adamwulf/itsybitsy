@@ -162,6 +162,7 @@ function makeMockCtx(overrides?: {
     submitRemoteMessage: async () => true,
     refuseOnRemoteRow: () => false,
     runRemoteRowCommand: async () => { throw new Error("Unexpected remote command"); },
+    acknowledgePeerQuestion: async () => { throw new Error("Unexpected peer acknowledge"); },
     get dialog() { return currentDialog; },
     peerService: null,
     remoteSelection: null,
@@ -174,8 +175,10 @@ function makeMockCtx(overrides?: {
       visibleList: overrides?.flatList ?? [],
       machineName: "studio",
       selectAgent: () => true,
+      selectAgentByKey: () => true,
       selectByRepoPath: () => true,
       selectSystemCoordinator: () => true,
+      remoteAgentRow: () => null,
     },
     // §17 ActionCtx additions: a focus handle, a teams-tree selection handle,
     // and a teamSend ctx field. Defaults: focus on agent-tree, no teams

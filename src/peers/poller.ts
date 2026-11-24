@@ -45,6 +45,7 @@ import {
   type PeerPane,
   type PeerPaneTarget,
   type RemoteAgent,
+  type RemoteQuestion,
   type RemoteRepo,
   type PeerSnapshot,
 } from "./peer-link";
@@ -81,6 +82,8 @@ export interface PeerLinkState {
   coordinator: PeerSnapshot["coordinator"];
   repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
+  /** The pending questions of those agents, kept like them; null until a list arrives. */
+  questions: readonly RemoteQuestion[] | null;
 }
 
 export type PeerLinkStatus = "connected" | "connecting" | "offline";
@@ -116,6 +119,7 @@ interface Link {
   coordinator: PeerSnapshot["coordinator"];
   repos: readonly RemoteRepo[] | null;
   agents: readonly RemoteAgent[] | null;
+  questions: readonly RemoteQuestion[] | null;
   /** The complete snapshot as JSON, to tell a changed list from the same one. */
   snapshotKey: string | null;
 }
@@ -175,6 +179,7 @@ export class PeerPoller {
       coordinator: link.coordinator,
       repos: link.repos,
       agents: link.agents,
+      questions: link.questions,
     }));
   }
 
@@ -272,6 +277,7 @@ export class PeerPoller {
           coordinator: null,
           repos: null,
           agents: null,
+          questions: null,
           snapshotKey: null,
         });
         changed = true;
@@ -376,6 +382,7 @@ export class PeerPoller {
       link.coordinator = snapshot.coordinator;
       link.repos = snapshot.repos;
       link.agents = snapshot.agents;
+      link.questions = snapshot.questions;
       link.snapshotKey = key;
     }
     if (changed) this.notify();

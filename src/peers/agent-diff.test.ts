@@ -30,7 +30,7 @@ test("a remote diff round trip reproduces committed additions, uncommitted text 
   const { a, b } = createMemoryLink("aa".repeat(32), "bb".repeat(32));
   const server = serveTrustedConnection(b, {
     captureDiff: (repo, id) => captureAgentDiff([agent], repo, id),
-    peerName: async () => "A", snapshot: () => ({ repos: [], agents: [], coordinator: null }),
+    peerName: async () => "A", snapshot: () => ({ repos: [], agents: [], coordinator: null, questions: [] }),
     setTimer: createFakeClock().setTimer, log() {},
   });
   try {

@@ -65,7 +65,7 @@ import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./tra
 
 import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
 import type { SendHeader } from "./send-frame";
-import { cleanRemoteText, requestLifecycle, requestSend } from "./peer-link";
+import { cleanRemoteText, requestAcknowledge, requestLifecycle, requestSend } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
 import { remoteLifecycleDenial, remoteSendDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
@@ -90,8 +90,9 @@ import {
 } from "./pairing";
 import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { acceptRemoteLifecycle, type RemoteLifecycleRequest, type RemoteLifecycleDeps } from "./remote-lifecycle";
+import { acceptRemoteAcknowledge, type RemoteQuestionDeps } from "./remote-questions";
 import { detectAgentStates } from "../agents";
-import { newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
+import { acknowledgeQuestion, newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
 import { PEER_ALPN, requestAgentDiff, requestAgentPrompt, requestNewAgent, serveTrustedConnection, type PeerPane, type PeerPaneTarget, type PeerResponderDeps, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
@@ -150,6 +151,7 @@ export interface PeerServiceDeps {
   readPrompt?: PeerResponderDeps["readPrompt"];
   remoteStartDenial: string | null | Promise<string | null>;
   remoteLifecycle?: RemoteLifecycleDeps;
+  remoteQuestions?: RemoteQuestionDeps;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[], generation: string): void;
   renewLease?(): Promise<void>;
@@ -194,6 +196,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
     remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, notice },
+    remoteQuestions: { listRepos, acknowledgeQuestion, notice },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
@@ -795,6 +798,16 @@ export class PeerService {
     return requestLifecycle(conn, request, machine, this.deps.setTimer, transfer);
   }
 
+  /** Acknowledge a pending question on the paired machine that owns it, gated like {@link runRemoteLifecycle}. */
+  async acknowledgeRemoteQuestion(peerId: string, repo: string, questionId: string): Promise<void> {
+    if (this.remoteStartDenial !== null) throw new Error(remoteLifecycleDenial(this.remoteStartDenial, "acknowledge"));
+    const machine = await this.peerName(peerId);
+    if (machine === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error(`${machine} is disconnected`);
+    await requestAcknowledge(conn, repo, questionId, this.deps.setTimer);
+  }
+
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest): Promise<string> {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
     if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
@@ -1063,6 +1076,8 @@ export class PeerService {
           peerName: (id) => this.peerName(id),
           lifecycle: this.deps.remoteLifecycle && ((request, readPeerName) =>
             acceptRemoteLifecycle(request, readPeerName, this.deps.remoteLifecycle!, this.deps.log)),
+          acknowledgeQuestion: this.deps.remoteQuestions && ((repo, id, readPeerName) =>
+            acceptRemoteAcknowledge(repo, id, readPeerName, this.deps.remoteQuestions!, this.deps.log)),
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
           receiveMessage: this.deps.receiveMessage && ((...args) => this.receiveTracked(...args)),

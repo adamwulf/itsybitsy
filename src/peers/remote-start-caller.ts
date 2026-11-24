@@ -188,7 +188,7 @@ export function remoteSendDenial(reason: string): string {
     .replace("start an agent on another machine", "send to another machine");
 }
 
-export function remoteLifecycleDenial(reason: string, action: RemoteLifecycleAction): string {
+export function remoteLifecycleDenial(reason: string, action: RemoteLifecycleAction | "acknowledge"): string {
   if (reason === TMUX_START_DENIAL) return `Remote ${action} is disabled inside tmux. Use a terminal outside tmux.`;
   return reason.replace("Remote starts are", `Remote ${action} is`)
     .replace("Remote starts require", `Remote ${action} requires`)

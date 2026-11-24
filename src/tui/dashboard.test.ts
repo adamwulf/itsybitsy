@@ -33,7 +33,7 @@ import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "
 import type { PeersDialogService } from "./peers-dialog";
 import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
-import type { RemoteAgent } from "../peers/peer-link";
+import type { RemoteAgent, RemoteQuestion } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
 import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
@@ -9216,6 +9216,7 @@ class FakePeerService implements PeersDialogService {
   fetchAgentPrompt = mock<PeersDialogService["fetchAgentPrompt"]>(async (_peerId, _repo, id) => `Prompt for ${id}\nsecond line`);
   remoteStartDenial: string | null = null;
   runRemoteLifecycle: PeersDialogService["runRemoteLifecycle"] = async () => { throw new Error("Unexpected lifecycle request"); };
+  acknowledgeRemoteQuestion = mock<PeersDialogService["acknowledgeRemoteQuestion"]>(async () => {});
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
   state: PeerServiceView = {
     status: { kind: "listening" },
@@ -9586,9 +9587,9 @@ describe("setup Peers tab", () => {
         { id: E, name: "E", pairedAt: "x" },
       ],
       links: [
-        { id: OTHER, name: "Laptop B", connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] },
-        { id: C, name: "C", connected: false, connectedAt: null, lastOkAt: Date.now(), coordinator: null, lastError: "closed by the other side", repos: [], agents: [] },
-        { id: D, name: "D", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
+        { id: OTHER, name: "Laptop B", connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [], questions: [] },
+        { id: C, name: "C", connected: false, connectedAt: null, lastOkAt: Date.now(), coordinator: null, lastError: "closed by the other side", repos: [], agents: [], questions: [] },
+        { id: D, name: "D", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null, questions: null },
       ],
     });
     function expectRow(id: string, word: string, color: string, error?: string) {
@@ -9603,7 +9604,7 @@ describe("setup Peers tab", () => {
     expectRow(C, "offline", RED, "closed by the other side");
     expectRow(D, "offline", RED, "timed out");
     expectRow(E, "connecting", YELLOW); // newly paired, before the poller lists it
-    service.set({ links: [{ id: E, name: "E", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: null, repos: null, agents: null }] });
+    service.set({ links: [{ id: E, name: "E", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: null, repos: null, agents: null, questions: null }] });
     expectRow(E, "connecting", YELLOW); // first dial in progress
   });
 
@@ -9629,7 +9630,7 @@ describe("setup Peers tab", () => {
     } as unknown as TUI);
     const service = new FakePeerService();
     dashboard.setPeerService(service);
-    const link = { id: OTHER, name: "B", connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [] };
+    const link = { id: OTHER, name: "B", connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: [], agents: [], questions: [] };
     // The Teams tab draws only its local tree.
     dashboard.setSidebarMode("teams");
 
@@ -9898,7 +9899,7 @@ describe("setup Peers tab", () => {
       const service = new FakePeerService();
       const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
       service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, connectedAt: null, lastOkAt: null,
-        coordinator: null, lastError: "connection refused", repos: null, agents: null })) });
+        coordinator: null, lastError: "connection refused", repos: null, agents: null, questions: null })) });
       dashboard.setPeerService(service);
       dashboard.handleInput("I");
       service.setSession("initiator", { stage: "code-entry" });
@@ -9927,7 +9928,7 @@ describe("setup Peers tab", () => {
       const service = new FakePeerService();
       const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: `peer-${i}`, pairedAt: "x" }));
       service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, connectedAt: null, lastOkAt: null,
-        coordinator: null, lastError: "connection refused while trying to reach the other endpoint during the most recent polling attempt", repos: null, agents: null })) });
+        coordinator: null, lastError: "connection refused while trying to reach the other endpoint during the most recent polling attempt", repos: null, agents: null, questions: null })) });
       dashboard.setPeerService(service);
       dashboard.handleInput("I");
       service.setSession("initiator", stage === "code-entry" ? { stage } : { stage, savedName: OTHER_SHORT });
@@ -9966,7 +9967,7 @@ describe("setup Peers tab", () => {
       const service = new FakePeerService();
       const peers = Array.from({ length: 11 }, (_, i) => ({ id: i.toString(16).repeat(64), name: "N".repeat(32), pairedAt: "x" }));
       service.set({ peers, links: peers.map(peer => ({ ...peer, connected: false, connectedAt: null, lastOkAt: null,
-        coordinator: null, lastError: "connection refused", repos: null, agents: null })) });
+        coordinator: null, lastError: "connection refused", repos: null, agents: null, questions: null })) });
       dashboard.setPeerService(service);
       dashboard.handleInput("I");
       dashboard.handleInput("abc");
@@ -9996,7 +9997,7 @@ describe("setup Peers tab", () => {
     const { dashboard, service } = open();
     service.set({
       peers: [{ id: OTHER, name: "N".repeat(32), pairedAt: "x" }],
-      links: [{ id: OTHER, name: "N".repeat(32), connected: false, connectedAt: null, lastOkAt: Date.now() - 50 * 3_600_000, coordinator: null, lastError: "e".repeat(160), repos: null, agents: null }],
+      links: [{ id: OTHER, name: "N".repeat(32), connected: false, connectedAt: null, lastOkAt: Date.now() - 50 * 3_600_000, coordinator: null, lastError: "e".repeat(160), repos: null, agents: null, questions: null }],
     });
     const stages: PairStage[] = [
       { stage: "connecting" },
@@ -10073,9 +10074,10 @@ describe("Unified peer repos in the Agents tree", () => {
           remote("manager-def", "itsybitsy", { state: "waiting", agentType: "manager" }),
           remote("agent-1", "other-repo", { state: "complete" }),
         ],
+        questions: [],
       },
-      { id: PEER_C, name: "Laptop C", connected: false, connectedAt: null, lastOkAt: now - 125_000, coordinator: null, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")] },
-      { id: PEER_D, name: "Laptop D", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null },
+      { id: PEER_C, name: "Laptop C", connected: false, connectedAt: null, lastOkAt: now - 125_000, coordinator: null, lastError: "timed out", repos: repos("app"), agents: [remote("agent-1", "app")], questions: [] },
+      { id: PEER_D, name: "Laptop D", connected: false, connectedAt: null, lastOkAt: null, coordinator: null, lastError: "timed out", repos: null, agents: null, questions: null },
     ];
   }
 
@@ -10791,7 +10793,7 @@ describe("Unified peer repos in the Agents tree", () => {
       const { dashboard, service } = setup();
       const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
       const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
-      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: repos(long.repoName), agents: [long, short] }] });
+      service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: repos(long.repoName), agents: [long, short], questions: [] }] });
       const rows = treeRows(dashboard, width);
       expect(rows.filter((r) => visibleWidth(r) > width)).toEqual([]);
       const text = rows.map(stripAnsi);
@@ -10860,7 +10862,8 @@ describe("Unified peer repos in the Agents tree", () => {
       selectByKey(dashboard, WORKER_KEY);
       await waitFor(() => paneText(dashboard.render(WIDTH), 2).startsWith("peer capture"));
       expect(service.fetchPane.mock.calls.at(-1)).toEqual([PEER_B, { op: "agent-pane", repo: "itsybitsy", id: "worker-abc" }, 200]);
-      for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
+      // TREE draws the tree, and QUESTIONS the agent's questions full-width.
+      for (const mode of PANE_MODES.filter((m) => m !== "TREE" && m !== "QUESTIONS")) {
         dashboard.jumpToMode(mode);
         // INITIAL PROMPT shows the agent's prompt, read from the peer, instead of the placeholder.
         const prompt = mode === "INITIAL PROMPT";
@@ -11334,7 +11337,7 @@ describe("Unified peer repos in the Agents tree", () => {
       stream.cancel = () => new Promise(() => {});
       return stream;
     };
-    const deps = { ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null),
+    const deps = { ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null, questions: [] }), () => {}, null),
       readPeers: async () => [], recoverTransfers: () => owners.sweepOutgoingDirectories(root) };
     const next = new PeerService(deps);
     try {
@@ -11367,7 +11370,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const { PeerService, defaultPeerServiceDeps } = await import("../peers/service");
     const { textHeader } = await import("../peers/peer-outbox");
     const release = Promise.withResolvers<void>();
-    const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null }), () => {}, null),
+    const service = new PeerService({ ...defaultPeerServiceDeps("local", () => {}, () => ({ agents: [], repos: [], coordinator: null, questions: [] }), () => {}, null),
       receiveMessage: async (_header, _peer, _name, _body, options) => {
         options?.admitted?.(true);
         for (let byte = 1; byte <= 100; byte++) options?.onProgress?.(byte);
@@ -11900,17 +11903,20 @@ describe("Unified peer repos in the Agents tree", () => {
     const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "V: filter", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
     expect(text).toContain("s: send");
-    for (const hint of [".: favorite", "o: diff", "m: merge", "x: retire", "R: resume"]) expect(text).toContain(hint);
-    for (const hint of ["a: new agent", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
+    for (const hint of [".: favorite", "o: diff", "m: merge", "x: retire", "R: resume", "q: questions"]) expect(text).toContain(hint);
+    for (const hint of ["a: new agent", "h: setup", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
     // Every key the remote footer names is one the guard allows.
     for (const key of ["j", "k", "J", "K", "p", "n", "1", "2", "3", "[", "]", "{", "}", "@", "/", "?", "I"]) {
       expect(isRemoteAllowedKey(key)).toBe(true);
     }
+    expect(isRemoteAllowedKey("q", dashboard.agentTree.selectedRemote!)).toBe(true);
 
     selectByKey(dashboard, repoKey("itsybitsy"));
     expect(footer()).toContain(".: pin");
+    expect(footer()).not.toContain("q: questions");
+    expect(isRemoteAllowedKey("q", dashboard.agentTree.selectedRemote!)).toBe(false);
     for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
     expect(footer()).toContain("s: send");
   });
@@ -12202,5 +12208,277 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.selectedAgent).toBe(local);
     expect(dashboard.infoPanel.remote).toBeNull();
     expect(dashboard.infoPanel.agent).toBe(local);
+  });
+
+  describe("peer questions (SPEC §20.5)", () => {
+    const asked = (agent: string, repo: string): RemoteQuestion =>
+      ({ id: `q-${agent}`, agent, repoRegistryName: repo, question: `${agent} asks?\nsecond line`, timestamp: "2026-11-24T10:00:00Z" });
+    const footer = (dashboard: DashboardComponent) => ((dashboard as any).statusBar.render(WIDTH) as string[]).map(stripAnsi).join("\n");
+    const listed = (dashboard: DashboardComponent) => dashboard.rightPane.questions.map((q) => `${q.peer?.name ?? "local"}:${q.agent}`);
+    const screen = (dashboard: DashboardComponent) => stripAnsi(dashboard.render(WIDTH).join("\n"));
+
+    /**
+     * setup() with the local agent asking a question, Laptop B's worker-abc
+     * asking one (and one for an agent it has no row for), and offline
+     * Laptop C's agent-1 asking one. `peerAgentAt` moves Laptop B's agent-1
+     * to that path.
+     */
+    function setupQuestions(peerAgentAt?: string) {
+      const { dashboard, service, local } = setup();
+      dashboard.onUpdate([local], [makeFlatAgent(local)], [
+        { id: "q-local", agent: local.id, question: "Local asks?", timestamp: "2026-11-24T09:00:00Z", status: "pending", repoPath: local.repoPath },
+      ]);
+      const [b, c, d] = links();
+      const agents = b!.agents!.map((agent) => agent.id === "agent-1" && peerAgentAt ? { ...agent, repoPath: peerAgentAt } : agent);
+      service.set({ links: [
+        { ...b!, agents, questions: [asked("worker-abc", "itsybitsy"), asked("gone", "itsybitsy"), ...peerAgentAt ? [asked("agent-1", "other-repo")] : []] },
+        { ...c!, questions: [asked("agent-1", "app")] },
+        d!,
+      ] });
+      return { dashboard, service, local };
+    }
+
+    test("follow the local questions in the list and the count, from connected peers only, and turn the name red", () => {
+      const { dashboard, service, local } = setupQuestions();
+      expect(listed(dashboard)).toEqual(["local:agent-1", "Laptop B:worker-abc"]);
+      expect(dashboard.rightPane.questions[1]).toMatchObject({
+        id: "q-worker-abc", question: "worker-abc asks?\nsecond line", repoPath: "/remote/itsybitsy",
+        peer: { id: PEER_B, name: "Laptop B", repo: "itsybitsy" },
+      });
+      expect(footer(dashboard)).toContain("q: questions (2)");
+      expect([...dashboard.agentTree.questionAgentKeys]).toEqual([dashboard.agentTree.agentKey(local), WORKER_KEY]);
+      expect(treeRows(dashboard).some((row) => row.includes(RED + "abc-nick"))).toBe(true);
+
+      // A new local list keeps the peer's after it.
+      dashboard.onUpdate([local], [makeFlatAgent(local)], []);
+      expect(listed(dashboard)).toEqual(["Laptop B:worker-abc"]);
+      expect(footer(dashboard)).toContain("q: questions (1)");
+
+      // Laptop B drops: its question and red name go with it.
+      const [b, ...rest] = service.state.links;
+      service.set({ links: [{ ...b!, connected: false, connectedAt: null, lastError: "timed out" }, ...rest] });
+      expect(listed(dashboard)).toEqual([]);
+      expect(footer(dashboard)).not.toContain("q: questions (");
+      expect(dashboard.agentTree.questionAgentKeys.size).toBe(0);
+    });
+
+    test("with no agent selected every question is listed, a peer's under its machine, and g selects its remote row", () => {
+      const { dashboard } = setupQuestions();
+      dashboard.agentTree.deselect();
+      dashboard.syncSelectedAgent();
+      dashboard.handleInput("q");
+      const text = screen(dashboard);
+      expect(text).toContain("agent-1: Local asks?");
+      expect(text).toContain("Laptop B/worker-abc: worker-abc asks?");
+      expect(text).toContain("second line");
+      dashboard.setQuestionsFocused(true);
+      dashboard.handleInput("j");
+      dashboard.handleInput("g");
+      expect(keyOf(dashboard)).toBe(WORKER_KEY);
+      expect(dashboard.activeSelectionSource).toBe("agents");
+      expect(dashboard.currentMode).toBe("AGENT LOG");
+    });
+
+    test("q on a remote agent shows its questions full-width and pauses its pane read while they show", () => {
+      const { dashboard } = setupQuestions();
+      const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+      const timers = new Set<() => void>();
+      (dashboard as any).remotePane.every = (_ms: number, tick: () => void) => {
+        timers.add(tick);
+        return () => timers.delete(tick);
+      };
+      try {
+        selectByKey(dashboard, WORKER_KEY);
+        expect(timers.size).toBe(1);
+        resetNotice(dashboard);
+        dashboard.handleInput("q");
+        expect(dashboard.notice).toBeNull();
+        expect(dashboard.currentMode).toBe("QUESTIONS");
+        expect(timers.size).toBe(0);
+        const text = screen(dashboard);
+        expect(text).toContain("Laptop B/worker-abc: worker-abc asks?");
+        expect(text).not.toContain("Local asks?");
+        expect(text).not.toContain(REMOTE_RIGHT_PANE_TEXT);
+        expect(text).not.toContain("peer capture");
+        // p/n cycle out to the split view and its read, and back to the same questions.
+        dashboard.handleInput("n");
+        expect(dashboard.currentMode).not.toBe("QUESTIONS");
+        expect(timers.size).toBe(1);
+        dashboard.handleInput("p");
+        expect(dashboard.currentMode).toBe("QUESTIONS");
+        expect(timers.size).toBe(0);
+        expect(screen(dashboard)).toContain("Laptop B/worker-abc: worker-abc asks?");
+
+        selectByKey(dashboard, agentKey(PEER_B, "itsybitsy", "manager-def"));
+        expect(dashboard.currentMode).toBe("QUESTIONS");
+        expect(screen(dashboard)).toContain("No pending questions for Laptop B/manager-def");
+      } finally {
+        running.mockRestore();
+        dashboard.stopPolling();
+      }
+    });
+
+    test("Enter answers with the remote send, then acknowledges on the peer; a failed acknowledge never resends", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("q");
+      dashboard.handleInput("\r");
+      const dialog = assertDialog(dashboard.dialog, "textarea");
+      expect(dialog.prompt).toBe("Answer Laptop B/worker-abc's question:");
+      service.acknowledgeRemoteQuestion.mockRejectedValueOnce(new Error("Laptop B is disconnected"));
+      dialog.onSubmit("Yes, ship it");
+      await waitFor(() => !dialog.inFlight && service.acknowledgeRemoteQuestion.mock.calls.length === 1);
+      expect(service.sendRemoteMessage.mock.calls.map((call) => call.slice(0, 2))).toMatchObject([[PEER_B, {
+        from: { kind: "user" }, target: { kind: "agent", repo: "itsybitsy", agent: "worker-abc" }, message: "Yes, ship it", files: [],
+      }]]);
+      expect(dashboard.dialog).toBe(dialog);
+      expect(dashboard.notice).toBe("Answered Laptop B/worker-abc, but acknowledge failed: Laptop B is disconnected");
+      expect(listed(dashboard)).toContain("Laptop B:worker-abc");
+
+      // The retry acknowledges only.
+      dialog.onSubmit("Yes, ship it");
+      await waitFor(() => dashboard.dialog === null);
+      expect(service.sendRemoteMessage).toHaveBeenCalledTimes(1);
+      expect(service.acknowledgeRemoteQuestion.mock.calls).toEqual([
+        [PEER_B, "itsybitsy", "q-worker-abc"], [PEER_B, "itsybitsy", "q-worker-abc"],
+      ]);
+      expect(dashboard.notice).toBe("Answered Laptop B/worker-abc");
+      expect(listed(dashboard)).toEqual(["local:agent-1"]);
+    });
+
+    test("Esc cancels a pending send first, then acknowledges, and the question leaves at once until a poll drops it", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("q");
+      service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) => new Promise((_resolve, reject) => {
+        transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason));
+      }));
+      dashboard.handleInput("s");
+      assertDialog(dashboard.dialog, "textarea").onSubmit("hello");
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      dashboard.closeDialog();
+      dashboard.handleInput("\x1b");
+      await waitFor(() => dashboard.notice === "Send cancelled");
+      expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+
+      service.acknowledgeRemoteQuestion.mockRejectedValueOnce(new Error("Question 'q-worker-abc' not found"));
+      dashboard.handleInput("\x1b");
+      await dashboard.flushPendingActions();
+      expect(dashboard.notice).toBe("Acknowledge failed: Question 'q-worker-abc' not found");
+      expect(listed(dashboard)).toContain("Laptop B:worker-abc");
+
+      dashboard.handleInput("\x1b");
+      await dashboard.flushPendingActions();
+      expect(dashboard.notice).toBe("Acknowledged q-worker-abc");
+      expect(service.acknowledgeRemoteQuestion.mock.calls.at(-1)).toEqual([PEER_B, "itsybitsy", "q-worker-abc"]);
+      expect(listed(dashboard)).toEqual(["local:agent-1"]);
+      expect(dashboard.agentTree.questionAgentKeys.has(WORKER_KEY)).toBe(false);
+      expect(screen(dashboard)).toContain("No pending questions for Laptop B/worker-abc");
+
+      // A poll that still lists it keeps it hidden; one that drops it forgets it.
+      const [b, ...rest] = service.state.links;
+      service.set({ links: [{ ...b!, questions: [...b!.questions!] }, ...rest] });
+      expect(listed(dashboard)).toEqual(["local:agent-1"]);
+      service.set({ links: [{ ...b!, questions: [] }, ...rest] });
+      service.set({ links: [{ ...b!, questions: [asked("worker-abc", "itsybitsy")] }, ...rest] });
+      expect(listed(dashboard)).toEqual(["local:agent-1", "Laptop B:worker-abc"]);
+    });
+
+    /** Open the answer dialog for the selected remote agent's question and press Send on `draft`. */
+    function submitAnswer(dashboard: DashboardComponent, draft: string) {
+      dashboard.handleInput("q");
+      dashboard.handleInput("\r");
+      const dialog = assertDialog(dashboard.dialog, "textarea");
+      for (const ch of draft) dashboard.handleInput(ch);
+      dashboard.handleInput("\x1b[Z");
+      dashboard.handleInput("\r");
+      return dialog;
+    }
+
+    test("a failed answer send keeps the dialog and its draft, and acknowledges nothing", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      service.sendRemoteMessage.mockRejectedValueOnce(new Error("Laptop B is disconnected"));
+      const dialog = submitAnswer(dashboard, "yes");
+      await waitFor(() => dashboard.notice === "Laptop B is disconnected" && !dialog.inFlight);
+      expect(service.sendRemoteMessage).toHaveBeenCalledTimes(1);
+      expect(dashboard.dialog).toBe(dialog);
+      expect(dialog.buffer.getText()).toBe("yes");
+      expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      expect(listed(dashboard)).toContain("Laptop B:worker-abc");
+    });
+
+    test("Esc while the answer is sending cancels it, keeps the draft and acknowledges nothing", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) =>
+        new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason))));
+      const dialog = submitAnswer(dashboard, "yes");
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      expect(dialog.inFlight).toBe(true);
+      dashboard.handleInput("\x1b");
+      await waitFor(() => dashboard.notice === "Send cancelled" && !dialog.inFlight);
+      expect(dashboard.dialog).toBe(dialog);
+      expect(dialog.buffer.getText()).toBe("yes");
+      expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      expect(listed(dashboard)).toContain("Laptop B:worker-abc");
+    });
+
+    test("; and l scroll a remote agent's questions, not its hidden capture", () => {
+      const { dashboard } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      const pane = (dashboard as any).remotePane;
+      dashboard.handleInput("q");
+      dashboard.handleInput(";");
+      expect(pane.scrollBack).toBe(0);
+      expect(dashboard.rightPane.scrollOffset).toBeGreaterThan(0);
+      dashboard.handleInput("l");
+      expect(dashboard.rightPane.scrollOffset).toBe(0);
+      // In the split view `;` scrolls the capture again.
+      dashboard.handleInput("n");
+      dashboard.handleInput(";");
+      expect(pane.scrollBack).toBeGreaterThan(0);
+    });
+
+    test("the palette's QUESTIONS entry passes the guard as q: allowed on a remote agent, refused on a remote header", () => {
+      const { dashboard } = setupQuestions();
+      const runQuestions = () => {
+        dashboard.handleInput("/");
+        const palette = assertDialog(dashboard.dialog, "fuzzy");
+        palette.onSelect(palette.allItems.findIndex((item) => item.startsWith("QUESTIONS")));
+      };
+      selectByKey(dashboard, WORKER_KEY);
+      resetNotice(dashboard);
+      runQuestions();
+      expect(dashboard.notice).toBeNull();
+      expect(dashboard.currentMode).toBe("QUESTIONS");
+      expect(screen(dashboard)).toContain("Laptop B/worker-abc: worker-abc asks?");
+
+      dashboard.handleInput("n");
+      const mode = dashboard.currentMode;
+      selectByKey(dashboard, repoKey("other-repo"));
+      runQuestions();
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(dashboard.currentMode).toBe(mode);
+    });
+
+    test("a local agent with the peer agent's id and path never gets the peer's question", () => {
+      const { dashboard, local } = setupQuestions("/repos/local");
+      expect(local.repoPath).toBe("/repos/local");
+      expect(dashboard.selectedAgent).toBe(local);
+      dashboard.handleInput("q");
+      expect(dashboard.rightPane.filteredQuestions.map((q) => q.id)).toEqual(["q-local"]);
+      expect(screen(dashboard)).not.toContain("Laptop B/agent-1");
+      expect(dashboard.agentTree.questionAgentKeys.has(agentKey(PEER_B, "other-repo", "agent-1"))).toBe(true);
+      dashboard.onUpdate([local], [makeFlatAgent(local)], []);
+      expect(dashboard.rightPane.filteredQuestions).toEqual([]);
+      expect(screen(dashboard)).toContain("No pending questions for agent-1");
+      expect(dashboard.agentTree.questionAgentKeys.has(dashboard.agentTree.agentKey(local))).toBe(false);
+      resetNotice(dashboard);
+      dashboard.handleInput("\r");
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+      expect(dashboard.notice).toBeNull();
+    });
   });
 });

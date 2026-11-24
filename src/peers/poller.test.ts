@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { waitFor } from "../test-utils";
 import { IrohError, irohAddonLoaderCtx } from "./iroh";
-import { requestNewAgent, encodeAgentsReply, PEER_CLOSE, PEER_MAX_REQUEST_BYTES, serveTrustedConnection, type RemoteAgent } from "./peer-link";
+import { requestNewAgent, encodeAgentsReply, PEER_CLOSE, PEER_MAX_REQUEST_BYTES, serveTrustedConnection, type RemoteAgent, type RemoteQuestion } from "./peer-link";
 import type { PairConnection } from "./pairing";
 import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS, PeerPoller, peerLinkStatus } from "./poller";
 import type { Peer } from "./store";
@@ -34,6 +34,7 @@ interface Remote {
   allowed: boolean;
   repos: { registryName: string; displayName: string }[];
   agents: RemoteAgent[];
+  questions: RemoteQuestion[];
   requests: number;
   /** The far (responder) end of each connection dialed to it. */
   served: MemoryConnection[];
@@ -54,7 +55,7 @@ function makeRig(initialPeers: Peer[]) {
   const remote = (id: string): Remote => {
     let r = remotes.get(id);
     if (r === undefined) {
-      r = { allowed: true, repos: [{ registryName: "app", displayName: "App" }], agents: [remoteAgent(`agent-of-${id.slice(0, 4)}`)], requests: 0, served: [], stalled: false, overlaps: 0 };
+      r = { allowed: true, repos: [{ registryName: "app", displayName: "App" }], agents: [remoteAgent(`agent-of-${id.slice(0, 4)}`)], questions: [], requests: 0, served: [], stalled: false, overlaps: 0 };
       remotes.set(id, r);
     }
     return r;
@@ -75,7 +76,7 @@ function makeRig(initialPeers: Peer[]) {
       },
       snapshot: () => {
         r.requests++;
-        return { coordinator: null, repos: r.repos, agents: r.agents };
+        return { coordinator: null, repos: r.repos, agents: r.agents, questions: r.questions };
       },
       log: () => {},
     });
@@ -151,6 +152,7 @@ describe("PeerPoller", () => {
       coordinator: null,
       repos: rig.remote(P1).repos,
       agents: rig.remote(P1).agents,
+      questions: rig.remote(P1).questions,
     });
     for (let i = 2; i <= 4; i++) {
       rig.tick();
@@ -324,7 +326,7 @@ describe("PeerPoller", () => {
     rig.poller.start();
     const stream = await b.acceptBi();
     await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
-    await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [] }));
+    await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [], questions: [] }));
     await stream.finish();
     b.close(PEER_CLOSE.done, "shutting down");
 
@@ -356,7 +358,7 @@ describe("PeerPoller", () => {
     async function reply(closeAfterReply: boolean) {
       const stream = await b.acceptBi();
       await stream.readToEnd(PEER_MAX_REQUEST_BYTES);
-      await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [] }));
+      await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [], questions: [] }));
       await stream.finish();
       if (closeAfterReply) b.close(PEER_CLOSE.done, "shutting down");
     }
@@ -424,7 +426,7 @@ describe("PeerPoller", () => {
     });
     rig.poller.start();
     await waitFor(() => rig.state(P1)?.lastError !== null, { message: "first dial failed" });
-    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, connectedAt: null, lastOkAt: null, lastError: "timed out", coordinator: null, repos: null, agents: null });
+    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, connectedAt: null, lastOkAt: null, lastError: "timed out", coordinator: null, repos: null, agents: null, questions: null });
 
     rig.setDial(rig.connect);
     rig.tick();
@@ -437,7 +439,7 @@ describe("PeerPoller", () => {
     rig.clock.jump(1_000);
     rig.remote(P1).served[0]!.close(PEER_CLOSE.done, "shutting down");
     await waitFor(() => rig.state(P1)?.connected === false, { message: "dropped" });
-    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, connectedAt: null, lastOkAt: okAt, lastError: "closed by the other side", coordinator: null, repos: rig.remote(P1).repos, agents: firstList });
+    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, connectedAt: null, lastOkAt: okAt, lastError: "closed by the other side", coordinator: null, repos: rig.remote(P1).repos, agents: firstList, questions: [] });
 
     // Its list changes while it is away; the redial brings the new one.
     rig.remote(P1).agents = [remoteAgent("agent-new", "waiting")];
@@ -503,6 +505,21 @@ describe("PeerPoller", () => {
     expect(rig.logs.filter((l) => l.includes("could not read peers.json"))).toEqual([
       "peer link: could not read peers.json: peers.json: not valid JSON",
     ]);
+    rig.poller.stop();
+  });
+
+  test("questions are kept with the lists, and a change in questions alone notifies", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    expect(rig.state(P1)?.questions).toEqual([]);
+    const before = rig.changes();
+    const asked: RemoteQuestion = { id: "q-1", agent: `agent-of-${P1.slice(0, 4)}`, repoRegistryName: "app", question: "Ship it?\nNow?", timestamp: "2026-11-24T10:00:00Z" };
+    rig.remote(P1).questions = [asked];
+    rig.tick();
+    await waitFor(() => rig.changes() === before + 1, { message: "a question-only change notifies" });
+    expect(rig.state(P1)?.questions).toEqual([asked]);
+    expect(rig.state(P1)?.agents).toEqual(rig.remote(P1).agents);
     rig.poller.stop();
   });
 
@@ -585,7 +602,7 @@ test("a coordinator reply during grace preserves a remote start on the same link
   };
   const answerAgents = async () => {
     const stream = await accept("agents");
-    await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [] }));
+    await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [], questions: [] }));
     await stream.finish();
   };
   rig.poller.start();
@@ -617,7 +634,7 @@ test("a pane slot stays occupied until its pending reply exhausts grace", async 
   const { a, b } = createMemoryLink(SELF, P1);
   const reading = Promise.withResolvers<void>();
   rig.setDial(async () => a);
-  void serveTrustedConnection(b, { peerName: async () => "paired", snapshot: () => ({ agents: [], repos: [], coordinator: null }),
+  void serveTrustedConnection(b, { peerName: async () => "paired", snapshot: () => ({ agents: [], repos: [], coordinator: null, questions: [] }),
     captureCoordinator: async () => { reading.resolve(); await b.closed(); return null; }, log() {}, setTimer: rig.clock.setTimer });
   rig.poller.start();
   try {

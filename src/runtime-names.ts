@@ -10,8 +10,27 @@ export const STATUS_TAG = "itsybitsy-status";
 export const AGY_HOOK_KEY = "itsybitsy";
 export const AGY_RULE_FILE = ".agents/rules/itsybitsy-agent.md";
 
+// Agents have no one to drive an interactive editor, so a git command that opens
+// one (vim by default) hangs the agent's shell. GIT_EDITOR=true is a no-op editor,
+// the value Claude Code already forces in its own Bash tool, so Codex agents get
+// the same behavior as Claude agents:
+// - a command that needs a new message fails (`git commit` without -m: "Aborting
+//   commit due to empty commit message"; `git tag -a`: "no tag message?"), so
+//   the agent passes -m/-F;
+// - a command that reuses one keeps it (`--amend`, `rebase --continue`,
+//   `merge --continue`), and git strips its `# Conflicts:` comment lines because
+//   an editor ran.
+// GIT_EDITOR outranks core.editor, VISUAL and EDITOR. GIT_SEQUENCE_EDITOR=false
+// makes `git rebase -i` fail instead of running the todo list unedited; Claude
+// Code does not set it, so it reaches Claude agents too. agy sets its own
+// GIT_EDITOR=false for the commands it runs, so agy agents see git's "Please
+// supply the message using either -m or -F option" on those commands instead.
+// VISUAL and EDITOR stay untouched: this is about git only.
+export const AGENT_GIT_EDITOR_ENV = ["GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=false"] as const;
+
 // tmux invokes start.sh and resume.sh by absolute path. Export only in that script's process tree.
-export const AGENT_LAUNCH_HEADER = '#!/bin/bash\nexport IB_AGENT_DIR="$(cd -- "${0%/*}" && pwd -P)"';
+export const AGENT_LAUNCH_HEADER = '#!/bin/bash\nexport IB_AGENT_DIR="$(cd -- "${0%/*}" && pwd -P)"\nexport ' +
+  AGENT_GIT_EDITOR_ENV.join(" ");
 
 export const runtimeDir = (repo: string): string => join(repo, RUNTIME_DIR_NAME);
 export const agentsDir = (repo: string): string => join(runtimeDir(repo), "agents");

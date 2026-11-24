@@ -3609,6 +3609,7 @@ describe("resumeAgent (native)", () => {
     expect(resumeScript).toContain("claude --resume");
     expect(resumeScript).toContain("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
     expect(resumeScript).toContain("--model opus");
+    expect(resumeScript).toContain("\nexport GIT_EDITOR=true GIT_SEQUENCE_EDITOR=false\n");
 
     // tmux new-session should have been called
     const newSessionCall = spawnCalls.find(
@@ -10795,7 +10796,9 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
     expect(tmuxNewSession).toBeDefined();
     expect(tmuxNewSession).toContain("-d");
     expect(tmuxNewSession!.join(" ")).not.toContain("IB_AGENT_DIR");
-    expect(await Bun.file(join(agentsDir, "test-tmux", "start.sh")).text()).toContain("export IB_AGENT_DIR=");
+    const startScript = await Bun.file(join(agentsDir, "test-tmux", "start.sh")).text();
+    expect(startScript).toContain("export IB_AGENT_DIR=");
+    expect(startScript).toContain("\nexport GIT_EDITOR=true GIT_SEQUENCE_EDITOR=false\n");
     expect(tmuxNewSession).toContain("-x");
     // Width comes from saved layout.json (or DEFAULT_TMUX_WIDTH if none)
     const xIndex = tmuxNewSession!.indexOf("-x");

@@ -155,6 +155,8 @@ Agents ask you questions with `ib ask`; `ib questions` lists what is pending and
 
 Run `ib watch` on both machines. For human remote sends, launch the dashboard or run `ib send` from a terminal outside tmux. Local text sends work inside tmux. Use `ib send <machine>/<agent> "message"` for a running agent, or `<machine>/<repo>/<agent>` to choose its registered repo. A bare ID or nickname searches your local repo first. If there’s no match there, it must identify one agent across local repos and connected peers. Use `<machine>/@system` for the peer’s system coordinator and `<machine>/@<repo>` for a registered repo’s coordinator.
 
+In `ib watch`, highlight a paired machine’s agent or its `@system` row to see its live, read-only screen. Press `;` to scroll back through up to 5,000 lines of history and `l` to return toward the latest output. Press `s` to message the selected agent or coordinator.
+
 Ordinary messages from a human shell or the dashboard carry the same user label as local sends. An agent can only send as itself and appears as `[sent by agent <machine>/<repo>/<id>]`. A successful send confirms that the receiver queued the message. Delivery to the recipient follows.
 
 Repeat `--attach <file>` to send several files to a local or remote recipient.

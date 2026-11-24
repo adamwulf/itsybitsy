@@ -9209,7 +9209,7 @@ const PEERS_OTHER = "0a".repeat(32);
 class FakePeerService implements PeersDialogService {
   cancelReceipt = mock((_id: string) => {});
   sendRemoteMessage = mock<PeersDialogService["sendRemoteMessage"]>(async (_id, header) => header.id);
-  fetchCoordinatorPane = mock(async (_peerId: string) => ({ state: "running", text: "peer capture" }));
+  fetchPane = mock(async (_peerId: string, _target: import("../peers/peer-link").PeerPaneTarget, _lines: number) => ({ state: "running", text: "peer capture" }));
   remoteStartDenial: string | null = null;
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
   state: PeerServiceView = {
@@ -10270,20 +10270,20 @@ describe("Unified peer repos in the Agents tree", () => {
       return () => timers.delete(tick);
     };
     const pending = Promise.withResolvers<{ state: string; text: string }>();
-    service.fetchCoordinatorPane.mockImplementationOnce(() => pending.promise);
+    service.fetchPane.mockImplementationOnce(() => pending.promise);
     try {
       selectByKey(dashboard, PEER_B + "/@system");
       dashboard.handleInput(key);
       expect(dashboard.dialog).not.toBeNull();
       for (let tick = 0; tick < 3; tick++) for (const poll of timers) poll();
       expect(timers.size).toBe(0);
-      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(1);
+      expect(service.fetchPane).toHaveBeenCalledTimes(1);
       pending.resolve({ state: "running", text: "late reply" });
       await Promise.resolve();
       expect((dashboard as any).remotePane.render(60, 3).join(" ")).not.toContain("late reply");
       dashboard.closeDialog();
       expect(timers.size).toBe(1);
-      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(2);
+      expect(service.fetchPane).toHaveBeenCalledTimes(2);
     } finally {
       running.mockRestore();
       dashboard.stopPolling();
@@ -10295,7 +10295,7 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
     const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
     const last = "peer-output-".repeat(8);
-    service.fetchCoordinatorPane.mockResolvedValue({ state: "running", text: [
+    service.fetchPane.mockResolvedValue({ state: "running", text: [
       ...Array.from({ length: (process.stdout.rows || 24) + 20 }, (_, i) => "line " + i), last,
     ].join("\n") });
     try {
@@ -10315,6 +10315,32 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("scrolling a remote agent requests older history on the next poll", async () => {
+    const { dashboard, service } = setup();
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    let poll: () => void = () => {};
+    (dashboard as any).remotePane.every = (_ms: number, tick: () => void) => { poll = tick; return () => {}; };
+    service.fetchPane.mockImplementation(async (_peer, _target, lines) => ({
+      state: "running", text: Array.from({ length: lines }, (_, i) => "history " + (lines - i)).join("\n"),
+    }));
+    try {
+      selectByKey(dashboard, WORKER_KEY);
+      const screen = () => stripAnsi(dashboard.render(180).join("\n"));
+      await waitFor(() => screen().includes("history 1"));
+      for (let i = 0; i < 80; i++) { dashboard.handleInput(";"); screen(); }
+      poll();
+      await Promise.resolve();
+      const lines = service.fetchPane.mock.calls.at(-1)![2];
+      expect(lines).toBeGreaterThan(210);
+      expect(screen()).toMatch(/history [2-9]\d\d/);
+      dashboard.handleInput("s");
+      expect(dashboard.focusManager.subFocus).toBe("input");
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
   test("a highlighted coordinator shows the startup denial, then the remote capture when permitted", async () => {
     const { dashboard, service } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
@@ -10323,11 +10349,11 @@ describe("Unified peer repos in the Agents tree", () => {
       service.remoteStartDenial = "Dashboard is inside tmux";
       selectByKey(dashboard, PEER_B + "/@system");
       expect(stripAnsi(dashboard.render(180).join("\n"))).toContain("Dashboard is inside tmux");
-      expect(service.fetchCoordinatorPane).not.toHaveBeenCalled();
+      expect(service.fetchPane).not.toHaveBeenCalled();
       service.remoteStartDenial = null;
       service.set({});
       await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("peer capture"));
-      expect(service.fetchCoordinatorPane.mock.calls).toEqual([[PEER_B]]);
+      expect(service.fetchPane.mock.calls).toEqual([[PEER_B, { op: "coordinator-pane" }, 200]]);
       dashboard.handleInput("s");
       expect(dashboard.focusManager.subFocus).toBe("input");
       dashboard.handleInput("hi");
@@ -10360,7 +10386,7 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.agentTree.visibleList.filter(row => row.kind === "remote-coordinator").map(row => row.peerName))
         .toEqual(["Renamed machine"]);
       expect(cancel).toHaveBeenCalledTimes(1);
-      expect(service.fetchCoordinatorPane).toHaveBeenCalledTimes(1);
+      expect(service.fetchPane).toHaveBeenCalledTimes(1);
     } finally {
       running.mockRestore();
       dashboard.stopPolling();
@@ -10757,39 +10783,50 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(items.some((item) => /Laptop|worker-abc|manager-def|itsybitsy|other-repo/.test(item))).toBe(false);
   });
 
-  test("a selected remote agent: center and right placeholders in every mode but TREE, and its fields in the info panel", () => {
-    const { dashboard } = setup();
-    selectByKey(dashboard, WORKER_KEY);
-    for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
-      dashboard.jumpToMode(mode);
-      const lines = dashboard.render(WIDTH);
-      expect(paneText(lines, 2)).toBe("Remote agent on Laptop B (output pane is read-only)");
-      // The right pane is narrow at this width: the placeholder wraps rather than being cut.
-      expect(paneText(lines, 1)).toBe(REMOTE_RIGHT_PANE_TEXT);
-      expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
-      expect(stripAnsi(lines[1]!)).toContain(` ${mode} `);
-    }
-    dashboard.infoPanel.displayHeight = 20;
-    const info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd()).filter((r) => r !== "");
-    expect(info).toEqual([
-      "Remote agent (read-only)",
-      "Machine: Laptop B · connected",
-      "Id: worker-abc",
-      "Full id: Laptop B/itsybitsy/worker-abc",
-      "Nickname: abc-nick",
-      "Repo: itsybitsy",
-      "Path: /remote/itsybitsy",
-      "State: running",
-      "Type: worker",
-      "Manager: manager-def",
-    ]);
+  test("a selected remote agent shows its capture in the center and its fields in the info panel", async () => {
+    const { dashboard, service } = setup();
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    try {
+      selectByKey(dashboard, WORKER_KEY);
+      await waitFor(() => paneText(dashboard.render(WIDTH), 2) === "peer capture");
+      expect(service.fetchPane.mock.calls.at(-1)).toEqual([PEER_B, { op: "agent-pane", repo: "itsybitsy", id: "worker-abc" }, 200]);
+      for (const mode of PANE_MODES.filter((m) => m !== "TREE")) {
+        dashboard.jumpToMode(mode);
+        const lines = dashboard.render(WIDTH);
+        expect(paneText(lines, 2)).toBe("peer capture");
+        // The right pane is narrow at this width: the placeholder wraps rather than being cut.
+        expect(paneText(lines, 1)).toBe(REMOTE_RIGHT_PANE_TEXT);
+        expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
+        expect(stripAnsi(lines[1]!)).toContain(` ${mode} `);
+      }
+      dashboard.infoPanel.displayHeight = 20;
+      const info = dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd()).filter((r) => r !== "");
+      expect(info).toEqual([
+        "Remote agent (read-only)",
+        "Machine: Laptop B · connected",
+        "Id: worker-abc",
+        "Full id: Laptop B/itsybitsy/worker-abc",
+        "Nickname: abc-nick",
+        "Repo: itsybitsy",
+        "Path: /remote/itsybitsy",
+        "State: running",
+        "Type: worker",
+        "Manager: manager-def",
+      ]);
 
-    // TREE mode draws the tree itself in the main area, so it stays on screen
-    // while j/k move through the sections.
-    dashboard.jumpToMode("TREE");
-    const tree = stripAnsi(dashboard.render(WIDTH).join("\n"));
-    expect(tree).toContain("abc-nick");
-    expect(tree).not.toContain(REMOTE_RIGHT_PANE_TEXT);
+      // Cycling to TREE is still available. Selecting the manager opens its own capture.
+      dashboard.jumpToMode("TREE");
+      const tree = stripAnsi(dashboard.render(WIDTH).join("\n"));
+      expect(tree).toContain("abc-nick");
+      expect(tree).not.toContain(REMOTE_RIGHT_PANE_TEXT);
+      dashboard.handleInput("k");
+      expect(dashboard.rightPane.mode).not.toBe("TREE");
+      await waitFor(() => paneText(dashboard.render(WIDTH), 2) === "peer capture");
+      expect(service.fetchPane.mock.calls.at(-1)?.[1]).toEqual({ op: "agent-pane", repo: "itsybitsy", id: "manager-def" });
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
   });
 
   test("a remote-only header keeps the repo placeholder, and a stale agent shows its last contact", () => {
@@ -11501,10 +11538,10 @@ describe("Unified peer repos in the Agents tree", () => {
 
     selectByKey(dashboard, WORKER_KEY);
     const text = footer();
-    const shown = ["j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
+    const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
     expect(text).toContain("s: send");
-    for (const hint of ["m: merge", "x: retire", "a: new agent", ";/l: scroll", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
+    for (const hint of ["m: merge", "x: retire", "a: new agent", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
     // Every key the remote footer names is one the guard allows.

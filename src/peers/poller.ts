@@ -41,8 +41,9 @@ import {
   cleanRemoteText,
   describePeerClose,
   requestAgents,
-  requestCoordinatorPane,
-  type CoordinatorPane,
+  requestPane,
+  type PeerPane,
+  type PeerPaneTarget,
   type RemoteAgent,
   type RemoteRepo,
   type PeerSnapshot,
@@ -183,12 +184,12 @@ export class PeerPoller {
     return link?.connected && link.conn?.closeInfo() === null ? link.conn : null;
   }
 
-  async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
+  async fetchPane(peerId: string, target: PeerPaneTarget, lines: number): Promise<PeerPane> {
     const conn = this.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
-    if (this.paneReads.has(conn)) throw new Error("Previous coordinator pane read is still pending");
+    if (this.paneReads.has(conn)) throw new Error("Previous pane read is still pending");
     this.paneReads.add(conn);
-    try { return await requestCoordinatorPane(conn, undefined, this.deps.setTimer); }
+    try { return await requestPane(conn, target, lines, this.deps.setTimer); }
     finally { this.paneReads.delete(conn); }
   }
 

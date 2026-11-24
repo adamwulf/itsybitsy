@@ -592,7 +592,7 @@ test("a coordinator reply during grace preserves a remote start on the same link
   try {
     await answerAgents();
     await waitFor(() => rig.state(P1)?.connected === true);
-    const pending = rig.poller.fetchCoordinatorPane(P1);
+    const pending = rig.poller.fetchPane(P1, { op: "coordinator-pane" }, 200);
     const pane = await accept("coordinator-pane");
     const start = requestNewAgent(a, { repo: "app", type: "worker", prompt: "hello" }, rig.clock.setTimer);
     const spawn = await accept("new-agent");
@@ -622,9 +622,9 @@ test("a pane slot stays occupied until its pending reply exhausts grace", async 
   rig.poller.start();
   try {
     await waitFor(() => rig.state(P1)?.connected === true);
-    const pane = rig.poller.fetchCoordinatorPane(P1).catch(err => err);
+    const pane = rig.poller.fetchPane(P1, { op: "coordinator-pane" }, 200).catch(err => err);
     await reading.promise; rig.clock.advance(PEER_REQUEST_TIMEOUT_MS); await Bun.sleep(0);
-    await expect(rig.poller.fetchCoordinatorPane(P1)).rejects.toThrow("still pending");
+    await expect(rig.poller.fetchPane(P1, { op: "agent-pane", repo: "app", id: "worker" }, 200)).rejects.toThrow("still pending");
     rig.clock.advance(749); expect(a.closeInfo()).toBeNull(); rig.clock.advance(1);
     expect(String(await pane)).toContain("request timed out");
     expect(rig.poller["paneReads"].has(a)).toBe(false); expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });

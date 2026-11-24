@@ -350,6 +350,7 @@ Do this on the same build on both laptops, after `agent/iroh-peering` is on main
 15. **Read-only delivery.** Ask B’s receiving agent to read one of the files from step 11 and then edit it in place with its edit tool. The read should return A’s original contents and the edit should be refused. Read the same path again and confirm the original text.
 16. **Sender identity.** Have A’s agent run `ib send --from <other-agent> B/<agent> "identity probe"`. A should report `agents can only act as themselves; drop --from`, and B should receive nothing. From a human terminal outside tmux in that same agent checkout, run `ib send B/<agent> "human probe"`. B should see the user label from step 10.
 17. **Retention.** After several more sends from A, reopen B’s saved paths from step 11. Both files should still contain A’s originals. ib never deletes delivered files from `/tmp`.
+18. **Remote agent screen.** On A, highlight a running agent on B with more than 200 lines of output. Compare the latest lines with B’s local view. Use `;` to reach output older than 200 lines, wait for a refresh, then use `l` to return toward the latest output. Switch to another agent and verify that its screen replaces the first one.
 
 ## Cross-cutting checklist
 

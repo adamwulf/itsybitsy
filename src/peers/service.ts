@@ -92,7 +92,7 @@ import { acceptRemoteAgent, type RemoteSpawnDeps } from "./new-agent";
 import { newAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
-import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type CoordinatorPane, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
+import { PEER_ALPN, requestNewAgent, serveTrustedConnection, type PeerPane, type PeerPaneTarget, type PeerResponderDeps, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
 import { captureMarkedCoordinatorPane } from "../tmux-poller";
 import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator";
 import { stripAnsi } from "../parse-state";
@@ -142,7 +142,8 @@ export interface PeerServiceDeps {
   pollOutbox?: typeof pollPeerOutbox;
   recoverTransfers?(): Promise<void>;
   receiveMessage?: ReturnType<typeof createMessageReceiver>;
-  captureCoordinator?(): Promise<CoordinatorPane | null>;
+  captureCoordinator?: PeerResponderDeps["captureCoordinator"];
+  captureAgent?: PeerResponderDeps["captureAgent"];
   remoteStartDenial: string | null | Promise<string | null>;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[], generation: string): void;
@@ -180,8 +181,8 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     },
     receiveMessage: createMessageReceiver(log, notice),
     remoteStartDenial,
-    captureCoordinator: async () => {
-      const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log });
+    captureCoordinator: async lines => {
+      const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log, lines });
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice },
@@ -699,10 +700,10 @@ export class PeerService {
     return null;
   }
 
-  async fetchCoordinatorPane(peerId: string): Promise<CoordinatorPane> {
+  async fetchPane(peerId: string, target: PeerPaneTarget, lines: number): Promise<PeerPane> {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
     if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
-    return this.poller.fetchCoordinatorPane(peerId);
+    return this.poller.fetchPane(peerId, target, lines);
   }
 
   async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
@@ -1030,6 +1031,7 @@ export class PeerService {
           receiveMessage: this.deps.receiveMessage && ((...args) => this.receiveTracked(...args)),
           snapshot: this.deps.snapshot,
           captureCoordinator: this.deps.captureCoordinator,
+          captureAgent: this.deps.captureAgent,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           log: this.deps.log,
         });

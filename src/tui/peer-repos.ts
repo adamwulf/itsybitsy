@@ -81,6 +81,19 @@ export function collectPeerRepos(links: readonly PeerLinkState[]): Map<string, P
     || a.header.repoRegistryName.localeCompare(b.header.repoRegistryName)));
 }
 
+/** Favorites and their descendants, using the same per-machine tree as the Agents tab. */
+export function favoriteRemoteAgents(repo: PeerRepo, favorites: ReadonlySet<string>): Set<AgentRow> {
+  const shown = new Set<AgentRow>();
+  for (const { row, parent } of repo.nodes) {
+    const { manager, repoRegistryName } = row.remote;
+    if (favorites.has(peerEntryKey(row)) || (parent >= 0 && shown.has(repo.nodes[parent]!.row))
+      || (manager !== null && favorites.has(fullyQualifiedAgentId(row.peerName, repoRegistryName, manager)))) {
+      shown.add(row);
+    }
+  }
+  return shown;
+}
+
 /** Resolve hidden parents in preorder, then draw connectors across all peers. */
 export function visibleRemoteAgents(repo: PeerRepo, keep: (row: AgentRow) => boolean): AgentRow[] {
   const nearest: number[] = [];

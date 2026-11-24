@@ -123,7 +123,7 @@ import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { captureAgentPane } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
-import { remoteMessageTarget, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
+import { peerEntryKey, remoteDisplayName, remoteMessageTarget, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 
 // Re-export for test compatibility
 export { AgentTreeComponent, formatAgentRow } from "./agent-tree";
@@ -530,8 +530,9 @@ class StatusBarComponent implements Component {
     let row1Left: string;
     let row2Left: string;
     if (this.remoteSelected) {
+      const markHint = this.remoteRepoSelected ? "    .: pin" : this.remoteAgentSelected ? "    .: favorite" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
-      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "o: diff    m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${RESET}`;
+      row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "o: diff    m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${markHint}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
       row1Left = `${DIM}j/k: select    J/K: repo    ;/l: scroll    p/n: pane    ${qLabel}${errBadge}${RESET}`;
@@ -760,6 +761,7 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
  * The footer's remote hints (StatusBarComponent.remoteSelected) list these keys.
  */
 export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
+  if (data === ".") return row?.kind === "remote-agent" || row?.kind === "remote-repo-header" || row?.kind === "remote-coordinator";
   if (data === "o" || data === "m" || data === "x" || data === "R") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
   switch (data) {
     case "j": case "k": case "J": case "K":
@@ -1326,6 +1328,9 @@ export class DashboardComponent implements Component {
     if (layout.pinnedRepoPaths !== undefined) {
       this.agentTree.pinnedRepoPaths = new Set(layout.pinnedRepoPaths);
     }
+    if (layout.pinnedRemoteRepoNames !== undefined) {
+      this.agentTree.pinnedRemoteRepoNames = new Set(layout.pinnedRemoteRepoNames.map(name => name.toLowerCase()));
+    }
     if (layout.favoriteAgentIds !== undefined) {
       this.agentTree.favoriteAgentIds = new Set(layout.favoriteAgentIds);
     }
@@ -1378,6 +1383,7 @@ export class DashboardComponent implements Component {
       heightOffsets: { ...this.sidebar.heightOffsets },
       repoCoordinatorHeightOffset: this.rightPane.repoCoordinatorHeightOffset,
       pinnedRepoPaths: Array.from(this.agentTree.pinnedRepoPaths),
+      pinnedRemoteRepoNames: Array.from(this.agentTree.pinnedRemoteRepoNames),
       favoriteAgentIds: Array.from(this.agentTree.favoriteAgentIds),
     });
   }
@@ -3682,16 +3688,20 @@ export class DashboardComponent implements Component {
     // EFFECTIVE selection (`activeSelectionSource`), so a team member selected
     // in the Teams tree is favorited too.
     else if (data === ".") {
-      const sel = this.activeSelectionSource === "teams"
+      const selection = this.activeSelectionSource === "teams"
         ? this.teamsTree.selection
         : this.agentTree.selection;
-      if (sel?.kind === "agent") {
-        const nowFavorite = this.agentTree.toggleFavorite(this.agentTree.agentKey(sel.agent));
-        const name = agentDisplayName(sel.agent);
+      const sel = selection?.kind === "remote" ? selection.entry : selection;
+      if (sel?.kind === "agent" || sel?.kind === "remote-agent") {
+        const key = sel.kind === "agent" ? this.agentTree.agentKey(sel.agent) : peerEntryKey(sel);
+        const name = sel.kind === "agent" ? agentDisplayName(sel.agent) : remoteDisplayName(sel.remote);
+        const nowFavorite = this.agentTree.toggleFavorite(key);
         this.setNotice(nowFavorite ? `Favorited ${name}` : `Unfavorited ${name}`, "info");
         this.favoritesChanged();
-      } else if (sel?.kind === "repo-header") {
-        const nowPinned = this.agentTree.togglePinnedRepo(sel.repoPath);
+      } else if (sel?.kind === "repo-header" || sel?.kind === "remote-repo-header") {
+        const nowPinned = sel.kind === "repo-header"
+          ? this.agentTree.togglePinnedRepo(sel.repoPath)
+          : this.agentTree.togglePinnedRemoteRepo(sel.repoRegistryName);
         this.setNotice(nowPinned ? `Pinned ${sel.repoName}` : `Unpinned ${sel.repoName}`, "info");
         // Persist the pin change so it survives an `ib watch` restart.
         this.persistLayout();

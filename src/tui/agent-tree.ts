@@ -9,7 +9,7 @@ import type { RepoHealthReport } from "../health-check";
 import type { Selection } from "./selection";
 import { getStateColors } from "./color-scheme";
 import { RESET, BOLD, DIM, ITALIC, REVERSE, RED, UNDERLINE, YELLOW } from "./colors";
-import { collectPeerRepos, peerEntryKey, remoteDisplayName, truncatePeerField, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
+import { collectPeerRepos, favoriteRemoteAgents, peerEntryKey, remoteDisplayName, truncatePeerField, visibleRemoteAgents, type PeerRepo } from "./peer-repos";
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { localAgentKey, repoRowKey } from "./row-keys";
@@ -242,8 +242,9 @@ export function formatRemoteRepoRow(
   entry: Extract<RemoteEntry, { kind: "remote-repo-header" }>,
   selected: boolean,
   width: number,
+  pinned = false,
 ): string {
-  const triangle = entry.agentCount ? "▾" : "▸";
+  const triangle = pinned ? "⚲" : entry.agentCount ? "▾" : "▸";
   const name = truncatePeerField(entry.repoName, width - 2);
   return highlightRow(truncateToWidth(`${BOLD}${triangle} ${name}${RESET}`, width, ""), selected, width);
 }
@@ -262,8 +263,11 @@ export function formatRemoteAgentRow(
   width: number,
   nameColWidth: number,
   stateColWidth: number,
+  isFavorite = false,
 ): string {
-  const prefix = entry.connector;
+  const offline = entry.linkStatus !== "connected";
+  const style = offline ? ITALIC + DIM : ITALIC;
+  const prefix = entry.connector + favoriteStar(isFavorite, selected).replace(RESET, RESET + style);
   const name = truncatePeerField(remoteDisplayName(entry.remote), Math.max(1, nameColWidth - visibleWidth(prefix)));
   const namePad = " ".repeat(Math.max(0, nameColWidth - visibleWidth(prefix) - visibleWidth(name)));
   const fullState = displayState(entry.remote.state);
@@ -272,9 +276,8 @@ export function formatRemoteAgentRow(
   // The styling ends at the state word, before its padding, as on a local row:
   // under a selected row's REVERSE the state color becomes the background, so
   // a color left on through the padding would paint past the word.
-  const line = entry.linkStatus !== "connected"
-    ? `${ITALIC}${DIM}${prefix}${name}${namePad}  ${state}${RESET}${statePad}`
-    : `${ITALIC}${prefix}${name}${namePad}  ${remoteStateColor(fullState)}${state}${RESET}${statePad}`;
+  const stateColor = offline ? "" : remoteStateColor(fullState);
+  const line = `${style}${prefix}${name}${namePad}  ${stateColor}${state}${RESET}${statePad}`;
   return highlightRow(truncateToWidth(line, width, ""), selected, width);
 }
 
@@ -498,6 +501,8 @@ export class AgentTreeComponent implements Component {
    * it in persistLayout() after each toggle. (repoFilter itself stays
    * session-only.) */
   pinnedRepoPaths: Set<string> = new Set();
+  /** Remote-only pins follow the case-insensitive registry name across peers. */
+  pinnedRemoteRepoNames: Set<string> = new Set();
 
   /**
    * This machine's name (src/machine-name.ts): the first segment of every
@@ -636,8 +641,13 @@ export class AgentTreeComponent implements Component {
     if (!this.peerRepos.size && !this.peerCoordinators.length) return local;
     const remaining = new Map(this.peerRepos);
     const rows: FlatEntry[] = [];
-    const agentsFor = (repo: PeerRepo) => visibleRemoteAgents(repo, (row) => this.isSelectedRow(row)
-      || (!this.favoritesOnly && (this.repoFilter !== "running-only" || isVisibleUnderRunningFilter(row.remote.state))));
+    const agentsFor = (repo: PeerRepo) => {
+      const favorites = this.favoritesOnly ? favoriteRemoteAgents(repo, this.favoriteAgentIds) : null;
+      return visibleRemoteAgents(repo, row => this.isSelectedRow(row) || (
+        (favorites === null || favorites.has(row))
+        && (this.repoFilter !== "running-only" || isVisibleUnderRunningFilter(row.remote.state))
+      ));
+    };
     for (let i = 0; i < local.length; i++) {
       const header = local[i]!;
       const repo = header.kind === "repo-header" ? remaining.get(repoRowKey(header.repoRegistryName)) : undefined;
@@ -676,6 +686,8 @@ export class AgentTreeComponent implements Component {
     if (this.repoFilter !== "all") {
       inputs.push(this.pinnedRepoPaths.size);
       for (const path of this.pinnedRepoPaths) inputs.push(path);
+      inputs.push(this.pinnedRemoteRepoNames.size);
+      for (const name of this.pinnedRemoteRepoNames) inputs.push(name);
     }
     if (this.favoritesOnly) {
       for (const id of this.favoriteAgentIds) inputs.push(id);
@@ -802,7 +814,7 @@ export class AgentTreeComponent implements Component {
       if (f.kind !== "repo-header" && f.kind !== "remote-repo-header") return true;
       const next = agentsVisible[i + 1];
       if (next?.kind === "agent" || next?.kind === "remote-agent" || this.isSelectedRow(f)) return true;
-      if (f.kind === "remote-repo-header") return false;
+      if (f.kind === "remote-repo-header") return this.pinnedRemoteRepoNames.has(f.repoRegistryName.toLowerCase());
       const passes = this.repoFilter === "non-empty" ? f.hasAgents : f.hasNonStoppedAgents;
       return passes || this.pinnedRepoPaths.has(f.repoPath) || f.repoPath === sticky;
     });
@@ -908,9 +920,17 @@ export class AgentTreeComponent implements Component {
 
   /** Toggle whether the repo at repoPath is pinned (always-visible under V). */
   togglePinnedRepo(repoPath: string): boolean {
-    const nowPinned = !this.pinnedRepoPaths.has(repoPath);
-    if (nowPinned) this.pinnedRepoPaths.add(repoPath);
-    else this.pinnedRepoPaths.delete(repoPath);
+    return this.togglePin(this.pinnedRepoPaths, repoPath);
+  }
+
+  togglePinnedRemoteRepo(registryName: string): boolean {
+    return this.togglePin(this.pinnedRemoteRepoNames, registryName.toLowerCase());
+  }
+
+  private togglePin(pins: Set<string>, key: string): boolean {
+    const nowPinned = !pins.has(key);
+    if (nowPinned) pins.add(key);
+    else pins.delete(key);
     // Selection indices are computed against visibleList, which just changed
     // for this repo; re-resolve so selectedIndex stays consistent.
     this.resyncAfterFilterChange();
@@ -1482,7 +1502,8 @@ export class AgentTreeComponent implements Component {
       } else if (item.kind === "remote-coordinator") {
         maxNameWidth = Math.max(maxNameWidth, visibleWidth(PEER_BRANCH_LAST + item.peerName));
       } else if (item.kind === "remote-agent") {
-        maxNameWidth = Math.max(maxNameWidth, visibleWidth(remoteIndent(i) + item.connector + remoteDisplayName(item.remote)));
+        const star = favoriteStar(this.favoriteAgentIds.has(peerEntryKey(item)));
+        maxNameWidth = Math.max(maxNameWidth, visibleWidth(remoteIndent(i) + item.connector + star + remoteDisplayName(item.remote)));
       }
     }
     const stateColWidth = computeStateColWidth(visible);
@@ -1500,7 +1521,8 @@ export class AgentTreeComponent implements Component {
     for (let i = start; i < end; i++) {
       const item = visible[i]!;
       if (item.kind === "remote-repo-header") {
-        lines.push(formatRemoteRepoRow(item, selectionActive && i === this.selectedIndex, width));
+        lines.push(formatRemoteRepoRow(item, selectionActive && i === this.selectedIndex, width,
+          this.pinnedRemoteRepoNames.has(item.repoRegistryName.toLowerCase())));
       } else if (item.kind === "remote-coordinator") {
         const branch = visible[i + 1]?.kind === "remote-coordinator" ? "├── " : PEER_BRANCH_LAST;
         lines.push(formatPeerCoordinatorRow(
@@ -1509,7 +1531,7 @@ export class AgentTreeComponent implements Component {
       } else if (item.kind === "remote-agent") {
         lines.push(formatRemoteAgentRow(
           { ...item, connector: remoteIndent(i) + item.connector }, selectionActive && i === this.selectedIndex, width,
-          remoteNameColWidth, stateColWidth,
+          remoteNameColWidth, stateColWidth, this.favoriteAgentIds.has(peerEntryKey(item)),
         ));
       } else if (item.kind === "system-coordinator") {
         lines.push(formatCoordinatorRow(
@@ -1570,7 +1592,7 @@ export class AgentTreeComponent implements Component {
    * extra row under them.
    */
   private hasFavoritesHintRow(visible: FlatEntry[]): boolean {
-    return this.favoritesOnly && visible.length > 0 && !visible.some((f) => f.kind === "agent");
+    return this.favoritesOnly && visible.length > 0 && !visible.some((f) => f.kind === "agent" || f.kind === "remote-agent");
   }
 
   /**
@@ -1595,6 +1617,7 @@ export class AgentTreeComponent implements Component {
     const hasFavoriteRow = this._flatList.some(
       (f) => f.kind === "agent" && !f.agent.archived && this.hasFavoriteInChain(f.agent, byKey),
     );
-    return hasFavoriteRow ? "No favorites match the V filter" : "No favorites — press . on an agent";
+    const hasPeerFavorite = [...this.peerRepos.values()].some(repo => favoriteRemoteAgents(repo, this.favoriteAgentIds).size > 0);
+    return hasFavoriteRow || hasPeerFavorite ? "No favorites match the V filter" : "No favorites — press . on an agent";
   }
 }

@@ -10469,7 +10469,7 @@ describe("Unified peer repos in the Agents tree", () => {
     service.set({ peers: [c!, b!].map(link => ({ ...link, pairedAt: "x" })), links: [c!, b!] });
     expect(keyOf(dashboard)).toBe(PEER_C + "/@system");
     expect(stripAnsi(dashboard.infoPanel.render(60).join("\n"))).toContain("Machine: Laptop C · offline");
-    const permittedAscii = new Set([..."jkJK123V@?/I;ls", "\t", "\x03"]);
+    const permittedAscii = new Set([..."jkJK123V@?/I;ls.", "\t", "\x03"]);
     const ascii = Array.from({ length: 128 }, (_, i) => String.fromCharCode(i));
     for (const key of permittedAscii) expect(dashboard.refuseOnRemoteRow(key)).toBe(false);
     const refused = new Set([
@@ -10583,6 +10583,7 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(newAgent).toHaveBeenCalledWith(dashboard);
       dashboard.handleInput(".");
       expect(dashboard.agentTree.pinnedRepoPaths.has(header.repoPath)).toBe(true);
+      expect(dashboard.agentTree.pinnedRemoteRepoNames.size).toBe(0);
     } finally {
       newAgent.mockRestore();
     }
@@ -11492,7 +11493,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["a", ".", "t", "!", "S", "O"]) {
+      for (const key of ["a", "t", "!", "S", "O"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -11755,7 +11756,8 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => k !== "a" && !isRemoteAllowedKey(k))) {
+      const header = dashboard.agentTree.selectedRemote!;
+      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => k !== "a" && !isRemoteAllowedKey(k, header))) {
         resetNotice(dashboard);
         dashboard.handleInput(k);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -11827,7 +11829,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "V: filter", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
     for (const hint of shown) expect(text).toContain(hint);
     expect(text).toContain("s: send");
-    for (const hint of ["m: merge", "x: retire", "R: resume"]) expect(text).toContain(hint);
+    for (const hint of [".: favorite", "o: diff", "m: merge", "x: retire", "R: resume"]) expect(text).toContain(hint);
     for (const hint of ["a: new agent", "q: questions", "h: setup", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
@@ -11836,6 +11838,8 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(isRemoteAllowedKey(key)).toBe(true);
     }
 
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    expect(footer()).toContain(".: pin");
     for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
     expect(footer()).toContain("s: send");
   });
@@ -11972,7 +11976,98 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
-  test("the Favorites tab shows no peer rows, except the selected one with its headers", () => {
+  test("remote favorites toggle locally, dim when offline, and survive a missing snapshot row", async () => {
+    const { dashboard, service, local } = setup();
+    const tree = dashboard.agentTree;
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Favorited abc-nick");
+    tree.selectAgent(local);
+    dashboard.syncSelectedAgent();
+    dashboard.handleInput("3");
+    const rows = () => treeRows(dashboard);
+    const favorite = () => rows().find(row => row.includes("abc-nick"));
+    expect(rows().map(stripAnsi)).toContain("▾ itsybitsy");
+    expect(favorite()).toContain(YELLOW + "★" + RESET + ITALIC + " abc-nick");
+    expect(rows().join("")).not.toContain("manager-def");
+    expect(rows().join("")).not.toContain("No favorites");
+    const peer = links()[0]!;
+    service.set({ links: [{ ...peer, connected: false, connectedAt: null, lastError: "offline" }] });
+    expect(favorite()).toContain(ITALIC + DIM + " abc-nick");
+    service.set({ links: [{ ...peer, agents: [] }] });
+    expect(favorite()).toBeUndefined();
+    await flushPendingSave();
+    expect((await loadLayout())?.favoriteAgentIds).toEqual([WORKER_KEY]);
+    service.set({ links: [peer] });
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Unfavorited abc-nick");
+    expect(tree.favoriteAgentIds.size).toBe(0);
+    dashboard.handleInput("k");
+    expect(favorite()).toBeUndefined();
+    expect(service.calls).toEqual([]);
+  });
+
+  test("favoriting a remote manager shows its descendants under their shared local header", () => {
+    const { dashboard, local } = setup();
+    dashboard.setRepos([{ name: "ItsyBitsy", nickname: "Local label", path: local.repoPath }]);
+    selectByKey(dashboard, agentKey(PEER_B, "itsybitsy", "manager-def"));
+    dashboard.handleInput(".");
+    dashboard.agentTree.selectByRepoPath(local.repoPath);
+    dashboard.syncSelectedAgent();
+    dashboard.handleInput("3");
+    const rows = treeRows(dashboard).map(row => stripAnsi(row).trimEnd());
+    expect(rows).toEqual(["▾ Local label", expect.stringContaining("└── ★ manager-def"), expect.stringContaining("    └── abc-nick")]);
+  });
+
+  test("a remote repo pin follows its registry name across peers under V", async () => {
+    const { dashboard, service, local } = setup();
+    const tree = dashboard.agentTree;
+    const [first, second] = links();
+    service.set({ links: [{ ...first!, repos: repos("App"), agents: [] }] });
+    selectByKey(dashboard, repoKey("App"));
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Pinned App");
+    tree.selectAgent(local);
+    dashboard.syncSelectedAgent();
+    await flushPendingSave();
+    const saved = await loadLayout();
+    expect(saved?.pinnedRemoteRepoNames).toEqual(["app"]);
+    expect(saved?.pinnedRepoPaths).toEqual([]);
+    expect(saved?.favoriteAgentIds).toEqual([]);
+    const restored = makeDashboard();
+    restored.applyLayout(saved!);
+    expect([...restored.agentTree.pinnedRemoteRepoNames]).toEqual(["app"]);
+    service.set({ links: [{ ...second!, repos: [{ registryName: "APP", displayName: "Renamed" }], agents: [] }] });
+    for (const filter of ["non-empty", "running-only"] as const) {
+      tree.setRepoFilter(filter);
+      expect(treeRows(dashboard).map(stripAnsi)).toContain("⚲ Renamed");
+    }
+    selectByKey(dashboard, repoKey("APP"));
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Unpinned Renamed");
+    tree.selectAgent(local);
+    expect(treeRows(dashboard).join("")).not.toContain("Renamed");
+    expect(tree.pinnedRemoteRepoNames.size).toBe(0);
+    expect(service.calls).toEqual([]);
+  });
+
+  test("dot on either system coordinator gives the same informational notice", () => {
+    const { dashboard } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    dashboard.agentTree.selectSystemCoordinator();
+    dashboard.syncSelectedAgent();
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Select an agent or repo header");
+    selectByKey(dashboard, PEER_B + "/@system");
+    resetNotice(dashboard);
+    dashboard.handleInput(".");
+    expect(dashboard.notice).toBe("Select an agent or repo header");
+    expect(dashboard.agentTree.favoriteAgentIds.size).toBe(0);
+    expect(dashboard.agentTree.pinnedRemoteRepoNames.size).toBe(0);
+  });
+
+  test("without remote favorites, Favorites only keeps the selected peer row and its header", () => {
     const { dashboard } = setup();
     dashboard.handleInput("3");
     expect(treeRows(dashboard).map(stripAnsi).some((r) => r.includes("Laptop"))).toBe(false);

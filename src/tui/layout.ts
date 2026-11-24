@@ -35,6 +35,8 @@ export interface LayoutState {
    * the layout (see loadLayout).
    */
   pinnedRepoPaths?: string[];
+  /** Lowercased registry names of remote-only repo headers pinned on this machine. */
+  pinnedRemoteRepoNames?: string[];
   /**
    * Fully qualified ids (`<machine>/<repo>/<agent>`, SPEC §17.1) of the agents
    * the user has favorited via '.' in the dashboard tree, plus agents made
@@ -107,14 +109,12 @@ export async function loadLayout(): Promise<LayoutState | null> {
       },
       repoCoordinatorHeightOffset: Math.round(repoCoordOffset),
     };
-    // Optional: pinnedRepoPaths (added later). Accept ONLY a string[]; a
-    // missing or malformed value is silently dropped — it must NOT reject the
-    // rest of the (valid) layout.
-    if (
-      Array.isArray(data.pinnedRepoPaths) &&
-      data.pinnedRepoPaths.every((p: unknown) => typeof p === "string")
-    ) {
-      result.pinnedRepoPaths = data.pinnedRepoPaths;
+    // Each pin list is optional. A malformed list drops only that field.
+    for (const field of ["pinnedRepoPaths", "pinnedRemoteRepoNames"] as const) {
+      const pins = data[field];
+      if (Array.isArray(pins) && pins.every((pin: unknown) => typeof pin === "string")) {
+        result[field] = pins;
+      }
     }
     // Optional: favoriteAgentIds. A missing or non-array value is dropped like
     // pinnedRepoPaths; in an array, only the fully qualified ids are kept, so

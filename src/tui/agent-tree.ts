@@ -13,7 +13,7 @@ import { collectPeerRepos, peerEntryKey, remoteDisplayName, truncatePeerField, v
 import { repoDisplayName, type RepoEntry } from "../registry";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { localAgentKey, repoRowKey } from "./row-keys";
-import { peerLinkStateText } from "./peers-dialog";
+import { PEER_LINK_WORD_WIDTH, peerLinkStateText } from "./peers-dialog";
 import { FALLBACK_MACHINE_NAME } from "../machine-name";
 
 export const MAX_TREE_HEIGHT = 7;
@@ -60,8 +60,9 @@ export function displayState(state: string): string {
 
 /**
  * Compute state column width from the rows being displayed. A peer
- * coordinator puts its link word in this column, counted as its widest
- * (`connecting`) so the tree does not shift when a link connects or drops;
+ * coordinator puts its link word in this column, counted as the widest link
+ * word (PEER_LINK_WORD_WIDTH) so the tree does not shift when a link
+ * connects or drops;
  * a remote agent its state, capped at MAX_REMOTE_STATE_COL_WIDTH because
  * that is the other install's text.
  */
@@ -73,7 +74,7 @@ export function computeStateColWidth(agents: FlatEntry[]): number {
     } else if (f.kind === "system-coordinator") {
       maxLen = Math.max(maxLen, displayState(f.state).length);
     } else if (f.kind === "remote-coordinator") {
-      maxLen = Math.max(maxLen, "connecting".length);
+      maxLen = Math.max(maxLen, PEER_LINK_WORD_WIDTH);
     } else if (f.kind === "remote-agent") {
       maxLen = Math.max(maxLen, Math.min(MAX_REMOTE_STATE_COL_WIDTH, visibleWidth(displayState(f.remote.state))));
     }

@@ -196,6 +196,9 @@ function retrySeconds(retryAt: number, now: number): number {
 
 const linkColors: Record<PeerLinkStatus, string> = { connected: GREEN, connecting: YELLOW, offline: RED };
 
+/** The width of the longest link status word, so a column sized for it holds any status. */
+export const PEER_LINK_WORD_WIDTH = Math.max(...Object.keys(linkColors).map((word) => word.length));
+
 /** The same colored word appears in the Peers tab and the remote agent's Machine line. */
 export function peerLinkStateText(status: PeerLinkStatus): string {
   return `${linkColors[status]}${status}${RESET}`;
@@ -219,7 +222,7 @@ function peerListLines(view: PeerServiceView, innerWidth: number, available: num
   if (view.peers.length === 0) return [`${DIM}  none yet${RESET}`].slice(0, available);
   const listed = view.peers.slice(0, MAX_LISTED_PEERS);
   // Reserve the indent, both gaps, the short id and the longest status word.
-  const availableNameWidth = innerWidth - 6 - SHORT_ID_LENGTH - "connecting".length;
+  const availableNameWidth = innerWidth - 6 - SHORT_ID_LENGTH - PEER_LINK_WORD_WIDTH;
   const nameWidth = Math.min(availableNameWidth, Math.max(...listed.map(p => visibleWidth(p.name))));
   const links = new Map(view.links.map((link) => [link.id, link]));
   const groups = listed.map(peer => {

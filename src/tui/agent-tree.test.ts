@@ -14,6 +14,7 @@ import { keyOf, selectById } from "./test-tree-keys";
 import { localAgentKey } from "./row-keys";
 import { peerEntryKey } from "./peer-repos";
 import { stripAnsi } from "../parse-state";
+import { PEER_LINK_WORD_WIDTH } from "./peers-dialog";
 
 function makeAgent(id: string, state: string = "running", overrides: Partial<Agent> = {}): Agent {
   return {
@@ -1575,10 +1576,11 @@ describe("agent-tree helpers", () => {
     expect(computeStateColWidth(flat)).toBeGreaterThanOrEqual(8);
   });
 
-  test("computeStateColWidth sizes a peer row for 'connecting' whatever its link status, so the tree does not shift", () => {
+  test("computeStateColWidth sizes a peer row for the longest link word whatever its link status, so the tree does not shift", () => {
     for (const linkStatus of ["connecting", "connected", "offline"] as const) {
+      expect(PEER_LINK_WORD_WIDTH).toBeGreaterThanOrEqual(linkStatus.length);
       const peer: FlatEntry = { kind: "remote-coordinator", peerId: "a1".repeat(32), peerName: "Laptop", state: null, linkStatus, connectedAt: null, lastOkAt: null };
-      expect(computeStateColWidth([...makeFlat([makeAgent("a", "running")]), peer])).toBe("connecting".length);
+      expect(computeStateColWidth([...makeFlat([makeAgent("a", "running")]), peer])).toBe(PEER_LINK_WORD_WIDTH);
     }
   });
 

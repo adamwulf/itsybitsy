@@ -10057,7 +10057,7 @@ describe("Unified peer repos in the Agents tree", () => {
   });
 
   function remote(id: string, repoName: string, overrides: Partial<RemoteAgent> = {}): RemoteAgent {
-    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, ...overrides };
+    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, prompt: "", ...overrides };
   }
 
   /** Laptop B connected; Laptop C unreachable, offline; Laptop D never answered. */
@@ -10068,7 +10068,7 @@ describe("Unified peer repos in the Agents tree", () => {
         id: PEER_B, name: "Laptop B", connected: true, connectedAt: now - 300_000, lastOkAt: now, coordinator: null, lastError: null,
         repos: repos("itsybitsy", "other-repo"),
         agents: [
-          remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
+          remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick", prompt: "Fix the parser\nthen add a test" }),
           remote("manager-def", "itsybitsy", { state: "waiting", agentType: "manager" }),
           remote("agent-1", "other-repo", { state: "complete" }),
         ],
@@ -10866,7 +10866,8 @@ describe("Unified peer repos in the Agents tree", () => {
         // capture, as on a local agent's tmux pane, and never spans the right pane.
         expect(paneText(lines, 2)).toMatch(/^peer capture ─+ ❯ ─+ \[Send\] ─+$/);
         // The right pane is narrow at this width: the placeholder wraps rather than being cut.
-        expect(paneText(lines, 1)).toBe(REMOTE_RIGHT_PANE_TEXT);
+        // INITIAL PROMPT shows the prompt from the peer's agent list instead.
+        expect(paneText(lines, 1)).toBe(mode === "INITIAL PROMPT" ? "Prompt: Fix the parser then add a test" : REMOTE_RIGHT_PANE_TEXT);
         expect(stripAnsi(lines[1]!)).toContain(` Laptop B/abc-nick ─`);
         expect(stripAnsi(lines[1]!)).toContain(` ${mode} `);
       }
@@ -10898,6 +10899,31 @@ describe("Unified peer repos in the Agents tree", () => {
       running.mockRestore();
       dashboard.stopPolling();
     }
+  });
+
+  test("INITIAL PROMPT shows a remote agent's prompt from the agent list, scrolls with ; and l, and follows the selection", () => {
+    const { dashboard, service } = setup();
+    const prompt = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
+    const [b, ...rest] = links();
+    service.set({ links: [{ ...b!, agents: b!.agents!.map((a) => a.id === "worker-abc" ? { ...a, prompt } : a) }, ...rest] });
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.jumpToMode("INITIAL PROMPT");
+    const right = () => paneText(dashboard.render(WIDTH), 1);
+    // Anchored at the bottom, as for a local agent's prompt.
+    expect(right()).toEndWith("line 99 line 100");
+    expect(right()).not.toContain("Prompt:");
+    for (let i = 0; i < 40; i++) dashboard.handleInput(";");
+    expect(right()).toStartWith("Prompt: line 1 line 2 ");
+    for (let i = 0; i < 40; i++) dashboard.handleInput("l");
+    expect(right()).toEndWith("line 99 line 100");
+
+    // The manager has no prompt: the local fallback text.
+    dashboard.handleInput("k");
+    expect(keyOf(dashboard)).toBe(agentKey(PEER_B, "itsybitsy", "manager-def"));
+    expect(right()).toBe("Prompt: No prompt available");
+    // A remote repo header keeps the placeholder.
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    expect(right()).toBe(REMOTE_RIGHT_PANE_TEXT);
   });
 
   test("a remote-only header keeps the repo placeholder, and a stale agent shows its last contact", () => {

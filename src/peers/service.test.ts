@@ -549,7 +549,7 @@ function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: stri
 }
 
 const REMOTE_AGENTS: RemoteAgent[] = [
-  { id: "agent-r1", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null },
+  { id: "agent-r1", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, prompt: "" },
 ];
 
 describe("PeerService at boot", () => {
@@ -1708,7 +1708,7 @@ describe("PeerService trusted ALPN", () => {
   test("answers a listed peer from agents(), projected to the allowed fields, and closes anyone else unread", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const local = makeAgent({ id: "agent-1", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "waiting" });
-    Object.assign(local.meta, { prompt: "SECRET PROMPT", agentType: "worker", manager: "agent-0", nickname: "nick" });
+    Object.assign(local.meta, { summary: "SECRET SUMMARY", agentType: "worker", manager: "agent-0", nickname: "nick" });
     let snapshots = 0;
     const { service, endpoint } = makeService({
       snapshot: () => {

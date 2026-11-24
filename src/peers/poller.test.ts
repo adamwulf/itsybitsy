@@ -26,7 +26,7 @@ beforeEach(() => {
 afterEach(() => irohAddonLoaderCtx.reset());
 
 function remoteAgent(id: string, state = "running"): RemoteAgent {
-  return { id, nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state, agentType: "worker", manager: null };
+  return { id, nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state, agentType: "worker", manager: null, prompt: "" };
 }
 
 /** The other install: whether it lists us, what it reports, and the connections it has served. */

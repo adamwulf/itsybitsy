@@ -380,8 +380,10 @@ export class RightPaneComponent implements Component {
         break;
       }
       case "INITIAL PROMPT":
-        if (!this.agent) { this.content = [`${DIM}No agent selected${RESET}`]; }
-        else if (this.promptContent) { this.content = [`${BOLD}Prompt:${RESET}`, "", ...this.promptContent]; }
+        // Checked before `agent`: a remote agent has none, and the dashboard
+        // sets its prompt from the peer's agent list (SPEC §20.5).
+        if (this.promptContent) { this.content = [`${BOLD}Prompt:${RESET}`, "", ...this.promptContent]; }
+        else if (!this.agent) { this.content = [`${DIM}No agent selected${RESET}`]; }
         else { this.content = [`${DIM}Loading prompt.txt...${RESET}`]; }
         break;
       case "DENIALS":

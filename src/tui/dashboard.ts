@@ -433,7 +433,7 @@ function padToWidth(str: string, width: number): string {
   return str + (needsReset ? RESET : "") + " ".repeat(width - vw);
 }
 
-/** The right pane's text for a selected remote row, in every mode (SPEC §20.5). */
+/** The right pane's text for a selected remote row, in every mode but INITIAL PROMPT on an agent (SPEC §20.5). */
 export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 
 /**
@@ -442,9 +442,10 @@ export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
  * `input` renders the message editor at the center pane's width; it sits at
- * the bottom of the center pane, as on a local agent's tmux pane.
+ * the bottom of the center pane, as on a local agent's tmux pane. `rightPane`,
+ * when given, renders the right pane in place of the placeholder.
  */
-function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number, input?: (width: number) => string[]): string[] {
+function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number, input?: (width: number) => string[], rightPane?: (width: number, rows: number) => string[]): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
   const rw = Math.max(1, mainWidth - lw - 1);
   const editor = input?.(lw) ?? [];
@@ -453,7 +454,7 @@ function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: numb
   const bodyHeight = Math.max(0, height - editor.length);
   const body = entry.kind === "remote-repo-header" ? placeholder(`Remote repo on ${entry.peerName} (read-only)`, lw, bodyHeight) : pane.render(lw, bodyHeight);
   const center = [...body, ...editor];
-  const right = placeholder(REMOTE_RIGHT_PANE_TEXT, rw, height);
+  const right = rightPane?.(rw, height) ?? placeholder(REMOTE_RIGHT_PANE_TEXT, rw, height);
   const sep = `${DIM_GRAY}│${RESET}`;
   return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
 }
@@ -2112,6 +2113,11 @@ export class DashboardComponent implements Component {
   private scrollOutput(up: boolean): void {
     if (remoteMessageTarget(this.remoteSelection)) {
       this.remotePane.scroll(up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP);
+      // As on a local agent, a remote agent's right pane (INITIAL PROMPT) scrolls
+      // with the output. A peer coordinator has no right pane.
+      if (this.remoteSelection?.kind === "remote-agent") {
+        this.rightPane.scrollOffset = Math.max(0, this.rightPane.scrollOffset + (up ? agentActions.SCROLL_STEP : -agentActions.SCROLL_STEP));
+      }
     } else if (up) agentActions.handleScrollUp(this);
     else agentActions.handleScrollDown(this);
   }
@@ -2487,7 +2493,8 @@ export class DashboardComponent implements Component {
     // A remote row (SPEC §20.5). It is none of the above: `selected`,
     // `isCoordinator` and the repo header are all empty for it, so every local
     // path below (tmux pollers, git probe, right-pane loaders, the per-repo
-    // coordinator) sees no selection. Only the info panel and render() use it.
+    // coordinator) sees no selection. Only the info panel, render() and the
+    // INITIAL PROMPT content (set from the agent list below) use it.
     const remote = this.remoteSelection;
     const peerCoordinator = remote?.kind === "remote-coordinator";
     const leftPeerCoordinator = !peerCoordinator && this.infoPanel.remote?.kind === "remote-coordinator";
@@ -2697,6 +2704,9 @@ export class DashboardComponent implements Component {
       if (selected) {
         loadAgentLog(this, selected);
         loadAgentPrompt(this, selected);
+      } else if (remote?.kind === "remote-agent") {
+        // The peer's agent list carries the prompt, so there is nothing to load.
+        this.rightPane.promptContent = remote.remote.prompt ? remote.remote.prompt.split("\n") : ["No prompt available"];
       }
 
       // "Git Status" stoplight (§11.4): drop the previous agent's answer so the
@@ -4025,7 +4035,13 @@ export class DashboardComponent implements Component {
         mainLines = [mainTitleSep, ...[...body, ...input].slice(0, availableHeight)];
       } else {
         const input = acceptsText ? (width: number) => this.inputField.render(width) : undefined;
-        mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight, input)];
+        const prompt = remote.kind === "remote-agent" && this.rightPane.mode === "INITIAL PROMPT"
+          ? (width: number, rows: number) => {
+            this.rightPane.displayHeight = rows;
+            return this.rightPane.render(width);
+          }
+          : undefined;
+        mainLines = [mainTitleSep, ...renderRemotePanes(remote, this.remotePane, mainWidth, leftPaneW, availableHeight, input, prompt)];
       }
     } else if (isTreeMode) {
       // TREE mode: full-height tree in the main area. The sidebar hides its

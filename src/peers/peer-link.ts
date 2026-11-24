@@ -24,7 +24,7 @@ import { trackSendCleanup } from "../send-cleanup";
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
  * reason. The agent list carries only the fields of {@link RemoteAgent} (SPEC §20.4), never
- * prompts, logs or tmux output, and never the system coordinator.
+ * logs or tmux output, and never the system coordinator.
  *
  * The transport is the pair protocol's seam ({@link PairConnection}):
  * service.ts adapts the iroh wrapper with `toPairConnection`, and the tests use
@@ -97,6 +97,8 @@ export interface RemoteAgent {
   agentType: string | null;
   /** The id of the agent's manager, so the receiving side can nest it. */
   manager: string | null;
+  /** The prompt the agent was started with (`meta.prompt`), for the INITIAL PROMPT pane. */
+  prompt: string;
 }
 
 export interface RemoteRepo {
@@ -206,7 +208,7 @@ function sendDiagnostic(text: string) {
 
 /**
  * The reply's agent list, from the watcher's last fully detected snapshot
- * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the eight
+ * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the nine
  * allowed fields of each agent, and no system coordinator. (The system
  * coordinator has no agent directory, so the watcher never lists it; the
  * filter keeps it out even if that changes.)
@@ -223,6 +225,7 @@ export function toRemoteAgents(agents: readonly Agent[]): RemoteAgent[] {
       state: a.state,
       agentType: a.meta.agentType ?? null,
       manager: a.meta.manager ?? null,
+      prompt: a.meta.prompt,
     }));
 }
 
@@ -279,15 +282,17 @@ export function decodePeerRequest(bytes: Uint8Array): Record<string, unknown> & 
  * \p{Cf} (bidi overrides that reorder the rest of the row, zero-width marks).
  */
 const cleanField = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]/gu, "");
+/** {@link cleanField} for multi-line text: newlines are kept and tabs become spaces. */
+const cleanLines = (text: string): string => expandTabs(text).replace(/[^\P{Cc}\n]|\p{Cf}/gu, "");
 
 function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
   const malformed = () => new PeerProtocolError(`agent ${index} in the reply is malformed`);
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw malformed();
   const e = entry as Record<string, unknown>;
-  const required = (key: string): string => {
+  const required = (key: string, clean = cleanField): string => {
     const value = e[key];
     if (typeof value !== "string") throw malformed();
-    return cleanField(value);
+    return clean(value);
   };
   const optional = (key: string): string | null => {
     const value = e[key];
@@ -306,6 +311,7 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
     state: required("state"),
     agentType: optional("agentType"),
     manager: optional("manager"),
+    prompt: required("prompt", cleanLines),
   };
 }
 

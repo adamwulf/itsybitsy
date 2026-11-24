@@ -42,10 +42,13 @@ const caseInsensitiveTmp = (() => {
 })();
 
 describe("cloneDestination", () => {
-  test("mirrors the peer's folders under the clone root, in a folder named after the registry name", () => {
-    expect(cloneDestination("/Users/me/Developer", "foo", "swift-packages/Foo")).toBe("/Users/me/Developer/swift-packages/foo");
-    expect(cloneDestination("/Users/me/Developer", "foo", "html/sites/Foo")).toBe("/Users/me/Developer/html/sites/foo");
-    expect(cloneDestination("/Users/me/Developer", "foo", "Foo")).toBe("/Users/me/Developer/foo");
+  test("is the peer's own path under the clone root, folder names in the peer's case and punctuation", () => {
+    expect(cloneDestination("/Users/me/Developer", "mantra", "swift/Mantra")).toBe("/Users/me/Developer/swift/Mantra");
+    expect(cloneDestination("/Users/me/Developer", "adamwulfme", "html/adamwulf.me")).toBe("/Users/me/Developer/html/adamwulf.me");
+    expect(cloneDestination("/Users/me/Developer", "foo", "Foo")).toBe("/Users/me/Developer/Foo");
+  });
+
+  test("without a path from the peer, is a folder named after the registry name", () => {
     expect(cloneDestination("/Users/me/Developer", "foo", null)).toBe("/Users/me/Developer/foo");
   });
 });
@@ -419,6 +422,20 @@ describe("with a temp home", () => {
     expect(clones[0]!.env).toEqual(await cloneEnv());
     expect(clones[0]!.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "ssh:https", PATH: process.env.PATH });
     expect((await loadRegistry()).repos).toEqual([{ path: dest, name: "foo" }]);
+  });
+
+  test("a clone at the peer's exact folder name registers under the peer's registry name", async () => {
+    const mantra = cloneDestination(root, "mantra", "swift/Mantra");
+    const site = cloneDestination(root, "adamwulfme", "html/adamwulf.me");
+    expect(await cloneRepo({ url: "git@github.com:owner/Mantra.git", dest: mantra, registryName: "mantra" }))
+      .toEqual({ ok: true, message: `Cloned and added: mantra (${join(root, "swift", "Mantra")})`, path: join(root, "swift", "Mantra") });
+    expect(await cloneRepo({ url: "git@github.com:owner/adamwulf.me.git", dest: site, registryName: "adamwulfme" }))
+      .toEqual({ ok: true, message: `Cloned and added: adamwulfme (${join(root, "html", "adamwulf.me")})`, path: join(root, "html", "adamwulf.me") });
+    expect(await readdir(join(root, "swift"))).toEqual(["Mantra"]);
+    expect((await loadRegistry()).repos).toEqual([
+      { path: join(root, "swift", "Mantra"), name: "mantra" },
+      { path: join(root, "html", "adamwulf.me"), name: "adamwulfme" },
+    ]);
   });
 
   test("a leading ~ in the destination is expanded", async () => {

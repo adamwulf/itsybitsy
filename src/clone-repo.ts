@@ -46,12 +46,13 @@ export async function resolveCloneRoot(): Promise<string> {
 }
 
 /**
- * Where a peer's repo is cloned: under the same folders below the clone root
- * as on the peer (`swift/…`, `html/…`), in a folder named after the registry
- * name, since the registry and coordinator naming rules key on the folder name.
+ * Where a peer's repo is cloned: at the peer's own path below the clone root
+ * (`swift/Mantra`, `html/adamwulf.me`), folder names in the peer's case and
+ * punctuation, or in a folder named after the registry name when the peer
+ * sends no path. Either way the clone registers under the registry name.
  */
 export function cloneDestination(cloneRoot: string, registryName: string, relPath: string | null): string {
-  return relPath ? join(cloneRoot, dirname(relPath), registryName) : join(cloneRoot, registryName);
+  return relPath ? join(cloneRoot, relPath) : join(cloneRoot, registryName);
 }
 
 /** A clone URL's host, as git will connect to it, and its path (`owner/repo.git`), for the dialog title. */

@@ -12578,7 +12578,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(visibleWidth(narrow)).toBe(50);
   });
 
-  test("c on a remote-only header with a remote URL clones into the peer's folders under the clone root, and the header turns local", async () => {
+  test("c on a remote-only header with a remote URL clones into the peer's exact folder under the clone root, and the header turns local", async () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), "ib-dashboard-clone-")));
     await mkdir(join(home, ".itsybitsy"));
     setUserHome(home);
@@ -12598,7 +12598,7 @@ describe("Unified peer repos in the Agents tree", () => {
       const { dashboard, service } = setup();
       // Laptop C reports a URL for itsybitsy too, but Laptop B is first.
       service.set({ links: links().map((link) => link.id === PEER_B
-        ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: url, relPath: "bun/itsybitsy" }, ...repos("other-repo")] }
+        ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: url, relPath: "bun/ItsyBitsy" }, ...repos("other-repo")] }
         : link.id === PEER_C
           ? { ...link, repos: [...repos("app"), { registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: "https://elsewhere/x", relPath: null }] }
           : link) });
@@ -12609,7 +12609,8 @@ describe("Unified peer repos in the Agents tree", () => {
       // owner tells a fork or a stale remote apart; it is built for the overlay's width.
       expect(typeof dialog.prompt === "function" && dialog.prompt(dialogTitleMaxWidth()))
         .toBe("Clone itsybitsy from github.com (owner/itsybitsy.git) via Laptop B into:");
-      const dest = join(home, "Developer", "bun", "itsybitsy");
+      // The peer's folder name, in its case; the clone still registers as itsybitsy.
+      const dest = join(home, "Developer", "bun", "ItsyBitsy");
       expect(dialog.value).toBe(dest);
 
       dialog.onSubmit(dialog.value);
@@ -12624,7 +12625,7 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.repos).toEqual([{ path: dest, name: "itsybitsy" }]);
       // The reload went through setRepos: the peer snapshot's cache now has the clone.
       await waitFor(() => dashboard.repoCloneInfo.has(dest));
-      expect(dashboard.repoCloneInfo.get(dest)).toEqual({ remoteUrl: url, relPath: "bun/itsybitsy" });
+      expect(dashboard.repoCloneInfo.get(dest)).toEqual({ remoteUrl: url, relPath: "bun/ItsyBitsy" });
 
       // The watcher's next list carries the new local header under the same key:
       // the selection stays on it, now a shared local header.

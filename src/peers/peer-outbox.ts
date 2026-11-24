@@ -100,9 +100,9 @@ export async function handoffRemoteMessage(peer: string, header: SendHeader, sig
   });
 }
 
-export function handoffRemoteLifecycle(peer: string, machine: string, lifecycle: RemoteLifecycleRequest): Promise<IbCommandResult> {
+export function handoffRemoteLifecycle(peer: string, machine: string, lifecycle: RemoteLifecycleRequest, signal: AbortSignal): Promise<IbCommandResult> {
   return handoffPeerRequest({
-    id: randomUUID(), success: `${machine} ${lifecyclePast[lifecycle.action]} ${lifecycle.id}`,
+    signal, id: randomUUID(), success: `${machine} ${lifecyclePast[lifecycle.action]} ${lifecycle.id}`,
     lifecycle: { machine, timeout: lifecycleTimeout(lifecycle.action) },
     prepare: async () => ({ peer, lifecycle }),
   });
@@ -211,6 +211,7 @@ async function handoffPeerRequest(options: {
       }
       if (claimed) await writeFile(join(claimed, signal?.aborted ? "cancel" : "timeout"), "", { mode: 0o600 })
         .catch(err => { if (!missing(err)) warnSendCleanup(`Could not signal claimed send cancellation: ${err}`); });
+      if (signal?.aborted) return interruptedSend("claimed", lifecycle?.machine);
       if (lifecycle) return fail(unknown);
       if (!signal?.aborted) {
         const last = await readResult(150, signal);
@@ -218,10 +219,13 @@ async function handoffPeerRequest(options: {
       }
       if (resultDiagnostic && !signal?.aborted) return fail(`outcome unknown — check the recipient (${resultDiagnostic})`);
     }
+    if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed", lifecycle?.machine);
     if (lifecycle) return fail(unknown);
-    if (signal?.aborted) return interruptedSend(withdrawn ? "withdrawn" : "claimed");
     return fail(withdrawn ? "Remote send timed out before ib watch claimed the request" : "Remote send timed out: " + SEND_UNKNOWN);
-  } catch (err) { return !published && signal?.aborted ? interruptedSend("unpublished") : fail(published ? `${lifecycle ? unknown : "outcome unknown — check the recipient"} (${detail(err)})` : detail(err)); }
+  } catch (err) {
+    if (signal?.aborted) return interruptedSend(published ? "claimed" : "unpublished", lifecycle?.machine);
+    return fail(published ? `${lifecycle ? unknown : "outcome unknown — check the recipient"} (${detail(err)})` : detail(err));
+  }
 }
 
 type Lifecycle = (peer: string, request: RemoteLifecycleRequest, transfer: OutgoingTransfer) => Promise<string>;

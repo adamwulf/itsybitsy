@@ -1,4 +1,5 @@
 import type { IbCommandResult } from "../ib-commands";
+import { interruptedSend } from "../spawn-broker";
 import { readMachineName } from "../machine-name";
 import { listRepos } from "../registry";
 import { resolveAgentTarget } from "../resolve-target";
@@ -13,8 +14,11 @@ export const lifecycleCliCaller = { denial: remoteStartDenialAtStartup };
 export async function routeQualifiedLifecycle(address: string, options: Pick<RemoteLifecycleRequest, "action" | "keep" | "force">): Promise<IbCommandResult | null> {
   const parts = address.split("/");
   const machine = parts[0]!;
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
   try {
     if (machine.toLowerCase() === (await readMachineName()).toLowerCase()) return null;
+    process.on("SIGINT", interrupt);
     const denial = await lifecycleCliCaller.denial();
     if (denial !== null) throw new Error(remoteLifecycleDenial(denial, options.action));
     if (parts.length < 2 || parts.length > 3 || parts.some(p => !p)) throw new Error(`Invalid agent address: ${address}`);
@@ -25,12 +29,13 @@ export async function routeQualifiedLifecycle(address: string, options: Pick<Rem
       if (peers.length !== 1) throw new Error(`${peers.length ? "Ambiguous" : "Unknown"} machine: ${machine}`);
       return await handoffRemoteLifecycle(peers[0]!.id, peers[0]!.name, parseLifecycleRequest({
         ...options, id: parts.at(-1), repo: parts.length === 3 ? parts[1] : undefined,
-      }));
+      }), controller.signal);
     }
     const { remote, error } = await resolveAgentTarget(address, await listRepos(), process.cwd(), "lifecycle");
     if (!remote || remote.target.kind !== "agent" || !remote.target.repo) throw new Error(error ?? "Select a remote agent");
-    return await handoffRemoteLifecycle(remote.peer, machine, { ...options, repo: remote.target.repo, id: remote.target.agent });
+    return await handoffRemoteLifecycle(remote.peer, machine, { ...options, repo: remote.target.repo, id: remote.target.agent }, controller.signal);
   } catch (err) {
+    if (controller.signal.aborted) return interruptedSend("unpublished");
     return { ok: false, exitCode: 1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
-  }
+  } finally { process.off("SIGINT", interrupt); }
 }

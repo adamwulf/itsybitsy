@@ -322,6 +322,34 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); }
   });
 
+  test.each([false, true])("Ctrl-C withdraws a pending lifecycle request or names the machine to check (claimed=%s)", async claimed => {
+    await peer();
+    const interrupt = new AbortController();
+    const command = cli.run(["retire", "laptop-b/remote-id"], { ancestry: human, interrupt: interrupt.signal });
+    const base = join(cli.home, ".itsybitsy", "peer-outbox");
+    let worker: Promise<void> | undefined;
+    let calls = 0;
+    const poll = () => pollPeerOutbox(async () => { throw new Error("Unexpected send"); }, () => {}, undefined, undefined,
+      async (_peer, _request, { signal }) => {
+        calls++;
+        await waitFor(() => !!signal?.aborted);
+        throw new Error("Cancelled");
+      });
+    try {
+      await waitFor(async () => (await readdir(base).catch(() => [])).some(name => !name.startsWith(".")));
+      if (claimed) {
+        worker = poll();
+        await waitFor(() => calls === 1);
+      }
+      interrupt.abort();
+      expect(await command).toMatchObject({ exitCode: 130, stdout: "",
+        stderr: claimed ? "outcome unknown — check laptop-b\n" : "cancelled before sending\n" });
+      await (worker ?? poll());
+      expect(calls).toBe(claimed ? 1 : 0);
+      expect((await readdir(base)).filter(name => !name.startsWith("."))).toEqual([]);
+    } finally { interrupt.abort(); await command; await worker; }
+  });
+
   test("an agent and a human inside tmux are refused before any lifecycle handoff", async () => {
     for (const action of ["retire", "rehire", "resume", "merge"]) {
       const result = await cli.run([action, "laptop-b/remote-id"], { ancestry: agentAncestry, cwd: worktree });

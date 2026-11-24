@@ -41,12 +41,36 @@ The golden path must work, and it must be hard for an agent to get wrong by acci
 4. **CLI.** `ib merge`, `ib retire` and `ib rehire` accept `<machine>/<agent>`, using the same qualified-address resolution as `ib send`. They work only from a human terminal outside tmux; otherwise the existing clear refusal applies. `--force` keeps its local meaning on the remote side.
 5. **Waiting for the result.** The command waits for the result, the same as a remote new-agent. Merge waits up to 2 minutes, retire and rehire up to 30 seconds. A timeout reports `outcome unknown — check <machine>`.
 
+## C. Opening a remote agent's diff with `o` (Adam, 2026-11-23)
+
+> "we should be able to use the 'o' tool to open the diff of a remote peer agent"
+
+**Today.** On a local row, `o` runs the configured `externalDiffTool` inside the agent's worktree as `<tool> $(git merge-base HEAD main)`. That compares the working tree, including uncommitted changes, with the merge base. Remote rows refuse `o`.
+
+**Change**
+
+1. **New peer request: an agent's diff, by repo and id.**
+   - The responder works in that agent's worktree.
+   - It computes the base commit with `git merge-base HEAD main`, then the binary patch with `git diff --binary <base>`. This is exactly what the local `o` shows: committed and uncommitted changes, without untracked files.
+   - It returns the base commit id and the patch, using the existing framed body transfer with a size cap.
+   - An empty diff gets the local message, "No changes to show — diff is empty".
+2. **Local side.**
+   - Find the same registered repo locally.
+   - Make a throwaway copy with `git clone --shared --no-checkout <local repo> <temp>`, which is cheap and leaves the local repo and its worktrees alone.
+   - Run `git checkout --detach <base>` and `git apply --binary <patch>` in the copy, then run the same `<tool> $(git merge-base HEAD main)` there. HEAD is the base, so the tool sees the same diff the agent's worktree would.
+   - Throwaway copies live under the protected staging root, and older ones are pruned when ib watch starts.
+3. **Limits on the golden path.** The repo must be registered on both machines, and the local copy must contain the base commit.
+   - If the base commit is missing: `Fetch or pull <repo> first: commit <base> from <machine> is not in your copy`.
+   - Remote-only repos: `Open diff needs <repo> on this machine`.
+4. **Caller gate.** Use the same startup human-caller decision as the remote screen. This is dashboard only.
+
 ## Phases
 
 - **R1. Remote agent screens (A).**
 - **R2. Remote merge, retire and rehire (B).**
+- **R3. Remote diff with `o` (C).**
 
-The two are independent and can be built in parallel. Each phase gets a review cycle under Adam's bar. Afterwards, add Phase 8 checklist steps for viewing a remote agent's screen, scrolling back, and merging, retiring and rehiring a remote agent from both the dashboard and the CLI.
+The three are independent and can be built in parallel. Each phase gets a review cycle under Adam's bar. Afterwards, add Phase 8 checklist steps for viewing a remote agent's screen, scrolling back, and merging, retiring and rehiring a remote agent from both the dashboard and the CLI.
 
 ## Defaults pending Adam's confirmation
 

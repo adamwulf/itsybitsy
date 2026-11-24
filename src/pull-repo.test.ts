@@ -315,4 +315,32 @@ describe("pullRepo", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toBe(`No remotes configured in ${lonely}`);
   });
+
+  // A config setting alone (here repo-local; in practice often a global
+  // `remote.origin.tagopt` or `remote.origin.prune`) makes `git remote` list a
+  // remote that has no URL and cannot be fetched.
+  test("a remote that config names but gives no URL is not a remote", async () => {
+    const lonely = join(root, "lonely");
+    await git(root, "init", "-q", "-b", "main", lonely);
+    await commitFile(lonely, "a.txt", "one\n", "first");
+    await git(lonely, "config", "remote.origin.tagopt", "--tags");
+
+    const result = await pullRepo(lonely);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe(`No remotes configured in ${lonely}`);
+  });
+
+  test("a URL-less remote beside a real one is skipped, not reported as failed", async () => {
+    const upstream = await commitFile(other, "a.txt", "two\n", "second");
+    await git(other, "push", "-q", "origin", "main");
+    await git(local, "config", "remote.ghost.prune", "true");
+
+    const result = await pullRepo(local);
+
+    expect(result.exitCode).toBe(0);
+    const statusLines = result.stdout.split("\n").filter((line) => !line.startsWith("  "));
+    expect(statusLines).toEqual(["✓ origin: pulled main"]);
+    expect(await git(local, "rev-parse", "main")).toBe(upstream);
+  });
 });

@@ -611,6 +611,8 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib merge <agent-id> [--force] [--keep]\n" +
     "  For a paired machine use <machine>/<agent> or <machine>/<repo>/<agent>.\n" +
     "  Merge an agent's branch into its parent and close the agent.\n" +
+    "  When the parent is main (or master) and the repo has remotes, main is\n" +
+    "  first pulled as `ib pull` does; a failed pull stops the merge.\n" +
     "  --force         Accepted for compatibility (no-op; the native merge never prompts)\n" +
     "  --keep          Merge exactly as above (same checks, rebase and merge;\n" +
     "                  fails the same way on conflict) but leave the agent running\n" +

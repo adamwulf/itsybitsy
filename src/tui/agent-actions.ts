@@ -30,6 +30,7 @@ import { parseStateForCli } from "../parse-state";
 import { parseModel } from "../agent-cli";
 import type { AgentCli } from "../agent-cli";
 import { openInGhostty, openPathInGhostty } from "../ghostty";
+import { openRemoteTerminal } from "../peers/terminal-window";
 import { buildFolderItems } from "./folder-browser";
 import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
@@ -2534,7 +2535,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("o", "diff tool"),
       row("O", "diff tool vs manager"),
       row("G", "Ghostty (repo/worktree)"),
-      row("C", "Ghostty (Claude tmux)"),
+      row("C", "Ghostty (Claude tmux; remote agent: its terminal)"),
       row("S", "snapshot"),
       "",
       header("App"),
@@ -2859,6 +2860,14 @@ export function handleOpenGhostty(ctx: ActionCtx) {
 }
 
 export function handleOpenGhosttyTmux(ctx: ActionCtx) {
+  const remote = ctx.remoteSelection;
+  if (remote?.kind === "remote-agent") {
+    // A local tmux session running `ib peer attach` (SPEC §20.5).
+    void openRemoteTerminal({
+      peerId: remote.peerId, peerName: remote.peerName, repo: remote.remote.repoRegistryName, agent: remote.remote.id,
+    }).then((result) => ctx.setNotice(result.message, result.ok ? "info" : "error"));
+    return;
+  }
   if (ctx.agentTree.isSystemCoordinatorSelected) {
     openSystemCoordinatorInGhostty(ctx);
     return;

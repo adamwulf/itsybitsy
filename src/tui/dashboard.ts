@@ -123,6 +123,7 @@ import { telegramLight, type TelegramConnectionView } from "../channels/connecti
 import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
 import { captureAgentPane, readAgentPromptText } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
+import { localTerminalHost } from "../peers/terminal-host";
 import { peerLinkStatus, type PeerLinkState } from "../peers/poller";
 import { peerEntryKey, remoteDisplayName, remoteMessageTarget, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 
@@ -540,7 +541,7 @@ class StatusBarComponent implements Component {
       const markHint = this.remoteRepoSelected ? "    .: pin" : this.remoteAgentSelected ? "    .: favorite" : "";
       // `q` works on every remote agent row, whatever its type (isRemoteAllowedKey).
       const questionsHint = this.remoteRepoSelected || this.remoteCoordinatorVisible ? "" : `${qLabel}    `;
-      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${questionsHint}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${errBadge}${RESET}`;
+      row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${questionsHint}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${this.remoteAgentSelected ? "    C: terminal" : ""}${errBadge}${RESET}`;
       row2Left = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab    ${this.remoteAgentSelected ? "o: diff    m: merge    x: retire    R: resume    " : ""}${this.remoteRepoSelected ? "a: new agent" : "s: send"}${markHint}${RESET}`;
     } else if (this.repoHeaderSelected) {
       const fixHint = this.hasResolvableWarnings ? "    f: fix" : "";
@@ -775,6 +776,8 @@ export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
   if (data === ".") return row?.kind === "remote-agent" || row?.kind === "remote-repo-header" || row?.kind === "remote-coordinator";
   if (data === "q") return row?.kind === "remote-agent";
   if (data === "o" || data === "m" || data === "x" || data === "R") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
+  // A terminal on the agent's tmux session (SPEC §20.4 "Remote terminal").
+  if (data === "C") return row?.kind === "remote-agent";
   switch (data) {
     case "j": case "k": case "J": case "K":
     case "\t": case "\x1b[Z":
@@ -4582,6 +4585,8 @@ export async function launchDashboard(): Promise<void> {
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
   peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
   peerDeps.readPrompt = (repo, id) => readAgentPromptText(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
+  // Remote terminals (SPEC §20.4) attach to the same agents the link reports.
+  peerDeps.terminal = localTerminalHost(() => dashboard.watcher?.lastDetectedAgents ?? []);
   const peerService = new PeerService(peerDeps);
   dashboard.setPeerService(peerService);
   // Top-bar status lights, both read in process, never by spawning:

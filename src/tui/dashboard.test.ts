@@ -35,6 +35,7 @@ import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent, RemoteQuestion } from "../peers/peer-link";
 import type { PeerLinkState } from "../peers/poller";
+import { terminalWindowCtx } from "../peers/terminal-window";
 import { peerEntryKey } from "./peer-repos";
 import { keyOf as treeKeyOf, selectById } from "./test-tree-keys";
 import { REMOTE_READ_ONLY_NOTICE, REMOTE_RIGHT_PANE_TEXT, isRemoteAllowedKey } from "./dashboard";
@@ -11911,7 +11912,7 @@ describe("Unified peer repos in the Agents tree", () => {
 
     selectByKey(dashboard, WORKER_KEY);
     const text = footer();
-    const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "V: filter", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab"];
+    const shown = [";/l: scroll", "j/k: select", "J/K: repo", "p/n: pane", "1/2/3: tab", "V: filter", "[ ] { }: resize", "@: jump", "/: commands", "?: help", "I: peers tab", "C: terminal"];
     for (const hint of shown) expect(text).toContain(hint);
     expect(text).toContain("s: send");
     for (const hint of [".: favorite", "o: diff", "m: merge", "x: retire", "R: resume", "q: questions"]) expect(text).toContain(hint);
@@ -11930,6 +11931,38 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(isRemoteAllowedKey("q", dashboard.agentTree.selectedRemote!)).toBe(false);
     for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
     expect(footer()).toContain("s: send");
+    expect(footer()).not.toContain("C: terminal");
+  });
+
+  test("C on a remote agent opens a local tmux session running ib peer attach on it; a remote repo header refuses C", async () => {
+    const calls: string[][] = [];
+    const opened: string[] = [];
+    terminalWindowCtx.set({
+      runTmux: async (args) => { calls.push(args); return args[0] === "has-session" ? 1 : 0; },
+      openInGhostty: async (session) => { opened.push(session); return { ok: true, message: "Opened in Ghostty" }; },
+    });
+    try {
+      const { dashboard } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      resetNotice(dashboard);
+      dashboard.handleInput("C");
+      await waitFor(() => opened.length === 1, { message: "Ghostty opened" });
+      const session = `ib-remote-${PEER_B.slice(0, 10)}-worker-abc`;
+      expect(calls).toEqual([
+        ["has-session", "-t", `=${session}`],
+        ["new-session", "-d", "-s", session, "ib", "peer", "attach", `${PEER_B}/itsybitsy/worker-abc`],
+      ]);
+      expect(opened).toEqual([session]);
+      await waitFor(() => dashboard.notice === "Opened Laptop B/worker-abc in Ghostty", { message: "notice" });
+
+      selectByKey(dashboard, repoKey("other-repo"));
+      resetNotice(dashboard);
+      dashboard.handleInput("C");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(calls.length).toBe(2);
+    } finally {
+      terminalWindowCtx.reset();
+    }
   });
 
   test("@ works on a remote row: it lists only local rows and lands on one", () => {

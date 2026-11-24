@@ -2853,8 +2853,9 @@ export class DashboardComponent implements Component {
       }
     }
     // Switch repo coordinator input field agent. Its draft is keyed by full id
-    // (SPEC §17.1): a per-repo coordinator's id is the folder's name, so two
-    // repos with one folder name have coordinators with one id.
+    // (SPEC §17.1): a per-repo coordinator's id comes from its folder's name
+    // (getCoordinatorAgentId), so two repos whose folder names give one id
+    // have coordinators with one id.
     const repoCoordinator = this.rightPane.repoCoordinatorAgent;
     this.repoCoordinatorInputField.switchAgent(
       repoCoordinator ? this.agentTree.agentKey(repoCoordinator) : null

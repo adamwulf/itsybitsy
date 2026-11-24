@@ -1094,7 +1094,7 @@ describe("watchdog", () => {
     });
 
     test("@<repo-name> sentinel resolves to that repo's coordinator and sendMessage", async () => {
-      // Use a real tempdir whose basename we control so the @<basename>
+      // Use a real tempdir whose basename we control so the @<coordinator-id>
       // lookup in notifySpawner finds the registered repo.
       const { join: pjoin, basename: pbasename } = await import("path");
       const parentDir = await Bun.$`mktemp -d`.text().then((s) => s.trim());
@@ -1103,7 +1103,7 @@ describe("watchdog", () => {
       const repoBasename = pbasename(repoDir); // "myrepo"
 
       try {
-        // Coordinator agent: id matches the repo basename.
+        // Coordinator agent: id is getCoordinatorAgentId(repoDir), "myrepo".
         const coord = makeAgent({
           repoPath: repoDir,
           id: repoBasename,

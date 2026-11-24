@@ -71,7 +71,9 @@ function validFrom(value: unknown): value is SendHeader["from"] {
       !nonempty(repo) || UNSAFE_LINE_CHARACTERS.test(repo) || repo.trim() !== repo ||
       !nonempty(agent)) return false;
   if (!(repo.startsWith("~") ? isRepoId(repo.slice(1)) : isStoredRepoName(repo))) return false;
-  // A coordinator takes its checkout basename. Allow dots alongside the usual agent-id characters.
+  // A coordinator created before ids were sanitized (or on a peer that still
+  // does not sanitize) has its dotted checkout basename. Allow dots alongside
+  // the usual agent-id characters.
   return isValidPeerSenderIdSegment(agent);
 }
 function targetPart(value: unknown): value is string {

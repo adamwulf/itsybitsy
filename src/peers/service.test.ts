@@ -36,6 +36,10 @@ import {
 } from "./service";
 import { addPeer, readPeers, type Peer } from "./store";
 import { TerminalFrameReader, encodeTerminalOpen, parseTerminalExit } from "./terminal-frame";
+import { listSpawnableTypeNamesSync } from "../agent-types";
+import type { RemoteSpawnDeps } from "./new-agent";
+import { createAttachmentReceiver } from "./receive-attachments";
+import { encodeFrameHeader } from "./send-frame";
 import { createFakeClock, createMemoryLink, type FakeClock, type MemoryConnection } from "./test-pair-transport";
 import { connect } from "node:net";
 
@@ -834,18 +838,27 @@ describe("PeerService at boot", () => {
         setTimer: createFakeClock().setTimer,
         peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }), log: () => {},
         startAgent: async request => { starts.push(request); return "my-agent"; },
+        startAgentWithFiles: async (header, _peer, _name, body) => {
+          starts.push({ ...header, body: new TextDecoder().decode(await body.read(16)) });
+          return "with-files";
+        },
       });
       return serviceConnection(link.a, PEER_ALPN);
     };
     const request = { repo: "app", type: "worker", prompt: "hello" };
+    const files = [{ name: "a.txt", size: 3, sha256: "0".repeat(64), spellings: ["./a.txt"] }];
+    const filesDir = join(home, "outgoing");
+    await mkdir(filesDir);
+    await writeFile(join(filesDir, "0"), "abc");
     try {
       await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("disconnected");
       await service.bootIfPaired();
       await waitFor(() => service.view().links[0]?.connected === true);
       expect(await service.startRemoteAgent(ID_REMOTE, request)).toBe("my-agent");
+      expect(await service.startRemoteAgent(ID_REMOTE, { ...request, files }, { filesDir })).toBe("with-files");
       await writeFile(peersFile(), "[]");
       await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("no longer paired");
-      expect(starts).toEqual([{ op: "new-agent", ...request }]);
+      expect(starts).toEqual([{ op: "new-agent", ...request }, { op: "new-agent", ...request, files, body: "abc" }]);
       expect(endpoint.connects).toEqual([ID_REMOTE]);
     } finally {
       await service.shutdown();
@@ -1810,6 +1823,31 @@ describe("PeerService trusted ALPN", () => {
 
     listed.close(PEER_CLOSE.done, "done");
     await service.shutdown();
+  });
+
+  test("a framed remote start shows its receipt row, and shutdown cancels it and removes the partial", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    await writeFile(join(home, ".itsybitsy", "machine-name"), "laptop");
+    const staging = join(home, "staging");
+    const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, exitCode: 0, stdout: "agent-1", stderr: "" }));
+    const { service, endpoint } = makeService({ remoteSpawn: {
+      listSpawnableTypes: listSpawnableTypeNamesSync, listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent, notice() {},
+      attachments: createAttachmentReceiver({ tempDir: home, stagingRoot: staging, hasFreeSpace: async () => true }),
+    } });
+    endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
+    await service.bootIfPaired();
+    const conn = incomingFrom(endpoint, service.view().selfId!, PEER_ALPN);
+    const files = [{ name: "a.txt", size: 3, sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex"), spellings: ["./a.txt"] }];
+    const stream = await conn.openBi();
+    await stream.writeAll(encodeFrameHeader({ op: "new-agent", repo: "app", type: "worker", prompt: "use ./a.txt", files }));
+    await stream.writeAll(Buffer.from("a"));
+    await waitFor(() => service.view().incoming?.[0]?.bytes === 1);
+    expect(service.view().incoming).toEqual([{ id: expect.any(String), label: "Laptop C → new agent in app", bytes: 1, total: 3 }]);
+    await service.shutdown();
+    await waitFor(async () => (await readdir(join(staging, "incoming"))).length === 0);
+    expect(service.view().incoming ?? []).toEqual([]);
+    expect(newAgent).not.toHaveBeenCalled();
+    conn.close(PEER_CLOSE.done, "done");
   });
 });
 

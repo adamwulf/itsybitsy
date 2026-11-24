@@ -1,6 +1,6 @@
 import { tmpdir } from "node:os";
 import { expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, open, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { processStartEpochSecondsCtx } from "../agents";
 import { hashFile } from "./attachment-manifest";
@@ -195,5 +195,20 @@ test("a dangling project symlink refuses absolute, relative and nested reference
     for (const reference of [join(project, "link"), "./link", "see ./link.", join(project, "link/file")]) {
       await expect(dashboardAttachmentPaths(reference, project, project)).rejects.toThrow("Unresolved attachment");
     }
+  } finally { await rm(project, { recursive: true, force: true }); }
+});
+
+test("a file under the local checkout's runtime directory is attached, not left live for the peer", async () => {
+  const { dashboardAttachmentPaths } = await import("./dashboard-attachments");
+  const project = await mkdtemp(join(tmpdir(), "ib-dashboard-runtime-"));
+  try {
+    const worktree = join(project, ".itsybitsy/agents/agent-x/repo");
+    await mkdir(worktree, { recursive: true });
+    const output = join(worktree, "out.png");
+    await writeFile(output, "png");
+    await writeFile(join(project, "live.ts"), "live");
+    expect(await dashboardAttachmentPaths(`see ${output} and ${join(project, "live.ts")}`, "/remote/project", project))
+      .toEqual({ paths: [{ argument: output, source: await realpath(output) }], noPassthrough: false });
+    await expect(dashboardAttachmentPaths(join(worktree, "missing.png"), "/remote/project", project)).rejects.toThrow("file not found");
   } finally { await rm(project, { recursive: true, force: true }); }
 });

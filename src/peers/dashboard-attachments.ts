@@ -3,6 +3,7 @@ import { lstat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { references } from "../message-attachments";
 import { userHome } from "../home";
+import { runtimeDir } from "../runtime-names";
 import { canonicalizeSandboxPath } from "../sandbox";
 
 async function resolveMissingReference(path: string) {
@@ -35,6 +36,9 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
   const paths = new Map<string, { argument: string; source: string }>();
   const local = localRoot && canonicalizeSandboxPath(localRoot);
   const inside = (root: string | undefined, path: string) => !!root && (path === root || path.startsWith(root + "/"));
+  // The checkout's runtime directory (other agents' worktrees, logs) exists
+  // only on this machine, so nothing in it is live on the peer.
+  const live = (path: string) => inside(local, path) && !inside(local && runtimeDir(local), path);
   for (const ref of references(text)) {
     let path = ref.path;
     const relative = !path.startsWith("/") && !path.startsWith("~/");
@@ -47,7 +51,7 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
       try {
         const source = await realpathArgument(absolute);
         if (ref.start === 0) noPassthrough = true;
-        if (relative || inside(local, source)) break;
+        if (relative || live(source)) break;
         paths.set(path, { argument: path, source });
         break;
       } catch (err) {
@@ -57,7 +61,7 @@ export async function dashboardAttachmentPaths(text: string, remoteRoot?: string
         if (!ref.quote && /^\/[\w-]+$/.test(path)) break;
         if (relative) { if (ref.start === 0) noPassthrough = true; break; }
         const peerOnly = !inside(localRoot, absolute) && inside(remoteRoot, absolute) && inside(remoteRoot, resolve(absolute));
-        if (peerOnly || inside(local, localPath)) {
+        if (peerOnly || live(localPath)) {
           if (ref.start === 0) noPassthrough = true;
           break;
         }

@@ -12525,6 +12525,46 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toBe("No connected machine has app");
   });
 
+  test("a on a remote agent looks for the prompt's files in this machine's checkout of the repo", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "ib-dashboard-remote-agent-start-"));
+    try {
+      await Bun.write(join(checkout, "src/app.ts"), "app");
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      const start = spyOn(service, "startRemoteAgent").mockResolvedValue("builder");
+      const openForm = (repos: typeof dashboard.repos) => {
+        dashboard.repos = repos;
+        dashboard.handleInput("a");
+        const form = assertDialog(dashboard.dialog, "new-agent-form");
+        form.machine = { id: PEER_B, name: "Laptop B" };
+        form.agentType = "worker";
+        form.buffer.handleInput("\x1b[200~Review ./src/app.ts\x1b[201~");
+        form.focused = "create";
+        return form;
+      };
+
+      // Registered here under another case: the relative path resolves in that checkout and is offered, unchecked.
+      const form = openForm([{ name: "ItsyBitsy", path: checkout }]);
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog?.type === "multi-select", { message: "the path dialog" });
+      const picker = assertDialog(dashboard.dialog, "multi-select");
+      expect(picker.items).toEqual(["./src/app.ts"]);
+      expect(picker.checked).toEqual([false]);
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBe(form);
+      await waitFor(() => !dashboard.remoteStartPending);
+      dashboard.closeDialog();
+
+      // Not registered here: no local checkout, so the relative path stays text with no dialog.
+      openForm([{ name: "local", path: "/repos/local" }]);
+      const shown = spyOn(dashboard, "showDialog");
+      dashboard.handleInput("\r");
+      await waitFor(() => dashboard.dialog === null);
+      expect(shown).not.toHaveBeenCalled();
+      expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt: "Review ./src/app.ts" }, { signal: expect.any(AbortSignal) }]]);
+    } finally { await rm(checkout, { recursive: true, force: true }); }
+  });
+
   test("the command palette goes through the same guard", () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);

@@ -39,7 +39,11 @@ function missing(err: unknown) {
 export async function peerAttachmentCandidates(text: string, localRoot?: string) {
   let noPassthrough = false;
   const candidates = new Map<string, PeerAttachmentCandidate>();
-  for (const ref of references(text)) {
+  let refs: ReturnType<typeof references>;
+  // Text the parser cannot read (an unclosed quote) is sent unchanged, as a local send does.
+  try { refs = references(text); }
+  catch { return { candidates: [], noPassthrough }; }
+  for (const ref of refs) {
     let path = ref.path;
     const relative = !path.startsWith("/") && !path.startsWith("~/");
     if (relative && !localRoot) {

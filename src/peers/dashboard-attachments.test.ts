@@ -26,6 +26,10 @@ test("a missing path stays raw text and is never an error", async () => {
   });
 });
 
+test("text the path parser cannot read offers nothing and is sent unchanged", async () => {
+  expect(await peerAttachmentCandidates("Look in the '~/Downloads folder")).toEqual({ candidates: [], noPassthrough: false });
+});
+
 test("a leading missing slash-command name still passes through unless quoted", async () => {
   expect(await peerAttachmentCandidates("/clear")).toEqual({ candidates: [], noPassthrough: false });
   expect(await peerAttachmentCandidates("/compact.")).toEqual({ candidates: [], noPassthrough: false });

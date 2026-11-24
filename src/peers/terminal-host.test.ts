@@ -307,8 +307,10 @@ describe("findAgentSession", () => {
     expect(() => findAgentSession(agents, "w3", "app")).toThrow("no agent w3 in app on this machine");
   });
 
-  test("never the system coordinator, and never a session name tmux could misread", () => {
+  test("never the system coordinator, an agent with a broken record, or a session name tmux could misread", () => {
     expect(() => findAgentSession([agent("sys", "home", { agentType: SYSTEM_COORDINATOR_TYPE })], "sys", undefined)).toThrow("no agent sys");
+    const broken = Object.assign(agent("w1", "app"), { metadataError: "meta.json is not valid JSON" });
+    expect(() => findAgentSession([broken], "w1", undefined)).toThrow("no agent w1");
     expect(() => findAgentSession([agent("w1", "app", { tmux_session: "bad:name" })], "w1", undefined)).toThrow("has no tmux session");
     expect(() => findAgentSession([agent("w1", "app", { tmux_session: undefined })], "w1", undefined)).toThrow("has no tmux session");
   });

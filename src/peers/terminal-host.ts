@@ -274,7 +274,8 @@ export function localTerminalHost(agents: () => readonly Agent[]): TerminalHostD
  * case, when given) among the watcher's agents. Never the system coordinator.
  */
 export function findAgentSession(agents: readonly Agent[], agent: string, repo: string | undefined): string {
-  const matches = agents.filter(a => a.id === agent && a.meta.agentType !== SYSTEM_COORDINATOR_TYPE
+  // The agents the trusted link reports (toRemoteAgents): no broken records.
+  const matches = agents.filter(a => a.id === agent && !a.metadataError && a.meta.agentType !== SYSTEM_COORDINATOR_TYPE
     && (repo === undefined || a.repoRegistryName.toLowerCase() === repo.toLowerCase()));
   if (matches.length === 0) throw new Error(`no agent ${agent}${repo === undefined ? "" : ` in ${repo}`} on this machine`);
   if (matches.length > 1) throw new Error(`more than one agent is named ${agent}; name its repo`);

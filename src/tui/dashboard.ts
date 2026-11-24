@@ -4003,8 +4003,9 @@ export class DashboardComponent implements Component {
       this.inputField.active = acceptsText && focused && this.focusManager.subFocus !== "pane";
       this.inputField.setFocusState(this.focusManager.subFocus === "send" ? "send" : "text");
       if (remoteCoordinator) {
-        // Full width, like the local coordinator's TMUX view and its input.
-        const input = this.inputField.render(mainWidth);
+        // Full width, like the local coordinator's TMUX view: the capture with
+        // its input box sliced off, this input field, then the CLI's status lines.
+        const input = [...this.inputField.render(mainWidth), ...this.remotePane.statusLines(mainWidth)];
         mainLines = [mainTitleSep, ...this.remotePane.render(mainWidth, Math.max(0, availableHeight - input.length)), ...input];
       } else {
         const input = acceptsText ? (width: number) => this.inputField.render(width) : undefined;

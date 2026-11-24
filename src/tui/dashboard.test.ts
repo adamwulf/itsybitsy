@@ -10352,6 +10352,32 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
+  test("the peer coordinator's own input box is trimmed and its status lines sit below the dashboard editor", async () => {
+    const { dashboard, service } = setup();
+    dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    const sep = "─".repeat(300);
+    service.fetchPane.mockResolvedValue({ state: "running",
+      text: ["peer reply", sep, "❯ /rc", sep, "  ⏵⏵ auto mode on", ""].join("\n") });
+    try {
+      selectByKey(dashboard, PEER_B + "/@system");
+      await Promise.resolve();
+      const main = dashboard.render(180).map((line) => stripAnsi(line).split("│").at(-1)!.trim()).filter(Boolean);
+      expect(main).not.toContain("❯ /rc");
+      const reply = main.indexOf("peer reply");
+      const prompt = main.indexOf("❯");
+      const status = main.indexOf("⏵⏵ auto mode on");
+      expect(reply).toBeGreaterThan(0);
+      expect(prompt).toBeGreaterThan(reply);
+      expect(main[prompt + 1]).toMatch(/^─+ \[Send\] ─+$/);
+      expect(status).toBe(prompt + 2);
+      expect(main.slice(reply + 1, prompt - 1).every((line) => !/^─+$/.test(line))).toBe(true);
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
   test("a highlighted coordinator shows the startup denial, then the remote capture when permitted", async () => {
     const { dashboard, service } = setup();
     dashboard.onUpdate([], [{ kind: "system-coordinator", state: "running", age: "1m" }], []);

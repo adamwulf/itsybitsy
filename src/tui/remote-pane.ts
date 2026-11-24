@@ -1,15 +1,20 @@
 import { truncateToWidth } from "@mariozechner/pi-tui";
+import { closeOsc8 } from "../hyperlinks";
 import { clampPaneLines, cleanRemoteText, type PeerPane, type PeerPaneTarget } from "../peers/peer-link";
 import { DIM, RED, RESET } from "./colors";
-import { padLines, WordWrapCache, wordWrapSingleLine } from "./wrap";
+import { computeChromeSlice, padLines, WordWrapCache, wordWrapSingleLine, type ChromeSlice } from "./wrap";
 
 type Selection = { peerId: string; target: PeerPaneTarget };
 
 /** Only the selected peer is polled. In-flight reads survive deselection until
- * the service settles them, so returning to a peer cannot start a second read. */
+ * the service settles them, so returning to a peer cannot start a second read.
+ * A coordinator's own input box is sliced off the capture, as for a local
+ * coordinator: render() draws the transcript above it, and statusLines() the
+ * CLI's status lines, which the dashboard draws below its own input field. */
 export class RemotePane {
   private selectedKey: string | null = null;
   private active: Selection | null = null;
+  private trimChrome = false;
   private visible = true;
   private denial: string | null = null;
   private cancel: (() => void) | null = null;
@@ -20,6 +25,7 @@ export class RemotePane {
   private text: string | null = null;
   private error: string | null = null;
   private wrap = new WordWrapCache();
+  private sliced: { text: string; slice: ChromeSlice } | null = null;
 
   constructor(
     private fetch: (peerId: string, target: PeerPaneTarget, lines: number) => Promise<PeerPane>,
@@ -38,6 +44,7 @@ export class RemotePane {
     this.cancel = null;
     this.selectedKey = key;
     this.active = null;
+    this.trimChrome = selection?.target.op === "coordinator-pane";
     this.denial = denial;
     this.visible = visible;
     if (!sameSelection) {
@@ -87,11 +94,26 @@ export class RemotePane {
     this.redraw();
   }
 
+  /** The capture split at a coordinator's input box (the Claude detector, as for a local coordinator); an agent's capture whole. */
+  private slice(): ChromeSlice | null {
+    if (this.text === null) return null;
+    if (!this.trimChrome) return { transcriptRaw: this.text, statusLines: [] };
+    if (this.sliced?.text !== this.text) this.sliced = { text: this.text, slice: computeChromeSlice(this.text, false) };
+    return this.sliced.slice;
+  }
+
+  /** The CLI's status lines from below its input box, each truncated to `width`, never wrapped. */
+  statusLines(width: number): string[] {
+    if (this.denial !== null) return [];
+    return (this.slice()?.statusLines ?? []).map((line) => closeOsc8(truncateToWidth(line, width, "")));
+  }
+
   render(width: number, height: number): string[] {
     this.displayHeight = height;
     if (height <= 0) return [];
     if (this.denial !== null) return padLines(wordWrapSingleLine(this.denial, width), height);
-    const output = this.text !== null ? this.wrap.get(this.text, width)
+    const slice = this.slice();
+    const output = slice !== null ? this.wrap.get(slice.transcriptRaw, width)
       : this.error === null ? [`${DIM}Waiting for output…${RESET}`] : [];
     const room = height - (this.error === null ? 0 : 1);
     this.maxVisibleOffset = Math.max(0, output.length - room);

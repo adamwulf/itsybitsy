@@ -67,17 +67,18 @@ function defaultDeps(): WatchCrashDeps {
 }
 
 /**
- * The thrown value as text: an Error's name, message and full stack, or any
- * other value's inspect form (a rejection can carry anything). Never throws.
+ * The thrown value as text, in its inspect form, as Bun's own printer shows
+ * it: for an Error the full stack plus its own fields and `[cause]` chain (a
+ * network or napi error's `code` is often the detail that matters). A
+ * rejection can carry any value. Never throws.
  */
 export function describeFatalReason(reason: unknown): string {
   try {
     if (reason instanceof Error) {
+      const text = inspect(reason, { depth: 4 });
+      // A stack overwritten with other text would hide the name and message.
       const head = `${reason.name}: ${reason.message}`;
-      const stack = typeof reason.stack === "string" ? reason.stack : "";
-      // Bun's stack starts with "Name: message"; don't print it twice.
-      if (stack.startsWith(head)) return stack;
-      return stack ? `${head}\n${stack}` : head;
+      return text.includes(head) ? text : `${head}\n${text}`;
     }
     return `non-Error value: ${inspect(reason, { depth: 4 })}`;
   } catch {

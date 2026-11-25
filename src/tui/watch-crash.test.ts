@@ -115,7 +115,29 @@ describe("installWatchCrashHandlers", () => {
     expect(() => describeFatalReason(hostile)).not.toThrow();
     const noStack = new RangeError("bad length");
     noStack.stack = undefined;
-    expect(describeFatalReason(noStack)).toBe("RangeError: bad length");
+    expect(describeFatalReason(noStack)).toBe("[RangeError: bad length]");
+    const replacedStack = new Error("lost head");
+    replacedStack.stack = "some other text";
+    expect(describeFatalReason(replacedStack)).toStartWith("Error: lost head\n");
+  });
+
+  test("an Error's code and cause are kept, in the log entry and on stderr", () => {
+    const handlers = installWatchCrashHandlers(deps);
+    const err = Object.assign(
+      new Error("socket hang up", { cause: new TypeError("iroh stream closed by peer") }),
+      { code: "ECONNRESET" },
+    );
+
+    target.emit("unhandledRejection", err, Promise.resolve());
+
+    const log = readLog(logPath);
+    expect(log).toContain("    Error: socket hang up\n");
+    expect(log).toContain("code: 'ECONNRESET'");
+    expect(log).toContain("[cause]: TypeError: iroh stream closed by peer");
+    const stderr = calls.find((c) => c.startsWith("stderr:"))!;
+    expect(stderr).toContain("code: 'ECONNRESET'");
+    expect(stderr).toContain("[cause]: TypeError: iroh stream closed by peer");
+    handlers.uninstall();
   });
 
   test("a teardown that throws still exits 1, with the entry written", () => {

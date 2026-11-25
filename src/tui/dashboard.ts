@@ -555,7 +555,7 @@ class StatusBarComponent implements Component {
       // `q` works on every remote agent row, whatever its type (isRemoteAllowedKey).
       const questionsHint = this.remoteRepoSelected || this.remoteCoordinatorVisible ? "" : `${qLabel}    `;
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${questionsHint}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${this.remoteAgentSelected ? "    C: terminal" : ""}${errBadge}${RESET}`;
-      let row2 = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab${this.remoteAgentSelected ? "    o: diff    m: merge    x: retire    R: resume" : ""}${this.remoteRepoSelected ? "    c: clone here" : "    s: send"}${markHint}`;
+      let row2 = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab${this.remoteAgentSelected ? "    o: diff    m: merge    x: retire    R/P: resume/pause" : ""}${this.remoteRepoSelected ? "    c: clone here" : "    s: send"}${markHint}`;
       // `a` and `h` come last, and only whole: on a narrow terminal the row's
       // own actions and the usage/version on the right matter more than the
       // two global dialogs, and a hint cut in half is noise. The room kept
@@ -804,7 +804,7 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
 export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
   if (data === ".") return row?.kind === "remote-agent" || row?.kind === "remote-repo-header" || row?.kind === "remote-coordinator";
   if (data === "q") return row?.kind === "remote-agent";
-  if (data === "o" || data === "m" || data === "x" || data === "R" || data === "b") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
+  if (data === "o" || data === "m" || data === "x" || data === "R" || data === "P" || data === "b") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
   // A terminal on the agent's tmux session (SPEC §20.4 "Remote terminal").
   if (data === "C") return row?.kind === "remote-agent";
   switch (data) {

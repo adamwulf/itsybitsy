@@ -620,10 +620,16 @@ test("lifecycle requests run the receiver’s local commands, return merge error
     // The merge names this machine, for a failed push's retry hint.
     expect(deps.mergeAgent.mock.calls.at(-1)).toEqual([expect.objectContaining({ id: "worker" }), repo, { keep: true, _peerRequest: { machine: "Studio" } }]);
     await ask({ ...target, action: "resume" });
+    await ask({ ...target, action: "pause" });
+    // Pause reads the agent's live state first, without reaping.
+    expect(deps.detectAgentStates.mock.calls.at(-1)).toEqual([[expect.objectContaining({ id: "worker" })]]);
+    expect(deps.pauseAgent.mock.calls).toEqual([[expect.objectContaining({ id: "worker" })]]);
+    deps.pauseAgent.mockResolvedValueOnce({ ok: false, exitCode: 1, stdout: "", stderr: "Agent 'worker' is already stopped" });
+    await expect(ask({ ...target, action: "pause" })).rejects.toThrow("Agent 'worker' is already stopped");
     await ask({ ...target, action: "retire" });
     await ask({ id: "worker", action: "rehire" });
     expect(deps.rehireAgent.mock.calls).toEqual([["worker", { repoPath: repo }]]);
-    expect(deps.notice.mock.calls).toEqual(["merged", "resumed", "retired", "rehired"].map(verb => [`Alice ${verb} worker in App`, "info"]));
+    expect(deps.notice.mock.calls).toEqual(["merged", "resumed", "paused", "retired", "rehired"].map(verb => [`Alice ${verb} worker in App`, "info"]));
     deps.mergeAgent.mockResolvedValueOnce({ ok: true, exitCode: 0, stdout: "Nothing to merge: branch is current", stderr: "" });
     expect(await ask({ ...target, action: "merge", keep: true })).toEqual({ output: "Nothing to merge: branch is current" });
     expect(deps.notice.mock.calls.at(-1)?.[0]).toContain("Nothing to merge: branch is current");
@@ -717,7 +723,7 @@ test("dropping the trusted link after lifecycle FIN leaves the outcome unknown",
   await expect(result).rejects.toThrow("outcome unknown — check Laptop B");
 });
 
-test.each([["merge", 120000], ["retire", 30000], ["rehire", 30000], ["resume", 30000]] as const)(
+test.each([["merge", 120000], ["retire", 30000], ["rehire", 30000], ["resume", 30000], ["pause", 30000]] as const)(
   "%s waits for its own deadline and reports the machine to check", async (action, ms) => {
     const link = createMemoryLink(ID_A, ID_B);
     const clock = createFakeClock();

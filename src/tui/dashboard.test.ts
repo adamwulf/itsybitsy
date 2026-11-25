@@ -11873,7 +11873,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(content()).not.toContain("sending to Laptop B/");
   });
 
-  test("remote m checks before confirming keep, x confirms retirement, and R resumes directly", async () => {
+  test("remote m checks before confirming keep, x confirms retirement, P confirms pausing, and R resumes directly", async () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);
     const run = spyOn(service, "runRemoteLifecycle").mockResolvedValue({ output: "Ready to merge" });
@@ -11908,6 +11908,18 @@ describe("Unified peer repos in the Agents tree", () => {
     pending.resolve({ output: "" });
     await Bun.sleep(0);
     expect(dashboard.notice).toContain("retired");
+    dashboard.handleInput("P");
+    const pause = assertDialog(dashboard.dialog, "confirm");
+    expect(pause.prompt).toBe(`Pause agent ${WORKER_KEY}?`);
+    expect(pause.focusedButton).toBe("cancel");
+    dashboard.closeDialog();
+    expect(run).toHaveBeenCalledTimes(3);
+    dashboard.handleInput("P");
+    run.mockResolvedValueOnce({ output: "" });
+    assertDialog(dashboard.dialog, "confirm").onYes();
+    await Bun.sleep(0);
+    expect(run.mock.calls.at(-1)).toEqual([PEER_B, { id: "worker-abc", repo: "itsybitsy", action: "pause" }]);
+    expect(dashboard.notice).toBe(`${WORKER_KEY} paused`);
     run.mockRejectedValueOnce(new Error("Agent is already running"));
     dashboard.handleInput("R");
     await Bun.sleep(0);
@@ -12016,6 +12028,18 @@ describe("Unified peer repos in the Agents tree", () => {
     const row = dashboard.agentTree.selectedRemote!;
     expect(isRemoteAllowedKey("b", row)).toBe(true);
     expect(row.kind === "remote-agent" && isRemoteAllowedKey("b", { ...row, remote: { ...row.remote, agentType: "repo-coordinator" } })).toBe(false);
+  });
+
+  test("P on a remote agent its peer reports stopped is refused without asking the peer", () => {
+    const { dashboard, service } = setup();
+    const [b, ...rest] = links();
+    service.set({ links: [{ ...b!, agents: b!.agents!.map(agent => agent.id === "worker-abc" ? { ...agent, state: "stopped" } : agent) }, ...rest] });
+    selectByKey(dashboard, WORKER_KEY);
+    const run = spyOn(service, "runRemoteLifecycle");
+    dashboard.handleInput("P");
+    expect(dashboard.dialog).toBeNull();
+    expect(dashboard.notice).toBe("Can only pause running, waiting, or complete agents");
+    expect(run).not.toHaveBeenCalled();
   });
 
   test("a remote merge whose push failed on the peer shows the failure in red", async () => {
@@ -13008,7 +13032,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const narrow = ((dashboard as any).statusBar.render(MIN_TERMINAL_WIDTH) as string[]).map(stripAnsi).join("\n");
     for (const hint of ["C: terminal", ".: favorite", "s: send"]) expect(narrow).toContain(hint);
     expect(text).toContain("s: send");
-    for (const hint of [".: favorite", "o: diff", "m: merge", "x: retire", "R: resume", "q: questions"]) expect(text).toContain(hint);
+    for (const hint of [".: favorite", "o: diff", "m: merge", "x: retire", "R/P: resume/pause", "q: questions"]) expect(text).toContain(hint);
     // The global dialogs come last on the row, after the row's own actions.
     const wide = ((dashboard as any).statusBar.render(240) as string[]).map(stripAnsi).join("\n");
     expect(wide).toMatch(/\.: favorite +a: new agent +h: setup/);

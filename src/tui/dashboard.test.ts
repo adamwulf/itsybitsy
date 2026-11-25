@@ -13654,10 +13654,15 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
       expect(dashboard.dialog).toBe(dialog);
       expect(dialog.inFlight).toBe(true);
+      // Accepted: the note goes while the question is acknowledged.
+      const acknowledged = Promise.withResolvers<void>();
+      service.acknowledgeRemoteQuestion.mockImplementationOnce(() => acknowledged.promise);
       result.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+      await waitFor(() => service.acknowledgeRemoteQuestion.mock.calls.length === 1);
+      expect(overlay()).not.toContain("Waiting for");
+      acknowledged.resolve();
       await waitFor(() => dashboard.notice === "Answered Laptop B/worker-abc");
       expect(dashboard.dialog).toBeNull();
-      expect(service.acknowledgeRemoteQuestion).toHaveBeenCalledTimes(1);
     });
 
     test("a written answer that then fails leaves no waiting note for the retry", async () => {

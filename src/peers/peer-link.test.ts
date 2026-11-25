@@ -620,8 +620,13 @@ test("lifecycle requests run the receiver’s local commands, return merge error
     // The merge names this machine, for a failed push's retry hint.
     expect(deps.mergeAgent.mock.calls.at(-1)).toEqual([expect.objectContaining({ id: "worker" }), repo, { keep: true, _peerRequest: { machine: "Studio" } }]);
     await ask({ ...target, action: "resume" });
+    // Pause reads the agent's live state first, without reaping: pauseAgent
+    // sees the detected state, not the "unknown" the agent is read with.
+    deps.detectAgentStates.mockImplementationOnce(async agents => { agents[0]!.state = "running"; });
+    let pausedState: string | undefined;
+    deps.pauseAgent.mockImplementationOnce(async agent => { pausedState = agent.state; return { ok: true, exitCode: 0, stdout: "", stderr: "" }; });
     await ask({ ...target, action: "pause" });
-    // Pause reads the agent's live state first, without reaping.
+    expect(pausedState).toBe("running");
     expect(deps.detectAgentStates.mock.calls.at(-1)).toEqual([[expect.objectContaining({ id: "worker" })]]);
     expect(deps.pauseAgent.mock.calls).toEqual([[expect.objectContaining({ id: "worker" })]]);
     deps.pauseAgent.mockResolvedValueOnce({ ok: false, exitCode: 1, stdout: "", stderr: "Agent 'worker' is already stopped" });

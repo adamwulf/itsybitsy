@@ -63,12 +63,13 @@ test("a spawn change sets the override and reports the new capability", async ()
   ]);
 });
 
-test("a change whose notify failed still succeeds, and says so in the reply and the log", async () => {
+test("a change whose notify failed still succeeds, and says so in the reply, the log and a red notice", async () => {
   const { deps, logs, accept } = fixture();
   deps.grantAgentPermission.mockResolvedValueOnce({ ok: true, notifyError: "No active tmux session\nfor worker" });
   expect(await accept({ allow: "Read" })).toEqual({ canSpawnChildren: false, notifyError: "No active tmux session\nfor worker" });
-  expect(logs).toEqual(["Laptop added Read to worker allow list in App · notify failed: No active tmux session for worker"]);
-  expect(deps.notice.mock.calls).toEqual([["Laptop added Read to worker allow list in App", "info"]]);
+  const line = "Laptop added Read to worker allow list in App · notify failed: No active tmux session for worker";
+  expect(logs).toEqual([line]);
+  expect(deps.notice.mock.calls).toEqual([[line, "error"]]);
 });
 
 test("a failed change fails with the local dialog's notice and notices nothing", async () => {

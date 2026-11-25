@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAliveCtx, processStartEpochSecondsCtx, resetProcessStartEpochSecondsCache } from "../agents";
 import { resetUserHome, setUserHome } from "../home";
-import { peerDir, peerEndpointLockFile, peersFile } from "../runtime-names";
+import { agentsDir, peerDir, peerEndpointLockFile, peersFile } from "../runtime-names";
+import { effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability } from "../agent-permissions";
+import type { RemotePermissionDeps } from "./remote-permissions";
 import { makeAgent, waitFor } from "../test-utils";
 import { acquireEndpointLock, releaseEndpointLock } from "./endpoint-lock";
 import { readConnectedPeers } from "./remote-agents";
@@ -20,6 +22,7 @@ import {
   encodeAgentsReply,
   encodePeerRequest,
   requestAgents,
+  requestPermissions,
   serveTrustedConnection,
   toRemoteAgents,
   type RemoteAgent,
@@ -958,6 +961,49 @@ describe("PeerService at boot", () => {
     }
   });
 
+  test("remotePermissions waits for the startup human decision, needs the connected link, then asks the peer", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const decision = gate<string | null>();
+    const { service, endpoint } = makeService({ remoteStartDenial: decision.promise });
+    const requests: unknown[] = [];
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer,
+        peerName: async () => "paired", snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }), log: () => {},
+        permissions: async request => { requests.push(request); return { canSpawnChildren: true }; },
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    const read = { repo: "app", id: "worker" };
+    try {
+      await expect(service.remotePermissions(ID_REMOTE, read)).rejects.toThrow("checking whether remote permission changes are allowed");
+      decision.resolve(null);
+      await flushMicrotasks();
+      await expect(service.remotePermissions(ID_REMOTE, read)).rejects.toThrow("Laptop C is disconnected");
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      expect(await service.remotePermissions(ID_REMOTE, { ...read, allow: "Read" })).toEqual({ canSpawnChildren: true });
+      expect(requests).toEqual([{ ...read, allow: "Read" }]);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  test("a denied dashboard opens no stream for remotePermissions", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint } = makeService({ remoteStartDenial: "Only a human can start an agent on another machine" });
+    const connections = answerDials(endpoint, []);
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      const open = spyOn(connections[0]!.peer, "openBi");
+      await expect(service.remotePermissions(ID_REMOTE, { repo: "app", id: "worker", canSpawnChildren: true }))
+        .rejects.toThrow("Only a human can change an agent's permissions on another machine");
+      expect(open).not.toHaveBeenCalled();
+    } finally { await service.shutdown(); }
+  });
+
   test("the owning watch renews the lease each poll and replaces the snapshot only on visible changes", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const { writeRemoteAgents, renewLease } = defaultPeerServiceDeps("Desk", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, null);
@@ -1883,6 +1929,11 @@ describe("peerRetryDelayMs", () => {
   });
 });
 
+test("defaultPeerServiceDeps answers permissions requests with the local b's own functions", () => {
+  const deps = defaultPeerServiceDeps("local", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, null, join(home, "staging"));
+  expect(deps.remotePermissions).toMatchObject({ effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability });
+});
+
 test("defaultPeerServiceDeps gives message sends and remote starts one attachment receiver", async () => {
   const deps = defaultPeerServiceDeps("local", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, null, join(home, "staging"));
   const file = { name: "a.txt", size: 1, sha256: "0".repeat(64), spellings: ["./a.txt"] };
@@ -2051,6 +2102,34 @@ describe("PeerService trusted ALPN", () => {
 
     listed.close(PEER_CLOSE.done, "done");
     await service.shutdown();
+  });
+
+  test("a permissions request reaches remotePermissions on this machine's agent, as the paired peer", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const repo = join(home, "app");
+    await Bun.write(join(agentsDir(repo), "worker", "meta.json"), JSON.stringify(makeAgent({ id: "worker" }).meta));
+    const notices: unknown[][] = [];
+    const remotePermissions: RemotePermissionDeps = {
+      listRepos: async () => [{ name: "App", path: repo }],
+      effectiveSpawnCapability: async () => false,
+      grantAgentPermission: mock<RemotePermissionDeps["grantAgentPermission"]>(async () => ({ ok: true })),
+      setAgentSpawnCapability: async () => ({ ok: true }),
+      notice: (...args) => { notices.push(args); },
+    };
+    const { service, endpoint, logs } = makeService({ remotePermissions });
+    endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
+    await service.bootIfPaired();
+    const conn = incomingFrom(endpoint, service.view().selfId!, PEER_ALPN);
+    try {
+      expect(await requestPermissions(conn, { repo: "app", id: "worker", allow: "Read" }, "Desk", createFakeClock().setTimer))
+        .toEqual({ canSpawnChildren: false });
+      expect(remotePermissions.grantAgentPermission).toHaveBeenCalledWith(expect.objectContaining({ id: "worker", repoPath: repo }), "Read");
+      expect(notices).toEqual([["Laptop C added Read to worker allow list in App", "info"]]);
+      expect(logs).toContain("Laptop C added Read to worker allow list in App");
+    } finally {
+      conn.close(PEER_CLOSE.done, "done");
+      await service.shutdown();
+    }
   });
 
   test("a framed remote start shows its receipt row, and shutdown cancels it and removes the partial", async () => {

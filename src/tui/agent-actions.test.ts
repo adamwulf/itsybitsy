@@ -1762,6 +1762,28 @@ describe("handleAddPermission", () => {
     expect(notices).toEqual(["Permission add cancelled"]);
   });
 
+  test("Enter adds the entry and sets one notice with the outcome; a listed entry is refused", async () => {
+    const repoDir = await mkdtemp(join(tmpdir(), "aa-add-permission-"));
+    try {
+      // No tmux session in this meta, so telling the agent fails at once.
+      const agent = makeAgent({ id: "agent-1", repoPath: repoDir, meta: { canSpawnChildren: false } as any });
+      const { ctx, dialogs, notices } = makeMockCtx({ agent });
+      const add = async (entry: string) => {
+        const opened = dialogs.length;
+        handleAddPermission(ctx);
+        await waitFor(() => dialogs.length > opened, { message: "the add-permission dialog", timeoutMs: WAIT_MS });
+        const shown = notices.length;
+        assertDialog(dialogs.at(-1)!, "add-permission").onSubmit(entry);
+        await waitFor(() => notices.length > shown, { message: "the add's notice", timeoutMs: WAIT_MS });
+        return notices.slice(shown);
+      };
+      expect(await add("Read")).toEqual(["Added Read, but notify failed: Agent has no tmux session"]);
+      expect(await add("Read")).toEqual(["Already in allow list"]);
+    } finally {
+      await rm(repoDir, { recursive: true, force: true });
+    }
+  });
+
   test("invalid characters rejected", async () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });

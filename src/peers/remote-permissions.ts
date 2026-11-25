@@ -67,8 +67,11 @@ export async function acceptRemotePermission(request: RemotePermissionRequest, r
   const done = request.allow !== undefined
     ? `${peer} added ${request.allow} to ${agent.id} allow list in ${agent.repoRegistryName}`
     : `${peer} ${request.canSpawnChildren ? "enabled" : "disabled"} sub-agent spawning for ${agent.id} in ${agent.repoRegistryName}`;
-  log(singleLine(result.notifyError === undefined ? done : `${done} · notify failed: ${result.notifyError}`));
-  deps.notice(done, "info");
+  // The change stands when only telling the agent failed, but this machine's
+  // user should know the agent was not told: an alert, as a failed push after a remote merge is.
+  const line = singleLine(result.notifyError === undefined ? done : `${done} · notify failed: ${result.notifyError}`);
+  log(line);
+  deps.notice(line, result.notifyError === undefined ? "info" : "error");
   return {
     canSpawnChildren: await deps.effectiveSpawnCapability(agent),
     ...(result.notifyError !== undefined && { notifyError: result.notifyError }),

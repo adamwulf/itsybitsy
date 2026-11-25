@@ -413,7 +413,7 @@ describe("with a temp home", () => {
   test("clones into a new folder, creating its parents, with prompts off, then registers it", async () => {
     const dest = join(root, "swift-packages", "foo");
     const url = "git@github.com:owner/Foo.git";
-    const result = await cloneRepo({ url, dest, registryName: "foo" });
+    const result = await cloneRepo({ url, dest, registryName: "foo", cloneRoot: root });
     expect(result).toEqual({ ok: true, message: `Cloned and added: foo (${dest})`, path: dest });
     const clones = calls.filter((c) => isClone(c.cmd));
     expect(clones.map((c) => c.cmd)).toEqual([["git", "-C", "/", "clone", "--quiet", "--", url, dest]]);
@@ -427,9 +427,9 @@ describe("with a temp home", () => {
   test("a clone at the peer's exact folder name registers under the peer's registry name", async () => {
     const mantra = cloneDestination(root, "mantra", "swift/Mantra");
     const site = cloneDestination(root, "adamwulfme", "html/adamwulf.me");
-    expect(await cloneRepo({ url: "git@github.com:owner/Mantra.git", dest: mantra, registryName: "mantra" }))
+    expect(await cloneRepo({ url: "git@github.com:owner/Mantra.git", dest: mantra, registryName: "mantra", cloneRoot: root }))
       .toEqual({ ok: true, message: `Cloned and added: mantra (${join(root, "swift", "Mantra")})`, path: join(root, "swift", "Mantra") });
-    expect(await cloneRepo({ url: "git@github.com:owner/adamwulf.me.git", dest: site, registryName: "adamwulfme" }))
+    expect(await cloneRepo({ url: "git@github.com:owner/adamwulf.me.git", dest: site, registryName: "adamwulfme", cloneRoot: root }))
       .toEqual({ ok: true, message: `Cloned and added: adamwulfme (${join(root, "html", "adamwulf.me")})`, path: join(root, "html", "adamwulf.me") });
     expect(await readdir(join(root, "swift"))).toEqual(["Mantra"]);
     expect((await loadRegistry()).repos).toEqual([
@@ -438,8 +438,67 @@ describe("with a temp home", () => {
     ]);
   });
 
+  // An earlier peer's clone can track a symlink; a later peer's relPath through
+  // it must not reach ~/.config/git or another repo's .git (SPEC §20.5).
+  test("a symlink in the clone root cannot take a destination outside it", async () => {
+    const home = join(baseDir, "fake-home");
+    await mkdir(join(home, ".config"), { recursive: true });
+    await mkdir(join(root, "A"));
+    await symlink(home, join(root, "A", "esc"));
+    const dest = cloneDestination(root, "git", "A/esc/.config/git");
+    const result = await cloneRepo({ url: "git@github.com:owner/git.git", dest, registryName: "git", cloneRoot: root });
+    expect(result).toEqual({
+      ok: false,
+      message: `Will not clone: the destination leaves the clone root through a symlink (${join(home, ".config", "git")})`,
+    });
+    expect(calls).toEqual([]);
+    expect(await readdir(join(home, ".config"))).toEqual([]);
+    expect((await loadRegistry()).repos).toEqual([]);
+  });
+
+  test("a symlink in the clone root cannot take a destination into another repo's .git or .itsybitsy", async () => {
+    // No hooks folder yet (a repo made without templates), so only the root check stands in the way.
+    await mkdir(join(root, "B", ".git"), { recursive: true });
+    await mkdir(join(root, "B", ".itsybitsy", "agents"), { recursive: true });
+    await mkdir(join(root, "A"));
+    await symlink("../B/.git", join(root, "A", "esc"));
+    await symlink("../B/.itsybitsy", join(root, "A", "rt"));
+    const hooks = await cloneRepo({ url: "git@github.com:owner/hooks.git", dest: join(root, "A", "esc", "hooks"), registryName: "hooks", cloneRoot: root });
+    expect(hooks).toEqual({
+      ok: false,
+      message: `Will not clone: the destination resolves into a .git or .itsybitsy folder (${join(root, "B", ".git", "hooks")})`,
+    });
+    const agent = await cloneRepo({ url: "git@github.com:owner/x.git", dest: join(root, "A", "rt", "agents", "x"), registryName: "x", cloneRoot: root });
+    expect(agent.ok).toBe(false);
+    expect(agent.message).toStartWith("Will not clone: the destination resolves into a .git or .itsybitsy folder (");
+    expect(calls).toEqual([]);
+    expect(await readdir(join(root, "B", ".git"))).toEqual([]);
+    expect(await readdir(join(root, "B", ".itsybitsy", "agents"))).toEqual([]);
+    expect((await loadRegistry()).repos).toEqual([]);
+  });
+
+  test("a symlink that stays in the clone root, or a clone root reached through one, still clones", async () => {
+    await mkdir(join(root, "swift"));
+    await symlink("swift", join(root, "swift-link"));
+    expect(await cloneRepo({ url: "git@github.com:owner/Foo.git", dest: join(root, "swift-link", "Foo"), registryName: "foo", cloneRoot: root }))
+      .toEqual({ ok: true, message: `Cloned and added: foo (${join(root, "swift", "Foo")})`, path: join(root, "swift", "Foo") });
+    await symlink(root, join(baseDir, "dev-link"));
+    const link = join(baseDir, "dev-link");
+    const viaRoot = await cloneRepo({ url: "git@github.com:owner/Bar.git", dest: join(link, "html", "Bar"), registryName: "bar", cloneRoot: link });
+    expect(viaRoot.path).toBe(join(root, "html", "Bar"));
+    expect((await loadRegistry()).repos.map((r) => r.path)).toEqual([join(root, "swift", "Foo"), join(root, "html", "Bar")]);
+  });
+
+  test("a destination the user typed outside the clone root is the user's choice, symlink or not", async () => {
+    const elsewhere = join(baseDir, "elsewhere");
+    await mkdir(elsewhere);
+    await symlink(elsewhere, join(baseDir, "elsewhere-link"));
+    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest: join(baseDir, "elsewhere-link", "foo"), registryName: "foo", cloneRoot: root });
+    expect(result).toEqual({ ok: true, message: `Cloned and added: foo (${join(elsewhere, "foo")})`, path: join(elsewhere, "foo") });
+  });
+
   test("a leading ~ in the destination is expanded", async () => {
-    const result = await cloneRepo({ url: "https://github.com/owner/foo", dest: "~/Developer/foo", registryName: "foo" });
+    const result = await cloneRepo({ url: "https://github.com/owner/foo", dest: "~/Developer/foo", registryName: "foo", cloneRoot: root });
     expect(result.path).toBe(join(root, "foo"));
     expect((await loadRegistry()).repos).toEqual([{ path: join(root, "foo"), name: "foo" }]);
   });
@@ -449,7 +508,7 @@ describe("with a temp home", () => {
     await mkdir(join(dest, ".git"), { recursive: true });
     // Same repo once a trailing ".git" and "/" are trimmed.
     cloneRepoSpawnCtx.set(workingGit("https://github.com/owner/foo.git/"));
-    const result = await cloneRepo({ url: "https://github.com/owner/foo", dest, registryName: "foo" });
+    const result = await cloneRepo({ url: "https://github.com/owner/foo", dest, registryName: "foo", cloneRoot: root });
     expect(result).toEqual({ ok: true, message: `Added the existing clone: foo (${dest})`, path: dest });
     expect(calls.map((c) => c.cmd)).toEqual([["git", "-C", dest, "config", "--get", "remote.origin.url"]]);
     expect((await loadRegistry()).repos).toEqual([{ path: dest, name: "foo" }]);
@@ -459,7 +518,7 @@ describe("with a temp home", () => {
     const dest = join(root, "foo");
     await mkdir(join(dest, ".git"), { recursive: true });
     cloneRepoSpawnCtx.set(workingGit("https://x-access-token:ghp_secret@github.com/owner/foo.git"));
-    const result = await cloneRepo({ url: "https://github.com/owner/foo", dest, registryName: "foo" });
+    const result = await cloneRepo({ url: "https://github.com/owner/foo", dest, registryName: "foo", cloneRoot: root });
     expect(result).toEqual({ ok: true, message: `Added the existing clone: foo (${dest})`, path: dest });
     expect(calls.some((c) => isClone(c.cmd))).toBe(false);
   });
@@ -468,18 +527,18 @@ describe("with a temp home", () => {
     const dest = join(root, "foo");
     await mkdir(join(dest, ".git"), { recursive: true });
     cloneRepoSpawnCtx.set(workingGit("git@github.com:someone-else/foo.git"));
-    const other = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
+    const other = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo", cloneRoot: root });
     expect(other).toEqual({
       ok: false,
       message: `${dest} already exists with origin git@github.com:someone-else/foo.git, not git@github.com:owner/foo.git — choose another folder`,
     });
     // The refusal names the local origin without its token.
     cloneRepoSpawnCtx.set(workingGit("https://user:ghp_secret@github.com/someone-else/foo.git"));
-    const tokened = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
+    const tokened = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo", cloneRoot: root });
     expect(tokened.message).toContain("already exists with origin https://github.com/someone-else/foo.git, not");
     expect(tokened.message).not.toContain("ghp_secret");
     cloneRepoSpawnCtx.set(workingGit(null));
-    const none = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
+    const none = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo", cloneRoot: root });
     expect(none.message).toContain("already exists with origin (none)");
     expect(calls.some((c) => isClone(c.cmd))).toBe(false);
     expect(await readdir(dest)).toEqual([".git"]);
@@ -489,7 +548,7 @@ describe("with a temp home", () => {
   test.if(caseInsensitiveTmp)("a typed myapp that names an existing MyApp registers the on-disk spelling", async () => {
     await mkdir(join(root, "MyApp", ".git"), { recursive: true });
     cloneRepoSpawnCtx.set(workingGit("git@github.com:owner/myapp.git"));
-    const result = await cloneRepo({ url: "git@github.com:owner/myapp.git", dest: join(root, "myapp"), registryName: "myapp" });
+    const result = await cloneRepo({ url: "git@github.com:owner/myapp.git", dest: join(root, "myapp"), registryName: "myapp", cloneRoot: root });
     const real = join(root, "MyApp");
     expect(result).toEqual({ ok: true, message: `Added the existing clone: myapp (${real})`, path: real });
     expect(calls.map((c) => c.cmd)).toEqual([["git", "-C", real, "config", "--get", "remote.origin.url"]]);
@@ -499,7 +558,7 @@ describe("with a temp home", () => {
   test.if(caseInsensitiveTmp)("a new clone under an existing folder spelled differently uses that folder's spelling", async () => {
     await mkdir(join(root, "Swift"));
     const url = "git@github.com:owner/foo.git";
-    const result = await cloneRepo({ url, dest: join(root, "swift", "foo"), registryName: "foo" });
+    const result = await cloneRepo({ url, dest: join(root, "swift", "foo"), registryName: "foo", cloneRoot: root });
     const real = join(root, "Swift", "foo");
     expect(result.path).toBe(real);
     expect(calls.filter((c) => isClone(c.cmd)).map((c) => c.cmd)).toEqual([["git", "-C", "/", "clone", "--quiet", "--", url, real]]);
@@ -509,7 +568,7 @@ describe("with a temp home", () => {
   test("an existing folder that is not a git repo is refused without running git", async () => {
     const dest = join(root, "foo");
     await mkdir(dest);
-    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
+    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo", cloneRoot: root });
     expect(result).toEqual({ ok: false, message: `${dest} already exists and is not a git repo — choose another folder` });
     expect(calls).toEqual([]);
     expect((await loadRegistry()).repos).toEqual([]);
@@ -518,7 +577,7 @@ describe("with a temp home", () => {
   test("a registry clash is refused before cloning, so no orphan clone is left", async () => {
     await saveRegistry({ repos: [{ path: "/elsewhere/foo-app", name: "FOO" }] });
     const dest = join(root, "foo");
-    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
+    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo", cloneRoot: root });
     expect(result.ok).toBe(false);
     expect(result.message).toContain("already the name of a registered repo (/elsewhere/foo-app)");
     expect(result.message).toEndWith("a clone keeps the peer's repo name");
@@ -528,7 +587,7 @@ describe("with a temp home", () => {
   });
 
   test("a URL the grammar refuses is refused without running git", async () => {
-    const result = await cloneRepo({ url: "ext::sh -c touch% /tmp/pwned", dest: join(root, "foo"), registryName: "foo" });
+    const result = await cloneRepo({ url: "ext::sh -c touch% /tmp/pwned", dest: join(root, "foo"), registryName: "foo", cloneRoot: root });
     // The same text the dashboard shows when c is pressed.
     expect(result).toEqual({ ok: false, message: "Will not clone: not an ssh://, https:// or [user@]host:path URL (ext::sh -c touch% /tmp/pwned)" });
     expect(result.message).toBe(refusalOf("ext::sh -c touch% /tmp/pwned")!);
@@ -542,7 +601,7 @@ describe("with a temp home", () => {
       exitCode: 128,
       stderr: "Host key verification failed.\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\n",
     })));
-    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest: join(root, "foo"), registryName: "foo" });
+    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest: join(root, "foo"), registryName: "foo", cloneRoot: root });
     expect(result).toEqual({
       ok: false,
       message: "git clone failed: Host key verification failed. fatal: Could not read from remote repository. Please make sure you have the correct access rights",
@@ -556,7 +615,7 @@ describe("with a temp home", () => {
     cloneRepoSpawnCtx.set(fakeGit((cmd) => isClone(cmd)
       ? { exitCode: 128, stderr: "remote: \x1b]52;c;eA==\x07hello\r\nfatal: \x1b[2Jbad\u202e\x7f\x9b31mz\n" }
       : { exitCode: 1 }));
-    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest: join(root, "foo"), registryName: "foo" });
+    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest: join(root, "foo"), registryName: "foo", cloneRoot: root });
     expect(result.ok).toBe(false);
     expect(result.message).not.toMatch(/[\p{Cc}\p{Cf}]/u);
     expect(result.message).toBe("git clone failed: remote: ]52;c;eA== hello fatal: [2Jbad 31mz");
@@ -569,7 +628,7 @@ describe("with a temp home", () => {
     const dest = join(root, "foo");
     await chmod(registryDir, 0o555);
     try {
-      const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
+      const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo", cloneRoot: root });
       expect(result.ok).toBe(false);
       expect(result.path).toBe(dest);
       expect(result.message).toStartWith(`Cloned into ${dest}, but could not add it: `);

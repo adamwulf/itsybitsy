@@ -16,6 +16,7 @@ import { readConfig } from "./config";
 import { userHome } from "./home";
 import { addRepo, checkNewRepoEntry, readRegistryStrict } from "./registry";
 import { hasGitEntry } from "./create-repo";
+import { RUNTIME_DIR_NAME } from "./runtime-names";
 
 /**
  * Runs git: `git clone`, and `git config --get remote.origin.url` for both the
@@ -53,6 +54,23 @@ export async function resolveCloneRoot(): Promise<string> {
  */
 export function cloneDestination(cloneRoot: string, registryName: string, relPath: string | null): string {
   return relPath ? join(cloneRoot, relPath) : join(cloneRoot, registryName);
+}
+
+/** Folder names no path below the clone root may pass through, in any case: git's and ib's own. */
+const RESERVED_SEGMENTS = new Set([".git", RUNTIME_DIR_NAME]);
+
+/**
+ * Whether `relPath`, "/"-separated, may name a clone below the clone root:
+ * no empty, `.` or `..` segment, and no `.git` or `.itsybitsy` segment in any
+ * case. A clone at `<root>/.git` would make the clone root a repo whose config
+ * (`core.fsmonitor`) a peer wrote, and one under a repo's `.itsybitsy` would
+ * plant a fake agent folder that ib reads. A peer's `relPath` is checked with
+ * it when it arrives (peer-link's safeRelPath), and so is cloneRepo's
+ * destination once it is resolved on disk.
+ */
+export function isSafeCloneRelPath(relPath: string): boolean {
+  return relPath.split("/").every((segment) =>
+    segment !== "" && segment !== "." && segment !== ".." && !RESERVED_SEGMENTS.has(segment.toLowerCase()));
 }
 
 /** A clone URL's host, as git will connect to it, and its path (`owner/repo.git`), for the dialog title. */
@@ -262,19 +280,36 @@ export interface CloneRepoResult {
  *
  * Everything that can fail without touching the disk runs first: the URL
  * grammar ({@link checkCloneUrl}, which the dashboard also checks when `c` is
- * pressed) and the registry rules addRepo enforces, so a name clash never
- * leaves an orphan clone. A `dest` that is already a clone of `url` is just
+ * pressed), the clone-root check below, and the registry rules addRepo
+ * enforces, so a name clash never leaves an orphan clone.
+ *
+ * A `dest` typed inside `cloneRoot` must stay there once resolved on disk:
+ * an earlier peer's clone can track a symlink (`esc -> $HOME`, or
+ * `esc -> ../B/.git`) that would otherwise take a later peer's path to
+ * `~/.config/git` or into another repo's `.git`. So its on-disk spelling must
+ * be strictly inside the root's, by a path {@link isSafeCloneRelPath} allows.
+ * A `dest` typed outside the root is the user's choice and is not checked.
+ *
+ * A `dest` that is already a clone of `url` is just
  * registered; anything else already at `dest` is refused. Git runs in `/`:
  * `git clone` first tries its URL as a local path relative to its working
  * directory, which a peer's `relPath` could otherwise plant under the clone
  * root. A failed clone reports git's stderr (git removes its own partial
  * folder); a clone that cannot be registered is kept and the result names it.
  */
-export async function cloneRepo({ url, dest, registryName }: { url: string; dest: string; registryName: string }): Promise<CloneRepoResult> {
+export async function cloneRepo({ url, dest, registryName, cloneRoot }: {
+  url: string;
+  dest: string;
+  registryName: string;
+  cloneRoot: string;
+}): Promise<CloneRepoResult> {
   const checked = checkCloneUrl(url);
   if ("refusal" in checked) return { ok: false, message: checked.refusal };
   if (!dest.trim()) return { ok: false, message: "The destination folder is empty" };
-  const target = await onDiskSpelling(expandHome(dest.trim()));
+  const typed = expandHome(dest.trim());
+  const target = await onDiskSpelling(typed);
+  const refusal = await cloneRootRefusal(typed, target, resolve(cloneRoot));
+  if (refusal) return { ok: false, message: refusal };
 
   let entryError: string | null;
   try {
@@ -326,6 +361,24 @@ async function onDiskSpelling(path: string): Promise<string> {
       missing.push(basename(dir));
     }
   }
+}
+
+/**
+ * Why a destination typed inside `cloneRoot` may not be cloned into, or null.
+ * `target` is the destination's {@link onDiskSpelling}; the root's is taken
+ * the same way, so a root that does not exist yet compares too. A `typed`
+ * path outside the root, or the root itself, is the user's choice: null.
+ * The rule comes first and the path last, since a notice is cut at the
+ * terminal's width.
+ */
+async function cloneRootRefusal(typed: string, target: string, cloneRoot: string): Promise<string | null> {
+  const lexical = relative(cloneRoot, typed);
+  if (lexical === "" || lexical === ".." || lexical.startsWith(`..${sep}`) || isAbsolute(lexical)) return null;
+  const rel = relative(await onDiskSpelling(cloneRoot), target).split(sep).join("/");
+  if (rel === "" || rel === ".." || rel.startsWith("../")) {
+    return `Will not clone: the destination leaves the clone root through a symlink (${target})`;
+  }
+  return isSafeCloneRelPath(rel) ? null : `Will not clone: the destination resolves into a .git or .itsybitsy folder (${target})`;
 }
 
 /** addRepo, with `done` naming what happened on success and `onDisk` on a failure. */

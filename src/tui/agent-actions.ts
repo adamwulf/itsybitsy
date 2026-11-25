@@ -3448,7 +3448,7 @@ export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
       if (clonesInFlight.has(key)) { ctx.setNotice(`Already cloning ${name}`, "info"); return; }
       clonesInFlight.add(key);
       ctx.setNotice(`Cloning ${name}…`, "info");
-      cloneRepo({ url, dest, registryName: name }).then(async (result) => {
+      cloneRepo({ url, dest, registryName: name, cloneRoot: root }).then(async (result) => {
         ctx.setNotice(result.message, result.ok ? "info" : "error");
         if (result.ok) await reloadRepos(ctx);
       }).catch((err) => {

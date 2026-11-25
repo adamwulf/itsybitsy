@@ -162,7 +162,7 @@ describe("readAgentMeta spawned_by validation", () => {
     expect(meta!.spawned_by!.repo_path).toBeNull();
   });
 
-  test("@<repo-name> sentinel with string repo_path is preserved", async () => {
+  test("@<coordinator id> sentinel with string repo_path is preserved", async () => {
     await Bun.write(
       join(tempDir, "meta.json"),
       JSON.stringify({
@@ -286,8 +286,8 @@ describe("checkIbCommandAccess spawned_by", () => {
     expect(result!.decision).toBe("deny");
   });
 
-  // ── @<repo-name> sentinel access checks ──────────────────────────────────
-  // Per-repo coordinators are stamped as `@<coordinator-id>` in spawned_by.
+  // ── @<coordinator id> sentinel access checks ─────────────────────────────
+  // Per-repo coordinators are stamped as `@<coordinator id>` in spawned_by.
   // The hasAccess path must grant the actual coordinator (whose ID is
   // getCoordinatorAgentId(repo), here the basename, and whose
   // meta.agentType==="repo-coordinator") and deny everyone else.
@@ -295,10 +295,10 @@ describe("checkIbCommandAccess spawned_by", () => {
   // We use `ib merge` for these tests instead of `ib retire` because the
   // per-repo coordinator bypass (SPEC §12.2) lets any same-repo coordinator
   // retire/reassign any non-coordinator agent — which would mask whether the
-  // @<repo-name> hasAccess branch is doing the work. `merge` exercises only
+  // @<coordinator id> hasAccess branch is doing the work. `merge` exercises only
   // the manager/spawner paths.
 
-  test("@<repo-name> sentinel: ALLOWS merge when caller is the per-repo coordinator", async () => {
+  test("@<coordinator id> sentinel: ALLOWS merge when caller is the per-repo coordinator", async () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta(repoName, {
       id: repoName,
@@ -314,10 +314,10 @@ describe("checkIbCommandAccess spawned_by", () => {
       },
     });
     const result = await checkIbCommandAccess("ib merge agent-targetA --force", repoName, agentsDir);
-    expect(result).toBeNull(); // allowed via @<repo-name> coordinator-spawner path
+    expect(result).toBeNull(); // allowed via @<coordinator id> coordinator-spawner path
   });
 
-  test("@<repo-name> sentinel: DENIES merge when caller is not flagged as coordinator", async () => {
+  test("@<coordinator id> sentinel: DENIES merge when caller is not flagged as coordinator", async () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta(repoName, {
       id: repoName,
@@ -336,7 +336,7 @@ describe("checkIbCommandAccess spawned_by", () => {
     expect(result!.decision).toBe("deny");
   });
 
-  test("@<repo-name> sentinel: DENIES merge when caller's ID does not match the sentinel suffix", async () => {
+  test("@<coordinator id> sentinel: DENIES merge when caller's ID does not match the sentinel suffix", async () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta("not-the-repo", {
       id: "not-the-repo",
@@ -356,7 +356,7 @@ describe("checkIbCommandAccess spawned_by", () => {
     expect(result!.decision).toBe("deny");
   });
 
-  test("@<repo-name> sentinel: DENIES merge when repo_path doesn't match caller's repo", async () => {
+  test("@<coordinator id> sentinel: DENIES merge when repo_path doesn't match caller's repo", async () => {
     const repoName = require("path").basename(tmpDir);
     await writeAgentMeta(repoName, {
       id: repoName,

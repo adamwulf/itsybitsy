@@ -104,7 +104,7 @@ import type { SpawnResult } from "./types";
 import type { ConfigResult } from "./config";
 
 // Several tests here spawn REAL subprocesses: `mktemp -d` and `rm -rf` in the
-// `@<repo-name>` sentinel test, plus the real `tmux capture-pane` that
+// `@<coordinator id>` sentinel test, plus the real `tmux capture-pane` that
 // `saveUnknownDebugLog` runs on every transition into `unknown`. A subprocess
 // spawn is far more load-sensitive than in-process work — one was measured at
 // 156s during a pathologically loaded run (see commit 5c8f254) — and bun's 5s
@@ -1158,7 +1158,7 @@ describe("watchdog", () => {
       }
     });
 
-    test("@<repo-name> sentinel: no-op when repo not registered", async () => {
+    test("@<coordinator id> sentinel: no-op when repo_path is not a registered repo", async () => {
       setWatchdogListRepos(async () => []);
       try {
         const a1 = agent("a1", "complete", null);

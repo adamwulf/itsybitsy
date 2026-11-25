@@ -121,3 +121,9 @@ gitStatusSpawnCtx.setDefault(safeTestSpawnRunner);
 // no stdin pipe, so the probe fails at once without spawning anything.
 const { codexLiveSpawnCtx } = await import("./src/codex-live-usage");
 codexLiveSpawnCtx.setDefault(safeTestSpawnRunner);
+
+// Every dashboard setRepos reads each repo's `remote.origin.url` for the peer
+// snapshot (src/clone-repo.ts), and dashboard tests call it with fake paths.
+// Same backstop: on the stub every origin reads as unset, and no git runs.
+const { cloneRepoSpawnCtx } = await import("./src/clone-repo");
+cloneRepoSpawnCtx.setDefault(safeTestSpawnRunner);

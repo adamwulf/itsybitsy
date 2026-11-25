@@ -37,6 +37,10 @@ export type SpawnStdin = {
  * inherits an open stdin pipe (agy 1.1.23 blocks forever on one). Adding the
  * optional field is backward-compatible — every current call site passes only
  * `{ stdout, stderr }`.
+ *
+ * `env` is optional too and, as with Bun.spawn, replaces the child's whole
+ * environment: `git clone` from a peer's repo (src/clone-repo.ts) passes
+ * process.env plus the variables that stop git and ssh from prompting.
  */
 export type SpawnFn = (
   cmd: string[],

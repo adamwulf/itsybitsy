@@ -32,6 +32,7 @@ import {
 import { tmuxSessionTarget } from "./validation";
 import { gitStatusSpawnCtx, checkWorktreeCleanliness } from "./git-status";
 import { codexLiveSpawnCtx, fetchCodexLiveUsage } from "./codex-live-usage";
+import { cloneRepoSpawnCtx, readOriginUrl } from "./clone-repo";
 import type { SpawnFn } from "./types";
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -66,6 +67,7 @@ afterEach(() => {
   tmuxPollerSpawnCtx.reset();
   gitStatusSpawnCtx.reset();
   codexLiveSpawnCtx.reset();
+  cloneRepoSpawnCtx.reset();
 });
 
 // The dashboard's live Codex usage probe runs from startPolling() and an 8-hour
@@ -102,6 +104,17 @@ describe("git-status probe backstop", () => {
     expect(gitStatusSpawnCtx.runner).toBe(safeTestSpawnRunner);
     // The stub yields stdout "" / exit 0 — an empty porcelain listing.
     expect(await checkWorktreeCleanliness("/nonexistent/agent/worktree")).toBe("clean");
+  });
+});
+
+// Every dashboard setRepos reads each repo's origin URL through the clone
+// module's context, so dashboard tests reach it with fake repo paths.
+describe("clone-repo origin probe backstop", () => {
+  test("cloneRepoSpawnCtx.reset() restores the safety stub, and an origin reads as unset", async () => {
+    cloneRepoSpawnCtx.set(((): any => { throw new Error("real spawn must never run"); }) as SpawnFn);
+    cloneRepoSpawnCtx.reset();
+    expect(cloneRepoSpawnCtx.runner).toBe(safeTestSpawnRunner);
+    expect(await readOriginUrl("/nonexistent/repo")).toBeNull();
   });
 });
 

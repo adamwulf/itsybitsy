@@ -1,0 +1,195 @@
+/**
+ * "Clone here" for a repo only a peer has registered (SPEC §20.5): clone it
+ * from the remote URL the peer reports and register it under the peer's
+ * registry name, so its header joins the peer's on its own. Also the sending
+ * side of that URL: each registered repo's origin URL and its path relative
+ * to the clone root, which `ib watch` caches for the peer snapshot (SPEC
+ * §20.4). Lives outside the TUI, like create-repo.ts, so it can be tested on
+ * its own.
+ */
+
+import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
+import { mkdir, realpath, stat } from "fs/promises";
+import { SpawnContext } from "./types";
+import { readConfig } from "./config";
+import { userHome } from "./home";
+import { addRepo, checkNewRepoEntry, readRegistryStrict } from "./registry";
+import { hasGitEntry } from "./create-repo";
+
+/**
+ * Runs git: `git clone`, and `git config --get remote.origin.url` for both the
+ * existing-folder check and the peer snapshot's cache. Tests swap in a fake
+ * git; the test preload makes its reset baseline a no-op stub, since every
+ * dashboard `setRepos` reads each repo's origin through it.
+ */
+export const cloneRepoSpawnCtx = new SpawnContext();
+
+/** What the peer snapshot sends for one registered repo (RemoteRepo's clone fields). */
+export interface RepoCloneInfo {
+  /** `remote.origin.url` exactly as configured, or null when there is none. */
+  remoteUrl: string | null;
+  /** The repo's path under this install's clone root, e.g. `swift-packages/Foo`, or null when it is not inside it. */
+  relPath: string | null;
+}
+
+/** Expand a leading `~` against userHome(), then make the path absolute and normal. */
+function expandHome(path: string): string {
+  if (path === "~" || path.startsWith("~/")) return resolve(userHome(), path.slice(2));
+  return resolve(path);
+}
+
+/** `repos.cloneRoot` as an absolute path; unset or blank means `~/Developer`. */
+export async function resolveCloneRoot(): Promise<string> {
+  const value = (await readConfig())["repos.cloneRoot"]?.value;
+  return expandHome(typeof value === "string" && value.trim() ? value.trim() : "~/Developer");
+}
+
+/**
+ * Where a peer's repo is cloned: under the same folders below the clone root
+ * as on the peer (`swift/…`, `html/…`), in a folder named after the registry
+ * name, since the registry and coordinator naming rules key on the folder name.
+ */
+export function cloneDestination(cloneRoot: string, registryName: string, relPath: string | null): string {
+  return relPath ? join(cloneRoot, dirname(relPath), registryName) : join(cloneRoot, registryName);
+}
+
+/**
+ * The URLs "Clone here" passes to git: `ssh://…`, `https://…`, and scp-style
+ * `user@host:path`. Everything else is refused, including `ext::` and
+ * `file://`, local paths, plain `http://`, anything starting with `-`, and any
+ * whitespace or control character. A host may not start with `-` either.
+ */
+export function isAllowedCloneUrl(url: string): boolean {
+  if (url === "" || url.startsWith("-") || /[\s\p{Cc}]/u.test(url)) return false;
+  for (const scheme of ["ssh://", "https://"]) {
+    if (!url.startsWith(scheme)) continue;
+    const host = url.slice(scheme.length).split("/")[0]!.replace(/^[^@]*@/, "");
+    return host !== "" && !host.startsWith("-");
+  }
+  return /^[^@:/]+@[^@:/-][^@:/]*:.+$/.test(url);
+}
+
+/** Two remote URLs name the same repo once a trailing `/` and `.git` are trimmed. */
+function sameRemote(a: string, b: string): boolean {
+  const trim = (url: string) => url.replace(/\/+$/, "").replace(/\.git$/, "");
+  return trim(a) === trim(b);
+}
+
+/** `remote.origin.url` of the repo at `repoPath`, or null when git fails or it is unset. */
+export async function readOriginUrl(repoPath: string): Promise<string | null> {
+  try {
+    const { stdout, exitCode } = await cloneRepoSpawnCtx.run(["git", "-C", repoPath, "config", "--get", "remote.origin.url"]);
+    return exitCode === 0 && stdout !== "" ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `repoPath` relative to `cloneRoot`, both after realpath, when it is strictly inside it; else null. */
+export async function cloneRootRelPath(repoPath: string, cloneRoot: string): Promise<string | null> {
+  let rel: string;
+  try {
+    rel = relative(await realpath(cloneRoot), await realpath(repoPath));
+  } catch {
+    return null;
+  }
+  if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  return rel.split(sep).join("/");
+}
+
+/** The clone fields of one repo's peer snapshot entry. Never throws. */
+export async function readRepoCloneInfo(repoPath: string, cloneRoot: string): Promise<RepoCloneInfo> {
+  const [remoteUrl, relPath] = await Promise.all([readOriginUrl(repoPath), cloneRootRelPath(repoPath, cloneRoot)]);
+  return { remoteUrl, relPath };
+}
+
+/**
+ * The environment `git clone` runs with: an unknown host key, a missing key
+ * or a password prompt fails at once instead of waiting for input nobody can
+ * see. `ib watch` is unsandboxed, so the user's SSH agent comes along.
+ */
+export function cloneEnv(base: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const ssh = base.GIT_SSH_COMMAND?.trim() || "ssh";
+  return { ...base, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` };
+}
+
+/** The way forward from a taken name: the clone must keep the peer's name for its header to join the peer's. */
+const CLONE_NAME_HINT = "a clone keeps the peer's repo name";
+
+export interface CloneRepoResult {
+  ok: boolean;
+  message: string;
+  /** Set once the clone exists on disk, even when registering it failed. */
+  path?: string;
+}
+
+/**
+ * Clone `url` into `dest` and register it as `registryName`.
+ *
+ * Everything that can fail without touching the disk runs first: the URL
+ * allowlist and the registry rules addRepo enforces, so a name clash never
+ * leaves an orphan clone. A `dest` that is already a clone of `url` is just
+ * registered; anything else already at `dest` is refused. A failed clone
+ * reports git's stderr (git removes its own partial folder); a clone that
+ * cannot be registered is kept and the result names it.
+ */
+export async function cloneRepo({ url, dest, registryName }: { url: string; dest: string; registryName: string }): Promise<CloneRepoResult> {
+  if (!isAllowedCloneUrl(url)) {
+    return { ok: false, message: `Will not clone ${JSON.stringify(url)}: only ssh://, https:// and user@host:path URLs are allowed` };
+  }
+  if (!dest.trim()) return { ok: false, message: "The destination folder is empty" };
+  const target = expandHome(dest.trim());
+
+  let entryError: string | null;
+  try {
+    entryError = await checkNewRepoEntry(target, registryName, await readRegistryStrict(), CLONE_NAME_HINT);
+  } catch (err) {
+    return { ok: false, message: (err as Error).message };
+  }
+  if (entryError) return { ok: false, message: entryError };
+
+  if (await stat(target).then(() => true, () => false)) {
+    if (!(await hasGitEntry(target))) {
+      return { ok: false, message: `${target} already exists and is not a git repo — choose another folder` };
+    }
+    const origin = await readOriginUrl(target);
+    if (origin === null || !sameRemote(origin, url)) {
+      return { ok: false, message: `${target} already exists with origin ${origin ?? "(none)"}, not ${url} — choose another folder` };
+    }
+    return register(target, registryName, "Added the existing clone", `Found a clone at ${target}`);
+  }
+
+  try {
+    await mkdir(dirname(target), { recursive: true });
+  } catch (err) {
+    return { ok: false, message: `Cannot create ${dirname(target)}: ${(err as Error).message}` };
+  }
+  const clone = await runGit(["git", "clone", "--", url, target]);
+  if (!clone.ok) return { ok: false, message: `git clone failed: ${clone.output}` };
+  return register(target, registryName, "Cloned and added", `Cloned into ${target}`);
+}
+
+/** addRepo, with `done` naming what happened on success and `onDisk` on a failure. */
+async function register(target: string, registryName: string, done: string, onDisk: string): Promise<CloneRepoResult> {
+  // addRepo reports a refusal in its result but THROWS when the registry
+  // write fails; either way the clone exists, so the error must name it.
+  let added: { ok: boolean; message: string };
+  try {
+    added = await addRepo(target, registryName);
+  } catch (err) {
+    added = { ok: false, message: (err as Error).message };
+  }
+  if (!added.ok) return { ok: false, message: `${onDisk}, but could not add it: ${added.message}`, path: target };
+  return { ok: true, message: `${done}: ${registryName} (${target})`, path: target };
+}
+
+/** Run git with {@link cloneEnv}. `output` is git's stderr (or stdout) folded onto one line for the dashboard's notice. */
+async function runGit(cmd: string[]): Promise<{ ok: boolean; output: string }> {
+  try {
+    const { stdout, stderr, exitCode } = await cloneRepoSpawnCtx.run(cmd, cloneEnv());
+    const text = (stderr || stdout).split("\n").map((line) => line.trim()).filter(Boolean).join(" ");
+    return { ok: exitCode === 0, output: text || `exit code ${exitCode}` };
+  } catch (err) {
+    return { ok: false, output: (err as Error).message };
+  }
+}

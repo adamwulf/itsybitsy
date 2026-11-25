@@ -52,7 +52,7 @@ import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import { attachmentSettingKey, TRANSFER_SETTING_BOUNDS } from "../peers/transfer-limits";
 import type { ConfigResult } from "../config";
-import { PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
+import { DIALOG_WIDTH, PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { peerEntryKey, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 import { fullyQualifiedAgentId } from "./row-keys";
@@ -3333,24 +3333,44 @@ export function newRepoPrompt(parentPath: string): string {
   return `${prefix}${elideLeft(parentPath, room)}${suffix}`;
 }
 
+/** The shortest left-cut URL worth showing: room for an `…owner/repo.git` tail. */
+const MIN_URL_TAIL = 12;
+/** What a host keeps, from its end, when even the repo name must be cut. */
+const MIN_HOST_TAIL = 24;
+
 /**
  * Title of the Clone here dialog: `Clone <name> from <host> (<url>) via
  * <peer> into:`. The URL is untrusted peer data (a fork or a stale remote),
- * so the host git will connect to, parsed from it, is its own part and is
- * never cut. To keep the title inside the box only the URL is cut, at its
- * end; when not even a stub of it fits, it is left out and the name and the
- * peer are cut instead.
+ * so the host git will connect to, parsed from it, is its own part. The
+ * title must fit the overlay as drawn (pi-tui cuts any line wider than the
+ * overlay, which is the dialog's 80 columns or the terminal, if narrower),
+ * so it shrinks in this order: the peer is left out; then the URL is cut
+ * from the left, keeping owner/repo, the fork or stale-remote signal; then
+ * it is left out; then the host is cut from the left, keeping its
+ * registrable domain (`…evil.example`); and only for an overlong name is
+ * the name cut too.
  */
-export function clonePrompt(name: string, url: string, host: string, peer: string): string {
-  const max = dialogTitleMaxWidth();
-  const title = (shownUrl: string | null, shownName: string, shownPeer: string) =>
-    `Clone ${shownName} from ${host}${shownUrl === null ? "" : ` (${shownUrl})`} via ${shownPeer} into:`;
-  const room = max - visibleWidth(title("", name, peer));
-  if (room >= 4) return title(truncatePeerField(url, room), name, peer);
-  const spare = max - visibleWidth(title(null, "", ""));
-  if (visibleWidth(name) + visibleWidth(peer) <= spare) return title(null, name, peer);
-  const peerRoom = Math.max(1, Math.min(visibleWidth(peer), Math.floor(spare / 2)));
-  return title(null, truncatePeerField(name, Math.max(1, spare - peerRoom)), truncatePeerField(peer, peerRoom));
+export function clonePrompt(
+  name: string,
+  url: string,
+  host: string,
+  peer: string,
+  max = dialogTitleMaxWidth(Math.min(DIALOG_WIDTH, process.stdout.columns || DIALOG_WIDTH)),
+): string {
+  const title = (shownHost: string, shownUrl: string | null, shownPeer: string | null, shownName = name) =>
+    `Clone ${shownName} from ${shownHost}${shownUrl === null ? "" : ` (${shownUrl})`}${shownPeer === null ? "" : ` via ${shownPeer}`} into:`;
+  const fits = (text: string) => visibleWidth(text) <= max;
+  for (const candidate of [title(host, url, peer), title(host, url, null)]) {
+    if (fits(candidate)) return candidate;
+  }
+  const urlRoom = max - visibleWidth(title(host, "", null));
+  if (urlRoom >= MIN_URL_TAIL) return title(host, elideLeft(url, urlRoom), null);
+  if (fits(title(host, null, null))) return title(host, null, null);
+  const hostRoom = max - visibleWidth(title("", null, null));
+  if (hostRoom >= MIN_HOST_TAIL) return title(elideLeft(host, hostRoom), null, null);
+  const shownHost = elideLeft(host, Math.min(visibleWidth(host), MIN_HOST_TAIL));
+  const nameRoom = Math.max(1, max - visibleWidth(title(shownHost, null, null, "")));
+  return title(shownHost, null, null, truncatePeerField(name, nameRoom));
 }
 
 /** Registry names, lowercased, with a "Clone here" in flight: one clone per name at a time. */

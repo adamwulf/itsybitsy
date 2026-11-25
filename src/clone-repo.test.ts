@@ -9,6 +9,7 @@ import {
   cloneRepo,
   cloneRepoSpawnCtx,
   cloneRootRelPath,
+  cloneUrlRefusal,
   isAllowedCloneUrl,
   parseCloneUrl,
   readRepoCloneInfo,
@@ -47,6 +48,7 @@ describe("isAllowedCloneUrl", () => {
     "user@host.example:path/to/repo",
     // User-less scp-style: an SSH-config alias, or a host with the user in ~/.ssh/config.
     "gh-work:org/repo.git",
+    "github_work:org/repo.git",
     "host.example:path/to/repo",
     "localhost:/srv/repo.git",
     "git@[::1]:srv/repo.git",
@@ -110,6 +112,21 @@ describe("isAllowedCloneUrl", () => {
     "ssh://%2Doops@host/repo",
     "ssh://git@host/My%20Project/repo",
     "git@github.com:o/r]",
+    // A user's insteadOf rule can turn an https:// or scp-style URL into an
+    // ssh:// one, which git %-decodes: no %40, %5B or %5D in any form or case.
+    "https://github.com/o%40%5Bevil.example%5D/r",
+    "https://github.com/o%40evil.example/r",
+    "https://github.com/o/%5bx%5d",
+    "git@github.com:o%40%5Bevil.example%5D/r",
+    "gh-work:o/%5Dr",
+    // Brackets wrap only a real IPv6 address: git reads a trailing :digits
+    // inside them as the port.
+    "git@[cafe.de:22]:o/r",
+    "ssh://git@[fade.be:2222]/o/r",
+    "[1:22]:o/r",
+    "https://[cafe.de]/o/r",
+    "git@[::1%en0]:o/r",
+    "ssh://[::1]x/o/r",
     // A host the title could misread: https userinfo, an email-style or
     // hostname-looking ssh user with no path, a %-encoded https host.
     "https://token@github.com/owner/repo",
@@ -127,11 +144,12 @@ describe("isAllowedCloneUrl", () => {
     "ssh://host:123456/repo",
     "git@host:",
     "host:",
-    // <transport>::<address> remote helpers, and other schemes, stay out.
+    // <transport>::<address> remote helpers, and other schemes (git's is_url), stay out.
     "fd::17",
     "host::path",
     "git+ssh://host/repo",
     "ssh+git://host/repo",
+    "1host://x/y",
     // A slash or an "@" before the colon is not a host.
     "./dir:path",
     "dir/sub:path",
@@ -154,6 +172,32 @@ describe("isAllowedCloneUrl", () => {
     // A user that looks like a host is allowed; the host shown is the real one.
     expect(parseCloneUrl("ssh://github.com@evil.example/o/r")).toEqual({ user: "github.com", host: "evil.example" });
     expect(parseCloneUrl("file:///tmp/repo")).toBeNull();
+  });
+
+  test.each([
+    ["ftp://host/repo", "only ssh://[user@]host[:port]/path, https://host[:port]/path and [user@]host:path URLs are allowed"],
+    ["ext::sh -c id", "only ssh://"],
+    ["repo", "only ssh://"],
+    ["https://github.com/o%40%5Bevil.example%5D/r", `it holds %40, %5B or %5D, which git can decode into "@", "[" or "]"`],
+    ["ssh://git@host/My%20Project/repo", `an ssh:// URL may not hold "%" (git decodes it)`],
+    ["https://token@github.com/o/r", "an https:// URL may not carry a user"],
+    // One rule each, with no contradiction for an email-style user.
+    ["ssh://jane@corp.com@gerrit.corp.com/project",
+      `the user "jane@corp.com" may hold only letters, digits, ".", "_" and "-", and may not start with "-" or "." (an email-style user is not supported)`],
+    ["-x@host:path", `the user "-x" may hold only letters`],
+    ["git@-host:path", `the host "-host" may hold only letters`],
+    ["https://github.com%2eevil.example/o/r", `the host "github.com%2eevil.example" may hold only letters`],
+    ["git@[cafe.de:22]:o/r", `the host "[cafe.de:22]" is not a bracketed IPv6 address`],
+    ["git@:o/r", "it has no host"],
+    ["ssh://git@host:123456/repo", `the port "123456" is not 1 to 5 digits`],
+    ["ssh://host/", "it has no path"],
+    ["https://github.com", "it has no path"],
+    ["git@github.com:o/r@[evil.example]:x", `the path may not hold "@", "[", "]", a backslash, whitespace or a control or format character`],
+  ])("the refusal of %p names the rule it breaks", (url, rule) => {
+    const refusal = cloneUrlRefusal(url)!;
+    expect(refusal).toStartWith(`Will not clone ${JSON.stringify(url)}: `);
+    expect(refusal).toContain(rule);
+    expect(cloneUrlRefusal("git@github.com:o/r.git")).toBeNull();
   });
 });
 
@@ -452,7 +496,7 @@ describe("with a temp home", () => {
 
   test("a URL outside the allowlist is refused without running git", async () => {
     const result = await cloneRepo({ url: "ext::sh -c touch% /tmp/pwned", dest: join(root, "foo"), registryName: "foo" });
-    expect(result).toEqual({ ok: false, message: 'Will not clone "ext::sh -c touch% /tmp/pwned": only ssh://, https:// and [user@]host:path URLs are allowed' });
+    expect(result).toEqual({ ok: false, message: 'Will not clone "ext::sh -c touch% /tmp/pwned": only ssh://[user@]host[:port]/path, https://host[:port]/path and [user@]host:path URLs are allowed' });
     expect(calls).toEqual([]);
     expect(await readdir(root)).toEqual([]);
   });

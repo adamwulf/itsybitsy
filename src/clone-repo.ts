@@ -10,6 +10,7 @@
 
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { mkdir, realpath, stat } from "fs/promises";
+import { isIPv6 } from "node:net";
 import { SpawnContext } from "./types";
 import { readConfig } from "./config";
 import { userHome } from "./home";
@@ -61,45 +62,96 @@ export interface CloneUrlParts {
 
 // The positive grammar of the URLs "Clone here" passes to git. Git takes the
 // ssh host from the first "@[" anywhere in a URL (path included, and after
-// %-decoding an ssh:// URL) and unwraps brackets before it splits the user
-// from the host, so nothing outside these parts may hold "@", "[" or "]".
-const USER = String.raw`[A-Za-z0-9_][A-Za-z0-9._-]*`;
-const HOST = String.raw`[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:.]+\]`;
-const PORT = String.raw`(?::[0-9]{1,5})?`;
-const PATH = String.raw`[^@\[\]\\\s\p{Cc}\p{Cf}]+`;
-const SSH_PATH = String.raw`[^@\[\]\\\s\p{Cc}\p{Cf}%]+`;
-const SCP_URL = new RegExp(String.raw`^(?:(${USER})@)?(${HOST}):(?!:)${PATH}$`, "u");
-const SSH_URL = new RegExp(String.raw`^ssh://(?:(${USER})@)?(${HOST})${PORT}/${SSH_PATH}$`, "u");
-const HTTPS_URL = new RegExp(String.raw`^https://(${HOST})${PORT}/${PATH}$`, "u");
+// %-decoding an ssh:// URL, which a user's insteadOf rule can make of an
+// https:// or scp-style one) and unwraps brackets before it splits the user
+// from the host. So nothing outside the user and host may hold "@", "[" or
+// "]", even %-encoded, and brackets only ever wrap a real IPv6 address.
+const USER = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+const HOST_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+const PORT = /^[0-9]{1,5}$/;
+const PATH_FORBIDDEN = /[@[\]\\\s\p{Cc}\p{Cf}]/u;
+/** git's is_url: a scheme, then "://". */
+const ANY_SCHEME = /^[a-z0-9][a-z0-9+.-]*:\/\//i;
+const FORMS = "only ssh://[user@]host[:port]/path, https://host[:port]/path and [user@]host:path URLs are allowed";
 
 /**
- * Parse a URL "Clone here" may pass to git, or null when it is refused. Only
- * these forms are accepted:
+ * Check a URL "Clone here" may pass to git: its user and host, or the rule it
+ * breaks. Only these forms are accepted:
  *
  *   [user@]host:path                    scp-style; the colon is not followed by another
  *   ssh://[user@]host[:port]/path
  *   https://host[:port]/path            no user at all
  *
  * - user: `[A-Za-z0-9._-]+`, not starting with `-` or `.`.
- * - host: `[A-Za-z0-9.-]+` not starting with `-` or `.`, or a bracketed IPv6
- *   address `[0-9A-Fa-f:.]`; brackets appear nowhere else.
- * - port: 1 to 5 digits.
- * - path: no `@`, `[`, `]`, backslash, whitespace, control or format
- *   character; an ssh:// URL has no `%` anywhere (git decodes it), while an
- *   https:// or scp-style path may hold one (Azure's `%20`).
+ * - host: `[A-Za-z0-9._-]+` not starting with `-` or `.`, or a bracketed IPv6
+ *   address (node:net isIPv6, and no `%` zone id); brackets appear nowhere else.
+ * - port: 1 to 5 digits, ssh:// and https:// only.
+ * - path: non-empty, with no `@`, `[`, `]`, backslash, whitespace, control or
+ *   format character.
+ * - `%`: none anywhere in an ssh:// URL (git decodes it). An https:// or
+ *   scp-style path may hold one (Azure's `%20`), but never `%40`, `%5B` or
+ *   `%5D`, in any case and in any form.
  *
- * Any other `scheme://` is refused, so `ext::`, `file://` and `http://` stay
- * out. An email-style ssh user (`jane@corp.com@host`) is refused too.
+ * Any other `scheme://` is refused, so `file://` and `http://` stay out, as
+ * do `ext::` and every other `<transport>::`. An email-style ssh user
+ * (`jane@corp.com@host`) is refused too.
  */
+function checkCloneUrl(url: string): { parts: CloneUrlParts } | { problem: string } {
+  const problem = (text: string) => ({ problem: text });
+  if (/%(?:40|5b|5d)/i.test(url)) return problem(`it holds %40, %5B or %5D, which git can decode into "@", "[" or "]"`);
+  for (const [scheme, ssh] of [["ssh://", true], ["https://", false]] as const) {
+    if (!url.startsWith(scheme)) continue;
+    if (ssh && url.includes("%")) return problem(`an ssh:// URL may not hold "%" (git decodes it)`);
+    const rest = url.slice(scheme.length);
+    const slash = rest.indexOf("/");
+    if (slash === -1) return problem("it has no path");
+    const authority = rest.slice(0, slash);
+    const at = authority.lastIndexOf("@");
+    const user = at === -1 ? null : authority.slice(0, at);
+    if (user !== null && !ssh) return problem("an https:// URL may not carry a user");
+    const hostPort = authority.slice(at + 1);
+    // The port follows a bracketed host's "]", else the host's first ":".
+    const close = hostPort.startsWith("[") ? hostPort.indexOf("]") : -1;
+    const colon = hostPort.indexOf(":", close === -1 ? 0 : close);
+    const portColon = close === -1 || colon === close + 1 ? colon : -1;
+    const host = portColon === -1 ? hostPort : hostPort.slice(0, portColon);
+    const port = portColon === -1 ? null : hostPort.slice(portColon + 1);
+    return checkParts(user, host, port, rest.slice(slash + 1));
+  }
+  if (ANY_SCHEME.test(url)) return problem(FORMS);
+  // scp-style: the host's colon is the first one outside a leading bracket pair.
+  const open = url.indexOf("[");
+  const firstColon = url.indexOf(":");
+  const colon = open !== -1 && open < firstColon ? url.indexOf(":", url.indexOf("]", open)) : firstColon;
+  if (colon === -1 || url[colon + 1] === ":") return problem(FORMS);
+  const head = url.slice(0, colon);
+  const at = head.lastIndexOf("@");
+  return checkParts(at === -1 ? null : head.slice(0, at), head.slice(at + 1), null, url.slice(colon + 1));
+}
+
+function checkParts(user: string | null, host: string, port: string | null, path: string): { parts: CloneUrlParts } | { problem: string } {
+  const problem = (text: string) => ({ problem: text });
+  const chars = `may hold only letters, digits, ".", "_" and "-", and may not start with "-" or "."`;
+  if (user !== null && !USER.test(user)) {
+    return problem(`the user ${JSON.stringify(user)} ${chars}${user.includes("@") ? " (an email-style user is not supported)" : ""}`);
+  }
+  if (host === "") return problem("it has no host");
+  if (host.startsWith("[")) {
+    const inner = host.endsWith("]") ? host.slice(1, -1) : "";
+    if (inner.includes("%") || !isIPv6(inner)) return problem(`the host ${JSON.stringify(host)} is not a bracketed IPv6 address`);
+  } else if (!HOST_NAME.test(host)) {
+    return problem(`the host ${JSON.stringify(host)} ${chars}`);
+  }
+  if (port !== null && !PORT.test(port)) return problem(`the port ${JSON.stringify(port)} is not 1 to 5 digits`);
+  if (path === "") return problem("it has no path");
+  if (PATH_FORBIDDEN.test(path)) return problem(`the path may not hold "@", "[", "]", a backslash, whitespace or a control or format character`);
+  return { parts: { user, host } };
+}
+
+/** The user and host of a URL "Clone here" may pass to git, or null when it is refused ({@link checkCloneUrl}). */
 export function parseCloneUrl(url: string): CloneUrlParts | null {
-  const ssh = SSH_URL.exec(url);
-  if (ssh) return { user: ssh[1] ?? null, host: ssh[2]! };
-  const https = HTTPS_URL.exec(url);
-  if (https) return { user: null, host: https[1]! };
-  // Any other scheme:// is a URL git would not read as scp-style.
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return null;
-  const scp = SCP_URL.exec(url);
-  return scp ? { user: scp[1] ?? null, host: scp[2]! } : null;
+  const checked = checkCloneUrl(url);
+  return "parts" in checked ? checked.parts : null;
 }
 
 /** Whether "Clone here" may pass `url` to git ({@link parseCloneUrl}). */
@@ -107,11 +159,10 @@ export function isAllowedCloneUrl(url: string): boolean {
   return parseCloneUrl(url) !== null;
 }
 
-/** Why `url` will not be cloned, or null when {@link isAllowedCloneUrl} allows it. */
+/** Why `url` will not be cloned, naming the rule it breaks, or null when it is allowed. */
 export function cloneUrlRefusal(url: string): string | null {
-  return isAllowedCloneUrl(url)
-    ? null
-    : `Will not clone ${JSON.stringify(url)}: only ssh://, https:// and [user@]host:path URLs are allowed`;
+  const checked = checkCloneUrl(url);
+  return "problem" in checked ? `Will not clone ${JSON.stringify(url)}: ${checked.problem}` : null;
 }
 
 /**

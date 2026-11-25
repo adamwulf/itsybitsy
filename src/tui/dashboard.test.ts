@@ -11948,10 +11948,20 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toBe("Permission add cancelled");
     expect(service.remotePermissions.mock.calls.length).toBe(sent + 2);
 
-    // A failed read opens no dialog, nor does one answered after the selection moved.
+    // A failed read opens no dialog, nor does one answered once another dialog
+    // is open (it would replace it) or after the selection moved.
     service.remotePermissions.mockRejectedValueOnce(new Error("Laptop B is disconnected"));
     dashboard.handleInput("b");
     await waitFor(() => dashboard.notice === "Laptop B is disconnected", { message: "the read failure" });
+    const covered = Promise.withResolvers<RemotePermissionOutcome>();
+    service.remotePermissions.mockImplementationOnce(() => covered.promise);
+    dashboard.handleInput("b");
+    dashboard.handleInput("?");
+    expect(dashboard.dialog?.type).toBe("help");
+    covered.resolve({ canSpawnChildren: true });
+    await Bun.sleep(0);
+    expect(dashboard.dialog?.type).toBe("help");
+    dashboard.closeDialog();
     const late = Promise.withResolvers<RemotePermissionOutcome>();
     service.remotePermissions.mockImplementationOnce(() => late.promise);
     dashboard.handleInput("b");

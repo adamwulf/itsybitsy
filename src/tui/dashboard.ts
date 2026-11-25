@@ -3,8 +3,9 @@ import {
 } from "../peers/dashboard-attachments";
 import { repoRowKey } from "./row-keys";
 import { lifecyclePast, type RemoteLifecycleRequest } from "../peers/remote-lifecycle";
+import type { RemotePermissionOutcome, RemotePermissionRequest } from "../peers/remote-permissions";
 import { pushFailedNotice } from "../push-failure";
-import { remoteLifecycleDenial, remoteSendDenial } from "../peers/remote-start-caller";
+import { remoteLifecycleDenial, remotePermissionDenial, remoteSendDenial } from "../peers/remote-start-caller";
 /**
  * Main TUI dashboard — agent tree + live tmux pane + all keybindings.
  * Composes AgentTree, TmuxPane, RightPane, StatusBar, and dialog system.
@@ -801,7 +802,7 @@ export const REMOTE_READ_ONLY_NOTICE = "Read-only remote agent";
 export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
   if (data === ".") return row?.kind === "remote-agent" || row?.kind === "remote-repo-header" || row?.kind === "remote-coordinator";
   if (data === "q") return row?.kind === "remote-agent";
-  if (data === "o" || data === "m" || data === "x" || data === "R") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
+  if (data === "o" || data === "m" || data === "x" || data === "R" || data === "b") return row?.kind === "remote-agent" && row.remote.agentType !== REPO_COORDINATOR_TYPE;
   // A terminal on the agent's tmux session (SPEC §20.4 "Remote terminal").
   if (data === "C") return row?.kind === "remote-agent";
   switch (data) {
@@ -2183,6 +2184,29 @@ export class DashboardComponent implements Component {
         }
       }
       return output;
+    } finally {
+      this.pendingLifecycle.delete(label);
+      this.invalidate();
+      this.tui?.requestRender();
+    }
+  }
+
+  /**
+   * `b` on a remote agent (SPEC §20.4 "Remote permissions"): with no change,
+   * read its spawn capability for the dialog. Pending like a lifecycle command.
+   */
+  async runRemotePermissions(row: Extract<RemoteEntry, { kind: "remote-agent" }>, change: Pick<RemotePermissionRequest, "allow" | "canSpawnChildren">): Promise<RemotePermissionOutcome> {
+    const service = this.peerService;
+    if (!service) throw new Error("Remote permissions are unavailable");
+    if (service.remoteStartDenial !== null) throw new Error(remotePermissionDenial(service.remoteStartDenial));
+    const { id, repoRegistryName: repo } = row.remote;
+    const label = `${row.peerName}/${repo}/${id}`;
+    if (this.pendingLifecycle.has(label)) throw new Error(`A remote command is already pending for ${label}`);
+    this.pendingLifecycle.set(label, `permissions ${label}…`);
+    this.invalidate();
+    this.tui?.requestRender();
+    try {
+      return await service.remotePermissions(row.peerId, { ...change, repo, id });
     } finally {
       this.pendingLifecycle.delete(label);
       this.invalidate();

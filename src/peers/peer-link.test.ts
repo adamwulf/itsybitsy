@@ -29,6 +29,7 @@ import {
   requestAgentPrompt,
   requestLifecycle,
   requestAcknowledge,
+  requestPermissions,
   PEER_MAX_REQUEST_BYTES,
   PeerErrorReply,
   PeerProtocolError,
@@ -75,7 +76,7 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; acknowledgeQuestion?: PeerResponderDeps["acknowledgeQuestion"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; readPrompt?: PeerResponderDeps["readPrompt"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; acknowledgeQuestion?: PeerResponderDeps["acknowledgeQuestion"]; permissions?: PeerResponderDeps["permissions"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; readPrompt?: PeerResponderDeps["readPrompt"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
   const readerId = options.readerId ?? ID_A;
   const link = createMemoryLink(readerId, ID_B);
   const peers = options.peers ?? new Set([readerId]);
@@ -88,6 +89,7 @@ function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; acknowledg
     startAgent: options.startAgent,
     lifecycle: options.lifecycle,
     acknowledgeQuestion: options.acknowledgeQuestion,
+    permissions: options.permissions,
     captureCoordinator: options.captureCoordinator,
     captureAgent: options.captureAgent,
     readPrompt: options.readPrompt,
@@ -749,6 +751,116 @@ describe("acknowledge", () => {
     expect(side.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.notPeer, reason: "not a peer" });
     expect(acknowledgeQuestion).not.toHaveBeenCalled();
     await side.done;
+  });
+});
+
+describe("permissions", () => {
+  test("reads and changes run the receiver's handler as the paired peer, and an error reply surfaces its reason", async () => {
+    const calls: unknown[][] = [];
+    const side = serve({ permissions: async (request, readPeerName) => {
+      calls.push([request, await readPeerName()]);
+      if (request.allow === "Read") throw new Error("Already in allow list");
+      if (request.allow) return { canSpawnChildren: false, notifyError: "No active tmux session\nfor worker" };
+      return { canSpawnChildren: request.canSpawnChildren ?? false };
+    } });
+    try {
+      const ask = (change: { allow?: string; canSpawnChildren?: boolean }) =>
+        requestPermissions(side.a, { repo: "app", id: "worker", ...change }, "Laptop", side.clock.setTimer);
+      expect(await ask({})).toEqual({ canSpawnChildren: false });
+      expect(await ask({ canSpawnChildren: true })).toEqual({ canSpawnChildren: true });
+      // The reason the agent was not told comes back on one line.
+      expect(await ask({ allow: "Bash(git status:*)" })).toEqual({ canSpawnChildren: false, notifyError: "No active tmux session for worker" });
+      await expect(ask({ allow: "Read" })).rejects.toThrow(new PeerErrorReply("Already in allow list"));
+      expect(calls).toEqual([
+        [{ repo: "app", id: "worker" }, "Alice"],
+        [{ repo: "app", id: "worker", canSpawnChildren: true }, "Alice"],
+        [{ repo: "app", id: "worker", allow: "Bash(git status:*)" }, "Alice"],
+        [{ repo: "app", id: "worker", allow: "Read" }, "Alice"],
+      ]);
+      expect(side.logs).toContain(`peer link: permissions request from ${ID_A.slice(0, 10)} failed: Already in allow list`);
+      expect(side.a.closeInfo()).toBeNull();
+    } finally {
+      side.a.close(0, "done");
+      await side.done;
+    }
+  });
+
+  test("a malformed request is refused before the handler runs", async () => {
+    const permissions = mock(async () => ({ canSpawnChildren: true }));
+    const side = serve({ permissions });
+    try {
+      const raw = async (request: Record<string, unknown>) =>
+        decodeText(await rawRequest(side.a, encode({ op: "permissions", repo: "app", id: "worker", ...request })));
+      expect(await raw({ allow: "Read", canSpawnChildren: true })).toEqual({ op: "error", reason: "A permission request changes one thing" });
+      expect(await raw({ allow: "Bash(foo; rm -rf /)" })).toEqual({ op: "error", reason: "Invalid permission entry" });
+      expect(await raw({ id: "../x" })).toEqual({ op: "error", reason: "Invalid agent id" });
+      expect(permissions).not.toHaveBeenCalled();
+    } finally {
+      side.a.close(0, "done");
+      await side.done;
+    }
+  });
+
+  test("an unpaired caller is refused and the handler never runs", async () => {
+    const permissions = mock(async () => ({ canSpawnChildren: true }));
+    const side = serve({ peers: new Set(), permissions });
+    await expect(requestPermissions(side.a, { repo: "app", id: "worker", allow: "Read" }, "Laptop", side.clock.setTimer)).rejects.toThrow();
+    expect(side.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.notPeer, reason: "not a peer" });
+    expect(permissions).not.toHaveBeenCalled();
+    await side.done;
+  });
+
+  test("dropping the link after a change's FIN leaves its outcome unknown; a read just fails", async () => {
+    for (const [change, unknown] of [[{ canSpawnChildren: true }, true], [{ allow: "Read" }, true], [{}, false]] as const) {
+      const link = createMemoryLink(ID_A, ID_B);
+      const clock = createFakeClock();
+      const result = requestPermissions(link.a, { repo: "app", id: "worker", ...change }, "Laptop B", clock.setTimer).catch((err: Error) => err);
+      const stream = await link.b.acceptBi();
+      expect(decodeText(await stream.readToEnd(4096))).toEqual({ op: "permissions", repo: "app", id: "worker", ...change });
+      link.b.close(0, "receiver stopped");
+      const error = await result;
+      expect(error).toBeInstanceOf(Error);
+      if (unknown) expect(error).toHaveProperty("message", "outcome unknown — check Laptop B");
+      else expect(error).not.toHaveProperty("message", "outcome unknown — check Laptop B");
+    }
+  });
+
+  test.each([{ ok: true }, { ok: true, canSpawnChildren: "yes" }, { ok: true, canSpawnChildren: true, notifyError: 7 }])(
+    "a malformed reply %j fails the read and leaves a change's outcome unknown", async (reply) => {
+      for (const change of [{}, { canSpawnChildren: true }]) {
+        const link = createMemoryLink(ID_A, ID_B);
+        const clock = createFakeClock();
+        const result = requestPermissions(link.a, { repo: "app", id: "worker", ...change }, "Laptop B", clock.setTimer).catch((err: Error) => err);
+        const stream = await link.b.acceptBi();
+        await stream.readToEnd(4096);
+        await stream.writeAll(encode(reply));
+        await stream.finish();
+        const error = await result;
+        if ("canSpawnChildren" in change) {
+          expect(error).toHaveProperty("message", "outcome unknown — check Laptop B");
+          expect((error as Error).cause).toBeInstanceOf(PeerProtocolError);
+        } else {
+          expect(error).toBeInstanceOf(PeerProtocolError);
+        }
+        link.a.close(0, "done");
+      }
+    });
+
+  test("a change waits 30 s, then reports the machine to check", async () => {
+    const link = createMemoryLink(ID_A, ID_B);
+    const clock = createFakeClock();
+    let settled = false;
+    const pending = requestPermissions(link.a, { repo: "app", id: "worker", allow: "Read" }, "Laptop", clock.setTimer)
+      .catch(err => err.message).finally(() => { settled = true; });
+    await (await link.b.acceptBi()).readToEnd(4096);
+    await Bun.sleep(0);
+    clock.advance(29_999);
+    await Bun.sleep(0);
+    expect(settled).toBe(false);
+    clock.advance(1);
+    await Bun.sleep(0);
+    clock.advance(750);
+    expect(await pending).toBe("outcome unknown — check Laptop");
   });
 });
 

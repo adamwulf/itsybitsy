@@ -195,6 +195,13 @@ export function remoteTerminalDenial(reason: string): string {
     .replace("start an agent on another machine", "open a terminal on another machine");
 }
 
+/** The startup decision worded for `b` on a remote agent (SPEC §20.4 "Remote permissions"). */
+export function remotePermissionDenial(reason: string): string {
+  if (reason === TMUX_START_DENIAL) return "Remote permission changes are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux";
+  return reason.replace(/remote starts/gi, match => match === "Remote starts" ? "Remote permission changes" : "remote permission changes")
+    .replace("start an agent on another machine", "change an agent's permissions on another machine");
+}
+
 export function remoteLifecycleDenial(reason: string, action: RemoteLifecycleAction | "acknowledge"): string {
   if (reason === TMUX_START_DENIAL) return `Remote ${action} is disabled inside tmux. Use a terminal outside tmux.`;
   return reason.replace("Remote starts are", `Remote ${action} is`)

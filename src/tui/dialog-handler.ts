@@ -120,6 +120,9 @@ export type DialogState =
        *  send (a remote send can wait on a long transfer). The send's failure
        *  path then unfreezes the dialog with the draft kept. */
       onCancelInFlight?: () => void;
+      /** Optional: shown while `inFlight` in place of `Sending… Esc: cancel`,
+       *  e.g. once a remote send is written and can no longer be cancelled. */
+      inFlightNote?: string;
     } & DialogCommon)
   | ({
       type: "folder-browser";
@@ -259,8 +262,9 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // it: swallow every key so the send cannot be re-fired (which would re-stage
   // attachments) and the dialog cannot be cancelled or replaced out from under
   // the pending send. The submit closure clears `inFlight` on failure (re-enabling
-  // the draft) or closes the dialog on success (a remote send or start: once it
-  // is pending), and closes only THIS dialog, never a later one.
+  // the draft) or closes the dialog on success (a remote row's `s` dialog and the
+  // New Agent form's peer start: once pending), and closes only THIS dialog,
+  // never a later one.
   if (dialog.type === "new-agent-form" && dialog.inFlight && !matchesKey(data, Key.escape)) return true;
   if ((dialog.type === "input" || dialog.type === "textarea") && dialog.inFlight) {
     if (dialog.type === "textarea" && matchesKey(data, Key.escape)) dialog.onCancelInFlight?.();

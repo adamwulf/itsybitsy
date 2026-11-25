@@ -13632,7 +13632,7 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(listed(dashboard)).toContain("Laptop B:worker-abc");
     });
 
-    test("once the answer is written, its dialog drops the Esc cancel and waits for the peer", async () => {
+    test("once the answer is written, its dialog says it waits for the peer and Esc cannot cancel", async () => {
       const { dashboard, service } = setupQuestions();
       selectByKey(dashboard, WORKER_KEY);
       const result = Promise.withResolvers<string>();
@@ -13647,8 +13647,10 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(overlay()).toContain("Sending… Esc: cancel");
       sent!();
       expect(overlay()).not.toContain("Esc: cancel");
+      expect(overlay()).toContain("Waiting for Laptop B to confirm…");
       // Aborting now would only leave the answer's outcome unknown, inviting a duplicate.
       dashboard.handleInput("\x1b");
+      expect(dashboard.notice).toBe("Cannot cancel: waiting for Laptop B to confirm");
       expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
       expect(dashboard.dialog).toBe(dialog);
       expect(dialog.inFlight).toBe(true);
@@ -13656,6 +13658,27 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.notice === "Answered Laptop B/worker-abc");
       expect(dashboard.dialog).toBeNull();
       expect(service.acknowledgeRemoteQuestion).toHaveBeenCalledTimes(1);
+    });
+
+    test("a written answer that then fails leaves no waiting note for the retry", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      service.sendRemoteMessage.mockImplementationOnce(async (_peer, _header, _source, transfer) => {
+        transfer!.onSent!();
+        throw new Error("Agent not found: worker-abc");
+      });
+      const dialog = submitAnswer(dashboard, "yes");
+      await waitFor(() => dashboard.notice === "Agent not found: worker-abc" && !dialog.inFlight);
+      expect(dialog.inFlightNote).toBeUndefined();
+      expect(dialog.buffer.getText()).toBe("yes");
+      const pending = Promise.withResolvers<string>();
+      service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
+      dashboard.handleInput("\r");
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 2);
+      const overlay = stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
+      expect(overlay).toContain("Sending… Esc: cancel");
+      pending.resolve(service.sendRemoteMessage.mock.calls[1]![1].id);
+      await waitFor(() => dashboard.notice === "Answered Laptop B/worker-abc");
     });
 
     test("Esc on the questions while a written send waits says it cannot cancel, and acknowledges nothing", async () => {

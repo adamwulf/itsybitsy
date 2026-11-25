@@ -752,7 +752,7 @@ class DialogOverlayComponent implements Component {
         } else {
           lines.push(leftSide);
         }
-        if (dialog.inFlight && dialog.onCancelInFlight) lines.push(`${DIM}Sending… Esc: cancel${RESET}`);
+        if (dialog.inFlight && (dialog.inFlightNote || dialog.onCancelInFlight)) lines.push(`${DIM}${dialog.inFlightNote ?? "Sending… Esc: cancel"}${RESET}`);
         return { title: dialog.prompt, contentLines: lines };
       }
       case "folder-browser": {

@@ -1636,9 +1636,10 @@ function handleSendToTeam(ctx: ActionCtx, teamName: string) {
  * editor. It is frozen while the send looks for attachments, and Esc then
  * cancels. It closes once the send is pending, since a remote send waits on
  * the whole transfer: the header alert carries it from there, and Esc on the
- * row cancels it until it is written. A send that fails before that keeps the draft in the open
- * dialog; one that fails or is cancelled after it reopens the dialog with the
- * draft, unless another dialog is open by then.
+ * row cancels it until it is written. A send that fails before it is pending
+ * keeps the draft in the open dialog; one that fails or is cancelled after
+ * that reopens the dialog with the draft, unless another dialog is open by
+ * then.
  * There is no send-to-all toggle and no [Send Esc]: neither reaches a peer.
  */
 function handleSendToRemote(ctx: ActionCtx, remote: RemoteMessageEntry) {
@@ -2170,7 +2171,8 @@ function questionAgent(ctx: ActionCtx, q: PendingQuestion): Agent | null {
  * the dialog is frozen while in flight, keeps the draft when the send fails
  * and never resends an accepted answer, so a retry after a failed acknowledge
  * only acknowledges. As for a remote send, Esc cancels the send until it is
- * written; after that the dialog drops its Esc hint and waits for the peer.
+ * written; after that the dialog shows `Waiting for <peer> to confirm…`, and
+ * Esc only says it cannot cancel.
  */
 function answerPeerQuestion(ctx: ActionCtx, q: PendingQuestion, peer: NonNullable<PendingQuestion["peer"]>) {
   const label = `${peer.name}/${q.agent}`;
@@ -2191,10 +2193,16 @@ function answerPeerQuestion(ctx: ActionCtx, q: PendingQuestion, peer: NonNullabl
         if (!answered) {
           const controller = new AbortController();
           dialog.onCancelInFlight = () => controller.abort(new Error("Send cancelled"));
-          const onSent = () => { dialog.onCancelInFlight = undefined; ctx.tui?.requestRender(); };
+          const onSent = () => {
+            // Aborting a written answer would only leave its outcome unknown.
+            dialog.inFlightNote = `Waiting for ${peer.name} to confirm…`;
+            dialog.onCancelInFlight = () => ctx.setNotice(`Cannot cancel: waiting for ${peer.name} to confirm`, "info");
+            ctx.tui?.requestRender();
+          };
           if (!await ctx.submitRemoteMessage(row, trimmed, controller, { onSent })) return;
           answered = true;
           dialog.onCancelInFlight = undefined;
+          dialog.inFlightNote = undefined;
         }
         try {
           await ctx.acknowledgePeerQuestion(peer, q.id);
@@ -2207,6 +2215,7 @@ function answerPeerQuestion(ctx: ActionCtx, q: PendingQuestion, peer: NonNullabl
       }).finally(() => {
         dialog.inFlight = false;
         dialog.onCancelInFlight = undefined;
+        dialog.inFlightNote = undefined;
         ctx.tui?.requestRender();
       });
     },

@@ -14,10 +14,10 @@ import { createCliFixture, type CliFixture } from "../test-cli-runner";
 import { makeSpawnResult, waitFor } from "../test-utils";
 import { spawnCtx as paneProbe } from "../tmux-poller";
 import { acceptRemoteAgentWithFiles, type RemoteSpawnDeps } from "./new-agent";
-import { NEW_AGENT_UNKNOWN, PEER_CLOSE, requestNewAgent, serveTrustedConnection, type PeerResponderDeps } from "./peer-link";
+import { NEW_AGENT_FILES_RECEIVED, NEW_AGENT_UNKNOWN, PEER_CLOSE, requestNewAgent, serveTrustedConnection, type PeerResponderDeps } from "./peer-link";
 import { createAttachmentReceiver, type AttachmentReceiver } from "./receive-attachments";
 import { createMessageReceiver } from "./receive-message";
-import { encodeFrameHeader, type AttachmentEntry, type SendHeader } from "./send-frame";
+import { encodeFrameHeader, TransferIdleError, type AttachmentEntry, type SendHeader } from "./send-frame";
 import { createFakeClock, createMemoryLink, type FakeClock } from "./test-pair-transport";
 
 let cli: CliFixture;
@@ -185,7 +185,10 @@ test("a hash mismatch leaves no snapshot and starts nothing", async () => {
     await stream.writeAll(encodeFrameHeader({ op: "new-agent", repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")] }));
     await stream.writeAll(Buffer.from("abd"));
     await stream.finish();
-    expect(decode(await stream.readToEnd(4096))).toEqual({ op: "error", reason: "Attachment hash mismatch" });
+    const reply = await stream.readToEnd(4096);
+    // The receipt failed before the files-received signal: the reply is the bare error.
+    expect(String.fromCharCode(reply[0]!)).toBe("{");
+    expect(decode(reply)).toEqual({ op: "error", reason: "Attachment hash mismatch" });
     await waitFor(noPartials);
     expect(await readdir(received)).toEqual([]);
     expect(spawn).not.toHaveBeenCalled();
@@ -222,7 +225,10 @@ test("the responder's 25 s deadline covers the spawn, not the transfer, and keep
     side.clock.advance(24_999);
     await Bun.sleep(0);
     side.clock.advance(1);
-    expect(decode(await stream.readToEnd(4096))).toEqual({ op: "error", reason: expect.stringContaining("outcome unknown after 25 s") });
+    const reply = await stream.readToEnd(4096);
+    // The files-received signal came before the spawn; the spawn's error follows it.
+    expect(reply[0]).toBe(NEW_AGENT_FILES_RECEIVED[0]!);
+    expect(decode(reply)).toEqual({ op: "error", reason: expect.stringContaining("outcome unknown after 25 s") });
     // The agent may still start and read its files.
     expect(await readdir(received)).toHaveLength(1);
     pending.resolve({ ok: false, exitCode: 1, stdout: "", stderr: "late failure" });
@@ -314,7 +320,9 @@ test("a framed start without its staged directory is refused before opening a st
   link.a.close(0, "done");
 });
 
-test.each(["timeout", "lost reply"])("with files the dialer's 30 s deadline starts at FIN, and a %s after FIN leaves the outcome unknown", async kind => {
+const TIMED_OUT = "Remote agent request timed out after 30 s. Check the peer for the agent.";
+
+test.each(["timeout", "lost reply"])("with files the dialer's 30 s deadline starts at the files-received signal, and a %s after it leaves the outcome unknown", async kind => {
   const link = createMemoryLink("dialer", "receiver");
   const clock = createFakeClock();
   const stream = await link.a.openBi();
@@ -327,8 +335,9 @@ test.each(["timeout", "lost reply"])("with files the dialer's 30 s deadline star
     return write(bytes);
   };
   let settled = false;
+  const progress: number[] = [];
   const outcome = requestNewAgent(link.a, { repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")] },
-    clock.setTimer, { filesDir: await stage("abc") }).catch(err => err).finally(() => { settled = true; });
+    clock.setTimer, { filesDir: await stage("abc"), onProgress: bytes => progress.push(bytes) }).catch(err => err).finally(() => { settled = true; });
   try {
     const incoming = await link.b.acceptBi();
     await bodyWrite.promise;
@@ -339,6 +348,17 @@ test.each(["timeout", "lost reply"])("with files the dialer's 30 s deadline star
     release.resolve();
     await incoming.readToEnd(4096);
     await Bun.sleep(0);
+    // The bodies are still in flight after FIN: no deadline yet. A deadline would have fired and spent its teardown grace.
+    clock.advance(45_000);
+    await Bun.sleep(0);
+    clock.advance(1_000);
+    await Bun.sleep(0);
+    expect(settled).toBe(false);
+    const reports = progress.length;
+    await incoming.writeAll(NEW_AGENT_FILES_RECEIVED);
+    await Bun.sleep(0);
+    // Reading the signal is transfer progress, which the keep-open rule counts.
+    expect(progress.length).toBe(reports + 1);
     if (kind === "timeout") {
       clock.advance(29_999);
       await Bun.sleep(0);
@@ -347,6 +367,89 @@ test.each(["timeout", "lost reply"])("with files the dialer's 30 s deadline star
       await Bun.sleep(0);
       clock.advance(750);
     } else link.b.close(0, "receiver stopped");
-    expect((await outcome).message).toBe(NEW_AGENT_UNKNOWN);
+    const err = await outcome;
+    expect(err.message).toBe(NEW_AGENT_UNKNOWN);
+    if (kind === "timeout") expect(err.cause.message).toBe(TIMED_OUT);
   } finally { release.resolve(); link.a.close(0, "done"); }
+});
+
+test("with files a transfer that stalls before the files-received signal fails on the 60 s idle timeout", async () => {
+  const link = createMemoryLink("dialer", "receiver");
+  const clock = createFakeClock();
+  let settled = false;
+  const outcome = requestNewAgent(link.a, { repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")] },
+    clock.setTimer, { filesDir: await stage("abc") }).catch(err => err).finally(() => { settled = true; });
+  try {
+    await (await link.b.acceptBi()).readToEnd(4096);
+    await Bun.sleep(0);
+    clock.advance(59_999);
+    await Bun.sleep(0);
+    expect(settled).toBe(false);
+    clock.advance(1);
+    await Bun.sleep(0);
+    clock.advance(750);
+    const err = await outcome;
+    expect(err.message).toBe(NEW_AGENT_UNKNOWN);
+    expect(err.cause).toBeInstanceOf(TransferIdleError);
+  } finally { link.a.close(0, "done"); }
+});
+
+test("a framed start whose bodies arrive more than 30 s after FIN, still moving, starts the agent", async () => {
+  const side = serve();
+  // QUIC accepts each write and FIN at once; the bytes reach B only as `deliver` sends them, like a slow link's stream window.
+  const stream = await side.a.openBi();
+  side.a.openBi = async () => stream;
+  const write = stream.write.bind(stream), finish = stream.finish.bind(stream);
+  const inFlight: Array<() => Promise<unknown>> = [];
+  stream.write = async bytes => {
+    const copy = Uint8Array.from(bytes);
+    inFlight.push(() => write(copy));
+    return bytes.length;
+  };
+  stream.finish = async () => { inFlight.push(finish); };
+  const deliver = async () => { await inFlight.shift()!(); };
+  let settled = false;
+  const outcome = requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")] },
+    side.clock.setTimer, { filesDir: await stage("abc") }).finally(() => { settled = true; });
+  try {
+    await waitFor(() => inFlight.length === 3, { message: "header, body and FIN sent" });
+    await deliver();
+    await waitFor(async () => (await entries(join(staging, "incoming"))).some(name => name.endsWith(".partial")));
+    side.clock.advance(20_000);
+    await deliver();
+    // Past 30 s after FIN, and past any teardown grace a deadline there would have started.
+    side.clock.advance(25_000);
+    await Bun.sleep(0);
+    side.clock.advance(1_000);
+    await Bun.sleep(0);
+    expect(settled).toBe(false);
+    expect(side.a.closeInfo()).toBeNull();
+    await deliver();
+    expect(await outcome).toBe("agent-123");
+    expect(spawn).toHaveBeenCalledTimes(1);
+  } finally { await side.close(); }
+});
+
+test("the responder signals before its spawn, so a spawn that hangs 30 s after the signal times out the dialer", async () => {
+  const pending = Promise.withResolvers<Awaited<ReturnType<RemoteSpawnDeps["newAgent"]>>>();
+  spawn.mockImplementation(() => pending.promise);
+  // The responder's clock stays still, so its own 25 s deadline cannot answer first.
+  const side = serve();
+  const dialer = createFakeClock();
+  let settled = false;
+  const outcome = requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")] },
+    dialer.setTimer, { filesDir: await stage("abc") }).catch(err => err).finally(() => { settled = true; });
+  try {
+    await waitFor(() => spawn.mock.calls.length === 1);
+    await Bun.sleep(0);
+    dialer.advance(29_999);
+    await Bun.sleep(0);
+    expect(settled).toBe(false);
+    dialer.advance(1);
+    await Bun.sleep(0);
+    dialer.advance(750);
+    const err = await outcome;
+    expect(err.message).toBe(NEW_AGENT_UNKNOWN);
+    expect(err.cause.message).toBe(TIMED_OUT);
+  } finally { pending.resolve({ ok: false, exitCode: 1, stdout: "", stderr: "" }); await side.close(); }
 });

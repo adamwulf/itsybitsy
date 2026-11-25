@@ -66,6 +66,13 @@ export const NEW_AGENT_MAX_REQUEST_BYTES = 256 * 1024;
 export const NEW_AGENT_TIMEOUT_MS = 30_000;
 // Leave the responder time to return an uncertain outcome before the dialer gives up.
 const RESPONDER_START_TIMEOUT_MS = 25_000;
+/**
+ * "Files received": the first byte of a framed new-agent's reply once the
+ * responder has received, verified and committed every body, before it spawns.
+ * The dialer starts its {@link NEW_AGENT_TIMEOUT_MS} deadline when it reads it.
+ * It is JSON whitespace, so the reply after it parses as before.
+ */
+export const NEW_AGENT_FILES_RECEIVED = Uint8Array.of(0x0a);
 
 export interface RemoteNewAgentRequest {
   repo: string;
@@ -566,8 +573,10 @@ export const NEW_AGENT_UNKNOWN = "Remote start outcome unknown. Check the peer f
 
 /**
  * Without files, one JSON request. With files, a framed request like `send`:
- * the 30 s deadline starts after FIN, and the transfer before it has the
- * send's idle timeouts. After FIN a lost reply leaves the outcome unknown.
+ * the 30 s deadline starts when the reply says the files are received
+ * ({@link NEW_AGENT_FILES_RECEIVED}), and the transfer before it, including
+ * the bodies still in flight after FIN, has the send's idle timeouts. After
+ * FIN a lost reply leaves the outcome unknown.
  */
 export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt, files = [] }: RemoteNewAgentRequest, setTimer: Timer, transfer: OutgoingTransfer = {}): Promise<string> {
   const framed = files.length > 0;
@@ -591,7 +600,7 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
     setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")],
     // Both forms can be aborted (dashboard shutdown); the file transfer is framed-only.
     signal: transfer.signal, onSent: transfer.onSent,
-    ...framed && { ...transfer, files, timeoutAfterFin: true, unknownAfterFin: NEW_AGENT_UNKNOWN },
+    ...framed && { ...transfer, files, timeoutAfterFilesReceived: true, unknownAfterFin: NEW_AGENT_UNKNOWN },
   });
 }
 
@@ -676,8 +685,11 @@ export interface OutgoingTransfer {
 interface ClientOptions extends OutgoingTransfer {
   setTimer: Timer;
   timeout?: [number, Error];
-  /** Arm `timeout` once FIN is sent instead of at stream open: the transfer before it has idle timeouts only. */
-  timeoutAfterFin?: boolean;
+  /**
+   * Arm `timeout` when the reply begins with {@link NEW_AGENT_FILES_RECEIVED}
+   * instead of at stream open: the transfer before it has idle timeouts only.
+   */
+  timeoutAfterFilesReceived?: boolean;
   /**
    * Asked once `timeout` has fired and this exchange's stream could not be torn
    * down within the grace. True leaves the connection open instead of closing
@@ -702,7 +714,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   const deadline = new AbortController();
   const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
   const armTimeout = () => timeout && setTimer(timeout[0], () => deadline.abort(timeout[1]));
-  let clear = options.timeoutAfterFin ? undefined : armTimeout();
+  let clear = options.timeoutAfterFilesReceived ? undefined : armTimeout();
   const io = <V>(operation: () => Promise<V>) => waitForIO({ setTimer, signal }, operation);
   /**
    * A teardown (`stalled`) that missed its grace closes the connection, unless
@@ -764,6 +776,8 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     for (;;) {
       const chunk = await active.read(Math.min(CHUNK_BYTES, PEER_MAX_REPLY_BYTES + 1 - length));
       if (!chunk.length) return decode(Buffer.concat(parts, length));
+      // An exchange that is ending has aborted `deadline` first, so this timer cannot outlive it.
+      if (options.timeoutAfterFilesReceived && length === 0 && chunk[0] === NEW_AGENT_FILES_RECEIVED[0] && !signal.aborted) clear = armTimeout();
       length += chunk.length;
       if (length > PEER_MAX_REPLY_BYTES) throw new Error("Send acknowledgement exceeds limit");
       parts.push(chunk);
@@ -798,8 +812,6 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     await io(() => active.finish());
     sendDone = true;
     options.onSent?.();
-    // An exchange that ends before FIN aborts `deadline` first, so this timer cannot outlive it.
-    if (options.timeoutAfterFin && !signal.aborted) clear = armTimeout();
     if (files) renewReplyIdle();
   }
 
@@ -846,7 +858,11 @@ export async function requestSend(conn: PairConnection, header: SendHeader, setT
 // ---------------------------------------------------------------------------
 
 export interface ReceiptOptions extends FileBodyOptions { cancelStream?: () => void; admitted?: (ownsBody: boolean) => void; committing?: () => void }
-export interface StartReceiptOptions extends ReceiptOptions { setTimer: Timer }
+export interface StartReceiptOptions extends ReceiptOptions {
+  setTimer: Timer;
+  /** Write {@link NEW_AGENT_FILES_RECEIVED} on the reply stream: call it once every body is committed, before the spawn. */
+  filesReceived(): Promise<void>;
+}
 
 export interface PeerResponderDeps {
   /** Paired name for this id, re-read on every call. A failed read returns null. */
@@ -1056,7 +1072,9 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
           starting = true;
           const header = parseNewAgentHeader(frame);
           if (!deps.startAgentWithFiles) throw new Error("Remote starts with attachments are unavailable");
-          reply = encodeJson({ ok: true, id: await deps.startAgentWithFiles(header, conn.remoteId, readPeerName, reader, receipt) });
+          reply = encodeJson({ ok: true, id: await deps.startAgentWithFiles(header, conn.remoteId, readPeerName, reader, {
+            ...receipt, filesReceived: () => writeWithProgress(stream, NEW_AGENT_FILES_RECEIVED, deps.setTimer),
+          }) });
         } else throw new Error("Malformed frame header");
       } catch (err) {
         if (err instanceof TransferIdleError) stalledRead = reading;

@@ -72,6 +72,7 @@ test("describe_exit decodes a death by signal", async () => {
     [0, "status 0"],
     [1, "status 1"],
     [128, "status 128"],
+    [133, "status 133 (signal 5, SIGTRAP)"],
     [134, "status 134 (signal 6, SIGABRT)"],
     [137, "status 137 (signal 9, SIGKILL)"],
     [139, "status 139 (signal 11, SIGSEGV)"],

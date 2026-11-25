@@ -3977,8 +3977,7 @@ export class DashboardComponent implements Component {
 
 
   private availableMainHeight(): number {
-    const chromeLines = 5 + this.pendingLifecycle.size;
-    return Math.max(5, (process.stdout.rows || 24) - chromeLines);
+    return Math.max(5, (process.stdout.rows || 24) - 5);
   }
 
   invalidate(): void {
@@ -4016,8 +4015,9 @@ export class DashboardComponent implements Component {
     const isFullWidth = remoteCoordinator !== null || (!remoteView && (isCoordinatorView || FULL_WIDTH_MODES.has(this.rightPane.mode)));
 
     // Header. Its alert shows the transient notice, then each peer transfer in
-    // flight (SPEC §20.5), so a transfer never adds a row and shifts the layout.
-    // The transfer Esc acts on goes first, so its hint survives a cut header.
+    // flight (SPEC §20.5), then each pending remote lifecycle command, so none
+    // of them adds a row and shifts the layout. The transfer Esc acts on goes
+    // first, so its hint survives a cut header.
     const cancellableSend = this.escapeSend();
     const incoming = this.peerService?.view().incoming ?? [];
     const transfers = [
@@ -4035,6 +4035,7 @@ export class DashboardComponent implements Component {
     const alerts = [
       ...(this.lastSentNotice ? [`${noticeColor}${this.lastSentNotice}${RESET}`] : []),
       ...transfers.map((transfer) => `${YELLOW}${transfer}${RESET}`),
+      ...[...this.pendingLifecycle.values()].map((pending) => `${YELLOW}${pending}${RESET}`),
     ];
     const subtitle = alerts.length > 0
       ? `${DIM}—${RESET} ${alerts.join(`${DIM}  ·  ${RESET}`)}`
@@ -4076,7 +4077,6 @@ export class DashboardComponent implements Component {
     // Compute available height for the main content area.
     // Chrome lines: header(1) + main title separator(1) +
     //               bottom separator(1) + status bar(2) = 5.
-    for (const notice of this.pendingLifecycle.values()) lines.push(truncateToWidth(notice, width, "…"));
     const availableHeight = this.availableMainHeight();
 
     // Width math comes from the widths module — never inline.

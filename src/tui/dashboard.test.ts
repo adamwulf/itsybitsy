@@ -11775,11 +11775,18 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(assertDialog(dashboard.dialog, "confirm").focusedButton).toBe("cancel");
     dashboard.closeDialog();
     expect(run).toHaveBeenCalledTimes(2);
+    const before = dashboard.render(WIDTH).map(stripAnsi);
     dashboard.handleInput("x");
     const pending = Promise.withResolvers<{ output: string }>();
     run.mockReturnValueOnce(pending.promise);
     assertDialog(dashboard.dialog, "confirm").onYes();
-    expect(dashboard.render(WIDTH).join("\n")).toContain(`retire ${WORKER_KEY}…`);
+    // The pending command is a yellow alert in the header row, after the
+    // notice, and leaves every other row in place.
+    const rows = dashboard.render(WIDTH);
+    expect(rows[0]).toContain(`${YELLOW}retire ${WORKER_KEY}…`);
+    expect(stripAnsi(rows[0]!)).toStartWith(`ib — ${WORKER_KEY}: Nothing to merge: branch is current  ·  retire ${WORKER_KEY}…`);
+    expect(rows).toHaveLength(before.length);
+    expect(rows.slice(1).map(stripAnsi)).toEqual(before.slice(1));
     pending.resolve({ output: "" });
     await Bun.sleep(0);
     expect(dashboard.notice).toContain("retired");

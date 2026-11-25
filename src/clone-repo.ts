@@ -68,10 +68,10 @@ const RESERVED_SEGMENTS = new Set([".git", RUNTIME_DIR_NAME]);
  * it when it arrives (peer-link's safeRelPath), and so is cloneRepo's
  * destination once it is resolved on disk.
  *
- * "In any case" is APFS's: its case folding maps the long s (ſ) to s, the
- * Kelvin sign to k and the dotless ı to i, so `.itſybitſy` names
- * `.itsybitsy`. Upper-casing first folds those too; folding more names than
- * APFS does only refuses more.
+ * "In any case" includes APFS's case folding, which maps the long s (ſ) to
+ * s, so `.itſybitſy` names `.itsybitsy`; upper-casing before lower-casing
+ * folds it. That also folds the dotless ı to i, which APFS does not: folding
+ * more than APFS does only refuses more.
  */
 export function isSafeCloneRelPath(relPath: string): boolean {
   return relPath.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".." &&

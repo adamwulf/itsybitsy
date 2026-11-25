@@ -311,6 +311,13 @@ describe("cloneEnv", () => {
     cloneRepoSpawnCtx.set(() => { throw new Error('Executable not found in $PATH: "git"'); });
     expect(await cloneEnv({})).toEqual({ GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "ssh:https", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" });
   });
+
+  test("the fixed keys override the user's own values", async () => {
+    coreSshCommand(null);
+    const env = await cloneEnv({ GIT_ALLOW_PROTOCOL: "ext:file:http", GIT_TERMINAL_PROMPT: "1" });
+    expect(env.GIT_ALLOW_PROTOCOL).toBe("ssh:https");
+    expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+  });
 });
 
 // repos.json and config.json live at userHome()/.itsybitsy and teams.json in
@@ -523,6 +530,18 @@ describe("with a temp home", () => {
       message: "git clone failed: Cloning into '/x'... Host key verification failed. fatal: Could not read from remote repository. Please make sure you have the correct access rights",
     });
     expect((await loadRegistry()).repos).toEqual([]);
+  });
+
+  test("a hostile server's escapes in git's stderr never reach the notice", async () => {
+    // ssh passes the server's stderr through: an OSC 52 clipboard write, a
+    // carriage return, a clear-screen and a bidi override.
+    cloneRepoSpawnCtx.set(fakeGit((cmd) => isClone(cmd)
+      ? { exitCode: 128, stderr: "remote: \x1b]52;c;eA==\x07hello\r\nfatal: \x1b[2Jbad‮\n" }
+      : { exitCode: 1 }));
+    const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest: join(root, "foo"), registryName: "foo" });
+    expect(result.ok).toBe(false);
+    expect(result.message).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+    expect(result.message).toBe("git clone failed: remote: ]52;c;eA== hello fatal: [2Jbad");
   });
 
   test("a registry write that fails after the clone keeps the clone and says so", async () => {

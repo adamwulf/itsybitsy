@@ -12457,7 +12457,7 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
-  test("the Clone here title names the host and the URL's path, and shrinks the peer, then the path, then the host", () => {
+  test("the Clone here title names the host and the URL's path, and shrinks the peer, the path, the name, then the host", () => {
     const max = dialogTitleMaxWidth(); // the dialog's 80 columns
     expect(clonePrompt("foo", "o/foo.git", "github.com", "Desk", max)).toBe("Clone foo from github.com (o/foo.git) via Desk into:");
     // The peer goes first.
@@ -12472,7 +12472,16 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(fork).toBe("Clone muse-ios-shared-utils from github.com (someoneelse/muse-ios-s…) into:");
     expect(visibleWidth(original)).toBe(max);
 
-    // Then the parentheses go, when not even the owner fits.
+    // Then the name is cut, before the path goes: at 60 columns the owner
+    // still tells the original from the fork.
+    const at60 = dialogTitleMaxWidth(60);
+    const original60 = clonePrompt("muse-ios-shared-utils", "museapphq/muse-ios-shared-utils.git", "github.com", "Laptop B", at60);
+    const fork60 = clonePrompt("muse-ios-shared-utils", "someoneelse/muse-ios-shared-utils.git", "github.com", "Laptop B", at60);
+    expect(original60).toBe("Clone muse-ios-shar… from github.com (museapphq…) into:");
+    expect(fork60).toBe("Clone muse-ios-sh… from github.com (someoneelse…) into:");
+    expect(visibleWidth(original60)).toBe(at60);
+
+    // Then the parentheses go, when not even the owner fits beside a 3-character name.
     const host40 = `${"h".repeat(28)}.example.com`;
     expect(clonePrompt("app", "averylongownername/repo.git", host40, "Laptop B", max)).toBe(`Clone app from ${host40} into:`);
 
@@ -12488,7 +12497,23 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(visibleWidth(tight)).toBe(max);
     expect(tight).toStartWith("Clone nnn");
     expect(tight).toEndWith(` from …${longHost.slice(-23)} into:`);
-    for (const title of [original, hostCut, tight]) expect(title).not.toContain("\x1b");
+    for (const title of [original, original60, hostCut, tight]) expect(title).not.toContain("\x1b");
+  });
+
+  test("the Clone here title is never wider than the overlay allows, however narrow", () => {
+    const longHost = `${"a".repeat(30)}.${"b".repeat(30)}.${"c".repeat(20)}.evil.example`;
+    for (const width of [30, 20, 10]) {
+      const max = dialogTitleMaxWidth(width);
+      for (const [name, path, host] of [
+        ["muse-ios-shared-utils", "museapphq/muse-ios-shared-utils.git", "github.com"],
+        ["app", "o/r.git", longHost],
+        ["n".repeat(64), "o/r.git", longHost],
+      ] as const) {
+        const title = clonePrompt(name, path, host, "Laptop B", max);
+        expect(visibleWidth(title)).toBeLessThanOrEqual(max);
+        expect(title).not.toContain("\x1b");
+      }
+    }
   });
 
   test("the Clone here title is built at each render, so a terminal that shrinks after open keeps the host whole", async () => {
@@ -12501,9 +12526,10 @@ describe("Unified peer repos in the Agents tree", () => {
     const titleRow = (width: number) => stripAnsi(((dashboard as any).dialogOverlay.render(width) as string[])[0]!);
     // Opened at the dialog's 80 columns...
     expect(titleRow(80)).toContain(" Clone itsybitsy from github.com (museapphq/muse-ios-shared-utils.git) into: ");
-    // ...then drawn at 50: the title is rebuilt for 45 columns, the path goes, the host stays whole.
+    // ...then drawn at 50: the title is rebuilt for 45 columns; the name is cut
+    // so the owner still shows, and the host stays whole.
     const narrow = titleRow(50);
-    expect(narrow).toContain(" Clone itsybitsy from github.com into: ");
+    expect(narrow).toContain(" Clone its… from github.com (museapphq…) into: ");
     expect(visibleWidth(narrow)).toBe(50);
   });
 

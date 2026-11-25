@@ -339,11 +339,17 @@ async function register(target: string, registryName: string, done: string, onDi
   return { ok: true, message: `${done}: ${registryName} (${target})`, path: target };
 }
 
-/** Run git with {@link cloneEnv}. `output` is git's stderr (or stdout) folded onto one line for the dashboard's notice. */
+/**
+ * Run git with {@link cloneEnv}. `output` is git's stderr (or stdout) folded
+ * onto one line for the dashboard's notice, with every control and format
+ * character gone: ssh passes a server's stderr through, and an escape in it
+ * could set the terminal title, write the clipboard (OSC 52) or clear the
+ * screen. Not length-capped: the notice is cut at the terminal's width.
+ */
 async function runGit(cmd: string[]): Promise<{ ok: boolean; output: string }> {
   try {
     const { stdout, stderr, exitCode } = await cloneRepoSpawnCtx.run(cmd, await cloneEnv());
-    const text = (stderr || stdout).split("\n").map((line) => line.trim()).filter(Boolean).join(" ");
+    const text = (stderr || stdout).replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim();
     return { ok: exitCode === 0, output: text || `exit code ${exitCode}` };
   } catch (err) {
     return { ok: false, output: (err as Error).message };

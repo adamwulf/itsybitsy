@@ -3335,6 +3335,8 @@ export function newRepoPrompt(parentPath: string): string {
 
 /** What a host keeps when even the repo name must be cut: "…" and its last 23 characters. */
 const MIN_HOST_TAIL = 24;
+/** The narrowest cut name: three characters and "…". */
+const MIN_NAME = 4;
 
 /**
  * Title of the Clone here dialog, `Clone <name> from <host> (<path>) via
@@ -3342,12 +3344,18 @@ const MIN_HOST_TAIL = 24;
  * (pi-tui narrows the overlay with the terminal and cuts any longer line).
  * `<host>` is the host git will connect to and `<path>` the URL's path
  * (`owner/repo.git`: no scheme, user or host). The URL is untrusted peer
- * data, and its owner is what tells a fork or a stale remote apart. The
- * title shrinks in this order: the peer is left out; then the path is cut
- * from the right, keeping at least its owner (first segment); then it is
- * left out; then the host is cut from the left, keeping as much of its end
- * as fits; only for an overlong name is the name cut too, the host keeping
- * its last 23 characters.
+ * data, and its owner is what tells a fork or a stale remote apart; the rest
+ * of the path mostly repeats the name. The title shrinks in this order:
+ *
+ *   1. the peer is left out;
+ *   2. the path is cut from the right, down to its owner (first segment) and "…";
+ *   3. the name is cut, down to three characters and "…", so the owner still shows;
+ *   4. the path is left out;
+ *   5. the host is cut from the left, keeping as much of its end as fits;
+ *   6. for an overlong name, the name is cut too, the host keeping its last
+ *      23 characters, and whatever is still too wide is cut at its end.
+ *
+ * So the result is never wider than `max`.
  */
 export function clonePrompt(name: string, path: string, host: string, peer: string, max: number): string {
   const title = (shownHost: string, shownPath: string | null, shownPeer: string | null, shownName = name) =>
@@ -3361,12 +3369,15 @@ export function clonePrompt(name: string, path: string, host: string, peer: stri
   const owner = ownerEnd === -1 ? path : path.slice(0, ownerEnd);
   const pathRoom = max - visibleWidth(title(host, "", null));
   if (pathRoom > visibleWidth(owner)) return title(host, truncatePeerField(path, pathRoom), null);
+  const ownerOnly = truncatePeerField(path, visibleWidth(owner) + 1);
+  const nameRoom = max - visibleWidth(title(host, ownerOnly, null, ""));
+  if (nameRoom >= MIN_NAME) return title(host, ownerOnly, null, truncatePeerField(name, nameRoom));
   if (fits(title(host, null, null))) return title(host, null, null);
   const hostRoom = max - visibleWidth(title("", null, null));
   if (hostRoom >= MIN_HOST_TAIL) return title(elideLeft(host, hostRoom), null, null);
   const shownHost = elideLeft(host, Math.min(visibleWidth(host), MIN_HOST_TAIL));
-  const nameRoom = Math.max(1, max - visibleWidth(title(shownHost, null, null, "")));
-  return title(shownHost, null, null, truncatePeerField(name, nameRoom));
+  const lastNameRoom = Math.max(1, max - visibleWidth(title(shownHost, null, null, "")));
+  return truncatePeerField(title(shownHost, null, null, truncatePeerField(name, lastNameRoom)), max);
 }
 
 /** Registry names, lowercased, with a "Clone here" in flight: one clone per name at a time. */

@@ -81,7 +81,10 @@ class Pipe {
   }
 }
 
-class MemoryStream implements PairStream {
+export class MemoryStream implements PairStream {
+  /** The send priority set on this end, for assertions (the real default is 0). */
+  priority = 0;
+
   constructor(
     private readonly outgoing: Pipe,
     private readonly incoming: Pipe,
@@ -107,6 +110,11 @@ class MemoryStream implements PairStream {
   async finish(): Promise<void> {
     if (this.conn.closeInfo()) throw new Error("connection lost");
     this.outgoing.finish();
+  }
+
+  async setPriority(priority: number): Promise<void> {
+    if (this.conn.closeInfo()) throw new Error("connection lost");
+    this.priority = priority;
   }
 
   read(limit: number): Promise<Uint8Array> {

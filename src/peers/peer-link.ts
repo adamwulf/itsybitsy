@@ -78,6 +78,14 @@ export interface RemoteNewAgentRequest {
 /** Longest reply the dialer reads (`readToEnd` limit), and the cap on the agent list. */
 export const PEER_MAX_REPLY_BYTES = 1_048_576;
 
+/**
+ * The send priority of a request stream that carries attachment bodies (a
+ * send or new-agent with files; SPEC §20.4 "Slow links"). Every other stream
+ * keeps the default 0, so a poll, pane read, reply or other request written
+ * on the same connection goes out ahead of queued body bytes.
+ */
+export const ATTACHMENT_BODY_PRIORITY = -1;
+
 /** Connection close codes on the trusted ALPN. */
 export const PEER_CLOSE = {
   /** A normal close: this side is shutting down or stopped polling the peer. */
@@ -735,6 +743,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   }
   async function writeRequest() {
     options.verifyClient?.();
+    if (files?.length) await io(() => active.setPriority(ATTACHMENT_BODY_PRIORITY));
     if (files) await writeWithProgress(active, bytes, setTimer, signal, () => options.onProgress?.(0));
     else await io(() => active.writeAll(bytes));
     for (const [index, file] of (files ?? []).entries()) {

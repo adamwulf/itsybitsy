@@ -1879,6 +1879,7 @@ function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
     writeAll: (bytes) => stream.writeAll(bytes),
     cancel: () => stream.cancel(),
     finish: () => stream.finish(),
+    setPriority: (priority) => stream.setPriority(priority),
     readToEnd: async () => {
       throw fail();
     },

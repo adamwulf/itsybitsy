@@ -124,6 +124,7 @@ export interface ServiceStream {
   finish(): Promise<void>;
   readToEnd(limit: number): Promise<Uint8Array>;
   cancel(): Promise<void>;
+  setPriority(priority: number): Promise<void>;
 }
 
 export interface ServiceConnection {
@@ -322,6 +323,7 @@ export function toPairConnection(conn: ServiceConnection): PairConnection {
     writeAll: (bytes) => s.writeAll(bytes),
     finish: () => s.finish(),
     cancel: () => s.cancel(),
+    setPriority: (priority) => s.setPriority(priority),
     readToEnd: async (limit) => {
       try {
         return await s.readToEnd(limit);

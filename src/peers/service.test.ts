@@ -865,6 +865,53 @@ describe("PeerService at boot", () => {
     }
   });
 
+  test("an outbound send or start with files logs one line when its transfer starts and one when it ends; one without files logs none", async () => {
+    const { textHeader } = await import("./peer-outbox");
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, logs } = makeService();
+    /** Read a request's bodies through FIN: the sender has reported every byte by then. */
+    const drain = async (body: { read(limit: number): Promise<Uint8Array> }) => { while ((await body.read(16)).length); };
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer, peerName: async () => "paired", log: () => {},
+        snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
+        startAgentWithFiles: async (_header, _peer, _name, body) => { await drain(body); return "with-files"; },
+        receiveMessage: async (header, _peer, _name, body) => {
+          if (body) await drain(body);
+          if (header.files.length) throw new Error("Agent not found: helper");
+        },
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    const files = [{ name: "a.txt", size: 3, sha256: "0".repeat(64), spellings: ["./a.txt"] }];
+    const filesDir = join(home, "outgoing");
+    await mkdir(filesDir);
+    await writeFile(join(filesDir, "0"), "abc");
+    const peer = `Laptop C (${ID_REMOTE.slice(0, 10)})`;
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      const progress: number[] = [];
+      const header = textHeader({ kind: "agent", agent: "helper" }, "hi", { kind: "user" });
+      expect(await service.sendRemoteMessage(ID_REMOTE, header, "handoff")).toBe(header.id);
+      expect(logs.filter(line => line.includes("transfer"))).toEqual([]);
+      expect(await service.startRemoteAgent(ID_REMOTE, { repo: "app", type: "worker", prompt: "use ./a.txt", files }, { filesDir, onProgress: bytes => progress.push(bytes) })).toBe("with-files");
+      // The caller's own progress callback still sees every report.
+      expect(progress.at(-1)).toBe(3);
+      await expect(service.sendRemoteMessage(ID_REMOTE, { ...textHeader({ kind: "agent", agent: "helper" }, "read ./a.txt", { kind: "user" }), files }, "handoff", { filesDir }))
+        .rejects.toThrow("Agent not found: helper");
+      expect(logs.filter(line => line.includes("transfer"))).toEqual([
+        `peer link: transfer started: new-agent to ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer ok: new-agent to ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+        `peer link: transfer started: send to ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer failed (Agent not found: helper): send to ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+      ]);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   test("acknowledgeRemoteQuestion waits for the startup human decision, needs the connected link, then asks the peer", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const decision = gate<string | null>();
@@ -1863,6 +1910,41 @@ describe("PeerService trusted ALPN", () => {
     expect(service.view().incoming ?? []).toEqual([]);
     expect(newAgent).not.toHaveBeenCalled();
     conn.close(PEER_CLOSE.done, "done");
+  });
+
+  test("an inbound framed start logs one transfer line once it owns its body and one when it is answered", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    await writeFile(join(home, ".itsybitsy", "machine-name"), "laptop");
+    const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, exitCode: 0, stdout: "agent-1", stderr: "" }));
+    const { service, endpoint, logs } = makeService({ remoteSpawn: {
+      listSpawnableTypes: listSpawnableTypeNamesSync, listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent, notice() {},
+      attachments: createAttachmentReceiver({ tempDir: home, stagingRoot: join(home, "staging"), hasFreeSpace: async () => true }),
+    } });
+    endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
+    await service.bootIfPaired();
+    const conn = incomingFrom(endpoint, service.view().selfId!, PEER_ALPN);
+    const start = async (sha256: string) => {
+      const stream = await conn.openBi();
+      await stream.writeAll(encodeFrameHeader({ op: "new-agent", repo: "app", type: "worker", prompt: "use ./a.txt",
+        files: [{ name: "a.txt", size: 3, sha256, spellings: ["./a.txt"] }] }));
+      await stream.writeAll(Buffer.from("abc"));
+      await stream.finish();
+      return JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
+    };
+    const peer = `Laptop C (${ID_REMOTE.slice(0, 10)})`;
+    try {
+      expect(await start(new Bun.CryptoHasher("sha256").update("abc").digest("hex"))).toEqual({ ok: true, id: "agent-1" });
+      expect(await start("0".repeat(64))).toEqual({ op: "error", reason: "Attachment hash mismatch" });
+      expect(logs.filter(line => line.includes("transfer"))).toEqual([
+        `peer link: transfer started: new-agent from ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer ok: new-agent from ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+        `peer link: transfer started: new-agent from ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer failed (Attachment hash mismatch): new-agent from ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+      ]);
+    } finally {
+      conn.close(PEER_CLOSE.done, "done");
+      await service.shutdown();
+    }
   });
 });
 

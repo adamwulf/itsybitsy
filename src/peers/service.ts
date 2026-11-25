@@ -70,7 +70,7 @@ import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./tra
 
 import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
 import type { AttachmentEntry, SendHeader } from "./send-frame";
-import { cleanRemoteText, requestAcknowledge, requestLifecycle, requestSend } from "./peer-link";
+import { cleanRemoteText, requestAcknowledge, requestLifecycle, requestSend, type OutgoingTransfer } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
 import { createAttachmentReceiver, totalBytes } from "./receive-attachments";
 import { remoteLifecycleDenial, remoteSendDenial, remoteStartDenialAtStartup, remoteTerminalDenial } from "./remote-start-caller";
@@ -108,6 +108,7 @@ import { stripAnsi } from "../parse-state";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
+import { TransferActivity, type ActiveTransfer } from "./transfer-activity";
 
 // ---------------------------------------------------------------------------
 // What the service needs from a bound endpoint. The wrapper's IrohEndpoint,
@@ -313,6 +314,17 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+/** `transfer` with `progress` also told of each of its progress reports. */
+function reportingTo(progress: (bytes: number) => void, transfer: OutgoingTransfer = {}): OutgoingTransfer {
+  return {
+    ...transfer,
+    onProgress: (bytes) => {
+      progress(bytes);
+      transfer.onProgress?.(bytes);
+    },
+  };
+}
+
 /** Adapt a wrapper connection to the pair protocol's seam. */
 export function toPairConnection(conn: ServiceConnection): PairConnection {
   const stream = (s: ServiceStream): PairStream => ({
@@ -387,6 +399,8 @@ export class PeerService {
   private readonly listeners = new Set<() => void>();
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
+  /** Attachment transfers per peer: their watch.log lines, and recent progress for the poller. */
+  private readonly transfers: TransferActivity;
   private readonly outboxPolls = new Set<Promise<void>>();
   private recoveryTimer?: ReturnType<typeof setInterval>;
   private outboxOwner?: AbortController;
@@ -420,6 +434,7 @@ export class PeerService {
         this.notify();
       });
     }
+    this.transfers = new TransferActivity({ now: deps.now, log: deps.log });
     this.poller = new PeerPoller({
       readPeers: async () => {
         await deps.renewLease?.();
@@ -754,23 +769,28 @@ export class PeerService {
   async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
     const [header, peer, name, body, options] = args;
     const receive = this.deps.receiveMessage!;
-    await this.trackReceipt(peer, targetLabel(header.target), header.files, options ?? {}, tracked => receive(header, peer, name, body, tracked));
+    await this.trackReceipt(peer, "send", targetLabel(header.target), header.files, options ?? {}, tracked => receive(header, peer, name, body, tracked));
   }
 
-  /** An inbound receipt (a send or a framed remote start): its row while it owns a body, Esc until commit, and shutdown. */
-  private async trackReceipt<O extends import("./peer-link").ReceiptOptions, T>(peer: string, target: string, files: readonly AttachmentEntry[], options: O, receive: (options: O) => Promise<T>): Promise<T> {
+  /**
+   * An inbound receipt (a send or a framed remote start): its row while it owns a body, Esc until commit, and shutdown.
+   * Once it owns a body it is also a transfer (transfer-activity.ts) until the request is answered.
+   */
+  private async trackReceipt<O extends import("./peer-link").ReceiptOptions, T>(peer: string, op: "send" | "new-agent", target: string, files: readonly AttachmentEntry[], options: O, receive: (options: O) => Promise<T>): Promise<T> {
     if (this.shuttingDown) throw new Error("Watcher shutting down");
     const id = crypto.randomUUID();
     const controller = new AbortController();
-    const label = this.peers.find(p => p.id === peer)?.name ?? shortPeerId(peer);
-    const row = { id, label: cleanRemoteText(label + " → " + target), bytes: 0, total: totalBytes(files) };
+    const peerName = this.peers.find(p => p.id === peer)?.name ?? null;
+    const row = { id, label: cleanRemoteText((peerName ?? shortPeerId(peer)) + " → " + target), bytes: 0, total: totalBytes(files) };
     const done = Promise.withResolvers<void>();
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let transfer: ActiveTransfer | undefined;
     try {
-      return await receive({ ...options, signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal, admitted: ownsBody => {
+      const value = await receive({ ...options, signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal, admitted: ownsBody => {
         if (this.shuttingDown) throw new Error("Watcher shutting down");
         this.receipts.set(id, { row: ownsBody ? row : undefined, controller, done: done.promise });
         if (ownsBody) {
+          transfer = this.transfers.begin({ peerId: peer, peerName, op, direction: "from", files: files.length, bytes: row.total });
           if (options.cancelStream) controller.signal.addEventListener("abort", options.cancelStream, { once: true });
           this.notify();
         }
@@ -781,11 +801,17 @@ export class PeerService {
         options.committing?.();
       }, onProgress: bytes => {
         row.bytes = bytes;
+        transfer?.progress(bytes);
         progressTimer ??= setTimeout(() => {
           progressTimer = undefined;
           this.notify();
         }, 100);
       } });
+      transfer?.ok();
+      return value;
+    } catch (err) {
+      transfer?.failed(err);
+      throw err;
     } finally {
       clearTimeout(progressTimer);
       const visible = this.receipts.get(id)?.row;
@@ -795,7 +821,7 @@ export class PeerService {
     }
   }
 
-  async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
+  async sendRemoteMessage(peerId: string, header: SendHeader, source: "dashboard" | "handoff" = "dashboard", transfer?: OutgoingTransfer): Promise<string> {
     if (source === "dashboard") {
       if (this.remoteStartDenial !== null) throw new Error(remoteSendDenial(this.remoteStartDenial));
       if (header.from.kind !== "user") throw new Error("Dashboard sends require a user sender");
@@ -804,7 +830,11 @@ export class PeerService {
     if (peer === null) throw new Error("Machine is no longer paired");
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
-    const id = await requestSend(conn, header, this.deps.setTimer, transfer);
+    const files = header.files;
+    const id = files.length
+      ? await this.transfers.track({ peerId, peerName: peer, op: "send", direction: "to", files: files.length, bytes: totalBytes(files) },
+        progress => requestSend(conn, header, this.deps.setTimer, reportingTo(progress, transfer)))
+      : await requestSend(conn, header, this.deps.setTimer, transfer);
     const line = `Sent a message to ${peer}/${targetLabel(header.target)}`;
     this.deps.log(line);
     if (source === "handoff") this.deps.notice?.(line);
@@ -831,12 +861,16 @@ export class PeerService {
   }
 
   /** With `request.files`, `transfer.filesDir` holds the staged bodies, numbered as in {@link sendRemoteMessage}. */
-  async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest, transfer?: import("./peer-link").OutgoingTransfer): Promise<string> {
+  async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest, transfer?: OutgoingTransfer): Promise<string> {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
-    if (await waitForIO({ setTimer: this.deps.setTimer, signal: transfer?.signal }, () => this.peerName(peerId)) === null) throw new Error("Machine is no longer paired");
+    const peer = await waitForIO({ setTimer: this.deps.setTimer, signal: transfer?.signal }, () => this.peerName(peerId));
+    if (peer === null) throw new Error("Machine is no longer paired");
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
-    return requestNewAgent(conn, request, this.deps.setTimer, transfer);
+    const files = request.files ?? [];
+    if (!files.length) return requestNewAgent(conn, request, this.deps.setTimer, transfer);
+    return this.transfers.track({ peerId, peerName: peer, op: "new-agent", direction: "to", files: files.length, bytes: totalBytes(files) },
+      progress => requestNewAgent(conn, request, this.deps.setTimer, reportingTo(progress, transfer)));
   }
 
   /** The code typed at A's prompt. */
@@ -1113,7 +1147,7 @@ export class PeerService {
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
           startAgentWithFiles: remoteSpawn && ((header, peer, readPeerName, body, options) =>
-            this.trackReceipt(peer, `new agent in ${header.repo}`, header.files, options, tracked =>
+            this.trackReceipt(peer, "new-agent", `new agent in ${header.repo}`, header.files, options, tracked =>
               acceptRemoteAgentWithFiles(header, peer, readPeerName, body, { ...options, ...tracked }, remoteSpawn, this.deps.log))),
           receiveMessage: this.deps.receiveMessage && ((...args) => this.receiveTracked(...args)),
           snapshot: this.deps.snapshot,

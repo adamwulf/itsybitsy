@@ -363,7 +363,7 @@ test("agents send text and two files in both directions over real paired endpoin
   await pairBoth(a, b);
   await bootPair(a, b);
   await waitFor(() => !!link(a)?.connected && !!link(b)?.connected, { message: "both connected", timeoutMs: 10_000 });
-  for (const [sender, recipient, from, to] of [[a, b, "A/app/alice", "bob"], [b, a, "B/app/bob", "alice"]] as const) {
+  for (const [sender, recipient, from, to, senderName, recipientName] of [[a, b, "A/app/alice", "bob", "A", "B"], [b, a, "B/app/bob", "alice", "B", "A"]] as const) {
     const id = crypto.randomUUID();
     const filesDir = join(sender.home, "staged");
     const files = [];
@@ -389,6 +389,20 @@ test("agents send text and two files in both directions over real paired endpoin
         expect(await Bun.file(path).text()).toBe(from + "/" + files[index]!.name);
       }
     } finally { await rm(root, { recursive: true, force: true }); }
+    // One start and one end line on each side, nothing per chunk.
+    const bytes = files.reduce((sum, file) => sum + file.size, 0);
+    const ended = (label: string) => new RegExp(`^peer link: transfer ok: ${label}: ${bytes} of ${bytes} bytes in \\d+\\.\\d s, \\d+\\.\\d KB/s$`);
+    const outbound = `send to ${recipientName} \\(${shortPeerId(recipient.id)}\\)`;
+    const inbound = `send from ${senderName} \\(${shortPeerId(sender.id)}\\)`;
+    expect(sender.logs.filter(line => line.includes(`send to ${recipientName} `))).toEqual([
+      `peer link: transfer started: send to ${recipientName} (${shortPeerId(recipient.id)}): 2 files, ${bytes} bytes`,
+      expect.stringMatching(ended(outbound)),
+    ]);
+    await waitFor(() => recipient.logs.some(line => ended(inbound).test(line)), { message: "receipt ended" });
+    expect(recipient.logs.filter(line => line.includes(`send from ${senderName} `))).toEqual([
+      `peer link: transfer started: send from ${senderName} (${shortPeerId(sender.id)}): 2 files, ${bytes} bytes`,
+      expect.stringMatching(ended(inbound)),
+    ]);
   }
 });
 

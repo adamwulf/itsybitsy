@@ -9,7 +9,10 @@
  * synchronously (the process is about to die), restores the terminal the way
  * a quit does, prints the error to stderr as Bun would have, and exits 1. A
  * crash is never turned into keep-running: registering an unhandledRejection
- * listener stops Bun from exiting on its own, so the handler must exit.
+ * listener stops Bun from exiting on its own, so the handler must exit. A
+ * startup failure (launchDashboard rejects) never reaches these handlers:
+ * launchDashboard writes its `[crash] ... startup` entry with recordFatal and
+ * rethrows it to main().catch.
  *
  * Every JS-level exit (a quit, a crash above, a signal handled by
  * terminal-cleanup.ts, a `process.exit` anywhere) also writes one `[exit]`
@@ -22,7 +25,8 @@
 import { inspect } from "util";
 import { getWatchLogPath, logToWatchLog } from "../watch-log";
 
-export type FatalEvent = "uncaughtException" | "unhandledRejection";
+/** `startup`: launchDashboard rejected before the dashboard was up (recordFatal). */
+export type FatalEvent = "uncaughtException" | "unhandledRejection" | "startup";
 
 /** The process surface the handlers attach to. Tests pass an EventEmitter. */
 export interface CrashHandlerTarget {
@@ -51,6 +55,12 @@ export interface WatchCrashHandlers {
   setRestoreTerminal(restore: () => void): void;
   /** Called as an orderly quit begins, so the `[exit]` line says how it was asked to quit. */
   noteQuit(how: string): void;
+  /**
+   * Write the `[crash]` entry for an error the handlers never see: a startup
+   * failure that launchDashboard rethrows to main().catch, which prints it
+   * and exits 1 as before. Only records; no teardown, no exit.
+   */
+  recordFatal(event: FatalEvent, reason: unknown): void;
   /** Detach every listener (tests). */
   uninstall(): void;
 }
@@ -109,21 +119,26 @@ export function installWatchCrashHandlers(overrides: Partial<WatchCrashDeps> = {
   let ending: string | null = null;
   let crashed = false;
 
+  /** Write the `[crash]` entry; false when this run already wrote one. */
+  const record = (event: FatalEvent, reason: unknown): boolean => {
+    if (crashed) return false;
+    crashed = true;
+    ending = `crashed (${event})`;
+    try { deps.log(formatCrashEntry(event, reason, runInfo(deps))); } catch { /* logging never throws, but be sure */ }
+    return true;
+  };
+
   const onFatal = (event: FatalEvent, reason: unknown): void => {
-    if (crashed) {
-      // A second fatal error while handling the first (its stderr write, a
-      // late rejection): the first one's entry is written; just leave.
+    // A second fatal error while handling the first (its stderr write, a
+    // late rejection): the first one's entry is written; just leave.
+    if (!record(event, reason)) {
       deps.exit(1);
       return;
     }
-    crashed = true;
-    ending = `crashed (${event})`;
-    const described = describeFatalReason(reason);
-    // The record first: everything after it is best effort.
-    try { deps.log(formatCrashEntry(event, reason, runInfo(deps))); } catch { /* logging never throws, but be sure */ }
+    // The record is written: everything after it is best effort.
     try { restoreTerminal(); } catch { /* still exit */ }
     try {
-      deps.writeStderr(`ib watch crashed (${event}); the error is also in ${getWatchLogPath()}\n${described}\n`);
+      deps.writeStderr(`ib watch crashed (${event}); the error is also in ${getWatchLogPath()}\n${describeFatalReason(reason)}\n`);
     } catch { /* a closed stderr must not stop the exit */ }
     deps.exit(1);
   };
@@ -144,6 +159,7 @@ export function installWatchCrashHandlers(overrides: Partial<WatchCrashDeps> = {
   return {
     setRestoreTerminal(restore) { restoreTerminal = restore; },
     noteQuit(how) { if (!crashed) ending = `quit via ${how}`; },
+    recordFatal(event, reason) { record(event, reason); },
     uninstall() {
       deps.target.off("uncaughtException", watchCrashOnUncaughtException);
       deps.target.off("unhandledRejection", watchCrashOnUnhandledRejection);

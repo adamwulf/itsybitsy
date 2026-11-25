@@ -194,6 +194,25 @@ describe("installWatchCrashHandlers", () => {
     handlers.uninstall();
   });
 
+  test("recordFatal writes the [crash] entry only: no teardown, no stderr, no exit (main().catch does those)", () => {
+    const handlers = installWatchCrashHandlers(deps);
+    handlers.setRestoreTerminal(() => { calls.push("restore"); });
+
+    handlers.recordFatal("startup", thrown());
+
+    const log = readLog(logPath);
+    expect(log).toMatch(/Z \[crash\] ib watch died: startup \(pid 4242, uptime 12\.3s\)\n    TypeError: attachment frame out of range\n/);
+    expect(log).toContain("explodeForCrashTest");
+    expect(calls).toEqual([]);
+
+    // main().catch then exits 1; a late fatal event adds no second entry.
+    target.emit("unhandledRejection", new Error("late"), Promise.resolve());
+    target.emit("exit", 1);
+    expect(readLog(logPath).match(/\[crash\]/g)).toHaveLength(1);
+    expect(readLog(logPath)).toContain("[exit] ib watch exiting with code 1, crashed (startup) (pid 4242, uptime 12.3s)");
+    handlers.uninstall();
+  });
+
   test("uninstall detaches every listener", () => {
     const handlers = installWatchCrashHandlers(deps);
     for (const event of ["uncaughtException", "unhandledRejection", "exit"]) expect(target.listenerCount(event)).toBe(1);
@@ -249,6 +268,33 @@ describe("installWatchCrashHandlers on a real process", () => {
     expect(run.log).toMatch(/Z \[exit\] ib watch exiting with code 1, crashed \(unhandledRejection\) \(pid \d+/);
   });
 
+  // The real launchDashboard, failing at its first await: an unreadable
+  // machine name makes initializeMachineName throw before anything is
+  // acquired or started. The catch mirrors main().catch in src/index.ts.
+  test("a launchDashboard startup failure leaves a [crash] entry, then main().catch prints it and exits 1 as before", async () => {
+    const logPath = join(tmp, "watch.log");
+    const home = join(tmp, "home");
+    await Bun.write(join(home, ".itsybitsy", "machine-name"), "\u0007\n");
+    const script = `
+      import { launchDashboard } from ${JSON.stringify(join(import.meta.dir, "dashboard.ts"))};
+      launchDashboard().catch((err) => { console.error(err); process.exit(1); });
+    `;
+    const child = Bun.spawn([process.execPath, "--eval", script], {
+      cwd: tmp,
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+      env: { HOME: home, TMPDIR: tmp, PATH: "/usr/bin:/bin", IB_WATCH_LOG_PATH: logPath },
+    });
+    const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
+    const log = readLog(logPath);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Invalid machine name in");
+    expect(log).toMatch(/Z \[crash\] ib watch died: startup \(pid \d+, uptime \d+\.\ds\)\n    Error: Invalid machine name in /);
+    expect(log).toContain("initializeMachineName");
+    expect(log.match(/\[crash\]/g)).toHaveLength(1);
+    expect(log).toMatch(/Z \[exit\] ib watch exiting with code 1, crashed \(startup\) \(pid \d+/);
+  });
+
   test("an uncaught exception leaves a [crash] entry and exits 1", async () => {
     const run = await runCrashingChild(`throw new RangeError("offset beyond 6 MB attachment");`);
 
@@ -284,6 +330,10 @@ describe("crash handlers are installed for ib watch only", () => {
     expect(install).toBeGreaterThan(0);
     expect(install).toBeLessThan(body.indexOf("await "));
     expect(source.match(/installWatchCrashHandlers\(/g)).toHaveLength(1);
+    // A startup failure is recorded, then rethrown to main().catch.
+    const launch = body.slice(0, body.indexOf("\n}\n"));
+    expect(launch).toContain("await startDashboard(crashHandlers, bootStart);");
+    expect(launch).toMatch(/\} catch \(err\) \{[\s\S]*crashHandlers\.recordFatal\("startup", err\);\n\s*throw err;\n\s*\}$/);
     // The teardown is handed over, and a quit names itself for the [exit] line.
     expect(body).toContain("crashHandlers.setRestoreTerminal(");
     expect(body.slice(body.indexOf("const quitDashboard = "))).toContain("crashHandlers.noteQuit(");

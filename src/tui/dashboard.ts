@@ -56,7 +56,7 @@ import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
-import { installWatchCrashHandlers } from "./watch-crash";
+import { installWatchCrashHandlers, type WatchCrashHandlers } from "./watch-crash";
 import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import { RemotePane } from "./remote-pane";
 import { RemotePrompt } from "./remote-prompt";
@@ -4539,8 +4539,20 @@ export async function launchDashboard(): Promise<void> {
   logToWatchLog("[startup] launchDashboard initiated");
   // `ib watch` only (SPEC §8.14): a JS crash writes a [crash] entry to
   // watch.log before exiting, and every JS-level exit writes an [exit] line.
-  // A run that ends with neither died natively (Bun panic, addon segfault).
   const crashHandlers = installWatchCrashHandlers();
+  try {
+    await startDashboard(crashHandlers, bootStart);
+  } catch (err) {
+    // A startup failure (anything startDashboard awaits) goes on to
+    // main().catch, which prints it and exits 1 as before. The TUI may hide
+    // that print, so record it in watch.log first.
+    crashHandlers.recordFatal("startup", err);
+    throw err;
+  }
+}
+
+/** launchDashboard's body: everything until the TUI is up and the watcher's first scan is done. */
+async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: number): Promise<void> {
   const machine = await initializeMachineName();
   const registry = await loadRegistry();
   const repos = registry.repos;

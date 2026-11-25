@@ -18,6 +18,18 @@
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
  *   "request timed out", and the next tick redials. Closing the connection is
  *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
+ * - Except during a transfer (SPEC.md §20.4 "Slow links"): while an attachment
+ *   transfer with the peer, on either connection, has moved bytes within its
+ *   own 60 s idle deadline (`transferProgressing`), an agents poll or pane read
+ *   that times out leaves the connection open and keeps waiting for its late
+ *   reply, still holding its slot (`inFlight`, `paneReads`), so nothing piles
+ *   up behind it on the slow link. The link's state stays as it was
+ *   (connected, the last lists, no error); a late agents reply is used as that
+ *   poll's answer, and a late pane reply as the read's. Each kept timeout is
+ *   one watch.log line. The exchange asks again every 15 s while it waits;
+ *   once the transfer has ended or stalled, it closes the connection as an
+ *   unkept timeout would. A peer that moves attachment bytes is not wedged,
+ *   and on a slow link closing the connection would kill the transfer itself.
  * - The poller tracks per-peer state: connected or not (and since when), `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
  *   keeps disconnected agents dimmed and shows the peer’s link status in their info panel.
@@ -106,6 +118,12 @@ export interface PeerPollerDeps {
   setTimer(ms: number, fn: () => void): () => void;
   /** watch.log in `ib watch`. */
   log(line: string): void;
+  /**
+   * An attachment transfer with this peer moved bytes recently
+   * (transfer-activity.ts `recentProgress`). While it has, a timed-out agents
+   * poll or pane read keeps its connection. Without it, every timeout closes it.
+   */
+  transferProgressing?(peerId: string): boolean;
 }
 
 interface Link {
@@ -138,12 +156,17 @@ function describeFailure(err: unknown, conn: PairConnection | null): string {
 export class PeerPoller {
   private links = new Map<string, Link>();
   /**
-   * Peer ids with a dial or request in flight. Keyed by id rather than kept
-   * on the link, so a peer removed and paired again while its old dial hangs
-   * still never gets a second one.
+   * Peer ids with a dial or request in flight, including a request kept
+   * through a transfer that still waits for its late reply. Keyed by id
+   * rather than kept on the link, so a peer removed and paired again while its
+   * old dial hangs still never gets a second one.
    */
   private readonly inFlight = new Set<string>();
-  /** Each peer has one live link. Its native pane read can outlast the wire deadline. */
+  /**
+   * One pane read per live link. Its native read can outlast the wire deadline,
+   * and a read kept through a transfer waits for its late reply: either way the
+   * slot stays taken until the read settles.
+   */
   private readonly paneReads = new WeakSet<PairConnection>();
   /** Bumped by every stop(): work started before a stop is ignored when it settles, even after a restart. */
   private generation = 0;
@@ -194,8 +217,28 @@ export class PeerPoller {
     if (!conn) throw new Error("Machine is disconnected");
     if (this.paneReads.has(conn)) throw new Error("Previous pane read is still pending");
     this.paneReads.add(conn);
-    try { return await requestPane(conn, target, lines, this.deps.setTimer); }
+    // A kept timeout keeps waiting inside requestPane, so the slot stays taken until the read settles.
+    try { return await requestPane(conn, target, lines, this.deps.setTimer, this.keepOnTimeout(peerId, `${target.op} read`)); }
     finally { this.paneReads.delete(conn); }
+  }
+
+  /**
+   * One request's `keepOpenOnTimeout`: true while an attachment transfer with
+   * the peer moves bytes. The exchange asks when the request's teardown misses
+   * its grace and again each interval while the kept read waits; the first yes
+   * writes the one watch.log line for this timeout.
+   */
+  private keepOnTimeout(peerId: string, what: string): () => boolean {
+    let logged = false;
+    return () => {
+      const keep = this.deps.transferProgressing?.(peerId) ?? false;
+      if (keep && !logged) {
+        logged = true;
+        const name = this.links.get(peerId)?.name ?? "peer";
+        this.deps.log(`peer link: ${name} (${shortPeerId(peerId)}): ${what} timed out while an attachment transfer is moving bytes; keeping the connection`);
+      }
+      return keep;
+    };
   }
 
   /** Poll now, then every {@link PEER_POLL_INTERVAL_MS}. */
@@ -330,7 +373,8 @@ export class PeerPoller {
         link.conn = dialed;
         this.watchClose(link, dialed, generation);
       }
-      const snapshot = await requestAgents(conn, this.deps.setTimer, new PeerRequestTimeout());
+      // A kept timeout keeps waiting inside requestAgents, so `inFlight` holds until its late reply or a close.
+      const snapshot = await requestAgents(conn, this.deps.setTimer, new PeerRequestTimeout(), this.keepOnTimeout(link.id, "agents poll"));
       // A final reply can arrive alongside the close notification. Only a live link recovers.
       if (!this.isCurrent(link, generation) || link.conn !== conn || this.recordObservedClose(link, conn)) return;
       this.succeeded(link, snapshot);

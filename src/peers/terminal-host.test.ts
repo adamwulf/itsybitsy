@@ -234,6 +234,7 @@ describe("remote terminal output backlog", () => {
       resetSending: async () => {},
       stopReceiving: async () => { stopped.reject(new Error("stream stopped")); },
       cancel: async () => { stopped.reject(new Error("stream cancelled")); },
+      setPriority: async () => {},
       readToEnd: () => stopped.promise,
     };
     /** Let every queued write through, including the ones each release starts (a write starts a turn later). */

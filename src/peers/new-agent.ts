@@ -64,9 +64,11 @@ export async function acceptRemoteAgent(
  * A framed start (SPEC §20.4 "Remote starts"): every check of
  * {@link acceptRemoteAgent} before any body is read, then the bodies under the
  * limits, busy rule and reservation that message sends use. After the bodies
- * verify it re-checks the pairing, commits the snapshot and spawns with the
+ * verify it re-checks the pairing, commits the snapshot, tells the dialer the
+ * files are received (which starts its 30 s deadline) and spawns with the
  * rewritten prompt. Only the spawn runs under the responder's start deadline.
- * A spawn that fails removes the committed snapshot, since nothing refers to it.
+ * A spawn that fails, or a "files received" write that fails, removes the
+ * committed snapshot, since nothing refers to it.
  */
 export async function acceptRemoteAgentWithFiles(
   header: NewAgentHeader,
@@ -92,10 +94,14 @@ export async function acceptRemoteAgentWithFiles(
     await received.commit();
     return received;
   });
+  const discard = () => staged.discard().catch(err => log(`peer link: could not remove unused attachments: ${err}`));
+  // Written before the start deadline is armed, so it finishes before any reply and the deadline is the spawn's alone.
+  try { await options.filesReceived(); }
+  catch (err) { void discard(); throw err; }
   return withStartDeadline(options.setTimer, async () => {
     const spawn = spawnRemoteAgent(start, staged.text, peerName, deps, log, fileSummary(header.files));
     // Past the deadline the spawn may still succeed and use the files: only its own failure discards them.
-    spawn.catch(() => staged.discard().catch(err => log(`peer link: could not remove unused attachments: ${err}`)));
+    spawn.catch(discard);
     return spawn;
   });
 }

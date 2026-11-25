@@ -175,6 +175,35 @@ describe("endpoints over a relay-disabled loopback (real addon, no network)", ()
     expect(await serverSide).toBe("Incoming.accept");
   });
 
+  test("both ends report their selected direct path; a stream's priority is set before its first write; a path watch stops", async () => {
+    const iroh = await loadIroh();
+    const server = await bindLocal(iroh, [ALPN]);
+    const client = await bindLocal(iroh, []);
+    const served = (async () => {
+      const conn = await (await server.acceptNext())!.accept();
+      const paths = conn.paths();
+      const stream = await conn.acceptBi();
+      await stream.writeAll(await stream.readToEnd(100));
+      await stream.finish();
+      await conn.closed();
+      return paths;
+    })();
+    const conn = await client.connect(server.id().toString(), ALPN, server.directAddresses());
+    const direct = { selected: true, relay: false, remoteAddr: expect.stringMatching(/:\d+$/), rttMs: expect.any(Number) };
+    expect(conn.paths().filter((path) => path.selected)).toEqual([direct]);
+    const stop = conn.watchPaths(() => {});
+    const stream = await conn.openBi();
+    expect(await stream.priority()).toBe(0);
+    await stream.setPriority(-1);
+    expect(await stream.priority()).toBe(-1);
+    await stream.writeAll(new TextEncoder().encode("low"));
+    await stream.finish();
+    expect(new TextDecoder().decode(await stream.readToEnd(100))).toBe("low");
+    stop();
+    conn.close(0, "done");
+    expect((await served).filter((path) => path.selected)).toEqual([direct]);
+  });
+
   test("close() resolves a pending acceptNext with null", async () => {
     const iroh = await loadIroh();
     const ep = await bindLocal(iroh, [ALPN]);
@@ -253,6 +282,46 @@ test("only src/peers/iroh.ts references @number0/iroh, and only through a dynami
     expect(line).toContain(`import("${pkg}")`);
     expect(line).not.toMatch(/\bfrom\s+["']/);
     expect(line).not.toContain("require(");
+  }
+});
+
+test("a path watch takes the addon's node-style (err, event) callback and passes on every path event", async () => {
+  const { IrohConnection } = await import("./iroh");
+  let emit: ((err: unknown, event?: unknown) => void) | undefined;
+  let stops = 0;
+  const conn = new IrohConnection({
+    watchPathEvents: (callback: (err: unknown, event?: unknown) => void) => {
+      emit = callback;
+      return { stop: async () => { stops++; } };
+    },
+  } as never);
+  let changes = 0;
+  const stop = conn.watchPaths(() => changes++);
+  emit!(null, { kind: "Opened", id: "1", remoteAddr: "10.0.0.2:4433" });
+  emit!(null, { kind: "Selected", id: "1", remoteAddr: "10.0.0.2:4433" });
+  emit!(null, { kind: "Closed", id: "0", remoteAddr: "https://relay.example./" });
+  emit!(null, { kind: "Lagged", missed: 3 });
+  emit!(new Error("no event"));
+  expect(changes).toBe(4);
+  stop();
+  expect(stops).toBe(1);
+});
+
+test("stopping a path watch whose native stop rejects leaves no unhandled rejection", async () => {
+  const { IrohConnection } = await import("./iroh");
+  const conn = new IrohConnection({
+    watchPathEvents: () => ({ stop: async () => { throw new Error("watch task gone"); } }),
+  } as never);
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    conn.watchPaths(() => {})();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
   }
 });
 

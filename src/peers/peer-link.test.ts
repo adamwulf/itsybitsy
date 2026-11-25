@@ -42,7 +42,7 @@ import {
   type PeerResponderDeps,
   type RemoteAgent,
 } from "./peer-link";
-import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test-pair-transport";
+import { createFakeClock, createMemoryLink, type MemoryConnection, type MemoryStream } from "./test-pair-transport";
 
 const ID_A = "a1".repeat(32);
 const ID_B = "b2".repeat(32);
@@ -354,6 +354,81 @@ describe("requestAgents", () => {
     await expect(requestAgents(link.a)).rejects.toThrow(new PeerProtocolError(`reply longer than ${PEER_MAX_REPLY_BYTES} bytes`));
     await responder;
     link.a.close(PEER_CLOSE.done, "done");
+  });
+
+  /** A request on `link.a` whose far end has read it and not answered; `asks` counts keepOpenOnTimeout calls. */
+  async function stalledAgentsRequest(keep: () => boolean) {
+    const link = createMemoryLink(ID_A, ID_B);
+    const clock = createFakeClock();
+    const timedOut = new Error("request timed out");
+    const state = { asks: 0, settled: false };
+    const request = requestAgents(link.a, clock.setTimer, timedOut, () => { state.asks++; return keep(); })
+      .catch(err => err).finally(() => { state.settled = true; });
+    const far = await link.b.acceptBi();
+    await far.readToEnd(PEER_MAX_REQUEST_BYTES);
+    await Bun.sleep(0);
+    clock.advance(15_000); await Bun.sleep(0); clock.advance(749);
+    expect(state.asks).toBe(0); // still within the grace
+    clock.advance(1);
+    await Bun.sleep(0);
+    return { link, clock, timedOut, state, request, far };
+  }
+
+  test("a timeout whose reply stalls past the grace and is not kept closes the connection", async () => {
+    const { link, timedOut, state, request } = await stalledAgentsRequest(() => false);
+    expect(await request).toBe(timedOut);
+    expect(state.asks).toBe(1);
+    expect(link.b.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.error, reason: "send reset stalled" });
+  });
+
+  test("a kept timeout keeps the connection and keeps waiting: the late reply is the answer", async () => {
+    const { link, state, request, far } = await stalledAgentsRequest(() => true);
+    expect(state.asks).toBe(1);
+    expect(link.b.closeInfo()).toBeNull();
+    // Still pending, so a caller's request slot stays taken.
+    expect(state.settled).toBe(false);
+    const late = { coordinator: null, repos: [], agents: [], questions: [] };
+    await far.writeAll(encodeAgentsReply(late));
+    await far.finish();
+    expect(await request).toEqual(late);
+    expect(state.asks).toBe(1);
+    expect(link.b.closeInfo()).toBeNull();
+    link.a.close(PEER_CLOSE.done, "done");
+  });
+
+  test("a kept timeout asks again every timeout interval and closes at the first no", async () => {
+    let keep = true;
+    const { link, clock, timedOut, state, request } = await stalledAgentsRequest(() => keep);
+    clock.advance(15_000); await Bun.sleep(0);
+    expect(state.asks).toBe(2);
+    expect(state.settled).toBe(false);
+    keep = false;
+    clock.advance(14_999); await Bun.sleep(0);
+    expect(state.asks).toBe(2);
+    clock.advance(1);
+    expect(await request).toBe(timedOut);
+    expect(state.asks).toBe(3);
+    expect(link.b.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.error, reason: "send reset stalled" });
+    expect(clock.pending()).toBe(0);
+  });
+
+  test("a stalled teardown that is not the request's own timeout closes without asking", async () => {
+    const link = createMemoryLink(ID_A, ID_B);
+    const clock = createFakeClock();
+    const open = link.a.openBi.bind(link.a);
+    spyOn(link.a, "openBi").mockImplementation(async () => {
+      const stream = await open();
+      stream.writeAll = async () => { throw new Error("request half stopped"); };
+      return stream;
+    });
+    let asks = 0;
+    const request = requestAgents(link.a, clock.setTimer, new Error("request timed out"), () => { asks++; return true; }).catch(err => err);
+    await link.b.acceptBi(); // never answered
+    await Bun.sleep(0);
+    clock.advance(750);
+    expect(String(await request)).toContain("request half stopped");
+    expect(asks).toBe(0);
+    expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
   });
 });
 
@@ -1195,6 +1270,40 @@ test.each(["send", "new-agent"])("a %s request reports onSent once its FIN is wr
   await replied;
   expect(events).toEqual(["fin", "sent", "reply"]);
   a.close(0, "done");
+});
+
+test("only a request carrying attachment bodies lowers its stream's send priority, before its first write", async () => {
+  const { requestSend, ATTACHMENT_BODY_PRIORITY } = await import("./peer-link");
+  const { textHeader } = await import("./peer-outbox");
+  const rig = serve();
+  const filesDir = await mkdtemp(join(tmpdir(), "ib-priority-"));
+  const open = rig.a.openBi.bind(rig.a);
+  const streams: Array<{ stream: MemoryStream; calls: string[] }> = [];
+  spyOn(rig.a, "openBi").mockImplementation(async () => {
+    const stream = await open() as MemoryStream, calls: string[] = [];
+    streams.push({ stream, calls });
+    const setPriority = stream.setPriority.bind(stream), write = stream.write.bind(stream), writeAll = stream.writeAll.bind(stream);
+    stream.setPriority = priority => { calls.push(`priority ${priority}`); return setPriority(priority); };
+    stream.write = bytes => { calls.push("write"); return write(bytes); };
+    stream.writeAll = bytes => { calls.push("write"); return writeAll(bytes); };
+    return stream;
+  });
+  try {
+    await Bun.write(join(filesDir, "0"), "abc");
+    const files = [{ name: "a.txt", size: 3, sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex"), spellings: ["./a.txt"] }];
+    await requestAgents(rig.a, rig.clock.setTimer);
+    await expect(requestSend(rig.a, { ...textHeader({ kind: "system" }, "read ./a.txt", { kind: "user" }), files }, rig.clock.setTimer, { filesDir })).rejects.toThrow();
+    await expect(requestNewAgent(rig.a, { repo: "app", type: "worker", prompt: "read ./a.txt", files }, rig.clock.setTimer, { filesDir })).rejects.toThrow();
+    await expect(requestSend(rig.a, textHeader({ kind: "system" }, "text only", { kind: "user" }), rig.clock.setTimer)).rejects.toThrow("Remote sends are unavailable");
+    await expect(requestPane(rig.a, { op: "coordinator-pane" }, 200, rig.clock.setTimer)).rejects.toThrow("No system coordinator");
+    expect(ATTACHMENT_BODY_PRIORITY).toBeLessThan(0);
+    expect(streams.map(({ stream }) => stream.priority)).toEqual([0, ATTACHMENT_BODY_PRIORITY, ATTACHMENT_BODY_PRIORITY, 0, 0]);
+    // Set before any byte of the framed requests is written; never touched on the others.
+    expect(streams.map(({ calls }) => calls[0])).toEqual(["write", `priority ${ATTACHMENT_BODY_PRIORITY}`, `priority ${ATTACHMENT_BODY_PRIORITY}`, "write", "write"]);
+  } finally {
+    rig.a.close(0, "done");
+    await rm(filesDir, { recursive: true, force: true });
+  }
 });
 
 test("a client that exits while openBi is pending writes nothing and resets", async () => {

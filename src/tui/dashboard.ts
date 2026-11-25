@@ -56,6 +56,7 @@ import { checkWorktreeCleanliness, getCommitsSinceParent, getWorktreeHead } from
 import { SplitPane } from "./split-pane";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { installTerminalCleanup } from "./terminal-cleanup";
+import { installWatchCrashHandlers, type WatchCrashHandlers } from "./watch-crash";
 import { wrapSingleLine, wordWrapLines, wordWrapSingleLine, padLines, WordWrapCache, computeChromeSlice } from "./wrap";
 import { RemotePane } from "./remote-pane";
 import { RemotePrompt } from "./remote-prompt";
@@ -4536,6 +4537,22 @@ export class DashboardComponent implements Component {
 export async function launchDashboard(): Promise<void> {
   const bootStart = Date.now();
   logToWatchLog("[startup] launchDashboard initiated");
+  // `ib watch` only (SPEC §8.14): a JS crash writes a [crash] entry to
+  // watch.log before exiting, and every JS-level exit writes an [exit] line.
+  const crashHandlers = installWatchCrashHandlers();
+  try {
+    await startDashboard(crashHandlers, bootStart);
+  } catch (err) {
+    // A startup failure (anything startDashboard awaits) goes on to
+    // main().catch, which prints it and exits 1 as before. The TUI may hide
+    // that print, so record it in watch.log first.
+    crashHandlers.recordFatal("startup", err);
+    throw err;
+  }
+}
+
+/** launchDashboard's body: everything until the TUI is up and the watcher's first scan is done. */
+async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: number): Promise<void> {
   const machine = await initializeMachineName();
   const registry = await loadRegistry();
   const repos = registry.repos;
@@ -4803,6 +4820,17 @@ export async function launchDashboard(): Promise<void> {
     typePickerKeyboard.stop();
     tui.stop();
   });
+  // A crash's terminal teardown: the synchronous terminal steps of
+  // quitDashboard below, in its order. The async rest (Telegram, peers, the
+  // coordinator release) is skipped, as it was when Bun killed the process.
+  crashHandlers.setRestoreTerminal(() => {
+    setWatchRunning(false);
+    agentActions.killActiveDiffProc();
+    colorDetection.cleanup();
+    stopTerminal();
+    dashboard.setTerminalTitle("");
+    process.stdout.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[2J\x1b[H");
+  });
   // Ctrl+C and `ib bounce` (BOUNCE_SIGNAL) both quit through here. bounce.sh
   // relaunches ib watch within seconds, so a bounce leaves per-repo
   // coordinators running instead of pausing them. The flag keeps a signal
@@ -4811,6 +4839,8 @@ export async function launchDashboard(): Promise<void> {
   const quitDashboard = (pauseRepoCoordinators: boolean): void => {
     if (quitting) return;
     quitting = true;
+    // The [exit] line process.exit(0) writes below says this was a quit.
+    crashHandlers.noteQuit(pauseRepoCoordinators ? "Ctrl+C" : "ib bounce");
     // Re-enable stderr-bound warnings — TUI is going down.
     setWatchRunning(false);
     agentActions.killActiveDiffProc();

@@ -506,6 +506,7 @@ describe("pair protocol: read failures close the connection", () => {
           writeAll: (bytes) => stream.writeAll(bytes),
           cancel: () => stream.cancel(),
           finish: () => stream.finish(),
+          setPriority: (priority) => stream.setPriority(priority),
           readToEnd: async () => {
             throw new Error("RecvStream.readToEnd: stream reset by peer");
           },

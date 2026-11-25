@@ -11,12 +11,13 @@ import { makeAgent, waitFor } from "../test-utils";
 import { acquireEndpointLock, releaseEndpointLock } from "./endpoint-lock";
 import { readConnectedPeers } from "./remote-agents";
 import { loadOrCreateIdentity } from "./identity";
-import { IrohError, irohAddonLoaderCtx } from "./iroh";
+import { IrohError, irohAddonLoaderCtx, type IrohPath } from "./iroh";
 import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, PairProtocolError, decodePairMessage, encodePairMessage } from "./pairing";
 import {
   PEER_ALPN,
   PEER_CLOSE,
   NEW_AGENT_MAX_REQUEST_BYTES,
+  encodeAgentsReply,
   encodePeerRequest,
   requestAgents,
   serveTrustedConnection,
@@ -26,6 +27,7 @@ import {
 import {
   PeerService,
   defaultPeerServiceDeps,
+  describePaths,
   peerRetryDelayMs,
   toPairConnection,
   type PeerServiceDeps,
@@ -35,6 +37,7 @@ import {
   type ServiceStream,
 } from "./service";
 import { addPeer, readPeers, type Peer } from "./store";
+import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS } from "./poller";
 import { TerminalFrameReader, encodeTerminalOpen, parseTerminalExit } from "./terminal-frame";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import type { RemoteSpawnDeps } from "./new-agent";
@@ -105,8 +108,8 @@ class FakeEndpoint implements ServiceEndpoint {
   }
 }
 
-/** A memory connection as the wrapper's connection shape, on `alpn`. */
-function serviceConnection(conn: MemoryConnection, alpn = PAIR_ALPN): ServiceConnection {
+/** A memory connection as the wrapper's connection shape, on `alpn`: one direct path, and no path changes unless `paths` says so. */
+function serviceConnection(conn: MemoryConnection, alpn = PAIR_ALPN, paths: FakePaths = new FakePaths()): ServiceConnection {
   return {
     remoteId: () => conn.remoteId,
     alpn: () => alpn,
@@ -115,7 +118,22 @@ function serviceConnection(conn: MemoryConnection, alpn = PAIR_ALPN): ServiceCon
     close: (code, reason) => conn.close(code, reason),
     closed: () => conn.closed(),
     closeInfo: () => conn.closeInfo(),
+    paths: () => paths.current,
+    watchPaths: (onChange) => {
+      paths.watchers.add(onChange);
+      return () => { paths.watchers.delete(onChange); };
+    },
   };
+}
+
+/** A connection's paths as a test sets them; `select` fires the path watch. */
+class FakePaths {
+  current: IrohPath[] = [{ selected: true, relay: false, remoteAddr: "192.0.2.7:4433", rttMs: 12 }];
+  readonly watchers = new Set<() => void>();
+  select(path: IrohPath): void {
+    this.current = [path];
+    for (const watcher of this.watchers) watcher();
+  }
 }
 
 /** An incoming connection from ID_REMOTE; returns the remote (dialing) end. */
@@ -860,6 +878,53 @@ describe("PeerService at boot", () => {
       await expect(service.startRemoteAgent(ID_REMOTE, request)).rejects.toThrow("no longer paired");
       expect(starts).toEqual([{ op: "new-agent", ...request }, { op: "new-agent", ...request, files, body: "abc" }]);
       expect(endpoint.connects).toEqual([ID_REMOTE]);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  test("an outbound send or start with files logs one line when its transfer starts and one when it ends; one without files logs none", async () => {
+    const { textHeader } = await import("./peer-outbox");
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, logs } = makeService();
+    /** Read a request's bodies through FIN: the sender has reported every byte by then. */
+    const drain = async (body: { read(limit: number): Promise<Uint8Array> }) => { while ((await body.read(16)).length); };
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer, peerName: async () => "paired", log: () => {},
+        snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
+        startAgentWithFiles: async (_header, _peer, _name, body) => { await drain(body); return "with-files"; },
+        receiveMessage: async (header, _peer, _name, body) => {
+          if (body) await drain(body);
+          if (header.files.length) throw new Error("Agent not found: helper");
+        },
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    const files = [{ name: "a.txt", size: 3, sha256: "0".repeat(64), spellings: ["./a.txt"] }];
+    const filesDir = join(home, "outgoing");
+    await mkdir(filesDir);
+    await writeFile(join(filesDir, "0"), "abc");
+    const peer = `Laptop C (${ID_REMOTE.slice(0, 10)})`;
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      const progress: number[] = [];
+      const header = textHeader({ kind: "agent", agent: "helper" }, "hi", { kind: "user" });
+      expect(await service.sendRemoteMessage(ID_REMOTE, header, "handoff")).toBe(header.id);
+      expect(logs.filter(line => line.includes("transfer"))).toEqual([]);
+      expect(await service.startRemoteAgent(ID_REMOTE, { repo: "app", type: "worker", prompt: "use ./a.txt", files }, { filesDir, onProgress: bytes => progress.push(bytes) })).toBe("with-files");
+      // The caller's own progress callback still sees every report.
+      expect(progress.at(-1)).toBe(3);
+      await expect(service.sendRemoteMessage(ID_REMOTE, { ...textHeader({ kind: "agent", agent: "helper" }, "read ./a.txt", { kind: "user" }), files }, "handoff", { filesDir }))
+        .rejects.toThrow("Agent not found: helper");
+      expect(logs.filter(line => line.includes("transfer"))).toEqual([
+        `peer link: transfer started: new-agent to ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer ok: new-agent to ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+        `peer link: transfer started: send to ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer failed (Agent not found: helper): send to ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+      ]);
     } finally {
       await service.shutdown();
     }
@@ -1785,6 +1850,31 @@ describe("PeerService self-heal", () => {
   });
 });
 
+describe("describePaths", () => {
+  const relay = { selected: false, relay: true, remoteAddr: "https://relay.example./", rttMs: 140 };
+  const ip = (remoteAddr: string, rttMs = 30) => ({ selected: false, relay: false, remoteAddr, rttMs });
+
+  test("names the selected path, direct or relayed, with its RTT", () => {
+    expect(describePaths([{ ...relay, selected: true }, ip("198.51.100.4:61000")]).text).toBe("relayed via https://relay.example./, rtt 140 ms");
+    expect(describePaths([relay, { ...ip("198.51.100.4:61000", 31), selected: true }]).text).toBe("direct to 198.51.100.4:61000, rtt 31 ms");
+  });
+
+  test("with none selected (an accepting side can stay so): direct if any direct path is open, else relayed", () => {
+    expect(describePaths([relay, ip("198.51.100.4:61000")]).text).toBe("direct to 198.51.100.4:61000, rtt 30 ms (none selected, 2 open)");
+    expect(describePaths([relay]).text).toBe("relayed via https://relay.example./, rtt 140 ms (none selected, 1 open)");
+    expect(describePaths([])).toEqual({ key: "none", text: "no open path" });
+  });
+
+  test("the key changes only with the answer: hole-punch candidates coming and going leave it alone", () => {
+    const key = (paths: Parameters<typeof describePaths>[0]) => describePaths(paths).key;
+    expect(key([ip("[2001:db8::1]:5000")])).toBe(key([ip("127.0.0.1:5000", 2), relay]));
+    expect(key([relay])).not.toBe(key([relay, ip("127.0.0.1:5000")]));
+    const selected = { ...ip("127.0.0.1:5000"), selected: true };
+    expect(key([selected])).toBe(key([{ ...selected, rttMs: 99 }, ip("[2001:db8::1]:5000")]));
+    expect(key([selected])).not.toBe(key([{ ...ip("127.0.0.1:6000"), selected: true }]));
+  });
+});
+
 describe("peerRetryDelayMs", () => {
   test("5, 10, 20, 40, then 60 s however many failures", () => {
     expect([1, 2, 3, 4, 5, 6, 7, 100, 10_000].map(peerRetryDelayMs)).toEqual([
@@ -1806,6 +1896,129 @@ test("defaultPeerServiceDeps gives message sends and remote starts one attachmen
     release.resolve();
     await holding;
   }
+});
+
+describe("PeerService keeps the link while a transfer moves bytes", () => {
+  const kept = `peer link: Laptop C (${ID_REMOTE.slice(0, 10)}): agents poll timed out while an attachment transfer is moving bytes; keeping the connection`;
+
+  /**
+   * A service whose poller dials ID_REMOTE over a memory link whose far end the
+   * test drives: it answers the first agents poll, so the link is connected.
+   */
+  async function connectedService(overrides: Partial<PeerServiceDeps> = {}, wrap: (conn: MemoryConnection) => void = () => {}) {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const rig = makeService(overrides);
+    let far: MemoryConnection | undefined;
+    rig.endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      wrap(link.a);
+      far = link.b;
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    await rig.service.bootIfPaired();
+    await waitFor(() => far !== undefined, { message: "dialed" });
+    const first = await far!.acceptBi();
+    await first.readToEnd(4096);
+    await first.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [], questions: [] }));
+    await first.finish();
+    await waitFor(() => rig.service.view().links[0]?.connected === true, { message: "connected" });
+    /** The next tick's agents poll, read and left unanswered, then its 15 s deadline and 750 ms grace. */
+    const stallPoll = async () => {
+      rig.clock.advance(PEER_POLL_INTERVAL_MS);
+      const poll = await far!.acceptBi();
+      expect(JSON.parse(new TextDecoder().decode(await poll.readToEnd(4096))).op).toBe("agents");
+      await Bun.sleep(0);
+      rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
+      await Bun.sleep(0);
+      rig.clock.advance(750);
+      await Bun.sleep(0);
+    };
+    return { ...rig, far: far!, stallPoll };
+  }
+
+  test("inbound: a receipt blocked mid-body keeps a stalled poll's connection; once it ends, the kept poll closes at its next check", async () => {
+    const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, exitCode: 0, stdout: "agent-1", stderr: "" }));
+    const { service, endpoint, logs, clock, far, stallPoll } = await connectedService({ remoteSpawn: {
+      listSpawnableTypes: listSpawnableTypeNamesSync, listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent, notice() {},
+      attachments: createAttachmentReceiver({ tempDir: home, stagingRoot: join(home, "staging"), hasFreeSpace: async () => true }),
+    } });
+    await writeFile(join(home, ".itsybitsy", "machine-name"), "laptop");
+    // The other side's own connection carries a start whose body arrives 1 byte of 3, then stops.
+    const inbound = incomingFrom(endpoint, service.view().selfId!, PEER_ALPN);
+    try {
+      const stream = await inbound.openBi();
+      await stream.writeAll(encodeFrameHeader({ op: "new-agent", repo: "app", type: "worker", prompt: "use ./a.txt",
+        files: [{ name: "a.txt", size: 3, sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex"), spellings: ["./a.txt"] }] }));
+      await stream.writeAll(Buffer.from("a"));
+      await waitFor(() => service.view().incoming?.[0]?.bytes === 1, { message: "receiving" });
+
+      await stallPoll();
+      await waitFor(() => logs.includes(kept), { message: "kept" });
+      expect(far.closeInfo()).toBeNull();
+      expect(service.view().links[0]).toMatchObject({ connected: true, lastError: null });
+
+      // The receipt completes: no transfer with the peer moves bytes any more.
+      await stream.writeAll(Buffer.from("bc"));
+      await stream.finish();
+      expect(JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)))).toEqual({ ok: true, id: "agent-1" });
+      clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
+      await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
+      expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
+      expect(service.view().links[0]?.lastError).toBe("request timed out");
+    } finally {
+      inbound.close(PEER_CLOSE.done, "done");
+      await service.shutdown();
+    }
+  });
+
+  test("outbound: a send whose body write is blocked keeps a stalled poll's connection; once it ends, the kept poll closes at its next check", async () => {
+    const { textHeader } = await import("./peer-outbox");
+    // The far end reads slowly: after the header, this side's body writes wait.
+    const reading = Promise.withResolvers<void>();
+    const { service, logs, clock, far, stallPoll } = await connectedService({}, conn => {
+      const open = conn.openBi.bind(conn);
+      conn.openBi = async () => {
+        const stream = await open();
+        const setPriority = stream.setPriority.bind(stream), write = stream.write.bind(stream);
+        let body = false, writes = 0;
+        stream.setPriority = priority => { body = true; return setPriority(priority); };
+        stream.write = async bytes => {
+          if (body && writes++ > 0) await reading.promise;
+          return write(bytes);
+        };
+        return stream;
+      };
+    });
+    const filesDir = join(home, "outgoing");
+    await mkdir(filesDir);
+    await writeFile(join(filesDir, "0"), "abc");
+    const header = { ...textHeader({ kind: "agent", agent: "helper" }, "read ./a.txt", { kind: "user" }),
+      files: [{ name: "a.txt", size: 3, sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex"), spellings: ["./a.txt"] }] };
+    try {
+      const sending = service.sendRemoteMessage(ID_REMOTE, header, "handoff", { filesDir });
+      const send = await far.acceptBi();
+      await waitFor(() => logs.some(line => line.startsWith("peer link: transfer started: send to Laptop C")), { message: "sending" });
+
+      await stallPoll();
+      await waitFor(() => logs.includes(kept), { message: "kept" });
+      expect(far.closeInfo()).toBeNull();
+      expect(service.view().links[0]).toMatchObject({ connected: true, lastError: null });
+
+      // The far end takes the body and acknowledges: the send ends.
+      reading.resolve();
+      await send.readToEnd(4096);
+      await send.writeAll(new TextEncoder().encode(JSON.stringify({ ok: true, id: header.id })));
+      await send.finish();
+      expect(await sending).toBe(header.id);
+      clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
+      await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
+      expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
+      expect(service.view().links[0]?.lastError).toBe("request timed out");
+    } finally {
+      reading.resolve();
+      await service.shutdown();
+    }
+  });
 });
 
 describe("PeerService trusted ALPN", () => {
@@ -1864,6 +2077,108 @@ describe("PeerService trusted ALPN", () => {
     expect(newAgent).not.toHaveBeenCalled();
     conn.close(PEER_CLOSE.done, "done");
   });
+
+  test("each trusted connection logs its path when it opens and each time its selected path changes; the watch stops on close", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, logs } = makeService();
+    const dialedPaths = new FakePaths();
+    dialedPaths.current = [
+      { selected: true, relay: true, remoteAddr: "https://relay.example./", rttMs: 140 },
+      { selected: false, relay: false, remoteAddr: "198.51.100.4:61000", rttMs: 0 },
+    ];
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer, peerName: async () => "paired", log: () => {},
+        snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
+      });
+      return serviceConnection(link.a, PEER_ALPN, dialedPaths);
+    };
+    const peer = `Laptop C (${ID_REMOTE.slice(0, 10)})`;
+    const pathLines = () => logs.filter(line => / (dialed|accepted) /.test(line));
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      expect(pathLines()).toEqual([`peer link: dialed ${peer}: relayed via https://relay.example./, rtt 140 ms`]);
+
+      // The relay to direct upgrade, then a repeat event for the same path: one line.
+      dialedPaths.select({ selected: true, relay: false, remoteAddr: "198.51.100.4:61000", rttMs: 31 });
+      dialedPaths.select({ selected: true, relay: false, remoteAddr: "198.51.100.4:61000", rttMs: 29 });
+      expect(pathLines().at(-1)).toBe(`peer link: dialed ${peer}: path changed: direct to 198.51.100.4:61000, rtt 31 ms`);
+      expect(pathLines()).toHaveLength(2);
+
+      // The other side's own dial, accepted here.
+      const acceptedPaths = new FakePaths();
+      const inbound = createMemoryLink(ID_REMOTE, service.view().selfId!);
+      endpoint.push({ accept: async () => serviceConnection(inbound.b, PEER_ALPN, acceptedPaths) });
+      await waitFor(() => acceptedPaths.watchers.size === 1, { message: "accepted" });
+      expect(pathLines().at(-1)).toBe(`peer link: accepted ${peer}: direct to 192.0.2.7:4433, rtt 12 ms`);
+      inbound.a.close(PEER_CLOSE.done, "done");
+      await waitFor(() => acceptedPaths.watchers.size === 0, { message: "accepted watch stopped" });
+
+      // A connection that fails the allowlist gets no path line and no watch.
+      const strangerId = "d4".repeat(32);
+      const strangerPaths = new FakePaths();
+      const stranger = createMemoryLink(strangerId, service.view().selfId!);
+      endpoint.push({ accept: async () => serviceConnection(stranger.b, PEER_ALPN, strangerPaths) });
+      await waitFor(() => stranger.a.closeInfo() !== null, { message: "stranger closed" });
+      expect(stranger.a.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.notPeer });
+      expect(logs.filter(line => line.includes(strangerId.slice(0, 10)))).toEqual([
+        `peer link: closed a connection from ${strangerId.slice(0, 10)}: not a peer`,
+      ]);
+      expect(strangerPaths.watchers.size).toBe(0);
+      expect(pathLines()).toHaveLength(3);
+    } finally {
+      await service.shutdown();
+    }
+    await waitFor(() => dialedPaths.watchers.size === 0, { message: "dialed watch stopped" });
+  });
+
+  test("an inbound framed start logs one transfer line once it owns its body and one at its commit: the spawn after it is not counted", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    await writeFile(join(home, ".itsybitsy", "machine-name"), "laptop");
+    let spawnTakes = () => {};
+    const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => {
+      spawnTakes(); // a worktree and a tmux session take seconds
+      return { ok: true, exitCode: 0, stdout: "agent-1", stderr: "" };
+    });
+    const { service, endpoint, logs, clock } = makeService({ remoteSpawn: {
+      listSpawnableTypes: listSpawnableTypeNamesSync, listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent, notice() {},
+      attachments: createAttachmentReceiver({ tempDir: home, stagingRoot: join(home, "staging"), hasFreeSpace: async () => true }),
+    } });
+    endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
+    await service.bootIfPaired();
+    const conn = incomingFrom(endpoint, service.view().selfId!, PEER_ALPN);
+    const start = async (sha256: string) => {
+      const stream = await conn.openBi();
+      await stream.writeAll(encodeFrameHeader({ op: "new-agent", repo: "app", type: "worker", prompt: "use ./a.txt",
+        files: [{ name: "a.txt", size: 3, sha256, spellings: ["./a.txt"] }] }));
+      await stream.writeAll(Buffer.from("abc"));
+      await stream.finish();
+      return JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
+    };
+    const peer = `Laptop C (${ID_REMOTE.slice(0, 10)})`;
+    const abc = new Bun.CryptoHasher("sha256").update("abc").digest("hex");
+    try {
+      spawnTakes = () => clock.jump(8_000);
+      expect(await start(abc)).toEqual({ ok: true, id: "agent-1" });
+      expect(await start("0".repeat(64))).toEqual({ op: "error", reason: "Attachment hash mismatch" });
+      // A spawn that fails after the whole body arrived: the transfer itself was fine.
+      newAgent.mockImplementationOnce(async () => ({ ok: false, exitCode: 1, stdout: "", stderr: "worktree add failed" }));
+      expect(await start(abc)).toEqual({ op: "error", reason: "worktree add failed" });
+      expect(logs.filter(line => line.includes("transfer"))).toEqual([
+        `peer link: transfer started: new-agent from ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer ok: new-agent from ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+        `peer link: transfer started: new-agent from ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer failed (Attachment hash mismatch): new-agent from ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+        `peer link: transfer started: new-agent from ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer ok: new-agent from ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+      ]);
+    } finally {
+      conn.close(PEER_CLOSE.done, "done");
+      await service.shutdown();
+    }
+  });
 });
 
 /** What the wrapper's readToEnd throws for a stream longer than its limit (iroh.ts isIrohTooLong). */
@@ -1879,6 +2194,7 @@ function failingReads(stream: ServiceStream, fail: () => Error): ServiceStream {
     writeAll: (bytes) => stream.writeAll(bytes),
     cancel: () => stream.cancel(),
     finish: () => stream.finish(),
+    setPriority: (priority) => stream.setPriority(priority),
     readToEnd: async () => {
       throw fail();
     },

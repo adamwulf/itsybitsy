@@ -175,6 +175,14 @@ test("each side binds at boot and its poller fetches the other's snapshot, with 
   expect(link(b)!.agents!.map((agent) => agent.id)).toEqual(["agent-a1"]);
   expect(JSON.stringify([seenByA, link(b)!.agents])).not.toContain("SECRET");
   expect([...a.logs, ...b.logs].filter((line) => line.includes("not a peer") || line.includes("failed"))).toEqual([]);
+  // Each side logs the path of the connection it dialed and of the one it accepted: direct on loopback.
+  for (const [side, other, otherName] of [[a, b, "B"], [b, a, "A"]] as const) {
+    for (const how of ["dialed", "accepted"]) {
+      // The accepting side can have open paths and none selected.
+      const line = new RegExp(`^peer link: ${how} ${otherName} \\(${shortPeerId(other.id)}\\): direct to \\S+:\\d+, rtt \\d+ ms( \\(none selected, \\d+ open\\))?$`);
+      expect(side.logs).toContainEqual(expect.stringMatching(line));
+    }
+  }
 });
 
 test("an id not in peers.json is closed on the peer ALPN before anything is read, and the handler never runs", async () => {
@@ -247,6 +255,38 @@ test("a trusted loopback new-agent stream starts the stubbed agent and returns i
   expect(newAgent.mock.calls).toEqual([["/b/app", prompt, { type, name: undefined }]]);
   expect(b.logs).toContain("A started agent worker-23 in App");
   expect(notice.mock.calls).toEqual([["A started agent worker-23 in App"]]);
+});
+
+test("a trusted loopback new-agent with files delivers them, says they arrived, and starts the agent with this machine's copy", async () => {
+  const net = makeNetwork(await loadIroh());
+  const received = await mkdtemp(join(tmpdir(), "ib-peer-link-real-received-"));
+  homes.push(received);
+  const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, stdout: "worker-24\n", stderr: "", exitCode: 0 }));
+  const type = "receiver-fixture-only";
+  const a = await net.makeSide("a", []);
+  const b = await net.makeSide("b", [], {
+    listSpawnableTypes: () => [type], listRepos: async () => [{ name: "App", path: "/b/app" }], newAgent, notice: () => {},
+    attachments: createAttachmentReceiver({ tempDir: received, hasFreeSpace: async () => true }),
+  });
+  await pairBoth(a, b);
+  await bootPair(a, b);
+  await waitFor(() => link(a)?.connected === true, { message: "A polls B", timeoutMs: 10_000 });
+  // Several body chunks.
+  const content = "0123456789".repeat(20_000);
+  const filesDir = join(a.home, "staged");
+  await Bun.write(join(filesDir, "0"), content);
+  const files = [{ name: "one.txt", spellings: ["./one.txt"], size: content.length, sha256: new Bun.CryptoHasher("sha256").update(content).digest("hex") }];
+  expect(await a.service.startRemoteAgent(b.id, { repo: "app", type, prompt: "read ./one.txt", files }, { filesDir })).toBe("worker-24");
+  expect(newAgent.mock.calls).toHaveLength(1);
+  const [repoPath, prompt] = newAgent.mock.calls[0]!;
+  expect(repoPath).toBe("/b/app");
+  const copy = prompt.split("\n").at(-1)!.split(" → ")[1]!;
+  expect(copy).toStartWith(received);
+  expect(prompt).toStartWith(`read ${copy}\n`);
+  expect(await Bun.file(copy).text()).toBe(content);
+  const ended = (label: string) => new RegExp(`^peer link: transfer ok: new-agent ${label} \\(\\S+\\): ${content.length} of ${content.length} bytes in `);
+  expect(a.logs).toContainEqual(expect.stringMatching(ended("to B")));
+  await waitFor(() => b.logs.some(line => ended("from A").test(line)), { message: "receipt ended" });
 });
 
 test("a trusted loopback peer retires and rehires an archived agent on the other machine", async () => {
@@ -363,7 +403,7 @@ test("agents send text and two files in both directions over real paired endpoin
   await pairBoth(a, b);
   await bootPair(a, b);
   await waitFor(() => !!link(a)?.connected && !!link(b)?.connected, { message: "both connected", timeoutMs: 10_000 });
-  for (const [sender, recipient, from, to] of [[a, b, "A/app/alice", "bob"], [b, a, "B/app/bob", "alice"]] as const) {
+  for (const [sender, recipient, from, to, senderName, recipientName] of [[a, b, "A/app/alice", "bob", "A", "B"], [b, a, "B/app/bob", "alice", "B", "A"]] as const) {
     const id = crypto.randomUUID();
     const filesDir = join(sender.home, "staged");
     const files = [];
@@ -389,6 +429,20 @@ test("agents send text and two files in both directions over real paired endpoin
         expect(await Bun.file(path).text()).toBe(from + "/" + files[index]!.name);
       }
     } finally { await rm(root, { recursive: true, force: true }); }
+    // One start and one end line on each side, nothing per chunk.
+    const bytes = files.reduce((sum, file) => sum + file.size, 0);
+    const ended = (label: string) => new RegExp(`^peer link: transfer ok: ${label}: ${bytes} of ${bytes} bytes in \\d+\\.\\d s, \\d+\\.\\d KB/s$`);
+    const outbound = `send to ${recipientName} \\(${shortPeerId(recipient.id)}\\)`;
+    const inbound = `send from ${senderName} \\(${shortPeerId(sender.id)}\\)`;
+    expect(sender.logs.filter(line => line.includes(`send to ${recipientName} `))).toEqual([
+      `peer link: transfer started: send to ${recipientName} (${shortPeerId(recipient.id)}): 2 files, ${bytes} bytes`,
+      expect.stringMatching(ended(outbound)),
+    ]);
+    await waitFor(() => recipient.logs.some(line => ended(inbound).test(line)), { message: "receipt ended" });
+    expect(recipient.logs.filter(line => line.includes(`send from ${senderName} `))).toEqual([
+      `peer link: transfer started: send from ${senderName} (${shortPeerId(sender.id)}): 2 files, ${bytes} bytes`,
+      expect.stringMatching(ended(inbound)),
+    ]);
   }
 });
 

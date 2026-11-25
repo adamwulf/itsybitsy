@@ -79,6 +79,8 @@ export interface PairStream {
   /** Read until the other side finishes. Throws {@link PairProtocolError} past `limit` bytes. */
   readToEnd(limit: number): Promise<Uint8Array>;
   cancel(): Promise<void>;
+  /** The send half's priority on its connection (default 0; higher is sent first). Set before the first write. */
+  setPriority(priority: number): Promise<void>;
 }
 
 /** Why a connection closed. */

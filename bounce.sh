@@ -8,11 +8,63 @@
 # Ctrl-C during the countdown stops the loop.
 #
 # A failed pull (uncommitted changes, main not checked out, no fast-forward)
-# builds what is already checked out. A failed build keeps the previous ./ib
+# builds what is checked out. A failed build keeps the previous ./ib
 # binary, so a broken merge still relaunches the last good `ib watch` instead
 # of leaving you without one.
+#
+# Crash records (SPEC §8.14). `ib watch` writes its own [crash] and [exit]
+# lines to watch.log, but a native crash (a Bun panic, a segfault in a napi
+# addon) kills it before any JS runs. So after each run this script appends
+# how it ended to watch.log, and it keeps a copy of `ib watch`'s stderr, where
+# Bun prints a panic, in watch-stderr.log while still showing it here.
 
 cd "$(dirname "$0")" || exit 1
+
+# The file `ib watch` logs to, which honors the same override.
+WATCH_LOG="${IB_WATCH_LOG_PATH:-$HOME/.itsybitsy/watch.log}"
+STDERR_LOG="$HOME/.itsybitsy/watch-stderr.log"
+# Past this size watch-stderr.log moves to watch-stderr.log.1 (replacing it)
+# before the next launch, so the two stay near 4 MB together.
+STDERR_LOG_MAX_BYTES=2097152
+
+utc_now() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# "status 0", or for a death by signal N (status 128+N) "status 133 (signal
+# 5, SIGTRAP)". 133 is how a Bun panic ends on Apple Silicon, including a
+# native segfault Bun catches (in a napi addon, say): Bun ends a panic with
+# Zig's @trap(), a brk instruction there. On Intel it is ud2, so 132 (SIGILL)
+# is expected (not measured). It first prints a panic line to stderr:
+# "panic(main thread): ..." on the main thread, "panic: Segmentation fault at
+# address ..." on any other thread (the iroh addon works on tokio threads, so
+# an iroh crash most likely shows this form). "oh no: Bun has crashed" follows
+# either way and is the stable marker. A Bun panic never shows as SIGSEGV.
+# 134 (SIGABRT) is a native abort() Bun does not intercept, maybe with no
+# message at all.
+describe_exit() {
+  local status=$1 sig name
+  if [ "$status" -gt 128 ]; then
+    sig=$((status - 128))
+    name=$(kill -l "$sig" 2>/dev/null)
+    if [ -n "$name" ]; then
+      echo "status $status (signal $sig, SIG${name#SIG})"
+    else
+      echo "status $status (signal $sig)"
+    fi
+  else
+    echo "status $status"
+  fi
+}
+
+rotate_stderr_log() {
+  local size
+  [ -f "$STDERR_LOG" ] || return 0
+  size=$(wc -c < "$STDERR_LOG")
+  if [ "$size" -gt "$STDERR_LOG_MAX_BYTES" ]; then
+    mv -f "$STDERR_LOG" "$STDERR_LOG.1"
+  fi
+}
 
 while true; do
   # `./` resolves to this checkout's path, so no repo id is needed. A fresh
@@ -27,7 +79,19 @@ while true; do
     echo "Build failed; relaunching the previous ib."
   fi
 
-  ./ib watch
+  mkdir -p "$(dirname "$WATCH_LOG")" "$(dirname "$STDERR_LOG")"
+  rotate_stderr_log
+  echo "===== $(utc_now) bounce.sh launching ib watch =====" >> "$STDERR_LOG"
+
+  # The process substitution keeps ./ib watch a direct child of this script,
+  # which `ib bounce` requires. tee must ignore SIGINT: a Ctrl-C while ib
+  # watch shuts down (which ib watch ignores) must not kill tee and leave ib
+  # watch writing to a closed pipe. Bash already starts a process substitution
+  # with SIGINT ignored when job control is off, as in this script; -i says so
+  # explicitly and keeps tee safe if it is ever moved into a pipeline.
+  ./ib watch 2> >(tee -i -a "$STDERR_LOG" >&2)
+  status=$?
+  echo "$(utc_now) [bounce.sh] ib watch exited with $(describe_exit "$status")" >> "$WATCH_LOG"
 
   for i in 5 4 3 2 1; do
     printf '\rRebuilding and relaunching ib watch in %ds (Ctrl-C to stop) ' "$i"

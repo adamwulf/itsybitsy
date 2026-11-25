@@ -442,13 +442,16 @@ const MAX_REL_PATH = 512;
 
 /**
  * A peer's `relPath` as this side may join it under its own clone root, or
- * null: an absolute path, an empty, `.` or `..` segment, a backslash, NUL or
- * any other control or format character, or more than {@link MAX_REL_PATH}
- * characters all drop it, so the clone falls back to `<root>/<name>`.
+ * null: an absolute path, an empty, `.` or `..` segment, a `.git` segment in
+ * any case, a backslash, NUL or any other control or format character, or
+ * more than {@link MAX_REL_PATH} characters all drop it, so the clone falls
+ * back to `<root>/<name>`. A clone at `<root>/.git` would make the clone root
+ * a repo whose config (`core.fsmonitor`) the peer wrote.
  */
 function safeRelPath(relPath: string | null): string | null {
   if (relPath === null || relPath.length > MAX_REL_PATH || relPath.startsWith("/") || /[\\\p{Cc}\p{Cf}]/u.test(relPath)) return null;
-  return relPath.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..") ? relPath : null;
+  const safe = (segment: string) => segment !== "" && segment !== "." && segment !== ".." && segment.toLowerCase() !== ".git";
+  return relPath.split("/").every(safe) ? relPath : null;
 }
 
 /** What a close of the trusted connection means, as the poller shows it. */

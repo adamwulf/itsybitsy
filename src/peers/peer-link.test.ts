@@ -226,12 +226,14 @@ describe("decodeAgentsReply", () => {
   test("a relPath that could leave the clone root, or is unsafe to join, is dropped to null", () => {
     const relPathOf = (relPath: string) =>
       decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", remoteUrl: "https://h/foo", relPath }] })).repos[0]!.relPath;
-    for (const kept of ["Foo", "swift-packages/Foo", "a/b/c/Foo", "dots.in.name/..Foo", "x".repeat(512)]) {
+    for (const kept of ["Foo", "swift-packages/Foo", "a/b/c/Foo", "dots.in.name/..Foo", "x".repeat(512), ".github/Foo", "swift/Foo.git"]) {
       expect(relPathOf(kept)).toBe(kept);
     }
     for (const dropped of [
       "/Users/me/Developer/Foo", "../Foo", "a/../../Foo", "a/./Foo", "./Foo", "a//Foo", "a/Foo/", "", "..",
       "a\\..\\Foo", "a\0/Foo", "a\n/Foo", "a/.\u200b./Foo", "x".repeat(513),
+      // A clone at <root>/.git would make the clone root a repo the peer configured.
+      ".git", "swift/.git", "a/.GIT/x", ".Git",
     ]) {
       expect(relPathOf(dropped)).toBeNull();
     }

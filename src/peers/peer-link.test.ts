@@ -1172,6 +1172,25 @@ test("each partial header write reports a milestone with zero body bytes", async
   a.close(0, "done");
 });
 
+test.each(["send", "new-agent"])("a %s request reports onSent once its FIN is written, before the reply", async op => {
+  const { requestSend, requestNewAgent } = await import("./peer-link");
+  const { a, b } = createMemoryLink("sender", "receiver");
+  const events: string[] = [];
+  const transfer = { onSent: () => events.push("sent") };
+  const id = crypto.randomUUID();
+  const request = op === "send"
+    ? requestSend(a, { op: "send", id, from: { kind: "user" }, target: { kind: "system" }, message: "hello", files: [] }, createFakeClock().setTimer, transfer)
+    : requestNewAgent(a, { repo: "repo", type: "worker", prompt: "hi" }, createFakeClock().setTimer, transfer);
+  const replied = request.then(() => events.push("reply"));
+  const peer = await b.acceptBi();
+  await peer.readToEnd(4096);
+  await peer.writeAll(encode(op === "send" ? { ok: true, id } : { ok: true, id: "builder" }));
+  await peer.finish();
+  await replied;
+  expect(events).toEqual(["sent", "reply"]);
+  a.close(0, "done");
+});
+
 test("a client that exits while openBi is pending writes nothing and resets", async () => {
   const { requestSend } = await import("./peer-link");
   const { a, b } = createMemoryLink("sender", "receiver");

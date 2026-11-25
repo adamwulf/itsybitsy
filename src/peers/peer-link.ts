@@ -582,7 +582,7 @@ export async function requestNewAgent(conn: PairConnection, { repo, type, name, 
   }, {
     setTimer, timeout: [NEW_AGENT_TIMEOUT_MS, new Error("Remote agent request timed out after 30 s. Check the peer for the agent.")],
     // Both forms can be aborted (dashboard shutdown); the file transfer is framed-only.
-    signal: transfer.signal,
+    signal: transfer.signal, onSent: transfer.onSent,
     ...framed && { ...transfer, files, timeoutAfterFin: true, unknownAfterFin: NEW_AGENT_UNKNOWN },
   });
 }
@@ -657,6 +657,12 @@ export interface OutgoingTransfer {
   filesDir?: string;
   signal?: AbortSignal;
   onProgress?: (bytes: number) => void;
+  /**
+   * The request, its bodies and FIN are written. A write completes once QUIC
+   * buffers it, so bytes may still be in flight: only the reply says the peer
+   * has them.
+   */
+  onSent?: () => void;
 }
 
 interface ClientOptions extends OutgoingTransfer {
@@ -752,6 +758,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     attemptedFin = true;
     await io(() => active.finish());
     sendDone = true;
+    options.onSent?.();
     // An exchange that ends before FIN aborts `deadline` first, so this timer cannot outlive it.
     if (options.timeoutAfterFin && !signal.aborted) clear = armTimeout();
     if (files) renewReplyIdle();

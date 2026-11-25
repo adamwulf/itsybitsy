@@ -112,7 +112,9 @@ export type DialogState =
       /** Set true while an acceptance-gated send launched from this dialog is in
        *  flight. The dialog is frozen (no re-submit, no cancel, no [Send Esc])
        *  until the send resolves — cleared on failure so the draft can be
-       *  corrected, or the dialog is closed on success. */
+       *  corrected, or the dialog is closed on success. A remote row's `s`
+       *  dialog closes once its send is pending instead, and comes back with
+       *  the draft on failure. */
       inFlight?: boolean;
       /** Optional: when set, Escape while `inFlight` invokes this to cancel the
        *  send (a remote send can wait on a long transfer). The send's failure

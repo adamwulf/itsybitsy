@@ -11,7 +11,7 @@ import { makeAgent, waitFor } from "../test-utils";
 import { acquireEndpointLock, releaseEndpointLock } from "./endpoint-lock";
 import { readConnectedPeers } from "./remote-agents";
 import { loadOrCreateIdentity } from "./identity";
-import { IrohError, irohAddonLoaderCtx } from "./iroh";
+import { IrohError, irohAddonLoaderCtx, type IrohPath } from "./iroh";
 import { PAIR_ALPN, PAIR_CLOSE, PAIR_MAX_MESSAGE_BYTES, PairProtocolError, decodePairMessage, encodePairMessage } from "./pairing";
 import {
   PEER_ALPN,
@@ -26,6 +26,7 @@ import {
 import {
   PeerService,
   defaultPeerServiceDeps,
+  describePaths,
   peerRetryDelayMs,
   toPairConnection,
   type PeerServiceDeps,
@@ -105,8 +106,8 @@ class FakeEndpoint implements ServiceEndpoint {
   }
 }
 
-/** A memory connection as the wrapper's connection shape, on `alpn`. */
-function serviceConnection(conn: MemoryConnection, alpn = PAIR_ALPN): ServiceConnection {
+/** A memory connection as the wrapper's connection shape, on `alpn`: one direct path, and no path changes unless `paths` says so. */
+function serviceConnection(conn: MemoryConnection, alpn = PAIR_ALPN, paths: FakePaths = new FakePaths()): ServiceConnection {
   return {
     remoteId: () => conn.remoteId,
     alpn: () => alpn,
@@ -115,7 +116,22 @@ function serviceConnection(conn: MemoryConnection, alpn = PAIR_ALPN): ServiceCon
     close: (code, reason) => conn.close(code, reason),
     closed: () => conn.closed(),
     closeInfo: () => conn.closeInfo(),
+    paths: () => paths.current,
+    watchPaths: (onChange) => {
+      paths.watchers.add(onChange);
+      return () => { paths.watchers.delete(onChange); };
+    },
   };
+}
+
+/** A connection's paths as a test sets them; `select` fires the path watch. */
+class FakePaths {
+  current: IrohPath[] = [{ selected: true, relay: false, remoteAddr: "192.0.2.7:4433", rttMs: 12 }];
+  readonly watchers = new Set<() => void>();
+  select(path: IrohPath): void {
+    this.current = [path];
+    for (const watcher of this.watchers) watcher();
+  }
 }
 
 /** An incoming connection from ID_REMOTE; returns the remote (dialing) end. */
@@ -1832,6 +1848,31 @@ describe("PeerService self-heal", () => {
   });
 });
 
+describe("describePaths", () => {
+  const relay = { selected: false, relay: true, remoteAddr: "https://relay.example./", rttMs: 140 };
+  const ip = (remoteAddr: string, rttMs = 30) => ({ selected: false, relay: false, remoteAddr, rttMs });
+
+  test("names the selected path, direct or relayed, with its RTT", () => {
+    expect(describePaths([{ ...relay, selected: true }, ip("198.51.100.4:61000")]).text).toBe("relayed via https://relay.example./, rtt 140 ms");
+    expect(describePaths([relay, { ...ip("198.51.100.4:61000", 31), selected: true }]).text).toBe("direct to 198.51.100.4:61000, rtt 31 ms");
+  });
+
+  test("with none selected (an accepting side can stay so): direct if any direct path is open, else relayed", () => {
+    expect(describePaths([relay, ip("198.51.100.4:61000")]).text).toBe("direct to 198.51.100.4:61000, rtt 30 ms (none selected, 2 open)");
+    expect(describePaths([relay]).text).toBe("relayed via https://relay.example./, rtt 140 ms (none selected, 1 open)");
+    expect(describePaths([])).toEqual({ key: "none", text: "no open path" });
+  });
+
+  test("the key changes only with the answer: hole-punch candidates coming and going leave it alone", () => {
+    const key = (paths: Parameters<typeof describePaths>[0]) => describePaths(paths).key;
+    expect(key([ip("[2001:db8::1]:5000")])).toBe(key([ip("127.0.0.1:5000", 2), relay]));
+    expect(key([relay])).not.toBe(key([relay, ip("127.0.0.1:5000")]));
+    const selected = { ...ip("127.0.0.1:5000"), selected: true };
+    expect(key([selected])).toBe(key([{ ...selected, rttMs: 99 }, ip("[2001:db8::1]:5000")]));
+    expect(key([selected])).not.toBe(key([{ ...ip("127.0.0.1:6000"), selected: true }]));
+  });
+});
+
 describe("peerRetryDelayMs", () => {
   test("5, 10, 20, 40, then 60 s however many failures", () => {
     expect([1, 2, 3, 4, 5, 6, 7, 100, 10_000].map(peerRetryDelayMs)).toEqual([
@@ -1910,6 +1951,49 @@ describe("PeerService trusted ALPN", () => {
     expect(service.view().incoming ?? []).toEqual([]);
     expect(newAgent).not.toHaveBeenCalled();
     conn.close(PEER_CLOSE.done, "done");
+  });
+
+  test("each trusted connection logs its path when it opens and each time its selected path changes; the watch stops on close", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, logs } = makeService();
+    const dialedPaths = new FakePaths();
+    dialedPaths.current = [
+      { selected: true, relay: true, remoteAddr: "https://relay.example./", rttMs: 140 },
+      { selected: false, relay: false, remoteAddr: "198.51.100.4:61000", rttMs: 0 },
+    ];
+    endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer, peerName: async () => "paired", log: () => {},
+        snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
+      });
+      return serviceConnection(link.a, PEER_ALPN, dialedPaths);
+    };
+    const peer = `Laptop C (${ID_REMOTE.slice(0, 10)})`;
+    const pathLines = () => logs.filter(line => / (dialed|accepted) /.test(line));
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      expect(pathLines()).toEqual([`peer link: dialed ${peer}: relayed via https://relay.example./, rtt 140 ms`]);
+
+      // The relay to direct upgrade, then a repeat event for the same path: one line.
+      dialedPaths.select({ selected: true, relay: false, remoteAddr: "198.51.100.4:61000", rttMs: 31 });
+      dialedPaths.select({ selected: true, relay: false, remoteAddr: "198.51.100.4:61000", rttMs: 29 });
+      expect(pathLines().at(-1)).toBe(`peer link: dialed ${peer}: path changed: direct to 198.51.100.4:61000, rtt 31 ms`);
+      expect(pathLines()).toHaveLength(2);
+
+      // The other side's own dial, accepted here.
+      const acceptedPaths = new FakePaths();
+      const inbound = createMemoryLink(ID_REMOTE, service.view().selfId!);
+      endpoint.push({ accept: async () => serviceConnection(inbound.b, PEER_ALPN, acceptedPaths) });
+      await waitFor(() => acceptedPaths.watchers.size === 1, { message: "accepted" });
+      expect(pathLines().at(-1)).toBe(`peer link: accepted ${peer}: direct to 192.0.2.7:4433, rtt 12 ms`);
+      inbound.a.close(PEER_CLOSE.done, "done");
+      await waitFor(() => acceptedPaths.watchers.size === 0, { message: "accepted watch stopped" });
+    } finally {
+      await service.shutdown();
+    }
+    await waitFor(() => dialedPaths.watchers.size === 0, { message: "dialed watch stopped" });
   });
 
   test("an inbound framed start logs one transfer line once it owns its body and one when it is answered", async () => {

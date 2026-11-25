@@ -76,7 +76,7 @@ import { createAttachmentReceiver, totalBytes } from "./receive-attachments";
 import { remoteLifecycleDenial, remoteSendDenial, remoteStartDenialAtStartup, remoteTerminalDenial } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
-import { isIrohTooLong, loadIroh, type IrohCloseInfo } from "./iroh";
+import { isIrohTooLong, loadIroh, type IrohCloseInfo, type IrohPath } from "./iroh";
 import { generatePairCode } from "./pair-code";
 import {
   PAIR_ALPN,
@@ -136,6 +136,10 @@ export interface ServiceConnection {
   close(code: number, reason: string): void;
   closed(): Promise<IrohCloseInfo>;
   closeInfo(): IrohCloseInfo | null;
+  /** The open network paths, at most one selected (iroh.ts). */
+  paths(): IrohPath[];
+  /** Call `onChange` on each path event (opened, closed, selected); returns the stop function (iroh.ts). */
+  watchPaths(onChange: () => void): () => void;
 }
 
 export interface ServiceIncoming {
@@ -312,6 +316,23 @@ function errorDetail(err: unknown): string {
 /** `1 failure`, `2 failures`. */
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * A connection's paths for watch.log: the selected one, direct (`ip:port`) or
+ * relayed (the relay URL), with its RTT. The accepting side of a connection
+ * can have open paths and none selected for its whole life; then it is
+ * direct if any direct path is open, else relayed. `key` changes only when
+ * that answer does (a new selected path, or direct/relayed flipping), so
+ * hole punching's burst of candidate paths is not logged.
+ */
+export function describePaths(paths: readonly IrohPath[]): { key: string; text: string } {
+  const describe = (path: IrohPath) => `${path.relay ? "relayed via" : "direct to"} ${path.remoteAddr}, rtt ${path.rttMs} ms`;
+  const selected = paths.find((path) => path.selected);
+  if (selected) return { key: `selected\0${selected.relay}\0${selected.remoteAddr}`, text: describe(selected) };
+  const shown = paths.find((path) => !path.relay) ?? paths[0];
+  if (shown === undefined) return { key: "none", text: "no open path" };
+  return { key: `open\0${shown.relay}`, text: `${describe(shown)} (none selected, ${paths.length} open)` };
 }
 
 /** `transfer` with `progress` also told of each of its progress reports. */
@@ -1137,6 +1158,7 @@ export class PeerService {
         return;
       }
       if (alpn === PEER_ALPN) {
+        this.logPath(conn, conn.remoteId().toString(), "accepted");
         const remoteSpawn = this.deps.remoteSpawn;
         await serveTrustedConnection(toPairConnection(conn), {
           setTimer: this.deps.setTimer,
@@ -1212,7 +1234,42 @@ export class PeerService {
   private async dialPeer(id: string): Promise<PairConnection> {
     const ep = this.endpoint;
     if (ep === null) throw new Error("the endpoint is closed");
-    return toPairConnection(await ep.connect(id, PEER_ALPN));
+    const conn = await ep.connect(id, PEER_ALPN);
+    this.logPath(conn, id, "dialed");
+    return toPairConnection(conn);
+  }
+
+  /**
+   * A trusted connection's network path in watch.log (SPEC §20.4 "Slow
+   * links"): one line when it opens, direct or relayed with the remote address
+   * and RTT, and one per later change of the selected path (a relay to direct
+   * upgrade, say). Changes are checked on the addon's path events, nothing
+   * polls, and a line is written only when the selected path differs from the
+   * last one logged.
+   */
+  private logPath(conn: ServiceConnection, peerId: string, how: "dialed" | "accepted"): void {
+    const name = this.peers.find((peer) => peer.id === peerId)?.name;
+    const prefix = `peer link: ${how} ${name === undefined ? "" : `${cleanRemoteText(name)} `}(${shortPeerId(peerId)})`;
+    let shown: string | null = null;
+    const log = (change: string) => {
+      let path: { key: string; text: string };
+      try {
+        path = describePaths(conn.paths());
+      } catch (err) {
+        const text = `path unknown: ${errorDetail(err)}`;
+        path = { key: text, text };
+      }
+      if (path.key === shown) return;
+      shown = path.key;
+      this.deps.log(`${prefix}: ${change}${path.text}`);
+    };
+    log("");
+    try {
+      const stop = conn.watchPaths(() => log("path changed: "));
+      void conn.closed().then(stop, stop);
+    } catch (err) {
+      this.deps.log(`${prefix}: cannot watch for path changes: ${errorDetail(err)}`);
+    }
   }
 
   /** B's admission rule: only while the dialog is open and no other pairing is pending. */

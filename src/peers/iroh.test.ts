@@ -191,7 +191,7 @@ describe("endpoints over a relay-disabled loopback (real addon, no network)", ()
     const conn = await client.connect(server.id().toString(), ALPN, server.directAddresses());
     const direct = { selected: true, relay: false, remoteAddr: expect.stringMatching(/:\d+$/), rttMs: expect.any(Number) };
     expect(conn.paths().filter((path) => path.selected)).toEqual([direct]);
-    const stop = conn.watchPathSelection(() => {});
+    const stop = conn.watchPaths(() => {});
     const stream = await conn.openBi();
     expect(await stream.priority()).toBe(0);
     await stream.setPriority(-1);
@@ -285,23 +285,24 @@ test("only src/peers/iroh.ts references @number0/iroh, and only through a dynami
   }
 });
 
-test("a path watch takes the addon's node-style (err, event) callback and reports only path selections", async () => {
+test("a path watch takes the addon's node-style (err, event) callback and passes on every path event", async () => {
   const { IrohConnection } = await import("./iroh");
-  let emit: ((err: unknown, event: unknown) => void) | undefined;
+  let emit: ((err: unknown, event?: unknown) => void) | undefined;
   let stops = 0;
   const conn = new IrohConnection({
-    watchPathEvents: (callback: (err: unknown, event: unknown) => void) => {
+    watchPathEvents: (callback: (err: unknown, event?: unknown) => void) => {
       emit = callback;
       return { stop: async () => { stops++; } };
     },
   } as never);
-  let selections = 0;
-  const stop = conn.watchPathSelection(() => selections++);
+  let changes = 0;
+  const stop = conn.watchPaths(() => changes++);
   emit!(null, { kind: "Opened", id: "1", remoteAddr: "10.0.0.2:4433" });
   emit!(null, { kind: "Selected", id: "1", remoteAddr: "10.0.0.2:4433" });
   emit!(null, { kind: "Closed", id: "0", remoteAddr: "https://relay.example./" });
   emit!(null, { kind: "Lagged", missed: 3 });
-  expect(selections).toBe(1);
+  emit!(new Error("no event"));
+  expect(changes).toBe(4);
   stop();
   expect(stops).toBe(1);
 });

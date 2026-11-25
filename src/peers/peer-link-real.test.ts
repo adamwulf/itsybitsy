@@ -175,6 +175,14 @@ test("each side binds at boot and its poller fetches the other's snapshot, with 
   expect(link(b)!.agents!.map((agent) => agent.id)).toEqual(["agent-a1"]);
   expect(JSON.stringify([seenByA, link(b)!.agents])).not.toContain("SECRET");
   expect([...a.logs, ...b.logs].filter((line) => line.includes("not a peer") || line.includes("failed"))).toEqual([]);
+  // Each side logs the path of the connection it dialed and of the one it accepted: direct on loopback.
+  for (const [side, other, otherName] of [[a, b, "B"], [b, a, "A"]] as const) {
+    for (const how of ["dialed", "accepted"]) {
+      // The accepting side can have open paths and none selected.
+      const line = new RegExp(`^peer link: ${how} ${otherName} \\(${shortPeerId(other.id)}\\): direct to \\S+:\\d+, rtt \\d+ ms( \\(none selected, \\d+ open\\))?$`);
+      expect(side.logs).toContainEqual(expect.stringMatching(line));
+    }
+  }
 });
 
 test("an id not in peers.json is closed on the peer ALPN before anything is read, and the handler never runs", async () => {

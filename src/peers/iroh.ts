@@ -278,16 +278,19 @@ export class IrohConnection {
   }
 
   /**
-   * Call `onSelect` each time the connection selects another path (a relay to
-   * direct upgrade, say); read {@link paths} for the new one. Event-driven:
-   * nothing polls. The watch ends with the connection; the returned function
-   * stops it sooner. `onSelect` must not throw: it runs from the addon's
-   * callback, where a throw is an uncaught exception.
+   * Call `onChange` on each path event: a path opened, closed or was selected
+   * (a relay to direct upgrade, say), or events were missed. Read {@link paths}
+   * for the result. Event-driven: nothing polls; hole punching sends a burst
+   * of events as a connection starts, then they are rare. A path can become
+   * selected with no Selected event of its own, so every kind is passed on.
+   * The watch ends with the connection; the returned function stops it
+   * sooner. `onChange` must not throw: it runs from the addon's callback,
+   * where a throw is an uncaught exception.
    */
-  watchPathSelection(onSelect: () => void): () => void {
+  watchPaths(onChange: () => void): () => void {
     // node-style (err, event), not the (event) the .d.ts declares.
     const callback = (_err: unknown, event?: AddonPathEvent) => {
-      if (event !== undefined && String(event.kind) === "Selected") onSelect();
+      if (event !== undefined) onChange();
     };
     const handle = call("Connection.watchPathEvents", () => this.raw.watchPathEvents(callback as never));
     return () => {

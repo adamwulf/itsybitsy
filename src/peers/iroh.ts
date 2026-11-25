@@ -13,7 +13,9 @@
  *     callers only see `Uint8Array`;
  *   - every addon error is a plain `Error` with `code: "GenericFailure"` whose
  *     meaning is only in its (often multi-line, Rust-debug) message; this module
- *     rethrows each one as an {@link IrohError} with a short one-line message.
+ *     rethrows each one as an {@link IrohError} with a short one-line message;
+ *   - the addon's watch callbacks are node-style `(err, value)` (napi's
+ *     default), although its .d.ts declares `(value)`.
  *
  * It exposes only what the current phase uses. Later phases extend it. Phase 2
  * (pairing) adds endpoints, connections and bi streams.
@@ -30,6 +32,7 @@ type AddonEndpointAddr = InstanceType<IrohAddon["EndpointAddr"]>;
 type AddonIncoming = InstanceType<IrohAddon["Incoming"]>;
 type AddonConnection = InstanceType<IrohAddon["Connection"]>;
 type AddonBiStream = InstanceType<IrohAddon["BiStream"]>;
+type AddonPathEvent = Parameters<Parameters<AddonConnection["watchPathEvents"]>[0]>[0];
 
 /** Longest message an {@link IrohError} carries before it is cut. */
 const MAX_ERROR_MESSAGE = 160;
@@ -175,6 +178,21 @@ export class IrohBiStream {
     return callAsync("SendStream.writeAll", () => this.raw.send.writeAll(toArray(bytes)));
   }
 
+  /**
+   * The send half's priority among this connection's streams (quinn's
+   * `SendStream::set_priority`): pending data of a higher priority is sent
+   * first; equal priorities share. The default is 0. It waits for the send
+   * half's lock, so set it before the first write.
+   */
+  setPriority(priority: number): Promise<void> {
+    return callAsync("SendStream.setPriority", () => this.raw.send.setPriority(priority));
+  }
+
+  /** The send half's current priority. */
+  priority(): Promise<number> {
+    return callAsync("SendStream.priority", () => this.raw.send.priority());
+  }
+
   /** Finish the send half: the other side's `readToEnd` then completes. */
   async finish(): Promise<void> {
     try { await callAsync("SendStream.finish", () => this.raw.send.finish()); }
@@ -190,6 +208,17 @@ export class IrohBiStream {
     this.receivedFin = true;
     return bytes;
   }
+}
+
+/** One network path of a connection, as {@link IrohConnection.paths} reports it. */
+export interface IrohPath {
+  /** The path the connection sends on now. */
+  selected: boolean;
+  /** Through a relay server (`remoteAddr` is its URL), not direct UDP (`remoteAddr` is `ip:port`). */
+  relay: boolean;
+  remoteAddr: string;
+  /** The path's round-trip time estimate, in ms. */
+  rttMs: number;
 }
 
 /** An open connection to another endpoint. */
@@ -236,6 +265,34 @@ export class IrohConnection {
   closeInfo(): IrohCloseInfo | null {
     const reason = call("Connection.closeReason", () => this.raw.closeReason());
     return reason === null ? null : parseIrohCloseReason(reason);
+  }
+
+  /** The connection's open paths; at most one is selected. A cheap read of local state. */
+  paths(): IrohPath[] {
+    return call("Connection.paths", () => this.raw.paths()).map((path) => ({
+      selected: path.isSelected,
+      relay: path.isRelay,
+      remoteAddr: path.remoteAddr,
+      rttMs: path.rttMs,
+    }));
+  }
+
+  /**
+   * Call `onSelect` each time the connection selects another path (a relay to
+   * direct upgrade, say); read {@link paths} for the new one. Event-driven:
+   * nothing polls. The watch ends with the connection; the returned function
+   * stops it sooner. `onSelect` must not throw: it runs from the addon's
+   * callback, where a throw is an uncaught exception.
+   */
+  watchPathSelection(onSelect: () => void): () => void {
+    // node-style (err, event), not the (event) the .d.ts declares.
+    const callback = (_err: unknown, event?: AddonPathEvent) => {
+      if (event !== undefined && String(event.kind) === "Selected") onSelect();
+    };
+    const handle = call("Connection.watchPathEvents", () => this.raw.watchPathEvents(callback as never));
+    return () => {
+      void handle.stop();
+    };
   }
 }
 

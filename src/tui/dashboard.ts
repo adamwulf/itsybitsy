@@ -2135,8 +2135,7 @@ export class DashboardComponent implements Component {
     const selected = this.remoteSelection;
     const target = remoteMessageTarget(selected);
     if (!selected || selected.kind === "remote-repo-header" || !target) return;
-    // A written request can no longer be cancelled: aborting it only makes its outcome unknown.
-    return [...this.pendingRemoteSends.values()].reverse().find(send => !send.sent &&
+    return [...this.pendingRemoteSends.values()].reverse().find(send =>
       send.peerId === selected.peerId && JSON.stringify(send.target) === JSON.stringify(target));
   }
 
@@ -2196,9 +2195,11 @@ export class DashboardComponent implements Component {
    * acceptance; on failure it shows the reason and resolves false. Aborting
    * `controller` cancels the send. When `text` names files the peer can take
    * as attachments, the path dialog asks which to attach first; cancelling it
-   * sends nothing and resolves false. `onPending` runs once the entry shows.
+   * sends nothing and resolves false. `hooks.onPending` runs once the entry
+   * shows, and `hooks.onSent` once the request is written and can no longer be
+   * cancelled.
    */
-  async submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller = new AbortController(), onPending?: () => void): Promise<boolean> {
+  async submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller = new AbortController(), hooks: agentActions.RemoteSendHooks = {}): Promise<boolean> {
     const service = this.peerService;
     const header = textHeader(remoteMessageTarget(remote), text, { kind: "user" });
     const label = remoteTitle(remote);
@@ -2226,7 +2227,7 @@ export class DashboardComponent implements Component {
       this.pendingRemoteSends.set(header.id, pending);
       this.invalidate();
       this.tui?.requestRender();
-      onPending?.();
+      hooks.onPending?.();
       if (paths.length) {
         staged = await stagePeerAttachments(paths, {
           signal: controller.signal, onCleanupError: err => this.addError(`Outgoing attachment cleanup failed: ${err}`),
@@ -2241,6 +2242,7 @@ export class DashboardComponent implements Component {
           this.tui?.requestRender();
         }, onSent: () => {
           pending.sent = true;
+          hooks.onSent?.();
           this.invalidate();
           this.tui?.requestRender();
         },
@@ -3352,7 +3354,9 @@ export class DashboardComponent implements Component {
     if (matchesKey(data, Key.escape)) {
       const send = this.escapeSend();
       if (send) {
-        send.controller.abort(new Error("Send cancelled"));
+        // A written request cannot be cancelled: aborting it would only leave its outcome unknown.
+        if (send.sent) this.setNotice(`Cannot cancel: waiting for ${send.peerName} to confirm`, "info");
+        else send.controller.abort(new Error("Send cancelled"));
         return;
       }
     }
@@ -4041,7 +4045,7 @@ export class DashboardComponent implements Component {
     const transfers = [
       ...[...this.pendingRemoteSends.values()].map((send) => {
         const esc = send === cancellableSend;
-        return { esc, text: `sending to ${send.label}…${transferStatus(send)}${esc ? "  Esc: cancel" : ""}` };
+        return { esc, text: `sending to ${send.label}…${transferStatus(send)}${esc && !send.sent ? "  Esc: cancel" : ""}` };
       }),
       ...start ? [{ esc: false, text: `starting agent on ${start.peerName}…${transferStatus(start)}` }] : [],
       ...incoming.map((row) => {

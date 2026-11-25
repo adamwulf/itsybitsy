@@ -11294,9 +11294,10 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(header()).not.toContain("waiting for");
     sent!();
     expect(header()).toContain("sending to Laptop B/abc-nick… waiting for Laptop B to confirm");
-    // A written request cannot be cancelled, only made unknown: Esc leaves it alone.
+    // A written request cannot be cancelled, only made unknown: Esc says so and leaves it alone.
     expect(header()).not.toContain("Esc: cancel");
     dashboard.handleInput("\x1b");
+    expect(dashboard.notice).toBe("Cannot cancel: waiting for Laptop B to confirm");
     expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
     result.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
     await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
@@ -13628,6 +13629,55 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.dialog).toBe(dialog);
       expect(dialog.buffer.getText()).toBe("yes");
       expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      expect(listed(dashboard)).toContain("Laptop B:worker-abc");
+    });
+
+    test("once the answer is written, its dialog drops the Esc cancel and waits for the peer", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      const result = Promise.withResolvers<string>();
+      let sent: (() => void) | undefined;
+      service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) => {
+        sent = transfer!.onSent;
+        return result.promise;
+      });
+      const dialog = submitAnswer(dashboard, "yes");
+      await waitFor(() => sent !== undefined);
+      const overlay = () => stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
+      expect(overlay()).toContain("Sending… Esc: cancel");
+      sent!();
+      expect(overlay()).not.toContain("Esc: cancel");
+      // Aborting now would only leave the answer's outcome unknown, inviting a duplicate.
+      dashboard.handleInput("\x1b");
+      expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
+      expect(dashboard.dialog).toBe(dialog);
+      expect(dialog.inFlight).toBe(true);
+      result.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+      await waitFor(() => dashboard.notice === "Answered Laptop B/worker-abc");
+      expect(dashboard.dialog).toBeNull();
+      expect(service.acknowledgeRemoteQuestion).toHaveBeenCalledTimes(1);
+    });
+
+    test("Esc on the questions while a written send waits says it cannot cancel, and acknowledges nothing", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("q");
+      const result = Promise.withResolvers<string>();
+      service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) => {
+        transfer!.onSent!();
+        return result.promise;
+      });
+      dashboard.handleInput("s");
+      assertDialog(dashboard.dialog, "textarea").onSubmit("hello");
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      expect(dashboard.dialog).toBeNull();
+      dashboard.handleInput("\x1b");
+      await dashboard.flushPendingActions();
+      expect(dashboard.notice).toBe("Cannot cancel: waiting for Laptop B to confirm");
+      expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
+      result.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+      await waitFor(() => dashboard.notice?.startsWith("Sent to Laptop B/") === true);
       expect(listed(dashboard)).toContain("Laptop B:worker-abc");
     });
 

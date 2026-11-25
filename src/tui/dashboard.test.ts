@@ -10632,6 +10632,29 @@ describe("Unified peer repos in the Agents tree", () => {
     for (const name of ["Laptop B", "Laptop C"]) expect(ageEnd(peer(name))).toBe(ageEnd(coordinator));
   });
 
+  test("at a narrow width remote and peer rows keep the shared state column and are cut at the edge like local rows", () => {
+    const { dashboard, service, local } = setup();
+    dashboard.onUpdate([local], [{ kind: "system-coordinator", state: "running", age: "1m" }, makeFlatAgent(local)], []);
+    const [b] = links();
+    // The widest name is a remote one, so it sets the shared name column.
+    const wide = { ...b!, agents: b!.agents!.map(a => a.id === "manager-def" ? { ...a, nickname: "a-remote-nickname-wider-than-every-other-name" } : a) };
+    service.set({ peers: [{ id: wide.id, name: wide.name, pairedAt: "x" }], links: [wide] });
+    const STATE = / (running|waiting|complete|connected)\b/;
+    const stateCol = (row: string) => visibleWidth(row.slice(0, row.search(STATE) + 1));
+    const full = treeRows(dashboard, WIDTH).map(row => stripAnsi(row).trimEnd());
+    const coordinator = full.find(row => row.includes("◆ coordinator"))!;
+    // Room for only the first 3 cells of each state.
+    const cut = treeRows(dashboard, stateCol(coordinator) + 3).map(row => stripAnsi(row).trimEnd());
+    const stated = full.flatMap((row, i) => row.search(STATE) < 0 ? [] : [i]);
+    // The coordinator, the peer, the local agent and three remote agents.
+    expect(stated).toHaveLength(6);
+    for (const i of stated) {
+      const row = full[i]!;
+      expect(stateCol(row)).toBe(stateCol(coordinator));
+      expect(cut[i]).toBe(row.slice(0, row.search(STATE) + 1) + row.match(STATE)![1]!.slice(0, 3));
+    }
+  });
+
   test("remote-only repos follow local rows in display order, with italic agents and dim stale rows", () => {
     const { dashboard } = setup();
     const raw = treeRows(dashboard);
@@ -10838,15 +10861,14 @@ describe("Unified peer repos in the Agents tree", () => {
   });
 
   for (const width of [40, 80]) {
-    test(`at ${width} columns a truncated nickname preserves state styling through selection and disconnect`, () => {
+    test(`at ${width} columns a remote row's state keeps its styling through selection and disconnect`, () => {
       const { dashboard, service } = setup();
       const name = "P".repeat(32);
-      const agent = remote("worker", "app", { nickname: "long nickname ".repeat(12), state: "waiting" });
+      const agent = remote("worker", "app", { nickname: "nick", state: "waiting" });
       const peer = { ...links()[0]!, name, repos: repos("app"), agents: [agent] };
       service.set({ links: [peer] });
       const assertStyle = (stale: boolean, selected: boolean) => {
-        const line = treeRows(dashboard, width).find((row) => row.includes("long nickname"))!;
-        expect(stripAnsi(line)).toContain("…");
+        const line = treeRows(dashboard, width).find((row) => row.includes("nick"))!;
         // SGR 0 clears all three attributes. Look after the last reset before the state.
         const atState = line.slice(0, line.indexOf("waiting")).split("\x1b[0m").at(-1)!;
         expect(line).toContain("waiting");
@@ -10861,7 +10883,7 @@ describe("Unified peer repos in the Agents tree", () => {
         // the state column's padding, as a local row does).
         expect(line).toContain("\x1b[0m");
         expect(line.slice(line.lastIndexOf("\x1b[0m") + "\x1b[0m".length)).not.toContain("\x1b[");
-        expect(visibleWidth(line)).toBe(width);
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
       };
       assertStyle(false, false);
       selectByKey(dashboard, `${name}/app/worker`);
@@ -10883,16 +10905,21 @@ describe("Unified peer repos in the Agents tree", () => {
       assertStyle(true, false);
     });
 
-    test(`at ${width} columns every row fits, long remote values are cut, and short states stay on screen`, () => {
+    test(`at ${width} columns every row fits and a long remote name moves every row's state, as a long local name does`, () => {
       const { dashboard, service } = setup();
       const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
       const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
       service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: repos(long.repoName), agents: [long, short], questions: [] }] });
       const rows = treeRows(dashboard, width);
       expect(rows.filter((r) => visibleWidth(r) > width)).toEqual([]);
-      const text = rows.map(stripAnsi);
-      expect(text.find((r) => r.includes("short"))).toContain("running");
-      expect(text.find((r) => r.includes("nnn"))).toContain("…");
+      // The long name widens the shared name column, so the local and the
+      // short remote row lose their state off the right edge together.
+      expect(rows.map((r) => stripAnsi(r).trimEnd())).toEqual([
+        "◆ agent-1",
+        `▾ ${"r".repeat(width - 3)}…`,
+        `├── ${"n".repeat(width - 4)}`,
+        "└── short",
+      ]);
       // The info panel and the whole screen fit too, with the long row selected.
       selectByKey(dashboard, `${"P".repeat(32)}/${"r".repeat(100)}/${"n".repeat(100)}`);
       dashboard.infoPanel.displayHeight = 20;
@@ -10901,6 +10928,13 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.render(WIDTH).filter((r) => visibleWidth(r) > WIDTH)).toEqual([]);
     });
   }
+
+  test("a long remote state is cut to its 16-cell state column", () => {
+    const { dashboard, service } = setup();
+    service.set({ links: [{ ...links()[0]!, repos: repos("app"), agents: [remote("worker", "app", { state: "s".repeat(50) })] }] });
+    const row = treeRows(dashboard, WIDTH).map(stripAnsi).find((r) => r.includes("worker"))!;
+    expect(row.trimEnd()).toMatch(new RegExp(`worker +${"s".repeat(15)}…$`));
+  });
 
   test("same-id agents in a shared repo keep their own highlight and info when peer rows move or disconnect", () => {
     const { dashboard, service, local } = setup();

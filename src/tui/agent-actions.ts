@@ -14,7 +14,7 @@ import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { createRepo } from "../create-repo";
-import { cloneDestination, cloneRepo, cloneUrlRefusal, resolveCloneRoot } from "../clone-repo";
+import { cloneDestination, cloneRepo, cloneUrlRefusal, parseCloneUrl, resolveCloneRoot } from "../clone-repo";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
@@ -3334,16 +3334,23 @@ export function newRepoPrompt(parentPath: string): string {
 }
 
 /**
- * Title of the Clone here dialog. It names the URL, since that is untrusted
- * peer data (a fork or a stale remote), and cuts the URL's end to keep the
- * title inside the box, or the whole title when even a short URL cannot fit.
+ * Title of the Clone here dialog: `Clone <name> from <host> (<url>) via
+ * <peer> into:`. The URL is untrusted peer data (a fork or a stale remote),
+ * so the host git will connect to, parsed from it, is its own part and is
+ * never cut. To keep the title inside the box only the URL is cut, at its
+ * end; when not even a stub of it fits, it is left out and the name and the
+ * peer are cut instead.
  */
-export function clonePrompt(name: string, url: string, peer: string): string {
-  const prefix = `Clone ${name} (`;
-  const suffix = `) from ${peer} into:`;
-  const room = dialogTitleMaxWidth() - visibleWidth(prefix) - visibleWidth(suffix);
-  if (room >= 12) return `${prefix}${truncatePeerField(url, room)}${suffix}`;
-  return truncatePeerField(`${prefix}${url}${suffix}`, dialogTitleMaxWidth());
+export function clonePrompt(name: string, url: string, host: string, peer: string): string {
+  const max = dialogTitleMaxWidth();
+  const title = (shownUrl: string | null, shownName: string, shownPeer: string) =>
+    `Clone ${shownName} from ${host}${shownUrl === null ? "" : ` (${shownUrl})`} via ${shownPeer} into:`;
+  const room = max - visibleWidth(title("", name, peer));
+  if (room >= 4) return title(truncatePeerField(url, room), name, peer);
+  const spare = max - visibleWidth(title(null, "", ""));
+  if (visibleWidth(name) + visibleWidth(peer) <= spare) return title(null, name, peer);
+  const peerRoom = Math.max(1, Math.min(visibleWidth(peer), Math.floor(spare / 2)));
+  return title(null, truncatePeerField(name, Math.max(1, spare - peerRoom)), truncatePeerField(peer, peerRoom));
 }
 
 /** Registry names, lowercased, with a "Clone here" in flight: one clone per name at a time. */
@@ -3367,9 +3374,9 @@ export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
     ctx.setNotice(`${header.peerName} reports no remote for ${header.repoName}`, "error");
     return;
   }
-  const refusal = cloneUrlRefusal(url);
-  if (refusal) {
-    ctx.setNotice(refusal, "error");
+  const parts = parseCloneUrl(url);
+  if (parts === null) {
+    ctx.setNotice(cloneUrlRefusal(url)!, "error");
     return;
   }
   const key = name.toLowerCase();
@@ -3380,7 +3387,7 @@ export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
   const root = await resolveCloneRoot();
   ctx.showDialog({
     type: "input",
-    prompt: clonePrompt(name, url, header.remoteUrlPeer ?? header.peerName),
+    prompt: clonePrompt(name, url, parts.host, header.remoteUrlPeer ?? header.peerName),
     value: cloneDestination(root, name, header.relPath),
     onSubmit: (dest: string) => {
       ctx.closeDialog();

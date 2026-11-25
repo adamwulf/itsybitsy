@@ -53,40 +53,58 @@ export function cloneDestination(cloneRoot: string, registryName: string, relPat
   return relPath ? join(cloneRoot, dirname(relPath), registryName) : join(cloneRoot, registryName);
 }
 
+/** A clone URL's user (null when it has none) and host, as git will connect to them. */
+export interface CloneUrlParts {
+  user: string | null;
+  host: string;
+}
+
+// The positive grammar of the URLs "Clone here" passes to git. Git takes the
+// ssh host from the first "@[" anywhere in a URL (path included, and after
+// %-decoding an ssh:// URL) and unwraps brackets before it splits the user
+// from the host, so nothing outside these parts may hold "@", "[" or "]".
+const USER = String.raw`[A-Za-z0-9_][A-Za-z0-9._-]*`;
+const HOST = String.raw`[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9A-Fa-f:.]+\]`;
+const PORT = String.raw`(?::[0-9]{1,5})?`;
+const PATH = String.raw`[^@\[\]\\\s\p{Cc}\p{Cf}]+`;
+const SSH_PATH = String.raw`[^@\[\]\\\s\p{Cc}\p{Cf}%]+`;
+const SCP_URL = new RegExp(String.raw`^(?:(${USER})@)?(${HOST}):(?!:)${PATH}$`, "u");
+const SSH_URL = new RegExp(String.raw`^ssh://(?:(${USER})@)?(${HOST})${PORT}/${SSH_PATH}$`, "u");
+const HTTPS_URL = new RegExp(String.raw`^https://(${HOST})${PORT}/${PATH}$`, "u");
+
 /**
- * The URLs "Clone here" passes to git: `ssh://…`, `https://…`, and scp-style
- * `[user@]host:path` (an SSH-config alias such as `gh-work:org/repo.git` has
- * no user). Everything else is refused: `ext::` and every other
- * `<transport>::` form, `file://` and any other `scheme://`, local paths,
- * anything starting with `-`, and any whitespace, backslash or control
- * character.
+ * Parse a URL "Clone here" may pass to git, or null when it is refused. Only
+ * these forms are accepted:
  *
- * Git unwraps a bracketed `[host]`, and url-decodes a `scheme://` URL's host,
- * before it builds the ssh command line, so: no host may start with `-` or
- * `[-`; an ssh:// authority may not start with `-` (a user may not either),
- * may hold at most one `@`, and may not contain `%`; an https:// URL may
- * carry no userinfo at all (the sender strips credentials, so a real peer
- * never sends one, and `https://github.com@evil.example/` would read as
- * github.com); an scp-style host has no `/` or `@`.
+ *   [user@]host:path                    scp-style; the colon is not followed by another
+ *   ssh://[user@]host[:port]/path
+ *   https://host[:port]/path            no user at all
+ *
+ * - user: `[A-Za-z0-9._-]+`, not starting with `-` or `.`.
+ * - host: `[A-Za-z0-9.-]+` not starting with `-` or `.`, or a bracketed IPv6
+ *   address `[0-9A-Fa-f:.]`; brackets appear nowhere else.
+ * - port: 1 to 5 digits.
+ * - path: no `@`, `[`, `]`, backslash, whitespace, control or format
+ *   character; an ssh:// URL has no `%` anywhere (git decodes it), while an
+ *   https:// or scp-style path may hold one (Azure's `%20`).
+ *
+ * Any other `scheme://` is refused, so `ext::`, `file://` and `http://` stay
+ * out. An email-style ssh user (`jane@corp.com@host`) is refused too.
  */
-export function isAllowedCloneUrl(url: string): boolean {
-  if (url === "" || url.startsWith("-") || /[\s\\\p{Cc}]/u.test(url)) return false;
-  const dashHost = (host: string) => host.startsWith("-") || host.startsWith("[-");
-  const authorityOf = (scheme: string) => url.slice(scheme.length).split("/")[0]!;
-  if (url.startsWith("ssh://")) {
-    const authority = authorityOf("ssh://");
-    const parts = authority.split("@");
-    const host = parts.at(-1)!;
-    return parts.length <= 2 && !authority.includes("%") && !authority.startsWith("-") && host !== "" && !dashHost(host);
-  }
-  if (url.startsWith("https://")) {
-    const host = authorityOf("https://");
-    return host !== "" && !host.includes("@") && !dashHost(host);
-  }
+export function parseCloneUrl(url: string): CloneUrlParts | null {
+  const ssh = SSH_URL.exec(url);
+  if (ssh) return { user: ssh[1] ?? null, host: ssh[2]! };
+  const https = HTTPS_URL.exec(url);
+  if (https) return { user: null, host: https[1]! };
   // Any other scheme:// is a URL git would not read as scp-style.
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return false;
-  const scp = /^(?:[^@:/]+@)?([^@:/]+):(?!:).+$/.exec(url);
-  return scp !== null && !dashHost(scp[1]!);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return null;
+  const scp = SCP_URL.exec(url);
+  return scp ? { user: scp[1] ?? null, host: scp[2]! } : null;
+}
+
+/** Whether "Clone here" may pass `url` to git ({@link parseCloneUrl}). */
+export function isAllowedCloneUrl(url: string): boolean {
+  return parseCloneUrl(url) !== null;
 }
 
 /** Why `url` will not be cloned, or null when {@link isAllowedCloneUrl} allows it. */

@@ -10,6 +10,7 @@ import {
   cloneRepoSpawnCtx,
   cloneRootRelPath,
   isAllowedCloneUrl,
+  parseCloneUrl,
   readRepoCloneInfo,
   resolveCloneRoot,
   stripUrlCredentials,
@@ -42,18 +43,25 @@ describe("cloneDestination", () => {
 
 describe("isAllowedCloneUrl", () => {
   test.each([
-    "git@github.com:owner/repo.git",
+    "git@github.com:o/r.git",
     "user@host.example:path/to/repo",
-    "ssh://git@github.com/owner/repo.git",
-    "ssh://host.example:2222/srv/repo",
-    "ssh://git@[::1]:2222/srv/repo",
-    "https://github.com/owner/repo.git",
-    "https://github.com:8443/owner/repo.git",
     // User-less scp-style: an SSH-config alias, or a host with the user in ~/.ssh/config.
     "gh-work:org/repo.git",
     "host.example:path/to/repo",
     "localhost:/srv/repo.git",
-    "[host.example]:repo",
+    "git@[::1]:srv/repo.git",
+    "ssh://git@github.com/owner/repo.git",
+    "ssh://git@host:2222/p",
+    "ssh://git@[::1]:22/x",
+    "ssh://host.example/srv/repo",
+    "https://github.com/o/r.git",
+    "https://host:8443/x",
+    // Azure DevOps v3: %20 in a project name, scp-style and https.
+    "git@ssh.dev.azure.com:v3/org/My%20Project/repo",
+    "https://dev.azure.com/org/My%20Project/_git/repo",
+    // AWS CodeCommit: an SSH key id as the user.
+    "ssh://APKAEIBAERJR2EXAMPLE@git-codecommit.us-east-2.amazonaws.com/v1/repos/MyDemoRepo",
+    "APKAEIBAERJR2EXAMPLE@git-codecommit.us-east-2.amazonaws.com:v1/repos/MyDemoRepo",
   ])("allows %p", (url) => {
     expect(isAllowedCloneUrl(url)).toBe(true);
   });
@@ -72,30 +80,51 @@ describe("isAllowedCloneUrl", () => {
     "ftp://host/repo",
     "-uhelp",
     "--upload-pack=touch /tmp/pwned",
+    // No user or host starts with "-" (or "."), bracketed or not.
     "-x@host:path",
     "ssh://-oProxyCommand=touch/repo",
     "ssh://git@-oProxyCommand=x/repo",
-    // The authority, userinfo included, may not start with "-" either.
     "ssh://-oProxyCommand=x@host/repo",
-    "https://-x@host/repo",
-    // Git unwraps [host] and url-decodes a scheme:// host before building the ssh command.
+    "https://-host/repo",
+    "git@-host:path",
+    "-host:path",
+    ".user@host:path",
+    "git@.host:path",
     "[-oProxyCommand=x]:repo",
     "git@[-oProxyCommand=x]:repo",
     "ssh://[-oProxyCommand=x]/repo",
     "ssh://git@[-oProxyCommand=x]/repo",
+    "https://[-x]/repo",
+    // Git takes the ssh host from the first "@[" anywhere (path included, after
+    // %-decoding an ssh:// URL) and unwraps brackets before splitting off the
+    // user: "@", "[" and "]" appear only around the user and host, brackets
+    // only around an IPv6 host, and an ssh:// URL has no "%" at all.
+    "git@github.com:o/r@[evil.example]:x",
+    "ssh://git@github.com/o%40%5Bevil.example%5D/r",
+    "[evil.example]@github.com:o/r",
+    "[-oProxyCommand=x@host]:repo",
+    "ssh://[-oProxyCommand=x@host]/repo",
+    "[host.example]:repo",
     "ssh://%2DoProxyCommand=x/repo",
     "ssh://git@%2Dhost/repo",
     "ssh://%2Doops@host/repo",
-    "https://[-x]/repo",
-    // A host the title could misread: https userinfo, a second "@" in an ssh authority.
+    "ssh://git@host/My%20Project/repo",
+    "git@github.com:o/r]",
+    // A host the title could misread: https userinfo, an email-style or
+    // hostname-looking ssh user with no path, a %-encoded https host.
     "https://token@github.com/owner/repo",
+    "https://-x@host/repo",
     "https://github.com@evil.example/owner/repo",
     "https://github.com?@evil.example/owner/repo",
+    "https://github.com%2eevil.example/owner/repo",
     "ssh://git@github.com@evil.example/owner/repo",
+    "ssh://github.com@evil.example/",
+    "ssh://jane@corp.com@gerrit.corp.com/project",
     "ssh://",
     "https:///path",
-    "git@-host:path",
-    "-host:path",
+    "https://github.com",
+    "ssh://host/",
+    "ssh://host:123456/repo",
     "git@host:",
     "host:",
     // <transport>::<address> remote helpers, and other schemes, stay out.
@@ -111,26 +140,46 @@ describe("isAllowedCloneUrl", () => {
     "host:owner\\repo",
     "https://github.com/owner/repo\n",
     "https://github.com/owner/\x1b[31mrepo",
+    "https://github.com/owner/\u202erepo",
     "git@github.com:owner/repo\0",
   ])("refuses %p", (url) => {
     expect(isAllowedCloneUrl(url)).toBe(false);
   });
+
+  test("parseCloneUrl gives the user and the host git connects to, which the dialog title shows", () => {
+    expect(parseCloneUrl("git@github.com:o/r.git")).toEqual({ user: "git", host: "github.com" });
+    expect(parseCloneUrl("gh-work:org/repo.git")).toEqual({ user: null, host: "gh-work" });
+    expect(parseCloneUrl("ssh://git@[::1]:22/x")).toEqual({ user: "git", host: "[::1]" });
+    expect(parseCloneUrl("https://host:8443/x")).toEqual({ user: null, host: "host" });
+    // A user that looks like a host is allowed; the host shown is the real one.
+    expect(parseCloneUrl("ssh://github.com@evil.example/o/r")).toEqual({ user: "github.com", host: "evil.example" });
+    expect(parseCloneUrl("file:///tmp/repo")).toBeNull();
+  });
 });
 
 describe("stripUrlCredentials", () => {
-  test.each([
+  const stripCases: [string, string][] = [
     ["https://user:token@github.com/owner/repo.git", "https://github.com/owner/repo.git"],
     ["https://ghp_token@github.com/owner/repo", "https://github.com/owner/repo"],
     ["https://user:p@ss@github.com/owner/repo", "https://github.com/owner/repo"],
-    ["https://user:token@github.com", "https://github.com"],
     ["https://user:token@host:8443/repo?x=1", "https://host:8443/repo?x=1"],
-    ["http://token@host/repo", "http://host/repo"],
+    ["https://org@dev.azure.com/org/My%20Project/_git/repo", "https://dev.azure.com/org/My%20Project/_git/repo"],
     ["ssh://git:secret@github.com/owner/repo.git", "ssh://git@github.com/owner/repo.git"],
     ["ssh://git:secret@host:2222/srv/repo", "ssh://git@host:2222/srv/repo"],
-    ["git+ssh://git:secret@host/repo", "git+ssh://git@host/repo"],
     ["ssh://:secret@host/repo", "ssh://host/repo"],
+  ];
+  test.each([
+    ...stripCases,
+    // Not clone URLs, but stripped all the same.
+    ["https://user:token@github.com", "https://github.com"],
+    ["http://token@host/repo", "http://host/repo"],
+    ["git+ssh://git:secret@host/repo", "git+ssh://git@host/repo"],
   ])("strips %p", (url, stripped) => {
     expect(stripUrlCredentials(url)).toBe(stripped);
+  });
+
+  test.each(stripCases)("what the sender sends for %p is a URL the receiver will clone", (url) => {
+    expect(isAllowedCloneUrl(stripUrlCredentials(url))).toBe(true);
   });
 
   test.each([

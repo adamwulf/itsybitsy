@@ -31,8 +31,12 @@ utc_now() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
-# "status 0", or for a death by signal N (status 128+N) "status 139 (signal
-# 11, SIGSEGV)"; 134 is SIGABRT, Bun's abort after a panic.
+# "status 0", or for a death by signal N (status 128+N) "status 133 (signal
+# 5, SIGTRAP)". 133 is how a Bun panic ends, including a native segfault Bun
+# catches (in a napi addon, say): it prints "panic(main thread): ..." and "oh
+# no: Bun has crashed" to stderr first. A Bun panic never shows as SIGSEGV.
+# 134 (SIGABRT) is a native abort() Bun does not intercept, maybe with no
+# message at all.
 describe_exit() {
   local status=$1 sig name
   if [ "$status" -gt 128 ]; then

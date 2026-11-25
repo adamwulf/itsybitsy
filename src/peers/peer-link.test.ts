@@ -147,7 +147,7 @@ describe("toRemoteAgents", () => {
       for (let refresh = 0; refresh < 2; refresh++) {
         const { agents } = await readRepoAgents(repo, "app", false);
         expect(agents.find(a => a.id === "placeholder")?.state).toBe("creating");
-        const reply = decodeAgentsReply(encodeAgentsReply(peerSnapshot([], agents, [], undefined)));
+        const reply = decodeAgentsReply(encodeAgentsReply(peerSnapshot([], agents, [], undefined, new Map())));
         expect(reply.agents.map(a => a.id).sort()).toEqual(["active", "starting"]);
       }
       if (process.getuid?.() !== 0) {
@@ -186,7 +186,7 @@ describe("decodeAgentsReply", () => {
         agents: [{ id: "agent-1", repoName: "app\x1b[31m", repoRegistryName: "app\x1b[31m", repoPath: "/r", state: "running", createdEpoch: 1_700_000_000, prompt: "leak", extra: { x: 1 } }],
       }),
     );
-    expect(repos).toEqual([{ registryName: "app", displayName: "App" }]);
+    expect(repos).toEqual([{ registryName: "app", displayName: "App", remoteUrl: null, relPath: null }]);
     expect(agents).toEqual([{ id: "agent-1", nickname: null, repoName: "app[31m", repoRegistryName: "app[31m", repoPath: "/r", state: "running", agentType: null, manager: null, createdEpoch: 1_700_000_000 }]);
     expect(Object.keys(agents[0]!).sort()).toEqual(ALLOWED_KEYS);
   });
@@ -197,6 +197,49 @@ describe("decodeAgentsReply", () => {
     expect(decodeAgentsReply(reply({ createdEpoch: 1_700_000_000 })).agents[0]!.createdEpoch).toBe(1_700_000_000);
     for (const bad of [{}, { createdEpoch: null }, { createdEpoch: "1700000000" }, { createdEpoch: true }]) {
       expect(() => decodeAgentsReply(reply(bad))).toThrow(new PeerProtocolError("agent 0 in the reply is malformed"));
+    }
+  });
+
+  test("a repo's remoteUrl and relPath round-trip; absent or null decode as null, and any other type fails the reply", () => {
+    const sent: PeerSnapshot = { coordinator: null, repos: [
+      { registryName: "foo", displayName: "Foo", remoteUrl: "git@github.com:owner/Foo.git", relPath: "swift-packages/Foo" },
+      { registryName: "bar", displayName: "bar", remoteUrl: null, relPath: null },
+    ], agents: [], questions: [] };
+    expect(decodeAgentsReply(encodeAgentsReply(sent))).toEqual(sent);
+    const absent = decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo" }] }));
+    expect(absent.repos).toEqual([{ registryName: "foo", displayName: "Foo", remoteUrl: null, relPath: null }]);
+    // A URL that is empty or carries a control or format character is dropped,
+    // not cleaned into another URL. Anything else is kept as sent:
+    // checkCloneUrl checks it when `c` is pressed and again in cloneRepo.
+    const urlOf = (remoteUrl: string) =>
+      decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", remoteUrl }] })).repos[0]!.remoteUrl;
+    for (const dropped of ["", "ext::sh\x1b[31m", "git@host:o/r\n", "git@host:o/r\0", "https://h/o/\u202er", "git@host:o/\u200br"]) {
+      expect(urlOf(dropped)).toBeNull();
+    }
+    for (const kept of ["git@github.com:owner/Foo.git", "ext::ssh", "https://h/o/r"]) expect(urlOf(kept)).toBe(kept);
+    for (const bad of [{ remoteUrl: 1 }, { remoteUrl: {} }, { relPath: ["a"] }, { relPath: false }]) {
+      expect(() => decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", ...bad }] })))
+        .toThrow(new PeerProtocolError("repo 0 in the reply is malformed"));
+    }
+  });
+
+  test("a relPath that could leave the clone root, or is unsafe to join, is dropped to null", () => {
+    const relPathOf = (relPath: string) =>
+      decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", remoteUrl: "https://h/foo", relPath }] })).repos[0]!.relPath;
+    for (const kept of ["Foo", "swift-packages/Foo", "a/b/c/Foo", "dots.in.name/..Foo", "x".repeat(512), ".github/Foo", "swift/Foo.git", "itsybitsy/Foo"]) {
+      expect(relPathOf(kept)).toBe(kept);
+    }
+    for (const dropped of [
+      "/Users/me/Developer/Foo", "../Foo", "a/../../Foo", "a/./Foo", "./Foo", "a//Foo", "a/Foo/", "", "..",
+      "a\\..\\Foo", "a\0/Foo", "a\n/Foo", "a/.\u200b./Foo", "x".repeat(513),
+      // A clone at <root>/.git would make the clone root a repo the peer configured.
+      ".git", "swift/.git", "a/.GIT/x", ".Git",
+      // One under a repo's runtime dir would plant a fake agent folder ib reads.
+      ".itsybitsy", "foo/.itsybitsy/agents/x", ".ItsyBitsy",
+      // APFS folds the long s to s; the fold also takes the dotless ı to i, more than APFS does.
+      ".itſybitſy", "a/.itſybitſy/agents/x", ".gıt",
+    ]) {
+      expect(relPathOf(dropped)).toBeNull();
     }
   });
 
@@ -267,7 +310,7 @@ describe("questions in the agents reply", () => {
       question("agent-1", "/repos/other"), // the same id in a repo the reply has no agent for
       question("agent-sys", "/repos/app"),
       question("agent-gone", "/repos/lib"),
-    ], undefined);
+    ], undefined, new Map());
     expect(snapshot.questions).toEqual([
       { id: "q-agent-1", agent: "agent-1", repoRegistryName: "lib", question: "Proceed?", timestamp: "2026-11-24T10:00:00Z" },
     ]);
@@ -318,14 +361,18 @@ describe("serveTrustedConnection", () => {
   const snapshot = () => peerSnapshot([
     { name: "app", path: "/repos/app" },
     { name: "empty", nickname: "No agents", path: "/repos/empty" },
-  ], [fullAgent("agent-1")], [], "waiting");
+  ], [fullAgent("agent-1")], [], "waiting", new Map([["/repos/app", { remoteUrl: "git@github.com:owner/app.git", relPath: "tools/app" }]]));
 
   test("answers a peer's agents requests, each on its own stream, over one connection", async () => {
     const side = serve({ snapshot });
     expect(await requestAgents(side.a)).toEqual(snapshot());
     expect(await requestAgents(side.a)).toEqual(snapshot());
     expect(snapshot().coordinator).toEqual({ state: "waiting" });
-    expect(snapshot().repos).toEqual([{ registryName: "app", displayName: "app" }, { registryName: "empty", displayName: "No agents" }]);
+    // A repo the clone-info cache has not read yet reports null for both fields.
+    expect(snapshot().repos).toEqual([
+      { registryName: "app", displayName: "app", remoteUrl: "git@github.com:owner/app.git", relPath: "tools/app" },
+      { registryName: "empty", displayName: "No agents", remoteUrl: null, relPath: null },
+    ]);
     expect(side.snapshots()).toBe(2);
     // One check at the connection's accept, then two per request: when its
     // stream is accepted and right before it is answered.

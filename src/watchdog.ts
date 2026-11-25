@@ -479,7 +479,9 @@ export async function notifyManager(
  * Routing:
  *   - `@system` → deliver to the system coordinator's tmux session via
  *     sendToSystemCoordinator (the same direct-tmux path `ib send @system` uses)
- *   - `@<repo-name>` → look up the repo, find its per-repo coordinator, sendMessage
+ *   - `@<coordinator id>` → look up the registered repo at `repo_path`, find
+ *     its current per-repo coordinator by agentType, sendMessage (the id in
+ *     the sentinel is not used)
  *   - real agent_id → findAgent + sendMessage (existing path)
  *
  * Returns `true` only when a real notification was delivered.
@@ -518,7 +520,7 @@ export async function notifySpawner(
     }
   }
 
-  // @<repo-name> → resolve to that repo's per-repo coordinator.
+  // @<coordinator id> → resolve to the current per-repo coordinator of repo_path.
   if (spawner.agent_id.startsWith("@")) {
     try {
       const repo = (await listReposFn()).find((entry) => sameRepoPath(entry.path, spawner.repo_path));

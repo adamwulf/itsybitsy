@@ -1609,7 +1609,7 @@ export async function nukeAllAgents(repoPath: string): Promise<IbCommandResult> 
  * The new coordinator's settings.local.json is rebuilt from current sources
  * (hardcoded constants + _all.md + repo-coordinator.md), so any edits to those
  * files are picked up. Hooks block is rebuilt fresh too. Agent ID stays the
- * same (it's keyed to the repo basename).
+ * same (it's keyed to the repo folder name, see getCoordinatorAgentId).
  *
  * Caller must have already verified `agent.meta.agentType === REPO_COORDINATOR_TYPE`.
  */
@@ -1625,7 +1625,7 @@ async function resetCoordinator(agent: Agent): Promise<IbCommandResult> {
   }
 
   // Spawn a fresh coordinator. newAgent's coordinator path generates the
-  // agent ID from the repo basename, so it lands at the same ID we just
+  // agent ID from the repo folder name, so it lands at the same ID we just
   // tore down.
   const cleanupWarnings = nukeResult.stderr;
   const spawnResult = await newAgent(
@@ -6586,15 +6586,16 @@ async function spawnAgent(
     const cwd = callerCwd;
 
     // Verified worktree and worktree:false callers share one attribution path.
-    // Per-repo coordinators retain their stable @repo sentinel so notifications
-    // survive coordinator recreation; regular shared agents use their real id.
+    // Per-repo coordinators record the stable `@<coordinator id>` sentinel so
+    // notifications survive coordinator recreation (the watchdog routes them
+    // by repo_path); regular shared agents use their real id.
     if (
       callerContext?.repoPath &&
       typeof callerContext.meta.id === "string"
     ) {
       spawnedBy = {
         agent_id: callerContext.meta.agentType === REPO_COORDINATOR_TYPE
-          ? `@${basename(callerContext.repoPath)}`
+          ? `@${getCoordinatorAgentId(callerContext.repoPath)}`
           : callerContext.meta.id,
         repo_path: callerContext.repoPath,
       };
@@ -6653,9 +6654,12 @@ async function spawnAgent(
     // command line won't have this variable, so they won't get auto-assigned a coordinator
     // as spawner.
     //
-    // The stored agent_id is the `@<repo-name>` sentinel (not the coordinator's
-    // actual agent_id) so the watchdog looks up the current coordinator in repo_path,
-    // which is robust to the coordinator being killed and re-created.
+    // The stored agent_id is the `@<coordinator id>` sentinel, built from the
+    // folder name with getCoordinatorAgentId rather than copied from the found
+    // coordinator (which may be a collision-suffixed or pre-sanitizing id). The
+    // `@` marks it as a sentinel, so the watchdog looks up the current
+    // coordinator in repo_path, which is robust to the coordinator being
+    // killed and re-created.
     if (!spawnedBy && !worktreeMatch && process.env.CLAUDE_SESSION_ID) {
       try {
         const repos = await listRepos();
@@ -6666,7 +6670,7 @@ async function spawnAgent(
             // The ownership gate checks the coordinator id in the sentinel.
             // notifySpawner finds the current coordinator by its recorded repo_path.
             spawnedBy = {
-              agent_id: `@${basename(cwd)}`,
+              agent_id: `@${getCoordinatorAgentId(cwd)}`,
               repo_path: cwd,
             };
           }
@@ -7120,7 +7124,7 @@ async function spawnAgent(
   let id: string;
   if (coordinatorMode) {
     id = getCoordinatorAgentId(rootRepoPath);
-    // Collision handling: if a non-coordinator agent already has the basename,
+    // Collision handling: if a non-coordinator agent already has that ID,
     // append a random 4-char hex suffix
     const coordCheck = await checkCoordinatorExists(rootRepoPath);
     if (!coordCheck.exists && coordCheck.collision) {
@@ -7155,7 +7159,7 @@ async function spawnAgent(
   // Repo display name collision check
   if (coordinatorMode) {
     // For coordinator agents, check against OTHER repos' display names
-    // (the ID IS the repo basename by design, which is the current repo)
+    // (the ID comes from this repo's own folder name by design)
     const otherRepos = repos.filter(r => r.path !== rootRepoPath);
     const collision = otherRepos.find(r => repoDisplayName(r) === id);
     if (collision) {
@@ -7231,7 +7235,7 @@ async function spawnAgent(
   await mkdir(agentDir, { recursive: true });
 
   // Prefer spawnedBy; fall back to --manager flag.
-  // @-prefixed sentinels (e.g. @system, @<repo-name>) and null repo_path are
+  // @-prefixed sentinels (e.g. @system, @<coordinator id>) and null repo_path are
   // skipped here — the spawner is not a real agent directory we can log into,
   // so logSpawn writes only to the spawnee's log.
   const spawnerAgentDir: string | null =

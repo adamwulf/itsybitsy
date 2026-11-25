@@ -46,6 +46,8 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
   { key: "providers.fugu.api_key", type: "string", default: "", sensitive: true },
   { key: "notifications.sayOnQuestion", type: "boolean", default: true },
   { key: "tree.groupByParent", type: "boolean", default: false },
+  /** Where "Clone here" puts a peer's repo, and what each repo's `relPath` sent to peers is relative to (SPEC §20.4, §20.5). */
+  { key: "repos.cloneRoot", type: "string", default: "~/Developer" },
 ];
 
 function getNestedValue(obj: Record<string, unknown>, dotKey: string): unknown {

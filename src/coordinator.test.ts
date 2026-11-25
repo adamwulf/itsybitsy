@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
-import { join } from "path";
+import { dirname, join } from "path";
 import { chmod, mkdtemp, rm, readFile, readdir, mkdir, stat } from "fs/promises";
 import { tmpdir } from "os";
 import { rmSync } from "node:fs";
@@ -27,6 +27,7 @@ import {
   resetCoordinatorSleepFn,
   buildPerRepoCoordinatorSettings,
   perRepoCoordinatorPrompt,
+  coordinatorIdFromFolderName,
   getCoordinatorAgentId,
   checkCoordinatorExists,
   getRepoBasename,
@@ -49,6 +50,7 @@ import { spawnCtx as tmuxSpawnCtx } from "./tmux-poller";
 import { setWatchLogPath, resetWatchLogPath } from "./watch-log";
 import { STARTUP_MARKERS } from "./parse-state";
 import { setUserHome, resetUserHome } from "./home";
+import { isValidAgentId, isValidTmuxSession } from "./validation";
 
 // The system-coordinator lifecycle tests drive real async work — git init /
 // settings writes through the injected spawn contexts, and the ready-poll loop
@@ -3208,10 +3210,48 @@ describe("waitForCoordinatorReady diagnostics", () => {
 // Per-repo coordinator tests (SPEC §12.2)
 // ---------------------------------------------------------------------------
 
+describe("coordinatorIdFromFolderName", () => {
+  test("replaces a dot with an underscore", () => {
+    expect(coordinatorIdFromFolderName("adamwulf.me")).toBe("adamwulf_me");
+    expect(coordinatorIdFromFolderName("milestonemade.com")).toBe("milestonemade_com");
+  });
+
+  test("replaces each space with an underscore", () => {
+    expect(coordinatorIdFromFolderName("My Repo")).toBe("My_Repo");
+    expect(coordinatorIdFromFolderName("a  b")).toBe("a__b");
+  });
+
+  test("replaces other punctuation and non-ASCII characters, one underscore per character", () => {
+    expect(coordinatorIdFromFolderName("a+b(c)!")).toBe("a_b_c__");
+    expect(coordinatorIdFromFolderName("café")).toBe("caf_");
+    expect(coordinatorIdFromFolderName("r🚀")).toBe("r_");
+  });
+
+  test("leaves an already valid name unchanged, case kept", () => {
+    for (const name of ["Mantra", "muse-ios", "my_repo", "ABC-123"]) {
+      expect(coordinatorIdFromFolderName(name)).toBe(name);
+    }
+    expect(coordinatorIdFromFolderName("Adam.Wulf")).toBe("Adam_Wulf");
+  });
+
+  test("always gives a valid agent id and tmux session name", () => {
+    for (const name of ["adamwulf.me", "My Repo", "a:b", "x\ty", "é"]) {
+      const id = coordinatorIdFromFolderName(name);
+      expect(isValidAgentId(id)).toBe(true);
+      expect(isValidTmuxSession(id)).toBe(true);
+    }
+  });
+});
+
 describe("getCoordinatorAgentId", () => {
   test("returns repo basename", () => {
     expect(getCoordinatorAgentId("/Users/adam/Developer/muse-ios")).toBe("muse-ios");
     expect(getCoordinatorAgentId("/home/user/itsybitsy")).toBe("itsybitsy");
+  });
+
+  test("sanitizes a dotted or spaced folder name", () => {
+    expect(getCoordinatorAgentId("/Users/adam/Developer/html/adamwulf.me")).toBe("adamwulf_me");
+    expect(getCoordinatorAgentId("/Users/adam/My Repo")).toBe("My_Repo");
   });
 });
 
@@ -3491,6 +3531,17 @@ describe("checkCoordinatorExists", () => {
       expect(result.collision).toBe(true);
     }
     await rm(td, { recursive: true, force: true });
+  });
+
+  test("a dotted folder's collision is an agent with the sanitized id, not the raw basename", async () => {
+    const td = join(tmpdir(), `coord-dot-${Date.now()}-${Math.random().toString(36).slice(2)}`, "site.me");
+    const agentDir = join(td, ".itsybitsy", "agents", "site_me");
+    await mkdir(agentDir, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "site_me" }));
+
+    const result = await checkCoordinatorExists(td);
+    expect(result).toEqual({ exists: false, collision: true });
+    await rm(dirname(td), { recursive: true, force: true });
   });
 
   test("returns no collision when agents exist but none match basename", async () => {

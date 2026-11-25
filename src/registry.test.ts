@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
-import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes } from "./registry";
+import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes, checkNewRepoEntry, readRegistryStrict } from "./registry";
 import { join } from "path";
 import { chmod, mkdtemp, open, stat, rm, mkdir, symlink } from "fs/promises";
 import { tmpdir } from "os";
@@ -167,8 +167,26 @@ describe("registry", () => {
     expect((await addRepo(registered, "website")).ok).toBe(true);
     const result = await addRepo(alias, "phone");
     expect(result.ok).toBe(false);
-    expect(result.message).toContain(`folder name "App" is already used by registered repo "website" (${registered})`);
+    expect(result.message).toContain(`coordinator id "App" (from repo root folder name "App") matches, ignoring case, the coordinator id "app" of registered repo "website" (${registered})`);
     expect(await listRepos()).toEqual([{ path: registered, name: "website" }]);
+  });
+
+  test("refuses a second folder whose name gives the same coordinator id, case-insensitively", async () => {
+    const dotted = join(tempDir, "one", "a.b");
+    const underscored = join(tempDir, "two", "a_b");
+    const spaced = join(tempDir, "three", "A B");
+    for (const dir of [dotted, underscored, spaced]) await mkdir(dir, { recursive: true });
+
+    expect((await addRepo(dotted, "first")).ok).toBe(true);
+    const registry = await readRegistryStrict();
+    expect(await checkNewRepoEntry(underscored, "second", registry)).toContain(
+      `coordinator id "a_b" (from repo root folder name "a_b") matches, ignoring case, the coordinator id "a_b" of registered repo "first" (${dotted})`,
+    );
+    expect(await checkNewRepoEntry(spaced, "third", registry)).toContain(
+      `coordinator id "A_B" (from repo root folder name "A B") matches, ignoring case, the coordinator id "a_b" of registered repo "first" (${dotted})`,
+    );
+    expect((await addRepo(underscored, "second")).ok).toBe(false);
+    expect(await listRepos()).toEqual([{ path: dotted, name: "first" }]);
   });
 
   test("a stalled git root lookup is killed and falls back to the registered folder basename", async () => {
@@ -200,7 +218,7 @@ describe("registry", () => {
       expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
       expect(Bun.peek(exit.promise)).toBe(exit.promise);
       expect(result.ok).toBe(false);
-      expect(result.message).toContain(`folder name "App" is already used by registered repo "website" (${existing.path})`);
+      expect(result.message).toContain(`coordinator id "App" (from repo root folder name "App") matches, ignoring case, the coordinator id "app" of registered repo "website" (${existing.path})`);
       expect(await listRepos()).toEqual([existing]);
     } finally {
       exit.resolve(137);
@@ -758,7 +776,7 @@ describe("ib add [path] [name] (CLI)", () => {
       for (const args of [["add", second], ["add", second, "app-two"]]) {
         const result = await cli.run(args, options);
         expect(result.exitCode).toBe(1);
-        expect(result.stdout).toContain(`folder name "App" is already used by registered repo "website" (${first})`);
+        expect(result.stdout).toContain(`coordinator id "App" (from repo root folder name "App") matches, ignoring case, the coordinator id "app" of registered repo "website" (${first})`);
       }
       const registry = await Bun.file(join(cli.home, ".itsybitsy", "repos.json")).json();
       expect(registry.repos).toEqual([{ path: first, name: "website" }]);

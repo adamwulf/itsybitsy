@@ -90,6 +90,14 @@ describe("readConfig", () => {
     expect((await readConfig(opts()))["merge.pushAfterMerge"]).toEqual({ value: false, source: "default" });
   });
 
+  test("repos.cloneRoot is a string defaulting to ~/Developer, written under repos.*", async () => {
+    expect(CONFIG_KEYS.find((def) => def.key === "repos.cloneRoot")).toEqual({ key: "repos.cloneRoot", type: "string", default: "~/Developer" });
+    expect((await readConfig(opts()))["repos.cloneRoot"]).toEqual({ value: "~/Developer", source: "default" });
+    await writeConfig(userCfgPath, "repos.cloneRoot", "~/src");
+    expect((await readConfig(opts()))["repos.cloneRoot"]).toEqual({ value: "~/src", source: "user" });
+    expect(await Bun.file(userCfgPath).json()).toEqual({ repos: { cloneRoot: "~/src" } });
+  });
+
   test("reads user config values", async () => {
     await Bun.write(userCfgPath, JSON.stringify({ model: "opus", maxAgents: 5 }));
 

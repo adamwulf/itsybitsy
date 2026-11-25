@@ -46,7 +46,11 @@ export function isValidAgentId(value: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
-/** Peer senders may also be repo coordinators named after a dotted checkout basename. */
+/**
+ * Peer senders may also be repo coordinators named after a dotted checkout
+ * basename: ones created before coordinator ids were sanitized
+ * (coordinatorIdFromFolderName), or on a peer that does not sanitize yet.
+ */
 export function isValidPeerSenderIdSegment(value: string): boolean {
   return value !== "." && value !== ".." && isValidAgentId(value.replaceAll(".", "_"));
 }

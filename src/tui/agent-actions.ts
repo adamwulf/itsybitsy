@@ -14,6 +14,8 @@ import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { createRepo } from "../create-repo";
+import { checkCloneUrl, cloneDestination, cloneRepo, resolveCloneRoot } from "../clone-repo";
+import { visibleWidth } from "@mariozechner/pi-tui";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
   mergeCheckAgent, mergeAgent, sendMessage, newAgent,
@@ -34,6 +36,7 @@ import { openInGhostty, openPathInGhostty } from "../ghostty";
 import { openRemoteTerminal } from "../peers/terminal-window";
 import { remoteTerminalDenial } from "../peers/remote-start-caller";
 import { buildFolderItems } from "./folder-browser";
+import { truncatePeerField } from "./peer-repos";
 import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { EMPTY_DIFF, prepareDiffCopy } from "../peers/agent-diff";
@@ -70,7 +73,7 @@ import { wordWrapLines } from "./wrap";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, restartSystemCoordinatorFresh, isCoordinatorRestartCommand, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
-import { isValidToolList } from "../validation";
+import { isValidRepoName, isValidToolList } from "../validation";
 import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
 import { collectorHealthDetail, type CollectorHealth } from "../sandbox-collector-light";
@@ -307,6 +310,11 @@ export interface ActionCtx {
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
   repos: RepoEntry[];
+  /**
+   * Hand the host a reloaded repo list. The dashboard re-reads each repo's
+   * clone info for the peer snapshot (SPEC §20.4); tests may omit it.
+   */
+  setRepos?(repos: RepoEntry[]): void;
   watcher: { refresh(): void; updateRepos(repos: RepoEntry[]): void; recheckHealth(): void; lastAgents: Agent[] } | null;
   diffTool: string | undefined;
   /**
@@ -2593,6 +2601,7 @@ export function handleHelp(ctx: ActionCtx) {
       row("+ / A", "add repo"),
       row("x / D", "remove repo (on header)"),
       row("r", "rename repo (on header)"),
+      row("c", "clone here (on a repo only a peer has)"),
       row("f", "fix resolvable health warnings"),
       row("V", "cycle filter: all / non-empty / running-only"),
       row(".", "pin/unpin repo (on header; stays visible under V)"),
@@ -2857,6 +2866,8 @@ function handleConfigItemAction(
             if (item.key === "externalDiffTool") {
               ctx.diffTool = typeof parsed === "string" && parsed ? parsed : undefined;
             }
+            // As for the boolean toggle: e.g. repos.cloneRoot re-reads the peer snapshot's clone info.
+            ctx.onConfigChange?.(item.key, parsed);
             ctx.setNotice(`${item.key} updated`, "info");
             // Re-open setup dialog on the same tab
             handleSetup(ctx, tab);
@@ -3322,11 +3333,137 @@ export function newRepoPrompt(parentPath: string): string {
   return `${prefix}${elideLeft(parentPath, room)}${suffix}`;
 }
 
-/** Reload the registry into ctx.repos and point the watcher at the new list. */
+/** A name this wide or narrower is never cut; a longer one keeps at least three characters and "…". */
+const MIN_NAME = 4;
+/**
+ * The host's floor: a host this wide or narrower is not cut at the floor, and
+ * when the floor fits a longer one keeps at least "…" and its last 23
+ * characters. Without room for the floor the host can be cut further.
+ */
+const MIN_HOST_TAIL = 24;
+
+/**
+ * Title of the Clone here dialog, `Clone <name> from <host> (<path>) via
+ * <peer> into:`, built at each render for the overlay's `max` title width
+ * (pi-tui narrows the overlay with the terminal and cuts any longer line).
+ * `<host>` is the host git will connect to and `<path>` the URL's path
+ * (`owner/repo.git`: no scheme, user or host). The URL is untrusted peer
+ * data, and its owner (the first path segment) is what tells a fork or a
+ * stale remote apart.
+ *
+ * The columns are allocated, not shrunk step by step. The floor is
+ * `Clone <name> from <host> (<owner>…) into:` with the name cut to
+ * {@link MIN_NAME} and the host cut from the left to {@link MIN_HOST_TAIL}
+ * (each only if longer). When the floor fits, the spare columns go, in this
+ * order and each part up to its full width, to the host (a smaller left-cut),
+ * the name, the rest of the path (cut from the right), and last
+ * ` via <peer>`, which is shown whole or not at all. So whenever the floor
+ * fits, the owner shows and an original and a fork with another owner get
+ * different titles. When it does not, the owner is left out and the host
+ * gets whatever is left beside the floor name and ` into:` (so it can keep
+ * fewer than 23 characters), then the name; only when that leaves the host
+ * fewer than 2 columns is the whole title cut at its end. The result is
+ * never wider than `max`.
+ */
+export function clonePrompt(name: string, path: string, host: string, peer: string, max: number): string {
+  const width = visibleWidth;
+  const ownerEnd = path.indexOf("/", Math.max(0, path.search(/[^/]/)));
+  const owner = ownerEnd === -1 ? path : path.slice(0, ownerEnd);
+  const nameFloor = Math.min(width(name), MIN_NAME);
+  const hostFloor = Math.min(width(host), MIN_HOST_TAIL);
+  const pathFloor = Math.min(width(path), width(owner) + 1);
+  const viaPeer = ` via ${peer}`;
+  const title = (nameWidth: number, hostWidth: number, pathWidth: number | null, withPeer: boolean) =>
+    `Clone ${truncatePeerField(name, nameWidth)} from ${elideLeft(host, hostWidth)}`
+    + `${pathWidth === null ? "" : ` (${truncatePeerField(path, pathWidth)})`}${withPeer ? viaPeer : ""} into:`;
+
+  let spare = max - width("Clone  from  () into:") - nameFloor - hostFloor - pathFloor;
+  /** Up to `want` more columns from what is spare. */
+  const take = (want: number) => {
+    const given = Math.max(0, Math.min(spare, want));
+    spare -= given;
+    return given;
+  };
+  if (spare >= 0) {
+    const hostWidth = hostFloor + take(width(host) - hostFloor);
+    const nameWidth = nameFloor + take(width(name) - nameFloor);
+    const pathWidth = pathFloor + take(width(path) - pathFloor);
+    return title(nameWidth, hostWidth, pathWidth, spare >= width(viaPeer));
+  }
+  // No room for the owner: the host, then the name, share what is beside the floor name.
+  spare = max - width("Clone  from  into:") - nameFloor;
+  if (spare >= 2) {
+    const hostWidth = take(width(host));
+    return title(nameFloor + take(width(name) - nameFloor), hostWidth, null, false);
+  }
+  return truncatePeerField(title(nameFloor, width(host), null, false), max);
+}
+
+/** Registry names, lowercased, with a "Clone here" in flight: one clone per name at a time. */
+const clonesInFlight = new Set<string>();
+
+/**
+ * 'c' on a remote-only repo header: clone the repo from the remote URL a peer
+ * reports into an editable folder under `repos.cloneRoot`, then register it
+ * under the peer's registry name, so the header becomes a shared local one on
+ * the next refresh (SPEC §20.5). Resolves once the dialog is open; the clone
+ * itself runs after submit.
+ */
+export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
+  const header = ctx.remoteSelection;
+  if (header?.kind !== "remote-repo-header") {
+    ctx.setNotice("Clone here works on a repo header that only a peer has", "error");
+    return;
+  }
+  const { repoRegistryName: name, remoteUrl: url } = header;
+  // The name goes into the title and the destination path: only a valid one.
+  if (!isValidRepoName(name)) {
+    ctx.setNotice(`Will not clone: ${header.peerName} reports a repo name that is not valid here`, "error");
+    return;
+  }
+  if (url === null) {
+    ctx.setNotice(`${header.peerName} reports no remote for ${header.repoName}`, "error");
+    return;
+  }
+  const checked = checkCloneUrl(url);
+  if ("refusal" in checked) {
+    ctx.setNotice(checked.refusal, "error");
+    return;
+  }
+  const key = name.toLowerCase();
+  if (clonesInFlight.has(key)) {
+    ctx.setNotice(`Already cloning ${name}`, "info");
+    return;
+  }
+  const root = await resolveCloneRoot();
+  const { host, path } = checked.parts;
+  const peer = header.remoteUrlPeer ?? header.peerName;
+  ctx.showDialog({
+    type: "input",
+    prompt: (maxWidth) => clonePrompt(name, path, host, peer, maxWidth),
+    value: cloneDestination(root, name, header.relPath),
+    onSubmit: (dest: string) => {
+      ctx.closeDialog();
+      if (!dest.trim()) { ctx.setNotice("Clone cancelled", "info"); return; }
+      if (clonesInFlight.has(key)) { ctx.setNotice(`Already cloning ${name}`, "info"); return; }
+      clonesInFlight.add(key);
+      ctx.setNotice(`Cloning ${name}…`, "info");
+      cloneRepo({ url, dest, registryName: name, cloneRoot: root }).then(async (result) => {
+        ctx.setNotice(result.message, result.ok ? "info" : "error");
+        if (result.ok) await reloadRepos(ctx);
+      }).catch((err) => {
+        ctx.setNotice(`Error cloning: ${err}`, "error");
+      }).finally(() => clonesInFlight.delete(key));
+    },
+  });
+}
+
+/** Reload the registry into ctx.repos and point the host and the watcher at the new list. */
 async function reloadRepos(ctx: ActionCtx) {
   const freshRepos = await listRepos();
   ctx.repos.length = 0;
   ctx.repos.push(...freshRepos);
+  ctx.setRepos?.(ctx.repos);
   ctx.watcher?.updateRepos(ctx.repos);
   ctx.watcher?.refresh();
 }

@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { waitFor } from "../test-utils";
 import { IrohError, irohAddonLoaderCtx } from "./iroh";
-import { requestNewAgent, encodeAgentsReply, PEER_CLOSE, PEER_MAX_REQUEST_BYTES, serveTrustedConnection, type RemoteAgent, type RemoteQuestion } from "./peer-link";
+import { requestNewAgent, encodeAgentsReply, PEER_CLOSE, PEER_MAX_REQUEST_BYTES, serveTrustedConnection, type RemoteAgent, type RemoteQuestion, type RemoteRepo } from "./peer-link";
 import type { PairConnection } from "./pairing";
 import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS, PeerPoller, peerLinkStatus } from "./poller";
 import type { Peer } from "./store";
@@ -32,7 +32,7 @@ function remoteAgent(id: string, state = "running"): RemoteAgent {
 /** The other install: whether it lists us, what it reports, and the connections it has served. */
 interface Remote {
   allowed: boolean;
-  repos: { registryName: string; displayName: string }[];
+  repos: RemoteRepo[];
   agents: RemoteAgent[];
   questions: RemoteQuestion[];
   requests: number;
@@ -55,7 +55,7 @@ function makeRig(initialPeers: Peer[]) {
   const remote = (id: string): Remote => {
     let r = remotes.get(id);
     if (r === undefined) {
-      r = { allowed: true, repos: [{ registryName: "app", displayName: "App" }], agents: [remoteAgent(`agent-of-${id.slice(0, 4)}`)], questions: [], requests: 0, served: [], stalled: false, overlaps: 0 };
+      r = { allowed: true, repos: [{ registryName: "app", displayName: "App", remoteUrl: null, relPath: null }], agents: [remoteAgent(`agent-of-${id.slice(0, 4)}`)], questions: [], requests: 0, served: [], stalled: false, overlaps: 0 };
       remotes.set(id, r);
     }
     return r;
@@ -538,7 +538,7 @@ describe("PeerPoller", () => {
     rig.tick();
     await waitFor(() => rig.changes() === afterConnect + 1, { message: "a new list notifies" });
     const unchangedAgents = rig.state(P1)!.agents;
-    rig.remote(P1).repos.push({ registryName: "empty", displayName: "Empty" });
+    rig.remote(P1).repos.push({ registryName: "empty", displayName: "Empty", remoteUrl: null, relPath: null });
     rig.tick();
     await waitFor(() => rig.changes() === afterConnect + 2, { message: "a repo-only change notifies" });
     expect(rig.state(P1)?.repos).toEqual(rig.remote(P1).repos);

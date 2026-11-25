@@ -1,12 +1,13 @@
 import { useAttachmentTemp } from "../test-attachment-temp";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout, setSystemTime, mock, spyOn } from "bun:test";
 import { join } from "path";
+import { mkdirSync } from "fs";
 import { mkdtemp, rm, mkdir, readdir, realpath, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { readAgentLog, readAgentFileWindow, readAgentPrompt, parseDenials } from "../agents";
 import type { Agent, AgentMeta, FlatEntry, PendingQuestion } from "../agents";
 import { stripAnsi } from "../parse-state";
-import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor } from "../test-utils";
+import { makeAgent as _makeAgent, makeFlatAgent, makeFlatRepoHeader, makeFlatSystemCoordinator, setAgentState, makeSpawnResult, waitFor, waitForValue } from "../test-utils";
 import { TmuxPaneComponent, RightPaneComponent, DashboardComponent, AgentTreeComponent, colorizeDiff, colorizeLog, formatAgentRow, formatFooterClock, usageFetchCtx, CODEX_LIVE_PROBE_INTERVAL_MS } from "./dashboard";
 import type { CodexUsageReading, GeminiUsageResult } from "../usage";
 import type { CodexLiveUsageResult } from "../codex-live-usage";
@@ -17,16 +18,18 @@ import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, rese
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { gitStatusSpawnCtx } from "../git-status";
-import { IB_COORDINATOR_SESSION } from "../coordinator";
+import { IB_COORDINATOR_SESSION, setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
-import type { SpawnResult } from "../types";
+import { cloneRepoSpawnCtx } from "../clone-repo";
+import * as cloneRepoModule from "../clone-repo";
+import type { SpawnFn, SpawnResult } from "../types";
 import type { TeamFlatEntry } from "./teams-tree";
 import { PANE_MODES, FULL_WIDTH_MODES, type PaneMode } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
 import { assertDialog } from "./test-helpers";
-import { DIALOG_WIDTH, buildNewAgentFormContent } from "./dialog-handler";
-import { newRepoPrompt } from "./agent-actions";
+import { DIALOG_WIDTH, buildNewAgentFormContent, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
+import { clonePrompt, newRepoPrompt } from "./agent-actions";
 import { TypePickerKeyboard } from "./type-picker-keyboard";
 import { setStagedSenderForTests, resetStagedSenderForTests } from "./message-send";
 import { setLayoutPath, loadLayout, flushPendingSave, cancelPendingSave } from "./layout";
@@ -9482,6 +9485,33 @@ describe("setup Peers tab", () => {
     }
   });
 
+  test("saving repos.cloneRoot in Config re-reads the relPath each repo sends to peers", async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "ib-clone-root-config-")));
+    const repoPath = join(dir, "work", "app");
+    await mkdir(repoPath, { recursive: true });
+    setUserConfigPath(join(dir, "config.json"));
+    const dashboard = makeDashboard();
+    try {
+      dashboard.setRepos([{ name: "app", path: repoPath }]);
+      // Under the default ~/Developer root, the repo has no relPath.
+      await waitFor(() => dashboard.repoCloneInfo.has(repoPath));
+      expect(dashboard.repoCloneInfo.get(repoPath)).toEqual({ remoteUrl: null, relPath: null });
+
+      dashboard.handleInput("h");
+      dashboard.handleInput("2");
+      await waitFor(() => dashboard.dialog?.type === "setup" && !!dashboard.dialog.configItems?.length);
+      const setup = assertDialog(dashboard.dialog, "setup");
+      setup.configSelectedIndex = setup.configItems!.findIndex(item => item.key === "repos.cloneRoot");
+      dashboard.handleInput("\r");
+      assertDialog(dashboard.dialog, "input").onSubmit(dir);
+      await waitFor(() => dashboard.repoCloneInfo.get(repoPath)?.relPath === "work/app");
+      expect((await Bun.file(join(dir, "config.json")).json()).repos).toEqual({ cloneRoot: dir });
+    } finally {
+      resetUserConfigPath();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("Config shows a stored 512 MB message limit that conflicts with the default file limit", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ib-config-repair-"));
     const path = join(dir, "config.json");
@@ -10083,7 +10113,7 @@ describe("Unified peer repos in the Agents tree", () => {
   /** A remote agent's selection key (peer-repos.ts peerEntryKey): `<peer name>/<repo>/<id>`. */
   const agentKey = (peer: string, repo: string, id: string) => `${PEER_NAMES[peer]}/${repo}/${id}`;
   const repoKey = (repo: string) => `/${repo.toLowerCase()}`;
-  const repos = (...names: string[]) => names.map((name) => ({ registryName: name, displayName: name }));
+  const repos = (...names: string[]) => names.map((name) => ({ registryName: name, displayName: name, remoteUrl: null, relPath: null }));
   const WORKER_KEY = agentKey(PEER_B, "itsybitsy", "worker-abc");
 
   let origRows: number;
@@ -10629,7 +10659,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const service = new FakePeerService();
     dashboard.setPeerService(service);
     const peer = (index: number, registry: string) => ({
-      ...links()[index]!, repos: [...repos(registry), { registryName: "remote", displayName: "Empty remote" }],
+      ...links()[index]!, repos: [...repos(registry), { registryName: "remote", displayName: "Empty remote", remoteUrl: null, relPath: null }],
       agents: [remote("kid", registry, { manager: "manager" }), remote("manager", registry)],
     });
     service.set({ links: [peer(0, "APP"), peer(1, "app")] });
@@ -10759,7 +10789,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const service = new FakePeerService();
     dashboard.onUpdate([], [makeFlatRepoHeader("Same label", "/local", false, false, false, "a")], []);
     dashboard.setPeerService(service);
-    service.set({ links: [{ ...links()[0]!, repos: [{ registryName: "b", displayName: "Same label" }],
+    service.set({ links: [{ ...links()[0]!, repos: [{ registryName: "b", displayName: "Same label", remoteUrl: null, relPath: null }],
       agents: [remote("worker", "Same label", { repoRegistryName: "b", repoPath: "/local" })] }] });
     expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["repo-header", "remote-repo-header", "remote-agent"]);
   });
@@ -11886,7 +11916,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["t", "!", "S", "O", "b"]) {
+      for (const key of ["c", "t", "!", "S", "O", "b"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -12364,6 +12394,293 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toBe("No connected machine has app");
   });
 
+  test("c reaches Clone here only on a remote-only header; with no remote URL it shows a notice and opens nothing", () => {
+    const { dashboard, local } = setup();
+    const clone = spyOn(agentActions, "handleCloneHere");
+    try {
+      // A remote agent row: refused by the guard.
+      selectByKey(dashboard, WORKER_KEY);
+      resetNotice(dashboard);
+      dashboard.handleInput("c");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      expect(clone).not.toHaveBeenCalled();
+
+      // A remote-only header whose peer reports no remote.
+      selectByKey(dashboard, repoKey("other-repo"));
+      resetNotice(dashboard);
+      dashboard.handleInput("c");
+      expect(clone).toHaveBeenCalledTimes(1);
+      expect(dashboard.dialog).toBeNull();
+      expect(dashboard.notice).toBe("Laptop B reports no remote for other-repo");
+
+      // A local row: c is the ERRORS-mode "clear errors" key, as before.
+      for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
+      expect(dashboard.selectedAgent).toBe(local);
+      dashboard.handleInput("c");
+      expect(clone).toHaveBeenCalledTimes(1);
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  test("c on a header whose peer repo name is not a valid repo name shows a notice and opens no dialog", async () => {
+    const { dashboard, service } = setup();
+    service.set({ links: links().map((link) => link.id === PEER_B
+      ? { ...link, repos: [{ registryName: "bad.name", displayName: "bad", remoteUrl: "git@github.com:o/r.git", relPath: null }, ...repos("other-repo")] }
+      : link) });
+    selectByKey(dashboard, repoKey("bad.name"));
+    resetNotice(dashboard);
+    await agentActions.handleCloneHere(dashboard);
+    expect(dashboard.dialog).toBeNull();
+    expect(dashboard.notice).toBe("Will not clone: Laptop B reports a repo name that is not valid here");
+  });
+
+  test("c on a header whose remote URL the grammar refuses shows the refusal and opens no dialog", async () => {
+    const { dashboard, service } = setup();
+    const clone = spyOn(cloneRepoModule, "cloneRepo");
+    try {
+      for (const remoteUrl of ["file:///tmp/evil", "ext::sh -c id", "ssh://-oProxyCommand=x@host/repo"]) {
+        service.set({ links: links().map((link) => link.id === PEER_B
+          ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl, relPath: null }, ...repos("other-repo")] }
+          : link) });
+        selectByKey(dashboard, repoKey("itsybitsy"));
+        resetNotice(dashboard);
+        await agentActions.handleCloneHere(dashboard);
+        expect(dashboard.dialog).toBeNull();
+        // The notice names the rule the URL breaks (clone-repo.test.ts covers each rule's text).
+        const checked = cloneRepoModule.checkCloneUrl(remoteUrl);
+        expect("refusal" in checked && dashboard.notice === checked.refusal).toBe(true);
+      }
+      expect(clone).not.toHaveBeenCalled();
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  // clonePrompt allocates columns: the floor is `Clone <name cut to 4> from
+  // <host left-cut to 24> (<owner>…) into:`; spare columns go to the host, the
+  // name, the rest of the path, then " via <peer>". `title(cols, …)` is the
+  // title for a dialog that many columns wide.
+  const title = (cols: number, name: string, path: string, host: string, peer = "Laptop B") =>
+    clonePrompt(name, path, host, peer, dialogTitleMaxWidth(cols));
+  const NAME = "muse-ios-shared-utils";
+  const ORIGINAL = "museapphq/muse-ios-shared-utils.git";
+  const FORK = "someoneelse/muse-ios-shared-utils.git";
+
+  test("the Clone here title: everything fits, then the spare columns go to the host, the name, the path, the peer", () => {
+    expect(title(80, "foo", "o/foo.git", "github.com", "Desk")).toBe("Clone foo from github.com (o/foo.git) via Desk into:");
+    expect(title(80, "itsybitsy", "owner/itsybitsy.git", "github.com")).toBe("Clone itsybitsy from github.com (owner/itsybitsy.git) via Laptop B into:");
+    // Not enough for the peer: the path takes the rest.
+    expect(title(80, NAME, ORIGINAL, "github.com")).toBe("Clone muse-ios-shared-utils from github.com (museapphq/muse-ios-sha…) into:");
+    // The name grows before the path: only the owner shows.
+    expect(title(64, NAME, ORIGINAL, "github.com")).toBe("Clone muse-ios-shared-u… from github.com (museapphq…) into:");
+    // The host grows first, from its left-cut toward the whole host...
+    expect(title(66, NAME, ORIGINAL, "gitlab.internal.example.com")).toBe("Clone mus… from …tlab.internal.example.com (museapphq…) into:");
+    // ...and once it is whole, the name gets the rest.
+    expect(title(68, NAME, ORIGINAL, "gitlab.internal.example.com")).toBe("Clone muse… from gitlab.internal.example.com (museapphq…) into:");
+    // A long owner beside a long host: the host is left-cut, the owner kept.
+    expect(title(80, "app", "averylongownername/repo.git", "hhhhhhhhhhhhhhhhhhhhhhhhhhhh.example.com"))
+      .toBe("Clone app from …hhhhhhhhhhhhhhhhhhh.example.com (averylongownername…) into:");
+    // A 64-character name takes what the floor leaves.
+    expect(title(80, "n".repeat(64), "o/r.git", "github.com")).toBe(`Clone ${"n".repeat(41)}… from github.com (o…) into:`);
+  });
+
+  test.each([
+    // github.com, at 60 and 80 columns.
+    [60, "github.com", "Clone muse-ios-shar… from github.com (museapphq…) into:", "Clone muse-ios-sh… from github.com (someoneelse…) into:"],
+    [80, "github.com", "Clone muse-ios-shared-utils from github.com (museapphq/muse-ios-sha…) into:",
+      "Clone muse-ios-shared-utils from github.com (someoneelse/muse-ios-s…) into:"],
+    // A 27-character self-hosted GitLab host, at 64 to 68 columns.
+    [64, "gitlab.internal.example.com", "Clone mus… from …ab.internal.example.com (museapphq…) into:",
+      "Clone muse-ios-shar… from gitlab.internal.example.com into:"],
+    [66, "gitlab.internal.example.com", "Clone mus… from …tlab.internal.example.com (museapphq…) into:",
+      "Clone mus… from …ab.internal.example.com (someoneelse…) into:"],
+    [68, "gitlab.internal.example.com", "Clone muse… from gitlab.internal.example.com (museapphq…) into:",
+      "Clone mus… from …tlab.internal.example.com (someoneelse…) into:"],
+    // A 29-character one.
+    [64, "git.internal.company-name.com", "Clone mus… from …ternal.company-name.com (museapphq…) into:",
+      "Clone muse-ios-sh… from git.internal.company-name.com into:"],
+    [66, "git.internal.company-name.com", "Clone mus… from …internal.company-name.com (museapphq…) into:",
+      "Clone mus… from …ternal.company-name.com (someoneelse…) into:"],
+    [68, "git.internal.company-name.com", "Clone mus… from …t.internal.company-name.com (museapphq…) into:",
+      "Clone mus… from …internal.company-name.com (someoneelse…) into:"],
+  ] as const)("at %i columns on %s, the original and a fork with another owner get different titles", (cols, host, original, fork) => {
+    expect(title(cols, NAME, ORIGINAL, host)).toBe(original);
+    expect(title(cols, NAME, FORK, host)).toBe(fork);
+  });
+
+  test("the Clone here title measures wide characters by their columns, not their length", () => {
+    // A CJK owner: 3 characters but 6 columns, so the floor is 41 columns wide.
+    expect(clonePrompt("app", "日本語/app.git", "github.com", "Laptop B", 41)).toBe("Clone app from github.com (日本語…) into:");
+    expect(clonePrompt("app", "日本語/app.git", "github.com", "Laptop B", 42)).toBe("Clone app from github.com (日本語/…) into:");
+    // One column short of the floor: the owner is left out, not cut to "日…".
+    expect(clonePrompt("app", "日本語/app.git", "github.com", "Laptop B", 40)).toBe("Clone app from github.com into:");
+    // A CJK peer: " via 東京のMac" is 11 characters but 14 columns.
+    for (const max of [55, 56]) {
+      expect(clonePrompt("foo", "o/foo.git", "github.com", "東京のMac", max)).toBe("Clone foo from github.com (o/foo.git) into:");
+    }
+    const withPeer = clonePrompt("foo", "o/foo.git", "github.com", "東京のMac", 57);
+    expect(withPeer).toBe("Clone foo from github.com (o/foo.git) via 東京のMac into:");
+    expect(visibleWidth(withPeer)).toBe(57);
+  });
+
+  test.each([
+    // No room for the owner: the host takes what is beside the 3-character name, and keeps its end.
+    [45, "Clone app from …l.company-name.com into:"],
+    [43, "Clone app from …company-name.com into:"],
+    [41, "Clone app from …mpany-name.com into:"],
+  ] as const)("at %i columns the host's end survives: %s", (cols, expected) => {
+    expect(title(cols, "app", "team/app.git", "git.internal.company-name.com")).toBe(expected);
+  });
+
+  test("across widths and hosts: never wider than max; the owner shows whenever the floor fits; forks differ; the host keeps its end", () => {
+    const longHost = `${"a".repeat(30)}.${"b".repeat(30)}.${"c".repeat(20)}.evil.example`;
+    const hosts = ["github.com", "gitlab.example.com", "gitlab.internal.example.com", "git.internal.company-name.com", longHost];
+    const names = ["app", "itsybitsy", NAME, "n".repeat(64)];
+    const pairs = [[ORIGINAL, FORK], ["team/app.git", "teamx/app.git"], ["o/r.git", "averylongownername/r.git"],
+      // Wide owners: their columns, not their length, decide the floor.
+      ["日本語/app.git", "中文组织/app.git"]] as const;
+    const ownerOf = (path: string) => path.split("/")[0]!;
+    // The floor, as clonePrompt's doc defines it, in columns.
+    const floorFits = (max: number, name: string, path: string, host: string) =>
+      21 + Math.min(name.length, 4) + Math.min(host.length, 24) + Math.min(visibleWidth(path), visibleWidth(ownerOf(path)) + 1) <= max;
+    for (let cols = 10; cols <= 100; cols++) {
+      const max = dialogTitleMaxWidth(cols);
+      for (const host of hosts) for (const name of names) for (const [original, fork] of pairs) {
+        const shown = [original, fork].map((path) => clonePrompt(name, path, host, "Laptop B", max));
+        for (const [i, path] of [original, fork].entries()) {
+          const text = shown[i]!;
+          expect(visibleWidth(text)).toBeLessThanOrEqual(max);
+          expect(text).not.toContain("\x1b");
+          if (floorFits(max, name, path, host)) expect(text).toContain(` (${ownerOf(path)}`);
+          // Unless it is cut at its end, the title keeps the host's last character.
+          if (max >= 18 + Math.min(name.length, 4) + 2) expect(text).toMatch(new RegExp(`${host.at(-1)} (\\(|via |into:)`));
+        }
+        if (floorFits(max, name, original, host) || floorFits(max, name, fork, host)) expect(shown[0]).not.toBe(shown[1]);
+      }
+    }
+  });
+
+  test("the Clone here title is built at each render, so a terminal that shrinks after open keeps the host whole", async () => {
+    const { dashboard, service } = setup();
+    service.set({ links: links().map((link) => link.id === PEER_B
+      ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: "git@github.com:museapphq/muse-ios-shared-utils.git", relPath: null }, ...repos("other-repo")] }
+      : link) });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    await agentActions.handleCloneHere(dashboard);
+    const titleRow = (width: number) => stripAnsi(((dashboard as any).dialogOverlay.render(width) as string[])[0]!);
+    // Opened at the dialog's 80 columns...
+    expect(titleRow(80)).toContain(" Clone itsybitsy from github.com (museapphq/muse-ios-shared-utils.git) into: ");
+    // ...then drawn at 50: the title is rebuilt for 45 columns; the name is cut
+    // so the owner still shows, and the host stays whole.
+    const narrow = titleRow(50);
+    expect(narrow).toContain(" Clone its… from github.com (museapphq…) into: ");
+    expect(visibleWidth(narrow)).toBe(50);
+  });
+
+  test("c on a remote-only header with a remote URL clones into the peer's exact folder under the clone root, and the header turns local", async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), "ib-dashboard-clone-")));
+    await mkdir(join(home, ".itsybitsy"));
+    setUserHome(home);
+    setCoordinatorHome(join(home, ".itsybitsy"));
+    const clones: string[][] = [];
+    const url = "git@github.com:owner/itsybitsy.git";
+    cloneRepoSpawnCtx.set(((cmd: string[]) => {
+      if (cmd[3] === "clone") {
+        clones.push(cmd);
+        mkdirSync(join(cmd.at(-1)!, ".git"), { recursive: true });
+        return makeSpawnResult(0);
+      }
+      // A repo's origin (the clone's, once registered); no core.sshCommand (read from "/").
+      return cmd.at(-1) === "remote.origin.url" ? makeSpawnResult(0, url) : makeSpawnResult(1);
+    }) as SpawnFn);
+    try {
+      const { dashboard, service } = setup();
+      // Laptop C reports a URL for itsybitsy too, but Laptop B is first.
+      service.set({ links: links().map((link) => link.id === PEER_B
+        ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: url, relPath: "bun/ItsyBitsy" }, ...repos("other-repo")] }
+        : link.id === PEER_C
+          ? { ...link, repos: [...repos("app"), { registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: "https://elsewhere/x", relPath: null }] }
+          : link) });
+      selectByKey(dashboard, repoKey("itsybitsy"));
+      dashboard.handleInput("c");
+      const dialog = await waitForValue(() => dashboard.dialog?.type === "input" ? dashboard.dialog : null);
+      // The title names the host git will connect to and the URL's path, whose
+      // owner tells a fork or a stale remote apart; it is built for the overlay's width.
+      expect(typeof dialog.prompt === "function" && dialog.prompt(dialogTitleMaxWidth()))
+        .toBe("Clone itsybitsy from github.com (owner/itsybitsy.git) via Laptop B into:");
+      // The peer's folder name, in its case; the clone still registers as itsybitsy.
+      const dest = join(home, "Developer", "bun", "ItsyBitsy");
+      expect(dialog.value).toBe(dest);
+
+      dialog.onSubmit(dialog.value);
+      expect(dashboard.dialog).toBeNull();
+      expect(dashboard.notice).toBe("Cloning itsybitsy…");
+      // A second c while the clone runs opens no second dialog.
+      dashboard.handleInput("c");
+      expect(dashboard.notice).toBe("Already cloning itsybitsy");
+      await waitFor(() => dashboard.repos.length === 1);
+      expect(dashboard.notice).toBe(`Cloned and added: itsybitsy (${dest})`);
+      expect(clones).toEqual([["git", "-C", "/", "clone", "--quiet", "--", url, dest]]);
+      expect(dashboard.repos).toEqual([{ path: dest, name: "itsybitsy" }]);
+      // The reload went through setRepos: the peer snapshot's cache now has the clone.
+      await waitFor(() => dashboard.repoCloneInfo.has(dest));
+      expect(dashboard.repoCloneInfo.get(dest)).toEqual({ remoteUrl: url, relPath: "bun/ItsyBitsy" });
+
+      // The watcher's next list carries the new local header under the same key:
+      // the selection stays on it, now a shared local header.
+      dashboard.onUpdate([], [makeFlatRepoHeader("itsybitsy", dest, false, false, false, "itsybitsy")], []);
+      expect(dashboard.remoteSelection).toBeNull();
+      expect(dashboard.agentTree.selectedRepoPath).toBe(dest);
+      expect(treeRows(dashboard).map((r) => stripAnsi(r).trim()).filter((r) => r.startsWith("▾ itsybitsy"))).toHaveLength(1);
+    } finally {
+      cloneRepoSpawnCtx.reset();
+      resetCoordinatorHome();
+      resetUserHome();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("c checks the prefilled destination against the clone root it was built from, so a symlink cannot take it out", async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), "ib-dashboard-clone-")));
+    await mkdir(join(home, ".itsybitsy"));
+    setUserHome(home);
+    setCoordinatorHome(join(home, ".itsybitsy"));
+    // An earlier clone under the default root (~/Developer) tracks a link out of it.
+    const outside = join(home, "outside");
+    await mkdir(join(outside, ".config"), { recursive: true });
+    await mkdir(join(home, "Developer", "A"), { recursive: true });
+    await symlink(outside, join(home, "Developer", "A", "esc"));
+    const gitCalls: string[][] = [];
+    cloneRepoSpawnCtx.set(((cmd: string[]) => {
+      gitCalls.push(cmd);
+      return makeSpawnResult(1);
+    }) as SpawnFn);
+    try {
+      const { dashboard, service } = setup();
+      const url = "git@github.com:owner/itsybitsy.git";
+      service.set({ links: links().map((link) => link.id === PEER_B
+        ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: url, relPath: "A/esc/.config/git" }, ...repos("other-repo")] }
+        : link) });
+      selectByKey(dashboard, repoKey("itsybitsy"));
+      dashboard.handleInput("c");
+      const dialog = await waitForValue(() => dashboard.dialog?.type === "input" ? dashboard.dialog : null);
+      expect(dialog.value).toBe(join(home, "Developer", "A", "esc", ".config", "git"));
+
+      dialog.onSubmit(dialog.value);
+      await waitFor(() => dashboard.notice !== "Cloning itsybitsy…");
+      expect(dashboard.notice).toBe(`Will not clone: the destination leaves the clone root through a symlink (${join(outside, ".config", "git")})`);
+      expect(gitCalls).toEqual([]);
+      expect(await readdir(join(outside, ".config"))).toEqual([]);
+      expect(dashboard.repos).toEqual([]);
+    } finally {
+      cloneRepoSpawnCtx.reset();
+      resetCoordinatorHome();
+      resetUserHome();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("all non-allowlisted keys are refused on a remote-only header before dispatch", () => {
     const key = repoKey("itsybitsy");
     const { dashboard } = setup();
@@ -12374,7 +12691,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
       const header = dashboard.agentTree.selectedRemote!;
-      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => !isRemoteAllowedKey(k, header))) {
+      for (const k of Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)).filter((k) => k !== "c" && !isRemoteAllowedKey(k, header))) {
         resetNotice(dashboard);
         dashboard.handleInput(k);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
@@ -12470,7 +12787,7 @@ describe("Unified peer repos in the Agents tree", () => {
     }
     expect(shownWithVersion).toBeGreaterThan(0);
     (dashboard as any).statusBar.version = "";
-    for (const hint of ["A: add repo", "f: fix"]) {
+    for (const hint of ["c: clone here", "A: add repo", "f: fix"]) {
       expect(text).not.toContain(hint);
     }
     // Every key the remote footer names is one the guard allows.
@@ -12483,9 +12800,13 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(footer()).toContain(".: pin");
     expect(footer()).not.toContain("q: questions");
     expect(isRemoteAllowedKey("q", dashboard.agentTree.selectedRemote!)).toBe(false);
+    // A remote-only header adds the two keys it alone takes.
+    for (const hint of ["a: new agent", "c: clone here"]) expect(footer()).toContain(hint);
+    expect(footer()).not.toContain("s: send");
     for (let i = 0; i < 20 && dashboard.selectedAgent !== local; i++) dashboard.handleInput("k");
     expect(footer()).toContain("s: send");
     expect(footer()).not.toContain("C: terminal");
+    expect(footer()).not.toContain("c: clone here");
   });
 
   test("C on a remote agent opens a local tmux session running ib peer attach on it; a remote repo header refuses C", async () => {
@@ -12771,6 +13092,13 @@ describe("Unified peer repos in the Agents tree", () => {
       pick("force kill agent — !");
       expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
       expect(dashboard.dialog).toBeNull();
+      // Clone here is a remote-only header's key, not a remote agent's.
+      resetNotice(dashboard);
+      pick("clone repo here (peer-only repo) — c");
+      expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);
+      selectByKey(dashboard, repoKey("other-repo"));
+      pick("clone repo here (peer-only repo) — c");
+      expect(dashboard.notice).toBe("Laptop B reports no remote for other-repo");
       pick("setup: Peers tab — I");
       expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
       expect(service.calls).toContain("open");
@@ -12877,7 +13205,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const restored = makeDashboard();
     restored.applyLayout(saved!);
     expect([...restored.agentTree.pinnedRemoteRepoNames]).toEqual(["app"]);
-    service.set({ links: [{ ...second!, repos: [{ registryName: "APP", displayName: "Renamed" }], agents: [] }] });
+    service.set({ links: [{ ...second!, repos: [{ registryName: "APP", displayName: "Renamed", remoteUrl: null, relPath: null }], agents: [] }] });
     for (const filter of ["non-empty", "running-only"] as const) {
       tree.setRepoFilter(filter);
       expect(treeRows(dashboard).map(stripAnsi)).toContain("⚲ Renamed");
@@ -13286,5 +13614,59 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.dialog).toBeNull();
       expect(dashboard.notice).toBeNull();
     });
+  });
+});
+
+// What the peer snapshot sends with each repo (SPEC §20.4): read in the
+// background by setRepos, through a fake git.
+describe("the peer snapshot's clone-info cache", () => {
+  afterEach(() => cloneRepoSpawnCtx.reset());
+
+  /** A fake git whose `config --get remote.origin.url` for each repo answers once its gate opens. */
+  function gatedGit() {
+    const gates = new Map<string, () => void>();
+    cloneRepoSpawnCtx.set(((cmd: string[]) => {
+      const path = cmd[2]!;
+      const open = new Promise<void>((resolve) => gates.set(path, resolve));
+      const stdout = new ReadableStream<Uint8Array>({
+        async start(c) {
+          await open;
+          c.enqueue(new TextEncoder().encode(`git@github.com:owner/${path.split("/").pop()}.git\n`));
+          c.close();
+        },
+      });
+      return { stdout, stderr: new Response("").body, exited: open.then(() => 0) };
+    }) as SpawnFn);
+    return gates;
+  }
+
+  test("setRepos re-reads each repo's origin URL in the background", async () => {
+    const gates = gatedGit();
+    const dashboard = makeDashboard();
+    dashboard.setRepos([{ name: "app", path: "/repos/app" }, { name: "lib", path: "/repos/lib" }]);
+    expect(dashboard.repoCloneInfo.size).toBe(0);
+    // By path: a re-read an earlier test's dashboard left running can reach this fake too.
+    await waitFor(() => gates.has("/repos/app") && gates.has("/repos/lib"));
+    for (const open of gates.values()) open();
+    await waitFor(() => dashboard.repoCloneInfo.size === 2);
+    expect([...dashboard.repoCloneInfo]).toEqual([
+      ["/repos/app", { remoteUrl: "git@github.com:owner/app.git", relPath: null }],
+      ["/repos/lib", { remoteUrl: "git@github.com:owner/lib.git", relPath: null }],
+    ]);
+  });
+
+  test("a re-read that a newer one overtook is dropped", async () => {
+    const gates = gatedGit();
+    const dashboard = makeDashboard();
+    dashboard.repos = [{ name: "old", path: "/repos/old" }];
+    const older = dashboard.refreshRepoCloneInfo();
+    dashboard.repos = [{ name: "new", path: "/repos/new" }];
+    const newer = dashboard.refreshRepoCloneInfo();
+    await waitFor(() => gates.has("/repos/old") && gates.has("/repos/new"));
+    gates.get("/repos/new")!();
+    await newer;
+    gates.get("/repos/old")!();
+    await older;
+    expect([...dashboard.repoCloneInfo]).toEqual([["/repos/new", { remoteUrl: "git@github.com:owner/new.git", relPath: null }]]);
   });
 });

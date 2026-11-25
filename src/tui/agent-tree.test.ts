@@ -1723,7 +1723,7 @@ describe("fully qualified row keys", () => {
   test("the same agent id locally, on a peer, and on two peers is a row of its own each", () => {
     const { tree } = twoRepos();
     const remote = { id: "dup", nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/repos/alpha", state: "running", agentType: "worker", manager: null, createdEpoch: 1_800_000_000 };
-    const link = (id: string, name: string) => ({ id, name, connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null, repos: [{ registryName: remote.repoRegistryName, displayName: remote.repoName }], agents: [remote], questions: [] });
+    const link = (id: string, name: string) => ({ id, name, connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null, repos: [{ registryName: remote.repoRegistryName, displayName: remote.repoName, remoteUrl: null, relPath: null }], agents: [remote], questions: [] });
     tree.setPeerLinks([link("a1".repeat(32), "Laptop"), link("b2".repeat(32), "Desk")]);
     const keys: string[] = [];
     for (let i = 0; i < tree.visibleList.length; i++) {
@@ -1745,7 +1745,7 @@ describe("fully qualified row keys", () => {
     const remote = (id: string, manager: string | null, createdEpoch: number) =>
       ({ id, nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/r/alpha", state: "running", agentType: "worker", manager, createdEpoch });
     const peer = (agents: ReturnType<typeof remote>[]) => [{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1,
-      coordinator: null, lastError: null, repos: [{ registryName: "alpha", displayName: "alpha" }], agents, questions: [] }];
+      coordinator: null, lastError: null, repos: [{ registryName: "alpha", displayName: "alpha", remoteUrl: null, relPath: null }], agents, questions: [] }];
     const tree = new AgentTreeComponent();
     tree.machineName = "studio";
     const agents = [local("old", null, 100), local("old-kid", "old", 150), local("new", null, 400, "stopped"), local("solo", null, 0, "running", "beta")];
@@ -1784,7 +1784,7 @@ describe("fully qualified row keys", () => {
       ({ id, nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/r/alpha", state, agentType: "worker", manager, createdEpoch });
     // The manager is older than "other"; its worker is newer.
     tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
-      repos: [{ registryName: "alpha", displayName: "alpha" }], questions: [],
+      repos: [{ registryName: "alpha", displayName: "alpha", remoteUrl: null, relPath: null }], questions: [],
       agents: [remote("mgr", null, 100, "stopped"), remote("kid", "mgr", 500), remote("kid-kid", "kid", 600), remote("other", null, 300)] }]);
     const drawn = () => tree.visibleList.map((f) => f.kind === "agent" ? `${f.connector}${tree.agentKey(f.agent)}`
       : f.kind === "remote-agent" ? `${f.connector}${peerEntryKey(f)}` : f.kind === "repo-header" ? `[${f.repoName}]` : f.kind);
@@ -1806,7 +1806,7 @@ describe("fully qualified row keys", () => {
       ({ id, nickname, repoName: repo, repoRegistryName: repo, repoPath: `/r/${repo}`, state: "waiting", agentType: "worker", manager: null, createdEpoch: 1_800_000_000 });
     tree.setPeerLinks([{
       id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
-      repos: [{ registryName: "alpha", displayName: "alpha" }, { registryName: "zeta", displayName: "zeta" }],
+      repos: [{ registryName: "alpha", displayName: "alpha", remoteUrl: null, relPath: null }, { registryName: "zeta", displayName: "zeta", remoteUrl: null, relPath: null }],
       // The widest name, under the shared (indented) alpha header; zeta is remote-only, indented under Peer Only.
       agents: [remote("r1", "alpha", "the-longest-name"), remote("r2", "zeta")],
       questions: [],
@@ -1824,7 +1824,7 @@ describe("fully qualified row keys", () => {
       ({ id, nickname: null, repoName: repo, repoRegistryName: repo, repoPath: `/r/${repo}`, state, agentType: "worker", manager: null, createdEpoch: 1_800_000_000 });
     const link = (zetaState = "running") => ({
       id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
-      repos: [{ registryName: "alpha", displayName: "alpha" }, { registryName: "zeta", displayName: "zeta" }],
+      repos: [{ registryName: "alpha", displayName: "alpha", remoteUrl: null, relPath: null }, { registryName: "zeta", displayName: "zeta", remoteUrl: null, relPath: null }],
       agents: [remote("r1", "alpha"), remote("r2", "zeta", zetaState)], questions: [],
     });
     const headers = (tree: AgentTreeComponent) =>
@@ -1877,7 +1877,7 @@ describe("fully qualified row keys", () => {
     };
     const { tree } = twoRepos();
     const remote = { id: "remote-x", nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/r/alpha", state: "waiting", agentType: "worker", manager: null, createdEpoch: 1_800_000_000 };
-    tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null, repos: [{ registryName: "alpha", displayName: "alpha" }], agents: [remote], questions: [] }]);
+    tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null, repos: [{ registryName: "alpha", displayName: "alpha", remoteUrl: null, relPath: null }], agents: [remote], questions: [] }]);
     tree.maxHeight = 100;
     expect(computeStateColWidth(tree.visibleList)).toBeGreaterThan("waiting".length);
 
@@ -1897,7 +1897,7 @@ describe("fully qualified row keys", () => {
     const { tree } = twoRepos();
     const remote = (id: string) => ({ id, nickname: null, repoName: "alpha", repoRegistryName: "alpha", repoPath: "/r/alpha", state: "waiting", agentType: "worker", manager: null, createdEpoch: 1_800_000_000 });
     tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
-      repos: [{ registryName: "alpha", displayName: "alpha" }], agents: [remote("asker"), remote("quiet")], questions: [] }]);
+      repos: [{ registryName: "alpha", displayName: "alpha", remoteUrl: null, relPath: null }], agents: [remote("asker"), remote("quiet")], questions: [] }]);
     tree.questionAgentKeys = new Set(["Laptop/alpha/asker"]);
     tree.maxHeight = 100;
     const line = (id: string) => tree.render(60).find((row) => stripAnsi(row).includes(id))!;
@@ -1915,7 +1915,7 @@ describe("fully qualified row keys", () => {
   test("a vanished local row clamps within the local rows (local keys start with this machine's name)", () => {
     const { tree, betaDup } = twoRepos();
     const remote = { id: "x", nickname: null, repoName: "r", repoRegistryName: "r", repoPath: "/r", state: "running", agentType: null, manager: null, createdEpoch: 1_800_000_000 };
-    tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null, repos: [{ registryName: remote.repoRegistryName, displayName: remote.repoName }], agents: [remote], questions: [] }]);
+    tree.setPeerLinks([{ id: "a1".repeat(32), name: "Laptop", connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null, repos: [{ registryName: remote.repoRegistryName, displayName: remote.repoName, remoteUrl: null, relPath: null }], agents: [remote], questions: [] }]);
     tree.selectAgent(betaDup);
     tree.setFlatList(tree.flatList.filter((f) => !(f.kind === "agent" && f.agent === betaDup)));
     expect(tree.selection?.kind).toBe("repo-header");

@@ -21,6 +21,8 @@ import { rmSync } from "node:fs";
 const { resolveTarget, matchAgentById } = await import("./index");
 const { resolveSendTarget } = await import("./resolve-target");
 const { isRecentlyCreatedDirCtx, readAllAgents } = await import("./agents");
+const { getCoordinatorAgentId } = await import("./coordinator");
+const { isValidAgentId, isValidTmuxSession } = await import("./validation");
 
 // --- Temp directory management ---
 let _tempDirs: string[] = [];
@@ -212,6 +214,27 @@ describe("Group C: @repo-name coordinator lookup", () => {
     const result = await resolveTarget("@app", repos);
     expect(result.agent).toBeNull();
     expect(errorOutput.some((e) => e.includes("no coordinator found for repo app"))).toBe(true);
+  });
+
+  test("C6: a dotted repo folder's coordinator is reached by @<repo>, @coordinator and its id", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "ib-test-dotted-"));
+    _tempDirs.push(parent);
+    const path = join(parent, "adamwulf.me");
+    mkdirSync(join(path, ".itsybitsy", "agents"), { recursive: true });
+    // A registry name taken from the folder before names were validated, and a chosen one.
+    const dotted: RepoEntry = { path, name: "adamwulf.me", nickname: "site" };
+    const coordinatorId = getCoordinatorAgentId(path);
+    expect(coordinatorId).toBe("adamwulf_me");
+    addCoordinatorToRepo(path, coordinatorId);
+    const all = [...repos, dotted];
+
+    for (const [target, cwd] of [["@adamwulf.me", parent], ["@site", parent], ["@coordinator", path], ["adamwulf_me", parent]] as const) {
+      const result = await resolveSendTarget(target, all, cwd);
+      expect(result.error).toBeUndefined();
+      expect(result.agent?.id).toBe("adamwulf_me");
+      expect(isValidAgentId(result.agent!.id)).toBe(true);
+      expect(isValidTmuxSession(result.agent!.meta.tmux_session)).toBe(true);
+    }
   });
 });
 

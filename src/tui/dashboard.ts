@@ -33,6 +33,7 @@ import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync 
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { peerSnapshot } from "../peers/peer-link";
 import type { RepoEntry } from "../registry";
+import { readRepoCloneInfo, resolveCloneRoot, type RepoCloneInfo } from "../clone-repo";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow, expandTabs } from "../tmux-poller";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
@@ -77,7 +78,7 @@ import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
 import type { DialogState } from "./dialog-handler";
 import {
-  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH, MULTI_SELECT_WIDTH,
+  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH, MULTI_SELECT_WIDTH, dialogTitleMaxWidth,
   handleDialogInput, syncNewAgentMachine, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
   PEERS_TAB, buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
@@ -540,7 +541,7 @@ class StatusBarComponent implements Component {
       // `q` works on every remote agent row, whatever its type (isRemoteAllowedKey).
       const questionsHint = this.remoteRepoSelected || this.remoteCoordinatorVisible ? "" : `${qLabel}    `;
       row1Left = `${DIM}j/k: select    J/K: repo    ${this.remoteRepoSelected ? "" : ";/l: scroll    "}${this.remoteCoordinatorVisible ? "" : "p/n: pane    "}${questionsHint}1/2/3: tab    V: filter${this.remoteCoordinatorVisible ? "" : "    [ ] { }: resize"}${this.remoteAgentSelected ? "    C: terminal" : ""}${errBadge}${RESET}`;
-      let row2 = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab${this.remoteAgentSelected ? "    o: diff    m: merge    x: retire    R: resume" : ""}${this.remoteRepoSelected ? "" : "    s: send"}${markHint}`;
+      let row2 = `${DIM}${timeStr}  @: jump    /: commands    ?: help    I: peers tab${this.remoteAgentSelected ? "    o: diff    m: merge    x: retire    R: resume" : ""}${this.remoteRepoSelected ? "    c: clone here" : "    s: send"}${markHint}`;
       // `a` and `h` come last, and only whole: on a narrow terminal the row's
       // own actions and the usage/version on the right matter more than the
       // two global dialogs, and a hint cut in half is noise. The room kept
@@ -653,7 +654,8 @@ class DialogOverlayComponent implements Component {
       }
       case "input": {
         return {
-          title: dialog.prompt,
+          // A built title gets this render's width: the overlay narrows with the terminal.
+          title: typeof dialog.prompt === "string" ? dialog.prompt : dialog.prompt(dialogTitleMaxWidth(innerWidth + 4)),
           contentLines: [...(dialog.hint ? wordWrapLines(dialog.hint, innerWidth) : []), truncateToWidth(`> ${dialog.value}█`, innerWidth, "")],
         };
       }
@@ -924,6 +926,14 @@ export class DashboardComponent implements Component {
   }
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
+  /**
+   * Each registered repo's origin URL and clone-root-relative path, by repo
+   * path: what the peer snapshot sends with it (SPEC §20.4). setRepos re-reads
+   * it in the background, so answering a peer costs no IO.
+   */
+  repoCloneInfo: ReadonlyMap<string, RepoCloneInfo> = new Map();
+  /** Bumped by each re-read: only the newest one's result is kept. */
+  private repoCloneInfoGeneration = 0;
   private noticeCounter = 0;
   diffTool: string | undefined;
   /**
@@ -1810,6 +1820,20 @@ export class DashboardComponent implements Component {
   setRepos(repos: RepoEntry[]) {
     this.repos = repos;
     this.agentTree.registeredRepos = repos;
+    void this.refreshRepoCloneInfo();
+  }
+
+  /** Re-read {@link repoCloneInfo} for the current repos. A re-read that a newer one overtook is dropped. */
+  async refreshRepoCloneInfo(): Promise<void> {
+    const generation = ++this.repoCloneInfoGeneration;
+    const repos = [...this.repos];
+    try {
+      const root = await resolveCloneRoot();
+      const entries = await Promise.all(repos.map(async (repo) => [repo.path, await readRepoCloneInfo(repo.path, root)] as const));
+      if (generation === this.repoCloneInfoGeneration) this.repoCloneInfo = new Map(entries);
+    } catch (err) {
+      logToWatchLog(`[peers] could not read the repos' remote URLs: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   setDiffTool(tool: string | undefined) {
@@ -1830,14 +1854,16 @@ export class DashboardComponent implements Component {
   }
 
   /**
-   * ActionCtx hook: the 'h' settings-menu boolean toggle calls this after a
-   * successful writeConfig so display-only config keys take effect live. Only
-   * `tree.groupByParent` currently needs live wiring; other keys are read at
-   * their own use sites.
+   * ActionCtx hook: the 'h' settings menu calls this after a successful
+   * writeConfig so config keys take effect live. `tree.groupByParent`
+   * re-flattens the tree; `repos.cloneRoot` re-reads each repo's `relPath`
+   * for the peer snapshot. Other keys are read at their own use sites.
    */
   onConfigChange(key: string, value: unknown): void {
     if (key === "tree.groupByParent") {
       this.setGroupByParent(value === true);
+    } else if (key === "repos.cloneRoot") {
+      void this.refreshRepoCloneInfo();
     }
   }
 
@@ -2254,6 +2280,8 @@ export class DashboardComponent implements Component {
     if (this.remoteQuestionsVisible && (key === "g" || matchesKey(key, Key.enter) || matchesKey(key, Key.escape))) return false;
     if (remote === null || isRemoteAllowedKey(key, remote)) return false;
     if (remote.kind !== "remote-repo-header" && (key === ";" || key === "l")) return false;
+    // A remote-only header also takes Clone here.
+    if (remote.kind === "remote-repo-header" && key === "c") return false;
     this.setNotice(REMOTE_READ_ONLY_NOTICE, "error");
     return true;
   }
@@ -2452,6 +2480,7 @@ export class DashboardComponent implements Component {
       { label: "reassign manager — r", key: "r", action: () => agentActions.handleReassign(this) },
       { label: "nickname agent — N", key: "N", action: () => agentActions.handleRename(this) },
       { label: "new agent — a", key: "a", action: () => agentActions.handleNewAgent(this) },
+      { label: "clone repo here (peer-only repo) — c", key: "c", action: () => void agentActions.handleCloneHere(this) },
       { label: "open worktree — w", key: "w", action: () => agentActions.handleOpenWorktree(this) },
       { label: "open diff in tool — o", key: "o", action: () => agentActions.handleOpenDiffTool(this) },
       { label: "open diff vs manager in tool — O", key: "O", action: () => agentActions.handleOpenDiffToolVsManager(this) },
@@ -2824,8 +2853,9 @@ export class DashboardComponent implements Component {
       }
     }
     // Switch repo coordinator input field agent. Its draft is keyed by full id
-    // (SPEC §17.1): a per-repo coordinator's id is the folder's name, so two
-    // repos with one folder name have coordinators with one id.
+    // (SPEC §17.1): a per-repo coordinator's id comes from its folder's name
+    // (getCoordinatorAgentId), so two repos whose folder names give one id
+    // have coordinators with one id.
     const repoCoordinator = this.rightPane.repoCoordinatorAgent;
     this.repoCoordinatorInputField.switchAgent(
       repoCoordinator ? this.agentTree.agentKey(repoCoordinator) : null
@@ -3719,9 +3749,10 @@ export class DashboardComponent implements Component {
       this.jumpToMode("QUESTIONS");
       this.tui?.requestRender();
     }
-    // Clear errors
+    // Clone here (on a remote-only repo header), else clear errors
     else if (data === "c") {
-      if (this.rightPane.mode === "ERRORS") { this.clearErrors(); }
+      if (this.remoteSelection?.kind === "remote-repo-header") { void agentActions.handleCloneHere(this); }
+      else if (this.rightPane.mode === "ERRORS") { this.clearErrors(); }
     }
     // Kill orphaned tmux session (Enter in ERRORS mode)
     else if (matchesKey(data, Key.enter) && this.rightPane.mode === "ERRORS" && this.rightPane.orphanedTmuxSessions.length > 0) {
@@ -4633,12 +4664,14 @@ export async function launchDashboard(): Promise<void> {
   // the UI once, for about a third of a second: the dynamic import in
   // src/peers/iroh.ts evaluates the napi addon synchronously on the event loop.
   // The trusted link answers peers from the watcher's last fully detected
-  // agents (lastDetectedAgents, what the tree shows) and the pending questions
-  // of the same refresh, so an answer costs no IO and never carries a state
+  // agents (lastDetectedAgents, what the tree shows), the pending questions
+  // of the same refresh and the repos' cached clone info (repoCloneInfo,
+  // re-read by setRepos), so an answer costs no IO and never carries a state
   // that detection has not filled in yet.
   const peerDeps = defaultPeerServiceDeps(machine, logToWatchLog, () =>
     peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [], dashboard.watcher?.lastQuestions ?? [],
-      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), (message, kind) => dashboard.remoteAgentStarted(message, kind));
+      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state, dashboard.repoCloneInfo),
+    (message, kind) => dashboard.remoteAgentStarted(message, kind));
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
   peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
   peerDeps.readPrompt = (repo, id) => readAgentPromptText(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);

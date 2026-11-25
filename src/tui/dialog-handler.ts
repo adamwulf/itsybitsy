@@ -52,7 +52,11 @@ type DialogCommon = { width?: number };
 // Dialog types for agent actions
 export type DialogState =
   | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel" | "checkbox"; confirmColor?: string; checkbox?: { label: string; checked: boolean }; onYes: () => void } & DialogCommon)
-  | ({ type: "input"; prompt: string; hint?: string; value: string; onSubmit: (value: string) => void; sanitize?: (text: string) => string;
+  | ({ type: "input";
+      /** The title, or a function that builds it for the title width the overlay has at this render
+       *  (the overlay narrows with the terminal), for a title that must shrink to fit. */
+      prompt: string | ((maxWidth: number) => string);
+      hint?: string; value: string; onSubmit: (value: string) => void; sanitize?: (text: string) => string;
       /** Set true while an acceptance-gated send launched from this dialog is in
        *  flight. The dialog is frozen (no re-submit, no cancel) until the send
        *  resolves — cleared on failure so the draft can be corrected, or the

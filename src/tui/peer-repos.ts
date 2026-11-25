@@ -62,20 +62,28 @@ interface MachineRoot {
   visited: Set<RemoteAgent>;
 }
 
-/** First peer supplies the display name and placeholder for a remote-only repo. */
+/**
+ * First peer supplies the display name and placeholder for a remote-only repo.
+ * The first peer that reports a remote URL supplies the clone fields.
+ */
 export function collectPeerRepos(links: readonly PeerLinkState[]): Map<string, PeerRepo> {
   const repos = new Map<string, PeerRepo>();
   const roots = new Map<string, MachineRoot[]>();
   for (const link of links) {
     const byRepo = new Map<string, RemoteAgent[]>();
-    for (const { registryName, displayName } of link.repos ?? []) {
+    for (const { registryName, displayName, remoteUrl, relPath } of link.repos ?? []) {
       const key = repoRowKey(registryName);
       byRepo.set(key, []);
-      if (!repos.has(key)) repos.set(key, {
+      const known = repos.get(key);
+      if (!known) repos.set(key, {
         header: { kind: "remote-repo-header", peerName: link.name, repoName: displayName,
-          repoRegistryName: registryName, agentCount: 0 },
+          repoRegistryName: registryName, agentCount: 0,
+          remoteUrl, relPath: remoteUrl === null ? null : relPath, remoteUrlPeer: remoteUrl === null ? null : link.name },
         nodes: [],
       });
+      else if (known.header.remoteUrl === null && remoteUrl !== null) {
+        Object.assign(known.header, { remoteUrl, relPath, remoteUrlPeer: link.name });
+      }
     }
     for (const agent of link.agents ?? []) {
       if (agent.agentType !== REPO_COORDINATOR_TYPE) byRepo.get(repoRowKey(agent.repoRegistryName))?.push(agent);

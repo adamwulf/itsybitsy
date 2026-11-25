@@ -11,6 +11,9 @@ import { REPO_COORDINATOR_TYPE, SYSTEM_COORDINATOR_TYPE, isCoordinatorType } fro
 import { writeAgentState } from "../agents";
 import { logAgent } from "../agent-lifecycle";
 import { listTeams } from "../teams";
+import { listRepos } from "../registry";
+import { sameRepoPath } from "../repo-identity";
+import { suggestedAddress } from "../resolve-target";
 import { isValidSessionId } from "../validation";
 import { resolveSandboxEnabled, type SandboxConfig } from "../sandbox";
 import { metadataCli } from "../agent-cli";
@@ -30,7 +33,7 @@ export interface SessionContext {
   agentType?: string;
   /** Cross-repo spawner info (set when meta.spawned_by is present and differs from manager).
    * `repo_path` may be `null` for the `@system` sentinel (system coordinator
-   * has no repo). `agent_id` may be `@system` or `@<repo-name>`. */
+   * has no repo). `agent_id` may be `@system` or `@<coordinator-id>`. */
   spawnedBy?: { agent_id: string; repo_path: string | null };
   /**
    * Fully-resolved sandbox policy frozen at spawn (`meta.sandbox`). Only
@@ -337,9 +340,9 @@ async function generateInstructionsInner(ctx: SessionContext): Promise<string> {
     case "primary":
       return generatePrimaryInstructions();
     case "manager":
-      return generateManagerInstructions(ctx);
+      return generateManagerInstructions(ctx, ctx.spawnedBy ? await formatSpawnerInfo(ctx.spawnedBy) : "");
     case "worker":
-      return generateWorkerInstructions(ctx);
+      return generateWorkerInstructions(ctx, ctx.spawnedBy ? await formatSpawnerInfo(ctx.spawnedBy) : "");
     default:
       return generatePrimaryInstructions();
   }
@@ -479,27 +482,39 @@ Each Bash tool call must run exactly ONE command. Multi-command calls will be bl
  * Format a one-line `You were spawned by ...` blurb for inclusion in
  * session-start instructions. Handles `@`-prefixed sentinels:
  *   - `@system` — system coordinator (no repo_path)
- *   - `@<repo-name>` — per-repo coordinator
+ *   - `@<coordinator-id>` — per-repo coordinator
  * Real agent IDs render with the spawner's repo basename when available.
+ *
+ * A per-repo sentinel holds the coordinator's agent ID, which `ib send @<name>`
+ * does not resolve: `@<name>` takes a registry name or nickname, and the two
+ * differ for a dotted folder (coordinator `adamwulf_me`, repo `adamwulfme`).
+ * So the send address is `@<registry name>` of `repo_path`, or the bare
+ * coordinator ID when that repo is not registered, shell-quoted when it needs
+ * it (a registry name taken from a folder before names were validated can
+ * hold a space).
  */
-function formatSpawnerInfo(spawnedBy: { agent_id: string; repo_path: string | null }): string {
+async function formatSpawnerInfo(spawnedBy: { agent_id: string; repo_path: string | null }): Promise<string> {
   const id = spawnedBy.agent_id;
   if (id === "@system") {
     return `You were spawned by the system coordinator. You can send messages to it with: \`ib send @system "message"\``;
   }
   if (id.startsWith("@")) {
-    return `You were spawned by the per-repo coordinator \`${id}\`. You can send messages to it with: \`ib send ${id} "message"\``;
+    const coordinatorId = id.slice(1);
+    const repoPath = spawnedBy.repo_path;
+    const repo = repoPath
+      ? (await listRepos().catch(() => [])).find((r) => sameRepoPath(r.path, repoPath))
+      : undefined;
+    const address = suggestedAddress(repo ? `@${repo.name}` : coordinatorId);
+    return `You were spawned by the per-repo coordinator \`${coordinatorId}\`. You can send messages to it with: \`ib send ${address} "message"\``;
   }
   const repoLabel = spawnedBy.repo_path ? ` in repo \`${basename(spawnedBy.repo_path)}\`` : "";
   return `You were spawned by agent \`${id}\`${repoLabel}. You can send messages to your spawner with: \`ib send ${id} "message"\``;
 }
 
-function generateManagerInstructions(ctx: SessionContext): string {
+function generateManagerInstructions(ctx: SessionContext, spawnerInfo: string): string {
   const managerInfo = ctx.agentManager
     ? `Your manager agent is: ${ctx.agentManager}`
     : "";
-
-  const spawnerInfo = ctx.spawnedBy ? formatSpawnerInfo(ctx.spawnedBy) : "";
 
   const askLine = !ctx.agentManager
     ? `| \`ib ask "question"\` | Ask the user a question (top-level managers only) |`
@@ -620,13 +635,11 @@ ${askSection}
 </${runtimeNames.PROMPT_TAG}>`;
 }
 
-function generateWorkerInstructions(ctx: SessionContext): string {
-  // Workers send messages to their manager by agent ID.
-  // Per-repo coordinators are now named with the repo basename (e.g., "muse-ios"),
-  // so `ib send muse-ios` routes correctly to the per-repo coordinator.
+function generateWorkerInstructions(ctx: SessionContext, spawnerInfo: string): string {
+  // Workers send messages to their manager by agent ID. A per-repo
+  // coordinator's ID comes from its repo folder name (getCoordinatorAgentId:
+  // "muse-ios" stays "muse-ios"), so `ib send muse-ios` reaches it directly.
   const managerSendTarget = ctx.agentManager;
-
-  const spawnerInfo = ctx.spawnedBy ? formatSpawnerInfo(ctx.spawnedBy) : "";
 
   return `<${runtimeNames.PROMPT_TAG}>
 ## ItsyBitsy Worker Agent

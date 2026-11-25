@@ -10503,6 +10503,18 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(row("[Send]")).toBeGreaterThan(row("peer reply"));
       expect(row(codexStatus)).toBe(row("[Send]") + 1);
       expect(rows).toHaveLength(process.stdout.rows);
+
+      // A Claude agent's `/` menu: more status lines than the pane holds still
+      // fill the terminal exactly, with the editor kept on screen.
+      const sep = "─".repeat(300);
+      const menu = Array.from({ length: 60 }, (_, i) => `  /command-${i}`);
+      service.fetchPane.mockResolvedValue({ state: "running", text: ["peer reply", sep, "❯ /", sep, ...menu].join("\n") });
+      selectByKey(dashboard, agentKey(PEER_B, "itsybitsy", "manager-def"));
+      await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("/command-0"));
+      const lines = dashboard.render(180);
+      expect(lines).toHaveLength(process.stdout.rows);
+      expect(stripAnsi(lines.join("\n"))).toContain("[Send]");
+      expect(stripAnsi(lines.join("\n"))).not.toContain("❯ /");
     } finally {
       running.mockRestore();
       dashboard.stopPolling();

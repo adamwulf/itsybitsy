@@ -92,6 +92,19 @@ test("an agent's input box is sliced off by the detector for the CLI its model n
   expect(await view("claude:opus")).toEqual({ body: ["codex reply", "› draft", codexStatus], status: [] });
 });
 
+test("an agy agent's background-task section stays in its status lines, below the input box", async () => {
+  const text = await Bun.file(new URL("../fixtures/agy-background-task.txt", import.meta.url)).text();
+  const pane = new RemotePane(async () => ({ state: "running", text }), () => {}, () => () => {});
+  pane.select({ peerId: "A", target: { op: "agent-pane", repo: "r", id: "a" }, model: "agy:default" });
+  await Promise.resolve();
+  expect(stripAnsi(pane.render(100, 20).join("\n")).trim()).toBe("WAITING");
+  expect(pane.statusLines(100).map(stripAnsi)).toEqual([
+    '  ● [23:31:06] python3 -c "import time; time.sleep(120)" running',
+    "─".repeat(100),
+    "Gemini 3.8 Flash (High) | Context: 21%",
+  ]);
+});
+
 test("scrollback clamps at each wrap width while the error line stays visible", async () => {
   let tick: () => void = () => {};
   const fetch = mock(async () => ({ state: "running", text: "abcdefgh\nijklmnop\nqrstuvwx" }));

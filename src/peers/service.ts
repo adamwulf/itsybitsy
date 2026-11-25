@@ -1161,7 +1161,6 @@ export class PeerService {
         return;
       }
       if (alpn === PEER_ALPN) {
-        this.logPath(conn, conn.remoteId().toString(), "accepted");
         const remoteSpawn = this.deps.remoteSpawn;
         await serveTrustedConnection(toPairConnection(conn), {
           setTimer: this.deps.setTimer,
@@ -1183,6 +1182,8 @@ export class PeerService {
           readPrompt: this.deps.readPrompt,
           terminal: this.deps.terminal,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,
+          // Only a connection that passed the allowlist gets a path line and a path watch.
+          trusted: () => this.logPath(conn, conn.remoteId().toString(), "accepted"),
           log: this.deps.log,
         });
         return;

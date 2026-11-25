@@ -1990,6 +1990,19 @@ describe("PeerService trusted ALPN", () => {
       expect(pathLines().at(-1)).toBe(`peer link: accepted ${peer}: direct to 192.0.2.7:4433, rtt 12 ms`);
       inbound.a.close(PEER_CLOSE.done, "done");
       await waitFor(() => acceptedPaths.watchers.size === 0, { message: "accepted watch stopped" });
+
+      // A connection that fails the allowlist gets no path line and no watch.
+      const strangerId = "d4".repeat(32);
+      const strangerPaths = new FakePaths();
+      const stranger = createMemoryLink(strangerId, service.view().selfId!);
+      endpoint.push({ accept: async () => serviceConnection(stranger.b, PEER_ALPN, strangerPaths) });
+      await waitFor(() => stranger.a.closeInfo() !== null, { message: "stranger closed" });
+      expect(stranger.a.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.notPeer });
+      expect(logs.filter(line => line.includes(strangerId.slice(0, 10)))).toEqual([
+        `peer link: closed a connection from ${strangerId.slice(0, 10)}: not a peer`,
+      ]);
+      expect(strangerPaths.watchers.size).toBe(0);
+      expect(pathLines()).toHaveLength(3);
     } finally {
       await service.shutdown();
     }

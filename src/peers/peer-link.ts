@@ -853,6 +853,8 @@ export interface PeerResponderDeps {
   startAgentWithFiles?(header: NewAgentHeader, peerId: string, readPeerName: () => Promise<string | null>, body: Pick<PairStream, "read">, options: StartReceiptOptions): Promise<string>;
   /** Remote terminals (terminal-host.ts). Without it every terminal open is refused. */
   terminal?: TerminalHostDeps;
+  /** Called once the connection's id passed the allowlist, before any request is read (service.ts logs its path then). Must not throw. */
+  trusted?(): void;
   /** watch.log in `ib watch`. */
   log(line: string): void;
 }
@@ -879,6 +881,7 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
     return;
   }
   deps.log(`peer link: ${from} connected`);
+  deps.trusted?.();
   for (;;) {
     let stream: PairStream;
     try {

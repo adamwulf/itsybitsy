@@ -356,21 +356,60 @@ describe("requestAgents", () => {
     link.a.close(PEER_CLOSE.done, "done");
   });
 
-  test.each([true, false])("a timeout whose reply stalls past the grace asks keepOpenOnTimeout once: keep=%s", async keep => {
+  /** A request on `link.a` whose far end has read it and not answered; `asks` counts keepOpenOnTimeout calls. */
+  async function stalledAgentsRequest(keep: () => boolean) {
     const link = createMemoryLink(ID_A, ID_B);
     const clock = createFakeClock();
     const timedOut = new Error("request timed out");
-    let asks = 0;
-    const request = requestAgents(link.a, clock.setTimer, timedOut, () => { asks++; return keep; }).catch(err => err);
-    await (await link.b.acceptBi()).readToEnd(PEER_MAX_REQUEST_BYTES); // never answered
+    const state = { asks: 0, settled: false };
+    const request = requestAgents(link.a, clock.setTimer, timedOut, () => { state.asks++; return keep(); })
+      .catch(err => err).finally(() => { state.settled = true; });
+    const far = await link.b.acceptBi();
+    await far.readToEnd(PEER_MAX_REQUEST_BYTES);
     await Bun.sleep(0);
     clock.advance(15_000); await Bun.sleep(0); clock.advance(749);
-    expect(asks).toBe(0); // still within the grace
+    expect(state.asks).toBe(0); // still within the grace
+    clock.advance(1);
+    await Bun.sleep(0);
+    return { link, clock, timedOut, state, request, far };
+  }
+
+  test("a timeout whose reply stalls past the grace and is not kept closes the connection", async () => {
+    const { link, timedOut, state, request } = await stalledAgentsRequest(() => false);
+    expect(await request).toBe(timedOut);
+    expect(state.asks).toBe(1);
+    expect(link.b.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.error, reason: "send reset stalled" });
+  });
+
+  test("a kept timeout keeps the connection and keeps waiting: the late reply is the answer", async () => {
+    const { link, state, request, far } = await stalledAgentsRequest(() => true);
+    expect(state.asks).toBe(1);
+    expect(link.b.closeInfo()).toBeNull();
+    // Still pending, so a caller's request slot stays taken.
+    expect(state.settled).toBe(false);
+    const late = { coordinator: null, repos: [], agents: [], questions: [] };
+    await far.writeAll(encodeAgentsReply(late));
+    await far.finish();
+    expect(await request).toEqual(late);
+    expect(state.asks).toBe(1);
+    expect(link.b.closeInfo()).toBeNull();
+    link.a.close(PEER_CLOSE.done, "done");
+  });
+
+  test("a kept timeout asks again every timeout interval and closes at the first no", async () => {
+    let keep = true;
+    const { link, clock, timedOut, state, request } = await stalledAgentsRequest(() => keep);
+    clock.advance(15_000); await Bun.sleep(0);
+    expect(state.asks).toBe(2);
+    expect(state.settled).toBe(false);
+    keep = false;
+    clock.advance(14_999); await Bun.sleep(0);
+    expect(state.asks).toBe(2);
     clock.advance(1);
     expect(await request).toBe(timedOut);
-    expect(asks).toBe(1);
-    expect(link.b.closeInfo()).toEqual(keep ? null : { byPeer: true, code: PEER_CLOSE.error, reason: "send reset stalled" });
-    link.a.close(PEER_CLOSE.done, "done");
+    expect(state.asks).toBe(3);
+    expect(link.b.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.error, reason: "send reset stalled" });
+    expect(clock.pending()).toBe(0);
   });
 
   test("a stalled teardown that is not the request's own timeout closes without asking", async () => {

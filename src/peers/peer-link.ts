@@ -681,9 +681,14 @@ interface ClientOptions extends OutgoingTransfer {
   /**
    * Asked once `timeout` has fired and this exchange's stream could not be torn
    * down within the grace. True leaves the connection open instead of closing
-   * it: the stalled native read settles on its own once the late reply or the
-   * connection's close arrives. The poller's agents poll and pane reads pass
-   * it while an attachment transfer with the peer moves bytes (SPEC §20.4 "Slow links").
+   * it, and the exchange then waits for its stalled native read, which settles
+   * once the late reply or the connection's close arrives. So the caller's
+   * request slot stays taken and no second request piles up behind it on the
+   * slow link. A late reply is returned as the exchange's result. While it
+   * waits it asks again every `timeout` interval, and the first no closes the
+   * connection as an unkept timeout would. The poller's agents poll and pane
+   * reads pass it while an attachment transfer with the peer moves bytes
+   * (SPEC §20.4 "Slow links").
    */
   keepOpenOnTimeout?: () => boolean;
   unknownAfterFin?: string;
@@ -699,9 +704,18 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   const armTimeout = () => timeout && setTimer(timeout[0], () => deadline.abort(timeout[1]));
   let clear = options.timeoutAfterFin ? undefined : armTimeout();
   const io = <V>(operation: () => Promise<V>) => waitForIO({ setTimer, signal }, operation);
-  /** A teardown that missed its grace closes the connection, unless the caller keeps it through its own timeout. */
-  const closeStalled = () => {
-    if (timeout && signal.reason === timeout[1] && options.keepOpenOnTimeout?.()) return;
+  /**
+   * A teardown (`stalled`) that missed its grace closes the connection, unless
+   * the caller keeps it through this request's own timeout: then wait for it,
+   * asking again each `timeout` interval, and close once the caller says no.
+   */
+  const closeStalled = async (stalled: Promise<unknown>) => {
+    const keep = options.keepOpenOnTimeout;
+    if (timeout && keep && signal.reason === timeout[1]) {
+      while (keep()) {
+        if (await settledWithinGrace(stalled, { setTimer }, timeout[0])) return;
+      }
+    }
     closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
   };
   let opening: Promise<PairStream> | undefined;
@@ -709,7 +723,10 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   try { active = await io(() => { options.verifyClient?.(); return opening = conn.openBi(); }); }
   catch (err) {
     clear?.();
-    if (opening && !await settledWithinGrace(opening.then(stream => stream.cancel()), { setTimer })) closeStalled();
+    if (opening) {
+      const cancelled = opening.then(stream => stream.cancel());
+      if (!await settledWithinGrace(cancelled, { setTimer })) await closeStalled(cancelled);
+    }
     throw err;
   }
 
@@ -801,7 +818,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     if (!received || !sendDone || frameStop) {
       deadline.abort(new Error("Request writer stopped"));
       const teardown = Promise.allSettled([reply.then(() => frameStop), sendDone ? undefined : active.resetSending()]);
-      if (!await settledWithinGrace(teardown, { setTimer })) closeStalled();
+      if (!await settledWithinGrace(teardown, { setTimer })) await closeStalled(teardown);
     }
     if (received?.ok) return received.value;
     if (received && received.error instanceof PeerErrorReply) throw received.error;

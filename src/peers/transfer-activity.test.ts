@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createFakeClock } from "./test-pair-transport";
 import { TRANSFER_PROGRESS_WINDOW_MS, TransferActivity, type TransferStart } from "./transfer-activity";
+import { IDLE_TIMEOUT_MS } from "./transfer-limits";
 
 const P1 = "a1".repeat(32);
 const P2 = "b2".repeat(32);
@@ -63,7 +64,9 @@ test("begin: the first end wins and later calls do nothing", () => {
 
 test("recent progress: per peer, while a transfer runs and moved bytes within the window", async () => {
   const { clock, activity } = rig();
-  expect(TRANSFER_PROGRESS_WINDOW_MS).toBe(30_000);
+  // The transfer's own idle deadline: the rule never lapses while the transfer still counts as alive.
+  expect(TRANSFER_PROGRESS_WINDOW_MS).toBe(IDLE_TIMEOUT_MS);
+  expect(TRANSFER_PROGRESS_WINDOW_MS).toBe(60_000);
   expect(activity.recentProgress(P1)).toBe(false);
   const first = Promise.withResolvers<void>();
   const second = Promise.withResolvers<void>();

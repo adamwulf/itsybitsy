@@ -19,8 +19,8 @@
  *   "request timed out", and the next tick redials. Closing the connection is
  *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
  * - Except during a transfer (SPEC.md §20.4 "Slow links"): while an attachment
- *   transfer with the peer, on either connection, has moved bytes within the
- *   last 30 s (`transferProgressing`), an agents poll or pane read that times
+ *   transfer with the peer, on either connection, has moved bytes within its
+ *   own 60 s idle deadline (`transferProgressing`), an agents poll or pane read that times
  *   out leaves the connection open. A poll keeps the link's state as it was
  *   (connected, the last lists, no error) and the next tick polls again on the
  *   same connection; a pane read only fails. Each such timeout is one

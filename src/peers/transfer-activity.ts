@@ -8,8 +8,9 @@
  *   owns its body. It logs one watch.log line when the transfer starts and
  *   one when it ends: ok or failed with the reason, bytes moved, elapsed
  *   seconds and average KB/s. Nothing is logged per chunk.
- * - Each progress report (a body chunk written or received, a header write, a
- *   reply fragment) marks the peer as moving bytes now.
+ * - Each progress report (a body chunk QUIC accepted for sending or one
+ *   received, a header write, a reply fragment) marks the peer as moving
+ *   bytes now.
  * - {@link TransferActivity.recentProgress} is true while a transfer with the
  *   peer runs and has moved bytes within {@link TRANSFER_PROGRESS_WINDOW_MS}.
  *   The poller then keeps a link whose agents poll or pane read timed out
@@ -18,9 +19,17 @@
 
 import { singleLine } from "./single-line";
 import { shortPeerId } from "./store";
+import { IDLE_TIMEOUT_MS } from "./transfer-limits";
 
-/** How recently a running transfer must have moved bytes to keep its link through a request timeout. */
-export const TRANSFER_PROGRESS_WINDOW_MS = 30_000;
+/**
+ * How recently a running transfer must have moved bytes to keep its link
+ * through a request timeout: the transfer's own idle deadline. A sender's
+ * progress is a write QUIC accepted, and up to a stream window of it (about
+ * 1.25 MB) is still in flight after the last write and FIN, so on a slow link
+ * a healthy transfer can report nothing for longer than any shorter window.
+ * The keep rule must not lapse while the transfer itself still counts as alive.
+ */
+export const TRANSFER_PROGRESS_WINDOW_MS = IDLE_TIMEOUT_MS;
 
 /** Longest failure reason an end line carries. */
 const MAX_REASON = 200;

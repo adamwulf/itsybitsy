@@ -12,6 +12,7 @@ import {
   isAllowedCloneUrl,
   readRepoCloneInfo,
   resolveCloneRoot,
+  stripUrlCredentials,
 } from "./clone-repo";
 import { writeConfig, defaultUserConfigPath } from "./config";
 import { loadRegistry, saveRegistry } from "./registry";
@@ -71,15 +72,83 @@ describe("isAllowedCloneUrl", () => {
   });
 });
 
-test("cloneEnv turns off git's prompt and runs ssh in batch mode, appending to the user's GIT_SSH_COMMAND", () => {
-  expect(cloneEnv({ PATH: "/bin", SSH_AUTH_SOCK: "/tmp/agent" })).toEqual({
-    PATH: "/bin",
-    SSH_AUTH_SOCK: "/tmp/agent",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
+describe("stripUrlCredentials", () => {
+  test.each([
+    ["https://user:token@github.com/owner/repo.git", "https://github.com/owner/repo.git"],
+    ["https://ghp_token@github.com/owner/repo", "https://github.com/owner/repo"],
+    ["https://user:p@ss@github.com/owner/repo", "https://github.com/owner/repo"],
+    ["https://user:token@github.com", "https://github.com"],
+    ["https://user:token@host:8443/repo?x=1", "https://host:8443/repo?x=1"],
+    ["http://token@host/repo", "http://host/repo"],
+    ["ssh://git:secret@github.com/owner/repo.git", "ssh://git@github.com/owner/repo.git"],
+    ["ssh://git:secret@host:2222/srv/repo", "ssh://git@host:2222/srv/repo"],
+    ["git+ssh://git:secret@host/repo", "git+ssh://git@host/repo"],
+    ["ssh://:secret@host/repo", "ssh://host/repo"],
+  ])("strips %p", (url, stripped) => {
+    expect(stripUrlCredentials(url)).toBe(stripped);
   });
-  expect(cloneEnv({ GIT_SSH_COMMAND: "ssh -i ~/.ssh/work " }).GIT_SSH_COMMAND).toBe("ssh -i ~/.ssh/work -o BatchMode=yes");
-  expect(cloneEnv({ GIT_SSH_COMMAND: "" }).GIT_SSH_COMMAND).toBe("ssh -o BatchMode=yes");
+
+  test.each([
+    "ssh://git@github.com/owner/repo.git",
+    "https://github.com/owner/repo.git",
+    "https://github.com/owner/repo@v1",
+    "git@github.com:owner/repo.git",
+    "user@host.example:path/to/repo",
+    "/local/path",
+  ])("leaves %p alone", (url) => {
+    expect(stripUrlCredentials(url)).toBe(url);
+  });
+});
+
+// The clone's ssh setup follows git's precedence: GIT_SSH_COMMAND, then
+// core.sshCommand, then GIT_SSH; each gets BatchMode where it can take it.
+describe("cloneEnv", () => {
+  let reads: string[][];
+  /** A git whose `config --get core.sshCommand` prints `value`, or exits 1 when null. */
+  const coreSshCommand = (value: string | null) => {
+    reads = [];
+    cloneRepoSpawnCtx.set(((cmd: string[]) => {
+      reads.push(cmd);
+      return { stdout: new Response(value ?? "").body, stderr: new Response("").body, exited: Promise.resolve(value === null ? 1 : 0) };
+    }) as SpawnFn);
+  };
+  afterEach(() => cloneRepoSpawnCtx.reset());
+
+  test("GIT_SSH_COMMAND set: BatchMode is appended to it, and core.sshCommand is not read", async () => {
+    coreSshCommand("ssh -i ~/.ssh/config-key");
+    expect(await cloneEnv({ PATH: "/bin", GIT_SSH_COMMAND: "ssh -i ~/.ssh/work " })).toEqual({
+      PATH: "/bin", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -i ~/.ssh/work -o BatchMode=yes",
+    });
+    expect(reads).toEqual([]);
+  });
+
+  test("else core.sshCommand: it becomes GIT_SSH_COMMAND with BatchMode, ahead of GIT_SSH", async () => {
+    coreSshCommand("ssh -i ~/.ssh/config-key\n");
+    expect(await cloneEnv({ PATH: "/bin", GIT_SSH: "/usr/bin/plink" })).toEqual({
+      PATH: "/bin", GIT_SSH: "/usr/bin/plink", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -i ~/.ssh/config-key -o BatchMode=yes",
+    });
+    // Read without -C: the user's config, not some repo's.
+    expect(reads).toEqual([["git", "config", "--get", "core.sshCommand"]]);
+  });
+
+  test("else GIT_SSH: the ssh environment is left alone, since plink takes no -o", async () => {
+    coreSshCommand(null);
+    expect(await cloneEnv({ PATH: "/bin", GIT_SSH: "/usr/bin/plink" })).toEqual({
+      PATH: "/bin", GIT_SSH: "/usr/bin/plink", GIT_TERMINAL_PROMPT: "0",
+    });
+  });
+
+  test("else plain ssh in batch mode; a blank GIT_SSH_COMMAND or a failed config read counts as unset", async () => {
+    coreSshCommand(null);
+    expect(await cloneEnv({ PATH: "/bin", SSH_AUTH_SOCK: "/tmp/agent" })).toEqual({
+      PATH: "/bin", SSH_AUTH_SOCK: "/tmp/agent", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
+    });
+    expect((await cloneEnv({ GIT_SSH_COMMAND: " " })).GIT_SSH_COMMAND).toBe("ssh -o BatchMode=yes");
+    coreSshCommand("");
+    expect((await cloneEnv({})).GIT_SSH_COMMAND).toBe("ssh -o BatchMode=yes");
+    cloneRepoSpawnCtx.set(() => { throw new Error('Executable not found in $PATH: "git"'); });
+    expect(await cloneEnv({})).toEqual({ GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" });
+  });
 });
 
 // repos.json and config.json live at userHome()/.itsybitsy and teams.json in
@@ -152,12 +221,16 @@ describe("with a temp home", () => {
     expect(await cloneRootRelPath(join(root, "swift-packages"), join(baseDir, "no-root"))).toBeNull();
   });
 
-  test("readRepoCloneInfo reads the origin as configured; a failed read is null", async () => {
+  test("readRepoCloneInfo reads the origin as configured, minus credentials; a failed read is null", async () => {
     const repo = join(root, "html", "site");
     await mkdir(repo, { recursive: true });
     cloneRepoSpawnCtx.set(workingGit("git@github.com:owner/site.git"));
     expect(await readRepoCloneInfo(repo, root)).toEqual({ remoteUrl: "git@github.com:owner/site.git", relPath: "html/site" });
     expect(calls.map((c) => c.cmd)).toEqual([["git", "-C", repo, "config", "--get", "remote.origin.url"]]);
+    cloneRepoSpawnCtx.set(workingGit("https://x-access-token:ghp_secret@github.com/owner/site.git"));
+    expect(await readRepoCloneInfo(repo, root)).toEqual({ remoteUrl: "https://github.com/owner/site.git", relPath: "html/site" });
+    cloneRepoSpawnCtx.set(workingGit("ssh://git:secret@host/site.git"));
+    expect((await readRepoCloneInfo(repo, root)).remoteUrl).toBe("ssh://git@host/site.git");
     cloneRepoSpawnCtx.set(workingGit(null));
     expect(await readRepoCloneInfo(repo, root)).toEqual({ remoteUrl: null, relPath: "html/site" });
     cloneRepoSpawnCtx.set(() => { throw new Error('Executable not found in $PATH: "git"'); });
@@ -169,10 +242,12 @@ describe("with a temp home", () => {
     const url = "git@github.com:owner/Foo.git";
     const result = await cloneRepo({ url, dest, registryName: "foo" });
     expect(result).toEqual({ ok: true, message: `Cloned and added: foo (${dest})`, path: dest });
-    expect(calls.map((c) => c.cmd)).toEqual([["git", "clone", "--", url, dest]]);
-    expect(calls[0]!.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: expect.stringMatching(/ -o BatchMode=yes$/) });
-    // The user's own environment comes along (PATH, the SSH agent).
-    expect(calls[0]!.env?.PATH).toBe(process.env.PATH);
+    const clones = calls.filter((c) => c.cmd[1] === "clone");
+    expect(clones.map((c) => c.cmd)).toEqual([["git", "clone", "--", url, dest]]);
+    // cloneEnv's environment (its branches are covered above), with the
+    // user's own one along with it (PATH, the SSH agent).
+    expect(clones[0]!.env).toEqual(await cloneEnv());
+    expect(clones[0]!.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", PATH: process.env.PATH });
     expect((await loadRegistry()).repos).toEqual([{ path: dest, name: "foo" }]);
   });
 
@@ -193,6 +268,15 @@ describe("with a temp home", () => {
     expect((await loadRegistry()).repos).toEqual([{ path: dest, name: "foo" }]);
   });
 
+  test("an existing clone whose origin carries a token matches the peer's stripped URL", async () => {
+    const dest = join(root, "foo");
+    await mkdir(join(dest, ".git"), { recursive: true });
+    cloneRepoSpawnCtx.set(workingGit("https://x-access-token:ghp_secret@github.com/owner/foo.git"));
+    const result = await cloneRepo({ url: "https://github.com/owner/foo", dest, registryName: "foo" });
+    expect(result).toEqual({ ok: true, message: `Added the existing clone: foo (${dest})`, path: dest });
+    expect(calls.some((c) => c.cmd[1] === "clone")).toBe(false);
+  });
+
   test("an existing clone of another origin, or with none, is refused and left alone", async () => {
     const dest = join(root, "foo");
     await mkdir(join(dest, ".git"), { recursive: true });
@@ -202,6 +286,11 @@ describe("with a temp home", () => {
       ok: false,
       message: `${dest} already exists with origin git@github.com:someone-else/foo.git, not git@github.com:owner/foo.git — choose another folder`,
     });
+    // The refusal names the local origin without its token.
+    cloneRepoSpawnCtx.set(workingGit("https://user:ghp_secret@github.com/someone-else/foo.git"));
+    const tokened = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
+    expect(tokened.message).toContain("already exists with origin https://github.com/someone-else/foo.git, not");
+    expect(tokened.message).not.toContain("ghp_secret");
     cloneRepoSpawnCtx.set(workingGit(null));
     const none = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
     expect(none.message).toContain("already exists with origin (none)");

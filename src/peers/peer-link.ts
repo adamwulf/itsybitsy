@@ -113,7 +113,7 @@ export interface RemoteAgent {
 export interface RemoteRepo {
   registryName: string;
   displayName: string;
-  /** The repo's `remote.origin.url` on the other install, exactly as configured; what "Clone here" clones (SPEC §20.5). */
+  /** The repo's `remote.origin.url` on the other install, as configured minus credentials; what "Clone here" clones (SPEC §20.5). */
   remoteUrl: string | null;
   /** The repo's path under the other install's clone root, e.g. `swift-packages/Foo`; sanitized on receipt. */
   relPath: string | null;

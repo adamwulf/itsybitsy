@@ -26,7 +26,7 @@ export const cloneRepoSpawnCtx = new SpawnContext();
 
 /** What the peer snapshot sends for one registered repo (RemoteRepo's clone fields). */
 export interface RepoCloneInfo {
-  /** `remote.origin.url` exactly as configured, or null when there is none. */
+  /** `remote.origin.url` as configured, minus credentials ({@link stripUrlCredentials}), or null when there is none. */
   remoteUrl: string | null;
   /** The repo's path under this install's clone root, e.g. `swift-packages/Foo`, or null when it is not inside it. */
   relPath: string | null;
@@ -69,20 +69,49 @@ export function isAllowedCloneUrl(url: string): boolean {
   return /^[^@:/]+@[^@:/-][^@:/]*:.+$/.test(url);
 }
 
-/** Two remote URLs name the same repo once a trailing `/` and `.git` are trimmed. */
+/**
+ * `url` without the credentials an origin can carry, so none reach a peer:
+ * a `scheme://` URL loses its userinfo (`https://user:token@host/…` and
+ * `https://token@host/…` become `https://host/…`), except that an ssh URL
+ * keeps its user and loses only the password (`ssh://user:pass@host/…`
+ * becomes `ssh://user@host/…`). An scp-style `user@host:path` has no password
+ * and is unchanged, as is anything else.
+ */
+export function stripUrlCredentials(url: string): string {
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(url);
+  if (!scheme) return url;
+  const start = scheme[0].length;
+  const end = url.slice(start).search(/[/?#]/);
+  const authority = end === -1 ? url.slice(start) : url.slice(start, start + end);
+  // The host cannot hold an "@"; a password may, unencoded.
+  const at = authority.lastIndexOf("@");
+  if (at === -1) return url;
+  const userinfo = authority.slice(0, at);
+  const isSsh = ["ssh", "git+ssh", "ssh+git"].includes(scheme[1]!.toLowerCase());
+  const kept = isSsh && userinfo.split(":")[0] ? `${userinfo.split(":")[0]}@` : "";
+  return url.slice(0, start) + kept + url.slice(start + at + 1);
+}
+
+/** Two remote URLs name the same repo once credentials, a trailing `/` and `.git` are dropped. */
 function sameRemote(a: string, b: string): boolean {
-  const trim = (url: string) => url.replace(/\/+$/, "").replace(/\.git$/, "");
+  const trim = (url: string) => stripUrlCredentials(url).replace(/\/+$/, "").replace(/\.git$/, "");
   return trim(a) === trim(b);
 }
 
-/** `remote.origin.url` of the repo at `repoPath`, or null when git fails or it is unset. */
-export async function readOriginUrl(repoPath: string): Promise<string | null> {
+/** `git config --get <key>` (in `repoPath` when given), or null when git fails or prints nothing. */
+async function gitConfigGet(key: string, repoPath?: string, env?: Record<string, string | undefined>): Promise<string | null> {
   try {
-    const { stdout, exitCode } = await cloneRepoSpawnCtx.run(["git", "-C", repoPath, "config", "--get", "remote.origin.url"]);
+    const cmd = repoPath === undefined ? ["git", "config", "--get", key] : ["git", "-C", repoPath, "config", "--get", key];
+    const { stdout, exitCode } = await cloneRepoSpawnCtx.run(cmd, env);
     return exitCode === 0 && stdout !== "" ? stdout : null;
   } catch {
     return null;
   }
+}
+
+/** `remote.origin.url` of the repo at `repoPath`, as configured, or null when git fails or it is unset. */
+export async function readOriginUrl(repoPath: string): Promise<string | null> {
+  return gitConfigGet("remote.origin.url", repoPath);
 }
 
 /** `repoPath` relative to `cloneRoot`, both after realpath, when it is strictly inside it; else null. */
@@ -97,20 +126,32 @@ export async function cloneRootRelPath(repoPath: string, cloneRoot: string): Pro
   return rel.split(sep).join("/");
 }
 
-/** The clone fields of one repo's peer snapshot entry. Never throws. */
+/** The clone fields of one repo's peer snapshot entry, credentials stripped. Never throws. */
 export async function readRepoCloneInfo(repoPath: string, cloneRoot: string): Promise<RepoCloneInfo> {
-  const [remoteUrl, relPath] = await Promise.all([readOriginUrl(repoPath), cloneRootRelPath(repoPath, cloneRoot)]);
-  return { remoteUrl, relPath };
+  const [origin, relPath] = await Promise.all([readOriginUrl(repoPath), cloneRootRelPath(repoPath, cloneRoot)]);
+  return { remoteUrl: origin === null ? null : stripUrlCredentials(origin), relPath };
 }
 
 /**
- * The environment `git clone` runs with: an unknown host key, a missing key
- * or a password prompt fails at once instead of waiting for input nobody can
+ * The environment `git clone` runs with: a password prompt, an unknown host
+ * key or a missing key fails at once instead of waiting for input nobody can
  * see. `ib watch` is unsandboxed, so the user's SSH agent comes along.
+ *
+ * It keeps the user's own SSH setup, following git's precedence:
+ * `GIT_SSH_COMMAND` gets `-o BatchMode=yes` appended; else a
+ * `core.sshCommand` becomes `GIT_SSH_COMMAND` with the option appended; else
+ * a `GIT_SSH` is left alone (it may be plink, which takes no `-o`); else ssh
+ * runs as `ssh -o BatchMode=yes`. `GIT_TERMINAL_PROMPT=0` is always set.
  */
-export function cloneEnv(base: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
-  const ssh = base.GIT_SSH_COMMAND?.trim() || "ssh";
-  return { ...base, GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` };
+export async function cloneEnv(base: Record<string, string | undefined> = process.env): Promise<Record<string, string | undefined>> {
+  const env = { ...base, GIT_TERMINAL_PROMPT: "0" };
+  const batch = (ssh: string) => ({ ...env, GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` });
+  const own = base.GIT_SSH_COMMAND?.trim();
+  if (own) return batch(own);
+  const configured = (await gitConfigGet("core.sshCommand", undefined, base))?.trim();
+  if (configured) return batch(configured);
+  if (base.GIT_SSH?.trim()) return env;
+  return batch("ssh");
 }
 
 /** The way forward from a taken name: the clone must keep the peer's name for its header to join the peer's. */
@@ -154,7 +195,8 @@ export async function cloneRepo({ url, dest, registryName }: { url: string; dest
     }
     const origin = await readOriginUrl(target);
     if (origin === null || !sameRemote(origin, url)) {
-      return { ok: false, message: `${target} already exists with origin ${origin ?? "(none)"}, not ${url} — choose another folder` };
+      const shown = origin === null ? "(none)" : stripUrlCredentials(origin);
+      return { ok: false, message: `${target} already exists with origin ${shown}, not ${url} — choose another folder` };
     }
     return register(target, registryName, "Added the existing clone", `Found a clone at ${target}`);
   }
@@ -186,7 +228,7 @@ async function register(target: string, registryName: string, done: string, onDi
 /** Run git with {@link cloneEnv}. `output` is git's stderr (or stdout) folded onto one line for the dashboard's notice. */
 async function runGit(cmd: string[]): Promise<{ ok: boolean; output: string }> {
   try {
-    const { stdout, stderr, exitCode } = await cloneRepoSpawnCtx.run(cmd, cloneEnv());
+    const { stdout, stderr, exitCode } = await cloneRepoSpawnCtx.run(cmd, await cloneEnv());
     const text = (stderr || stdout).split("\n").map((line) => line.trim()).filter(Boolean).join(" ");
     return { ok: exitCode === 0, output: text || `exit code ${exitCode}` };
   } catch (err) {

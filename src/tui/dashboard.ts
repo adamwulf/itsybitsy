@@ -78,7 +78,7 @@ import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
 import type { DialogState } from "./dialog-handler";
 import {
-  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH, MULTI_SELECT_WIDTH,
+  wrapTextareaLines, TEXTAREA_VISIBLE_HEIGHT, DIALOG_WIDTH, MULTI_SELECT_WIDTH, dialogTitleMaxWidth,
   handleDialogInput, syncNewAgentMachine, renderTextareaBlock, buildFolderBrowserContent, buildNewAgentFormContent,
   PEERS_TAB, buildSetupContent, buildPermissionsEditorContent, buildMultiSelectContent,
 } from "./dialog-handler";
@@ -654,7 +654,8 @@ class DialogOverlayComponent implements Component {
       }
       case "input": {
         return {
-          title: dialog.prompt,
+          // A built title gets this render's width: the overlay narrows with the terminal.
+          title: typeof dialog.prompt === "string" ? dialog.prompt : dialog.prompt(dialogTitleMaxWidth(innerWidth + 4)),
           contentLines: [...(dialog.hint ? wordWrapLines(dialog.hint, innerWidth) : []), truncateToWidth(`> ${dialog.value}█`, innerWidth, "")],
         };
       }

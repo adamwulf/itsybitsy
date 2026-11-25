@@ -14,7 +14,7 @@ import type { RepoEntry } from "../registry";
 import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { createRepo } from "../create-repo";
-import { cloneDestination, cloneRepo, cloneUrlRefusal, parseCloneUrl, resolveCloneRoot } from "../clone-repo";
+import { checkCloneUrl, cloneDestination, cloneRepo, resolveCloneRoot } from "../clone-repo";
 import { visibleWidth } from "@mariozechner/pi-tui";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
@@ -52,7 +52,7 @@ import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import { attachmentSettingKey, TRANSFER_SETTING_BOUNDS } from "../peers/transfer-limits";
 import type { ConfigResult } from "../config";
-import { DIALOG_WIDTH, PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
+import { PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { peerEntryKey, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 import { fullyQualifiedAgentId } from "./row-keys";
@@ -73,7 +73,7 @@ import { wordWrapLines } from "./wrap";
 import type { RepoHealthReport } from "../health-check";
 import { getResolvableWarnings, resolveHealthWarnings } from "../health-check";
 import { IB_COORDINATOR_SESSION, sanitizeTmuxInput, restartSystemCoordinator, restartSystemCoordinatorFresh, isCoordinatorRestartCommand, checkCoordinatorExists, getLastCoordinatorSpawnMode, discardSystemCoordinator } from "../coordinator";
-import { isValidToolList } from "../validation";
+import { isValidRepoName, isValidToolList } from "../validation";
 import { listTeams, getTeam } from "../teams";
 import type { Team } from "../teams";
 import { collectorHealthDetail, type CollectorHealth } from "../sandbox-collector-light";
@@ -3333,38 +3333,34 @@ export function newRepoPrompt(parentPath: string): string {
   return `${prefix}${elideLeft(parentPath, room)}${suffix}`;
 }
 
-/** The shortest left-cut URL worth showing: room for an `…owner/repo.git` tail. */
-const MIN_URL_TAIL = 12;
-/** What a host keeps, from its end, when even the repo name must be cut. */
+/** What a host keeps when even the repo name must be cut: "…" and its last 23 characters. */
 const MIN_HOST_TAIL = 24;
 
 /**
- * Title of the Clone here dialog: `Clone <name> from <host> (<url>) via
- * <peer> into:`. The URL is untrusted peer data (a fork or a stale remote),
- * so the host git will connect to, parsed from it, is its own part. The
- * title must fit the overlay as drawn (pi-tui cuts any line wider than the
- * overlay, which is the dialog's 80 columns or the terminal, if narrower),
- * so it shrinks in this order: the peer is left out; then the URL is cut
- * from the left, keeping owner/repo, the fork or stale-remote signal; then
- * it is left out; then the host is cut from the left, keeping its
- * registrable domain (`…evil.example`); and only for an overlong name is
- * the name cut too.
+ * Title of the Clone here dialog, `Clone <name> from <host> (<path>) via
+ * <peer> into:`, built at each render for the overlay's `max` title width
+ * (pi-tui narrows the overlay with the terminal and cuts any longer line).
+ * `<host>` is the host git will connect to and `<path>` the URL's path
+ * (`owner/repo.git`: no scheme, user or host). The URL is untrusted peer
+ * data, and its owner is what tells a fork or a stale remote apart. The
+ * title shrinks in this order: the peer is left out; then the path is cut
+ * from the right, keeping at least its owner (first segment); then it is
+ * left out; then the host is cut from the left, keeping as much of its end
+ * as fits; only for an overlong name is the name cut too, the host keeping
+ * its last 23 characters.
  */
-export function clonePrompt(
-  name: string,
-  url: string,
-  host: string,
-  peer: string,
-  max = dialogTitleMaxWidth(Math.min(DIALOG_WIDTH, process.stdout.columns || DIALOG_WIDTH)),
-): string {
-  const title = (shownHost: string, shownUrl: string | null, shownPeer: string | null, shownName = name) =>
-    `Clone ${shownName} from ${shownHost}${shownUrl === null ? "" : ` (${shownUrl})`}${shownPeer === null ? "" : ` via ${shownPeer}`} into:`;
+export function clonePrompt(name: string, path: string, host: string, peer: string, max: number): string {
+  const title = (shownHost: string, shownPath: string | null, shownPeer: string | null, shownName = name) =>
+    `Clone ${shownName} from ${shownHost}${shownPath === null ? "" : ` (${shownPath})`}${shownPeer === null ? "" : ` via ${shownPeer}`} into:`;
   const fits = (text: string) => visibleWidth(text) <= max;
-  for (const candidate of [title(host, url, peer), title(host, url, null)]) {
+  for (const candidate of [title(host, path, peer), title(host, path, null)]) {
     if (fits(candidate)) return candidate;
   }
-  const urlRoom = max - visibleWidth(title(host, "", null));
-  if (urlRoom >= MIN_URL_TAIL) return title(host, elideLeft(url, urlRoom), null);
+  // The owner: up to the "/" that ends the first segment (leading slashes kept).
+  const ownerEnd = path.indexOf("/", Math.max(0, path.search(/[^/]/)));
+  const owner = ownerEnd === -1 ? path : path.slice(0, ownerEnd);
+  const pathRoom = max - visibleWidth(title(host, "", null));
+  if (pathRoom > visibleWidth(owner)) return title(host, truncatePeerField(path, pathRoom), null);
   if (fits(title(host, null, null))) return title(host, null, null);
   const hostRoom = max - visibleWidth(title("", null, null));
   if (hostRoom >= MIN_HOST_TAIL) return title(elideLeft(host, hostRoom), null, null);
@@ -3390,13 +3386,18 @@ export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
     return;
   }
   const { repoRegistryName: name, remoteUrl: url } = header;
+  // The name goes into the title and the destination path: only a valid one.
+  if (!isValidRepoName(name)) {
+    ctx.setNotice(`Will not clone: ${header.peerName} reports a repo name that is not valid here`, "error");
+    return;
+  }
   if (url === null) {
     ctx.setNotice(`${header.peerName} reports no remote for ${header.repoName}`, "error");
     return;
   }
-  const parts = parseCloneUrl(url);
-  if (parts === null) {
-    ctx.setNotice(cloneUrlRefusal(url)!, "error");
+  const checked = checkCloneUrl(url);
+  if ("refusal" in checked) {
+    ctx.setNotice(checked.refusal, "error");
     return;
   }
   const key = name.toLowerCase();
@@ -3405,9 +3406,11 @@ export async function handleCloneHere(ctx: ActionCtx): Promise<void> {
     return;
   }
   const root = await resolveCloneRoot();
+  const { host, path } = checked.parts;
+  const peer = header.remoteUrlPeer ?? header.peerName;
   ctx.showDialog({
     type: "input",
-    prompt: clonePrompt(name, url, parts.host, header.remoteUrlPeer ?? header.peerName),
+    prompt: (maxWidth) => clonePrompt(name, path, host, peer, maxWidth),
     value: cloneDestination(root, name, header.relPath),
     onSubmit: (dest: string) => {
       ctx.closeDialog();

@@ -4,14 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "fs";
 import { chmod, mkdtemp, mkdir, readdir, realpath, rm, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
+  checkCloneUrl,
   cloneDestination,
   cloneEnv,
   cloneRepo,
   cloneRepoSpawnCtx,
   cloneRootRelPath,
-  cloneUrlRefusal,
-  isAllowedCloneUrl,
-  parseCloneUrl,
   readRepoCloneInfo,
   resolveCloneRoot,
   stripUrlCredentials,
@@ -21,6 +19,16 @@ import { loadRegistry, saveRegistry } from "./registry";
 import { setUserHome, resetUserHome } from "./home";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import type { SpawnFn } from "./types";
+
+/** Whether the grammar accepts `url`. */
+const parses = (url: string) => "parts" in checkCloneUrl(url);
+/** The notice for a refused `url`, or null. */
+const refusalOf = (url: string) => {
+  const checked = checkCloneUrl(url);
+  return "refusal" in checked ? checked.refusal : null;
+};
+/** A `git -C / clone -- <url> <target>` command. */
+const isClone = (cmd: string[]) => cmd[3] === "clone";
 
 /** Whether the temp volume ignores case (the APFS default), so a typed `myapp` names an existing `MyApp`. */
 const caseInsensitiveTmp = (() => {
@@ -42,7 +50,7 @@ describe("cloneDestination", () => {
   });
 });
 
-describe("isAllowedCloneUrl", () => {
+describe("checkCloneUrl", () => {
   test.each([
     "git@github.com:o/r.git",
     "user@host.example:path/to/repo",
@@ -65,7 +73,7 @@ describe("isAllowedCloneUrl", () => {
     "ssh://APKAEIBAERJR2EXAMPLE@git-codecommit.us-east-2.amazonaws.com/v1/repos/MyDemoRepo",
     "APKAEIBAERJR2EXAMPLE@git-codecommit.us-east-2.amazonaws.com:v1/repos/MyDemoRepo",
   ])("allows %p", (url) => {
-    expect(isAllowedCloneUrl(url)).toBe(true);
+    expect(parses(url)).toBe(true);
   });
 
   test.each([
@@ -161,43 +169,44 @@ describe("isAllowedCloneUrl", () => {
     "https://github.com/owner/\u202erepo",
     "git@github.com:owner/repo\0",
   ])("refuses %p", (url) => {
-    expect(isAllowedCloneUrl(url)).toBe(false);
+    expect(parses(url)).toBe(false);
   });
 
-  test("parseCloneUrl gives the user and the host git connects to, which the dialog title shows", () => {
-    expect(parseCloneUrl("git@github.com:o/r.git")).toEqual({ user: "git", host: "github.com" });
-    expect(parseCloneUrl("gh-work:org/repo.git")).toEqual({ user: null, host: "gh-work" });
-    expect(parseCloneUrl("ssh://git@[::1]:22/x")).toEqual({ user: "git", host: "[::1]" });
-    expect(parseCloneUrl("https://host:8443/x")).toEqual({ user: null, host: "host" });
+  test("checkCloneUrl gives the host git connects to and the path, which the dialog title shows", () => {
+    expect(checkCloneUrl("git@github.com:o/r.git")).toEqual({ parts: { host: "github.com", path: "o/r.git" } });
+    expect(checkCloneUrl("gh-work:org/repo.git")).toEqual({ parts: { host: "gh-work", path: "org/repo.git" } });
+    expect(checkCloneUrl("ssh://git@[::1]:22/x")).toEqual({ parts: { host: "[::1]", path: "x" } });
+    expect(checkCloneUrl("https://host:8443/o/r")).toEqual({ parts: { host: "host", path: "o/r" } });
+    expect(checkCloneUrl("localhost:/srv/repo.git")).toEqual({ parts: { host: "localhost", path: "/srv/repo.git" } });
     // A user that looks like a host is allowed; the host shown is the real one.
-    expect(parseCloneUrl("ssh://github.com@evil.example/o/r")).toEqual({ user: "github.com", host: "evil.example" });
-    expect(parseCloneUrl("file:///tmp/repo")).toBeNull();
+    expect(checkCloneUrl("ssh://github.com@evil.example/o/r")).toEqual({ parts: { host: "evil.example", path: "o/r" } });
   });
 
   test.each([
-    ["ftp://host/repo", "only ssh://[user@]host[:port]/path, https://host[:port]/path and [user@]host:path URLs are allowed"],
-    ["ext::sh -c id", "only ssh://"],
-    ["repo", "only ssh://"],
-    ["https://github.com/o%40%5Bevil.example%5D/r", `it holds %40, %5B or %5D, which git can decode into "@", "[" or "]"`],
-    ["ssh://git@host/My%20Project/repo", `an ssh:// URL may not hold "%" (git decodes it)`],
-    ["https://token@github.com/o/r", "an https:// URL may not carry a user"],
+    ["ftp://host/repo", "not an ssh://, https:// or [user@]host:path URL"],
+    ["ext::sh -c id", "not an ssh://, https:// or [user@]host:path URL"],
+    ["repo", "not an ssh://, https:// or [user@]host:path URL"],
+    ["https://github.com/o%40%5Bevil.example%5D/r", "it holds %40, %5B or %5D"],
+    ["ssh://git@host/My%20Project/repo", "an ssh:// URL may not hold %"],
+    ["https://token@github.com/o/r", "an https:// URL may not name a user"],
     // One rule each, with no contradiction for an email-style user.
-    ["ssh://jane@corp.com@gerrit.corp.com/project",
-      `the user "jane@corp.com" may hold only letters, digits, ".", "_" and "-", and may not start with "-" or "." (an email-style user is not supported)`],
-    ["-x@host:path", `the user "-x" may hold only letters`],
-    ["git@-host:path", `the host "-host" may hold only letters`],
-    ["https://github.com%2eevil.example/o/r", `the host "github.com%2eevil.example" may hold only letters`],
-    ["git@[cafe.de:22]:o/r", `the host "[cafe.de:22]" is not a bracketed IPv6 address`],
+    ["ssh://jane@corp.com@gerrit.corp.com/project", "an email-style ssh user is not supported"],
+    ["-x@host:path", `the user may hold only letters, digits, ".", "_" and "-", not leading "-" or "."`],
+    ["git@-host:path", `the host may hold only letters, digits, ".", "_" and "-", not leading "-" or "."`],
+    ["https://github.com%2eevil.example/o/r", `the host may hold only letters, digits, ".", "_" and "-", not leading "-" or "."`],
+    ["git@[cafe.de:22]:o/r", "a bracketed host must be an IPv6 address"],
     ["git@:o/r", "it has no host"],
-    ["ssh://git@host:123456/repo", `the port "123456" is not 1 to 5 digits`],
+    ["ssh://git@host:123456/repo", "the port must be 1 to 5 digits"],
     ["ssh://host/", "it has no path"],
     ["https://github.com", "it has no path"],
-    ["git@github.com:o/r@[evil.example]:x", `the path may not hold "@", "[", "]", a backslash, whitespace or a control or format character`],
-  ])("the refusal of %p names the rule it breaks", (url, rule) => {
-    const refusal = cloneUrlRefusal(url)!;
-    expect(refusal).toStartWith(`Will not clone ${JSON.stringify(url)}: `);
-    expect(refusal).toContain(rule);
-    expect(cloneUrlRefusal("git@github.com:o/r.git")).toBeNull();
+    ["git@github.com:o/r@[evil.example]:x", "the path may not hold @, [, ], a backslash, spaces or control characters"],
+  ])("the refusal of %p names the rule first and the URL last", (url, rule) => {
+    expect(refusalOf(url)).toBe(`Will not clone: ${rule} (${url})`);
+  });
+
+  test("the URL in a refusal is escaped, so a notice stays one line", () => {
+    expect(refusalOf("https://github.com/o/r\nx")).toBe(String.raw`Will not clone: the path may not hold @, [, ], a backslash, spaces or control characters (https://github.com/o/r\nx)`);
+    expect(refusalOf("git@github.com:o/r.git")).toBeNull();
   });
 });
 
@@ -223,7 +232,7 @@ describe("stripUrlCredentials", () => {
   });
 
   test.each(stripCases)("what the sender sends for %p is a URL the receiver will clone", (url) => {
-    expect(isAllowedCloneUrl(stripUrlCredentials(url))).toBe(true);
+    expect(parses(stripUrlCredentials(url))).toBe(true);
   });
 
   test.each([
@@ -255,7 +264,7 @@ describe("cloneEnv", () => {
   test("GIT_SSH_COMMAND set: BatchMode is appended to it, and core.sshCommand is not read", async () => {
     coreSshCommand("ssh -i ~/.ssh/config-key");
     expect(await cloneEnv({ PATH: "/bin", GIT_SSH_COMMAND: "ssh -i ~/.ssh/work " })).toEqual({
-      PATH: "/bin", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -i ~/.ssh/work -o BatchMode=yes",
+      PATH: "/bin", GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "ssh:https", GIT_SSH_COMMAND: "ssh -i ~/.ssh/work -o BatchMode=yes",
     });
     expect(reads).toEqual([]);
   });
@@ -263,7 +272,7 @@ describe("cloneEnv", () => {
   test("else core.sshCommand: it becomes GIT_SSH_COMMAND with BatchMode, ahead of GIT_SSH", async () => {
     coreSshCommand("ssh -i ~/.ssh/config-key\n");
     expect(await cloneEnv({ PATH: "/bin", GIT_SSH: "/usr/bin/plink" })).toEqual({
-      PATH: "/bin", GIT_SSH: "/usr/bin/plink", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -i ~/.ssh/config-key -o BatchMode=yes",
+      PATH: "/bin", GIT_SSH: "/usr/bin/plink", GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "ssh:https", GIT_SSH_COMMAND: "ssh -i ~/.ssh/config-key -o BatchMode=yes",
     });
     // Read from "/", outside any repo: the user's global and system config,
     // never the local config of a repo ib watch was started in.
@@ -287,20 +296,20 @@ describe("cloneEnv", () => {
   test("else GIT_SSH: the ssh environment is left alone, since plink takes no -o", async () => {
     coreSshCommand(null);
     expect(await cloneEnv({ PATH: "/bin", GIT_SSH: "/usr/bin/plink" })).toEqual({
-      PATH: "/bin", GIT_SSH: "/usr/bin/plink", GIT_TERMINAL_PROMPT: "0",
+      PATH: "/bin", GIT_SSH: "/usr/bin/plink", GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "ssh:https",
     });
   });
 
   test("else plain ssh in batch mode; a blank GIT_SSH_COMMAND or a failed config read counts as unset", async () => {
     coreSshCommand(null);
     expect(await cloneEnv({ PATH: "/bin", SSH_AUTH_SOCK: "/tmp/agent" })).toEqual({
-      PATH: "/bin", SSH_AUTH_SOCK: "/tmp/agent", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
+      PATH: "/bin", SSH_AUTH_SOCK: "/tmp/agent", GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "ssh:https", GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
     });
     expect((await cloneEnv({ GIT_SSH_COMMAND: " " })).GIT_SSH_COMMAND).toBe("ssh -o BatchMode=yes");
     coreSshCommand("");
     expect((await cloneEnv({})).GIT_SSH_COMMAND).toBe("ssh -o BatchMode=yes");
     cloneRepoSpawnCtx.set(() => { throw new Error('Executable not found in $PATH: "git"'); });
-    expect(await cloneEnv({})).toEqual({ GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" });
+    expect(await cloneEnv({})).toEqual({ GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "ssh:https", GIT_SSH_COMMAND: "ssh -o BatchMode=yes" });
   });
 });
 
@@ -323,8 +332,8 @@ describe("with a temp home", () => {
 
   /** `git clone` makes the folder; `git config` reports `origin` (none when null). */
   const workingGit = (origin: string | null = null) => fakeGit((cmd) => {
-    if (cmd[1] === "clone") {
-      mkdirSync(join(cmd[4]!, ".git"), { recursive: true });
+    if (isClone(cmd)) {
+      mkdirSync(join(cmd.at(-1)!, ".git"), { recursive: true });
       return {};
     }
     return origin === null ? { exitCode: 1 } : { stdout: `${origin}\n` };
@@ -396,12 +405,12 @@ describe("with a temp home", () => {
     const url = "git@github.com:owner/Foo.git";
     const result = await cloneRepo({ url, dest, registryName: "foo" });
     expect(result).toEqual({ ok: true, message: `Cloned and added: foo (${dest})`, path: dest });
-    const clones = calls.filter((c) => c.cmd[1] === "clone");
-    expect(clones.map((c) => c.cmd)).toEqual([["git", "clone", "--", url, dest]]);
+    const clones = calls.filter((c) => isClone(c.cmd));
+    expect(clones.map((c) => c.cmd)).toEqual([["git", "-C", "/", "clone", "--", url, dest]]);
     // cloneEnv's environment (its branches are covered above), with the
     // user's own one along with it (PATH, the SSH agent).
     expect(clones[0]!.env).toEqual(await cloneEnv());
-    expect(clones[0]!.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", PATH: process.env.PATH });
+    expect(clones[0]!.env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "ssh:https", PATH: process.env.PATH });
     expect((await loadRegistry()).repos).toEqual([{ path: dest, name: "foo" }]);
   });
 
@@ -428,7 +437,7 @@ describe("with a temp home", () => {
     cloneRepoSpawnCtx.set(workingGit("https://x-access-token:ghp_secret@github.com/owner/foo.git"));
     const result = await cloneRepo({ url: "https://github.com/owner/foo", dest, registryName: "foo" });
     expect(result).toEqual({ ok: true, message: `Added the existing clone: foo (${dest})`, path: dest });
-    expect(calls.some((c) => c.cmd[1] === "clone")).toBe(false);
+    expect(calls.some((c) => isClone(c.cmd))).toBe(false);
   });
 
   test("an existing clone of another origin, or with none, is refused and left alone", async () => {
@@ -448,7 +457,7 @@ describe("with a temp home", () => {
     cloneRepoSpawnCtx.set(workingGit(null));
     const none = await cloneRepo({ url: "git@github.com:owner/foo.git", dest, registryName: "foo" });
     expect(none.message).toContain("already exists with origin (none)");
-    expect(calls.some((c) => c.cmd[1] === "clone")).toBe(false);
+    expect(calls.some((c) => isClone(c.cmd))).toBe(false);
     expect(await readdir(dest)).toEqual([".git"]);
     expect((await loadRegistry()).repos).toEqual([]);
   });
@@ -469,7 +478,7 @@ describe("with a temp home", () => {
     const result = await cloneRepo({ url, dest: join(root, "swift", "foo"), registryName: "foo" });
     const real = join(root, "Swift", "foo");
     expect(result.path).toBe(real);
-    expect(calls.filter((c) => c.cmd[1] === "clone").map((c) => c.cmd)).toEqual([["git", "clone", "--", url, real]]);
+    expect(calls.filter((c) => isClone(c.cmd)).map((c) => c.cmd)).toEqual([["git", "-C", "/", "clone", "--", url, real]]);
     expect((await loadRegistry()).repos).toEqual([{ path: real, name: "foo" }]);
   });
 
@@ -494,9 +503,11 @@ describe("with a temp home", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
-  test("a URL outside the allowlist is refused without running git", async () => {
+  test("a URL the grammar refuses is refused without running git", async () => {
     const result = await cloneRepo({ url: "ext::sh -c touch% /tmp/pwned", dest: join(root, "foo"), registryName: "foo" });
-    expect(result).toEqual({ ok: false, message: 'Will not clone "ext::sh -c touch% /tmp/pwned": only ssh://[user@]host[:port]/path, https://host[:port]/path and [user@]host:path URLs are allowed' });
+    // The same text the dashboard shows when c is pressed.
+    expect(result).toEqual({ ok: false, message: "Will not clone: not an ssh://, https:// or [user@]host:path URL (ext::sh -c touch% /tmp/pwned)" });
+    expect(result.message).toBe(refusalOf("ext::sh -c touch% /tmp/pwned")!);
     expect(calls).toEqual([]);
     expect(await readdir(root)).toEqual([]);
   });

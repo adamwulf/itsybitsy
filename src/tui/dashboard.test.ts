@@ -12423,7 +12423,19 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
-  test("c on a header whose remote URL the allowlist refuses shows the refusal and opens no dialog", async () => {
+  test("c on a header whose peer repo name is not a valid repo name shows a notice and opens no dialog", async () => {
+    const { dashboard, service } = setup();
+    service.set({ links: links().map((link) => link.id === PEER_B
+      ? { ...link, repos: [{ registryName: "bad.name", displayName: "bad", remoteUrl: "git@github.com:o/r.git", relPath: null }, ...repos("other-repo")] }
+      : link) });
+    selectByKey(dashboard, repoKey("bad.name"));
+    resetNotice(dashboard);
+    await agentActions.handleCloneHere(dashboard);
+    expect(dashboard.dialog).toBeNull();
+    expect(dashboard.notice).toBe("Will not clone: Laptop B reports a repo name that is not valid here");
+  });
+
+  test("c on a header whose remote URL the grammar refuses shows the refusal and opens no dialog", async () => {
     const { dashboard, service } = setup();
     const clone = spyOn(cloneRepoModule, "cloneRepo");
     try {
@@ -12436,7 +12448,8 @@ describe("Unified peer repos in the Agents tree", () => {
         await agentActions.handleCloneHere(dashboard);
         expect(dashboard.dialog).toBeNull();
         // The notice names the rule the URL breaks (clone-repo.test.ts covers each rule's text).
-        expect(dashboard.notice).toBe(cloneRepoModule.cloneUrlRefusal(remoteUrl)!);
+        const checked = cloneRepoModule.checkCloneUrl(remoteUrl);
+        expect("refusal" in checked && dashboard.notice === checked.refusal).toBe(true);
       }
       expect(clone).not.toHaveBeenCalled();
     } finally {
@@ -12444,49 +12457,54 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
-  test("the Clone here title names the parsed host and shrinks the peer, then the URL, then the host", () => {
-    const max = dialogTitleMaxWidth();
-    expect(clonePrompt("foo", "git@github.com:o/foo.git", "github.com", "Desk", max))
-      .toBe("Clone foo from github.com (git@github.com:o/foo.git) via Desk into:");
+  test("the Clone here title names the host and the URL's path, and shrinks the peer, then the path, then the host", () => {
+    const max = dialogTitleMaxWidth(); // the dialog's 80 columns
+    expect(clonePrompt("foo", "o/foo.git", "github.com", "Desk", max)).toBe("Clone foo from github.com (o/foo.git) via Desk into:");
     // The peer goes first.
-    expect(clonePrompt("itsybitsy", "git@github.com:owner/itsybitsy.git", "github.com", "Laptop B", max))
-      .toBe("Clone itsybitsy from github.com (git@github.com:owner/itsybitsy.git) into:");
+    expect(clonePrompt("muse-ios-shared", "museapphq/muse-ios-shared.git", "github.com", "Laptop B", max))
+      .toBe("Clone muse-ios-shared from github.com (museapphq/muse-ios-shared.git) into:");
 
-    // Then the URL is cut from the left, so owner/repo, the fork signal, stays.
-    const cut = clonePrompt("app", `git@github.com:${"o".repeat(60)}/fork-of-app.git`, "github.com", "Laptop B", max);
-    expect(visibleWidth(cut)).toBe(max);
-    expect(cut).toStartWith("Clone app from github.com (…");
-    expect(cut).toEndWith("/fork-of-app.git) into:");
+    // Then the path is cut from the right: with a 19-24 character name at 80
+    // columns, the owner survives, so a fork does not look like the original.
+    const original = clonePrompt("muse-ios-shared-utils", "museapphq/muse-ios-shared-utils.git", "github.com", "Laptop B", max);
+    const fork = clonePrompt("muse-ios-shared-utils", "someoneelse/muse-ios-shared-utils.git", "github.com", "Laptop B", max);
+    expect(original).toBe("Clone muse-ios-shared-utils from github.com (museapphq/muse-ios-sha…) into:");
+    expect(fork).toBe("Clone muse-ios-shared-utils from github.com (someoneelse/muse-ios-s…) into:");
+    expect(visibleWidth(original)).toBe(max);
 
-    // Then the URL is left out, when a long host leaves it under a 12-column tail.
-    const host50 = `${"h".repeat(38)}.example.com`;
-    expect(clonePrompt("app", `git@${host50}:o/r.git`, host50, "Laptop B", max)).toBe(`Clone app from ${host50} into:`);
+    // Then the parentheses go, when not even the owner fits.
+    const host40 = `${"h".repeat(28)}.example.com`;
+    expect(clonePrompt("app", "averylongownername/repo.git", host40, "Laptop B", max)).toBe(`Clone app from ${host40} into:`);
 
-    // Then the host is cut from the left, keeping its registrable domain.
+    // Then the host is cut from the left, keeping as much of its end as fits.
     const longHost = `${"a".repeat(30)}.${"b".repeat(30)}.${"c".repeat(20)}.evil.example`;
-    const hostCut = clonePrompt("app", `git@${longHost}:o/r.git`, longHost, "Laptop B", max);
+    const hostCut = clonePrompt("app", "o/r.git", longHost, "Laptop B", max);
     expect(visibleWidth(hostCut)).toBe(max);
-    expect(hostCut).toStartWith("Clone app from …");
+    expect(hostCut).toBe(`Clone app from ${elideLeft(longHost, max - 21)} into:`);
     expect(hostCut).toEndWith(".evil.example into:");
 
-    // Only an overlong name is cut too, and the host keeps its end.
-    const tight = clonePrompt("n".repeat(64), `git@${longHost}:o/r.git`, longHost, "Laptop B", max);
+    // Only an overlong name is cut too, and the host keeps its last 23 characters.
+    const tight = clonePrompt("n".repeat(64), "o/r.git", longHost, "Laptop B", max);
     expect(visibleWidth(tight)).toBe(max);
     expect(tight).toStartWith("Clone nnn");
-    expect(tight).toEndWith(` from ${elideLeft(longHost, 24)} into:`);
-    for (const title of [cut, hostCut, tight]) expect(title).not.toContain("\x1b");
+    expect(tight).toEndWith(` from …${longHost.slice(-23)} into:`);
+    for (const title of [original, hostCut, tight]) expect(title).not.toContain("\x1b");
   });
 
-  test("the Clone here title fits the overlay as drawn, which a narrow terminal narrows", () => {
-    const columns = process.stdout.columns;
-    Object.defineProperty(process.stdout, "columns", { value: 60, writable: true, configurable: true });
-    try {
-      const title = clonePrompt("itsybitsy", "git@github.com:owner/itsybitsy.git", "github.com", "Laptop B");
-      expect(title).toBe("Clone itsybitsy from github.com (…/itsybitsy.git) into:");
-      expect(visibleWidth(title)).toBe(dialogTitleMaxWidth(60));
-    } finally {
-      Object.defineProperty(process.stdout, "columns", { value: columns, writable: true, configurable: true });
-    }
+  test("the Clone here title is built at each render, so a terminal that shrinks after open keeps the host whole", async () => {
+    const { dashboard, service } = setup();
+    service.set({ links: links().map((link) => link.id === PEER_B
+      ? { ...link, repos: [{ registryName: "itsybitsy", displayName: "itsybitsy", remoteUrl: "git@github.com:museapphq/muse-ios-shared-utils.git", relPath: null }, ...repos("other-repo")] }
+      : link) });
+    selectByKey(dashboard, repoKey("itsybitsy"));
+    await agentActions.handleCloneHere(dashboard);
+    const titleRow = (width: number) => stripAnsi(((dashboard as any).dialogOverlay.render(width) as string[])[0]!);
+    // Opened at the dialog's 80 columns...
+    expect(titleRow(80)).toContain(" Clone itsybitsy from github.com (museapphq/muse-ios-shared-utils.git) into: ");
+    // ...then drawn at 50: the title is rebuilt for 45 columns, the path goes, the host stays whole.
+    const narrow = titleRow(50);
+    expect(narrow).toContain(" Clone itsybitsy from github.com into: ");
+    expect(visibleWidth(narrow)).toBe(50);
   });
 
   test("c on a remote-only header with a remote URL clones into the peer's folders under the clone root, and the header turns local", async () => {
@@ -12496,13 +12514,10 @@ describe("Unified peer repos in the Agents tree", () => {
     setCoordinatorHome(join(home, ".itsybitsy"));
     const clones: string[][] = [];
     const url = "git@github.com:owner/itsybitsy.git";
-    // A terminal wider than the dialog, so the title gets the dialog's full 80 columns.
-    const columns = process.stdout.columns;
-    Object.defineProperty(process.stdout, "columns", { value: 200, writable: true, configurable: true });
     cloneRepoSpawnCtx.set(((cmd: string[]) => {
-      if (cmd[1] === "clone") {
+      if (cmd[3] === "clone") {
         clones.push(cmd);
-        mkdirSync(join(cmd[4]!, ".git"), { recursive: true });
+        mkdirSync(join(cmd.at(-1)!, ".git"), { recursive: true });
         return makeSpawnResult(0);
       }
       // A repo's origin (the clone's, once registered); no core.sshCommand (read from "/").
@@ -12519,9 +12534,10 @@ describe("Unified peer repos in the Agents tree", () => {
       selectByKey(dashboard, repoKey("itsybitsy"));
       dashboard.handleInput("c");
       const dialog = await waitForValue(() => dashboard.dialog?.type === "input" ? dashboard.dialog : null);
-      // The title names the host git will connect to and the URL, untrusted
-      // peer data that may be a fork or a stale remote; the peer is left out to fit.
-      expect(dialog.prompt).toBe("Clone itsybitsy from github.com (git@github.com:owner/itsybitsy.git) into:");
+      // The title names the host git will connect to and the URL's path, whose
+      // owner tells a fork or a stale remote apart; it is built for the overlay's width.
+      expect(typeof dialog.prompt === "function" && dialog.prompt(dialogTitleMaxWidth()))
+        .toBe("Clone itsybitsy from github.com (owner/itsybitsy.git) via Laptop B into:");
       const dest = join(home, "Developer", "bun", "itsybitsy");
       expect(dialog.value).toBe(dest);
 
@@ -12533,7 +12549,7 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.notice).toBe("Already cloning itsybitsy");
       await waitFor(() => dashboard.repos.length === 1);
       expect(dashboard.notice).toBe(`Cloned and added: itsybitsy (${dest})`);
-      expect(clones).toEqual([["git", "clone", "--", url, dest]]);
+      expect(clones).toEqual([["git", "-C", "/", "clone", "--", url, dest]]);
       expect(dashboard.repos).toEqual([{ path: dest, name: "itsybitsy" }]);
       // The reload went through setRepos: the peer snapshot's cache now has the clone.
       await waitFor(() => dashboard.repoCloneInfo.has(dest));
@@ -12546,7 +12562,6 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.agentTree.selectedRepoPath).toBe(dest);
       expect(treeRows(dashboard).map((r) => stripAnsi(r).trim()).filter((r) => r.startsWith("▾ itsybitsy"))).toHaveLength(1);
     } finally {
-      Object.defineProperty(process.stdout, "columns", { value: columns, writable: true, configurable: true });
       cloneRepoSpawnCtx.reset();
       resetCoordinatorHome();
       resetUserHome();

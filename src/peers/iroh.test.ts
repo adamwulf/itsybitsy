@@ -307,6 +307,24 @@ test("a path watch takes the addon's node-style (err, event) callback and passes
   expect(stops).toBe(1);
 });
 
+test("stopping a path watch whose native stop rejects leaves no unhandled rejection", async () => {
+  const { IrohConnection } = await import("./iroh");
+  const conn = new IrohConnection({
+    watchPathEvents: () => ({ stop: async () => { throw new Error("watch task gone"); } }),
+  } as never);
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    conn.watchPaths(() => {})();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("native cancellation waits for both halves even when stop and reset reject", async () => {
   const { IrohBiStream } = await import("./iroh");
   const reset = Promise.withResolvers<void>();

@@ -294,7 +294,8 @@ export class IrohConnection {
     };
     const handle = call("Connection.watchPathEvents", () => this.raw.watchPathEvents(callback as never));
     return () => {
-      void handle.stop();
+      // Stopping only aborts the watch task; a failure leaves nothing to undo.
+      handle.stop().catch(() => {});
     };
   }
 }

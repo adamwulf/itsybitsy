@@ -16,10 +16,11 @@
  *
  * Every JS-level exit (a quit, a crash above, a signal handled by
  * terminal-cleanup.ts, a `process.exit` anywhere) also writes one `[exit]`
- * line from the process "exit" event. A native crash (a Bun panic, a segfault
- * in the iroh napi addon) runs no JS, so it leaves neither line: a run that
- * ends with no `[exit]` line died natively, and bounce.sh's exit-status line
- * and watch-stderr.log are its only record.
+ * line from the process "exit" event. A run that ends with no `[exit]` line
+ * ran no JS exit handlers: a native crash (a Bun panic, a segfault in the iroh
+ * napi addon), an outside SIGKILL, a signal not handled at that moment, or a
+ * failure before launchDashboard ran. bounce.sh's exit-status line and
+ * watch-stderr.log tell which.
  */
 
 import { inspect } from "util";

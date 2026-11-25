@@ -50,6 +50,7 @@ import { isStoredRepoName, repoDisplayName, type RepoEntry } from "../registry";
 import { isValidAgentId } from "../validation";
 import type { Agent, PendingQuestion } from "../agents";
 import { SYSTEM_COORDINATOR_TYPE } from "../coordinator-type-names";
+import { RUNTIME_DIR_NAME } from "../runtime-names";
 import { PairProtocolError, type PairCloseInfo, type PairConnection, type PairStream } from "./pairing";
 import { shortPeerId } from "./store";
 import { keepAllowedLinks, linkifyMessageUrls } from "../hyperlinks";
@@ -440,17 +441,21 @@ function safeRemoteUrl(remoteUrl: string | null): string | null {
 /** Longest `relPath` kept from the other side. */
 const MAX_REL_PATH = 512;
 
+/** Folder names a `relPath` segment may not be, in any case: git's and ib's own. */
+const RESERVED_SEGMENTS = new Set([".git", RUNTIME_DIR_NAME]);
+
 /**
  * A peer's `relPath` as this side may join it under its own clone root, or
- * null: an absolute path, an empty, `.` or `..` segment, a `.git` segment in
- * any case, a backslash, NUL or any other control or format character, or
- * more than {@link MAX_REL_PATH} characters all drop it, so the clone falls
- * back to `<root>/<name>`. A clone at `<root>/.git` would make the clone root
- * a repo whose config (`core.fsmonitor`) the peer wrote.
+ * null: an absolute path, an empty, `.` or `..` segment, a `.git` or
+ * `.itsybitsy` segment in any case, a backslash, NUL or any other control or
+ * format character, or more than {@link MAX_REL_PATH} characters all drop it,
+ * so the clone falls back to `<root>/<name>`. A clone at `<root>/.git` would
+ * make the clone root a repo whose config (`core.fsmonitor`) the peer wrote,
+ * and one under a repo's `.itsybitsy` would plant a fake agent folder there.
  */
 function safeRelPath(relPath: string | null): string | null {
   if (relPath === null || relPath.length > MAX_REL_PATH || relPath.startsWith("/") || /[\\\p{Cc}\p{Cf}]/u.test(relPath)) return null;
-  const safe = (segment: string) => segment !== "" && segment !== "." && segment !== ".." && segment.toLowerCase() !== ".git";
+  const safe = (segment: string) => segment !== "" && segment !== "." && segment !== ".." && !RESERVED_SEGMENTS.has(segment.toLowerCase());
   return relPath.split("/").every(safe) ? relPath : null;
 }
 

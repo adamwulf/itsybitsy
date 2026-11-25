@@ -33,8 +33,11 @@ utc_now() {
 
 # "status 0", or for a death by signal N (status 128+N) "status 133 (signal
 # 5, SIGTRAP)". 133 is how a Bun panic ends, including a native segfault Bun
-# catches (in a napi addon, say): it prints "panic(main thread): ..." and "oh
-# no: Bun has crashed" to stderr first. A Bun panic never shows as SIGSEGV.
+# catches (in a napi addon, say). It first prints a panic line to stderr:
+# "panic(main thread): ..." on the main thread, "panic: Segmentation fault at
+# address ..." on any other thread (the iroh addon works on tokio threads, so
+# an iroh crash most likely shows this form). "oh no: Bun has crashed" follows
+# either way and is the stable marker. A Bun panic never shows as SIGSEGV.
 # 134 (SIGABRT) is a native abort() Bun does not intercept, maybe with no
 # message at all.
 describe_exit() {

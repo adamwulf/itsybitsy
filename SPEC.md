@@ -1491,7 +1491,7 @@ The REPO pane mode displays repo-level action hints — available `ib` commands 
 - **`[bounce.sh]`**: under `bounce.sh` (§12.1.2), after each run it appends `<UTC time> [bounce.sh] ib watch exited with status N` to the same file. A status above 128 is decoded as death by signal N−128, for example `status 133 (signal 5, SIGTRAP)`, which is how a Bun panic ends.
 
 A `[bounce.sh]` status with no `[exit]` line before it means the run ended without running JS exit handlers. That can be:
-- a Bun panic, including a native segfault that Bun catches, for example inside the `@number0/iroh` napi addon. Bun prints `panic(main thread): …` and `oh no: Bun has crashed` to stderr and dies with `SIGTRAP` (133), never `SIGSEGV` (measured on arm64 macOS, Bun 1.3.14, with `ib`'s build flags);
+- a Bun panic, including a native segfault that Bun catches, for example inside the `@number0/iroh` napi addon. Bun prints a panic line to stderr and dies with `SIGTRAP` (133), never `SIGSEGV` (measured on arm64 macOS, Bun 1.3.14, with `ib`'s build flags). A panic on the main thread prints `panic(main thread): …`. A panic on any other thread prints `panic: Segmentation fault at address …`, and that is the likely form for an iroh crash, since the addon does its native work on tokio threads. Both are followed by `oh no: Bun has crashed`, the stable marker to search `watch-stderr.log` for;
 - a native `abort()` that Bun does not intercept: `SIGABRT` (134), possibly with nothing printed;
 - an outside `SIGKILL` (137): macOS ending the process for memory, Force Quit, or `kill -9`;
 - a signal `ib watch` was not handling at that moment;

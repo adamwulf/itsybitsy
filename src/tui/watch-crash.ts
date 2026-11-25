@@ -7,7 +7,9 @@
  * the TUI hides it, and exits 1, so a JS crash used to leave nothing in
  * watch.log. Each handler here writes ONE `[crash]` entry to watch.log
  * synchronously (the process is about to die), restores the terminal the way
- * a quit does, prints the error to stderr as Bun would have, and exits 1. A
+ * a quit does, prints the same text to stderr where Bun would have printed
+ * the error, and exits 1. The text is the util.inspect form with bot tokens
+ * redacted (describeFatalReason), not Bun's own error printer. A
  * crash is never turned into keep-running: registering an unhandledRejection
  * listener stops Bun from exiting on its own, so the handler must exit. A
  * startup failure (launchDashboard rejects) never reaches these handlers:

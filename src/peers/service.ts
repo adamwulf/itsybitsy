@@ -796,7 +796,9 @@ export class PeerService {
 
   /**
    * An inbound receipt (a send or a framed remote start): its row while it owns a body, Esc until commit, and shutdown.
-   * Once it owns a body it is also a transfer (transfer-activity.ts) until the request is answered.
+   * Once it owns a body it is also a transfer (transfer-activity.ts) until its commit, when every body has
+   * arrived and verified, so its line is the link's own rate. What follows the commit (an enqueue, a
+   * remote start's spawn) neither counts toward it nor fails it. A receipt that fails first ends it failed.
    */
   private async trackReceipt<O extends import("./peer-link").ReceiptOptions, T>(peer: string, op: "send" | "new-agent", target: string, files: readonly AttachmentEntry[], options: O, receive: (options: O) => Promise<T>): Promise<T> {
     if (this.shuttingDown) throw new Error("Watcher shutting down");
@@ -818,6 +820,7 @@ export class PeerService {
         }
         options.admitted?.(ownsBody);
       }, committing: () => {
+        transfer?.ok();
         const receipt = this.receipts.get(id);
         if (receipt?.row) { receipt.row = undefined; this.notify(); }
         options.committing?.();

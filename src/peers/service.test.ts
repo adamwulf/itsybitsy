@@ -1996,11 +1996,15 @@ describe("PeerService trusted ALPN", () => {
     await waitFor(() => dialedPaths.watchers.size === 0, { message: "dialed watch stopped" });
   });
 
-  test("an inbound framed start logs one transfer line once it owns its body and one when it is answered", async () => {
+  test("an inbound framed start logs one transfer line once it owns its body and one at its commit: the spawn after it is not counted", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     await writeFile(join(home, ".itsybitsy", "machine-name"), "laptop");
-    const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, exitCode: 0, stdout: "agent-1", stderr: "" }));
-    const { service, endpoint, logs } = makeService({ remoteSpawn: {
+    let spawnTakes = () => {};
+    const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => {
+      spawnTakes(); // a worktree and a tmux session take seconds
+      return { ok: true, exitCode: 0, stdout: "agent-1", stderr: "" };
+    });
+    const { service, endpoint, logs, clock } = makeService({ remoteSpawn: {
       listSpawnableTypes: listSpawnableTypeNamesSync, listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent, notice() {},
       attachments: createAttachmentReceiver({ tempDir: home, stagingRoot: join(home, "staging"), hasFreeSpace: async () => true }),
     } });
@@ -2016,14 +2020,21 @@ describe("PeerService trusted ALPN", () => {
       return JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)));
     };
     const peer = `Laptop C (${ID_REMOTE.slice(0, 10)})`;
+    const abc = new Bun.CryptoHasher("sha256").update("abc").digest("hex");
     try {
-      expect(await start(new Bun.CryptoHasher("sha256").update("abc").digest("hex"))).toEqual({ ok: true, id: "agent-1" });
+      spawnTakes = () => clock.jump(8_000);
+      expect(await start(abc)).toEqual({ ok: true, id: "agent-1" });
       expect(await start("0".repeat(64))).toEqual({ op: "error", reason: "Attachment hash mismatch" });
+      // A spawn that fails after the whole body arrived: the transfer itself was fine.
+      newAgent.mockImplementationOnce(async () => ({ ok: false, exitCode: 1, stdout: "", stderr: "worktree add failed" }));
+      expect(await start(abc)).toEqual({ op: "error", reason: "worktree add failed" });
       expect(logs.filter(line => line.includes("transfer"))).toEqual([
         `peer link: transfer started: new-agent from ${peer}: 1 file, 3 bytes`,
         `peer link: transfer ok: new-agent from ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
         `peer link: transfer started: new-agent from ${peer}: 1 file, 3 bytes`,
         `peer link: transfer failed (Attachment hash mismatch): new-agent from ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
+        `peer link: transfer started: new-agent from ${peer}: 1 file, 3 bytes`,
+        `peer link: transfer ok: new-agent from ${peer}: 3 of 3 bytes in 0.0 s, 2.9 KB/s`,
       ]);
     } finally {
       conn.close(PEER_CLOSE.done, "done");

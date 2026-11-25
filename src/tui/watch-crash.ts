@@ -78,12 +78,36 @@ function defaultDeps(): WatchCrashDeps {
 }
 
 /**
- * The thrown value as text, in its inspect form, as Bun's own printer shows
- * it: for an Error the full stack plus its own fields and `[cause]` chain (a
- * network or napi error's `code` is often the detail that matters). A
- * rejection can carry any value. Never throws.
+ * A Telegram bot token as it appears in a Bot API URL (`bot<id>:<secret>`),
+ * or bare, as the config stores it. Tight to the token's shape, so words in a
+ * stack ("bottom", "robot") are left alone.
+ */
+const BOT_TOKEN_IN_PATH = /\bbot\d+:[A-Za-z0-9_-]+/g;
+const BARE_BOT_TOKEN = /\b\d{5,}:[A-Za-z0-9_-]{30,}/g;
+
+/**
+ * Remove Telegram bot tokens. watch.log is a file users copy between
+ * machines, and an Error's own fields can carry a request URL (a fetch
+ * error's `path`) with the token in it. telegram-client.ts redacts its own
+ * log labels the same way (redactLabelText).
+ */
+export function redactSecrets(text: string): string {
+  return text.replace(BOT_TOKEN_IN_PATH, "bot<redacted>").replace(BARE_BOT_TOKEN, "<redacted bot token>");
+}
+
+/**
+ * The thrown value as text, with bot tokens redacted (redactSecrets): its
+ * util.inspect form (`inspect(value, { depth: 4 })`). For an Error that is
+ * the full stack plus its own fields and `[cause]` chain; a network or napi
+ * error's `code` is often the detail that matters. This is not Bun's own
+ * error printer (no source excerpt). A rejection can carry any value. Never
+ * throws.
  */
 export function describeFatalReason(reason: unknown): string {
+  return redactSecrets(describeUnredacted(reason));
+}
+
+function describeUnredacted(reason: unknown): string {
   try {
     if (reason instanceof Error) {
       const text = inspect(reason, { depth: 4 });

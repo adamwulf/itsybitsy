@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join, relative, resolve } from "path";
 import { resetWatchLogPath, setWatchLogPath } from "../watch-log";
-import { describeFatalReason, installWatchCrashHandlers, type WatchCrashDeps } from "./watch-crash";
+import { describeFatalReason, installWatchCrashHandlers, redactSecrets, type WatchCrashDeps } from "./watch-crash";
 
 const SRC = resolve(import.meta.dir, "..");
 
@@ -138,6 +138,32 @@ describe("installWatchCrashHandlers", () => {
     expect(stderr).toContain("code: 'ECONNRESET'");
     expect(stderr).toContain("[cause]: TypeError: iroh stream closed by peer");
     handlers.uninstall();
+  });
+
+  test("a Telegram bot token in an error's message or fields is redacted in the log entry and on stderr", () => {
+    const handlers = installWatchCrashHandlers(deps);
+    // Built at runtime: a token-shaped literal would trip secret scanners.
+    const secret = `S3cr3t-${"x".repeat(30)}`;
+    const token = `123456789:${secret}`;
+    const url = `https://api.telegram.org/bot${token}/getUpdates`;
+    const err = Object.assign(new TypeError(`fetch failed: ${url}`), { path: url, config: { bot_token: token } });
+
+    target.emit("unhandledRejection", err, Promise.resolve());
+
+    const log = readLog(logPath);
+    const stderr = calls.find((c) => c.startsWith("stderr:"))!;
+    for (const text of [log, stderr]) {
+      expect(text).not.toContain(secret);
+      expect(text).toContain("https://api.telegram.org/bot<redacted>/getUpdates");
+      expect(text).toContain("<redacted bot token>");
+    }
+    handlers.uninstall();
+  });
+
+  test("redactSecrets leaves ordinary words and stack positions alone", () => {
+    const text = "at bottom (robot.ts:12:34) robot42:abc bot:1 bot12 at bot (x.ts:1:2) 2026-11-25T06:08:00.123Z";
+    expect(redactSecrets(text)).toBe(text);
+    expect(redactSecrets("GET /bot42:a_b-C/sendMessage")).toBe("GET /bot<redacted>/sendMessage");
   });
 
   test("a teardown that throws still exits 1, with the entry written", () => {

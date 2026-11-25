@@ -209,6 +209,28 @@ test("a failed spawn removes the committed snapshot", async () => {
   } finally { await side.close(); }
 });
 
+test("a files-received signal that cannot be written removes the committed snapshot and starts nothing", async () => {
+  let committed: string[] = [];
+  const side = serve(createFakeClock(), {
+    startAgentWithFiles: (header, peer, readPeerName, body, options) => acceptRemoteAgentWithFiles(header, peer, readPeerName, body, {
+      ...options, filesReceived: async () => {
+        committed = await readdir(received);
+        throw new Error("signal write failed");
+      },
+    }, spawnDeps(), line => logs.push(line)),
+  });
+  try {
+    await expect(requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")] },
+      side.clock.setTimer, { filesDir: await stage("abc") })).rejects.toThrow("signal write failed");
+    // The snapshot was committed when the write failed, and is gone after it.
+    expect(committed).toHaveLength(1);
+    await waitFor(async () => (await readdir(received)).length === 0);
+    expect(await noPartials()).toBe(true);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(notices).toEqual([]);
+  } finally { await side.close(); }
+});
+
 test("the responder's 25 s deadline covers the spawn, not the transfer, and keeps a pending spawn's files", async () => {
   const pending = Promise.withResolvers<Awaited<ReturnType<RemoteSpawnDeps["newAgent"]>>>();
   spawn.mockImplementation(() => pending.promise);

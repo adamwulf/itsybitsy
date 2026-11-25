@@ -70,10 +70,10 @@ import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./tra
 
 import { createPeerOutboxPoll, type pollPeerOutbox } from "./peer-outbox";
 import type { AttachmentEntry, SendHeader } from "./send-frame";
-import { cleanRemoteText, requestAcknowledge, requestLifecycle, requestSend, type OutgoingTransfer } from "./peer-link";
+import { cleanRemoteText, requestAcknowledge, requestLifecycle, requestPermissions, requestSend, type OutgoingTransfer } from "./peer-link";
 import { createMessageReceiver, targetLabel } from "./receive-message";
 import { createAttachmentReceiver, totalBytes } from "./receive-attachments";
-import { remoteLifecycleDenial, remoteSendDenial, remoteStartDenialAtStartup, remoteTerminalDenial } from "./remote-start-caller";
+import { remoteLifecycleDenial, remotePermissionDenial, remoteSendDenial, remoteStartDenialAtStartup, remoteTerminalDenial } from "./remote-start-caller";
 import { acquireEndpointLock, releaseEndpointLock, renewEndpointLease, type EndpointLockResult } from "./endpoint-lock";
 import { loadOrCreateIdentity, type PeerIdentity } from "./identity";
 import { isIrohTooLong, loadIroh, type IrohCloseInfo, type IrohPath } from "./iroh";
@@ -97,6 +97,8 @@ import {
 import { acceptRemoteAgent, acceptRemoteAgentWithFiles, type RemoteSpawnDeps } from "./new-agent";
 import { acceptRemoteLifecycle, type RemoteLifecycleOutcome, type RemoteLifecycleRequest, type RemoteLifecycleDeps } from "./remote-lifecycle";
 import { acceptRemoteAcknowledge, type RemoteQuestionDeps } from "./remote-questions";
+import { acceptRemotePermission, type RemotePermissionDeps, type RemotePermissionOutcome, type RemotePermissionRequest } from "./remote-permissions";
+import { effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability } from "../agent-permissions";
 import { detectAgentStates } from "../agents";
 import { acknowledgeQuestion, newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
@@ -164,6 +166,7 @@ export interface PeerServiceDeps {
   remoteStartDenial: string | null | Promise<string | null>;
   remoteLifecycle?: RemoteLifecycleDeps;
   remoteQuestions?: RemoteQuestionDeps;
+  remotePermissions?: RemotePermissionDeps;
   remoteSpawn?: RemoteSpawnDeps;
   writeRemoteAgents?(states: PeerLinkState[], generation: string): void;
   renewLease?(): Promise<void>;
@@ -215,6 +218,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     },
     remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, machine, notice },
     remoteQuestions: { listRepos, acknowledgeQuestion, notice },
+    remotePermissions: { listRepos, effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability, notice },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice, attachments },
     writeRemoteAgents,
     renewLease: renewEndpointLease,
@@ -885,6 +889,16 @@ export class PeerService {
     await requestAcknowledge(conn, repo, questionId, this.deps.setTimer);
   }
 
+  /** Read or change a paired machine's agent's permissions (`b`), gated like {@link runRemoteLifecycle}. */
+  async remotePermissions(peerId: string, request: RemotePermissionRequest): Promise<RemotePermissionOutcome> {
+    if (this.remoteStartDenial !== null) throw new Error(remotePermissionDenial(this.remoteStartDenial));
+    const machine = await this.peerName(peerId);
+    if (machine === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error(`${machine} is disconnected`);
+    return requestPermissions(conn, request, machine, this.deps.setTimer);
+  }
+
   /** With `request.files`, `transfer.filesDir` holds the staged bodies, numbered as in {@link sendRemoteMessage}. */
   async startRemoteAgent(peerId: string, request: RemoteNewAgentRequest, transfer?: OutgoingTransfer): Promise<string> {
     if (this.remoteStartDenial !== null) throw new Error(this.remoteStartDenial);
@@ -1169,6 +1183,8 @@ export class PeerService {
             acceptRemoteLifecycle(request, readPeerName, this.deps.remoteLifecycle!, this.deps.log)),
           acknowledgeQuestion: this.deps.remoteQuestions && ((repo, id, readPeerName) =>
             acceptRemoteAcknowledge(repo, id, readPeerName, this.deps.remoteQuestions!, this.deps.log)),
+          permissions: this.deps.remotePermissions && ((request, readPeerName) =>
+            acceptRemotePermission(request, readPeerName, this.deps.remotePermissions!, this.deps.log)),
           startAgent: remoteSpawn && ((request, readPeerName) =>
             acceptRemoteAgent(request, readPeerName, remoteSpawn, this.deps.log)),
           startAgentWithFiles: remoteSpawn && ((header, peer, readPeerName, body, options) =>

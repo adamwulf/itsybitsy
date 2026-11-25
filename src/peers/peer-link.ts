@@ -1,5 +1,6 @@
 import { suggestedAddress } from "../resolve-target";
 import { AmbiguousRemoteRehire, lifecycleTimeout, parseLifecycleRequest, type RemoteLifecycleOutcome, type RemoteLifecycleRequest } from "./remote-lifecycle";
+import { parsePermissionRequest, type RemotePermissionOutcome, type RemotePermissionRequest } from "./remote-permissions";
 import { trackSendCleanup } from "../send-cleanup";
 import { singleLine } from "./single-line";
 /**
@@ -23,7 +24,7 @@ import { singleLine } from "./single-line";
  * A stream whose first byte is 1 is a long-lived remote terminal, served by
  * terminal-host.ts (SPEC §20.4 "Remote terminal").
  *
- * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle, acknowledge and send.
+ * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle, acknowledge, permissions and send.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -656,6 +657,38 @@ export function requestAcknowledge(conn: PairConnection, repo: string, id: strin
   }, { setTimer, timeout: [15_000, new Error("Acknowledge request timed out")] });
 }
 
+/** A change re-seals a sandboxed agent and enqueues a message to it before the reply. */
+const PERMISSIONS_TIMEOUT_MS = 30_000;
+
+/**
+ * Read or change the permissions of one of the other install's agents (SPEC
+ * §20.4 "Remote permissions"). After FIN, a change whose reply is lost has an
+ * unknown outcome; a read just failed.
+ */
+export async function requestPermissions(conn: PairConnection, request: RemotePermissionRequest, machine: string, setTimer: Timer): Promise<RemotePermissionOutcome> {
+  const bytes = encodeJson({ ...request, op: "permissions" });
+  if (bytes.length > PEER_MAX_REQUEST_BYTES) throw new Error("Permission request exceeds the request limit");
+  const change = request.allow !== undefined || request.canSpawnChildren !== undefined;
+  const unknown = new Error(`outcome unknown — check ${machine}`);
+  try {
+    return await clientExchange(conn, bytes, payload => {
+      const reply = decodeObject(payload, "reply");
+      if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(sendDiagnostic(reply.reason));
+      if (reply.ok !== true || typeof reply.canSpawnChildren !== "boolean" ||
+          (reply.notifyError !== undefined && typeof reply.notifyError !== "string")) throw new PeerProtocolError("Malformed permissions reply");
+      return {
+        canSpawnChildren: reply.canSpawnChildren,
+        ...(typeof reply.notifyError === "string" && { notifyError: sendDiagnostic(reply.notifyError) }),
+      };
+    }, change
+      ? { setTimer, unknownAfterFin: unknown.message, timeout: [PERMISSIONS_TIMEOUT_MS, unknown] }
+      : { setTimer, timeout: [PERMISSIONS_TIMEOUT_MS, new Error("Permission request timed out")] });
+  } catch (err) {
+    if (change && err instanceof TransferIdleError) throw unknown;
+    throw err;
+  }
+}
+
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
 
 async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal, milestone?: () => void) {
@@ -881,6 +914,7 @@ export interface PeerResponderDeps {
   lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<RemoteLifecycleOutcome>;
   /** The request's `repo` and `id` as received: the handler validates them. */
   acknowledgeQuestion?(repo: unknown, id: unknown, readPeerName: () => Promise<string | null>): Promise<void>;
+  permissions?(request: RemotePermissionRequest, readPeerName: () => Promise<string | null>): Promise<RemotePermissionOutcome>;
   startAgent?(request: Record<string, unknown>, readPeerName: () => Promise<string | null>): Promise<string>;
   /** A framed new-agent request: validate, receive the bodies, then spawn within {@link withStartDeadline}. */
   startAgentWithFiles?(header: NewAgentHeader, peerId: string, readPeerName: () => Promise<string | null>, body: Pick<PairStream, "read">, options: StartReceiptOptions): Promise<string>;
@@ -1221,6 +1255,16 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     } catch (err) {
       const error = cleanRemoteText(errorDetail(err));
       deps.log(`peer link: acknowledge from ${from} failed: ${error}`);
+      reply = encodeErrorReply(error);
+    }
+  } else if (request.op === "permissions") {
+    try {
+      if (!deps.permissions) throw new Error("Remote permissions are unavailable");
+      const { canSpawnChildren, notifyError } = await deps.permissions(parsePermissionRequest(request), () => deps.peerName(conn.remoteId));
+      reply = encodeJson({ ok: true, canSpawnChildren, ...(notifyError !== undefined && { notifyError: sendDiagnostic(notifyError) }) });
+    } catch (err) {
+      const error = sendDiagnostic(errorDetail(err));
+      deps.log(`peer link: permissions request from ${from} failed: ${error}`);
       reply = encodeErrorReply(error);
     }
   } else {

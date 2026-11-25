@@ -37,6 +37,7 @@ import type { PeersDialogService } from "./peers-dialog";
 import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent, RemoteQuestion } from "../peers/peer-link";
+import type { RemotePermissionOutcome } from "../peers/remote-permissions";
 import type { PeerLinkState } from "../peers/poller";
 import { remoteTerminalSession, terminalWindowCtx } from "../peers/terminal-window";
 import { peerEntryKey } from "./peer-repos";
@@ -9270,6 +9271,7 @@ class FakePeerService implements PeersDialogService {
   remoteStartDenial: string | null = null;
   runRemoteLifecycle: PeersDialogService["runRemoteLifecycle"] = async () => { throw new Error("Unexpected lifecycle request"); };
   acknowledgeRemoteQuestion = mock<PeersDialogService["acknowledgeRemoteQuestion"]>(async () => {});
+  remotePermissions = mock<PeersDialogService["remotePermissions"]>(async () => { throw new Error("Unexpected permissions request"); });
   startRemoteAgent: PeersDialogService["startRemoteAgent"] = async () => { throw new Error("Unexpected remote start"); };
   state: PeerServiceView = {
     status: { kind: "listening" },
@@ -11881,6 +11883,108 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toContain("Agent is already running");
   });
 
+  test("b on a remote agent opens the local permission dialog, and the agent's machine makes each change", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const target = { repo: "itsybitsy", id: "worker-abc" };
+    const read = Promise.withResolvers<RemotePermissionOutcome>();
+    service.remotePermissions.mockImplementationOnce(() => read.promise);
+    dashboard.handleInput("b");
+    // The read is a pending command in the header alert until the peer answers.
+    expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toContain(`permissions ${WORKER_KEY}…`);
+    expect(dashboard.dialog).toBeNull();
+    read.resolve({ canSpawnChildren: false });
+    await waitFor(() => dashboard.dialog !== null, { message: "the permission dialog" });
+    const dialog = assertDialog(dashboard.dialog, "add-permission");
+    expect(dialog.prompt).toBe(`Add permission to ${WORKER_KEY}:`);
+    expect(dialog.focused).toBe("input");
+    expect(dialog.canSpawnChildren).toBe(false);
+    expect(service.remotePermissions.mock.calls).toEqual([[PEER_B, target]]);
+    expect(stripAnsi(dashboard.render(WIDTH)[0]!)).not.toContain(`permissions ${WORKER_KEY}…`);
+
+    service.remotePermissions.mockResolvedValueOnce({ canSpawnChildren: false });
+    for (const ch of "Bash(git status:*)") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    expect(dashboard.dialog).toBeNull();
+    await waitFor(() => dashboard.notice === `Added Bash(git status:*) to ${WORKER_KEY} allow list`, { message: "the added notice" });
+    expect(service.remotePermissions.mock.calls.at(-1)).toEqual([PEER_B, { ...target, allow: "Bash(git status:*)" }]);
+
+    // Tab to the toggle: it flips the capability the peer reported.
+    service.remotePermissions.mockResolvedValueOnce({ canSpawnChildren: true });
+    dashboard.handleInput("b");
+    await waitFor(() => dashboard.dialog !== null, { message: "the permission dialog" });
+    expect(assertDialog(dashboard.dialog, "add-permission").canSpawnChildren).toBe(true);
+    service.remotePermissions.mockResolvedValueOnce({ canSpawnChildren: false });
+    dashboard.handleInput("\t");
+    dashboard.handleInput("\r");
+    expect(dashboard.dialog).toBeNull();
+    await waitFor(() => dashboard.notice === `Disabled sub-agent spawning for ${WORKER_KEY}`, { message: "the toggle notice" });
+    expect(service.remotePermissions.mock.calls.at(-1)).toEqual([PEER_B, { ...target, canSpawnChildren: false }]);
+  });
+
+  test("b on a remote agent shows refusals, a failed notify and the caller denial as the local dialog does", async () => {
+    const { dashboard, service } = setup();
+    selectByKey(dashboard, WORKER_KEY);
+    const open = async () => {
+      service.remotePermissions.mockResolvedValueOnce({ canSpawnChildren: false });
+      dashboard.handleInput("b");
+      await waitFor(() => dashboard.dialog?.type === "add-permission", { message: "the permission dialog" });
+      return assertDialog(dashboard.dialog, "add-permission");
+    };
+    // The peer's refusal is the local dialog's notice.
+    let dialog = await open();
+    service.remotePermissions.mockRejectedValueOnce(new Error("Already in allow list"));
+    dialog.onSubmit("Read");
+    await waitFor(() => dashboard.notice === "Already in allow list", { message: "the refusal" });
+    dialog = await open();
+    service.remotePermissions.mockResolvedValueOnce({ canSpawnChildren: true, notifyError: "No active tmux session" });
+    dialog.onToggleSpawn();
+    await waitFor(() => dashboard.notice === `Toggled spawn for ${WORKER_KEY}, but notify failed: No active tmux session`, { message: "the notify failure" });
+    // An empty or invalid entry is handled here, as locally: nothing is sent.
+    const sent = service.remotePermissions.mock.calls.length;
+    (await open()).onSubmit("Bash(foo; rm -rf /)");
+    expect(dashboard.notice).toBe("Invalid permission entry — disallowed characters");
+    (await open()).onSubmit("  ");
+    expect(dashboard.notice).toBe("Permission add cancelled");
+    expect(service.remotePermissions.mock.calls.length).toBe(sent + 2);
+
+    // A failed read opens no dialog, nor does one answered once another dialog
+    // is open (it would replace it) or after the selection moved.
+    service.remotePermissions.mockRejectedValueOnce(new Error("Laptop B is disconnected"));
+    dashboard.handleInput("b");
+    await waitFor(() => dashboard.notice === "Laptop B is disconnected", { message: "the read failure" });
+    const covered = Promise.withResolvers<RemotePermissionOutcome>();
+    service.remotePermissions.mockImplementationOnce(() => covered.promise);
+    dashboard.handleInput("b");
+    dashboard.handleInput("?");
+    expect(dashboard.dialog?.type).toBe("help");
+    covered.resolve({ canSpawnChildren: true });
+    await Bun.sleep(0);
+    expect(dashboard.dialog?.type).toBe("help");
+    dashboard.closeDialog();
+    const late = Promise.withResolvers<RemotePermissionOutcome>();
+    service.remotePermissions.mockImplementationOnce(() => late.promise);
+    dashboard.handleInput("b");
+    dashboard.handleInput("j");
+    late.resolve({ canSpawnChildren: true });
+    await Bun.sleep(0);
+    expect(dashboard.dialog).toBeNull();
+
+    selectByKey(dashboard, WORKER_KEY);
+    service.remoteStartDenial = "Remote starts are disabled inside tmux";
+    const before = service.remotePermissions.mock.calls.length;
+    dashboard.handleInput("b");
+    await waitFor(() => dashboard.notice === "Remote permission changes are disabled while ib watch runs inside tmux; restart ib watch from a terminal outside tmux",
+      { message: "the caller denial" });
+    expect(service.remotePermissions.mock.calls.length).toBe(before);
+    expect(dashboard.dialog).toBeNull();
+
+    // A remote coordinator stays read-only.
+    const row = dashboard.agentTree.selectedRemote!;
+    expect(isRemoteAllowedKey("b", row)).toBe(true);
+    expect(row.kind === "remote-agent" && isRemoteAllowedKey("b", { ...row, remote: { ...row.remote, agentType: "repo-coordinator" } })).toBe(false);
+  });
+
   test("a remote merge whose push failed on the peer shows the failure in red", async () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);
@@ -12006,7 +12110,7 @@ describe("Unified peer repos in the Agents tree", () => {
       .filter((name) => typeof (agentActions as Record<string, unknown>)[name] === "function")
       .map((name) => spyOn(agentActions as Record<string, any>, name).mockImplementation(() => undefined));
     try {
-      for (const key of ["c", "t", "!", "S", "O", "b"]) {
+      for (const key of ["c", "t", "!", "S", "O", "P", "N"]) {
         resetNotice(dashboard);
         dashboard.handleInput(key);
         expect(dashboard.notice).toBe(REMOTE_READ_ONLY_NOTICE);

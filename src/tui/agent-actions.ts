@@ -18,13 +18,15 @@ import { checkCloneUrl, cloneDestination, cloneRepo, resolveCloneRoot } from "..
 import { visibleWidth } from "@mariozechner/pi-tui";
 import {
   retireAgent, nukeAgent, nukeAllAgents, resumeAgent, pauseAgent, reassignAgent, renameAgent,
-  mergeCheckAgent, mergeAgent, sendMessage, newAgent,
+  mergeCheckAgent, mergeAgent, newAgent,
   acknowledgeQuestion, hooksStatus, interceptHooksStatus,
   installSafetyHooks, uninstallSafetyHooks,
   installInterceptHook, uninstallInterceptHook,
   teamCreate, teamAdd, teamDelete, teamRemove, teamRemoveStoredMember,
-  writeMetaJsonAtomic, sealAgentRecord,
 } from "../ib-commands";
+import {
+  effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability, INVALID_PERMISSION_ENTRY, type PermissionChangeResult,
+} from "../agent-permissions";
 import { sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { pushFailedNotice } from "../push-failure";
@@ -37,7 +39,7 @@ import { openRemoteTerminal } from "../peers/terminal-window";
 import { remoteTerminalDenial } from "../peers/remote-start-caller";
 import { buildFolderItems } from "./folder-browser";
 import { truncatePeerField } from "./peer-repos";
-import { listSpawnableTypeNamesSync, loadAgentType } from "../agent-types";
+import { listSpawnableTypeNamesSync } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { EMPTY_DIFF, prepareDiffCopy } from "../peers/agent-diff";
 import { resolveDefaultAgentType } from "./default-agent-type";
@@ -110,69 +112,6 @@ export function setDiffToolLaunching(v: boolean) { diffToolLaunching = v; }
 export function getCoordinatorSpawnsInFlight() { return coordinatorSpawnsInFlight; }
 export function clearCoordinatorSpawnsInFlight() { coordinatorSpawnsInFlight.clear(); }
 
-/** Resolve the settings.local.json path for an agent.
- * Coordinator agents use <agentDir>/.claude/; everyone else uses <agentDir>/repo/.claude/. */
-export function agentSettingsLocalPath(agent: Agent): string {
-  const dir = agent.archived ? "archive" : "agents";
-  const agentDir = join(runtimeNames.runtimeDir(agent.repoPath), dir, agent.id);
-  const base = agent.meta.agentType === REPO_COORDINATOR_TYPE ? agentDir : join(agentDir, "repo");
-  return join(base, ".claude", "settings.local.json");
-}
-
-/** Append an entry to the permissions.allow array in a settings.local.json file.
- *  Returns { added: true } on success, { added: false, reason: "duplicate" } if the
- *  entry is already present, or { added: false, reason: "error", message } on failure.
- *  Preserves deny list and any other keys. If the file is missing, creates a new one.
- *  If the file exists but is malformed, aborts without overwriting. */
-export type AddPermissionResult =
-  | { added: true }
-  | { added: false; reason: "duplicate" }
-  | { added: false; reason: "error"; message: string };
-
-export async function addPermissionToSettings(
-  settingsPath: string,
-  entry: string,
-): Promise<AddPermissionResult> {
-  const file = Bun.file(settingsPath);
-  let settings: Record<string, unknown> = {};
-  if (await file.exists()) {
-    try {
-      settings = (await file.json()) as Record<string, unknown>;
-    } catch (err) {
-      return { added: false, reason: "error", message: `Malformed JSON: ${(err as Error).message}` };
-    }
-    if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
-      return { added: false, reason: "error", message: "settings.local.json is not an object" };
-    }
-  }
-  const existingPerms = (settings.permissions as Record<string, unknown> | undefined) ?? {};
-  if (typeof existingPerms !== "object" || existingPerms === null || Array.isArray(existingPerms)) {
-    return { added: false, reason: "error", message: "permissions is not an object" };
-  }
-  const rawAllow = existingPerms.allow;
-  const allow = Array.isArray(rawAllow) ? [...(rawAllow as unknown[])].filter((v): v is string => typeof v === "string") : [];
-  const rawDeny = existingPerms.deny;
-  const deny = Array.isArray(rawDeny) ? [...(rawDeny as unknown[])].filter((v): v is string => typeof v === "string") : [];
-  if (allow.includes(entry)) {
-    return { added: false, reason: "duplicate" };
-  }
-  const dedupedAllow = Array.from(new Set([...allow, entry]));
-  const newSettings = {
-    ...settings,
-    permissions: {
-      ...existingPerms,
-      allow: dedupedAllow,
-      deny,
-    },
-  };
-  try {
-    await Bun.write(settingsPath, JSON.stringify(newSettings, null, 2));
-  } catch (err) {
-    return { added: false, reason: "error", message: (err as Error).message };
-  }
-  return { added: true };
-}
-
 /** Kill any active diff process (used during shutdown to prevent orphans) */
 export function killActiveDiffProc() {
   if (activeDiffProc) {
@@ -218,6 +157,8 @@ export interface ActionCtx {
   peerService: PeersDialogService | null;
   remoteSelection: RemoteEntry | null;
   runRemoteRowCommand(row: Extract<RemoteEntry, { kind: "remote-agent" }>, options: Pick<import("../peers/remote-lifecycle").RemoteLifecycleRequest, "action" | "checkOnly" | "keep">): Promise<string>;
+  /** `b` on a remote agent: read (no change) or change its permissions on its machine (SPEC §20.4). */
+  runRemotePermissions(row: Extract<RemoteEntry, { kind: "remote-agent" }>, change: Pick<import("../peers/remote-permissions").RemotePermissionRequest, "allow" | "canSpawnChildren">): Promise<import("../peers/remote-permissions").RemotePermissionOutcome>;
   /** Acknowledge a peer question on its machine (SPEC §20.5); it leaves the list at once. */
   acknowledgePeerQuestion(peer: NonNullable<PendingQuestion["peer"]>, id: string): Promise<void>;
   agentTree: {
@@ -414,6 +355,13 @@ function showCoordinatorResetResult(ctx: ActionCtx, agent: Agent, result: IbComm
  */
 function remoteAgentLabel(row: Extract<RemoteEntry, { kind: "remote-agent" }>) {
   return `${row.peerName}/${row.remote.repoRegistryName}/${row.remote.id}`;
+}
+
+/** Whether `row` is still the selection, after a peer request it waited on. */
+function isRemoteRowSelected(ctx: ActionCtx, row: Extract<RemoteEntry, { kind: "remote-agent" }>) {
+  const selected = ctx.remoteSelection;
+  return selected?.kind === "remote-agent" && row.peerId === selected.peerId &&
+    row.remote.id === selected.remote.id && row.remote.repoRegistryName === selected.remote.repoRegistryName;
 }
 
 function confirmRetire(ctx: ActionCtx, agent: Agent) {
@@ -1363,9 +1311,7 @@ export function handleMerge(ctx: ActionCtx) {
   if (row?.kind === "remote-agent") {
     ctx.executeAndRefresh(async () => {
       const output = await ctx.runRemoteRowCommand(row, { action: "merge", checkOnly: true });
-      const selected = ctx.remoteSelection;
-      if (ctx.dialog || selected?.kind !== "remote-agent" || row.peerId !== selected.peerId ||
-          row.remote.id !== selected.remote.id || row.remote.repoRegistryName !== selected.remote.repoRegistryName) return;
+      if (ctx.dialog || !isRemoteRowSelected(ctx, row)) return;
       mergeDialog(ctx, remoteAgentLabel(row), output, keep => ctx.runRemoteRowCommand(row, { action: "merge", keep }));
     });
     return;
@@ -1776,36 +1722,24 @@ function handleSendToRepoCoordinator(ctx: ActionCtx, agent: Agent) {
   ctx.showDialog(dialog);
 }
 
-/** 'b' — add an entry to the selected agent's settings.local.json allow list. */
 /**
- * Resolve an agent's CURRENT effective spawn capability, mirroring the
- * precedence the intercept-task hook enforces:
- *   1. `meta.canSpawnChildren` per-agent override (when a boolean).
- *   2. otherwise the agent type's `canSpawnChildren`.
- *   3. otherwise the legacy `!meta.worker` fallback.
- * Kept in one place so the 'b' dialog's toggle label matches what the hook does.
+ * 'b' — add an entry to the selected agent's settings.local.json allow list,
+ * or (Tab) flip its sub-agent spawning. A remote agent gets the same dialog,
+ * and its machine makes the change (SPEC §20.4 "Remote permissions").
  */
-export async function effectiveSpawnCapability(agent: Agent): Promise<boolean> {
-  const meta = agent.meta;
-  if (typeof meta.canSpawnChildren === "boolean") return meta.canSpawnChildren;
-  if (meta.agentType) {
-    try {
-      const type = await loadAgentType(meta.agentType);
-      return type.canSpawnChildren;
-    } catch {
-      // Unknown type — fall through to the worker fallback.
-    }
-  }
-  return !meta.worker;
-}
-
-/** Physical agent dir backing an agent record (archived agents are blocked before this). */
-function agentDirFor(agent: Agent): string {
-  const dir = agent.archived ? "archive" : "agents";
-  return join(runtimeNames.runtimeDir(agent.repoPath), dir, agent.id);
-}
-
 export function handleAddPermission(ctx: ActionCtx) {
+  const row = ctx.remoteSelection;
+  if (row?.kind === "remote-agent") {
+    const label = remoteAgentLabel(row);
+    ctx.runRemotePermissions(row, {}).then(({ canSpawnChildren }) => {
+      if (ctx.dialog || !isRemoteRowSelected(ctx, row)) return;
+      showAddPermissionDialog(ctx, label, canSpawnChildren, change => ctx.runRemotePermissions(row, change).then(
+        ({ notifyError }) => ({ ok: true, ...(notifyError !== undefined && { notifyError }) }),
+        (err) => ({ ok: false, error: (err as Error).message }),
+      ));
+    }, (err) => ctx.setNotice((err as Error).message, "error"));
+    return;
+  }
   if (ctx.agentTree.isSystemCoordinatorSelected) return;
 
   // Resolve target agent: if a repo header is selected with a coordinator,
@@ -1828,119 +1762,63 @@ export function handleAddPermission(ctx: ActionCtx) {
   }
   const agent = target;
 
-  const onSubmit = (value: string) => {
-    ctx.closeDialog();
-    const entry = value.trim();
-    if (!entry) { ctx.setNotice("Permission add cancelled", "info"); return; }
-    if (!isValidToolList(entry)) {
-      ctx.setNotice("Invalid permission entry — disallowed characters", "error");
-      return;
-    }
-    const settingsPath = agentSettingsLocalPath(agent);
-    addPermissionToSettings(settingsPath, entry).then(async (result) => {
-      if (result.added) {
-        ctx.setNotice(`Added ${entry} to ${agent.id} allow list`, "info");
-        const sendResult = await sendMessage(
-          agent,
-          `Permission to '${entry}' has been granted. You may retry the action that was previously denied.`,
-          { cwd: "/" },
-        );
-        if (!sendResult.ok) {
-          ctx.setNotice(`Added ${entry}, but notify failed: ${sendResult.stderr || sendResult.stdout}`, "error");
-        }
-      } else if (result.reason === "duplicate") {
-        ctx.setNotice("Already in allow list", "error");
-      } else {
-        ctx.setNotice(`Failed: ${result.message}`, "error");
-      }
+  // Compute the target's current effective spawn capability for the toggle label,
+  // then open the dialog with the text input focused by default.
+  effectiveSpawnCapability(agent).then((canSpawn) => {
+    showAddPermissionDialog(ctx, agent.id, canSpawn, change => "allow" in change
+      ? grantAgentPermission(agent, change.allow)
+      : setAgentSpawnCapability(agent, change.canSpawnChildren));
+  }).catch((err) => {
+    ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
+  });
+}
+
+/**
+ * The 'b' dialog for `label`, local or remote: Enter adds the typed entry,
+ * the toggle flips `canSpawn`. `change` makes one change, and its outcome
+ * becomes the notice.
+ */
+function showAddPermissionDialog(
+  ctx: ActionCtx,
+  label: string,
+  canSpawn: boolean,
+  change: (change: { allow: string } | { canSpawnChildren: boolean }) => Promise<PermissionChangeResult>,
+) {
+  const report = (outcome: Promise<PermissionChangeResult>, done: string, changed: string) => {
+    outcome.then((result) => {
+      if (!result.ok) ctx.setNotice(result.error, "error");
+      else if (result.notifyError !== undefined) ctx.setNotice(`${changed}, but notify failed: ${result.notifyError}`, "error");
+      else ctx.setNotice(done, "info");
     }).catch((err) => {
       ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
     });
   };
-
-  // Compute the target's current effective spawn capability for the toggle label,
-  // then open the dialog with the text input focused by default.
-  effectiveSpawnCapability(agent).then((canSpawn) => {
-    const onToggleSpawn = () => {
+  ctx.showDialog({
+    type: "add-permission",
+    prompt: `Add permission to ${label}:`,
+    value: "",
+    focused: "input",
+    canSpawnChildren: canSpawn,
+    onSubmit: (value) => {
+      ctx.closeDialog();
+      const entry = value.trim();
+      if (!entry) { ctx.setNotice("Permission add cancelled", "info"); return; }
+      if (!isValidToolList(entry)) {
+        ctx.setNotice(INVALID_PERMISSION_ENTRY, "error");
+        return;
+      }
+      report(change({ allow: entry }), `Added ${entry} to ${label} allow list`, `Added ${entry}`);
+    },
+    onToggleSpawn: () => {
       // Flip the current effective capability and persist as a per-agent override.
       const next = !canSpawn;
       ctx.closeDialog();
-
-      const agentDir = agentDirFor(agent);
-      (async () => {
-        try {
-          const metaFile = Bun.file(join(agentDir, "meta.json"));
-          if (!(await metaFile.exists())) {
-            ctx.setNotice(`Failed: meta.json missing for ${agent.id}`, "error");
-            return;
-          }
-          const meta = (await metaFile.json()) as Record<string, unknown>;
-          const prevCanSpawn = meta.canSpawnChildren; // for rollback on re-seal failure
-          meta.canSpawnChildren = next;
-          await writeMetaJsonAtomic(agentDir, meta);
-
-          // Re-seal a sandboxed ENABLED agent so the frozen profile record
-          // reflects the new spawn capability. canSpawnChildren is a sealed
-          // input (SPEC-SANDBOX §4C.3): without re-sealing, this legitimate
-          // toggle reads as tamper on the next resume/respawn (verifyMetaAgainstSeal
-          // fails hard) and `ib sandbox refresh` refuses it. The toggle runs
-          // UNSANDBOXED in `ib watch`, so the direct seal write lands. A disabled
-          // agent has no profile and is never verified, so skip it.
-          const sandbox = meta.sandbox as { enabled?: boolean } | undefined;
-          if (sandbox?.enabled) {
-            try {
-              await sealAgentRecord(agent.repoPath, agent.id, meta, agentDir);
-            } catch (err) {
-              // Roll the meta write back — a half-applied toggle (meta changed,
-              // seal stale) would brick the agent on its next resume, which is
-              // worse than a refused toggle. Restore the prior canSpawnChildren
-              // (its absence when there was no per-agent override) and re-write.
-              if (prevCanSpawn === undefined) delete meta.canSpawnChildren;
-              else meta.canSpawnChildren = prevCanSpawn;
-              await writeMetaJsonAtomic(agentDir, meta).catch(() => {});
-              ctx.setNotice(
-                `Failed to re-seal ${agent.id}; spawn toggle rolled back: ${(err as Error).message}`,
-                "error",
-              );
-              return;
-            }
-          }
-
-          // Reflect the change in the in-memory record so the dashboard is current.
-          agent.meta.canSpawnChildren = next;
-          ctx.setNotice(
-            next
-              ? `Enabled sub-agent spawning for ${agent.id}`
-              : `Disabled sub-agent spawning for ${agent.id}`,
-            "info",
-          );
-          const sendResult = await sendMessage(
-            agent,
-            next
-              ? "You can now spawn sub-agents (`ib new-agent --type worker \"task\"`)."
-              : "Your ability to spawn sub-agents has been revoked. Report back to your manager instead.",
-            { cwd: "/" },
-          );
-          if (!sendResult.ok) {
-            ctx.setNotice(`Toggled spawn for ${agent.id}, but notify failed: ${sendResult.stderr || sendResult.stdout}`, "error");
-          }
-        } catch (err) {
-          ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
-        }
-      })();
-    };
-
-    ctx.showDialog({
-      type: "add-permission",
-      prompt: `Add permission to ${agent.id}:`,
-      value: "",
-      focused: "input",
-      canSpawnChildren: canSpawn,
-      onSubmit,
-      onToggleSpawn,
-    });
-  }).catch((err) => {
-    ctx.setNotice(`Failed: ${(err as Error).message}`, "error");
+      report(
+        change({ canSpawnChildren: next }),
+        next ? `Enabled sub-agent spawning for ${label}` : `Disabled sub-agent spawning for ${label}`,
+        `Toggled spawn for ${label}`,
+      );
+    },
   });
 }
 

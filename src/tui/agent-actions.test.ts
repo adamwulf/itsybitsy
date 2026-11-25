@@ -22,12 +22,12 @@ import {
   handleSnapshot,
   handleOpenDiffTool, handleOpenDiffToolVsManager, getActiveDiffProc, setActiveDiffProc, killActiveDiffProc,
   getDiffToolLaunching, setDiffToolLaunching,
-  handleAddPermission, addPermissionToSettings, agentSettingsLocalPath,
-  effectiveSpawnCapability, handleAnswerQuestion, handleAcknowledgeQuestion,
+  handleAddPermission, handleAnswerQuestion, handleAcknowledgeQuestion,
   getCoordinatorSpawnsInFlight, clearCoordinatorSpawnsInFlight,
   handleCreateTeam, handleAddAgentToTeam, handleDisbandTeam, handleManageRoster, handleManageTeam, handleManageTeamMember,
   handleFolderBrowser, newRepoPrompt, newAgentFormTypeOrder,
 } from "./agent-actions";
+import { addPermissionToSettings, agentSettingsLocalPath, effectiveSpawnCapability } from "../agent-permissions";
 import { setCoordinatorHome, resetCoordinatorHome } from "../coordinator";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { readTeams, createTeam, addMember, removeMember, deleteTeam } from "../teams";
@@ -161,6 +161,7 @@ function makeMockCtx(overrides?: {
     remoteStartPending: false,
     submitRemoteMessage: async () => true,
     runRemoteRowCommand: async () => { throw new Error("Unexpected remote command"); },
+    runRemotePermissions: async () => { throw new Error("Unexpected remote permissions request"); },
     acknowledgePeerQuestion: async () => { throw new Error("Unexpected peer acknowledge"); },
     get dialog() { return currentDialog; },
     peerService: null,
@@ -1761,6 +1762,28 @@ describe("handleAddPermission", () => {
     expect(notices).toEqual(["Permission add cancelled"]);
   });
 
+  test("Enter adds the entry and sets one notice with the outcome; a listed entry is refused", async () => {
+    const repoDir = await mkdtemp(join(tmpdir(), "aa-add-permission-"));
+    try {
+      // No tmux session in this meta, so telling the agent fails at once.
+      const agent = makeAgent({ id: "agent-1", repoPath: repoDir, meta: { canSpawnChildren: false } as any });
+      const { ctx, dialogs, notices } = makeMockCtx({ agent });
+      const add = async (entry: string) => {
+        const opened = dialogs.length;
+        handleAddPermission(ctx);
+        await waitFor(() => dialogs.length > opened, { message: "the add-permission dialog", timeoutMs: WAIT_MS });
+        const shown = notices.length;
+        assertDialog(dialogs.at(-1)!, "add-permission").onSubmit(entry);
+        await waitFor(() => notices.length > shown, { message: "the add's notice", timeoutMs: WAIT_MS });
+        return notices.slice(shown);
+      };
+      expect(await add("Read")).toEqual(["Added Read, but notify failed: Agent has no tmux session"]);
+      expect(await add("Read")).toEqual(["Already in allow list"]);
+    } finally {
+      await rm(repoDir, { recursive: true, force: true });
+    }
+  });
+
   test("invalid characters rejected", async () => {
     const agent = makeAgent({ id: "agent-1" });
     const { ctx, dialogs, notices } = makeMockCtx({ agent });
@@ -1841,7 +1864,8 @@ describe("handleAddPermission spawn toggle re-seals (A4 G3)", () => {
     // The frozen meta now matches its (re-derived) seal — no tamper on resume.
     const verification = await verifyMetaAgainstSeal(repoId, id, updatedMeta);
     expect(verification.ok).toBe(true);
-    expect(notices.some((n) => n.includes("Enabled sub-agent spawning"))).toBe(true);
+    // The toggle's one notice: success, or success with a failed notify (no tmux here).
+    await waitFor(() => notices.some((n) => toggledOn(id).test(n)), { message: "the toggle's notice", timeoutMs: WAIT_MS });
   });
 
   test("toggling spawn on a DISABLED agent does not touch the seal", async () => {
@@ -1861,7 +1885,7 @@ describe("handleAddPermission spawn toggle re-seals (A4 G3)", () => {
 
     // Wait for the toggle to finish (its notice lands after the skipped re-seal).
     await waitFor(
-      async () => notices.some((n) => n.includes("Enabled sub-agent spawning")),
+      async () => notices.some((n) => toggledOn(id).test(n)),
       { message: "the disabled-agent toggle to complete", timeoutMs: WAIT_MS },
     );
     const updatedMeta = await Bun.file(join(agentDir, "meta.json")).json();
@@ -1892,9 +1916,12 @@ describe("handleAddPermission spawn toggle re-seals (A4 G3)", () => {
     expect(rolledBack.canSpawnChildren).toBe(false);
     // In-memory record was NOT advanced, and no enable notice / send happened.
     expect(agent.meta.canSpawnChildren).toBe(false);
-    expect(notices.some((n) => n.includes("Enabled sub-agent spawning"))).toBe(false);
+    expect(notices.some((n) => toggledOn(id).test(n))).toBe(false);
   });
 });
+
+/** A spawn toggle's success notice, with or without a failed notify of the agent. */
+const toggledOn = (id: string) => new RegExp(`^(Enabled sub-agent spawning for ${id}$|Toggled spawn for ${id}, but notify failed: )`);
 
 describe("effectiveSpawnCapability", () => {
   beforeEach(async () => { await (await import("../agent-types")).ensureAgentTypesDir(); });

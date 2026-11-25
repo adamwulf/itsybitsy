@@ -10883,7 +10883,9 @@ describe("Unified peer repos in the Agents tree", () => {
         // the state column's padding, as a local row does).
         expect(line).toContain("\x1b[0m");
         expect(line.slice(line.lastIndexOf("\x1b[0m") + "\x1b[0m".length)).not.toContain("\x1b[");
-        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+        // A selected row is highlighted across the full width.
+        if (selected) expect(visibleWidth(line)).toBe(width);
+        else expect(visibleWidth(line)).toBeLessThanOrEqual(width);
       };
       assertStyle(false, false);
       selectByKey(dashboard, `${name}/app/worker`);

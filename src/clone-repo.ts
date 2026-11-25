@@ -98,11 +98,10 @@ function sameRemote(a: string, b: string): boolean {
   return trim(a) === trim(b);
 }
 
-/** `git config --get <key>` (in `repoPath` when given), or null when git fails or prints nothing. */
-async function gitConfigGet(key: string, repoPath?: string, env?: Record<string, string | undefined>): Promise<string | null> {
+/** `git -C <dir> config --get <key>`, or null when git fails or prints nothing. */
+async function gitConfigGet(key: string, dir: string, env?: Record<string, string | undefined>): Promise<string | null> {
   try {
-    const cmd = repoPath === undefined ? ["git", "config", "--get", key] : ["git", "-C", repoPath, "config", "--get", key];
-    const { stdout, exitCode } = await cloneRepoSpawnCtx.run(cmd, env);
+    const { stdout, exitCode } = await cloneRepoSpawnCtx.run(["git", "-C", dir, "config", "--get", key], env);
     return exitCode === 0 && stdout !== "" ? stdout : null;
   } catch {
     return null;
@@ -142,13 +141,15 @@ export async function readRepoCloneInfo(repoPath: string, cloneRoot: string): Pr
  * `core.sshCommand` becomes `GIT_SSH_COMMAND` with the option appended; else
  * a `GIT_SSH` is left alone (it may be plink, which takes no `-o`); else ssh
  * runs as `ssh -o BatchMode=yes`. `GIT_TERMINAL_PROMPT=0` is always set.
+ * `core.sshCommand` is read from `/`, outside any repo, so only the user's
+ * global and system config count, never a repo `ib watch` was started in.
  */
 export async function cloneEnv(base: Record<string, string | undefined> = process.env): Promise<Record<string, string | undefined>> {
   const env = { ...base, GIT_TERMINAL_PROMPT: "0" };
   const batch = (ssh: string) => ({ ...env, GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes` });
   const own = base.GIT_SSH_COMMAND?.trim();
   if (own) return batch(own);
-  const configured = (await gitConfigGet("core.sshCommand", undefined, base))?.trim();
+  const configured = (await gitConfigGet("core.sshCommand", "/", base))?.trim();
   if (configured) return batch(configured);
   if (base.GIT_SSH?.trim()) return env;
   return batch("ssh");

@@ -127,8 +127,23 @@ describe("cloneEnv", () => {
     expect(await cloneEnv({ PATH: "/bin", GIT_SSH: "/usr/bin/plink" })).toEqual({
       PATH: "/bin", GIT_SSH: "/usr/bin/plink", GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -i ~/.ssh/config-key -o BatchMode=yes",
     });
-    // Read without -C: the user's config, not some repo's.
-    expect(reads).toEqual([["git", "config", "--get", "core.sshCommand"]]);
+    // Read from "/", outside any repo: the user's global and system config,
+    // never the local config of a repo ib watch was started in.
+    expect(reads).toEqual([["git", "-C", "/", "config", "--get", "core.sshCommand"]]);
+  });
+
+  test("with real git, reading from / still finds core.sshCommand in the global config", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ib-clone-env-" + crypto.randomUUID() + "-"));
+    try {
+      const globalConfig = join(dir, "gitconfig");
+      await Bun.write(globalConfig, "[core]\n\tsshCommand = ssh -i /keys/work\n");
+      cloneRepoSpawnCtx.set(((cmd: string[], opts?: Parameters<SpawnFn>[1]) => Bun.spawn(cmd, { ...opts })) as SpawnFn);
+      const { GIT_SSH_COMMAND: _command, GIT_SSH: _ssh, ...rest } = process.env;
+      const env = await cloneEnv({ ...rest, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: "1" });
+      expect(env.GIT_SSH_COMMAND).toBe("ssh -i /keys/work -o BatchMode=yes");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("else GIT_SSH: the ssh environment is left alone, since plink takes no -o", async () => {

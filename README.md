@@ -230,6 +230,7 @@ Press `?` in the dashboard for this list.
 | Repos | `+` / `A` | Add repo |
 | | `x` / `D` | Remove repo (on a repo header) |
 | | `r` | Rename repo (on a repo header) |
+| | `c` | Clone here (on a repo header only a peer has): clone it under `repos.cloneRoot` and register it |
 | | `f` | Fix resolvable health warnings |
 | | `V` | Cycle filter: all / non-empty / running-only |
 | | `.` | Pin repo (on a repo header; stays visible under `V`) |
@@ -332,6 +333,7 @@ User-wide config lives in `~/.itsybitsy/config.json`, managed with `ib config li
 | `merge.pushAfterMerge` | `false` | After a merge into `main`/`master`, push it to every remote (as `ib push`); a failed push leaves the merge done and shows a red notice |
 | `notifications.sayOnQuestion` | `true` | Speak when an agent asks a question |
 | `tree.groupByParent` | `false` | Group repos under their parent directory |
+| `repos.cloneRoot` | `~/Developer` | Where the dashboard's `c` (Clone here) puts a repo only a peer has, mirroring the peer's folders under it |
 | `hooks.injectStatus` / `hooks.statusVisible` | `true` | Agents-status injection in the main session |
 | `channels.telegram.bot_token` | — | Telegram bridge |
 

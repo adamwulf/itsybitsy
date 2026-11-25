@@ -236,6 +236,8 @@ describe("decodeAgentsReply", () => {
       ".git", "swift/.git", "a/.GIT/x", ".Git",
       // One under a repo's runtime dir would plant a fake agent folder ib reads.
       ".itsybitsy", "foo/.itsybitsy/agents/x", ".ItsyBitsy",
+      // APFS's case folding: the long s is an s, the dotless ı an i.
+      ".itſybitſy", "a/.itſybitſy/agents/x", ".gıt",
     ]) {
       expect(relPathOf(dropped)).toBeNull();
     }

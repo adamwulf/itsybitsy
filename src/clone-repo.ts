@@ -67,10 +67,15 @@ const RESERVED_SEGMENTS = new Set([".git", RUNTIME_DIR_NAME]);
  * plant a fake agent folder that ib reads. A peer's `relPath` is checked with
  * it when it arrives (peer-link's safeRelPath), and so is cloneRepo's
  * destination once it is resolved on disk.
+ *
+ * "In any case" is APFS's: its case folding maps the long s (ſ) to s, the
+ * Kelvin sign to k and the dotless ı to i, so `.itſybitſy` names
+ * `.itsybitsy`. Upper-casing first folds those too; folding more names than
+ * APFS does only refuses more.
  */
 export function isSafeCloneRelPath(relPath: string): boolean {
-  return relPath.split("/").every((segment) =>
-    segment !== "" && segment !== "." && segment !== ".." && !RESERVED_SEGMENTS.has(segment.toLowerCase()));
+  return relPath.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".." &&
+    !RESERVED_SEGMENTS.has(segment.normalize("NFC").toUpperCase().toLowerCase()));
 }
 
 /** A clone URL's host, as git will connect to it, and its path (`owner/repo.git`), for the dialog title. */
@@ -375,7 +380,8 @@ async function cloneRootRefusal(typed: string, target: string, cloneRoot: string
   const lexical = relative(cloneRoot, typed);
   if (lexical === "" || lexical === ".." || lexical.startsWith(`..${sep}`) || isAbsolute(lexical)) return null;
   const rel = relative(await onDiskSpelling(cloneRoot), target).split(sep).join("/");
-  if (rel === "" || rel === ".." || rel.startsWith("../")) {
+  if (rel === "") return `Will not clone: the destination resolves to the clone root itself (${target})`;
+  if (rel === ".." || rel.startsWith("../")) {
     return `Will not clone: the destination leaves the clone root through a symlink (${target})`;
   }
   return isSafeCloneRelPath(rel) ? null : `Will not clone: the destination resolves into a .git or ${RUNTIME_DIR_NAME} folder (${target})`;

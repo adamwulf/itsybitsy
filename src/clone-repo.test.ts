@@ -477,6 +477,25 @@ describe("with a temp home", () => {
     expect((await loadRegistry()).repos).toEqual([]);
   });
 
+  test("a .itsybitsy spelled with a long s (APFS folds ſ to s) is refused too", async () => {
+    // A fresh Clone-here repo has no .itsybitsy of its own yet.
+    await mkdir(join(root, "swift", "Mantra", ".git"), { recursive: true });
+    for (const rel of ["swift/Mantra/.itſybitſy", "a/.itſybitſy/agents/x"]) {
+      const result = await cloneRepo({ url: "git@github.com:owner/x.git", dest: join(root, rel), registryName: "x", cloneRoot: root });
+      expect(result).toEqual({ ok: false, message: `Will not clone: the destination resolves into a .git or .itsybitsy folder (${join(root, rel)})` });
+    }
+    expect(calls).toEqual([]);
+    expect(await readdir(join(root, "swift", "Mantra"))).toEqual([".git"]);
+  });
+
+  test("a symlink to the clone root itself is refused as such", async () => {
+    await mkdir(join(root, "A"));
+    await symlink("..", join(root, "A", "up"));
+    const result = await cloneRepo({ url: "git@github.com:owner/up.git", dest: join(root, "A", "up"), registryName: "up", cloneRoot: root });
+    expect(result).toEqual({ ok: false, message: `Will not clone: the destination resolves to the clone root itself (${root})` });
+    expect(calls).toEqual([]);
+  });
+
   test("a symlink that stays in the clone root, or a clone root reached through one, still clones", async () => {
     await mkdir(join(root, "swift"));
     await symlink("swift", join(root, "swift-link"));

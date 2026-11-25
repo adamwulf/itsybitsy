@@ -11290,10 +11290,14 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.inputField.submit();
     await waitFor(() => sent !== undefined);
     const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
-    expect(header()).toContain("sending to Laptop B/abc-nick…");
+    expect(header()).toContain("sending to Laptop B/abc-nick…  Esc: cancel");
     expect(header()).not.toContain("waiting for");
     sent!();
     expect(header()).toContain("sending to Laptop B/abc-nick… waiting for Laptop B to confirm");
+    // A written request cannot be cancelled, only made unknown: Esc leaves it alone.
+    expect(header()).not.toContain("Esc: cancel");
+    dashboard.handleInput("\x1b");
+    expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
     result.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
     await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
     expect(header()).not.toContain("waiting for");

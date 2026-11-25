@@ -2135,7 +2135,8 @@ export class DashboardComponent implements Component {
     const selected = this.remoteSelection;
     const target = remoteMessageTarget(selected);
     if (!selected || selected.kind === "remote-repo-header" || !target) return;
-    return [...this.pendingRemoteSends.values()].reverse().find(send =>
+    // A written request can no longer be cancelled: aborting it only makes its outcome unknown.
+    return [...this.pendingRemoteSends.values()].reverse().find(send => !send.sent &&
       send.peerId === selected.peerId && JSON.stringify(send.target) === JSON.stringify(target));
   }
 

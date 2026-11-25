@@ -1176,6 +1176,12 @@ test.each(["send", "new-agent"])("a %s request reports onSent once its FIN is wr
   const { requestSend, requestNewAgent } = await import("./peer-link");
   const { a, b } = createMemoryLink("sender", "receiver");
   const events: string[] = [];
+  const open = a.openBi.bind(a);
+  spyOn(a, "openBi").mockImplementation(async () => {
+    const stream = await open(), finish = stream.finish.bind(stream);
+    stream.finish = async () => { await finish(); events.push("fin"); };
+    return stream;
+  });
   const transfer = { onSent: () => events.push("sent") };
   const id = crypto.randomUUID();
   const request = op === "send"
@@ -1187,7 +1193,7 @@ test.each(["send", "new-agent"])("a %s request reports onSent once its FIN is wr
   await peer.writeAll(encode(op === "send" ? { ok: true, id } : { ok: true, id: "builder" }));
   await peer.finish();
   await replied;
-  expect(events).toEqual(["sent", "reply"]);
+  expect(events).toEqual(["fin", "sent", "reply"]);
   a.close(0, "done");
 });
 

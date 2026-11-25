@@ -259,8 +259,8 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // it: swallow every key so the send cannot be re-fired (which would re-stage
   // attachments) and the dialog cannot be cancelled or replaced out from under
   // the pending send. The submit closure clears `inFlight` on failure (re-enabling
-  // the draft) or closes the dialog on success, so the success close always lands
-  // on THIS dialog, never a later one.
+  // the draft) or closes the dialog on success (a remote send or start: once it
+  // is pending), and closes only THIS dialog, never a later one.
   if (dialog.type === "new-agent-form" && dialog.inFlight && !matchesKey(data, Key.escape)) return true;
   if ((dialog.type === "input" || dialog.type === "textarea") && dialog.inFlight) {
     if (dialog.type === "textarea" && matchesKey(data, Key.escape)) dialog.onCancelInFlight?.();

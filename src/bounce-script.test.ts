@@ -191,7 +191,14 @@ case "$1" in
       # Like ib watch partway through a quit: Ctrl-C is ignored.
       trap '' INT
       : > "$dir/ready"
-      while [ ! -f "$dir/go" ]; do /bin/sleep 0.02; done
+      # Bounded (~10 s): if the test is gone, give up; the next launch then
+      # stops bounce.sh, so the detached group cannot outlive it.
+      tries=0
+      while [ ! -f "$dir/go" ]; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 500 ]; then exit 9; fi
+        /bin/sleep 0.02
+      done
       echo "late stderr line, written after the Ctrl-C" >&2
       exit 0
     fi

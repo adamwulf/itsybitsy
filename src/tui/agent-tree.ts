@@ -256,11 +256,11 @@ export function formatRemoteRepoRow(
 /**
  * A remote agent row: `<connector><name>  <state>`, indented under its repo
  * header. nameColWidth and stateColWidth are the tree's shared columns, so
- * the state lines up with the local rows' state. The caller caps
- * nameColWidth to the width, and the name and the state are cut to their
- * columns, so a long remote value cannot push the state off the row. Dimmed
- * while the peer is not connected. The name is red while the agent has a
- * pending question, as on a local row.
+ * the state lines up with the local rows' state; as on a local row, a row
+ * wider than the pane is cut at its right edge. The state is cut to its
+ * column, since it is the other install's text. Dimmed while the peer is not
+ * connected. The name is red while the agent has a pending question, as on a
+ * local row.
  */
 export function formatRemoteAgentRow(
   entry: Extract<RemoteEntry, { kind: "remote-agent" }>,
@@ -274,7 +274,7 @@ export function formatRemoteAgentRow(
   const offline = entry.linkStatus !== "connected";
   const style = offline ? ITALIC + DIM : ITALIC;
   const prefix = entry.connector + favoriteStar(isFavorite, selected).replace(RESET, RESET + style);
-  const name = truncatePeerField(remoteDisplayName(entry.remote), Math.max(1, nameColWidth - visibleWidth(prefix)));
+  const name = remoteDisplayName(entry.remote);
   const namePad = " ".repeat(Math.max(0, nameColWidth - visibleWidth(prefix) - visibleWidth(name)));
   const fullState = displayState(entry.remote.state);
   const state = truncatePeerField(fullState, stateColWidth);
@@ -294,8 +294,7 @@ export function formatRemoteAgentRow(
  * tree's state column and the age in its age column, so the row lines up
  * with the local rows. Connected: how long the link has been up. Otherwise:
  * when the peer last answered (`2m ago`), then the last reported coordinator
- * state. The caller caps nameColWidth so the link and age fit the width.
- * Dimmed while offline.
+ * state. nameColWidth is the tree's shared name column. Dimmed while offline.
  */
 export function formatPeerCoordinatorRow(
   entry: Extract<RemoteEntry, { kind: "remote-coordinator" }>,
@@ -305,9 +304,8 @@ export function formatPeerCoordinatorRow(
   nameColWidth: number,
   stateColWidth: number,
 ): string {
-  const nameWidth = Math.max(1, nameColWidth - visibleWidth(branch));
-  const name = truncatePeerField(entry.peerName, nameWidth);
-  const namePad = " ".repeat(Math.max(0, nameWidth - visibleWidth(name)));
+  const name = entry.peerName;
+  const namePad = " ".repeat(Math.max(0, nameColWidth - visibleWidth(branch) - visibleWidth(name)));
   const since = entry.connectedAt ?? entry.lastOkAt;
   const age = since === null ? "" : computeAge(Math.floor(since / 1000)).padStart(AGE_COL_WIDTH);
   const ago = entry.connectedAt === null && entry.lastOkAt !== null ? " ago" : "";
@@ -1565,10 +1563,6 @@ export class AgentTreeComponent implements Component {
       }
     }
     const stateColWidth = computeStateColWidth(visible);
-    // Remote rows keep their state (and a peer row its age) on screen at a
-    // narrow width by cutting the name instead.
-    const remoteNameColWidth = Math.min(maxNameWidth, Math.max(1, width - 2 - stateColWidth));
-    const peerNameColWidth = Math.min(maxNameWidth, Math.max(visibleWidth(PEER_BRANCH_LAST) + 1, width - 4 - stateColWidth - AGE_COL_WIDTH));
 
     // Scroll indicator at top (indented with the subtree when grouping so it
     // doesn't float left of the rows it summarizes).
@@ -1584,13 +1578,13 @@ export class AgentTreeComponent implements Component {
       } else if (item.kind === "remote-coordinator") {
         const branch = visible[i + 1]?.kind === "remote-coordinator" ? "├── " : PEER_BRANCH_LAST;
         lines.push(formatPeerCoordinatorRow(
-          item, branch, selectionActive && i === this.selectedIndex, width, peerNameColWidth, stateColWidth,
+          item, branch, selectionActive && i === this.selectedIndex, width, maxNameWidth, stateColWidth,
         ));
       } else if (item.kind === "remote-agent") {
         const key = peerEntryKey(item);
         lines.push(formatRemoteAgentRow(
           { ...item, connector: repoIndent + item.connector }, selectionActive && i === this.selectedIndex, width,
-          remoteNameColWidth, stateColWidth, this.favoriteAgentIds.has(key), this.questionAgentKeys.has(key),
+          maxNameWidth, stateColWidth, this.favoriteAgentIds.has(key), this.questionAgentKeys.has(key),
         ));
       } else if (item.kind === "system-coordinator") {
         lines.push(formatCoordinatorRow(

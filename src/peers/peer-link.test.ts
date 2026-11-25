@@ -355,6 +355,42 @@ describe("requestAgents", () => {
     await responder;
     link.a.close(PEER_CLOSE.done, "done");
   });
+
+  test.each([true, false])("a timeout whose reply stalls past the grace asks keepOpenOnTimeout once: keep=%s", async keep => {
+    const link = createMemoryLink(ID_A, ID_B);
+    const clock = createFakeClock();
+    const timedOut = new Error("request timed out");
+    let asks = 0;
+    const request = requestAgents(link.a, clock.setTimer, timedOut, () => { asks++; return keep; }).catch(err => err);
+    await (await link.b.acceptBi()).readToEnd(PEER_MAX_REQUEST_BYTES); // never answered
+    await Bun.sleep(0);
+    clock.advance(15_000); await Bun.sleep(0); clock.advance(749);
+    expect(asks).toBe(0); // still within the grace
+    clock.advance(1);
+    expect(await request).toBe(timedOut);
+    expect(asks).toBe(1);
+    expect(link.b.closeInfo()).toEqual(keep ? null : { byPeer: true, code: PEER_CLOSE.error, reason: "send reset stalled" });
+    link.a.close(PEER_CLOSE.done, "done");
+  });
+
+  test("a stalled teardown that is not the request's own timeout closes without asking", async () => {
+    const link = createMemoryLink(ID_A, ID_B);
+    const clock = createFakeClock();
+    const open = link.a.openBi.bind(link.a);
+    spyOn(link.a, "openBi").mockImplementation(async () => {
+      const stream = await open();
+      stream.writeAll = async () => { throw new Error("request half stopped"); };
+      return stream;
+    });
+    let asks = 0;
+    const request = requestAgents(link.a, clock.setTimer, new Error("request timed out"), () => { asks++; return true; }).catch(err => err);
+    await link.b.acceptBi(); // never answered
+    await Bun.sleep(0);
+    clock.advance(750);
+    expect(String(await request)).toContain("request half stopped");
+    expect(asks).toBe(0);
+    expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
+  });
 });
 
 describe("serveTrustedConnection", () => {

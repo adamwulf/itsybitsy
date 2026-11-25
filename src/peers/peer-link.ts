@@ -498,11 +498,11 @@ function errorDetail(err: unknown): string {
 type Timer = PeerResponderDeps["setTimer"];
 const realTimer: Timer = (ms, fn) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); };
 
-export function requestAgents(conn: PairConnection, setTimer = realTimer, timeoutError = new Error("request timed out")): Promise<PeerSnapshot> {
-  return clientExchange(conn, encodePeerRequest("agents"), decodeAgentsReply, { setTimer, timeout: [15_000, timeoutError] });
+export function requestAgents(conn: PairConnection, setTimer = realTimer, timeoutError = new Error("request timed out"), keepOpenOnTimeout?: () => boolean): Promise<PeerSnapshot> {
+  return clientExchange(conn, encodePeerRequest("agents"), decodeAgentsReply, { setTimer, timeout: [15_000, timeoutError], keepOpenOnTimeout });
 }
 
-export function requestPane(conn: PairConnection, target: PeerPaneTarget, lines: number, setTimer = realTimer): Promise<PeerPane> {
+export function requestPane(conn: PairConnection, target: PeerPaneTarget, lines: number, setTimer = realTimer, keepOpenOnTimeout?: () => boolean): Promise<PeerPane> {
   return clientExchange(conn, encodeJson({ ...target, lines: clampPaneLines(lines) }), bytes => {
     const reply = decodeObject(bytes, "reply");
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
@@ -510,7 +510,7 @@ export function requestPane(conn: PairConnection, target: PeerPaneTarget, lines:
       throw new PeerProtocolError(`malformed ${target.op} reply`);
     }
     return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
-  }, { setTimer, timeout: [15_000, new Error(target.op === "agent-pane" ? "Agent pane request timed out" : "Coordinator pane request timed out")] });
+  }, { setTimer, timeout: [15_000, new Error(target.op === "agent-pane" ? "Agent pane request timed out" : "Coordinator pane request timed out")], keepOpenOnTimeout });
 }
 
 /** The agent's prompt as its own INITIAL PROMPT pane shows it, safe to draw. */
@@ -678,6 +678,14 @@ interface ClientOptions extends OutgoingTransfer {
   timeout?: [number, Error];
   /** Arm `timeout` once FIN is sent instead of at stream open: the transfer before it has idle timeouts only. */
   timeoutAfterFin?: boolean;
+  /**
+   * Asked once `timeout` has fired and this exchange's stream could not be torn
+   * down within the grace. True leaves the connection open instead of closing
+   * it: the stalled native read settles on its own once the late reply or the
+   * connection's close arrives. The poller's agents poll and pane reads pass
+   * it while an attachment transfer with the peer moves bytes (SPEC §20.4 "Slow links").
+   */
+  keepOpenOnTimeout?: () => boolean;
   unknownAfterFin?: string;
   files?: AttachmentEntry[];
 }
@@ -691,12 +699,17 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
   const armTimeout = () => timeout && setTimer(timeout[0], () => deadline.abort(timeout[1]));
   let clear = options.timeoutAfterFin ? undefined : armTimeout();
   const io = <V>(operation: () => Promise<V>) => waitForIO({ setTimer, signal }, operation);
+  /** A teardown that missed its grace closes the connection, unless the caller keeps it through its own timeout. */
+  const closeStalled = () => {
+    if (timeout && signal.reason === timeout[1] && options.keepOpenOnTimeout?.()) return;
+    closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+  };
   let opening: Promise<PairStream> | undefined;
   let active: PairStream;
   try { active = await io(() => { options.verifyClient?.(); return opening = conn.openBi(); }); }
   catch (err) {
     clear?.();
-    if (opening && !await settledWithinGrace(opening.then(stream => stream.cancel()), { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+    if (opening && !await settledWithinGrace(opening.then(stream => stream.cancel()), { setTimer })) closeStalled();
     throw err;
   }
 
@@ -788,7 +801,7 @@ async function clientExchange<T>(conn: PairConnection, bytes: Uint8Array, decode
     if (!received || !sendDone || frameStop) {
       deadline.abort(new Error("Request writer stopped"));
       const teardown = Promise.allSettled([reply.then(() => frameStop), sendDone ? undefined : active.resetSending()]);
-      if (!await settledWithinGrace(teardown, { setTimer })) closeQuietly(conn, PEER_CLOSE.error, "send reset stalled");
+      if (!await settledWithinGrace(teardown, { setTimer })) closeStalled();
     }
     if (received?.ok) return received.value;
     if (received && received.error instanceof PeerErrorReply) throw received.error;

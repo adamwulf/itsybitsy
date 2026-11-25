@@ -445,6 +445,7 @@ export class PeerService {
       now: deps.now,
       setTimer: deps.setTimer,
       log: deps.log,
+      transferProgressing: (id) => this.transfers.recentProgress(id),
     });
     this.poller.onChange(() => {
       this.publishRemoteAgents();

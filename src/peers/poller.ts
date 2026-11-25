@@ -18,6 +18,14 @@
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
  *   "request timed out", and the next tick redials. Closing the connection is
  *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
+ * - Except during a transfer (SPEC.md §20.4 "Slow links"): while an attachment
+ *   transfer with the peer, on either connection, has moved bytes within the
+ *   last 30 s (`transferProgressing`), an agents poll or pane read that times
+ *   out leaves the connection open. A poll keeps the link's state as it was
+ *   (connected, the last lists, no error) and the next tick polls again on the
+ *   same connection; a pane read only fails. Each such timeout is one
+ *   watch.log line. A peer that moves attachment bytes is not wedged, and on a
+ *   slow link closing the connection would kill the transfer itself.
  * - The poller tracks per-peer state: connected or not (and since when), `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
  *   keeps disconnected agents dimmed and shows the peer’s link status in their info panel.
@@ -106,6 +114,12 @@ export interface PeerPollerDeps {
   setTimer(ms: number, fn: () => void): () => void;
   /** watch.log in `ib watch`. */
   log(line: string): void;
+  /**
+   * An attachment transfer with this peer moved bytes recently
+   * (transfer-activity.ts `recentProgress`). While it has, a timed-out agents
+   * poll or pane read keeps its connection. Without it, every timeout closes it.
+   */
+  transferProgressing?(peerId: string): boolean;
 }
 
 interface Link {
@@ -194,8 +208,27 @@ export class PeerPoller {
     if (!conn) throw new Error("Machine is disconnected");
     if (this.paneReads.has(conn)) throw new Error("Previous pane read is still pending");
     this.paneReads.add(conn);
-    try { return await requestPane(conn, target, lines, this.deps.setTimer); }
+    const keepLink = this.keepLinkOnTimeout(peerId);
+    try { return await requestPane(conn, target, lines, this.deps.setTimer, keepLink.ask); }
+    catch (err) {
+      if (keepLink.kept()) {
+        const name = this.links.get(peerId)?.name ?? "peer";
+        this.deps.log(`peer link: ${name} (${shortPeerId(peerId)}): ${target.op} read timed out while an attachment transfer is moving bytes; keeping the connection`);
+      }
+      throw err;
+    }
     finally { this.paneReads.delete(conn); }
+  }
+
+  /**
+   * Whether one request that times out keeps its connection: asked at most
+   * once, so the exchange that keeps or closes the connection and the caller
+   * that reports it agree. `kept` is true only once the answer was yes.
+   */
+  private keepLinkOnTimeout(peerId: string): { ask: () => boolean; kept: () => boolean } {
+    let answer: boolean | undefined;
+    const ask = () => answer ??= this.deps.transferProgressing?.(peerId) ?? false;
+    return { ask, kept: () => answer === true };
   }
 
   /** Poll now, then every {@link PEER_POLL_INTERVAL_MS}. */
@@ -318,6 +351,7 @@ export class PeerPoller {
     const generation = this.generation;
     this.inFlight.add(link.id);
     let conn: PairConnection | null = link.conn;
+    const keepLink = this.keepLinkOnTimeout(link.id);
     try {
       if (conn === null || this.recordObservedClose(link, conn)) {
         conn = null;
@@ -330,7 +364,7 @@ export class PeerPoller {
         link.conn = dialed;
         this.watchClose(link, dialed, generation);
       }
-      const snapshot = await requestAgents(conn, this.deps.setTimer, new PeerRequestTimeout());
+      const snapshot = await requestAgents(conn, this.deps.setTimer, new PeerRequestTimeout(), keepLink.ask);
       // A final reply can arrive alongside the close notification. Only a live link recovers.
       if (!this.isCurrent(link, generation) || link.conn !== conn || this.recordObservedClose(link, conn)) return;
       this.succeeded(link, snapshot);
@@ -339,6 +373,9 @@ export class PeerPoller {
       if (err instanceof PeerBusyReply && link.conn === conn && conn && !this.recordObservedClose(link, conn)) {
         link.connected = true;
         if (link.lastError !== err.message) { link.lastError = err.message; this.notify(); }
+      } else if (err instanceof PeerRequestTimeout && keepLink.ask() && link.conn === conn && conn && !this.recordObservedClose(link, conn)) {
+        // The link's state stays as it was; the next tick polls again on this connection.
+        this.deps.log(`peer link: ${link.name} (${shortPeerId(link.id)}): agents poll timed out while an attachment transfer is moving bytes; keeping the connection`);
       } else this.failed(link, describeFailure(err, conn));
     } finally {
       this.inFlight.delete(link.id);

@@ -84,6 +84,9 @@ function makeRig(initialPeers: Peer[]) {
   };
 
   let dialImpl: (id: string) => Promise<PairConnection> = connect;
+  /** What transferProgressing answers; false (no transfer) unless a test says otherwise. */
+  let progressing = false;
+  const progressAsks: string[] = [];
   const poller = new PeerPoller({
     readPeers: async () => {
       if (readError) throw readError;
@@ -96,6 +99,10 @@ function makeRig(initialPeers: Peer[]) {
     now: clock.now,
     setTimer: clock.setTimer,
     log: (line) => logs.push(line),
+    transferProgressing: (id) => {
+      progressAsks.push(id);
+      return progressing;
+    },
   });
   let changes = 0;
   poller.onChange(() => changes++);
@@ -117,6 +124,12 @@ function makeRig(initialPeers: Peer[]) {
     setDial: (fn: (id: string) => Promise<PairConnection>) => {
       dialImpl = fn;
     },
+    /** An attachment transfer with the peer is (or is no longer) moving bytes. */
+    setProgressing: (value: boolean) => {
+      progressing = value;
+    },
+    /** Each peer id transferProgressing was asked about, in order. */
+    progressAsks,
     state: (id: string) => poller.states().find((s) => s.id === id),
     /** Fire the next tick. */
     tick: () => clock.advance(PEER_POLL_INTERVAL_MS),
@@ -275,6 +288,8 @@ describe("PeerPoller", () => {
     await waitFor(() => rig.state(P1)?.lastError === "request timed out", { message: "timed out" });
     expect(rig.state(P1)?.connected).toBe(false);
     expect(silent.b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
+    // No transfer is moving bytes, so the timeout closes: asked once, by the stalled teardown.
+    expect(rig.progressAsks).toEqual([P1]);
     expect(streams).toBe(1);
     expect(rig.dials).toEqual([P1]);
     expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): request timed out`);
@@ -646,4 +661,93 @@ test("a pane slot stays occupied until its pending reply exhausts grace", async 
     expect(String(await pane)).toContain("request timed out");
     expect(rig.poller["paneReads"].has(a)).toBe(false); expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
   } finally { rig.poller.stop(); }
+});
+
+describe("request timeouts during an attachment transfer", () => {
+  /** A link to P1 whose far end the test answers by hand. */
+  function manualLink(rig: ReturnType<typeof makeRig>) {
+    const { a, b } = createMemoryLink(SELF, P1);
+    rig.setDial(async () => a);
+    const agents = [remoteAgent("agent-1")];
+    return {
+      a, b, agents,
+      /** Answer the next request, which must be an agents poll. */
+      answer: async () => {
+        const stream = await b.acceptBi();
+        expect(JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096))).op).toBe("agents");
+        await stream.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents, questions: [] }));
+        await stream.finish();
+      },
+      /** Accept the next request, read it through FIN (the dialer has sent it all), and never answer it. */
+      ignore: async () => {
+        const stream = await b.acceptBi();
+        await stream.readToEnd(4096);
+        await Bun.sleep(0);
+      },
+    };
+  }
+
+  test("an agents poll that times out while a transfer moves bytes keeps the connection and the link; once it stops, a timeout closes as before", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const link = manualLink(rig);
+    rig.poller.start();
+    try {
+      await link.answer();
+      await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+      const before = rig.state(P1);
+
+      rig.setProgressing(true);
+      rig.tick(); // t = 5 s: this poll is never answered
+      await link.ignore();
+      rig.clock.advance(PEER_REQUEST_TIMEOUT_MS); // t = 20 s: it times out
+      await Bun.sleep(0);
+      rig.clock.advance(750); // its teardown grace is spent
+      const kept = `peer link: B (${P1.slice(0, 10)}): agents poll timed out while an attachment transfer is moving bytes; keeping the connection`;
+      await waitFor(() => rig.logs.includes(kept), { message: "kept" });
+      expect(link.a.closeInfo()).toBeNull();
+      expect(rig.state(P1)).toEqual(before);
+      expect(rig.progressAsks).toEqual([P1]);
+
+      // The next tick polls again on the same connection.
+      link.agents.push(remoteAgent("agent-2"));
+      rig.tick();
+      await link.answer();
+      await waitFor(() => rig.state(P1)?.agents?.length === 2, { message: "polled again" });
+      expect(rig.dials).toEqual([P1]);
+      expect(rig.state(P1)).toMatchObject({ connected: true, connectedAt: before!.connectedAt, lastError: null });
+
+      // The transfer ended or stalled past the window: a timeout closes and fails as before.
+      rig.setProgressing(false);
+      rig.tick();
+      await link.ignore();
+      rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
+      await Bun.sleep(0);
+      rig.clock.advance(750);
+      await waitFor(() => rig.state(P1)?.lastError === "request timed out", { message: "timed out" });
+      expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
+      expect(rig.state(P1)).toMatchObject({ connected: false, agents: link.agents });
+      expect(rig.logs.filter((line) => line === kept)).toHaveLength(1);
+      expect(rig.progressAsks).toEqual([P1, P1]);
+    } finally { rig.poller.stop(); }
+  });
+
+  test("a pane read that times out while a transfer moves bytes fails alone and keeps the connection", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const link = manualLink(rig);
+    rig.poller.start();
+    try {
+      await link.answer();
+      await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+      rig.setProgressing(true);
+      const pane = rig.poller.fetchPane(P1, { op: "coordinator-pane" }, 200).catch((err: Error) => err);
+      await link.ignore();
+      rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
+      await Bun.sleep(0);
+      rig.clock.advance(750);
+      expect(String(await pane)).toContain("Coordinator pane request timed out");
+      expect(link.a.closeInfo()).toBeNull();
+      expect(rig.poller.connectedConnection(P1)).toBe(link.a);
+      expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): coordinator-pane read timed out while an attachment transfer is moving bytes; keeping the connection`);
+    } finally { rig.poller.stop(); }
+  });
 });

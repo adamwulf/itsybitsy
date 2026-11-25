@@ -11165,7 +11165,7 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(dashboard.notice).toContain("Sent to Laptop B/");
   });
 
-  test("s on a remote agent opens the send dialog: a failure keeps the draft, acceptance closes it", async () => {
+  test("s on a remote agent opens the send dialog: it closes once pending, and a failure reopens it with the draft", async () => {
     const { dashboard, service } = setup();
     selectByKey(dashboard, WORKER_KEY);
     dashboard.handleInput("s");
@@ -11179,30 +11179,52 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(send.focusedButton).toBe("send");
     // Enter on [ Send ]; focus stays there for the retry.
     const submit = () => dashboard.handleInput("\r");
+    const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
 
-    service.sendRemoteMessage.mockRejectedValueOnce(new Error("Machine is disconnected"));
+    const refused = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => refused.promise);
     submit();
-    await waitFor(() => dashboard.notice === "Machine is disconnected");
-    await Bun.sleep(0);
-    expect(dashboard.dialog).toBe(send);
+    expect(send.inFlight).toBe(true);
+    await waitFor(() => dashboard.dialog === null);
+    expect(header()).toStartWith("ib — sending to Laptop B/abc-nick…");
+    refused.reject(new Error("Machine is disconnected"));
+    await waitFor(() => dashboard.dialog === send);
+    expect(dashboard.notice).toBe("Machine is disconnected");
     expect(send.inFlight).toBe(false);
     expect(send.buffer.getText()).toBe("/compact");
+    expect(send.focusedButton).toBe("send");
 
     const pending = Promise.withResolvers<string>();
     service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
     submit();
-    expect(send.inFlight).toBe(true);
-    await waitFor(() => service.sendRemoteMessage.mock.calls.length === 2);
-    const [peer, header] = service.sendRemoteMessage.mock.calls[1]!;
-    expect(peer).toBe(PEER_B);
-    expect(header).toMatchObject({ from: { kind: "user" }, message: "/compact", files: [],
-      target: { kind: "agent", repo: "itsybitsy", agent: "worker-abc" } });
-    pending.resolve(header.id);
     await waitFor(() => dashboard.dialog === null);
-    expect(dashboard.notice).toBe("Sent to Laptop B/abc-nick");
+    const [peer, sent] = service.sendRemoteMessage.mock.calls[1]!;
+    expect(peer).toBe(PEER_B);
+    expect(sent).toMatchObject({ from: { kind: "user" }, message: "/compact", files: [],
+      target: { kind: "agent", repo: "itsybitsy", agent: "worker-abc" } });
+    pending.resolve(sent.id);
+    await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
+    expect(dashboard.dialog).toBeNull();
   });
 
-  test("Esc cancels a remote send in flight from the dialog and keeps the draft", async () => {
+  test("a send failure does not replace a dialog opened while it was pending", async () => {
+    const { dashboard, service } = setup();
+    const refused = Promise.withResolvers<string>();
+    service.sendRemoteMessage.mockImplementationOnce(() => refused.promise);
+    selectByKey(dashboard, WORKER_KEY);
+    dashboard.handleInput("s");
+    assertDialog(dashboard.dialog, "textarea").onSubmit("hello");
+    await waitFor(() => dashboard.dialog === null);
+    dashboard.handleInput("?");
+    const help = dashboard.dialog;
+    expect(help?.type).toBe("help");
+    refused.reject(new Error("Machine is disconnected"));
+    await waitFor(() => dashboard.notice === "Machine is disconnected");
+    await Bun.sleep(0);
+    expect(dashboard.dialog).toBe(help);
+  });
+
+  test("Esc on the row cancels a send from the dialog, and the dialog comes back with the draft", async () => {
     const { dashboard, service } = setup();
     service.sendRemoteMessage.mockImplementationOnce((_peer, header, _source, transfer) =>
       new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason))));
@@ -11213,16 +11235,14 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.handleInput("\x1b[Z");
     dashboard.handleInput("\r");
     await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
-    const overlay = () => stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
-    expect(overlay()).toContain("Sending… Esc: cancel");
-    dashboard.handleInput("x");
-    expect(send.buffer.getText()).toBe("hello");
+    expect(dashboard.dialog).toBeNull();
+    expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toStartWith("ib — sending to Laptop B/abc-nick…  Esc: cancel");
     dashboard.handleInput("\x1b");
-    await waitFor(() => dashboard.notice === "Send cancelled");
-    await Bun.sleep(0);
-    expect(dashboard.dialog).toBe(send);
+    await waitFor(() => dashboard.dialog === send);
+    expect(dashboard.notice).toBe("Send cancelled");
     expect(send.inFlight).toBe(false);
     expect(send.buffer.getText()).toBe("hello");
+    const overlay = () => stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
     expect(overlay()).not.toContain("Sending…");
     dashboard.handleInput("\x1b");
     expect(dashboard.dialog).toBeNull();
@@ -11254,6 +11274,34 @@ describe("Unified peer repos in the Agents tree", () => {
     expect(visibleWidth(header)).toBeLessThanOrEqual(WIDTH);
     pending.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
     await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
+  });
+
+  test("a pending send waits for the peer once everything is written, instead of showing a full count", async () => {
+    const { dashboard, service } = setup();
+    const result = Promise.withResolvers<string>();
+    let sent: (() => void) | undefined;
+    service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) => {
+      sent = transfer!.onSent;
+      return result.promise;
+    });
+    selectByKey(dashboard, WORKER_KEY);
+    focusEditor(dashboard);
+    dashboard.handleInput("hello");
+    dashboard.inputField.submit();
+    await waitFor(() => sent !== undefined);
+    const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
+    expect(header()).toContain("sending to Laptop B/abc-nick…  Esc: cancel");
+    expect(header()).not.toContain("waiting for");
+    sent!();
+    expect(header()).toContain("sending to Laptop B/abc-nick… waiting for Laptop B to confirm");
+    // A written request cannot be cancelled, only made unknown: Esc says so and leaves it alone.
+    expect(header()).not.toContain("Esc: cancel");
+    dashboard.handleInput("\x1b");
+    expect(dashboard.notice).toBe("Cannot cancel: waiting for Laptop B to confirm");
+    expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
+    result.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+    await waitFor(() => dashboard.notice === "Sent to Laptop B/abc-nick");
+    expect(header()).not.toContain("waiting for");
   });
 
   test("a multi-line notice is joined onto the header's one row", () => {
@@ -11451,7 +11499,7 @@ describe("Unified peer repos in the Agents tree", () => {
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
-  test("the s dialog comes back when the path dialog closes, frozen while the send waits", async () => {
+  test("the s dialog comes back when the path dialog closes, and closes once the send is pending", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-restore-"));
     try {
       const file = join(dir, "notes.txt");
@@ -11478,23 +11526,22 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(send.buffer.getText()).toBe(draft);
       expect(service.sendRemoteMessage).not.toHaveBeenCalled();
 
-      // Unchecked and submitted: the s dialog is back, frozen, and Esc cancels the send.
+      // Unchecked and submitted: the s dialog closes once the send is pending,
+      // and Esc on the row cancels it and brings the dialog back with the draft.
       service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) =>
         new Promise((_, reject) => transfer!.signal!.addEventListener("abort", () => reject(transfer!.signal!.reason))));
       await submit();
       dashboard.handleInput("\r");
-      expect(dashboard.dialog).toBe(send);
+      await waitFor(() => dashboard.dialog === null);
       await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
       expect(service.sendRemoteMessage.mock.calls[0]![1]).toMatchObject({ message: draft, files: [] });
-      const overlay = () => stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
-      expect(overlay()).toContain("Sending… Esc: cancel");
       dashboard.handleInput("\x1b");
-      await waitFor(() => !send.inFlight);
-      expect(dashboard.dialog).toBe(send);
+      await waitFor(() => dashboard.dialog === send);
+      expect(send.inFlight).toBe(false);
       expect(dashboard.notice).toBe("Send cancelled");
       expect(send.buffer.getText()).toBe(draft);
 
-      // Acceptance closes the s dialog, not some other one.
+      // Accepted: the dialog stays closed.
       await submit();
       dashboard.handleInput("\r");
       await waitFor(() => dashboard.dialog === null);
@@ -11982,19 +12029,32 @@ describe("Unified peer repos in the Agents tree", () => {
     const prompt = "Inspect /no/such/dir/report.txt";
     form.buffer.handleInput("\x1b[200~" + prompt + "\x1b[201~");
     form.focused = "create";
-    const start = spyOn(service, "startRemoteAgent").mockRejectedValueOnce(new Error("Type unavailable"));
+    const refused = Promise.withResolvers<string>();
+    const start = spyOn(service, "startRemoteAgent").mockReturnValueOnce(refused.promise);
     dashboard.handleInput("\r");
-    await waitFor(() => form.error === "Remote start on Laptop C: Type unavailable");
-    expect(dashboard.dialog).toBe(form);
+    // Handed off: the form closes and the header alert carries the start.
+    await waitFor(() => dashboard.dialog === null);
+    expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toStartWith("ib — starting agent on Laptop C…");
+    refused.reject(new Error("Type unavailable"));
+    // The failure brings the form back with its draft and the error.
+    await waitFor(() => dashboard.dialog === form);
+    expect(form.error).toBe("Remote start on Laptop C: Type unavailable");
+    expect(form.inFlight).toBeUndefined();
     expect(buildNewAgentFormContent(form, 70).contentLines.join(" ")).toContain("Type unavailable");
     expect(form.buffer.getText()).toBe(prompt);
+    expect(form.name).toBe("builder");
+    expect(form.agentType).toBe("worker");
+    expect(form.machine).toEqual({ id: PEER_C, name: "Laptop C" });
+    expect(stripAnsi(dashboard.render(WIDTH)[0]!)).not.toContain("starting agent");
     const longId = "builder-" + "w".repeat(240);
     start.mockResolvedValue(longId);
     dashboard.handleInput("\r");
     dashboard.handleInput("\r");
-    await waitFor(() => dashboard.dialog === null);
-    expect(start.mock.calls).toEqual(Array(2).fill([PEER_C, { repo: "itsybitsy", type: "worker", name: "builder", prompt }, { signal: expect.any(AbortSignal) }]));
+    await waitFor(() => dashboard.notice?.startsWith("Created agent") === true);
+    const transfer = expect.objectContaining({ signal: expect.any(AbortSignal) });
+    expect(start.mock.calls).toEqual(Array(2).fill([PEER_C, { repo: "itsybitsy", type: "worker", name: "builder", prompt }, transfer]));
     expect(dashboard.notice).toBe(`Created agent ${longId.slice(0, 79)}… on Laptop C`);
+    expect(dashboard.dialog).toBeNull();
   });
 
   /** The New Agent form on the remote-only `itsybitsy` header, whose first machine is Laptop B, with `prompt` typed. */
@@ -12039,10 +12099,10 @@ describe("Unified peer repos in the Agents tree", () => {
       // The start holds the pending slot while the path dialog is open.
       expect(dashboard.remoteStartPending).toBe(true);
       for (const key of [" ", "\r"]) dashboard.handleInput(key);
-      // The frozen form is back while the start is in flight.
-      expect(dashboard.dialog).toBe(form);
+      // Handed off: the form closes and the header alert carries the start.
       await waitFor(() => start.mock.calls.length === 1);
-      expect(form.inFlight).toBe("Laptop B");
+      expect(dashboard.dialog).toBeNull();
+      expect(dashboard.remoteStartPending).toBe(true);
       const [peer, request, transfer] = start.mock.calls[0]!;
       expect(peer).toBe(PEER_B);
       expect(request).toMatchObject({ repo: "itsybitsy", type: "worker", prompt });
@@ -12051,9 +12111,17 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(request.files![0]!.spellings).not.toContain(left);
       await waitFor(() => copied !== undefined);
       expect(copied).toBe("picked");
+      // Bytes written to the link, then the wait for the peer's reply.
+      const header = () => stripAnsi(dashboard.render(WIDTH)[0]!);
+      expect(header()).toContain("starting agent on Laptop B… 0 / 6 bytes");
+      transfer!.onProgress!(6);
+      expect(header()).toContain("starting agent on Laptop B… 6 / 6 bytes");
+      transfer!.onSent!();
+      expect(header()).toContain("starting agent on Laptop B… waiting for Laptop B to confirm");
       result.resolve("builder");
-      await waitFor(() => dashboard.dialog === null);
-      expect(dashboard.notice).toBe("Created agent builder on Laptop B");
+      await waitFor(() => dashboard.notice === "Created agent builder on Laptop B");
+      expect(dashboard.dialog).toBeNull();
+      expect(header()).not.toContain("starting agent");
       await waitFor(() => !dashboard.remoteStartPending);
       expect(await Bun.file(join(transfer!.filesDir!, "0")).exists()).toBe(false);
     } finally { stagingRoot.mockRestore(); processStartEpochSecondsCtx.reset(); resetUserHome(); await rm(home, { recursive: true, force: true }); }
@@ -12081,33 +12149,26 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.handleInput("\r");
       await waitFor(() => dashboard.dialog?.type === "multi-select");
       dashboard.handleInput("\r");
-      await waitFor(() => dashboard.dialog === null);
-      expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt }, { signal: expect.any(AbortSignal) }]]);
-      expect(dashboard.notice).toBe("Created agent builder on Laptop B");
+      await waitFor(() => dashboard.notice === "Created agent builder on Laptop B");
+      expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt }, expect.objectContaining({ signal: expect.any(AbortSignal) })]]);
+      expect(dashboard.dialog).toBeNull();
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
-  test("Esc on the form restored after the path dialog dismisses it, and the start's failure is a notice", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "ib-dashboard-start-detach-"));
-    try {
-      const file = join(dir, "notes.txt");
-      await Bun.write(file, "notes");
-      const { dashboard, service, form } = remoteStartForm(`Read ${file}`);
-      const result = Promise.withResolvers<string>();
-      const start = spyOn(service, "startRemoteAgent").mockReturnValue(result.promise);
-      dashboard.handleInput("\r");
-      await waitFor(() => dashboard.dialog?.type === "multi-select");
-      dashboard.handleInput("\r");
-      expect(dashboard.dialog).toBe(form);
-      await waitFor(() => start.mock.calls.length === 1);
-      dashboard.handleInput("\x1b");
-      expect(dashboard.dialog).toBeNull();
-      expect(dashboard.remoteStartPending).toBe(true);
-      result.reject(new Error("spawn failed"));
-      await waitFor(() => !dashboard.remoteStartPending);
-      expect(dashboard.notice).toBe("Remote start on Laptop B: spawn failed");
-      expect(dashboard.dialog).toBeNull();
-    } finally { await rm(dir, { recursive: true, force: true }); }
+  test("a start failure does not replace a dialog opened after the form closed", async () => {
+    const { dashboard, service } = remoteStartForm("hello");
+    const result = Promise.withResolvers<string>();
+    spyOn(service, "startRemoteAgent").mockReturnValue(result.promise);
+    dashboard.handleInput("\r");
+    await waitFor(() => dashboard.dialog === null);
+    expect(dashboard.remoteStartPending).toBe(true);
+    dashboard.handleInput("?");
+    const help = dashboard.dialog;
+    expect(help?.type).toBe("help");
+    result.reject(new Error("spawn failed"));
+    await waitFor(() => !dashboard.remoteStartPending);
+    expect(dashboard.notice).toBe("Remote start on Laptop B: spawn failed");
+    expect(dashboard.dialog).toBe(help);
   });
 
   test("a prompt with no attachable paths starts with the JSON request and no path dialog", async () => {
@@ -12116,9 +12177,10 @@ describe("Unified peer repos in the Agents tree", () => {
     const shown = spyOn(dashboard, "showDialog");
     const start = spyOn(service, "startRemoteAgent").mockResolvedValue("builder");
     dashboard.handleInput("\r");
-    await waitFor(() => dashboard.dialog === null);
+    await waitFor(() => dashboard.notice === "Created agent builder on Laptop B");
+    expect(dashboard.dialog).toBeNull();
     expect(shown).not.toHaveBeenCalled();
-    expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt }, { signal: expect.any(AbortSignal) }]]);
+    expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt }, expect.objectContaining({ signal: expect.any(AbortSignal) })]]);
     expect(start.mock.calls[0]![1].files).toBeUndefined();
   });
 
@@ -13076,9 +13138,10 @@ describe("Unified peer repos in the Agents tree", () => {
       openForm([{ name: "local", path: "/repos/local" }]);
       const shown = spyOn(dashboard, "showDialog");
       dashboard.handleInput("\r");
-      await waitFor(() => dashboard.dialog === null);
+      await waitFor(() => start.mock.calls.length === 1);
+      expect(dashboard.dialog).toBeNull();
       expect(shown).not.toHaveBeenCalled();
-      expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt: "Review ./src/app.ts" }, { signal: expect.any(AbortSignal) }]]);
+      expect(start.mock.calls).toEqual([[PEER_B, { repo: "itsybitsy", type: "worker", prompt: "Review ./src/app.ts" }, expect.objectContaining({ signal: expect.any(AbortSignal) })]]);
     } finally { await rm(checkout, { recursive: true, force: true }); }
   });
 
@@ -13501,6 +13564,10 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.handleInput("\x1b");
       await waitFor(() => dashboard.notice === "Send cancelled");
       expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      // The cancelled send's dialog comes back with its draft; Esc closes it.
+      await waitFor(() => dashboard.dialog?.type === "textarea");
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
 
       service.acknowledgeRemoteQuestion.mockRejectedValueOnce(new Error("Question 'q-worker-abc' not found"));
       dashboard.handleInput("\x1b");
@@ -13562,6 +13629,83 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.dialog).toBe(dialog);
       expect(dialog.buffer.getText()).toBe("yes");
       expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      expect(listed(dashboard)).toContain("Laptop B:worker-abc");
+    });
+
+    test("once the answer is written, its dialog says it waits for the peer and Esc cannot cancel", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      const result = Promise.withResolvers<string>();
+      let sent: (() => void) | undefined;
+      service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) => {
+        sent = transfer!.onSent;
+        return result.promise;
+      });
+      const dialog = submitAnswer(dashboard, "yes");
+      await waitFor(() => sent !== undefined);
+      const overlay = () => stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
+      expect(overlay()).toContain("Sending… Esc: cancel");
+      sent!();
+      expect(overlay()).not.toContain("Esc: cancel");
+      expect(overlay()).toContain("Waiting for Laptop B to confirm…");
+      // Aborting now would only leave the answer's outcome unknown, inviting a duplicate.
+      dashboard.handleInput("\x1b");
+      expect(dashboard.notice).toBe("Cannot cancel: waiting for Laptop B to confirm");
+      expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
+      expect(dashboard.dialog).toBe(dialog);
+      expect(dialog.inFlight).toBe(true);
+      // Accepted: the note goes while the question is acknowledged.
+      const acknowledged = Promise.withResolvers<void>();
+      service.acknowledgeRemoteQuestion.mockImplementationOnce(() => acknowledged.promise);
+      result.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+      await waitFor(() => service.acknowledgeRemoteQuestion.mock.calls.length === 1);
+      expect(overlay()).not.toContain("Waiting for");
+      acknowledged.resolve();
+      await waitFor(() => dashboard.notice === "Answered Laptop B/worker-abc");
+      expect(dashboard.dialog).toBeNull();
+    });
+
+    test("a written answer that then fails leaves no waiting note for the retry", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      service.sendRemoteMessage.mockImplementationOnce(async (_peer, _header, _source, transfer) => {
+        transfer!.onSent!();
+        throw new Error("Agent not found: worker-abc");
+      });
+      const dialog = submitAnswer(dashboard, "yes");
+      await waitFor(() => dashboard.notice === "Agent not found: worker-abc" && !dialog.inFlight);
+      expect(dialog.inFlightNote).toBeUndefined();
+      expect(dialog.buffer.getText()).toBe("yes");
+      const pending = Promise.withResolvers<string>();
+      service.sendRemoteMessage.mockImplementationOnce(() => pending.promise);
+      dashboard.handleInput("\r");
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 2);
+      const overlay = stripAnsi(((dashboard as any).dialogOverlay.render(80) as string[]).join("\n"));
+      expect(overlay).toContain("Sending… Esc: cancel");
+      pending.resolve(service.sendRemoteMessage.mock.calls[1]![1].id);
+      await waitFor(() => dashboard.notice === "Answered Laptop B/worker-abc");
+    });
+
+    test("Esc on the questions while a written send waits says it cannot cancel, and acknowledges nothing", async () => {
+      const { dashboard, service } = setupQuestions();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.handleInput("q");
+      const result = Promise.withResolvers<string>();
+      service.sendRemoteMessage.mockImplementationOnce((_peer, _header, _source, transfer) => {
+        transfer!.onSent!();
+        return result.promise;
+      });
+      dashboard.handleInput("s");
+      assertDialog(dashboard.dialog, "textarea").onSubmit("hello");
+      await waitFor(() => service.sendRemoteMessage.mock.calls.length === 1);
+      expect(dashboard.dialog).toBeNull();
+      dashboard.handleInput("\x1b");
+      await dashboard.flushPendingActions();
+      expect(dashboard.notice).toBe("Cannot cancel: waiting for Laptop B to confirm");
+      expect(service.acknowledgeRemoteQuestion).not.toHaveBeenCalled();
+      expect(service.sendRemoteMessage.mock.calls[0]![3]!.signal!.aborted).toBe(false);
+      result.resolve(service.sendRemoteMessage.mock.calls[0]![1].id);
+      await waitFor(() => dashboard.notice?.startsWith("Sent to Laptop B/") === true);
       expect(listed(dashboard)).toContain("Laptop B:worker-abc");
     });
 

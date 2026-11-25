@@ -181,14 +181,38 @@ export function killActiveDiffProc() {
   }
 }
 
+/**
+ * A peer request's header status (SPEC §20.5): the bytes written to the link,
+ * then, once `sent`, the wait for the peer's reply. Written bytes can still be
+ * in flight, so only the reply means the peer has them.
+ */
+export interface TransferProgress {
+  peerName: string;
+  bytes: number;
+  total?: number;
+  sent: boolean;
+}
+
+/** A remote send's milestones, for the dialog that started it (SPEC §20.5). */
+export interface RemoteSendHooks {
+  /** The send is pending in the header alert, after any path dialog. */
+  onPending?(): void;
+  /** The request is written: aborting it now would only leave its outcome unknown. */
+  onSent?(): void;
+}
+
 /** Context interface — DashboardComponent satisfies this structurally */
 export interface ActionCtx {
   readonly dialog: DialogState;
   /** Send to a remote row (SPEC §20.5); true once the peer accepts. Aborting `controller` cancels. */
-  submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller?: AbortController): Promise<boolean>;
+  submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller?: AbortController, hooks?: RemoteSendHooks): Promise<boolean>;
   remoteStartPending: boolean;
-  /** The pending remote start, which may carry attachments: dashboard shutdown aborts it and waits for its cleanup. */
-  remoteStart?: { controller: AbortController; done: Promise<void> } | null;
+  /**
+   * The pending remote start, which may carry attachments: dashboard shutdown
+   * aborts it and waits for its cleanup. `progress` is set once the start is
+   * handed off, and shows in the header alert.
+   */
+  remoteStart?: { controller: AbortController; done: Promise<void>; progress?: TransferProgress } | null;
   /** Add a line to the errors list. */
   addError?(message: string): void;
   peerService: PeersDialogService | null;
@@ -1609,9 +1633,13 @@ function handleSendToTeam(ctx: ActionCtx, teamName: string) {
 /**
  * SPEC §20.5: open a `Send message to <peer>/<target>:` dialog for a remote
  * agent or peer coordinator, sent through the same peer path as the inline
- * editor. Like the local dialog it is frozen while the send is in flight,
- * closes on acceptance and keeps the draft on failure; unlike it, Esc while in
- * flight cancels the send, since a remote send waits on the whole transfer.
+ * editor. It is frozen while the send looks for attachments, and Esc then
+ * cancels. It closes once the send is pending, since a remote send waits on
+ * the whole transfer: the header alert carries it from there, and Esc on the
+ * row cancels it until it is written. A send that fails before it is pending
+ * keeps the draft in the open dialog; one that fails or is cancelled after
+ * that reopens the dialog with the draft, unless another dialog is open by
+ * then.
  * There is no send-to-all toggle and no [Send Esc]: neither reaches a peer.
  */
 function handleSendToRemote(ctx: ActionCtx, remote: RemoteMessageEntry) {
@@ -1620,20 +1648,26 @@ function handleSendToRemote(ctx: ActionCtx, remote: RemoteMessageEntry) {
     prompt: `Send message to ${remoteTitle(remote)}:`,
     buffer: new TextBuffer(),
     focusedButton: "text",
-    onSubmit: (message: string) => {
+    onSubmit: async (message: string) => {
       if (dialog.inFlight) return;
       const trimmed = message.trim();
       if (!trimmed) { ctx.closeDialog(); ctx.setNotice("Send cancelled", "info"); return; }
       const controller = new AbortController();
       dialog.onCancelInFlight = () => controller.abort(new Error("Send cancelled"));
       dialog.inFlight = true;
-      void ctx.submitRemoteMessage(remote, trimmed, controller).then((ok) => {
-        if (ok) ctx.closeDialog();
-      }).finally(() => {
+      let pending = false;
+      let ok = false;
+      try {
+        ok = await ctx.submitRemoteMessage(remote, trimmed, controller, { onPending: () => {
+          pending = true;
+          if (ctx.dialog === dialog) ctx.closeDialog();
+        } });
+      } finally {
         dialog.inFlight = false;
         dialog.onCancelInFlight = undefined;
+        if (!ok && pending && !ctx.dialog) ctx.showDialog(dialog);
         ctx.tui?.requestRender();
-      });
+      }
     },
   };
   ctx.showDialog(dialog);
@@ -2003,8 +2037,10 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
         ctx.tui?.requestRender();
         const controller = new AbortController();
         const done = Promise.withResolvers<void>();
-        ctx.remoteStart = { controller, done: done.promise };
+        const pending: NonNullable<ActionCtx["remoteStart"]> = { controller, done: done.promise };
+        ctx.remoteStart = pending;
         let staged: StagedPeerAttachments | undefined;
+        let failure: string | undefined;
         try {
           // This machine's checkout of the same registry name, if any (SPEC §20.5).
           const { candidates } = await peerAttachmentCandidates(prompt, repo?.path);
@@ -2019,21 +2055,27 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
             }
             paths = candidates.filter(candidate => selected.has(candidate.argument));
           }
+          // Handed off: the header alert carries the start, and a failure brings the form back.
+          const progress: TransferProgress = pending.progress = { peerName: target.name, bytes: 0, sent: false };
+          if (ctx.dialog === form) ctx.closeDialog();
+          ctx.tui?.requestRender();
           if (paths.length) {
             staged = await stagePeerAttachments(paths, {
               signal: controller.signal, onCleanupError: err => ctx.addError?.(`Outgoing attachment cleanup failed: ${err}`),
             });
+            progress.total = staged.files.reduce((sum, file) => sum + file.size, 0);
           }
           const id = await service.startRemoteAgent(target.id, {
             repo: registryName, type: agentType, name: name.trim() || undefined, prompt, files: staged?.files,
-          }, { filesDir: staged?.filesDir, signal: controller.signal });
-          if (ctx.dialog === form) ctx.closeDialog();
+          }, {
+            filesDir: staged?.filesDir, signal: controller.signal,
+            onProgress: bytes => { progress.bytes = bytes; ctx.tui?.requestRender(); },
+            onSent: () => { progress.sent = true; ctx.tui?.requestRender(); },
+          });
           ctx.setNotice(`Created agent ${cleanRemoteText(id)} on ${target.name}`, "info");
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
-          const message = `Remote start on ${target.name}: ${detail}`;
-          if (ctx.dialog === form) form.error = message;
-          else ctx.setNotice(message, "error");
+          failure = `Remote start on ${target.name}: ${detail}`;
         } finally {
           try { await staged?.cleanup(); }
           finally {
@@ -2041,6 +2083,12 @@ function showNewAgentFormDialog(ctx: ActionCtx, repo: RepoEntry | null, registry
             done.resolve();
             ctx.remoteStartPending = false;
             form.inFlight = undefined;
+            if (failure !== undefined) {
+              if (ctx.dialog === form) form.error = failure;
+              // Handed off: the form comes back with its draft, unless another dialog took its place.
+              else if (pending.progress && !ctx.dialog) { form.error = failure; ctx.showDialog(form); }
+              else ctx.setNotice(failure, "error");
+            }
             ctx.tui?.requestRender();
           }
         }
@@ -2122,7 +2170,9 @@ function questionAgent(ctx: ActionCtx, q: PendingQuestion): Agent | null {
  * the notice), then acknowledge it on that machine. As for a local question
  * the dialog is frozen while in flight, keeps the draft when the send fails
  * and never resends an accepted answer, so a retry after a failed acknowledge
- * only acknowledges. As for a remote send, Esc while the send waits cancels it.
+ * only acknowledges. As for a remote send, Esc cancels the send until it is
+ * written; after that the dialog shows `Waiting for <peer> to confirm…`, and
+ * Esc only says it cannot cancel.
  */
 function answerPeerQuestion(ctx: ActionCtx, q: PendingQuestion, peer: NonNullable<PendingQuestion["peer"]>) {
   const label = `${peer.name}/${q.agent}`;
@@ -2143,9 +2193,16 @@ function answerPeerQuestion(ctx: ActionCtx, q: PendingQuestion, peer: NonNullabl
         if (!answered) {
           const controller = new AbortController();
           dialog.onCancelInFlight = () => controller.abort(new Error("Send cancelled"));
-          if (!await ctx.submitRemoteMessage(row, trimmed, controller)) return;
+          const onSent = () => {
+            // Aborting a written answer would only leave its outcome unknown.
+            dialog.inFlightNote = `Waiting for ${peer.name} to confirm…`;
+            dialog.onCancelInFlight = () => ctx.setNotice(`Cannot cancel: waiting for ${peer.name} to confirm`, "info");
+            ctx.tui?.requestRender();
+          };
+          if (!await ctx.submitRemoteMessage(row, trimmed, controller, { onSent })) return;
           answered = true;
           dialog.onCancelInFlight = undefined;
+          dialog.inFlightNote = undefined;
         }
         try {
           await ctx.acknowledgePeerQuestion(peer, q.id);
@@ -2158,6 +2215,7 @@ function answerPeerQuestion(ctx: ActionCtx, q: PendingQuestion, peer: NonNullabl
       }).finally(() => {
         dialog.inFlight = false;
         dialog.onCancelInFlight = undefined;
+        dialog.inFlightNote = undefined;
         ctx.tui?.requestRender();
       });
     },

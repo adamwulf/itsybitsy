@@ -437,6 +437,16 @@ function padToWidth(str: string, width: number): string {
 /** The right pane's text for a selected remote row, in every mode but INITIAL PROMPT on an agent (SPEC §20.5). */
 export const REMOTE_RIGHT_PANE_TEXT = "Not available for remote agents";
 
+/**
+ * A pending peer request's header status after its `…` (SPEC §20.5): the
+ * bytes written to the link for attachments, then, once all are written, the
+ * wait for the peer's reply, since written bytes can still be in flight.
+ */
+function transferStatus(progress: agentActions.TransferProgress): string {
+  if (progress.sent) return ` waiting for ${progress.peerName} to confirm`;
+  return progress.total === undefined ? "" : ` ${progress.bytes} / ${progress.total} bytes`;
+}
+
 /** A remote agent's key: `currentAgentKey` and its draft while it is selected. */
 function remoteAgentKey(row: Extract<RemoteEntry, { kind: "remote-agent" }>): string {
   return `${row.peerId}/${row.remote.repoRegistryName}/${row.remote.id}`;
@@ -742,7 +752,7 @@ class DialogOverlayComponent implements Component {
         } else {
           lines.push(leftSide);
         }
-        if (dialog.inFlight && dialog.onCancelInFlight) lines.push(`${DIM}Sending… Esc: cancel${RESET}`);
+        if (dialog.inFlight && (dialog.inFlightNote || dialog.onCancelInFlight)) lines.push(`${DIM}${dialog.inFlightNote ?? "Sending… Esc: cancel"}${RESET}`);
         return { title: dialog.prompt, contentLines: lines };
       }
       case "folder-browser": {
@@ -875,7 +885,7 @@ export class DashboardComponent implements Component {
    */
   remoteStartPending = false;
   /** The pending remote start (agent-actions.ts): shutdown aborts it with the pending sends. */
-  remoteStart: { controller: AbortController; done: Promise<void> } | null = null;
+  remoteStart: NonNullable<agentActions.ActionCtx["remoteStart"]> | null = null;
   peerService: PeersDialogService | null = null;
   /** The poller state the Agents tree's remote rows were last built from. */
   private peerLinks: readonly PeerLinkState[] = [];
@@ -949,7 +959,7 @@ export class DashboardComponent implements Component {
   }
   private selectedReceipt: string | undefined;
   private pendingLifecycle = new Map<string, string>();
-  private pendingRemoteSends = new Map<string, { id: string; peerId: string; target: SendTarget; label: string; bytes: number; total?: number; controller: AbortController; done: Promise<void> }>();
+  private pendingRemoteSends = new Map<string, agentActions.TransferProgress & { id: string; peerId: string; target: SendTarget; label: string; controller: AbortController; done: Promise<void> }>();
   private lastSentNotice: string | null = null;
   private lastSentNoticeKind: "info" | "error" = "info";
   private usageTimer: ReturnType<typeof setInterval> | null = null;
@@ -2185,14 +2195,17 @@ export class DashboardComponent implements Component {
    * acceptance; on failure it shows the reason and resolves false. Aborting
    * `controller` cancels the send. When `text` names files the peer can take
    * as attachments, the path dialog asks which to attach first; cancelling it
-   * sends nothing and resolves false.
+   * sends nothing and resolves false. `hooks.onPending` runs once the entry
+   * shows, and `hooks.onSent` once the request is written and can no longer be
+   * cancelled.
    */
-  async submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller = new AbortController()): Promise<boolean> {
+  async submitRemoteMessage(remote: RemoteMessageEntry, text: string, controller = new AbortController(), hooks: agentActions.RemoteSendHooks = {}): Promise<boolean> {
     const service = this.peerService;
     const header = textHeader(remoteMessageTarget(remote), text, { kind: "user" });
     const label = remoteTitle(remote);
     const done = Promise.withResolvers<void>();
-    const pending = { id: header.id, peerId: remote.peerId, target: header.target, label, controller, done: done.promise, bytes: 0, total: undefined as number | undefined };
+    const pending = { id: header.id, peerId: remote.peerId, peerName: remote.peerName, target: header.target, label, controller, done: done.promise,
+      bytes: 0, total: undefined as number | undefined, sent: false };
     let staged: StagedPeerAttachments | undefined;
     try {
       if (!service) throw new Error("Remote messaging is unavailable");
@@ -2214,6 +2227,7 @@ export class DashboardComponent implements Component {
       this.pendingRemoteSends.set(header.id, pending);
       this.invalidate();
       this.tui?.requestRender();
+      hooks.onPending?.();
       if (paths.length) {
         staged = await stagePeerAttachments(paths, {
           signal: controller.signal, onCleanupError: err => this.addError(`Outgoing attachment cleanup failed: ${err}`),
@@ -2224,6 +2238,11 @@ export class DashboardComponent implements Component {
       await service.sendRemoteMessage(remote.peerId, header, "dashboard", {
         filesDir: staged?.filesDir, signal: controller.signal, onProgress: bytes => {
           pending.bytes = bytes;
+          this.invalidate();
+          this.tui?.requestRender();
+        }, onSent: () => {
+          pending.sent = true;
+          hooks.onSent?.();
           this.invalidate();
           this.tui?.requestRender();
         },
@@ -3335,7 +3354,9 @@ export class DashboardComponent implements Component {
     if (matchesKey(data, Key.escape)) {
       const send = this.escapeSend();
       if (send) {
-        send.controller.abort(new Error("Send cancelled"));
+        // A written request cannot be cancelled: aborting it would only leave its outcome unknown.
+        if (send.sent) this.setNotice(`Cannot cancel: waiting for ${send.peerName} to confirm`, "info");
+        else send.controller.abort(new Error("Send cancelled"));
         return;
       }
     }
@@ -4020,12 +4041,13 @@ export class DashboardComponent implements Component {
     // first, so its hint survives a cut header.
     const cancellableSend = this.escapeSend();
     const incoming = this.peerService?.view().incoming ?? [];
+    const start = this.remoteStart?.progress;
     const transfers = [
       ...[...this.pendingRemoteSends.values()].map((send) => {
-        const progress = send.total === undefined ? "" : ` ${send.bytes} / ${send.total} bytes`;
         const esc = send === cancellableSend;
-        return { esc, text: `sending to ${send.label}…${progress}${esc ? "  Esc: cancel" : ""}` };
+        return { esc, text: `sending to ${send.label}…${transferStatus(send)}${esc && !send.sent ? "  Esc: cancel" : ""}` };
       }),
+      ...start ? [{ esc: false, text: `starting agent on ${start.peerName}…${transferStatus(start)}` }] : [],
       ...incoming.map((row) => {
         const esc = row.id === this.selectedReceipt;
         return { esc, text: `${esc ? "› " : ""}receiving ${row.label}  ${row.bytes} / ${row.total} bytes  ${esc ? "Esc: cancel" : "Ctrl-T: select"}` };

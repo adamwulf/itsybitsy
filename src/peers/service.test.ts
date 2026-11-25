@@ -17,6 +17,7 @@ import {
   PEER_ALPN,
   PEER_CLOSE,
   NEW_AGENT_MAX_REQUEST_BYTES,
+  encodeAgentsReply,
   encodePeerRequest,
   requestAgents,
   serveTrustedConnection,
@@ -36,6 +37,7 @@ import {
   type ServiceStream,
 } from "./service";
 import { addPeer, readPeers, type Peer } from "./store";
+import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS } from "./poller";
 import { TerminalFrameReader, encodeTerminalOpen, parseTerminalExit } from "./terminal-frame";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import type { RemoteSpawnDeps } from "./new-agent";
@@ -1894,6 +1896,129 @@ test("defaultPeerServiceDeps gives message sends and remote starts one attachmen
     release.resolve();
     await holding;
   }
+});
+
+describe("PeerService keeps the link while a transfer moves bytes", () => {
+  const kept = `peer link: Laptop C (${ID_REMOTE.slice(0, 10)}): agents poll timed out while an attachment transfer is moving bytes; keeping the connection`;
+
+  /**
+   * A service whose poller dials ID_REMOTE over a memory link whose far end the
+   * test drives: it answers the first agents poll, so the link is connected.
+   */
+  async function connectedService(overrides: Partial<PeerServiceDeps> = {}, wrap: (conn: MemoryConnection) => void = () => {}) {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const rig = makeService(overrides);
+    let far: MemoryConnection | undefined;
+    rig.endpoint.connectImpl = async id => {
+      const link = createMemoryLink("00".repeat(32), id);
+      wrap(link.a);
+      far = link.b;
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    await rig.service.bootIfPaired();
+    await waitFor(() => far !== undefined, { message: "dialed" });
+    const first = await far!.acceptBi();
+    await first.readToEnd(4096);
+    await first.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [], questions: [] }));
+    await first.finish();
+    await waitFor(() => rig.service.view().links[0]?.connected === true, { message: "connected" });
+    /** The next tick's agents poll, read and left unanswered, then its 15 s deadline and 750 ms grace. */
+    const stallPoll = async () => {
+      rig.clock.advance(PEER_POLL_INTERVAL_MS);
+      const poll = await far!.acceptBi();
+      expect(JSON.parse(new TextDecoder().decode(await poll.readToEnd(4096))).op).toBe("agents");
+      await Bun.sleep(0);
+      rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
+      await Bun.sleep(0);
+      rig.clock.advance(750);
+      await Bun.sleep(0);
+    };
+    return { ...rig, far: far!, stallPoll };
+  }
+
+  test("inbound: a receipt blocked mid-body keeps a stalled poll's connection; once it ends, the kept poll closes at its next check", async () => {
+    const newAgent = mock<RemoteSpawnDeps["newAgent"]>(async () => ({ ok: true, exitCode: 0, stdout: "agent-1", stderr: "" }));
+    const { service, endpoint, logs, clock, far, stallPoll } = await connectedService({ remoteSpawn: {
+      listSpawnableTypes: listSpawnableTypeNamesSync, listRepos: async () => [{ name: "app", path: "/local/app" }], newAgent, notice() {},
+      attachments: createAttachmentReceiver({ tempDir: home, stagingRoot: join(home, "staging"), hasFreeSpace: async () => true }),
+    } });
+    await writeFile(join(home, ".itsybitsy", "machine-name"), "laptop");
+    // The other side's own connection carries a start whose body arrives 1 byte of 3, then stops.
+    const inbound = incomingFrom(endpoint, service.view().selfId!, PEER_ALPN);
+    try {
+      const stream = await inbound.openBi();
+      await stream.writeAll(encodeFrameHeader({ op: "new-agent", repo: "app", type: "worker", prompt: "use ./a.txt",
+        files: [{ name: "a.txt", size: 3, sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex"), spellings: ["./a.txt"] }] }));
+      await stream.writeAll(Buffer.from("a"));
+      await waitFor(() => service.view().incoming?.[0]?.bytes === 1, { message: "receiving" });
+
+      await stallPoll();
+      await waitFor(() => logs.includes(kept), { message: "kept" });
+      expect(far.closeInfo()).toBeNull();
+      expect(service.view().links[0]).toMatchObject({ connected: true, lastError: null });
+
+      // The receipt completes: no transfer with the peer moves bytes any more.
+      await stream.writeAll(Buffer.from("bc"));
+      await stream.finish();
+      expect(JSON.parse(new TextDecoder().decode(await stream.readToEnd(4096)))).toEqual({ ok: true, id: "agent-1" });
+      clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
+      await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
+      expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
+      expect(service.view().links[0]?.lastError).toBe("request timed out");
+    } finally {
+      inbound.close(PEER_CLOSE.done, "done");
+      await service.shutdown();
+    }
+  });
+
+  test("outbound: a send whose body write is blocked keeps a stalled poll's connection; once it ends, the kept poll closes at its next check", async () => {
+    const { textHeader } = await import("./peer-outbox");
+    // The far end reads slowly: after the header, this side's body writes wait.
+    const reading = Promise.withResolvers<void>();
+    const { service, logs, clock, far, stallPoll } = await connectedService({}, conn => {
+      const open = conn.openBi.bind(conn);
+      conn.openBi = async () => {
+        const stream = await open();
+        const setPriority = stream.setPriority.bind(stream), write = stream.write.bind(stream);
+        let body = false, writes = 0;
+        stream.setPriority = priority => { body = true; return setPriority(priority); };
+        stream.write = async bytes => {
+          if (body && writes++ > 0) await reading.promise;
+          return write(bytes);
+        };
+        return stream;
+      };
+    });
+    const filesDir = join(home, "outgoing");
+    await mkdir(filesDir);
+    await writeFile(join(filesDir, "0"), "abc");
+    const header = { ...textHeader({ kind: "agent", agent: "helper" }, "read ./a.txt", { kind: "user" }),
+      files: [{ name: "a.txt", size: 3, sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex"), spellings: ["./a.txt"] }] };
+    try {
+      const sending = service.sendRemoteMessage(ID_REMOTE, header, "handoff", { filesDir });
+      const send = await far.acceptBi();
+      await waitFor(() => logs.some(line => line.startsWith("peer link: transfer started: send to Laptop C")), { message: "sending" });
+
+      await stallPoll();
+      await waitFor(() => logs.includes(kept), { message: "kept" });
+      expect(far.closeInfo()).toBeNull();
+      expect(service.view().links[0]).toMatchObject({ connected: true, lastError: null });
+
+      // The far end takes the body and acknowledges: the send ends.
+      reading.resolve();
+      await send.readToEnd(4096);
+      await send.writeAll(new TextEncoder().encode(JSON.stringify({ ok: true, id: header.id })));
+      await send.finish();
+      expect(await sending).toBe(header.id);
+      clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
+      await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
+      expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
+      expect(service.view().links[0]?.lastError).toBe("request timed out");
+    } finally {
+      reading.resolve();
+      await service.shutdown();
+    }
+  });
 });
 
 describe("PeerService trusted ALPN", () => {

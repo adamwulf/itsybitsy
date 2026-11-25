@@ -32,8 +32,10 @@ utc_now() {
 }
 
 # "status 0", or for a death by signal N (status 128+N) "status 133 (signal
-# 5, SIGTRAP)". 133 is how a Bun panic ends, including a native segfault Bun
-# catches (in a napi addon, say). It first prints a panic line to stderr:
+# 5, SIGTRAP)". 133 is how a Bun panic ends on Apple Silicon, including a
+# native segfault Bun catches (in a napi addon, say): Bun ends a panic with
+# Zig's @trap(), a brk instruction there. On Intel it is ud2, so 132 (SIGILL)
+# is expected (not measured). It first prints a panic line to stderr:
 # "panic(main thread): ..." on the main thread, "panic: Segmentation fault at
 # address ..." on any other thread (the iroh addon works on tokio threads, so
 # an iroh crash most likely shows this form). "oh no: Bun has crashed" follows

@@ -19,8 +19,9 @@
  * Every JS-level exit (a quit, a crash above, a signal handled by
  * terminal-cleanup.ts, a `process.exit` anywhere) also writes one `[exit]`
  * line from the process "exit" event. A run that ends with no `[exit]` line
- * ran no JS exit handlers: a Bun panic (SIGTRAP, including a native segfault
- * Bun catches, as in the iroh napi addon; its stderr, kept in
+ * ran no JS exit handlers: a Bun panic (SIGTRAP on Apple Silicon, SIGILL
+ * expected on Intel; including a native segfault Bun catches, as in the
+ * iroh napi addon; its stderr, kept in
  * watch-stderr.log, holds "panic(main thread): ..." or, on another thread,
  * "panic: Segmentation fault at address ...", then the stable marker "oh no:
  * Bun has crashed"), a native abort() (SIGABRT), an

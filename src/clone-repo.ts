@@ -301,7 +301,9 @@ export async function cloneRepo({ url, dest, registryName }: { url: string; dest
     return { ok: false, message: `Cannot create ${dirname(target)}: ${(err as Error).message}` };
   }
   // `target` is absolute, so it does not depend on git's working directory.
-  const clone = await runGit(["git", "-C", "/", "clone", "--", url, target]);
+  // --quiet drops the "Cloning into <target>..." line, so the error itself
+  // starts the notice; errors still print.
+  const clone = await runGit(["git", "-C", "/", "clone", "--quiet", "--", url, target]);
   if (!clone.ok) return { ok: false, message: `git clone failed: ${clone.output}` };
   return register(target, registryName, "Cloned and added", `Cloned into ${target}`);
 }

@@ -27,7 +27,7 @@ const refusalOf = (url: string) => {
   const checked = checkCloneUrl(url);
   return "refusal" in checked ? checked.refusal : null;
 };
-/** A `git -C / clone -- <url> <target>` command. */
+/** A `git -C / clone --quiet -- <url> <target>` command. */
 const isClone = (cmd: string[]) => cmd[3] === "clone";
 
 /** Whether the temp volume ignores case (the APFS default), so a typed `myapp` names an existing `MyApp`. */
@@ -413,7 +413,7 @@ describe("with a temp home", () => {
     const result = await cloneRepo({ url, dest, registryName: "foo" });
     expect(result).toEqual({ ok: true, message: `Cloned and added: foo (${dest})`, path: dest });
     const clones = calls.filter((c) => isClone(c.cmd));
-    expect(clones.map((c) => c.cmd)).toEqual([["git", "-C", "/", "clone", "--", url, dest]]);
+    expect(clones.map((c) => c.cmd)).toEqual([["git", "-C", "/", "clone", "--quiet", "--", url, dest]]);
     // cloneEnv's environment (its branches are covered above), with the
     // user's own one along with it (PATH, the SSH agent).
     expect(clones[0]!.env).toEqual(await cloneEnv());
@@ -485,7 +485,7 @@ describe("with a temp home", () => {
     const result = await cloneRepo({ url, dest: join(root, "swift", "foo"), registryName: "foo" });
     const real = join(root, "Swift", "foo");
     expect(result.path).toBe(real);
-    expect(calls.filter((c) => isClone(c.cmd)).map((c) => c.cmd)).toEqual([["git", "-C", "/", "clone", "--", url, real]]);
+    expect(calls.filter((c) => isClone(c.cmd)).map((c) => c.cmd)).toEqual([["git", "-C", "/", "clone", "--quiet", "--", url, real]]);
     expect((await loadRegistry()).repos).toEqual([{ path: real, name: "foo" }]);
   });
 
@@ -534,14 +534,14 @@ describe("with a temp home", () => {
 
   test("a hostile server's escapes in git's stderr never reach the notice", async () => {
     // ssh passes the server's stderr through: an OSC 52 clipboard write, a
-    // carriage return, a clear-screen and a bidi override.
+    // carriage return, a clear-screen, a bidi override, DEL and the C1 CSI.
     cloneRepoSpawnCtx.set(fakeGit((cmd) => isClone(cmd)
-      ? { exitCode: 128, stderr: "remote: \x1b]52;c;eA==\x07hello\r\nfatal: \x1b[2Jbad‮\n" }
+      ? { exitCode: 128, stderr: "remote: \x1b]52;c;eA==\x07hello\r\nfatal: \x1b[2Jbad\u202e\x7f\x9b31mz\n" }
       : { exitCode: 1 }));
     const result = await cloneRepo({ url: "git@github.com:owner/foo.git", dest: join(root, "foo"), registryName: "foo" });
     expect(result.ok).toBe(false);
     expect(result.message).not.toMatch(/[\p{Cc}\p{Cf}]/u);
-    expect(result.message).toBe("git clone failed: remote: ]52;c;eA== hello fatal: [2Jbad");
+    expect(result.message).toBe("git clone failed: remote: ]52;c;eA== hello fatal: [2Jbad 31mz");
   });
 
   test("a registry write that fails after the clone keeps the clone and says so", async () => {

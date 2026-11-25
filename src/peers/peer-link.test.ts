@@ -213,7 +213,7 @@ describe("decodeAgentsReply", () => {
     // allowlist checks it only at clone time.
     const urlOf = (remoteUrl: string) =>
       decodeAgentsReply(encode({ op: "agents", coordinator: null, agents: [], questions: [], repos: [{ registryName: "foo", displayName: "Foo", remoteUrl }] })).repos[0]!.remoteUrl;
-    for (const dropped of ["", "ext::sh\x1b[31m", "git@host:o/r\n", "git@host:o/r\0", "https://h/o/‮r", "git@host:o/​r"]) {
+    for (const dropped of ["", "ext::sh\x1b[31m", "git@host:o/r\n", "git@host:o/r\0", "https://h/o/\u202er", "git@host:o/\u200br"]) {
       expect(urlOf(dropped)).toBeNull();
     }
     for (const kept of ["git@github.com:owner/Foo.git", "ext::ssh", "https://h/o/r"]) expect(urlOf(kept)).toBe(kept);
@@ -231,7 +231,7 @@ describe("decodeAgentsReply", () => {
     }
     for (const dropped of [
       "/Users/me/Developer/Foo", "../Foo", "a/../../Foo", "a/./Foo", "./Foo", "a//Foo", "a/Foo/", "", "..",
-      "a\\..\\Foo", "a\0/Foo", "a\n/Foo", "a/.​./Foo", "x".repeat(513),
+      "a\\..\\Foo", "a\0/Foo", "a\n/Foo", "a/.\u200b./Foo", "x".repeat(513),
     ]) {
       expect(relPathOf(dropped)).toBeNull();
     }

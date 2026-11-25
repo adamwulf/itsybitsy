@@ -3333,10 +3333,10 @@ export function newRepoPrompt(parentPath: string): string {
   return `${prefix}${elideLeft(parentPath, room)}${suffix}`;
 }
 
-/** What a host keeps when even the repo name must be cut: "…" and its last 23 characters. */
-const MIN_HOST_TAIL = 24;
-/** The narrowest cut name: three characters and "…". */
+/** A name this wide or narrower is never cut; a longer one keeps at least three characters and "…". */
 const MIN_NAME = 4;
+/** A host this wide or narrower is never cut at the floor; a longer one keeps at least "…" and its last 23 characters. */
+const MIN_HOST_TAIL = 24;
 
 /**
  * Title of the Clone here dialog, `Clone <name> from <host> (<path>) via
@@ -3344,40 +3344,54 @@ const MIN_NAME = 4;
  * (pi-tui narrows the overlay with the terminal and cuts any longer line).
  * `<host>` is the host git will connect to and `<path>` the URL's path
  * (`owner/repo.git`: no scheme, user or host). The URL is untrusted peer
- * data, and its owner is what tells a fork or a stale remote apart; the rest
- * of the path mostly repeats the name. The title shrinks in this order:
+ * data, and its owner (the first path segment) is what tells a fork or a
+ * stale remote apart.
  *
- *   1. the peer is left out;
- *   2. the path is cut from the right, down to its owner (first segment) and "…";
- *   3. the name is cut, down to three characters and "…", so the owner still shows;
- *   4. the path is left out;
- *   5. the host is cut from the left, keeping as much of its end as fits;
- *   6. for an overlong name, the name is cut too, the host keeping its last
- *      23 characters, and whatever is still too wide is cut at its end.
- *
- * So the result is never wider than `max`.
+ * The columns are allocated, not shrunk step by step. The floor is
+ * `Clone <name> from <host> (<owner>…) into:` with the name cut to
+ * {@link MIN_NAME} and the host cut from the left to {@link MIN_HOST_TAIL}
+ * (each only if longer). When the floor fits, the spare columns go, in this
+ * order and each part up to its full width, to the host (a smaller left-cut),
+ * the name, the rest of the path (cut from the right), and last
+ * ` via <peer>`, which is shown whole or not at all. So whenever the floor
+ * fits, the owner shows and an original and a fork with another owner get
+ * different titles. When it does not, the owner is left out and the host
+ * gets whatever is left beside the floor name and ` into:`, then the name;
+ * only below that is the title cut at its end. The result is never wider
+ * than `max`.
  */
 export function clonePrompt(name: string, path: string, host: string, peer: string, max: number): string {
-  const title = (shownHost: string, shownPath: string | null, shownPeer: string | null, shownName = name) =>
-    `Clone ${shownName} from ${shownHost}${shownPath === null ? "" : ` (${shownPath})`}${shownPeer === null ? "" : ` via ${shownPeer}`} into:`;
-  const fits = (text: string) => visibleWidth(text) <= max;
-  for (const candidate of [title(host, path, peer), title(host, path, null)]) {
-    if (fits(candidate)) return candidate;
-  }
-  // The owner: up to the "/" that ends the first segment (leading slashes kept).
+  const width = visibleWidth;
   const ownerEnd = path.indexOf("/", Math.max(0, path.search(/[^/]/)));
   const owner = ownerEnd === -1 ? path : path.slice(0, ownerEnd);
-  const pathRoom = max - visibleWidth(title(host, "", null));
-  if (pathRoom > visibleWidth(owner)) return title(host, truncatePeerField(path, pathRoom), null);
-  const ownerOnly = truncatePeerField(path, visibleWidth(owner) + 1);
-  const nameRoom = max - visibleWidth(title(host, ownerOnly, null, ""));
-  if (nameRoom >= MIN_NAME) return title(host, ownerOnly, null, truncatePeerField(name, nameRoom));
-  if (fits(title(host, null, null))) return title(host, null, null);
-  const hostRoom = max - visibleWidth(title("", null, null));
-  if (hostRoom >= MIN_HOST_TAIL) return title(elideLeft(host, hostRoom), null, null);
-  const shownHost = elideLeft(host, Math.min(visibleWidth(host), MIN_HOST_TAIL));
-  const lastNameRoom = Math.max(1, max - visibleWidth(title(shownHost, null, null, "")));
-  return truncatePeerField(title(shownHost, null, null, truncatePeerField(name, lastNameRoom)), max);
+  const nameFloor = Math.min(width(name), MIN_NAME);
+  const hostFloor = Math.min(width(host), MIN_HOST_TAIL);
+  const pathFloor = Math.min(width(path), width(owner) + 1);
+  const viaPeer = ` via ${peer}`;
+  const title = (nameWidth: number, hostWidth: number, pathWidth: number | null, withPeer: boolean) =>
+    `Clone ${truncatePeerField(name, nameWidth)} from ${elideLeft(host, hostWidth)}`
+    + `${pathWidth === null ? "" : ` (${truncatePeerField(path, pathWidth)})`}${withPeer ? viaPeer : ""} into:`;
+
+  let spare = max - width("Clone  from  () into:") - nameFloor - hostFloor - pathFloor;
+  /** Up to `want` more columns from what is spare. */
+  const take = (want: number) => {
+    const given = Math.max(0, Math.min(spare, want));
+    spare -= given;
+    return given;
+  };
+  if (spare >= 0) {
+    const hostWidth = hostFloor + take(width(host) - hostFloor);
+    const nameWidth = nameFloor + take(width(name) - nameFloor);
+    const pathWidth = pathFloor + take(width(path) - pathFloor);
+    return title(nameWidth, hostWidth, pathWidth, spare >= width(viaPeer));
+  }
+  // No room for the owner: the host, then the name, share what is beside the floor name.
+  spare = max - width("Clone  from  into:") - nameFloor;
+  if (spare >= 2) {
+    const hostWidth = take(width(host));
+    return title(nameFloor + take(width(name) - nameFloor), hostWidth, null, false);
+  }
+  return truncatePeerField(title(nameFloor, width(host), null, false), max);
 }
 
 /** Registry names, lowercased, with a "Clone here" in flight: one clone per name at a time. */

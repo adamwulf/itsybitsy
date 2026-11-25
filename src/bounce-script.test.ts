@@ -13,17 +13,48 @@ import { waitFor } from "./test-utils";
 
 const BOUNCE = resolve(import.meta.dir, "..", "bounce.sh");
 const STDERR_LOG_MAX_BYTES = 2_097_152;
+/** A run's own deadline. Every internal wait stays under it... */
+const DEADLINE_MS = 15_000;
+/** ...and bun's per-test timeout sits above it, so a hung run is killed by
+ *  the deadline (whole group) rather than by bun (which skips cleanup). */
+const TEST_TIMEOUT_MS = 30_000;
 
-async function run(argv: string[], env: Record<string, string>, cwd: string): Promise<{ exitCode: number | null; signalCode: string | null; stdout: string; stderr: string }> {
-  const child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const deadline = setTimeout(() => child.kill("SIGKILL"), 20_000);
+interface RunResult { exitCode: number | null; signalCode: string | null; stdout: string; stderr: string }
+
+/**
+ * Start argv as the leader of a new process group; bash, the stand-in ib and
+ * tee all join it. At DEADLINE_MS the whole group gets SIGKILL, so a hung
+ * stand-in or tee cannot hold the pipes open. stop() does the same at once
+ * unless the run already finished.
+ */
+function startGroup(argv: string[], env: Record<string, string>, cwd: string): { pid: number; result: Promise<RunResult>; stop(): void } {
+  const child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
+  let settled = false;
+  const killGroup = () => {
+    if (settled) return;
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* the group is gone */ }
+  };
+  const deadline = setTimeout(killGroup, DEADLINE_MS);
+  const result = (async () => {
+    try {
+      // The pipes close only when tee, which bounce.sh starts per launch, is done too.
+      const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+      await child.exited;
+      return { exitCode: child.exitCode, signalCode: child.signalCode, stdout, stderr };
+    } finally {
+      settled = true;
+      clearTimeout(deadline);
+    }
+  })();
+  return { pid: child.pid, result, stop: killGroup };
+}
+
+async function run(argv: string[], env: Record<string, string>, cwd: string): Promise<RunResult> {
+  const group = startGroup(argv, env, cwd);
   try {
-    // The pipes close only when tee, which bounce.sh starts per launch, is done too.
-    const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
-    await child.exited;
-    return { exitCode: child.exitCode, signalCode: child.signalCode, stdout, stderr };
+    return await group.result;
   } finally {
-    clearTimeout(deadline);
+    group.stop();
   }
 }
 
@@ -31,7 +62,7 @@ test("bounce.sh passes bash -n", async () => {
   const result = await run(["/bin/bash", "-n", BOUNCE], { PATH: "/usr/bin:/bin" }, import.meta.dir);
   expect(result.stderr).toBe("");
   expect(result.exitCode).toBe(0);
-});
+}, TEST_TIMEOUT_MS);
 
 test("describe_exit decodes a death by signal", async () => {
   const source = readFileSync(BOUNCE, "utf8");
@@ -49,7 +80,7 @@ test("describe_exit decodes a death by signal", async () => {
   const script = `${fn}\n${cases.map(([status]) => `describe_exit ${status}`).join("\n")}\n`;
   const result = await run(["/bin/bash", "-c", script], { PATH: "/usr/bin:/bin" }, import.meta.dir);
   expect(result.stdout.trimEnd().split("\n")).toEqual(cases.map(([, text]) => text));
-});
+}, TEST_TIMEOUT_MS);
 
 describe("bounce.sh loop", () => {
   let root: string;
@@ -135,7 +166,7 @@ esac
     ]);
     // The oversized log was moved aside whole, not appended to.
     expect(statSync(`${stderrLog}.1`).size).toBe(STDERR_LOG_MAX_BYTES + 1);
-  });
+  }, TEST_TIMEOUT_MS);
 
   // `ib watch` ignores Ctrl-C once its quit has restored the terminal, and a
   // slow quit can still write to stderr. The terminal's Ctrl-C reaches the
@@ -168,32 +199,28 @@ case "$1" in
     ;;
 esac
 `);
-    // Detached: bounce.sh leads its own process group, as the foreground
-    // job of a terminal does, so the group kill below is a terminal Ctrl-C.
-    const child = Bun.spawn(["/bin/bash", join(checkout, "bounce.sh")], {
-      cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
-    });
-    const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    // bounce.sh leads its own process group, as the foreground job of a
+    // terminal does, so the group kill below is a terminal Ctrl-C.
+    const group = startGroup(["/bin/bash", join(checkout, "bounce.sh")], env, root);
     try {
       await waitFor(() => existsSync(join(checkout, "ready")), { timeoutMs: 10_000, message: "first launch ready" });
-      process.kill(-child.pid, "SIGINT");
+      process.kill(-group.pid, "SIGINT");
       // Let every process in the group act on the signal before the write.
       await Bun.sleep(200);
       await writeFile(join(checkout, "go"), "");
-      const [, stderr] = await output;
-      await child.exited;
+      const result = await group.result;
 
       // The loop went on to a second launch, which stopped it.
       expect(readFileSync(join(checkout, "launches"), "utf8").trim()).toBe("2");
-      expect(child.signalCode).toBe("SIGTERM");
-      expect(stderr).toContain("late stderr line, written after the Ctrl-C\n");
+      expect(result.signalCode).toBe("SIGTERM");
+      expect(result.stderr).toContain("late stderr line, written after the Ctrl-C\n");
       expect(readFileSync(join(home, ".itsybitsy", "watch-stderr.log"), "utf8")).toContain("late stderr line, written after the Ctrl-C\n");
       // The first launch exited normally, not by SIGPIPE.
       expect(readFileSync(join(home, ".itsybitsy", "watch.log"), "utf8")).toMatch(/\[bounce\.sh\] ib watch exited with status 0\n$/);
     } finally {
-      try { process.kill(-child.pid, "SIGKILL"); } catch { /* the group is gone */ }
+      group.stop();
     }
-  });
+  }, TEST_TIMEOUT_MS);
 
   test("writes the exit line where IB_WATCH_LOG_PATH points, as ib watch does", async () => {
     const redirected = join(root, "elsewhere", "watch.log");
@@ -202,5 +229,5 @@ esac
 
     expect(readFileSync(redirected, "utf8")).toContain("[bounce.sh] ib watch exited with status 137 (signal 9, SIGKILL)");
     expect(existsSync(join(home, ".itsybitsy", "watch.log"))).toBe(false);
-  });
+  }, TEST_TIMEOUT_MS);
 });

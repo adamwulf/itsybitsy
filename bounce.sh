@@ -75,9 +75,11 @@ while true; do
   echo "===== $(utc_now) bounce.sh launching ib watch =====" >> "$STDERR_LOG"
 
   # The process substitution keeps ./ib watch a direct child of this script,
-  # which `ib bounce` requires. tee -i ignores SIGINT: a Ctrl-C while ib watch
-  # shuts down (which ib watch ignores) must not kill tee and leave ib watch
-  # writing to a closed pipe.
+  # which `ib bounce` requires. tee must ignore SIGINT: a Ctrl-C while ib
+  # watch shuts down (which ib watch ignores) must not kill tee and leave ib
+  # watch writing to a closed pipe. Bash already starts a process substitution
+  # with SIGINT ignored when job control is off, as in this script; -i says so
+  # explicitly and keeps tee safe if it is ever moved into a pipeline.
   ./ib watch 2> >(tee -i -a "$STDERR_LOG" >&2)
   status=$?
   echo "$(utc_now) [bounce.sh] ib watch exited with $(describe_exit "$status")" >> "$WATCH_LOG"

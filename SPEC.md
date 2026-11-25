@@ -1498,7 +1498,7 @@ Teeing stderr does not change `ib watch`:
 - No long-lived helper inherits `ib watch`'s stderr. Watchdogs start through the tmux server, the tmux server detaches its stdio, and the sandbox collector and proxy get explicit descriptors.
 - Short-lived children that inherit stderr still print to the terminal through `tee`.
 - The process substitution keeps `./ib watch` a direct child of `bounce.sh`, which `ib bounce` requires.
-- `tee -i` ignores `SIGINT`, so a Ctrl-C during shutdown, which `ib watch` ignores, cannot kill `tee` and leave `ib watch` writing to a closed pipe.
+- `tee` ignores `SIGINT`, so a Ctrl-C during shutdown, which `ib watch` ignores, cannot kill `tee` and leave `ib watch` writing to a closed pipe. Bash already starts a process substitution with `SIGINT` ignored when job control is off, as in a script; `tee -i` makes that explicit.
 
 ---
 

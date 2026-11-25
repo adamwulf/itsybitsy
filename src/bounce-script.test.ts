@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { isBounceScriptProcess } from "./coordinator";
+import { waitFor } from "./test-utils";
 
 // bounce.sh's crash records (SPEC §8.14): after each `ib watch` run it appends
 // how the run ended to watch.log, and it tees ib watch's stderr into
@@ -134,6 +135,64 @@ esac
     ]);
     // The oversized log was moved aside whole, not appended to.
     expect(statSync(`${stderrLog}.1`).size).toBe(STDERR_LOG_MAX_BYTES + 1);
+  });
+
+  // `ib watch` ignores Ctrl-C once its quit has restored the terminal, and a
+  // slow quit can still write to stderr. The terminal's Ctrl-C reaches the
+  // whole foreground process group, tee included. A tee that died there would
+  // make ib watch's next stderr write fail: an uncaught EPIPE that the crash
+  // handler turns into a [crash] in the middle of a quit. Two things keep tee
+  // alive: bash starts the process substitution with SIGINT ignored (job
+  // control is off in a script), and `tee -i`. Measured on macOS bash 3.2: a
+  // plain `tee -a` passes this test too, so it guards the property (say,
+  // against moving tee into a pipeline, where SIGINT is not ignored), not the
+  // flag alone.
+  test("a Ctrl-C during ib watch's shutdown does not kill tee: later stderr still reaches the terminal and the file", async () => {
+    await writeFile(join(checkout, "ib"), `#!/bin/bash
+dir="$(dirname "$0")"
+case "$1" in
+  pull) exit 0 ;;
+  watch)
+    n=$(( $(cat "$dir/launches" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$dir/launches"
+    if [ "$n" = 1 ]; then
+      # Like ib watch partway through a quit: Ctrl-C is ignored.
+      trap '' INT
+      : > "$dir/ready"
+      while [ ! -f "$dir/go" ]; do /bin/sleep 0.02; done
+      echo "late stderr line, written after the Ctrl-C" >&2
+      exit 0
+    fi
+    kill -TERM "$PPID"
+    exit 0
+    ;;
+esac
+`);
+    // Detached: bounce.sh leads its own process group, as the foreground
+    // job of a terminal does, so the group kill below is a terminal Ctrl-C.
+    const child = Bun.spawn(["/bin/bash", join(checkout, "bounce.sh")], {
+      cwd: root, env, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
+    });
+    const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    try {
+      await waitFor(() => existsSync(join(checkout, "ready")), { timeoutMs: 10_000, message: "first launch ready" });
+      process.kill(-child.pid, "SIGINT");
+      // Let every process in the group act on the signal before the write.
+      await Bun.sleep(200);
+      await writeFile(join(checkout, "go"), "");
+      const [, stderr] = await output;
+      await child.exited;
+
+      // The loop went on to a second launch, which stopped it.
+      expect(readFileSync(join(checkout, "launches"), "utf8").trim()).toBe("2");
+      expect(child.signalCode).toBe("SIGTERM");
+      expect(stderr).toContain("late stderr line, written after the Ctrl-C\n");
+      expect(readFileSync(join(home, ".itsybitsy", "watch-stderr.log"), "utf8")).toContain("late stderr line, written after the Ctrl-C\n");
+      // The first launch exited normally, not by SIGPIPE.
+      expect(readFileSync(join(home, ".itsybitsy", "watch.log"), "utf8")).toMatch(/\[bounce\.sh\] ib watch exited with status 0\n$/);
+    } finally {
+      try { process.kill(-child.pid, "SIGKILL"); } catch { /* the group is gone */ }
+    }
   });
 
   test("writes the exit line where IB_WATCH_LOG_PATH points, as ib watch does", async () => {

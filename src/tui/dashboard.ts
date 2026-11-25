@@ -33,6 +33,7 @@ import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync 
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
 import { peerSnapshot } from "../peers/peer-link";
 import type { RepoEntry } from "../registry";
+import { readRepoCloneInfo, resolveCloneRoot, type RepoCloneInfo } from "../clone-repo";
 import { AgentWatcher } from "../watcher";
 import { TmuxPoller, hasAttachedClient, resizeTmuxWindow, expandTabs } from "../tmux-poller";
 import { isCodexBackedCli, parseModel } from "../agent-cli";
@@ -924,6 +925,14 @@ export class DashboardComponent implements Component {
   }
   watcher: AgentWatcher | null = null;
   repos: RepoEntry[] = [];
+  /**
+   * Each registered repo's origin URL and clone-root-relative path, by repo
+   * path: what the peer snapshot sends with it (SPEC §20.4). setRepos re-reads
+   * it in the background, so answering a peer costs no IO.
+   */
+  repoCloneInfo: ReadonlyMap<string, RepoCloneInfo> = new Map();
+  /** Bumped by each re-read: only the newest one's result is kept. */
+  private repoCloneInfoGeneration = 0;
   private noticeCounter = 0;
   diffTool: string | undefined;
   /**
@@ -1810,6 +1819,20 @@ export class DashboardComponent implements Component {
   setRepos(repos: RepoEntry[]) {
     this.repos = repos;
     this.agentTree.registeredRepos = repos;
+    void this.refreshRepoCloneInfo();
+  }
+
+  /** Re-read {@link repoCloneInfo} for the current repos. A re-read that a newer one overtook is dropped. */
+  async refreshRepoCloneInfo(): Promise<void> {
+    const generation = ++this.repoCloneInfoGeneration;
+    const repos = [...this.repos];
+    try {
+      const root = await resolveCloneRoot();
+      const entries = await Promise.all(repos.map(async (repo) => [repo.path, await readRepoCloneInfo(repo.path, root)] as const));
+      if (generation === this.repoCloneInfoGeneration) this.repoCloneInfo = new Map(entries);
+    } catch (err) {
+      logToWatchLog(`[peers] could not read the repos' remote URLs: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   setDiffTool(tool: string | undefined) {
@@ -4633,12 +4656,14 @@ export async function launchDashboard(): Promise<void> {
   // the UI once, for about a third of a second: the dynamic import in
   // src/peers/iroh.ts evaluates the napi addon synchronously on the event loop.
   // The trusted link answers peers from the watcher's last fully detected
-  // agents (lastDetectedAgents, what the tree shows) and the pending questions
-  // of the same refresh, so an answer costs no IO and never carries a state
+  // agents (lastDetectedAgents, what the tree shows), the pending questions
+  // of the same refresh and the repos' cached clone info (repoCloneInfo,
+  // re-read by setRepos), so an answer costs no IO and never carries a state
   // that detection has not filled in yet.
   const peerDeps = defaultPeerServiceDeps(machine, logToWatchLog, () =>
     peerSnapshot(dashboard.repos, dashboard.watcher?.lastDetectedAgents ?? [], dashboard.watcher?.lastQuestions ?? [],
-      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state), (message, kind) => dashboard.remoteAgentStarted(message, kind));
+      dashboard.agentTree.flatList.find(row => row.kind === "system-coordinator")?.state, dashboard.repoCloneInfo),
+    (message, kind) => dashboard.remoteAgentStarted(message, kind));
   peerDeps.captureAgent = (repo, id, lines) => captureAgentPane(dashboard.watcher?.lastDetectedAgents ?? [], repo, id, lines);
   peerDeps.captureDiff = (repo, id) => captureAgentDiff(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);
   peerDeps.readPrompt = (repo, id) => readAgentPromptText(dashboard.watcher?.lastDetectedAgents ?? [], repo, id);

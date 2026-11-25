@@ -10,7 +10,7 @@ function agent(id: string, manager: string | null = null, createdEpoch = 0): Rem
 
 function link(id: string, name: string, agents: RemoteAgent[]): PeerLinkState {
   return { id, name, connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null,
-    repos: [{ registryName: "APP", displayName: "Remote App" }], agents, questions: [] };
+    repos: [{ registryName: "APP", displayName: "Remote App", remoteUrl: null, relPath: null }], agents, questions: [] };
 }
 
 function rows(agents: RemoteAgent[], keep = (_: RemoteAgent) => true) {
@@ -48,6 +48,25 @@ test("skips repo coordinators and attaches children to their nearest visible man
 test("cycles, self managers and duplicate ids each draw once per received agent", () => {
   const agents = [agent("a", "b"), agent("b", "a"), agent("c", "b"), agent("self", "self"), agent("a")];
   expect(rows(agents).map((row) => row.remote.id).sort()).toEqual(["a", "a", "b", "c", "self"]);
+});
+
+test("a remote-only header takes its clone fields from the first peer that reports a remote URL", () => {
+  const link = (name: string, remoteUrl: string | null, relPath: string | null, displayName = name) =>
+    ({ id: name, name, connected: true, connectedAt: 1, lastOkAt: 1, coordinator: null, lastError: null, agents: [], questions: [],
+      repos: [{ registryName: "app", displayName, remoteUrl, relPath }] });
+  const header = (...links: ReturnType<typeof link>[]) => collectPeerRepos(links).get("/app")!.header;
+
+  // The first peer still names the repo; the second supplies URL and path together.
+  expect(header(link("Desk", null, "ignored/App", "Desk app"), link("Laptop", "git@h:o/app.git", "swift/App"),
+    link("Mini", "https://h/o/app", "html/App"))).toMatchObject({
+    peerName: "Desk", repoName: "Desk app", remoteUrl: "git@h:o/app.git", relPath: "swift/App", remoteUrlPeer: "Laptop",
+  });
+  expect(header(link("Desk", "git@h:o/app.git", null), link("Laptop", "https://h/o/app", "swift/App"))).toMatchObject({
+    peerName: "Desk", remoteUrl: "git@h:o/app.git", relPath: null, remoteUrlPeer: "Desk",
+  });
+  expect(header(link("Desk", null, "swift/App"), link("Laptop", null, null))).toMatchObject({
+    peerName: "Desk", remoteUrl: null, relPath: null, remoteUrlPeer: null,
+  });
 });
 
 test("deep manager chains keep bounded connectors", () => {

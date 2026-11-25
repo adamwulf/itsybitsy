@@ -2142,11 +2142,17 @@ export type FlatEntry =
   | { kind: "system-coordinator"; state: string; age: string }
   | RemoteEntry;
 
-/** Read-only dashboard rows. A local repo always keeps its local header. */
+/**
+ * Read-only dashboard rows. A local repo always keeps its local header. A
+ * remote-only header's `remoteUrl` and `relPath` (what "Clone here" uses, SPEC
+ * §20.5) come from the first peer that reports a URL, `remoteUrlPeer`; its
+ * `peerName`, which supplies the display name, is the first peer of all.
+ */
 export type RemoteEntry =
   | { kind: "remote-coordinator"; peerId: string; peerName: string; state: string | null;
       linkStatus: import("./peers/poller").PeerLinkStatus; connectedAt: number | null; lastOkAt: number | null }
-  | { kind: "remote-repo-header"; peerName: string; repoName: string; repoRegistryName: string; agentCount: number }
+  | { kind: "remote-repo-header"; peerName: string; repoName: string; repoRegistryName: string; agentCount: number;
+      remoteUrl: string | null; relPath: string | null; remoteUrlPeer: string | null }
   | { kind: "remote-agent"; peerId: string; peerName: string; remote: RemoteAgent; connector: string; linkStatus: PeerLinkStatus };
 
 /**

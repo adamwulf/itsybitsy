@@ -307,6 +307,11 @@ export interface ActionCtx {
   splitPane: { getLeftWidth(): number; setLeftWidth(w: number): void };
   tui: { requestRender(): void } | null;
   repos: RepoEntry[];
+  /**
+   * Hand the host a reloaded repo list. The dashboard re-reads each repo's
+   * clone info for the peer snapshot (SPEC §20.4); tests may omit it.
+   */
+  setRepos?(repos: RepoEntry[]): void;
   watcher: { refresh(): void; updateRepos(repos: RepoEntry[]): void; recheckHealth(): void; lastAgents: Agent[] } | null;
   diffTool: string | undefined;
   /**
@@ -3327,6 +3332,7 @@ async function reloadRepos(ctx: ActionCtx) {
   const freshRepos = await listRepos();
   ctx.repos.length = 0;
   ctx.repos.push(...freshRepos);
+  ctx.setRepos?.(ctx.repos);
   ctx.watcher?.updateRepos(ctx.repos);
   ctx.watcher?.refresh();
 }

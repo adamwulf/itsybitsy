@@ -113,6 +113,10 @@ export interface RemoteAgent {
 export interface RemoteRepo {
   registryName: string;
   displayName: string;
+  /** The repo's `remote.origin.url` on the other install, exactly as configured; what "Clone here" clones (SPEC §20.5). */
+  remoteUrl: string | null;
+  /** The repo's path under the other install's clone root, e.g. `swift-packages/Foo`; sanitized on receipt. */
+  relPath: string | null;
 }
 
 /** A pending `ib ask` question of an agent in the same reply (SPEC §20.4). Exactly these fields cross the wire. */
@@ -186,14 +190,25 @@ function encodePane(op: PeerPaneTarget["op"], pane: PeerPane): Uint8Array {
 /**
  * The `agents` reply. `questions` are the watcher's pending questions from the
  * same refresh as `agents`: only those of an agent the reply sends, each named
- * by that agent's repo registry name.
+ * by that agent's repo registry name. `cloneInfo` is the dashboard's cache of
+ * each repo's clone fields, by repo path, refreshed off this path, so the
+ * answer costs no IO; a repo it has not read yet reports null for both.
  */
-export function peerSnapshot(repos: readonly RepoEntry[], agents: readonly Agent[], questions: readonly PendingQuestion[], coordinatorState: string | undefined): PeerSnapshot {
+export function peerSnapshot(
+  repos: readonly RepoEntry[],
+  agents: readonly Agent[],
+  questions: readonly PendingQuestion[],
+  coordinatorState: string | undefined,
+  cloneInfo: ReadonlyMap<string, Pick<RemoteRepo, "remoteUrl" | "relPath">>,
+): PeerSnapshot {
   const sent = toRemoteAgents(agents);
   const registryNames = new Map(sent.map((agent) => [`${agent.repoPath}\0${agent.id}`, agent.repoRegistryName]));
   return {
     coordinator: coordinatorState === undefined ? null : { state: coordinatorState },
-    repos: repos.map((repo) => ({ registryName: repo.name, displayName: repoDisplayName(repo) })),
+    repos: repos.map((repo) => {
+      const info = cloneInfo.get(repo.path);
+      return { registryName: repo.name, displayName: repoDisplayName(repo), remoteUrl: info?.remoteUrl ?? null, relPath: info?.relPath ?? null };
+    }),
     agents: sent,
     questions: questions.flatMap((q) => {
       const repoRegistryName = registryNames.get(`${q.repoPath}\0${q.agent}`);
@@ -378,12 +393,25 @@ export function decodeAgentsReply(bytes: Uint8Array): PeerSnapshot {
   }
   if (message.op !== "agents" || !Array.isArray(message.agents)) throw new PeerProtocolError("reply is not an agent list");
   if (!Array.isArray(message.repos)) throw new PeerProtocolError("reply has no repo list");
-  const repos = message.repos.map((entry: unknown, i: number) => {
+  const repos = message.repos.map((entry: unknown, i: number): RemoteRepo => {
+    const malformed = () => new PeerProtocolError(`repo ${i} in the reply is malformed`);
     if (!entry || typeof entry !== "object" || !("registryName" in entry) || typeof entry.registryName !== "string"
         || !("displayName" in entry) || typeof entry.displayName !== "string") {
-      throw new PeerProtocolError(`repo ${i} in the reply is malformed`);
+      throw malformed();
     }
-    return { registryName: cleanField(entry.registryName), displayName: cleanField(entry.displayName) };
+    const optional = (value: unknown): string | null => {
+      if (value === undefined || value === null) return null;
+      if (typeof value !== "string") throw malformed();
+      return value;
+    };
+    const remoteUrl = optional("remoteUrl" in entry ? entry.remoteUrl : undefined);
+    const relPath = optional("relPath" in entry ? entry.relPath : undefined);
+    return {
+      registryName: cleanField(entry.registryName),
+      displayName: cleanField(entry.displayName),
+      remoteUrl: remoteUrl === null ? null : cleanField(remoteUrl),
+      relPath: safeRelPath(relPath),
+    };
   });
   const agents = message.agents.map(parseRemoteAgent);
   if (!Array.isArray(message.questions)) throw new PeerProtocolError("reply has no question list");
@@ -397,6 +425,20 @@ export function decodeAgentsReply(bytes: Uint8Array): PeerSnapshot {
     throw new PeerProtocolError("reply has malformed coordinator state");
   }
   return { repos, agents, coordinator: { state: cleanRemoteText(coordinator.state) }, questions };
+}
+
+/** Longest `relPath` kept from the other side. */
+const MAX_REL_PATH = 512;
+
+/**
+ * A peer's `relPath` as this side may join it under its own clone root, or
+ * null: an absolute path, an empty, `.` or `..` segment, a backslash, NUL or
+ * any other control or format character, or more than {@link MAX_REL_PATH}
+ * characters all drop it, so the clone falls back to `<root>/<name>`.
+ */
+function safeRelPath(relPath: string | null): string | null {
+  if (relPath === null || relPath.length > MAX_REL_PATH || relPath.startsWith("/") || /[\\\p{Cc}\p{Cf}]/u.test(relPath)) return null;
+  return relPath.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..") ? relPath : null;
 }
 
 /** What a close of the trusted connection means, as the poller shows it. */

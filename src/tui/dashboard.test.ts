@@ -20,7 +20,8 @@ import { gitStatusSpawnCtx } from "../git-status";
 import { IB_COORDINATOR_SESSION } from "../coordinator";
 import { setUserConfigPath, resetUserConfigPath } from "../config";
 import { setUserHome, resetUserHome } from "../home";
-import type { SpawnResult } from "../types";
+import { cloneRepoSpawnCtx } from "../clone-repo";
+import type { SpawnFn, SpawnResult } from "../types";
 import type { TeamFlatEntry } from "./teams-tree";
 import { PANE_MODES, FULL_WIDTH_MODES, type PaneMode } from "./pane-manager";
 import { computeSidebarHeights } from "./sidebar";
@@ -10083,7 +10084,7 @@ describe("Unified peer repos in the Agents tree", () => {
   /** A remote agent's selection key (peer-repos.ts peerEntryKey): `<peer name>/<repo>/<id>`. */
   const agentKey = (peer: string, repo: string, id: string) => `${PEER_NAMES[peer]}/${repo}/${id}`;
   const repoKey = (repo: string) => `/${repo.toLowerCase()}`;
-  const repos = (...names: string[]) => names.map((name) => ({ registryName: name, displayName: name }));
+  const repos = (...names: string[]) => names.map((name) => ({ registryName: name, displayName: name, remoteUrl: null, relPath: null }));
   const WORKER_KEY = agentKey(PEER_B, "itsybitsy", "worker-abc");
 
   let origRows: number;
@@ -10629,7 +10630,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const service = new FakePeerService();
     dashboard.setPeerService(service);
     const peer = (index: number, registry: string) => ({
-      ...links()[index]!, repos: [...repos(registry), { registryName: "remote", displayName: "Empty remote" }],
+      ...links()[index]!, repos: [...repos(registry), { registryName: "remote", displayName: "Empty remote", remoteUrl: null, relPath: null }],
       agents: [remote("kid", registry, { manager: "manager" }), remote("manager", registry)],
     });
     service.set({ links: [peer(0, "APP"), peer(1, "app")] });
@@ -10759,7 +10760,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const service = new FakePeerService();
     dashboard.onUpdate([], [makeFlatRepoHeader("Same label", "/local", false, false, false, "a")], []);
     dashboard.setPeerService(service);
-    service.set({ links: [{ ...links()[0]!, repos: [{ registryName: "b", displayName: "Same label" }],
+    service.set({ links: [{ ...links()[0]!, repos: [{ registryName: "b", displayName: "Same label", remoteUrl: null, relPath: null }],
       agents: [remote("worker", "Same label", { repoRegistryName: "b", repoPath: "/local" })] }] });
     expect(dashboard.agentTree.visibleList.map((row) => row.kind)).toEqual(["repo-header", "remote-repo-header", "remote-agent"]);
   });
@@ -12877,7 +12878,7 @@ describe("Unified peer repos in the Agents tree", () => {
     const restored = makeDashboard();
     restored.applyLayout(saved!);
     expect([...restored.agentTree.pinnedRemoteRepoNames]).toEqual(["app"]);
-    service.set({ links: [{ ...second!, repos: [{ registryName: "APP", displayName: "Renamed" }], agents: [] }] });
+    service.set({ links: [{ ...second!, repos: [{ registryName: "APP", displayName: "Renamed", remoteUrl: null, relPath: null }], agents: [] }] });
     for (const filter of ["non-empty", "running-only"] as const) {
       tree.setRepoFilter(filter);
       expect(treeRows(dashboard).map(stripAnsi)).toContain("⚲ Renamed");
@@ -13286,5 +13287,59 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.dialog).toBeNull();
       expect(dashboard.notice).toBeNull();
     });
+  });
+});
+
+// What the peer snapshot sends with each repo (SPEC §20.4): read in the
+// background by setRepos, through a fake git.
+describe("the peer snapshot's clone-info cache", () => {
+  afterEach(() => cloneRepoSpawnCtx.reset());
+
+  /** A fake git whose `config --get remote.origin.url` for each repo answers once its gate opens. */
+  function gatedGit() {
+    const gates = new Map<string, () => void>();
+    cloneRepoSpawnCtx.set(((cmd: string[]) => {
+      const path = cmd[2]!;
+      const open = new Promise<void>((resolve) => gates.set(path, resolve));
+      const stdout = new ReadableStream<Uint8Array>({
+        async start(c) {
+          await open;
+          c.enqueue(new TextEncoder().encode(`git@github.com:owner/${path.split("/").pop()}.git\n`));
+          c.close();
+        },
+      });
+      return { stdout, stderr: new Response("").body, exited: open.then(() => 0) };
+    }) as SpawnFn);
+    return gates;
+  }
+
+  test("setRepos re-reads each repo's origin URL in the background", async () => {
+    const gates = gatedGit();
+    const dashboard = makeDashboard();
+    dashboard.setRepos([{ name: "app", path: "/repos/app" }, { name: "lib", path: "/repos/lib" }]);
+    expect(dashboard.repoCloneInfo.size).toBe(0);
+    // By path: a re-read an earlier test's dashboard left running can reach this fake too.
+    await waitFor(() => gates.has("/repos/app") && gates.has("/repos/lib"));
+    for (const open of gates.values()) open();
+    await waitFor(() => dashboard.repoCloneInfo.size === 2);
+    expect([...dashboard.repoCloneInfo]).toEqual([
+      ["/repos/app", { remoteUrl: "git@github.com:owner/app.git", relPath: null }],
+      ["/repos/lib", { remoteUrl: "git@github.com:owner/lib.git", relPath: null }],
+    ]);
+  });
+
+  test("a re-read that a newer one overtook is dropped", async () => {
+    const gates = gatedGit();
+    const dashboard = makeDashboard();
+    dashboard.repos = [{ name: "old", path: "/repos/old" }];
+    const older = dashboard.refreshRepoCloneInfo();
+    dashboard.repos = [{ name: "new", path: "/repos/new" }];
+    const newer = dashboard.refreshRepoCloneInfo();
+    await waitFor(() => gates.has("/repos/old") && gates.has("/repos/new"));
+    gates.get("/repos/new")!();
+    await newer;
+    gates.get("/repos/old")!();
+    await older;
+    expect([...dashboard.repoCloneInfo]).toEqual([["/repos/new", { remoteUrl: "git@github.com:owner/new.git", relPath: null }]]);
   });
 });

@@ -128,7 +128,7 @@ function makeNetwork(iroh: Iroh) {
       log: (line) => logs.push(line),
       snapshot: () => {
         snapshots++;
-        return { coordinator: null, repos: [{ registryName: "app", displayName: "app" }], agents: toRemoteAgents(agents), questions: [] };
+        return { coordinator: null, repos: [{ registryName: "app", displayName: "app", remoteUrl: null, relPath: null }], agents: toRemoteAgents(agents), questions: [] };
       },
     });
     services.push(service);

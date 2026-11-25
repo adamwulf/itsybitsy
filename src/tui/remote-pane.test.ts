@@ -70,13 +70,26 @@ test("the coordinator's input box is sliced off and its status lines are returne
   expect(pane.statusLines(20).map(stripAnsi)).toEqual(["  ⏵⏵ auto mode on (s", "  Update available!"]);
   pane.select({ peerId: "B", target: { op: "coordinator-pane" } }, "Human dashboard required");
   expect(pane.statusLines(20)).toEqual([]);
-  // An agent's capture is shown whole: its CLI is not known here to pick a detector.
-  pane.select({ peerId: "A", target: { op: "agent-pane", repo: "r", id: "a" } });
+  // An agent without a model (Claude, as for a local agent) is sliced the same way.
+  pane.select({ peerId: "A", target: { op: "agent-pane", repo: "r", id: "a" }, model: null });
   await Promise.resolve();
-  const whole = stripAnsi(pane.render(40, 20).join("\n"));
-  expect(whole).toContain("❯");
-  expect(whole).toContain("Update available!");
-  expect(pane.statusLines(20)).toEqual([]);
+  expect(pane.render(40, 3).map(stripAnsi)).toEqual(["reply one", "reply two", ""]);
+  expect(pane.statusLines(20).map(stripAnsi)).toEqual(["  ⏵⏵ auto mode on (s", "  Update available!"]);
+});
+
+test("an agent's input box is sliced off by the detector for the CLI its model names", async () => {
+  const codexStatus = "gpt-5-codex · ~/proj · Context 42% · 3h left";
+  const text = ["codex reply", "› draft", codexStatus].join("\n");
+  const pane = new RemotePane(async () => ({ state: "running", text }), () => {}, () => () => {});
+  const view = async (model: string) => {
+    pane.select({ peerId: "A", target: { op: "agent-pane", repo: "r", id: "a" }, model });
+    await Promise.resolve();
+    return { body: pane.render(60, 3).map(stripAnsi), status: pane.statusLines(60).map(stripAnsi) };
+  };
+  expect(await view("codex:gpt-5-codex")).toEqual({ body: ["codex reply", "", ""], status: [codexStatus] });
+  expect(await view("fugu:gpt-5-codex")).toEqual({ body: ["codex reply", "", ""], status: [codexStatus] });
+  // The Claude detector finds no input box in a codex capture, so it is shown whole.
+  expect(await view("claude:opus")).toEqual({ body: ["codex reply", "› draft", codexStatus], status: [] });
 });
 
 test("scrollback clamps at each wrap width while the error line stays visible", async () => {

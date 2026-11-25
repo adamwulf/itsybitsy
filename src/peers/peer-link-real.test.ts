@@ -33,7 +33,7 @@ import { makeSpawnResult } from "../test-utils";
 import { PeerService } from "./service";
 import { addPeer, readPeers, removePeer, shortPeerId } from "./store";
 
-const ALLOWED_KEYS = ["agentType", "createdEpoch", "id", "manager", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
+const ALLOWED_KEYS = ["agentType", "createdEpoch", "id", "manager", "model", "nickname", "repoName", "repoPath", "repoRegistryName", "state"];
 
 const homes: string[] = [];
 const services: PeerService[] = [];
@@ -167,8 +167,8 @@ test("each side binds at boot and its poller fetches the other's snapshot, with 
   const seenByA = link(a)!.agents!;
   expect(seenByA).toEqual(toRemoteAgents(bAgents));
   expect(seenByA).toEqual([
-    { id: "agent-b1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, createdEpoch: 1_700_000_000 },
-    { id: "agent-b2", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-b1", createdEpoch: 1_700_000_060 },
+    { id: "agent-b1", nickname: "builder", repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, createdEpoch: 1_700_000_000, model: "claude:sonnet" },
+    { id: "agent-b2", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: "agent-b1", createdEpoch: 1_700_000_060, model: "claude:sonnet" },
   ]);
   for (const entry of seenByA) expect(Object.keys(entry).sort()).toEqual(ALLOWED_KEYS);
   // B sees A's agents without A's system coordinator.

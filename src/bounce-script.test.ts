@@ -3,6 +3,7 @@ import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { existsSync, readFileSync, statSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { isBounceScriptProcess } from "./coordinator";
 
 // bounce.sh's crash records (SPEC §8.14): after each `ib watch` run it appends
 // how the run ended to watch.log, and it tees ib watch's stderr into
@@ -11,8 +12,6 @@ import { join, resolve } from "path";
 
 const BOUNCE = resolve(import.meta.dir, "..", "bounce.sh");
 const STDERR_LOG_MAX_BYTES = 2_097_152;
-/** The check `ib bounce` makes on ib watch's parent (isBounceScriptProcess in coordinator.ts). */
-const BOUNCE_PARENT = /(?:^|[\s/])bounce\.sh(?:\s|$)/;
 
 async function run(argv: string[], env: Record<string, string>, cwd: string): Promise<{ exitCode: number | null; signalCode: string | null; stdout: string; stderr: string }> {
   const child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -108,8 +107,12 @@ esac
     // The loop ran until the third launch stopped it.
     expect(result.signalCode).toBe("SIGTERM");
     expect(readFileSync(join(checkout, "launches"), "utf8").trim()).toBe("3");
-    // Every launch is still a direct child of bounce.sh, which `ib bounce` requires.
-    for (const n of [1, 2, 3]) expect(readFileSync(join(checkout, `parent-${n}`), "utf8").trim()).toMatch(BOUNCE_PARENT);
+    // Every launch is still a direct child of bounce.sh: its parent passes
+    // the check `ib bounce` makes.
+    for (const n of [1, 2, 3]) {
+      const parent = readFileSync(join(checkout, `parent-${n}`), "utf8").trim();
+      expect(isBounceScriptProcess(parent)).toBe(true);
+    }
 
     const watchLog = readFileSync(join(home, ".itsybitsy", "watch.log"), "utf8");
     expect(watchLog.trimEnd().split("\n")).toEqual([

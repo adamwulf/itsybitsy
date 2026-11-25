@@ -1293,7 +1293,7 @@ export const bounceNoticeCtx = new InjectionContext<(message: string) => Promise
 );
 
 /** True when a `ps` command line is the bash process running bounce.sh. */
-function isBounceScriptProcess(command: string): boolean {
+export function isBounceScriptProcess(command: string): boolean {
   return /(?:^|[\s/])bounce\.sh(?:\s|$)/.test(command);
 }
 

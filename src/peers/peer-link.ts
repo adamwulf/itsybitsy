@@ -1049,8 +1049,9 @@ export interface PeerResponderDeps {
  * A lookup that says "not a peer" refuses as such. One that failed refuses
  * with its error and close code 3, so neither side's log says the peer was
  * removed. One cut short because the connection closed writes no refusal:
- * once the connection passed the allowlist, its close writes the shared
- * disconnect line (`accepted`, up since it passed).
+ * at the accept it writes that the connection closed during its pairing
+ * check, with the close's reason; once the connection passed the allowlist,
+ * its close writes the shared disconnect line (`accepted`, up since it passed).
  */
 export async function serveTrustedConnection(conn: PairConnection, deps: PeerResponderDeps): Promise<void> {
   const headerReaders = deps.headerReaders ??= new Set();
@@ -1079,6 +1080,12 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
     }
     name = found;
   } catch (err) {
+    if (lifetime.signal.aborted) {
+      // The connection closed during the check: this side refused nothing.
+      const reason = await conn.closed().then(describePeerClose, errorDetail);
+      deps.log(`peer link: connection from ${from} closed during its pairing check: ${reason}`);
+      return;
+    }
     deps.log(`peer link: closed a connection from ${from}: pairing lookup failed: ${errorDetail(err)}`);
     closeQuietly(conn, PEER_CLOSE.error, "pairing lookup failed");
     return;

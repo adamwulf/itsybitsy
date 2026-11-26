@@ -668,6 +668,23 @@ describe("the acceptor's connection log lines (SPEC §20.4)", () => {
     expect(side.logs).toEqual([`peer link: closed a connection from ${ID}: pairing lookup failed: peers.json: EIO`]);
   });
 
+  test.each([
+    ["the dialer", "closed by the other side"],
+    ["this side", "closed"],
+  ] as const)("an accept-time lookup cut short by a close from %s writes what closed, not a refusal", async (closer, reason) => {
+    const pending = Promise.withResolvers<void>();
+    const side = serve({ snapshot: empty, lookup: async () => {
+      pending.resolve();
+      return hang();
+    } });
+    await pending.promise;
+    (closer === "the dialer" ? side.a : side.b).close(PEER_CLOSE.done, "shutting down");
+    await side.done;
+    expect(side.logs).toEqual([`peer link: connection from ${ID} closed during its pairing check: ${reason}`]);
+    // This side closed nothing on its own: no code 3 "pairing lookup failed".
+    if (closer === "the dialer") expect(side.b.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "shutting down" });
+  });
+
   test.each([[2, "when its stream is accepted"], [3, "right before the answer"]] as const)(
     "a lookup cut short by the connection closing (check %i, %s) writes no refusal: the disconnect line covers it", async (check) => {
       const pending = Promise.withResolvers<void>();

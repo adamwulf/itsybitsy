@@ -713,6 +713,12 @@ Questions from agents that no longer exist (no directory in `.itsybitsy/agents/`
 
 ---
 
+### 4\.5 Telegram weekly-limit replies
+
+The Telegram dispatcher in `ib watch` acknowledges successfully forwarded message batches when `readClaudeUsage` reports weekly usage at 100%. It sends one direct Telegram notice per coalesced batch, explaining that the Claude weekly limit has been reached and the coordinator may be unable to reply, with the reset duration when known. Messages still reach the coordinator. The check uses the existing local statusline records; it makes no Claude API call, and expired windows stop triggering notices automatically. Missing readings and read failures do not interrupt delivery. `/context` and `/compact` receive the notice because their follow-up requires a model response; `/restart`, `/respawn`, and `/clear` retain their own direct acknowledgements. Unauthorized messages, reactions, and the coordinator-offline confirmation flow do not trigger limit notices.
+
+Cross-cutting review: general agent lifecycle and metadata are unchanged; hooks reuse the existing statusline records without changes; watchdog recovery and nudge timing are unchanged; the `ib watch` Telegram dispatcher owns the reply, with no dashboard layout or input changes.
+
 ## 5. Worktree / Agent Directory Structure
 
 ### 5.1 Directory Layout

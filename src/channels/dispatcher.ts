@@ -110,6 +110,7 @@
 
 import { InjectionContext } from "../types";
 import { isCoordinatorRestartCommand } from "../coordinator";
+import { readClaudeUsage } from "../claude-rate-limits";
 import { TelegramClient, abortableSleep, classifyError, TELEGRAM_GETFILE_LIMIT_BYTES } from "./telegram-client";
 import type { PollOutcome } from "./telegram-client";
 import { backoffDelayMs, type BackoffOptions } from "./backoff";
@@ -152,6 +153,9 @@ const defaultSendToCoordinator: SendToCoordinatorFn = async (msg, opts) => {
 };
 
 export const sendCtx = new InjectionContext<SendToCoordinatorFn>(defaultSendToCoordinator);
+
+/** Read the same local statusline records as ib watch, without an API call. */
+export const claudeUsageCtx = new InjectionContext<typeof readClaudeUsage>(readClaudeUsage);
 
 /** Injectable sleep — defaults to setTimeout. Tests fast-forward by injecting
  *  a near-instant resolver. */
@@ -1031,6 +1035,7 @@ export class TelegramDispatcher {
     }
 
     if (followupBody !== null) {
+      await this.replyIfWeeklyLimitReached();
       const note: NormalizedMessage = {
         chatId: message.chatId,
         messageId: message.messageId,
@@ -1097,6 +1102,7 @@ export class TelegramDispatcher {
     // affect delivery. Only the most recent message in the batch matters —
     // `messages` is in arrival order, so the last element is newest.
     if (delivered) {
+      await this.replyIfWeeklyLimitReached();
       const newest = messages[messages.length - 1]!;
       if (newest.messageId > 0) {
         try {
@@ -1133,6 +1139,23 @@ export class TelegramDispatcher {
     // with the local path and sent any too-big / failed Telegram reply itself.
     // The old "Received attachment — text only supported" notice is gone now
     // that real handling landed.
+  }
+
+  /** Acknowledge messages even when Claude cannot produce its own reply.
+   *  Delivery remains unchanged; this is a best-effort notice from ib watch,
+   *  once per coalesced message batch (or command needing an AI follow-up). */
+  private async replyIfWeeklyLimitReached(): Promise<void> {
+    try {
+      const usage = await claudeUsageCtx.fn();
+      if (usage.error || (usage.data?.weeklyPct ?? 0) < 100) return;
+      const reset = usage.data?.weeklyReset;
+      await this.replyOnTelegram(
+        "Claude's weekly usage limit has been reached. The coordinator may be unable to reply." +
+        (reset ? ` Resets in ${reset}.` : ""),
+      );
+    } catch (err) {
+      safeLog(`Telegram dispatcher: weekly usage check failed: ${classifyError(err)}`);
+    }
   }
 
   /** Handle a batch arriving on a chat that's in awaiting-confirmation state.

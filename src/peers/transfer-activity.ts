@@ -114,7 +114,7 @@ export class TransferActivity {
     let moved = 0;
     let ended = false;
     // Bytes QUIC accepted, not bytes the peer confirmed.
-    const bytes = start.endsAtLastWrite ? "bytes written" : "bytes";
+    const unit = start.endsAtLastWrite ? "bytes written" : "bytes";
     const end = (outcome: string) => {
       if (ended) return;
       ended = true;
@@ -125,7 +125,7 @@ export class TransferActivity {
       }
       const ms = Math.max(endedAt - began, 0);
       const rate = moved / 1024 / (Math.max(ms, 1) / 1000);
-      log(`peer link: transfer ${outcome}: ${label}: ${moved} of ${start.bytes} ${bytes} in ${(ms / 1000).toFixed(1)} s, ${rate.toFixed(1)} KB/s`);
+      log(`peer link: transfer ${outcome}: ${label}: ${moved} of ${start.bytes} ${unit} in ${(ms / 1000).toFixed(1)} s, ${rate.toFixed(1)} KB/s`);
     };
     return {
       progress: (bytes) => {

@@ -844,8 +844,10 @@ interface ClientOptions extends OutgoingTransfer {
    * slow link. A late reply is returned as the exchange's result. While it
    * waits it asks again every `timeout` interval, and the first no closes the
    * connection as an unkept timeout would. The poller's agents poll and pane
-   * reads pass it while an attachment transfer with the peer moves bytes
-   * (SPEC §20.4 "Slow links").
+   * reads pass one that is true while a transfer with the peer is running and
+   * has moved bytes within the last 60 s, or this machine's watch-log reply to
+   * the peer ended ok within that window (transfer-activity.ts
+   * `recentProgress`, SPEC §20.4 "Slow links").
    */
   keepOpenOnTimeout?: () => boolean;
   unknownAfterFin?: string;

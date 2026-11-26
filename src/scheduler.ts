@@ -7,7 +7,9 @@
  * fire time after the previous tick and at or before now. It fires that run
  * when it is at most {@link SCHEDULER_GRACE_MS} old; an older one was missed
  * (the dashboard was closed, the machine slept, the event loop stalled) and is
- * skipped. Nothing before the scheduler started fires. A run is claimed in the
+ * skipped. The first tick looks back from the scheduler's start by the grace,
+ * so a run that fell due while `ib watch` restarted still fires, and nothing
+ * older does. A run is claimed in the
  * store before it starts, so of several open dashboards only one starts it,
  * and its result (the agent id or the error) is recorded. A run that fails is
  * not retried.
@@ -109,9 +111,13 @@ export class Scheduler {
   private readonly abort = new AbortController();
   private lastReadError: string | null = null;
 
-  /** Fire times up to now are never fired: the first tick looks only after this moment. */
+  /**
+   * The first tick's window starts the grace before now, so a run due while
+   * `ib watch` restarted (an `ib bounce`) still fires; the store's claim keeps
+   * a run the previous instance claimed from firing twice.
+   */
   constructor(private readonly deps: SchedulerDeps) {
-    this.lastTick = deps.now();
+    this.lastTick = deps.now() - SCHEDULER_GRACE_MS;
   }
 
   start(): void {

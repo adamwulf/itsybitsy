@@ -5048,7 +5048,9 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
   // throws; shutdown waits for the bind.
   void peerService.bootIfPaired();
   // Scheduled tasks (SPEC §21.2), once the watcher and the peer service are
-  // up. Nothing due before this moment fires. A remote task starts through
+  // up. The first tick also fires a run due in the 2 minutes before this
+  // moment (the gap of an `ib bounce`), unless the previous `ib watch`
+  // claimed it. A remote task starts through
   // the peer service as the New Agent form's start does (its human-caller
   // decision and connection checks), but outside the form's one-start slot,
   // so it neither waits for nor blocks a user's remote start.

@@ -106,12 +106,37 @@ describe("Scheduler tick", () => {
     ]);
   });
 
-  test("fires nothing due before it started", async () => {
-    const h = harness([TASK], at(9, 30, 10));
-    h.setNow(at(9, 30, 40));
+  test("fires a run that fell due within the grace before it started, as after an ib bounce", async () => {
+    // The previous ib watch ticked at 9:29:50 and quit; this one started at 9:30:20.
+    const h = harness([TASK], at(9, 30, 20));
+    h.setNow(at(9, 30, 50));
+    await h.scheduler.tick();
+    expect(h.deps.claimRun.mock.calls).toEqual([[TASK.id, at(9, 30)]]);
+    expect(h.deps.startLocal).toHaveBeenCalledTimes(1);
+  });
+
+  test("after a restart, a run the previous instance claimed does not fire again", async () => {
+    const h = harness([TASK], at(9, 29, 50));
+    h.setNow(at(9, 30, 10));
+    await h.scheduler.tick();
+    expect(h.deps.startLocal).toHaveBeenCalledTimes(1);
+
+    h.setNow(at(9, 30, 30));
+    const restarted = new Scheduler(h.deps);
+    h.setNow(at(9, 31));
+    await restarted.tick();
+    // It looks at the 9:30 run again, and the claim refuses it.
+    expect(h.deps.claimRun.mock.calls).toEqual([[TASK.id, at(9, 30)], [TASK.id, at(9, 30)]]);
+    expect(h.deps.startLocal).toHaveBeenCalledTimes(1);
+  });
+
+  test("fires nothing, and logs nothing, due more than the grace before it started", async () => {
+    const h = harness([TASK], at(9, 32, 10));
+    h.setNow(at(9, 32, 40));
     await h.scheduler.tick();
     expect(h.deps.claimRun).not.toHaveBeenCalled();
     expect(h.deps.startLocal).not.toHaveBeenCalled();
+    expect(h.logs).toEqual([]);
   });
 
   test("fires a run up to the grace late, after a stalled tick", async () => {

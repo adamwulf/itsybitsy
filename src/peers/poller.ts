@@ -386,7 +386,8 @@ export class PeerPoller {
     } catch (err) {
       if (!this.isCurrent(link, generation)) return;
       if (err instanceof PeerBusyReply && link.conn === conn && conn && !this.recordObservedClose(link, conn)) {
-        link.connected = true;
+        // A busy first reply connects the link as a list would: its `connected to` line, and `connectedAt` for the disconnect line.
+        this.markConnected(link, this.deps.now());
         if (link.lastError !== err.message) { link.lastError = err.message; this.notify(); }
       } else this.failed(link, describeFailure(err, conn));
     } finally {
@@ -421,11 +422,7 @@ export class PeerPoller {
     link.lastOkAt = this.deps.now();
     const key = JSON.stringify(snapshot);
     const changed = !link.connected || link.lastError !== null || key !== link.snapshotKey;
-    if (!link.connected) {
-      this.deps.log(`peer link: connected to ${link.name} (${shortPeerId(link.id)})`);
-      link.connectedAt = link.lastOkAt;
-    }
-    link.connected = true;
+    this.markConnected(link, link.lastOkAt);
     link.lastError = null;
     if (key !== link.snapshotKey) {
       link.coordinator = snapshot.coordinator;
@@ -435,6 +432,14 @@ export class PeerPoller {
       link.snapshotKey = key;
     }
     if (changed) this.notify();
+  }
+
+  /** A link not yet connected becomes so at `at`: the `connected to` line, and the time its disconnect line counts from. */
+  private markConnected(link: Link, at: number): void {
+    if (link.connected) return;
+    this.deps.log(`peer link: connected to ${link.name} (${shortPeerId(link.id)})`);
+    link.connected = true;
+    link.connectedAt = at;
   }
 
   /**

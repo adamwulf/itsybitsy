@@ -612,6 +612,53 @@ describe("PeerPoller", () => {
     rig.poller.stop();
   });
 
+  test("a busy first reply connects the link: its connected line, connectedAt, and later the disconnect line", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const id = P1.slice(0, 10);
+    const { a, b } = createMemoryLink(SELF, P1);
+    rig.setDial(async () => a);
+    rig.poller.start();
+    const first = await b.acceptBi();
+    await first.readToEnd(PEER_MAX_REQUEST_BYTES);
+    await first.writeAll(new TextEncoder().encode(JSON.stringify({ op: "error", reason: "busy, try again" })));
+    await first.finish();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    expect(rig.state(P1)).toMatchObject({ connected: true, connectedAt: rig.clock.now(), lastError: "busy, try again" });
+    expect(rig.logs).toEqual([`peer link: connected to B (${id})`]);
+
+    rig.clock.jump(20_000);
+    b.close(PEER_CLOSE.done, "shutting down");
+    await waitFor(() => rig.state(P1)?.connected === false, { message: "dropped" });
+    expect(rig.state(P1)?.connectedAt).toBeNull();
+    expect(rig.logs).toEqual([
+      `peer link: connected to B (${id})`,
+      `peer link: B (${id}): disconnected (dialed, up 20s): closed by the other side`,
+    ]);
+    rig.poller.stop();
+  });
+
+  test("a busy reply on a link already connected keeps its connectedAt and writes no second connected line", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const { a, b } = createMemoryLink(SELF, P1);
+    rig.setDial(async () => a);
+    rig.poller.start();
+    const first = await b.acceptBi();
+    await first.readToEnd(PEER_MAX_REQUEST_BYTES);
+    await first.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [], questions: [] }));
+    await first.finish();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    const connectedAt = rig.state(P1)!.connectedAt;
+    rig.tick();
+    const second = await b.acceptBi();
+    await second.readToEnd(PEER_MAX_REQUEST_BYTES);
+    await second.writeAll(new TextEncoder().encode(JSON.stringify({ op: "error", reason: "busy, try again" })));
+    await second.finish();
+    await waitFor(() => rig.state(P1)?.lastError === "busy, try again", { message: "busy" });
+    expect(rig.state(P1)).toMatchObject({ connected: true, connectedAt });
+    expect(rig.logs).toEqual([`peer link: connected to B (${P1.slice(0, 10)})`]);
+    rig.poller.stop();
+  });
+
   test("an agents poll that times out on a connected link: the disconnect line names the poll and its deadline", async () => {
     const rig = makeRig([peer(P1, "B")]);
     const id = P1.slice(0, 10);

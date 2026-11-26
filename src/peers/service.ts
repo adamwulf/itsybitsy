@@ -100,7 +100,7 @@ import { acceptRemoteAcknowledge, type RemoteQuestionDeps } from "./remote-quest
 import { acceptRemotePermission, type RemotePermissionDeps, type RemotePermissionOutcome, type RemotePermissionRequest } from "./remote-permissions";
 import { effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability } from "../agent-permissions";
 import { detectAgentStates } from "../agents";
-import { acknowledgeQuestion, newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
+import { acknowledgeQuestion, newAgent, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, pauseAgent } from "../ib-commands";
 import { listSpawnableTypeNamesSync } from "../agent-types";
 import { listRepos } from "../registry";
 import { PEER_ALPN, requestAgentDiff, requestAgentPrompt, requestNewAgent, serveTrustedConnection, type PeerPane, type PeerPaneTarget, type PeerResponderDeps, type PeerSnapshot, type RemoteNewAgentRequest } from "./peer-link";
@@ -216,7 +216,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
       const text = await captureMarkedCoordinatorPane(IB_COORDINATOR_SESSION, machine, { log, lines });
       return text === null ? null : { text, state: classifyCoordinatorState(stripAnsi(text)) };
     },
-    remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, detectAgentStates, machine, notice },
+    remoteLifecycle: { listRepos, mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, pauseAgent, detectAgentStates, machine, notice },
     remoteQuestions: { listRepos, acknowledgeQuestion, notice },
     remotePermissions: { listRepos, effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability, notice },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice, attachments },

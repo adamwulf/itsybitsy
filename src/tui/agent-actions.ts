@@ -602,25 +602,38 @@ export function handleResume(ctx: ActionCtx) {
   });
 }
 
+const PAUSE_STOPPED_NOTICE = "Can only pause running, waiting, or complete agents";
+
 export function handlePause(ctx: ActionCtx) {
+  const row = ctx.remoteSelection;
+  if (row?.kind === "remote-agent") {
+    // The state the peer last reported; the peer checks it again.
+    if (row.remote.state === "stopped") { ctx.setNotice(PAUSE_STOPPED_NOTICE, "error"); return; }
+    pauseDialog(ctx, remoteAgentLabel(row), () => ctx.runRemoteRowCommand(row, { action: "pause" }));
+    return;
+  }
   const agent = ctx.agentTree.selectedAgent;
   if (!agent) return;
   if (agent.state === "stopped" || agent.archived) {
-    ctx.setNotice("Can only pause running, waiting, or complete agents", "error");
+    ctx.setNotice(PAUSE_STOPPED_NOTICE, "error");
     return;
   }
+  pauseDialog(ctx, agent.id, async () => {
+    const result = await pauseAgent(agent);
+    if (result.ok) ctx.setNotice(`Paused ${agent.id}`, "info");
+    else ctx.setNotice(`Pause failed: ${result.stderr || result.stdout}`, "error");
+  });
+}
+
+function pauseDialog(ctx: ActionCtx, label: string, pause: () => Promise<unknown>) {
   ctx.showDialog({
     type: "confirm",
-    prompt: `Pause agent ${agent.id}?`,
+    prompt: `Pause agent ${label}?`,
     confirmLabel: "Pause",
     focusedButton: "cancel",
     onYes: () => {
       ctx.closeDialog();
-      ctx.executeAndRefresh(async () => {
-        const result = await pauseAgent(agent);
-        if (result.ok) ctx.setNotice(`Paused ${agent.id}`, "info");
-        else ctx.setNotice(`Pause failed: ${result.stderr || result.stdout}`, "error");
-      });
+      ctx.executeAndRefresh(async () => { await pause(); });
     },
   });
 }

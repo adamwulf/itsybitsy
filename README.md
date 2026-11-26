@@ -177,7 +177,7 @@ Press Ctrl-C during a CLI send, or Esc on the dashboard’s transfer row. `cance
 
 In `ib watch`, press `.` to favorite a remote agent or pin a remote-only repo header. Both preferences are saved on this machine.
 
-Start the dashboard from a human terminal outside tmux. Select a remote agent and press `m` for its merge check and confirmation, `x` to confirm retirement, or `R` to resume a stopped agent. The merge dialog includes the usual **Keep agent after merge** checkbox.
+Start the dashboard from a human terminal outside tmux. Select a remote agent and press `m` for its merge check and confirmation, `x` to confirm retirement, `P` to confirm pausing it, or `R` to resume a stopped agent. The merge dialog includes the usual **Keep agent after merge** checkbox.
 
 From a human terminal outside tmux, `ib merge`, `ib retire`, `ib resume` and `ib rehire` accept `<machine>/<agent>` or `<machine>/<repo>/<agent>`. After retirement the row disappears. Run `ib rehire <machine>/<agent>` to restore it from the receiving machine’s archive. Both machines need a connected `ib watch`. A merge waits up to two minutes and the other commands wait up to 30 seconds. If the outcome is unknown, check the receiving machine before trying again.
 

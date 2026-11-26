@@ -1,13 +1,13 @@
 import type { detectAgentStates } from "../agents";
 import { isCoordinatorType } from "../coordinator-type-names";
-import type { mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent } from "../ib-commands";
+import type { mergeAgent, mergeCheckAgent, retireAgent, rehireAgent, resumeAgent, pauseAgent } from "../ib-commands";
 import { isStoredRepoName, type listRepos } from "../registry";
 import { resolveAgentTarget } from "../resolve-target";
 import { isValidAgentId } from "../validation";
 import { pushFailedNotice } from "../push-failure";
 import { singleLine } from "./single-line";
 
-export type RemoteLifecycleAction = "merge" | "retire" | "rehire" | "resume";
+export type RemoteLifecycleAction = "merge" | "retire" | "rehire" | "resume" | "pause";
 export interface RemoteLifecycleRequest {
   action: RemoteLifecycleAction;
   id: string;
@@ -35,12 +35,12 @@ export interface RemoteLifecycleOutcome {
   warnings?: string;
 }
 
-export const lifecyclePast = { merge: "merged", retire: "retired", rehire: "rehired", resume: "resumed" } as const;
+export const lifecyclePast = { merge: "merged", retire: "retired", rehire: "rehired", resume: "resumed", pause: "paused" } as const;
 export const lifecycleTimeout = (action: RemoteLifecycleAction) => action === "merge" ? 120_000 : 30_000;
 
 export function parseLifecycleRequest(raw: Record<string, unknown>): RemoteLifecycleRequest {
   const { action, id, repo, keep, checkOnly, force } = raw;
-  if (action !== "merge" && action !== "retire" && action !== "rehire" && action !== "resume") throw new Error("Unknown lifecycle action");
+  if (action !== "merge" && action !== "retire" && action !== "rehire" && action !== "resume" && action !== "pause") throw new Error("Unknown lifecycle action");
   if (typeof id !== "string" || !id.trim() || id.includes("/") || id.startsWith("@") || /[\p{Cc}\p{Cf}]/u.test(id) ||
       (action !== "rehire" && !isValidAgentId(id))) throw new Error("Invalid agent id");
   if (repo !== undefined && (!isStoredRepoName(repo) || repo.includes("\0"))) throw new Error("Invalid repo registry name");
@@ -63,6 +63,7 @@ export interface RemoteLifecycleDeps {
   retireAgent: typeof retireAgent;
   rehireAgent: typeof rehireAgent;
   resumeAgent: typeof resumeAgent;
+  pauseAgent: typeof pauseAgent;
   detectAgentStates: typeof detectAgentStates;
   /** This machine's name, as its peers know it: a failed push's retry hint names it. */
   machine: string;
@@ -95,6 +96,12 @@ export async function acceptRemoteLifecycle(request: RemoteLifecycleRequest, rea
     case "resume":
       await deps.detectAgentStates([agent], { reap: true });
       result = await deps.resumeAgent(agent);
+      break;
+    case "pause":
+      // Read-only: the agent is read with state "unknown", and pauseAgent
+      // refuses only one it sees as stopped.
+      await deps.detectAgentStates([agent]);
+      result = await deps.pauseAgent(agent);
       break;
   }
   if (!result.ok) throw new Error(result.stderr || result.stdout || `Remote ${action} failed`);

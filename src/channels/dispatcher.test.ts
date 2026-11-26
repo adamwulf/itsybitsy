@@ -19,6 +19,7 @@ import {
   logCtx,
   ensureCoordinatorCtx,
   restartCoordinatorCtx,
+  claudeUsageCtx,
 } from "./dispatcher";
 import {
   setStateDir as setAccessStateDir,
@@ -1082,6 +1083,7 @@ describe("TelegramDispatcher", () => {
 
     send = makeSendSpy();
     sendCtx.set(send.fn);
+    claudeUsageCtx.set(async () => ({ data: null, error: false }));
 
     dispSleeps = [];
     sleepCtx.set(async (ms) => { dispSleeps.push(ms); });
@@ -1115,6 +1117,7 @@ describe("TelegramDispatcher", () => {
     logCtx.reset();
     ensureCoordinatorCtx.reset();
     restartCoordinatorCtx.reset();
+    claudeUsageCtx.reset();
     resetAccessStateDir();
     resetLastMsgStateDir();
     resetInboundDir();
@@ -1171,6 +1174,118 @@ describe("TelegramDispatcher", () => {
     // The `<channel>` opening tag must be at column 1 (start of the message),
     // not pushed right by a prefix.
     expect(call.message.startsWith("<channel")).toBe(true);
+  });
+
+  describe("weekly-limit acknowledgement", () => {
+    function setUsage(weeklyPct: number | null, weeklyReset: string | null = "2d 3h") {
+      claudeUsageCtx.set(async () => ({
+        data: { weeklyPct, weeklyReset, sessionPct: 0, sessionReset: null },
+        error: false,
+      }));
+    }
+
+    function replies(): string[] {
+      return mock.allUrls().flatMap((url, i) => url.endsWith("/sendMessage")
+        ? [JSON.parse(String(mock.allInits()[i]?.body)).text as string]
+        : []);
+    }
+
+    async function process(updates: TelegramUpdate[]) {
+      const d = makeDispatcher();
+      // Exercise the batch synchronously so negative assertions do not race
+      // the long-poll loop. All network calls here are automatic replies.
+      mock.enqueueResponse({ ok: true, result: { message_id: 99 } });
+      await (d as any).processBatch(updates);
+    }
+
+    test("replies once for a coalesced batch and still forwards every message", async () => {
+      setUsage(100);
+      await process([
+        update(1, { chat: { id: 100 }, text: "hello" }),
+        update(2, { chat: { id: 100 }, text: "are you there?" }),
+      ]);
+      expect(replies()).toEqual([
+        "Claude's weekly usage limit has been reached. The coordinator may be unable to reply. Resets in 2d 3h.",
+      ]);
+      expect(send.calls).toHaveLength(1);
+      expect(send.calls[0]!.message).toContain("hello");
+      expect(send.calls[0]!.message).toContain("are you there?");
+      expect((await readLastMessage())?.message_id).toBe(20);
+    });
+
+    test("omits an unknown reset time", async () => {
+      setUsage(100, null);
+      await process([update(1, { chat: { id: 100 }, text: "hello" })]);
+      expect(replies()).toEqual([
+        "Claude's weekly usage limit has been reached. The coordinator may be unable to reply.",
+      ]);
+    });
+
+    test("rechecks usage for each batch and stops notifying after a reset", async () => {
+      setUsage(100);
+      await process([update(1, { chat: { id: 100 }, text: "hello" })]);
+      setUsage(0, null);
+      await process([update(2, { chat: { id: 100 }, text: "hello again" })]);
+      expect(replies()).toHaveLength(1);
+      expect(send.calls).toHaveLength(2);
+    });
+
+    for (const pct of [99, 0, null]) {
+      test(`does not notify for weekly usage ${pct}`, async () => {
+        setUsage(pct);
+        await process([update(1, { chat: { id: 100 }, text: "hello" })]);
+        expect(replies()).toEqual([]);
+        expect(send.calls).toHaveLength(1);
+      });
+    }
+
+    test("a usage read failure does not interrupt delivery or message caching", async () => {
+      claudeUsageCtx.set(async () => { throw new Error("unavailable"); });
+      await process([update(1, { chat: { id: 100 }, text: "hello" })]);
+      expect(replies()).toEqual([]);
+      expect(send.calls).toHaveLength(1);
+      expect((await readLastMessage())?.message_id).toBe(10);
+      expect(logs.some(line => line.includes("weekly usage check failed"))).toBe(true);
+    });
+
+    test("offline handling takes precedence", async () => {
+      setUsage(100);
+      send.setNext(false);
+      await process([update(1, { chat: { id: 100 }, text: "hello" })]);
+      expect(replies()).toEqual(["The coordinator is offline. Start the coordinator? (y/n)"]);
+    });
+
+    for (const command of ["/restart", "/respawn", "/clear", "/context", "/compact"]) {
+      test(`${command} still works at the weekly limit`, async () => {
+        setUsage(100);
+        restartCoordinatorCtx.set(async () => true);
+        await process([update(1, { chat: { id: 100 }, text: command })]);
+        if (command === "/restart" || command === "/respawn") {
+          expect(replies()).toEqual(["Coordinator restarted with a fresh session."]);
+          expect(send.calls).toHaveLength(0);
+        } else {
+          expect(send.calls[0]!.message).toBe(command);
+          if (command === "/clear") {
+            expect(replies()).toEqual(["Coordinator context is cleared."]);
+          } else {
+            expect(replies()).toHaveLength(1);
+            expect(replies()[0]).toContain("weekly usage limit");
+            expect(send.calls).toHaveLength(2);
+          }
+        }
+      });
+    }
+
+    test("unauthorized messages and reactions do not trigger limit replies", async () => {
+      setUsage(100);
+      await process([
+        update(1, { chat: { id: 999 }, text: "hello" }),
+        reactionUpdate(2, { chatId: 100, messageId: 50, added: ["👍"] }),
+      ]);
+      expect(replies()).toEqual([]);
+      expect(send.calls).toHaveLength(1);
+      expect(send.calls[0]!.message).toContain('kind="reaction"');
+    });
   });
 
   test("inbound text persists the latest message_id to the last-message cache", async () => {

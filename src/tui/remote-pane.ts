@@ -122,8 +122,13 @@ export class RemotePane {
       : this.error === null ? [`${DIM}Waiting for output…${RESET}`] : [];
     const room = height - (this.error === null ? 0 : 1);
     this.maxVisibleOffset = Math.max(0, output.length - room);
-    const end = output.length - Math.min(this.scrollBack, this.maxVisibleOffset);
-    const lines = padLines(output.slice(Math.max(0, end - room), end), room);
+    // As on a local agent's tmux pane (TmuxPaneComponent): scrolled back, the
+    // last row above the error line says how many lines are below.
+    const offset = room > 0 ? Math.min(this.scrollBack, this.maxVisibleOffset) : 0;
+    const rows = offset > 0 ? room - 1 : room;
+    const end = output.length - offset;
+    const lines = padLines(output.slice(Math.max(0, end - rows), end), rows);
+    if (offset > 0) lines.push(truncateToWidth(`${DIM}── ↓ ${offset} lines below ──${RESET}`, width, ""));
     if (this.error !== null) lines.push(truncateToWidth(`${RED}${this.error}${RESET}`, width, "…"));
     return lines;
   }

@@ -2128,6 +2128,54 @@ describe("PeerService keeps the link while a transfer moves bytes", () => {
       await service.shutdown();
     }
   });
+
+  test("a watch log copy whose body arrives slowly keeps a stalled poll's connection, with transfer lines from its header to its end", async () => {
+    const { service, logs, clock, far, stallPoll } = await connectedService();
+    const short = ID_REMOTE.slice(0, 10);
+    const body = Buffer.from("remote line\n");
+    try {
+      const copying = service.fetchWatchLog(ID_REMOTE);
+      const copy = await far.acceptBi();
+      expect(JSON.parse(new TextDecoder().decode(await copy.readToEnd(4096)))).toEqual({ op: "watch-log" });
+      await copy.writeAll(encodeFrameHeader({ op: "watch-log", now: clock.now(), version: "9.9.9", name: "laptop-c",
+        files: [{ name: "watch.log", size: body.length, sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex") }] }));
+      await copy.writeAll(body.subarray(0, 1));
+      await waitFor(() => logs.includes(`peer link: transfer started: watch-log from Laptop C (${short}): 1 file, 12 bytes`), { message: "copying" });
+
+      await stallPoll();
+      await waitFor(() => logs.includes(kept), { message: "kept" });
+      expect(far.closeInfo()).toBeNull();
+      expect(service.view().links[0]).toMatchObject({ connected: true, lastError: null });
+
+      // The rest of the body and FIN arrive: the copy ends ok.
+      await copy.writeAll(body.subarray(1));
+      await copy.finish();
+      expect(Buffer.from((await copying).files[0]!.body).toString()).toBe("remote line\n");
+      expect(logs.find(line => line.startsWith("peer link: transfer ok:"))).toStartWith(`peer link: transfer ok: watch-log from Laptop C (${short}): 12 of 12 bytes in `);
+      clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
+      await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  test("a watch log copy that fails after its header ends its transfer failed", async () => {
+    const { service, logs, far } = await connectedService();
+    const short = ID_REMOTE.slice(0, 10);
+    try {
+      const copying = service.fetchWatchLog(ID_REMOTE).catch((err: Error) => err);
+      const copy = await far.acceptBi();
+      await copy.readToEnd(4096);
+      await copy.writeAll(encodeFrameHeader({ op: "watch-log", now: 1, version: "9.9.9", name: "laptop-c",
+        files: [{ name: "watch.log", size: 3, sha256: "0".repeat(64) }] }));
+      await copy.writeAll(Buffer.from("abc"));
+      await copy.finish();
+      expect(String(await copying)).toContain("watch.log hash mismatch");
+      expect(logs.find(line => line.startsWith("peer link: transfer failed"))).toStartWith(`peer link: transfer failed (watch.log hash mismatch): watch-log from Laptop C (${short}): 3 of 3 bytes in `);
+    } finally {
+      await service.shutdown();
+    }
+  });
 });
 
 describe("PeerService trusted ALPN", () => {
@@ -2732,6 +2780,9 @@ describe("watch log copies (ib export-logs)", () => {
       expect(copy).toMatchObject({ name: "desk", version: "1.2.3" });
       expect(copy.files.map((file) => file.name)).toEqual(["watch.log"]);
       await waitFor(() => logs.includes(`peer link: Laptop C (${ID_REMOTE.slice(0, 10)}) copied the watch log (1 file, 0.0 MB)`));
+      // The reply's write is one of the service's transfers.
+      expect(logs).toContain(`peer link: transfer started: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 1 file, 14 bytes`);
+      expect(logs.some(line => line.startsWith(`peer link: transfer ok: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 14 of 14 bytes in `))).toBe(true);
     } finally {
       conn.close(PEER_CLOSE.done, "done");
       await service.shutdown();

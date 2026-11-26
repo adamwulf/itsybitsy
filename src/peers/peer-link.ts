@@ -40,6 +40,7 @@ import { singleLine } from "./single-line";
  */
 
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS } from "./transfer-limits";
+import type { TransferActivity } from "./transfer-activity";
 import { createHash } from "node:crypto";
 import { MAX_AGENT_DIFF_BYTES, type AgentDiff } from "./agent-diff";
 import { describeWatchLogFiles, isWatchLogFileName, totalWatchLogBytes, WATCH_LOG_FILE_NAMES, WATCH_LOG_MAX_BYTES, type PeerWatchLog, type WatchLogFile } from "./watch-log-files";
@@ -600,17 +601,26 @@ async function readDiffReply(stream: Pick<PairStream, "read">, options: FileBody
  * `clock` (epoch ms) stamps the request and the reply on this side, so the
  * caller can compare the peer's `now` with this machine's clock. There is no
  * overall deadline: each read has the transfer idle timeout, and `signal`
- * stops the exchange.
+ * stops the exchange. `report` hears of the bodies as they arrive, so the
+ * copy can count as a transfer (service.ts `fetchWatchLog`).
  */
-export async function requestWatchLog(conn: PairConnection, setTimer = realTimer, signal?: AbortSignal, clock: () => number = Date.now): Promise<PeerWatchLog> {
+export async function requestWatchLog(conn: PairConnection, setTimer = realTimer, signal?: AbortSignal, clock: () => number = Date.now, report?: WatchLogReport): Promise<PeerWatchLog> {
   const sentAt = clock();
   const reply = await clientExchange(conn, encodeJson({ op: "watch-log" }), {
-    read: (stream, options) => readWatchLogReply(stream, { ...options, signal }, clock),
+    read: (stream, options) => readWatchLogReply(stream, { ...options, signal }, clock, report),
   }, { setTimer, signal });
   return { ...reply, sentAt };
 }
 
-async function readWatchLogReply(stream: Pick<PairStream, "read">, options: FileBodyOptions, clock: () => number): Promise<Omit<PeerWatchLog, "sentAt">> {
+/** A watch-log copy's progress on the requesting side. */
+export interface WatchLogReport {
+  /** A valid header arrived: `files` bodies of `bytes` in all follow. */
+  header(files: number, bytes: number): void;
+  /** The cumulative body bytes received so far. */
+  progress(bytes: number): void;
+}
+
+async function readWatchLogReply(stream: Pick<PairStream, "read">, options: FileBodyOptions, clock: () => number, report?: WatchLogReport): Promise<Omit<PeerWatchLog, "sentAt">> {
   const prefix = await readHeaderBytes(stream, 4, options);
   if (prefix[0] !== 0) {
     // A JSON error reply: a refusal, or a peer whose ib has no watch-log op.
@@ -647,15 +657,18 @@ async function readWatchLogReply(stream: Pick<PairStream, "read">, options: File
     return { name, size, sha256 };
   });
   if (total > WATCH_LOG_MAX_BYTES) throw new PeerProtocolError(`The watch-log reply declares ${total} bytes, over the ${WATCH_LOG_MAX_BYTES}-byte limit`);
+  report?.header(entries.length, total);
   const bodies: WatchLogFile[] = [];
+  let received = 0;
   for (const { name, size, sha256 } of entries) {
     const body = Buffer.allocUnsafe(size);
     let offset = 0;
     const digest = await streamFileBody(stream, size, chunk => {
       body.set(chunk, offset);
       offset += chunk.length;
-    }, options);
+    }, { ...options, onProgress: bytes => report?.progress(received + bytes) });
     if (digest !== sha256) throw new PeerProtocolError(`${name} hash mismatch`);
+    received += size;
     bodies.push({ name, body });
   }
   await requireSendFin(stream, options);
@@ -785,14 +798,15 @@ export async function requestPermissions(conn: PairConnection, request: RemotePe
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
 
-async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal, milestone?: () => void) {
+/** `milestone` gets the bytes of `bytes` written so far, after each write. */
+async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal, milestone?: (written: number) => void) {
   let offset = 0;
   while (offset < bytes.length) {
     const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
     const n = await waitForIO({ setTimer, signal }, () => stream.write(chunk));
     if (!Number.isInteger(n) || n <= 0 || n > chunk.length) throw new Error("Invalid send write count");
     offset += n;
-    milestone?.();
+    milestone?.(offset);
   }
 }
 
@@ -1003,6 +1017,8 @@ export interface PeerResponderDeps {
   readPrompt?(repo: string, id: string): Promise<string>;
   /** This machine's name, `ib` version and watch log files, for a `watch-log` request. Without it the request is refused. */
   readWatchLog?(): Promise<{ name: string; version: string; files: WatchLogFile[] }>;
+  /** Transfers per peer (transfer-activity.ts): a `watch-log` reply's write is one. */
+  transfers?: Pick<TransferActivity, "begin">;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
@@ -1146,12 +1162,19 @@ async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerRe
   } finally { cancel(); }
 }
 
+/** A reply write's progress: the bytes of the whole reply written so far, and the write's failure. */
+interface ReplyReport { progress(bytes: number): void; failed(err: unknown): void }
+
 /** The handler owns the reply and teardown. A settled stop or reset is stream-local. */
 async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerResponderDeps, bytes: Uint8Array | Uint8Array[],
-  stop?: Promise<void>, stalledRead?: Promise<Uint8Array>) {
+  stop?: Promise<void>, stalledRead?: Promise<Uint8Array>, report?: ReplyReport) {
   const stopped = stop?.catch(() => {});
   const writeReply = async () => {
-    for (const part of Array.isArray(bytes) ? bytes : [bytes]) await writeWithProgress(stream, part, deps.setTimer);
+    let written = 0;
+    for (const part of Array.isArray(bytes) ? bytes : [bytes]) {
+      await writeWithProgress(stream, part, deps.setTimer, undefined, report && (n => report.progress(written + n)));
+      written += part.length;
+    }
     await waitForIO(deps, () => stream.finish());
   };
   if (stalledRead) {
@@ -1168,6 +1191,7 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
   try { await writeReply(); }
   catch (err) {
     delivered = false;
+    report?.failed(err);
     if (err instanceof TransferIdleError && !await settledWithinGrace(stream.cancel(), deps)) {
       closeQuietly(conn, PEER_CLOSE.error, "send reply stalled");
       return false;
@@ -1430,11 +1454,14 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
  * read into memory first, so a rotation during the reply cannot mix two
  * versions; then one framed reply in the style of `agent-diff`: the header
  * lists each file with its size and SHA-256 plus `now`, the `ib` version and
- * this machine's name, then the bodies in order, then FIN.
+ * this machine's name, then the bodies in order, then FIN. The reply's
+ * write is a transfer (`deps.transfers`), so a slow copy keeps the link
+ * (SPEC "Slow links").
  */
 async function serveWatchLog(conn: PairConnection, stream: PairStream, from: string, peerName: string, deps: PeerResponderDeps): Promise<void> {
   let reply: Uint8Array[];
   let copied: string | undefined;
+  let sizes = { files: 0, bytes: 0 };
   try {
     if (!deps.readWatchLog) throw new Error("Watch log copies are unavailable");
     const { name, version, files } = await deps.readWatchLog();
@@ -1445,6 +1472,7 @@ async function serveWatchLog(conn: PairConnection, stream: PairStream, from: str
     // requester's send and header times bound it.
     reply = [encodeFrameHeader({ op: "watch-log", now: (deps.now ?? Date.now)(), version, name, files: entries }), ...files.map(file => file.body)];
     copied = describeWatchLogFiles(files);
+    sizes = { files: files.length, bytes: total };
   } catch (err) {
     const error = sendDiagnostic(errorDetail(err));
     deps.log(`peer link: watch log request from ${peerName} (${from}) failed: ${error}`);
@@ -1455,9 +1483,20 @@ async function serveWatchLog(conn: PairConnection, stream: PairStream, from: str
     closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
     return;
   }
+  if (copied === undefined) {
+    await sendReply(conn, stream, deps, reply);
+    return;
+  }
   // Bulk bodies, like attachment bodies: other replies on this connection go out first.
-  if (copied !== undefined) await waitForIO(deps, () => stream.setPriority(ATTACHMENT_BODY_PRIORITY)).catch(() => {});
-  const delivered = await sendReply(conn, stream, deps, reply);
-  if (copied === undefined) return;
+  await waitForIO(deps, () => stream.setPriority(ATTACHMENT_BODY_PRIORITY)).catch(() => {});
+  const transfer = deps.transfers?.begin({ peerId: conn.remoteId, peerName: peerName || null, op: "watch-log", direction: "to", ...sizes });
+  const headerBytes = reply[0]!.length;
+  const delivered = await sendReply(conn, stream, deps, reply, undefined, undefined, transfer && {
+    // Body bytes only, as the transfer's total counts them.
+    progress: bytes => transfer.progress(Math.max(0, bytes - headerBytes)),
+    failed: err => transfer.failed(err),
+  });
+  if (delivered) transfer?.ok();
+  else transfer?.failed(new Error("writing the reply failed"));
   deps.log(delivered ? `peer link: ${peerName} (${from}) copied the watch log (${copied})` : `peer link: sending the watch log to ${peerName} (${from}) failed`);
 }

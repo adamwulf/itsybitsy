@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { ATTACHMENT_BODY_PRIORITY, PEER_CLOSE, requestWatchLog, serveTrustedConnection, type PeerResponderDeps } from "./peer-link";
 import { encodeFrameHeader } from "./send-frame";
 import { createFakeClock, createMemoryLink, type MemoryConnection, type MemoryStream } from "./test-pair-transport";
+import { TransferActivity } from "./transfer-activity";
+import { waitFor } from "../test-utils";
 import {
   decodeWatchLogOutput, describeWatchLogFiles, encodeWatchLogOutput, readWatchLogFiles, WATCH_LOG_MAX_BYTES, type WatchLogFile,
 } from "./watch-log-files";
@@ -93,6 +95,67 @@ describe("the watch-log op", () => {
     expect(accepted[0]!.priority).toBe(ATTACHMENT_BODY_PRIORITY);
     await Bun.sleep(0);
     expect(logs).toContain(`peer link: Desk (${ID_A.slice(0, 10)}) copied the watch log (3 files, 1.4 MB)`);
+  });
+
+  test("the requesting side hears of the header once it is valid, then the body bytes received so far", async () => {
+    const files: WatchLogFile[] = [
+      { name: "watch.log", body: randomBytes(150_000) },
+      { name: "watch.log.1", body: Buffer.from("older line\n") },
+    ];
+    serve({ readWatchLog: async () => ({ name: "laptop", version: "0.1.3", files }) });
+    const heard: string[] = [];
+    const progress: number[] = [];
+    await requestWatchLog(a, createFakeClock().setTimer, undefined, Date.now, {
+      header: (count, bytes) => heard.push(`${count} files, ${bytes} bytes`),
+      progress: bytes => progress.push(bytes),
+    });
+    expect(heard).toEqual(["2 files, 150011 bytes"]);
+    expect(progress.at(-1)).toBe(150_011);
+    expect(progress.length).toBeGreaterThan(2);
+    expect(progress).toEqual([...progress].sort((x, y) => x - y));
+  });
+
+  test("the responding side's reply write is a transfer: it moves bytes while it writes, then ends ok", async () => {
+    const clock = createFakeClock();
+    const transfers = new TransferActivity({ now: clock.now, log: line => logs.push(line) });
+    const body = randomBytes(200_000);
+    // The third write (after the header and the first body chunk) waits for the test.
+    const release = Promise.withResolvers<void>();
+    const blocked = Promise.withResolvers<void>();
+    const acceptBi = b.acceptBi.bind(b);
+    b.acceptBi = async () => {
+      const stream = await acceptBi();
+      const write = stream.write.bind(stream);
+      let writes = 0;
+      stream.write = async bytes => {
+        if (writes++ === 2) { blocked.resolve(); await release.promise; }
+        return write(bytes);
+      };
+      return stream;
+    };
+    serve({ transfers, readWatchLog: async () => ({ name: "laptop", version: "0.1.3", files: [{ name: "watch.log", body }] }) });
+    const copying = requestWatchLog(a, createFakeClock().setTimer);
+    await blocked.promise;
+    const short = ID_A.slice(0, 10);
+    expect(logs).toContain(`peer link: transfer started: watch-log to Desk (${short}): 1 file, 200000 bytes`);
+    expect(transfers.recentProgress(ID_A)).toBe(true);
+    release.resolve();
+    expect(sha256((await copying).files[0]!.body)).toBe(sha256(body));
+    await waitFor(() => logs.some(line => line.startsWith("peer link: transfer ok:")), { message: "transfer ok" });
+    expect(logs.find(line => line.startsWith("peer link: transfer ok:"))).toStartWith(`peer link: transfer ok: watch-log to Desk (${short}): 200000 of 200000 bytes in 0.0 s, `);
+    expect(transfers.recentProgress(ID_A)).toBe(false);
+  });
+
+  test("a reply write that fails ends the responder's transfer failed", async () => {
+    const transfers = new TransferActivity({ now: Date.now, log: line => logs.push(line) });
+    serve({ transfers, readWatchLog: async () => ({ name: "laptop", version: "0.1.3", files: [{ name: "watch.log", body: randomBytes(200_000) }] }) });
+    const stream = await a.openBi();
+    await stream.writeAll(Buffer.from(JSON.stringify({ op: "watch-log" })));
+    await stream.finish();
+    await stream.stopReceiving(); // the requester gave up on the reply
+    await waitFor(() => logs.some(line => line.startsWith("peer link: transfer failed")), { message: "transfer failed" });
+    expect(logs.find(line => line.startsWith("peer link: transfer failed"))).toMatch(/^peer link: transfer failed \(.+\): watch-log to Desk \(aaaaaaaaaa\): \d+ of 200000 bytes in /);
+    expect(logs).toContain(`peer link: sending the watch log to Desk (${ID_A.slice(0, 10)}) failed`);
   });
 
   test("a machine with no watch log answers with no files", async () => {

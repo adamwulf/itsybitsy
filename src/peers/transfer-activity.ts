@@ -5,9 +5,12 @@
  * - {@link TransferActivity.begin} starts one transfer with attachment
  *   bodies: an outbound send or new-agent with files (service.ts, through
  *   {@link TransferActivity.track}), or the inbound receipt of one once it
- *   owns its body. It logs one watch.log line when the transfer starts and
- *   one when it ends: ok or failed with the reason, bytes moved, elapsed
- *   seconds and average KB/s. Nothing is logged per chunk.
+ *   owns its body; or a `watch-log` copy (`ib export-logs`): the requester's
+ *   receipt of the reply from its header, and the responder's reply write
+ *   (service.ts `fetchWatchLog`, peer-link.ts `serveWatchLog`). It logs one
+ *   watch.log line when the transfer starts and one when it ends: ok or
+ *   failed with the reason, bytes moved, elapsed seconds and average KB/s.
+ *   Nothing is logged per chunk.
  * - Each progress report (a body chunk QUIC accepted for sending or one
  *   received, a header write, a reply fragment) marks the peer as moving
  *   bytes now.
@@ -38,8 +41,8 @@ export interface TransferStart {
   peerId: string;
   /** The paired name, or null when unknown: the line then names the short id alone. */
   peerName: string | null;
-  /** The request that carries the bodies. */
-  op: "send" | "new-agent";
+  /** The request that carries the bodies: a watch-log copy's are in its reply. */
+  op: "send" | "new-agent" | "watch-log";
   /** Outbound ("to" the peer) or inbound ("from" it). */
   direction: "to" | "from";
   files: number;

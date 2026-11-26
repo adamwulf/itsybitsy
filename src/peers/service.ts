@@ -833,12 +833,26 @@ export class PeerService {
    * (SPEC §20.4 "Watch log copies"). Only the peer outbox calls it, for
    * `ib export-logs`, which the hooks keep to humans and @system; so, unlike
    * the dashboard's reads, it does not apply the startup human-caller decision.
+   * From its reply header to its end it is a transfer (transfer-activity.ts),
+   * so the poller keeps the link through it (SPEC "Slow links").
    */
   async fetchWatchLog(peerId: string, signal?: AbortSignal): Promise<PeerWatchLog> {
-    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    const peerName = await this.peerName(peerId);
+    if (peerName === null) throw new Error("Machine is no longer paired");
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error("Machine is disconnected");
-    return requestWatchLog(conn, this.deps.setTimer, signal, this.deps.now);
+    let transfer: ActiveTransfer | undefined;
+    try {
+      const copy = await requestWatchLog(conn, this.deps.setTimer, signal, this.deps.now, {
+        header: (files, bytes) => { transfer = this.transfers.begin({ peerId, peerName: peerName || null, op: "watch-log", direction: "from", files, bytes }); },
+        progress: bytes => transfer?.progress(bytes),
+      });
+      transfer?.ok();
+      return copy;
+    } catch (err) {
+      transfer?.failed(err);
+      throw err;
+    }
   }
 
   async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
@@ -1278,6 +1292,7 @@ export class PeerService {
           captureDiff: this.deps.captureDiff,
           readPrompt: this.deps.readPrompt,
           readWatchLog: this.deps.readWatchLog,
+          transfers: this.transfers,
           terminal: this.deps.terminal,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           // Only a connection that passed the allowlist gets a path line and a path watch.

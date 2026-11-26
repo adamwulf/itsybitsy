@@ -48,6 +48,11 @@ import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./tra
  *   peer in `peers.json` for its agents every 5 s; the trusted ALPN answers
  *   from the injected `agents()` snapshot (the watcher's last fully detected
  *   agents).
+ * - While bound, a 1 s timer runs; a tick that runs 5 s or more after it was
+ *   due logs `peering: 1 s timer ran 9.8 s late`. That is the measurement
+ *   only: a blocked event loop, a suspended process and a system sleep look
+ *   the same from here. It starts with the bind and stops when the endpoint
+ *   closes or on shutdown.
  * - While bound, it also listens on the `ib peer attach` socket
  *   (terminal-relay.ts), which relays remote terminals over the poller's
  *   connections; closing the endpoint closes the socket first.
@@ -260,6 +265,11 @@ export function peerRetryDelayMs(failures: number): number {
   return Math.min(PEER_RETRY_MAX_MS, PEER_RETRY_INITIAL_MS * 2 ** doublings);
 }
 
+/** While the endpoint is bound, a timer runs this often (startLateTimer). */
+export const LATE_TIMER_INTERVAL_MS = 1_000;
+/** A tick of that timer at least this late is one watch.log line. */
+export const LATE_TIMER_LOG_MS = 5_000;
+
 /** How an accept-loop failure's message starts (the status message and its watch.log lines). */
 const ACCEPT_LOOP_STOPPED = "accept loop stopped: ";
 
@@ -447,6 +457,8 @@ export class PeerService {
   /** The `ib peer attach` socket, from a successful bind until closeEndpoint. */
   private terminalRelay: Promise<TerminalRelay | null> | null = null;
   private readonly paneReaders = new Set<string>();
+  /** Cancels the late-timer's next tick (startLateTimer); null while no endpoint is bound. */
+  private cancelLateTimer: (() => void) | null = null;
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
 
@@ -971,6 +983,7 @@ export class PeerService {
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     clearInterval(this.recoveryTimer);
+    this.stopLateTimer();
     const receipts = [...this.receipts.values()];
     for (const receipt of receipts) receipt.controller.abort(new Error("Watcher shutting down"));
     this.cancelRetry();
@@ -995,6 +1008,7 @@ export class PeerService {
    */
   private async closeEndpoint(logClosed = true): Promise<void> {
     this.cancelStable();
+    this.stopLateTimer();
     clearInterval(this.outboxTimer);
     this.outboxOwner?.abort(new Error("Endpoint stopped"));
     this.poller.stop();
@@ -1023,6 +1037,31 @@ export class PeerService {
       }
     }
     if (ep !== null && logClosed) this.deps.log("peering: endpoint closed");
+  }
+
+  /**
+   * While the endpoint is bound, a {@link LATE_TIMER_INTERVAL_MS} timer;
+   * a tick that runs {@link LATE_TIMER_LOG_MS} or more after it was due is
+   * one watch.log line with the measured delay. It states only that: a
+   * blocked event loop, a suspended process and a system sleep all look the
+   * same from here.
+   */
+  private startLateTimer(): void {
+    this.stopLateTimer();
+    const arm = () => {
+      const due = this.deps.now() + LATE_TIMER_INTERVAL_MS;
+      this.cancelLateTimer = this.deps.setTimer(LATE_TIMER_INTERVAL_MS, () => {
+        const late = this.deps.now() - due;
+        if (late >= LATE_TIMER_LOG_MS) this.deps.log(`peering: 1 s timer ran ${(late / 1000).toFixed(1)} s late`);
+        arm();
+      });
+    };
+    arm();
+  }
+
+  private stopLateTimer(): void {
+    this.cancelLateTimer?.();
+    this.cancelLateTimer = null;
   }
 
   private notify(): void {
@@ -1121,6 +1160,7 @@ export class PeerService {
     this.setStatus({ kind: "listening" });
     this.acceptLoopDone = this.acceptLoop(ep);
     this.poller.start();
+    this.startLateTimer();
     this.terminalRelay = this.startRelay();
     const poll = this.deps.pollOutbox;
     if (poll) {

@@ -28,6 +28,7 @@ import {
   type RemoteAgent,
 } from "./peer-link";
 import {
+  LATE_TIMER_INTERVAL_MS,
   PeerService,
   defaultPeerServiceDeps,
   describePaths,
@@ -244,6 +245,15 @@ function retryAt(service: PeerService): number | null {
   return status.kind === "error" ? status.retryAt : null;
 }
 
+/**
+ * Let `ms` pass in steps of at most 1 s, as it does while the event loop
+ * runs, so the bound endpoint's late-timer (LATE_TIMER_LOG_MS) stays quiet.
+ * A single advance(ms) is a stall that long, and the late-timer logs it.
+ */
+function elapse(clock: FakeClock, ms: number): void {
+  for (let left = ms; left > 0; left -= LATE_TIMER_INTERVAL_MS) clock.advance(Math.min(LATE_TIMER_INTERVAL_MS, left));
+}
+
 /** Run every continuation already queued as a microtask (and the ones they queue), without waiting on real time. */
 async function flushMicrotasks(rounds = 50): Promise<void> {
   for (let i = 0; i < rounds; i++) await Promise.resolve();
@@ -271,7 +281,7 @@ describe("PeerService binding", () => {
     expect(service.view().status).toEqual({ kind: "starting" });
     await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
     expect(binds).toEqual([[PAIR_ALPN, PEER_ALPN]]);
-    expect(clock.pending()).toBe(1); // the poller's timer only: a clean first bind arms no stability check
+    expect(clock.pending()).toBe(2); // the poller's timer and the late-timer: a clean first bind arms no stability check
     expect(await lockContents()).toBe(`${process.pid} ${ME_START}\n`);
     const selfId = service.view().selfId!;
     expect(selfId).toMatch(/^[0-9a-f]{64}$/);
@@ -1295,7 +1305,7 @@ describe("PeerService self-heal", () => {
     }
     await waitFor(() => service.view().status.kind === "listening" && endpoint.accepting, { message: "bound" });
     const selfId = service.view().selfId!;
-    clock.advance(60_000);
+    elapse(clock, 60_000);
     // Failures 6 and 7 repeat failure 5 at the cap: not logged. 8 differs, and 9 differs from 8.
     // The bind that ends a run of bind-stage failures is a change, so it is logged; its
     // recovery is logged once it has stayed up.
@@ -1409,7 +1419,7 @@ describe("PeerService self-heal", () => {
     await waitFor(() => service.view().status.kind === "listening" && endpoints[7]!.accepting, { message: "bind 8 stays up" });
     expect(binds.length).toBe(8);
     expect(logs).toEqual(quietLogs);
-    clock.advance(59_999);
+    elapse(clock, 59_999);
     expect(logs).toEqual(quietLogs);
     // ...and 60 s later its recovery is, counting all 7 failures.
     clock.advance(1);
@@ -1529,7 +1539,7 @@ describe("PeerService self-heal", () => {
     service.openDialog();
     await waitFor(() => service.view().status.kind === "listening", { message: "bound" });
     expect(binds.length).toBe(4);
-    expect(clock.pending()).toBe(1); // the poller's timer only
+    expect(clock.pending()).toBe(2); // the poller's timer and the late-timer
     clock.advance(60_000);
     expect(logs.some((line) => line.startsWith("peering: recovered"))).toBe(false);
     await service.shutdown();
@@ -1787,8 +1797,8 @@ describe("PeerService self-heal", () => {
     await waitFor(() => service.view().status.kind === "listening" && endpoint.accepting, { message: "bound" });
     expect(binds.length).toBe(2);
     expect(retryLines(logs)).toEqual(["peering: could not bind the endpoint: load: dlopen failed; retrying in 5 s"]);
-    // Left: the poller's timer, and the 60 s check that the rebind stays up. No retry.
-    expect(timers.filter((t) => t.armed).map((t) => t.ms).sort((a, b) => a - b)).toEqual([5_000, 60_000]);
+    // Left: the late-timer, the poller's timer, and the 60 s check that the rebind stays up. No retry.
+    expect(timers.filter((t) => t.armed).map((t) => t.ms).sort((a, b) => a - b)).toEqual([LATE_TIMER_INTERVAL_MS, 5_000, 60_000]);
     expect(timers.filter((t) => t.armed)).not.toContain(retry);
     clock.advance(60_000);
     expect(logs).toContain(recovered(1));
@@ -1835,7 +1845,7 @@ describe("PeerService self-heal", () => {
 
     await service.bootIfPaired();
     expect(service.view().status).toEqual({ kind: "listening" });
-    expect(clock.pending()).toBe(1); // the poller's timer only: a clean boot bind arms no stability check
+    expect(clock.pending()).toBe(2); // the poller's timer and the late-timer: a clean boot bind arms no stability check
 
     // The accept loop fails; its close hangs. Nothing binds until it is done.
     let finishClose!: () => void;
@@ -1928,6 +1938,50 @@ describe("peerRetryDelayMs", () => {
     expect([1, 2, 3, 4, 5, 6, 7, 100, 10_000].map(peerRetryDelayMs)).toEqual([
       5_000, 10_000, 20_000, 40_000, 60_000, 60_000, 60_000, 60_000, 60_000,
     ]);
+  });
+});
+
+describe("PeerService late-timer (SPEC §20.4)", () => {
+  const lateLines = (logs: string[]) => logs.filter((line) => line.startsWith("peering: 1 s timer"));
+
+  test("while bound, a 1 s tick that runs 5 s or more after it was due is one line with the measured delay", async () => {
+    const { service, logs, clock } = makeService();
+    clock.advance(60_000); // nothing bound yet: no timer runs
+    service.openDialog();
+    await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
+    elapse(clock, 30_000); // every tick on time
+    clock.advance(10_800); // the tick due 1 s after the last one runs 9.8 s late
+    clock.advance(5_999); // 4.999 s late: under the threshold
+    clock.advance(6_000); // exactly 5 s late
+    expect(lateLines(logs)).toEqual(["peering: 1 s timer ran 9.8 s late", "peering: 1 s timer ran 5.0 s late"]);
+    await service.shutdown();
+    clock.advance(60_000);
+    expect(lateLines(logs)).toHaveLength(2);
+  });
+
+  test("it stops when the endpoint closes and on shutdown, and starts again with the rebind", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const [first, second] = [new FakeEndpoint(), new FakeEndpoint()];
+    for (const ep of [first, second]) ep.connectImpl = () => new Promise(() => {}); // the poller's dials stay pending
+    const clock = createFakeClock();
+    const { timers, setTimer } = recordTimers(clock);
+    const { service, logs } = makeService({ now: clock.now, setTimer }, [first, second]);
+    const lateTimers = () => timers.filter((t) => t.armed && t.ms === LATE_TIMER_INTERVAL_MS).length;
+    expect(lateTimers()).toBe(0);
+    await service.bootIfPaired();
+    await waitFor(() => service.view().status.kind === "listening" && first.accepting, { message: "bound" });
+    expect(lateTimers()).toBe(1);
+
+    first.failAccept(new Error("Endpoint.acceptNext: socket gone"));
+    await waitFor(() => retryAt(service) !== null, { message: "closed, retry armed" });
+    expect(lateTimers()).toBe(0);
+    clock.advance(retryAt(service)! - clock.now());
+    await waitFor(() => service.view().status.kind === "listening" && second.accepting, { message: "rebound" });
+    expect(lateTimers()).toBe(1);
+
+    await service.shutdown();
+    expect(lateTimers()).toBe(0);
+    expect(lateLines(logs)).toEqual([]);
   });
 });
 

@@ -612,6 +612,9 @@ export async function requestWatchLog(conn: PairConnection, setTimer = realTimer
   return { ...reply, sentAt };
 }
 
+/** The largest epoch ms a Date holds (ECMA-262 time values). */
+const MAX_DATE_MS = 8.64e15;
+
 /** A watch-log copy's progress on the requesting side. */
 export interface WatchLogReport {
   /** A valid header arrived: `files` bodies of `bytes` in all follow. */
@@ -642,7 +645,8 @@ async function readWatchLogReply(stream: Pick<PairStream, "read">, options: File
   const malformed = () => new PeerProtocolError("Malformed watch-log header");
   if (!header || typeof header !== "object" || Array.isArray(header)) throw malformed();
   const { op, now, version, name: machine, files } = header as Record<string, unknown>;
-  if (op !== "watch-log" || typeof now !== "number" || !Number.isFinite(now) || typeof version !== "string" ||
+  // `now` must be a time a Date can hold (|now| ≤ 8.64e15 ms): export.txt prints it as one.
+  if (op !== "watch-log" || typeof now !== "number" || !Number.isFinite(now) || Math.abs(now) > MAX_DATE_MS || typeof version !== "string" ||
       typeof machine !== "string" || !Array.isArray(files) || files.length > WATCH_LOG_FILE_NAMES.length) throw malformed();
   const seen = new Set<string>();
   let total = 0;

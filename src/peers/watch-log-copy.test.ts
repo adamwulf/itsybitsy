@@ -229,9 +229,17 @@ describe("the watch-log op", () => {
     ["a name outside the three log files", { ...good, files: [{ name: "../x", size: 1, sha256: "0".repeat(64) }] }],
     ["the same file twice", { ...good, files: [{ name: "watch.log", size: 0, sha256: sha256(new Uint8Array()) }, { name: "watch.log", size: 0, sha256: sha256(new Uint8Array()) }] }],
     ["a missing clock", { ...good, now: "soon", files: [] }],
+    ["a clock past the last time a Date holds", { ...good, now: 8.64e15 + 1, files: [] }],
+    ["a clock before the first time a Date holds", { ...good, now: -8.64e15 - 1, files: [] }],
     ["another op", { ...good, op: "agent-diff", files: [] }],
   ])("refuses a header with %s", async (_what, header) => {
     await expect(answerWith(header)).rejects.toThrow("Malformed watch-log header");
+  });
+
+  test.each([8.64e15, -8.64e15])("accepts a clock of %d, the edge of the Date range", async (now) => {
+    const copy = await answerWith({ ...good, now, files: [] });
+    expect(copy.now).toBe(now);
+    expect(new Date(copy.now).toISOString()).toBeString();
   });
 
   test("refuses a declared total over the cap before reading a body", async () => {

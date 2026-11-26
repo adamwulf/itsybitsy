@@ -1443,7 +1443,7 @@ async function serveWatchLog(conn: PairConnection, stream: PairStream, from: str
     const entries = files.map(file => ({ name: file.name, size: file.body.length, sha256: createHash("sha256").update(file.body).digest("hex") }));
     // `now` is read after the files and before the header is written, so the
     // requester's send and header times bound it.
-    reply = [encodeFrameHeader({ op: "watch-log", now: Date.now(), version, name, files: entries }), ...files.map(file => file.body)];
+    reply = [encodeFrameHeader({ op: "watch-log", now: (deps.now ?? Date.now)(), version, name, files: entries }), ...files.map(file => file.body)];
     copied = describeWatchLogFiles(files);
   } catch (err) {
     const error = sendDiagnostic(errorDetail(err));

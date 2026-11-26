@@ -3397,7 +3397,7 @@ describe("auto-retire on completion (SPEC §21.3)", () => {
     for (let i = 0; i < 3; i++) await tick([w1]);
 
     expect(spawns).toHaveLength(0);
-    expect(getTracker("w1").autoRetireAttempted).toBe(false);
+    expect(getTracker("w1").autoRetireAttemptedAt).toBeNull();
   });
 
   test("a complete younger than AUTO_RETIRE_SETTLE_SECONDS waits for a later tick", async () => {
@@ -3405,7 +3405,7 @@ describe("auto-retire on completion (SPEC §21.3)", () => {
 
     await tick([w1]);
     expect(spawns).toHaveLength(0);
-    expect(getTracker("w1").autoRetireAttempted).toBe(false);
+    expect(getTracker("w1").autoRetireAttemptedAt).toBeNull();
 
     nowMs += 1000;
     await tick([w1]);
@@ -3419,7 +3419,7 @@ describe("auto-retire on completion (SPEC §21.3)", () => {
 
     await tick([resolvedComplete]);
     expect(spawns).toHaveLength(0);
-    expect(getTracker("w1").autoRetireAttempted).toBe(false);
+    expect(getTracker("w1").autoRetireAttemptedAt).toBeNull();
   });
 
   test("a failed retire is logged with its output and not retried on later complete ticks", async () => {
@@ -3464,10 +3464,27 @@ describe("auto-retire on completion (SPEC §21.3)", () => {
     expect(spawns).toHaveLength(1);
 
     await tick([onDisk("w1", "running", { auto_retire: true })]);
-    expect(getTracker("w1").autoRetireAttempted).toBe(false);
+
+    // The Stop hook's next `complete` write carries a new state_updated_at.
+    exitCode = 0;
+    nowMs += 10_000;
+    await tick([onDisk("w1", "complete", { auto_retire: true, state_updated_at: SETTLED_AT + 10 })]);
+    expect(spawns).toHaveLength(2);
+  });
+
+  test("after a failure, a new complete between two ticks (no running tick seen) retires again", async () => {
+    // complete → running → complete all happened between two 5 s polls: the
+    // watchdog sees only complete twice, but state_updated_at moved on.
+    exitCode = 1;
+    await tick([onDisk("w1", "complete", { auto_retire: true })]);
+    expect(spawns).toHaveLength(1);
+
+    nowMs += 10_000;
+    await tick([onDisk("w1", "complete", { auto_retire: true })]);
+    expect(spawns).toHaveLength(1);
 
     exitCode = 0;
-    await tick([onDisk("w1", "complete", { auto_retire: true })]);
+    await tick([onDisk("w1", "complete", { auto_retire: true, state_updated_at: SETTLED_AT + 5 })]);
     expect(spawns).toHaveLength(2);
   });
 });

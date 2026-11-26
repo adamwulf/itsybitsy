@@ -99,11 +99,14 @@ export interface AgentTracker {
    */
   completeCounter: number;
   /**
-   * True once this complete episode's auto-retire has run (SPEC §21.3),
-   * whatever its result, so a failed retire is not repeated every tick.
-   * Cleared on entry to `running`, with `completionNotified`.
+   * The `state_updated_at` of the complete episode whose auto-retire has run
+   * (SPEC §21.3), whatever its result, so a failed retire is not repeated
+   * every tick; null before any attempt. A complete with another
+   * `state_updated_at` is a new episode with its own attempt, even when the
+   * agent ran and completed again between two ticks, so no tick saw it
+   * `running`.
    */
-  autoRetireAttempted: boolean;
+  autoRetireAttemptedAt: number | null;
   /**
    * True when the last waiting/complete tick saw a current `ib ack`
    * (SPEC §8.5.2). If a later waiting/complete tick finds the ack gone, the
@@ -369,7 +372,7 @@ export function createTracker(): AgentTracker {
     notifyCount: 0,
     completionNotified: false,
     completeCounter: 0,
-    autoRetireAttempted: false,
+    autoRetireAttemptedAt: null,
     acked: false,
     rateLimitBypassed: false,
     rateLimitNudges: 0,
@@ -997,7 +1000,8 @@ async function runAutoRetire(agent: Agent): Promise<AutoRetireResult> {
 /**
  * Auto-retire (SPEC §21.3): retire an agent whose meta.json has
  * `auto_retire: true` once its `complete` state has settled. Called on every
- * complete tick; runs the retire at most once per complete episode.
+ * complete tick; runs the retire at most once per complete episode, an
+ * episode being one stored `complete` and its `state_updated_at`.
  *
  * meta.json is read here, right before the retire, and not taken from the
  * watchdog's startup copy (`agent.meta` in the per-agent loop), which can
@@ -1009,14 +1013,15 @@ async function runAutoRetire(agent: Agent): Promise<AutoRetireResult> {
  * rest of the complete handling.
  */
 async function autoRetireIfRequested(agent: Agent, tracker: AgentTracker): Promise<boolean> {
-  if (tracker.autoRetireAttempted) return false;
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
   const { meta } = await readAgentMetaFn(agentDir);
   if (meta?.auto_retire !== true || meta.state !== "complete") return false;
-  const ageSeconds = Math.floor(nowFn() / 1000) - (meta.state_updated_at ?? 0);
+  const completedAt = meta.state_updated_at ?? 0;
+  if (tracker.autoRetireAttemptedAt === completedAt) return false;
+  const ageSeconds = Math.floor(nowFn() / 1000) - completedAt;
   if (ageSeconds < AUTO_RETIRE_SETTLE_SECONDS) return false;
 
-  tracker.autoRetireAttempted = true;
+  tracker.autoRetireAttemptedAt = completedAt;
   await logAgent(agentDir, `[watchdog] auto-retire: state is complete and auto_retire is on — running ib retire ${agent.id} --force`);
   const result = await runAutoRetire(agent);
   // On success the retire has logged its own steps ("Agent retired", ...) to
@@ -1116,8 +1121,6 @@ async function handleRunning(_agent: Agent, tracker: AgentTracker, _getAllAgents
   // Reset the complete-state fallback countdown alongside completionNotified so
   // a fresh completion (running -> ... -> complete) starts its 30s delay over.
   tracker.completeCounter = 0;
-  // Working again: the next completion is a new episode, with its own auto-retire.
-  tracker.autoRetireAttempted = false;
   tracker.rateLimitBypassed = false;
 }
 

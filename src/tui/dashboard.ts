@@ -4634,6 +4634,13 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
   const config = await readConfig();
   logToWatchLog(`[startup] agent types validated and config read (+${Date.now() - bootStart}ms)`);
 
+  // macOS sleep, display, lock, session and keychain events, as `system: ...`
+  // lines in watch.log (src/system-events.ts, SPEC §8.15). Stopped in
+  // quitDashboard; its helper also exits on its own when ib watch dies.
+  const { SystemEventMonitor } = await import("../system-events");
+  const systemEvents = new SystemEventMonitor({ log: logToWatchLog });
+  systemEvents.start();
+
   // Telegram subsystem: three-step boot. Token check → connect probe →
   // resolve chat id from inbound inference → construct dispatcher + outbox.
   // Each step gates the next; on failure we log a single line and continue
@@ -4892,6 +4899,7 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
     // to discard by pid).
     telegramBootAbort.abort();
     telegramWake?.stop();
+    systemEvents.stop();
     const disposeTelegramMonitor = Promise.race([
       telegramMonitor.dispose(),
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),

@@ -1507,6 +1507,28 @@ Teeing stderr does not change `ib watch`:
 - The process substitution keeps `./ib watch` a direct child of `bounce.sh`, which `ib bounce` requires.
 - `tee` ignores `SIGINT`, so a Ctrl-C during shutdown, which `ib watch` ignores, cannot kill `tee` and leave `ib watch` writing to a closed pipe. Bash already starts a process substitution with `SIGINT` ignored when job control is off, as in a script; `tee -i` makes that explicit.
 
+### 8.15 macOS System Events in watch.log
+
+On macOS, `ib watch` logs what the machine does, so a peer disconnect or a "Not logged in" can be lined up with a sleep, a display sleep or a locked keychain. The lines go to `watch.log` with its usual UTC timestamp and the prefix `system: ` (`src/system-events.ts`). They are logging only: nothing reacts to them.
+
+Source: one helper process, `osascript -l JavaScript` running a JXA script through the ObjC bridge, started after config is read and killed by `quitDashboard`. It needs no compiled binary and no TCC permission. It exits on EOF on its stdin, a pipe `ib watch` holds, so it also dies with `ib watch` after a crash or `SIGKILL`. `log stream` was not used: it costs too much CPU to run all the time (§ sandbox denial collector, `src/sandbox-log-launch.ts`).
+
+| Line after `system: ` | Source |
+|---|---|
+| `will sleep` / `woke` / `woke (slept ~65s)` | NSWorkspace will sleep / did wake. The length appears only when this run saw the `will sleep`. |
+| `display sleep` / `display wake` | NSWorkspace screens did sleep / did wake |
+| `screen locked` / `screen unlocked` | distributed `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked` |
+| `screensaver started` / `screensaver stopped` | distributed `com.apple.screensaver.didstart` / `didstop` |
+| `session inactive` / `session active` | NSWorkspace session resigned / became active (fast user switching) |
+| `power off requested` | NSWorkspace will power off: logout, restart and shutdown look the same |
+| `keychain at start: <state>`, then `keychain locked` / `keychain unlocked` | the default keychain's `SecKeychainGetStatus`, polled every 10 s; it never prompts. `<state>` can also be `unknown`. |
+| `listening` | the helper started |
+| `listener stopped (exit N): <stderr>` / `listener failed to start: …` | the helper died or could not start; it is not restarted |
+| `power assertions (<when>): …` | `pmset -g assertions` and `pmset -g batt` summarised in one line, at start, display sleep, display wake and wake: the non-zero system-wide counts, each holder grouped by process and type with its count and longest age (is `caffeinate` still held), the kernel assertions and idle sleep preventers, and the power source with the battery charge. `<when>` names the event because the line lands when pmset finishes. |
+| `pmset: <entry>` | after each wake, the `Sleep`, `Wake` and `DarkWake` entries `pmset -g log` gained since start or the last read, with their own local timestamps: the sleep reason (`'Idle Sleep'`, `'Clamshell Sleep'`, `'Low Power Sleep'`, maintenance), each dark wake, and the wake cause. At most 40, the newest, after a `pmset: N older entries not shown`. The read takes about 3 s (a 2 MB log). |
+
+Not captured: login (`ib watch` is not running yet; its `[startup]` lines show when it came up), dark wakes as they happen (they appear only in the `pmset:` lines after the next full wake), and keychain access failures in other processes (only `log stream` sees them). Two `ib watch` processes on one machine each run a helper, so each event is logged twice. Off macOS nothing starts.
+
 ---
 
 ## 9. Multi-Repo Registry

@@ -125,6 +125,8 @@ export interface RemoteAgent {
   manager: string | null;
   /** The agent's `meta.created_epoch` (seconds), so the receiving side can sort it in spawn order. */
   createdEpoch: number;
+  /** The agent's `meta.model` (`<cli>:<model>`), so the receiving side slices the right CLI's input box off its capture. */
+  model: string | null;
 }
 
 export interface RemoteRepo {
@@ -270,7 +272,7 @@ function sendDiagnostic(text: string) {
 
 /**
  * The reply's agent list, from the watcher's last fully detected snapshot
- * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the nine
+ * (`AgentWatcher.lastDetectedAgents` in `ib watch`): the ten
  * allowed fields of each agent, and no system coordinator. (The system
  * coordinator has no agent directory, so the watcher never lists it; the
  * filter keeps it out even if that changes.)
@@ -288,6 +290,7 @@ export function toRemoteAgents(agents: readonly Agent[]): RemoteAgent[] {
       agentType: a.meta.agentType ?? null,
       manager: a.meta.manager ?? null,
       createdEpoch: a.meta.created_epoch,
+      model: a.meta.model ?? null,
     }));
 }
 
@@ -376,6 +379,7 @@ function parseRemoteAgent(entry: unknown, index: number): RemoteAgent {
     agentType: optional("agentType"),
     manager: optional("manager"),
     createdEpoch,
+    model: optional("model"),
   };
 }
 

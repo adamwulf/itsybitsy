@@ -5,7 +5,7 @@ import { collectPeerRepos, visibleRemoteAgents, MAX_REMOTE_DEPTH } from "./peer-
 
 function agent(id: string, manager: string | null = null, createdEpoch = 0): RemoteAgent {
   return { id, manager, state: "running", agentType: "worker", nickname: null,
-    repoRegistryName: "App", repoName: "App", repoPath: "/peer/app", createdEpoch };
+    repoRegistryName: "App", repoName: "App", repoPath: "/peer/app", createdEpoch, model: null };
 }
 
 function link(id: string, name: string, agents: RemoteAgent[]): PeerLinkState {

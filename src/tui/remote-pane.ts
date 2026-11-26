@@ -1,20 +1,23 @@
 import { truncateToWidth } from "@mariozechner/pi-tui";
+import { isCodexBackedCli, metadataCli, type AgentCli } from "../agent-cli";
 import { closeOsc8 } from "../hyperlinks";
 import { clampPaneLines, cleanRemoteText, type PeerPane, type PeerPaneTarget } from "../peers/peer-link";
 import { DIM, RED, RESET } from "./colors";
 import { computeChromeSlice, padLines, WordWrapCache, wordWrapSingleLine, type ChromeSlice } from "./wrap";
 
-type Selection = { peerId: string; target: PeerPaneTarget };
+/** `model` is the agent's `<cli>:<model>` as its peer reported it; a coordinator runs Claude. */
+type Selection = { peerId: string; target: PeerPaneTarget; model?: string | null };
 
 /** Only the selected peer is polled. In-flight reads survive deselection until
  * the service settles them, so returning to a peer cannot start a second read.
- * A coordinator's own input box is sliced off the capture, as for a local
- * coordinator: render() draws the transcript above it, and statusLines() the
- * CLI's status lines, which the dashboard draws below its own input field. */
+ * The CLI's own input box is sliced off the capture, as for a local agent,
+ * with the detector for the CLI its model names (Claude when unknown):
+ * render() draws the transcript above it, and statusLines() the CLI's status
+ * lines, which the dashboard draws below its own input field. */
 export class RemotePane {
   private selectedKey: string | null = null;
   private active: Selection | null = null;
-  private trimChrome = false;
+  private cli: AgentCli = "claude";
   private visible = true;
   private denial: string | null = null;
   private cancel: (() => void) | null = null;
@@ -37,20 +40,21 @@ export class RemotePane {
   ) {}
 
   select(selection: Selection | null, denial: string | null = null, visible = true): void {
-    const key = selection && JSON.stringify([selection.peerId, selection.target]);
+    const key = selection && JSON.stringify([selection.peerId, selection.target, selection.model ?? null]);
     const sameSelection = key === this.selectedKey && denial === this.denial;
     if (sameSelection && visible === this.visible) return;
     this.cancel?.();
     this.cancel = null;
     this.selectedKey = key;
     this.active = null;
-    this.trimChrome = selection?.target.op === "coordinator-pane";
+    this.cli = metadataCli(selection?.model) ?? "claude";
     this.denial = denial;
     this.visible = visible;
     if (!sameSelection) {
       this.text = null;
       this.error = null;
       this.wrap.reset();
+      this.sliced = null;
       this.scrollBack = 0;
       this.maxVisibleOffset = 0;
     }
@@ -94,11 +98,12 @@ export class RemotePane {
     this.redraw();
   }
 
-  /** The capture split at a coordinator's input box (the Claude detector, as for a local coordinator); an agent's capture whole. */
+  /** The capture split at its CLI's input box. */
   private slice(): ChromeSlice | null {
     if (this.text === null) return null;
-    if (!this.trimChrome) return { transcriptRaw: this.text, statusLines: [] };
-    if (this.sliced?.text !== this.text) this.sliced = { text: this.text, slice: computeChromeSlice(this.text, false) };
+    if (this.sliced?.text !== this.text) {
+      this.sliced = { text: this.text, slice: computeChromeSlice(this.text, isCodexBackedCli(this.cli), this.cli === "agy") };
+    }
     return this.sliced.slice;
   }
 

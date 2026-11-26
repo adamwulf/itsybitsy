@@ -459,9 +459,10 @@ function remoteAgentKey(row: Extract<RemoteEntry, { kind: "remote-agent" }>): st
  * and the right pane's "not available" placeholder, side by side
  * on the split layout's seam, `height` rows. Each is word-wrapped to its pane
  * (the right pane is often narrow), and a word longer than the pane is broken.
- * `input` renders the message editor at the center pane's width; it sits at
- * the bottom of the center pane, as on a local agent's tmux pane. `rightPane`,
- * when given, renders the right pane in place of the placeholder.
+ * `input` renders the message editor and the CLI's status lines at the center
+ * pane's width; they sit at the bottom of the center pane, as on a local
+ * agent's tmux pane. `rightPane`, when given, renders the right pane in place
+ * of the placeholder.
  */
 function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: number, leftPaneW: number, height: number, input?: (width: number) => string[], rightPane?: (width: number, rows: number) => string[]): string[] {
   const lw = Math.max(1, Math.min(leftPaneW, mainWidth - 2));
@@ -471,7 +472,8 @@ function renderRemotePanes(entry: RemoteEntry, pane: RemotePane, mainWidth: numb
     padLines(wordWrapSingleLine(text, width).map((line) => `${DIM}${truncateToWidth(line, width, "")}${RESET}`), rows);
   const bodyHeight = Math.max(0, height - editor.length);
   const body = entry.kind === "remote-repo-header" ? placeholder(`Remote repo on ${entry.peerName} (read-only)`, lw, bodyHeight) : pane.render(lw, bodyHeight);
-  const center = [...body, ...editor];
+  // Clamped like the coordinator's view: the peer's status lines can be long (a `/` menu).
+  const center = [...body, ...editor].slice(0, height);
   const right = rightPane?.(rw, height) ?? placeholder(REMOTE_RIGHT_PANE_TEXT, rw, height);
   const sep = `${DIM_GRAY}│${RESET}`;
   return center.map((line, i) => closeOsc8(padToWidth(line, lw)) + sep + (right[i] ?? ""));
@@ -921,12 +923,10 @@ export class DashboardComponent implements Component {
     const visible = this._dialog === null && !this.expandedAgentsTreeVisible;
     if (row && row.kind !== "remote-repo-header" && this.tmuxPoller.isRunning() && this.peerService) {
       this.remotePane.displayHeight = Math.max(0, this.availableMainHeight() - this.inputField.getHeight(this.getMainWidth()));
-      this.remotePane.select({
-        peerId: row.peerId,
-        target: row.kind === "remote-agent"
-          ? { op: "agent-pane", repo: row.remote.repoRegistryName, id: row.remote.id }
-          : { op: "coordinator-pane" },
-      }, this.peerService.remoteStartDenial, visible && !this.remoteQuestionsVisible);
+      this.remotePane.select(row.kind === "remote-agent"
+        ? { peerId: row.peerId, target: { op: "agent-pane", repo: row.remote.repoRegistryName, id: row.remote.id }, model: row.remote.model }
+        : { peerId: row.peerId, target: { op: "coordinator-pane" } },
+      this.peerService.remoteStartDenial, visible && !this.remoteQuestionsVisible);
     } else {
       this.remotePane.select(null);
     }
@@ -4265,7 +4265,10 @@ export class DashboardComponent implements Component {
         const body = this.remotePane.render(mainWidth, Math.max(0, availableHeight - input.length));
         mainLines = [mainTitleSep, ...[...body, ...input].slice(0, availableHeight)];
       } else {
-        const input = acceptsText ? (width: number) => this.inputField.render(width) : undefined;
+        // As on a local agent: the input field, then the CLI's status lines sliced off the capture.
+        const input = acceptsText
+          ? (width: number) => [...this.inputField.render(width), ...this.remotePane.statusLines(width)]
+          : undefined;
         const prompt = remote.kind === "remote-agent" && this.rightPane.mode === "INITIAL PROMPT"
           ? (width: number, rows: number) => {
             this.rightPane.displayHeight = rows;

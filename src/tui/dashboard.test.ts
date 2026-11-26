@@ -10141,7 +10141,7 @@ describe("Unified peer repos in the Agents tree", () => {
   });
 
   function remote(id: string, repoName: string, overrides: Partial<RemoteAgent> = {}): RemoteAgent {
-    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, createdEpoch: Math.floor(Date.now() / 1000), ...overrides };
+    return { id, nickname: null, repoName, repoRegistryName: repoName, repoPath: `/remote/${repoName}`, state: "running", agentType: "worker", manager: null, createdEpoch: Math.floor(Date.now() / 1000), model: null, ...overrides };
   }
 
   /** Laptop B connected; Laptop C unreachable, offline; Laptop D never answered. */
@@ -10152,7 +10152,7 @@ describe("Unified peer repos in the Agents tree", () => {
         id: PEER_B, name: "Laptop B", connected: true, connectedAt: now - 300_000, lastOkAt: now, coordinator: null, lastError: null,
         repos: repos("itsybitsy", "other-repo"),
         agents: [
-          remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick" }),
+          remote("worker-abc", "itsybitsy", { manager: "manager-def", nickname: "abc-nick", model: "codex:gpt-5-codex" }),
           remote("manager-def", "itsybitsy", { state: "waiting", agentType: "manager" }),
           remote("agent-1", "other-repo", { state: "complete" }),
         ],
@@ -10482,6 +10482,39 @@ describe("Unified peer repos in the Agents tree", () => {
       const lines = dashboard.render(180);
       expect(lines).toHaveLength(process.stdout.rows);
       expect(stripAnsi(lines.join("\n"))).toContain("[Send]");
+    } finally {
+      running.mockRestore();
+      dashboard.stopPolling();
+    }
+  });
+
+  test("a peer agent's own input box is trimmed by its CLI's detector and its status lines sit below the dashboard editor", async () => {
+    const { dashboard, service } = setup();
+    const running = spyOn((dashboard as any).tmuxPoller, "isRunning").mockReturnValue(true);
+    // worker-abc runs codex on Laptop B: a `›` prompt over its status bar, no separators.
+    const codexStatus = "gpt-5-codex · ~/proj · Context 42% · 3h left";
+    service.fetchPane.mockResolvedValue({ state: "running", text: ["peer reply", "› draft", codexStatus].join("\n") });
+    try {
+      selectByKey(dashboard, WORKER_KEY);
+      await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("peer reply"));
+      const rows = dashboard.render(180).map(stripAnsi);
+      const row = (text: string) => rows.findIndex((line) => line.includes(text));
+      expect(row("› draft")).toBe(-1);
+      expect(row("[Send]")).toBeGreaterThan(row("peer reply"));
+      expect(row(codexStatus)).toBe(row("[Send]") + 1);
+      expect(rows).toHaveLength(process.stdout.rows);
+
+      // A Claude agent's `/` menu: more status lines than the pane holds still
+      // fill the terminal exactly, with the editor kept on screen.
+      const sep = "─".repeat(300);
+      const menu = Array.from({ length: 60 }, (_, i) => `  /command-${i}`);
+      service.fetchPane.mockResolvedValue({ state: "running", text: ["peer reply", sep, "❯ /", sep, ...menu].join("\n") });
+      selectByKey(dashboard, agentKey(PEER_B, "itsybitsy", "manager-def"));
+      await waitFor(() => stripAnsi(dashboard.render(180).join("\n")).includes("/command-0"));
+      const lines = dashboard.render(180);
+      expect(lines).toHaveLength(process.stdout.rows);
+      expect(stripAnsi(lines.join("\n"))).toContain("[Send]");
+      expect(stripAnsi(lines.join("\n"))).not.toContain("❯ /");
     } finally {
       running.mockRestore();
       dashboard.stopPolling();

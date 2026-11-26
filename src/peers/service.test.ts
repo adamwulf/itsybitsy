@@ -1,4 +1,5 @@
-import { createPeerOutboxPoll, handoffRemoteMessage, textHeader } from "./peer-outbox";
+import { createPeerOutboxPoll, handoffRemoteMessage, handoffWatchLog, textHeader } from "./peer-outbox";
+import { decodeWatchLogOutput, type WatchLogFile } from "./watch-log-files";
 import { humanSendTerminalDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { spyOn, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
@@ -23,11 +24,13 @@ import {
   encodePeerRequest,
   requestAgents,
   requestPermissions,
+  requestWatchLog,
   serveTrustedConnection,
   toRemoteAgents,
   type RemoteAgent,
 } from "./peer-link";
 import {
+  LATE_TIMER_INTERVAL_MS,
   PeerService,
   defaultPeerServiceDeps,
   describePaths,
@@ -244,6 +247,15 @@ function retryAt(service: PeerService): number | null {
   return status.kind === "error" ? status.retryAt : null;
 }
 
+/**
+ * Let `ms` pass in steps of at most 1 s, as it does while the event loop
+ * runs, so the bound endpoint's late-timer (LATE_TIMER_LOG_MS) stays quiet.
+ * A single advance(ms) is a stall that long, and the late-timer logs it.
+ */
+function elapse(clock: FakeClock, ms: number): void {
+  for (let left = ms; left > 0; left -= LATE_TIMER_INTERVAL_MS) clock.advance(Math.min(LATE_TIMER_INTERVAL_MS, left));
+}
+
 /** Run every continuation already queued as a microtask (and the ones they queue), without waiting on real time. */
 async function flushMicrotasks(rounds = 50): Promise<void> {
   for (let i = 0; i < rounds; i++) await Promise.resolve();
@@ -271,7 +283,7 @@ describe("PeerService binding", () => {
     expect(service.view().status).toEqual({ kind: "starting" });
     await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
     expect(binds).toEqual([[PAIR_ALPN, PEER_ALPN]]);
-    expect(clock.pending()).toBe(1); // the poller's timer only: a clean first bind arms no stability check
+    expect(clock.pending()).toBe(2); // the poller's timer and the late-timer: a clean first bind arms no stability check
     expect(await lockContents()).toBe(`${process.pid} ${ME_START}\n`);
     const selfId = service.view().selfId!;
     expect(selfId).toMatch(/^[0-9a-f]{64}$/);
@@ -1295,7 +1307,7 @@ describe("PeerService self-heal", () => {
     }
     await waitFor(() => service.view().status.kind === "listening" && endpoint.accepting, { message: "bound" });
     const selfId = service.view().selfId!;
-    clock.advance(60_000);
+    elapse(clock, 60_000);
     // Failures 6 and 7 repeat failure 5 at the cap: not logged. 8 differs, and 9 differs from 8.
     // The bind that ends a run of bind-stage failures is a change, so it is logged; its
     // recovery is logged once it has stayed up.
@@ -1409,7 +1421,7 @@ describe("PeerService self-heal", () => {
     await waitFor(() => service.view().status.kind === "listening" && endpoints[7]!.accepting, { message: "bind 8 stays up" });
     expect(binds.length).toBe(8);
     expect(logs).toEqual(quietLogs);
-    clock.advance(59_999);
+    elapse(clock, 59_999);
     expect(logs).toEqual(quietLogs);
     // ...and 60 s later its recovery is, counting all 7 failures.
     clock.advance(1);
@@ -1529,7 +1541,7 @@ describe("PeerService self-heal", () => {
     service.openDialog();
     await waitFor(() => service.view().status.kind === "listening", { message: "bound" });
     expect(binds.length).toBe(4);
-    expect(clock.pending()).toBe(1); // the poller's timer only
+    expect(clock.pending()).toBe(2); // the poller's timer and the late-timer
     clock.advance(60_000);
     expect(logs.some((line) => line.startsWith("peering: recovered"))).toBe(false);
     await service.shutdown();
@@ -1787,8 +1799,8 @@ describe("PeerService self-heal", () => {
     await waitFor(() => service.view().status.kind === "listening" && endpoint.accepting, { message: "bound" });
     expect(binds.length).toBe(2);
     expect(retryLines(logs)).toEqual(["peering: could not bind the endpoint: load: dlopen failed; retrying in 5 s"]);
-    // Left: the poller's timer, and the 60 s check that the rebind stays up. No retry.
-    expect(timers.filter((t) => t.armed).map((t) => t.ms).sort((a, b) => a - b)).toEqual([5_000, 60_000]);
+    // Left: the late-timer, the poller's timer, and the 60 s check that the rebind stays up. No retry.
+    expect(timers.filter((t) => t.armed).map((t) => t.ms).sort((a, b) => a - b)).toEqual([LATE_TIMER_INTERVAL_MS, 5_000, 60_000]);
     expect(timers.filter((t) => t.armed)).not.toContain(retry);
     clock.advance(60_000);
     expect(logs).toContain(recovered(1));
@@ -1835,7 +1847,7 @@ describe("PeerService self-heal", () => {
 
     await service.bootIfPaired();
     expect(service.view().status).toEqual({ kind: "listening" });
-    expect(clock.pending()).toBe(1); // the poller's timer only: a clean boot bind arms no stability check
+    expect(clock.pending()).toBe(2); // the poller's timer and the late-timer: a clean boot bind arms no stability check
 
     // The accept loop fails; its close hangs. Nothing binds until it is done.
     let finishClose!: () => void;
@@ -1931,6 +1943,50 @@ describe("peerRetryDelayMs", () => {
   });
 });
 
+describe("PeerService late-timer (SPEC §20.4)", () => {
+  const lateLines = (logs: string[]) => logs.filter((line) => line.startsWith("peering: 1 s timer"));
+
+  test("while bound, a 1 s tick that runs 5 s or more after it was due is one line with the measured delay", async () => {
+    const { service, logs, clock } = makeService();
+    clock.advance(60_000); // nothing bound yet: no timer runs
+    service.openDialog();
+    await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
+    elapse(clock, 30_000); // every tick on time
+    clock.advance(10_800); // the tick due 1 s after the last one runs 9.8 s late
+    clock.advance(5_999); // 4.999 s late: under the threshold
+    clock.advance(6_000); // exactly 5 s late
+    expect(lateLines(logs)).toEqual(["peering: 1 s timer ran 9.8 s late", "peering: 1 s timer ran 5.0 s late"]);
+    await service.shutdown();
+    clock.advance(60_000);
+    expect(lateLines(logs)).toHaveLength(2);
+  });
+
+  test("it stops when the endpoint closes and on shutdown, and starts again with the rebind", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const [first, second] = [new FakeEndpoint(), new FakeEndpoint()];
+    for (const ep of [first, second]) ep.connectImpl = () => new Promise(() => {}); // the poller's dials stay pending
+    const clock = createFakeClock();
+    const { timers, setTimer } = recordTimers(clock);
+    const { service, logs } = makeService({ now: clock.now, setTimer }, [first, second]);
+    const lateTimers = () => timers.filter((t) => t.armed && t.ms === LATE_TIMER_INTERVAL_MS).length;
+    expect(lateTimers()).toBe(0);
+    await service.bootIfPaired();
+    await waitFor(() => service.view().status.kind === "listening" && first.accepting, { message: "bound" });
+    expect(lateTimers()).toBe(1);
+
+    first.failAccept(new Error("Endpoint.acceptNext: socket gone"));
+    await waitFor(() => retryAt(service) !== null, { message: "closed, retry armed" });
+    expect(lateTimers()).toBe(0);
+    clock.advance(retryAt(service)! - clock.now());
+    await waitFor(() => service.view().status.kind === "listening" && second.accepting, { message: "rebound" });
+    expect(lateTimers()).toBe(1);
+
+    await service.shutdown();
+    expect(lateTimers()).toBe(0);
+    expect(lateLines(logs)).toEqual([]);
+  });
+});
+
 test("defaultPeerServiceDeps answers permissions requests with the local b's own functions", () => {
   const deps = defaultPeerServiceDeps("local", () => {}, () => ({ coordinator: null, repos: [], agents: [], questions: [] }), () => {}, null, join(home, "staging"));
   expect(deps.remotePermissions).toMatchObject({ effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability });
@@ -1952,7 +2008,7 @@ test("defaultPeerServiceDeps gives message sends and remote starts one attachmen
 });
 
 describe("PeerService keeps the link while a transfer moves bytes", () => {
-  const kept = `peer link: Laptop C (${ID_REMOTE.slice(0, 10)}): agents poll timed out while an attachment transfer is moving bytes; keeping the connection`;
+  const kept = `peer link: Laptop C (${ID_REMOTE.slice(0, 10)}): agents poll timed out within 60 s of a transfer with this peer moving bytes; keeping the connection`;
 
   /**
    * A service whose poller dials ID_REMOTE over a memory link whose far end the
@@ -2017,7 +2073,7 @@ describe("PeerService keeps the link while a transfer moves bytes", () => {
       clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
       await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
       expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
-      expect(service.view().links[0]?.lastError).toBe("request timed out");
+      expect(service.view().links[0]?.lastError).toBe("no reply to the agents poll within 15 s");
     } finally {
       inbound.close(PEER_CLOSE.done, "done");
       await service.shutdown();
@@ -2066,9 +2122,57 @@ describe("PeerService keeps the link while a transfer moves bytes", () => {
       clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
       await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
       expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
-      expect(service.view().links[0]?.lastError).toBe("request timed out");
+      expect(service.view().links[0]?.lastError).toBe("no reply to the agents poll within 15 s");
     } finally {
       reading.resolve();
+      await service.shutdown();
+    }
+  });
+
+  test("a watch log copy whose body arrives slowly keeps a stalled poll's connection, with transfer lines from its header to its end", async () => {
+    const { service, logs, clock, far, stallPoll } = await connectedService();
+    const short = ID_REMOTE.slice(0, 10);
+    const body = Buffer.from("remote line\n");
+    try {
+      const copying = service.fetchWatchLog(ID_REMOTE);
+      const copy = await far.acceptBi();
+      expect(JSON.parse(new TextDecoder().decode(await copy.readToEnd(4096)))).toEqual({ op: "watch-log" });
+      await copy.writeAll(encodeFrameHeader({ op: "watch-log", now: clock.now(), version: "9.9.9", name: "laptop-c",
+        files: [{ name: "watch.log", size: body.length, sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex") }] }));
+      await copy.writeAll(body.subarray(0, 1));
+      await waitFor(() => logs.includes(`peer link: transfer started: watch-log from Laptop C (${short}): 1 file, 12 bytes`), { message: "copying" });
+
+      await stallPoll();
+      await waitFor(() => logs.includes(kept), { message: "kept" });
+      expect(far.closeInfo()).toBeNull();
+      expect(service.view().links[0]).toMatchObject({ connected: true, lastError: null });
+
+      // The rest of the body and FIN arrive: the copy ends ok.
+      await copy.writeAll(body.subarray(1));
+      await copy.finish();
+      expect(Buffer.from((await copying).files[0]!.body).toString()).toBe("remote line\n");
+      expect(logs.find(line => line.startsWith("peer link: transfer ok:"))).toStartWith(`peer link: transfer ok: watch-log from Laptop C (${short}): 12 of 12 bytes in `);
+      clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
+      await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  test("a watch log copy that fails after its header ends its transfer failed", async () => {
+    const { service, logs, far } = await connectedService();
+    const short = ID_REMOTE.slice(0, 10);
+    try {
+      const copying = service.fetchWatchLog(ID_REMOTE).catch((err: Error) => err);
+      const copy = await far.acceptBi();
+      await copy.readToEnd(4096);
+      await copy.writeAll(encodeFrameHeader({ op: "watch-log", now: 1, version: "9.9.9", name: "laptop-c",
+        files: [{ name: "watch.log", size: 3, sha256: "0".repeat(64) }] }));
+      await copy.writeAll(Buffer.from("abc"));
+      await copy.finish();
+      expect(String(await copying)).toContain("watch.log hash mismatch");
+      expect(logs.find(line => line.startsWith("peer link: transfer failed"))).toStartWith(`peer link: transfer failed (watch.log hash mismatch): watch-log from Laptop C (${short}): 3 of 3 bytes in `);
+    } finally {
       await service.shutdown();
     }
   });
@@ -2610,6 +2714,77 @@ describe("scheduled remote runs and the endpoint owner (SPEC §21.2)", () => {
       expect(stored.lastError).toBe("Machine is disconnected");
     } finally {
       await scheduler.stop();
+      await service.shutdown();
+    }
+  });
+});
+
+describe("watch log copies (ib export-logs)", () => {
+  const remoteFiles: WatchLogFile[] = [
+    { name: "watch.log", body: Buffer.from("remote newest\n") },
+    { name: "watch.log.1", body: Buffer.from("remote older\n") },
+  ];
+
+  test("the CLI's request reaches the peer through the outbox and the poller's connection", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, clock } = makeService({ pollOutbox: createPeerOutboxPoll() });
+    const responderLogs: string[] = [];
+    endpoint.connectImpl = async (id) => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer, peerName: async () => "Desk", log: (line) => responderLogs.push(line),
+        snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
+        readWatchLog: async () => ({ name: "laptop-c", version: "9.9.9", files: remoteFiles }),
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      const result = await handoffWatchLog(ID_REMOTE, "Laptop C", new AbortController().signal);
+      expect(result).toMatchObject({ ok: true, exitCode: 0, stderr: "" });
+      const copy = decodeWatchLogOutput(result.stdout);
+      expect(copy).toMatchObject({ name: "laptop-c", version: "9.9.9", sentAt: clock.now(), headerAt: clock.now(), doneAt: clock.now() });
+      expect(copy.files.map((file) => [file.name, Buffer.from(file.body).toString()])).toEqual([
+        ["watch.log", "remote newest\n"], ["watch.log.1", "remote older\n"],
+      ]);
+      expect(responderLogs).toContain("peer link: wrote the watch log to Desk (0000000000) (2 files, 0.0 MB)");
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  test("a disconnected peer is reported with the service's reason", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service } = makeService({ pollOutbox: createPeerOutboxPoll() });
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => typeof service.view().links[0]?.lastError === "string");
+      expect(await handoffWatchLog(ID_REMOTE, "Laptop C", new AbortController().signal))
+        .toMatchObject({ ok: false, exitCode: 1, stderr: "Machine is disconnected" });
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  test("an accepted trusted connection is answered from readWatchLog", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, logs } = makeService({
+      readWatchLog: async () => ({ name: "desk", version: "1.2.3", files: remoteFiles.slice(0, 1) }),
+    });
+    endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
+    await service.bootIfPaired();
+    const conn = incomingFrom(endpoint, service.view().selfId!, PEER_ALPN);
+    try {
+      const copy = await requestWatchLog(conn, createFakeClock().setTimer);
+      expect(copy).toMatchObject({ name: "desk", version: "1.2.3" });
+      expect(copy.files.map((file) => file.name)).toEqual(["watch.log"]);
+      await waitFor(() => logs.includes(`peer link: wrote the watch log to Laptop C (${ID_REMOTE.slice(0, 10)}) (1 file, 0.0 MB)`));
+      // The reply's write is one of the service's transfers.
+      expect(logs).toContain(`peer link: transfer started: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 1 file, 14 bytes`);
+      expect(logs.some(line => line.startsWith(`peer link: transfer ok: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 14 of 14 bytes written in `))).toBe(true);
+    } finally {
+      conn.close(PEER_CLOSE.done, "done");
       await service.shutdown();
     }
   });

@@ -1444,6 +1444,13 @@ const IB_TELEGRAM_OUTBOUND_COMMANDS = new Set(["tgsend", "tgsendfile", "tgreact"
 const IB_BOUNCE_COMMANDS = new Set(["bounce"]);
 
 /**
+ * `ib export-logs` copies the ib watch logs of this machine and of every
+ * paired peer (SPEC §20.4 "Watch log copies"). It is for the user, and the
+ * system coordinator may run it too; every other agent is denied.
+ */
+const IB_EXPORT_LOGS_COMMANDS = new Set(["export-logs"]);
+
+/**
  * `ib peer` reads and changes this install's peering identity and its trusted
  * peers (docs/plans/iroh-peering.md). Every subcommand is human-only: no agent,
  * not even @system, may run it.
@@ -1636,6 +1643,12 @@ export async function checkIbCommandAccess(
     return {
       decision: "deny",
       reason: "Access denied: 'ib bounce' is for the system coordinator only — it quits ib watch and restarts the system coordinator. Report to your manager (or to the user, if you have no manager) instead",
+    };
+  }
+  if (!system && containsIbSubcommandInvocation(normalizedCommand, IB_EXPORT_LOGS_COMMANDS)) {
+    return {
+      decision: "deny",
+      reason: "Access denied: 'ib export-logs' is for the user (and the system coordinator) only — it copies the ib watch logs of this machine and its paired peers. Ask the user to run it",
     };
   }
 

@@ -858,6 +858,18 @@ const COMMAND_HELP: Record<string, string> = {
     "  connected to the peer. Leave with the remote tmux's detach key (inside a\n" +
     "  local tmux window, press the prefix twice). In ib watch, C on a remote\n" +
     "  agent opens this in a new tmux session.",
+  "export-logs":
+    "Usage: ib export-logs [<machine>] [--out <dir>]\n" +
+    "  Copy the ib watch log files (watch.log, watch.log.1, watch.log.2) of this\n" +
+    "  machine and of every paired peer into one directory, as they are, with an\n" +
+    "  export.txt of names, ids, versions, sizes, times and errors.\n" +
+    "  <machine>      Only this paired peer: its name (ignoring case) or full id\n" +
+    "  --out <dir>    Write here (created, or an empty directory) instead of\n" +
+    "                 ~/.itsybitsy/log-exports/<UTC stamp>/\n" +
+    "  Peers are fetched by this machine's ib watch over the trusted link; without\n" +
+    "  it, only this machine's files are copied. Exits 1 when this machine's copy\n" +
+    "  failed, peers.json could not be read, or any peer was not fetched.\n" +
+    "  Agents cannot run it, except the system coordinator.",
   push:
     "Usage: ib push <repo-id>\n" +
     "  Push the repo's main (or master) branch to every configured remote.\n" +
@@ -1015,6 +1027,7 @@ function printUsage(): void {
   console.log("  peer id             Print this install's peer id");
   console.log("  peer list           List paired peers");
   console.log("  peer remove <name|id>  Remove a paired peer");
+  console.log("  export-logs [<machine>]  Copy this machine's and paired peers' ib watch logs into one directory (--out <dir>)");
   console.log("");
   console.log("Agent Lifecycle:");
   console.log("  new-agent, new      Spawn a new agent");
@@ -3257,6 +3270,13 @@ export async function main() {
       // Never loads the iroh addon (src/peers/peer-command.ts).
       const { runPeerCommand } = await import("./peers/peer-command");
       const code = await runPeerCommand(args.slice(1));
+      if (code !== 0) process.exit(code);
+      break;
+    }
+    case "export-logs": {
+      // Never loads the iroh addon (src/peers/export-logs.ts).
+      const { runExportLogs } = await import("./peers/export-logs");
+      const code = await runExportLogs(args.slice(1));
       if (code !== 0) process.exit(code);
       break;
     }

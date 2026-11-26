@@ -25,6 +25,7 @@ import { singleLine } from "./single-line";
  * terminal-host.ts (SPEC §20.4 "Remote terminal").
  *
  * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle, acknowledge, permissions and send.
+ * A `watch-log` reply (`ib export-logs`, "Watch log copies") is framed like `agent-diff`.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -39,8 +40,10 @@ import { singleLine } from "./single-line";
  */
 
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS } from "./transfer-limits";
+import type { TransferActivity } from "./transfer-activity";
 import { createHash } from "node:crypto";
 import { MAX_AGENT_DIFF_BYTES, type AgentDiff } from "./agent-diff";
+import { describeWatchLogFiles, isWatchLogFileName, totalWatchLogBytes, WATCH_LOG_FILE_NAMES, WATCH_LOG_MAX_BYTES, type PeerWatchLog, type WatchLogFile } from "./watch-log-files";
 import { join } from "node:path";
 import { openStagedFile } from "./remote-attachments";
 import {
@@ -488,6 +491,23 @@ export function describePeerClose(info: PairCloseInfo): string {
   }
 }
 
+/** How long a connection was up, for its disconnect line: `45s`, `7m05s`, `2h03m`. */
+export function formatLinkUptime(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${pad(seconds % 60)}s`;
+  return `${Math.floor(seconds / 3600)}h${pad(Math.floor(seconds / 60) % 60)}m`;
+}
+
+/**
+ * The line both ends write when a trusted connection that was up closes
+ * (SPEC §20.4 "Connection log lines"); agents grep both machines' logs for it.
+ */
+export function disconnectLine(name: string, id: string, how: "dialed" | "accepted", upMs: number, reason: string): string {
+  return `peer link: ${name} (${shortPeerId(id)}): disconnected (${how}, up ${formatLinkUptime(upMs)}): ${reason}`;
+}
+
 export function closeQuietly(conn: PairConnection, code: number, reason: string): void {
   try {
     if (conn.closeInfo() === null) conn.close(code, reason.slice(0, MAX_CLOSE_REASON));
@@ -574,6 +594,89 @@ async function readDiffReply(stream: Pick<PairStream, "read">, options: FileBody
   if (digest !== header.sha256) throw new PeerProtocolError("Agent diff hash mismatch");
   await requireSendFin(stream, options);
   return { base: header.base, patch };
+}
+
+/**
+ * Copy the other install's watch log files (SPEC §20.4 "Watch log copies").
+ * `clock` (epoch ms) stamps the request and the reply on this side, so the
+ * caller can compare the peer's `now` with this machine's clock. There is no
+ * overall deadline: each read has the transfer idle timeout, and `signal`
+ * stops the exchange. `report` hears of the bodies as they arrive, so the
+ * copy can count as a transfer (service.ts `fetchWatchLog`).
+ */
+export async function requestWatchLog(conn: PairConnection, setTimer = realTimer, signal?: AbortSignal, clock: () => number = Date.now, report?: WatchLogReport): Promise<PeerWatchLog> {
+  const sentAt = clock();
+  const reply = await clientExchange(conn, encodeJson({ op: "watch-log" }), {
+    read: (stream, options) => readWatchLogReply(stream, { ...options, signal }, clock, report),
+  }, { setTimer, signal });
+  return { ...reply, sentAt };
+}
+
+/** The largest epoch ms a Date holds (ECMA-262 time values). */
+const MAX_DATE_MS = 8.64e15;
+
+/** A watch-log copy's progress on the requesting side. */
+export interface WatchLogReport {
+  /** A valid header arrived: `files` bodies of `bytes` in all follow. */
+  header(files: number, bytes: number): void;
+  /** The cumulative body bytes received so far. */
+  progress(bytes: number): void;
+}
+
+async function readWatchLogReply(stream: Pick<PairStream, "read">, options: FileBodyOptions, clock: () => number, report?: WatchLogReport): Promise<Omit<PeerWatchLog, "sentAt">> {
+  const prefix = await readHeaderBytes(stream, 4, options);
+  if (prefix[0] !== 0) {
+    // A JSON error reply: a refusal, or a peer whose ib has no watch-log op.
+    const parts = [prefix];
+    let length = prefix.length;
+    for (;;) {
+      const chunk = await waitForIO(options, () => stream.read(PEER_MAX_REQUEST_BYTES + 1 - length));
+      if (!chunk.length) break;
+      parts.push(Buffer.from(chunk));
+      length += chunk.length;
+      if (length > PEER_MAX_REQUEST_BYTES) throw new PeerProtocolError("Malformed watch-log reply");
+    }
+    const reply = decodeObject(Buffer.concat(parts), "reply");
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(`the peer replied: ${sendDiagnostic(reply.reason)}`);
+    throw new PeerProtocolError("Malformed watch-log reply");
+  }
+  const header = await decodeFrameHeader(stream, prefix, options);
+  const headerAt = clock();
+  const malformed = () => new PeerProtocolError("Malformed watch-log header");
+  if (!header || typeof header !== "object" || Array.isArray(header)) throw malformed();
+  const { op, now, version, name: machine, files } = header as Record<string, unknown>;
+  // `now` must be a time a Date can hold (|now| ≤ 8.64e15 ms): export.txt prints it as one.
+  if (op !== "watch-log" || typeof now !== "number" || !Number.isFinite(now) || Math.abs(now) > MAX_DATE_MS || typeof version !== "string" ||
+      typeof machine !== "string" || !Array.isArray(files) || files.length > WATCH_LOG_FILE_NAMES.length) throw malformed();
+  const seen = new Set<string>();
+  let total = 0;
+  const entries = files.map((entry: unknown) => {
+    if (!entry || typeof entry !== "object") throw malformed();
+    const { name, size, sha256 } = entry as Record<string, unknown>;
+    // Only the three known names: the requesting side writes each file under its name.
+    if (!isWatchLogFileName(name) || seen.has(name) || typeof size !== "number" || !Number.isSafeInteger(size) || size < 0 ||
+        typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) throw malformed();
+    seen.add(name);
+    total += size;
+    return { name, size, sha256 };
+  });
+  if (total > WATCH_LOG_MAX_BYTES) throw new PeerProtocolError(`The watch-log reply declares ${total} bytes, over the ${WATCH_LOG_MAX_BYTES}-byte limit`);
+  report?.header(entries.length, total);
+  const bodies: WatchLogFile[] = [];
+  let received = 0;
+  for (const { name, size, sha256 } of entries) {
+    const body = Buffer.allocUnsafe(size);
+    let offset = 0;
+    const digest = await streamFileBody(stream, size, chunk => {
+      body.set(chunk, offset);
+      offset += chunk.length;
+    }, { ...options, onProgress: bytes => report?.progress(received + bytes) });
+    if (digest !== sha256) throw new PeerProtocolError(`${name} hash mismatch`);
+    received += size;
+    bodies.push({ name, body });
+  }
+  await requireSendFin(stream, options);
+  return { name: cleanRemoteText(machine), version: cleanRemoteText(version), now, headerAt, doneAt: clock(), files: bodies };
 }
 
 export const NEW_AGENT_UNKNOWN = "Remote start outcome unknown. Check the peer for the agent.";
@@ -699,14 +802,15 @@ export async function requestPermissions(conn: PairConnection, request: RemotePe
 
 export const SEND_UNKNOWN = "outcome unknown — check the agent";
 
-async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal, milestone?: () => void) {
+/** `milestone` gets the bytes of `bytes` written so far, after each write. */
+async function writeWithProgress(stream: Pick<PairStream, "write">, bytes: Uint8Array, setTimer: PeerResponderDeps["setTimer"], signal?: AbortSignal, milestone?: (written: number) => void) {
   let offset = 0;
   while (offset < bytes.length) {
     const chunk = bytes.subarray(offset, offset + CHUNK_BYTES);
     const n = await waitForIO({ setTimer, signal }, () => stream.write(chunk));
     if (!Number.isInteger(n) || n <= 0 || n > chunk.length) throw new Error("Invalid send write count");
     offset += n;
-    milestone?.();
+    milestone?.(offset);
   }
 }
 
@@ -740,8 +844,10 @@ interface ClientOptions extends OutgoingTransfer {
    * slow link. A late reply is returned as the exchange's result. While it
    * waits it asks again every `timeout` interval, and the first no closes the
    * connection as an unkept timeout would. The poller's agents poll and pane
-   * reads pass it while an attachment transfer with the peer moves bytes
-   * (SPEC §20.4 "Slow links").
+   * reads pass one that is true while a transfer with the peer is running and
+   * has moved bytes within the last 60 s, or this machine's watch-log reply to
+   * the peer ended ok within that window (transfer-activity.ts
+   * `recentProgress`, SPEC §20.4 "Slow links").
    */
   keepOpenOnTimeout?: () => boolean;
   unknownAfterFin?: string;
@@ -915,10 +1021,16 @@ export interface PeerResponderDeps {
   captureAgent?(repo: string, id: string, lines: number): Promise<PeerPane>;
   captureDiff?(repo: string, id: string): Promise<AgentDiff>;
   readPrompt?(repo: string, id: string): Promise<string>;
+  /** This machine's name, `ib` version and watch log files, for a `watch-log` request. Without it the request is refused. */
+  readWatchLog?(): Promise<{ name: string; version: string; files: WatchLogFile[] }>;
+  /** Transfers per peer (transfer-activity.ts): a `watch-log` reply's write is one. */
+  transfers?: Pick<TransferActivity, "begin">;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
+  /** Epoch ms, for the disconnect line's uptime and slow-answer lines. Defaults to Date.now. */
+  now?(): number;
   lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<RemoteLifecycleOutcome>;
   /** The request's `repo` and `id` as received: the handler validates them. */
   acknowledgeQuestion?(repo: unknown, id: unknown, readPeerName: () => Promise<string | null>): Promise<void>;
@@ -939,24 +1051,73 @@ export interface PeerResponderDeps {
  * allowlist before reading anything, again when each request's stream is
  * accepted, and again right before each answer. Each request runs in its own
  * task with its own error handling. Never throws.
+ *
+ * A lookup that says "not a peer" refuses as such. One that failed refuses
+ * with its error and close code 3, so neither side's log says the peer was
+ * removed. One cut short because the connection closed writes no refusal:
+ * at the accept it writes that the connection closed during its pairing
+ * check, with the close's reason; once the connection passed the allowlist,
+ * its close writes the shared disconnect line (`accepted`, up since it passed).
  */
 export async function serveTrustedConnection(conn: PairConnection, deps: PeerResponderDeps): Promise<void> {
   const headerReaders = deps.headerReaders ??= new Set();
   const from = shortPeerId(conn.remoteId);
+  const now = deps.now ?? Date.now;
   const lifetime = new AbortController();
   void conn.closed().then(() => lifetime.abort(new Error("Peer connection closed")), err => lifetime.abort(err));
-  const peerName = deps.peerName.bind(deps);
+  const readPeerName = deps.peerName.bind(deps);
+  /** The pairing lookup, bounded by the IO deadline and the connection's life. Throws when it did not finish. */
+  const lookup = (id = conn.remoteId) => waitForIO({ setTimer: deps.setTimer, signal: lifetime.signal }, () => readPeerName(id));
   deps = { ...deps, peerName: async id => {
-    try { return await waitForIO({ setTimer: deps.setTimer, signal: lifetime.signal }, () => peerName(id)); }
-    catch (err) { deps.log(`peer link: pairing lookup failed: ${errorDetail(err)}`); return null; }
+    try { return await lookup(id); }
+    catch (err) {
+      // A lookup cut short by the close adds nothing to the disconnect line.
+      if (!lifetime.signal.aborted) deps.log(`peer link: pairing lookup failed: ${errorDetail(err)}`);
+      return null;
+    }
   } };
-  if ((await deps.peerName(conn.remoteId)) === null) {
-    deps.log(`peer link: closed a connection from ${from}: not a peer`);
-    closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+  let name: string;
+  try {
+    const found = await lookup();
+    if (found === null) {
+      deps.log(`peer link: closed a connection from ${from}: not a peer`);
+      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+      return;
+    }
+    name = found;
+  } catch (err) {
+    if (lifetime.signal.aborted) {
+      // The connection closed during the check: this side refused nothing.
+      const reason = await conn.closed().then(describePeerClose, errorDetail);
+      deps.log(`peer link: connection from ${from} closed during its pairing check: ${reason}`);
+      return;
+    }
+    deps.log(`peer link: closed a connection from ${from}: pairing lookup failed: ${errorDetail(err)}`);
+    closeQuietly(conn, PEER_CLOSE.error, "pairing lookup failed");
     return;
   }
+  const trustedAt = now();
   deps.log(`peer link: ${from} connected`);
+  void conn.closed().then(describePeerClose, errorDetail).then(reason =>
+    deps.log(disconnectLine(name || from, conn.remoteId, "accepted", now() - trustedAt, reason)));
   deps.trusted?.();
+  /** Pairing still holds: the name. Otherwise the connection is closed (or already was) and null. */
+  const stillPaired = async (): Promise<string | null> => {
+    try {
+      const found = await lookup();
+      if (found !== null) {
+        name = found;
+        return found;
+      }
+      deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
+      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+    } catch (err) {
+      if (lifetime.signal.aborted) return null;
+      deps.log(`peer link: refused a request from ${from}: pairing lookup failed: ${errorDetail(err)}; closing`);
+      closeQuietly(conn, PEER_CLOSE.error, "pairing lookup failed");
+    }
+    return null;
+  };
   for (;;) {
     let stream: PairStream;
     try {
@@ -964,17 +1125,14 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
     } catch {
       return; // the connection closed
     }
-    if ((await deps.peerName(conn.remoteId)) === null) {
-      deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
-      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
-      return;
-    }
+    const acceptedAt = now();
+    if ((await stillPaired()) === null) return;
     if (headerReaders.size >= 8) {
       await sendReply(conn, stream, deps, encodeErrorReply("busy, try again"), stream.stopReceiving());
       continue;
     }
     headerReaders.add(stream);
-    void serveRequest(conn, stream, from, deps, lifetime.signal);
+    void serveRequest(conn, stream, from, deps, lifetime.signal, acceptedAt, stillPaired);
   }
 }
 
@@ -1017,12 +1175,19 @@ async function settledWithinGrace(operation: Promise<unknown>, deps: Pick<PeerRe
   } finally { cancel(); }
 }
 
+/** A reply write's progress: the bytes of the whole reply written so far, and the write's failure. */
+interface ReplyReport { progress(bytes: number): void; failed(err: unknown): void }
+
 /** The handler owns the reply and teardown. A settled stop or reset is stream-local. */
 async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerResponderDeps, bytes: Uint8Array | Uint8Array[],
-  stop?: Promise<void>, stalledRead?: Promise<Uint8Array>) {
+  stop?: Promise<void>, stalledRead?: Promise<Uint8Array>, report?: ReplyReport) {
   const stopped = stop?.catch(() => {});
   const writeReply = async () => {
-    for (const part of Array.isArray(bytes) ? bytes : [bytes]) await writeWithProgress(stream, part, deps.setTimer);
+    let written = 0;
+    for (const part of Array.isArray(bytes) ? bytes : [bytes]) {
+      await writeWithProgress(stream, part, deps.setTimer, undefined, report && (n => report.progress(written + n)));
+      written += part.length;
+    }
     await waitForIO(deps, () => stream.finish());
   };
   if (stalledRead) {
@@ -1039,6 +1204,7 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
   try { await writeReply(); }
   catch (err) {
     delivered = false;
+    report?.failed(err);
     if (err instanceof TransferIdleError && !await settledWithinGrace(stream.cancel(), deps)) {
       closeQuietly(conn, PEER_CLOSE.error, "send reply stalled");
       return false;
@@ -1048,8 +1214,16 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
   return delivered;
 }
 
-/** One request on its own stream. Every error stays here. */
-async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal): Promise<void> {
+/** Plain request/reply ops whose answer is timed: one taking {@link SLOW_ANSWER_MS} or more is logged. */
+const TIMED_OPS = new Set(["agents", "coordinator-pane", "agent-pane", "agent-prompt", "agent-diff", "lifecycle", "acknowledge", "permissions"]);
+const SLOW_ANSWER_MS = 5_000;
+
+/**
+ * One request on its own stream. Every error stays here. `acceptedAt` is when
+ * its stream was accepted; `stillPaired` is the connection's pairing re-check.
+ */
+async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal,
+  acceptedAt: number, stillPaired: () => Promise<string | null>): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
   let reading: Promise<Uint8Array> | undefined;
   async function read(limit: number) {
@@ -1161,12 +1335,8 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   // Again now, right before answering: the stream was accepted on its first
   // frame, and a client can hold it open across `ib peer remove` before it
   // finishes the request. The answer reflects peers.json as of this moment.
-  const peerName = await deps.peerName(conn.remoteId);
-  if (peerName === null) {
-    deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
-    closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
-    return;
-  }
+  const peerName = await stillPaired();
+  if (peerName === null) return;
 
   let reply: Uint8Array | Uint8Array[];
   let capturedCoordinator = false;
@@ -1217,6 +1387,8 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
       return;
     }
+  } else if (request.op === "watch-log") {
+    return serveWatchLog(conn, stream, from, peerName, deps, stillPaired);
   } else if (request.op === "agent-prompt") {
     try {
       if (typeof request.repo !== "string" || typeof request.id !== "string") throw new Error("Expected repo and agent id");
@@ -1279,8 +1451,70 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);
   }
   const delivered = await sendReply(conn, stream, deps, reply);
+  // From the stream's accept until the reply was written, or its write failed.
+  const tookMs = (deps.now ?? Date.now)() - acceptedAt;
+  if (TIMED_OPS.has(request.op) && tookMs >= SLOW_ANSWER_MS) {
+    deps.log(`peer link: answered ${request.op} for ${peerName} (${from}) in ${(tookMs / 1000).toFixed(1)} s${delivered ? "" : "; writing the reply failed"}`);
+  }
   if (delivered && capturedCoordinator && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
     deps.paneReaders.add(conn.remoteId);
     deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
   }
+}
+
+/**
+ * Answer a `watch-log` request (SPEC §20.4 "Watch log copies"). Every file is
+ * read into memory first, so a rotation during the reply cannot mix two
+ * versions; then one framed reply in the style of `agent-diff`: the header
+ * lists each file with its size and SHA-256 plus `now`, the `ib` version and
+ * this machine's name, then the bodies in order, then FIN. The reply's
+ * write is a transfer (`deps.transfers`), so a slow copy keeps the link
+ * (SPEC "Slow links"), also for a window after FIN while its last bytes can
+ * still be in flight. `stillPaired` is the connection's pairing re-check,
+ * so a failed lookup after the read closes with code 3, not as "not a peer".
+ */
+async function serveWatchLog(conn: PairConnection, stream: PairStream, from: string, peerName: string, deps: PeerResponderDeps,
+  stillPaired: () => Promise<string | null>): Promise<void> {
+  let reply: Uint8Array[];
+  let copied: string | undefined;
+  let sizes = { files: 0, bytes: 0 };
+  try {
+    if (!deps.readWatchLog) throw new Error("Watch log copies are unavailable");
+    const { name, version, files } = await deps.readWatchLog();
+    const total = totalWatchLogBytes(files);
+    if (total > WATCH_LOG_MAX_BYTES) throw new Error(`The watch log files total ${total} bytes, over the ${WATCH_LOG_MAX_BYTES}-byte limit`);
+    const entries = files.map(file => ({ name: file.name, size: file.body.length, sha256: createHash("sha256").update(file.body).digest("hex") }));
+    // `now` is read after the files and before the header is written, so the
+    // requester's send and header times bound it.
+    reply = [encodeFrameHeader({ op: "watch-log", now: (deps.now ?? Date.now)(), version, name, files: entries }), ...files.map(file => file.body)];
+    copied = describeWatchLogFiles(files);
+    sizes = { files: files.length, bytes: total };
+  } catch (err) {
+    const error = sendDiagnostic(errorDetail(err));
+    deps.log(`peer link: watch log request from ${peerName} (${from}) failed: ${error}`);
+    reply = [encodeErrorReply(error)];
+  }
+  // Reading the files is asynchronous, as a capture is. A refusal closes the connection and logs its line.
+  if (await stillPaired() === null) return;
+  if (copied === undefined) {
+    await sendReply(conn, stream, deps, reply);
+    return;
+  }
+  // Bulk bodies, like attachment bodies: other replies on this connection go out first.
+  await waitForIO(deps, () => stream.setPriority(ATTACHMENT_BODY_PRIORITY)).catch(() => {});
+  // No reply follows FIN, so the transfer ends when QUIC has accepted the
+  // last write, with up to a stream window still in flight: `endsAtLastWrite`
+  // keeps this peer's link through that tail.
+  const transfer = deps.transfers?.begin({
+    peerId: conn.remoteId, peerName: peerName || null, op: "watch-log", direction: "to", ...sizes, endsAtLastWrite: true,
+  });
+  const headerBytes = reply[0]!.length;
+  const delivered = await sendReply(conn, stream, deps, reply, undefined, undefined, transfer && {
+    // Body bytes only, as the transfer's total counts them.
+    progress: bytes => transfer.progress(Math.max(0, bytes - headerBytes)),
+    failed: err => transfer.failed(err),
+  });
+  if (delivered) transfer?.ok();
+  else transfer?.failed(new Error("writing the reply failed"));
+  deps.log(delivered ? `peer link: wrote the watch log to ${peerName} (${from}) (${copied})` : `peer link: sending the watch log to ${peerName} (${from}) failed`);
 }

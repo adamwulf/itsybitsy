@@ -2114,6 +2114,29 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess('ib send agent-target1 "ask @system to run ib bounce"', "agent-manager1", agentsDir)).toBeNull();
   });
 
+  const EXPORT_LOGS_COMMANDS = [
+    "ib export-logs",
+    "ib export-logs laptop",
+    `ib export-logs ${"a".repeat(64)} --out /tmp/logs`,
+    "ib export-logs --help",
+    "/usr/local/bin/ib export-logs",
+    "ib export-l''ogs",
+  ];
+
+  test("denies ib export-logs to a regular agent and says to ask the user", async () => {
+    for (const command of EXPORT_LOGS_COMMANDS) {
+      const result = await checkIbCommandAccess(command, "agent-manager1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib export-logs' is for the user (and the system coordinator) only");
+      expect(result!.reason).toContain("Ask the user to run it");
+    }
+  });
+
+  test("a message that only mentions ib export-logs is not an export", async () => {
+    await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-manager1" });
+    expect(await checkIbCommandAccess('ib send agent-target1 "ask the user to run ib export-logs"', "agent-manager1", agentsDir)).toBeNull();
+  });
+
   const PEER_COMMANDS = [
     "ib peer",
     "ib peer id",
@@ -2263,6 +2286,15 @@ describe("checkIbCommandAccess", () => {
     expect(result!.reason).toContain("'ib bounce' is for the system coordinator only");
   });
 
+  test("per-repo coordinator CANNOT export the watch logs — user and system coordinator only", async () => {
+    await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
+    for (const command of EXPORT_LOGS_COMMANDS) {
+      const result = await checkIbCommandAccess(command, "itsybitsy", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib export-logs' is for the user (and the system coordinator) only");
+    }
+  });
+
   test("per-repo coordinator CANNOT merge a non-child regular agent", async () => {
     await writeAgentMeta("itsybitsy", { id: "itsybitsy", agentType: "repo-coordinator" });
     await writeAgentMeta("agent-target1", { id: "agent-target1", manager: "agent-someone" });
@@ -2318,6 +2350,12 @@ describe("checkIbCommandAccess", () => {
 
   test("@system can bounce ib watch", async () => {
     expect(await checkIbCommandAccess("ib bounce", "@system", agentsDir)).toBeNull();
+  });
+
+  test("@system can export the watch logs", async () => {
+    for (const command of EXPORT_LOGS_COMMANDS) {
+      expect(await checkIbCommandAccess(command, "@system", agentsDir)).toBeNull();
+    }
   });
 
   test("@system is also denied ib peer — user-only, not even @system may run it", async () => {

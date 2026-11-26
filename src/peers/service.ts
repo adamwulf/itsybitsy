@@ -48,6 +48,11 @@ import { finishRecovery, sweepDiffCopies, sweepOutgoingDirectories } from "./tra
  *   peer in `peers.json` for its agents every 5 s; the trusted ALPN answers
  *   from the injected `agents()` snapshot (the watcher's last fully detected
  *   agents).
+ * - While bound, a 1 s timer runs; a tick that runs 5 s or more after it was
+ *   due logs `peering: 1 s timer ran 9.8 s late`. That is the measurement
+ *   only: a blocked event loop, a suspended process and a system sleep look
+ *   the same from here. It starts with the bind and stops when the endpoint
+ *   closes or on shutdown.
  * - While bound, it also listens on the `ib peer attach` socket
  *   (terminal-relay.ts), which relays remote terminals over the poller's
  *   connections; closing the endpoint closes the socket first.
@@ -111,6 +116,9 @@ import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
 import { TransferActivity, type ActiveTransfer } from "./transfer-activity";
+import { requestWatchLog } from "./peer-link";
+import { encodeWatchLogOutput, readWatchLogFiles, type PeerWatchLog } from "./watch-log-files";
+import { IB_VERSION } from "../ib-version";
 
 // ---------------------------------------------------------------------------
 // What the service needs from a bound endpoint. The wrapper's IrohEndpoint,
@@ -163,6 +171,8 @@ export interface PeerServiceDeps {
   captureAgent?: PeerResponderDeps["captureAgent"];
   captureDiff?: PeerResponderDeps["captureDiff"];
   readPrompt?: PeerResponderDeps["readPrompt"];
+  /** This machine's watch log files for a peer's `watch-log` request (`ib export-logs`). */
+  readWatchLog?: PeerResponderDeps["readWatchLog"];
   remoteStartDenial: string | null | Promise<string | null>;
   remoteLifecycle?: RemoteLifecycleDeps;
   remoteQuestions?: RemoteQuestionDeps;
@@ -220,6 +230,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     remoteQuestions: { listRepos, acknowledgeQuestion, notice },
     remotePermissions: { listRepos, effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability, notice },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice, attachments },
+    readWatchLog: async () => ({ name: machine, version: IB_VERSION, files: await readWatchLogFiles() }),
     writeRemoteAgents,
     renewLease: renewEndpointLease,
     acquireLock: () => acquireEndpointLock(),
@@ -259,6 +270,11 @@ export function peerRetryDelayMs(failures: number): number {
   const doublings = Math.min(Math.max(failures - 1, 0), 16);
   return Math.min(PEER_RETRY_MAX_MS, PEER_RETRY_INITIAL_MS * 2 ** doublings);
 }
+
+/** While the endpoint is bound, a timer runs this often (startLateTimer). */
+export const LATE_TIMER_INTERVAL_MS = 1_000;
+/** A tick of that timer at least this late is one watch.log line. */
+export const LATE_TIMER_LOG_MS = 5_000;
 
 /** How an accept-loop failure's message starts (the status message and its watch.log lines). */
 const ACCEPT_LOOP_STOPPED = "accept loop stopped: ";
@@ -431,7 +447,7 @@ export class PeerService {
   private readonly listeners = new Set<() => void>();
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
-  /** Attachment transfers per peer: their watch.log lines, and recent progress for the poller. */
+  /** Transfers per peer (attachments and watch-log copies): their watch.log lines, and recent progress for the poller. */
   private readonly transfers: TransferActivity;
   private readonly outboxPolls = new Set<Promise<void>>();
   private recoveryTimer?: ReturnType<typeof setInterval>;
@@ -447,6 +463,8 @@ export class PeerService {
   /** The `ib peer attach` socket, from a successful bind until closeEndpoint. */
   private terminalRelay: Promise<TerminalRelay | null> | null = null;
   private readonly paneReaders = new Set<string>();
+  /** Cancels the late-timer's next tick (startLateTimer); null while no endpoint is bound. */
+  private cancelLateTimer: (() => void) | null = null;
   /** The accept loop's promise, for tests. */
   acceptLoopDone: Promise<void> = Promise.resolve();
 
@@ -810,6 +828,33 @@ export class PeerService {
     return requestAgentPrompt(conn, repo, id, this.deps.setTimer);
   }
 
+  /**
+   * Copy a paired machine's watch log files over the poller's live connection
+   * (SPEC §20.4 "Watch log copies"). Only the peer outbox calls it, for
+   * `ib export-logs`, which the hooks keep to humans and @system; so, unlike
+   * the dashboard's reads, it does not apply the startup human-caller decision.
+   * From its reply header to its end it is a transfer (transfer-activity.ts),
+   * so the poller keeps the link through it (SPEC "Slow links").
+   */
+  async fetchWatchLog(peerId: string, signal?: AbortSignal): Promise<PeerWatchLog> {
+    const peerName = await this.peerName(peerId);
+    if (peerName === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    let transfer: ActiveTransfer | undefined;
+    try {
+      const copy = await requestWatchLog(conn, this.deps.setTimer, signal, this.deps.now, {
+        header: (files, bytes) => { transfer = this.transfers.begin({ peerId, peerName: peerName || null, op: "watch-log", direction: "from", files, bytes }); },
+        progress: bytes => transfer?.progress(bytes),
+      });
+      transfer?.ok();
+      return copy;
+    } catch (err) {
+      transfer?.failed(err);
+      throw err;
+    }
+  }
+
   async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
     const [header, peer, name, body, options] = args;
     const receive = this.deps.receiveMessage!;
@@ -971,6 +1016,7 @@ export class PeerService {
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     clearInterval(this.recoveryTimer);
+    this.stopLateTimer();
     const receipts = [...this.receipts.values()];
     for (const receipt of receipts) receipt.controller.abort(new Error("Watcher shutting down"));
     this.cancelRetry();
@@ -995,6 +1041,7 @@ export class PeerService {
    */
   private async closeEndpoint(logClosed = true): Promise<void> {
     this.cancelStable();
+    this.stopLateTimer();
     clearInterval(this.outboxTimer);
     this.outboxOwner?.abort(new Error("Endpoint stopped"));
     this.poller.stop();
@@ -1023,6 +1070,31 @@ export class PeerService {
       }
     }
     if (ep !== null && logClosed) this.deps.log("peering: endpoint closed");
+  }
+
+  /**
+   * While the endpoint is bound, a {@link LATE_TIMER_INTERVAL_MS} timer;
+   * a tick that runs {@link LATE_TIMER_LOG_MS} or more after it was due is
+   * one watch.log line with the measured delay. It states only that: a
+   * blocked event loop, a suspended process and a system sleep all look the
+   * same from here.
+   */
+  private startLateTimer(): void {
+    this.stopLateTimer();
+    const arm = () => {
+      const due = this.deps.now() + LATE_TIMER_INTERVAL_MS;
+      this.cancelLateTimer = this.deps.setTimer(LATE_TIMER_INTERVAL_MS, () => {
+        const late = this.deps.now() - due;
+        if (late >= LATE_TIMER_LOG_MS) this.deps.log(`peering: 1 s timer ran ${(late / 1000).toFixed(1)} s late`);
+        arm();
+      });
+    };
+    arm();
+  }
+
+  private stopLateTimer(): void {
+    this.cancelLateTimer?.();
+    this.cancelLateTimer = null;
   }
 
   private notify(): void {
@@ -1121,6 +1193,7 @@ export class PeerService {
     this.setStatus({ kind: "listening" });
     this.acceptLoopDone = this.acceptLoop(ep);
     this.poller.start();
+    this.startLateTimer();
     this.terminalRelay = this.startRelay();
     const poll = this.deps.pollOutbox;
     if (poll) {
@@ -1135,7 +1208,9 @@ export class PeerService {
           ...transfer, signal: transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal,
         }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown, dispatchFinished,
           // The CLI prints the output, which already names a failed push.
-          (peer, request, transfer) => this.runRemoteLifecycle(peer, request, "handoff", transfer).then(outcome => outcome.output))
+          (peer, request, transfer) => this.runRemoteLifecycle(peer, request, "handoff", transfer).then(outcome => outcome.output),
+          (peer, transfer) => this.fetchWatchLog(peer, transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal)
+            .then(encodeWatchLogOutput))
           .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`))
           .finally(() => { dispatchFinished(); this.outboxPolls.delete(work); });
         this.outboxPolls.add(work);
@@ -1197,6 +1272,7 @@ export class PeerService {
         const remoteSpawn = this.deps.remoteSpawn;
         await serveTrustedConnection(toPairConnection(conn), {
           setTimer: this.deps.setTimer,
+          now: this.deps.now,
           peerName: (id) => this.peerName(id),
           lifecycle: this.deps.remoteLifecycle && ((request, readPeerName) =>
             acceptRemoteLifecycle(request, readPeerName, this.deps.remoteLifecycle!, this.deps.log)),
@@ -1215,6 +1291,8 @@ export class PeerService {
           captureAgent: this.deps.captureAgent,
           captureDiff: this.deps.captureDiff,
           readPrompt: this.deps.readPrompt,
+          readWatchLog: this.deps.readWatchLog,
+          transfers: this.transfers,
           terminal: this.deps.terminal,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           // Only a connection that passed the allowlist gets a path line and a path watch.

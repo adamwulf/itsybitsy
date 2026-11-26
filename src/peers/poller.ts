@@ -16,20 +16,27 @@
  *   its QUIC connection alive and still never answer (its `ib watch` event
  *   loop wedged while the Rust side runs on), which would otherwise leave the
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
- *   "request timed out", and the next tick redials. Closing the connection is
+ *   "no reply to the agents poll within 15 s", and the next tick redials. Closing the connection is
  *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
- * - Except during a transfer (SPEC.md §20.4 "Slow links"): while an attachment
- *   transfer with the peer, on either connection, has moved bytes within its
- *   own 60 s idle deadline (`transferProgressing`), an agents poll or pane read
+ * - Except during a transfer (SPEC.md §20.4 "Slow links"): while
+ *   `transferProgressing` holds for the peer, an agents poll or pane read
  *   that times out leaves the connection open and keeps waiting for its late
  *   reply, still holding its slot (`inFlight`, `paneReads`), so nothing piles
- *   up behind it on the slow link. The link's state stays as it was
+ *   up behind it on the slow link. It holds while a transfer with the peer (a
+ *   send or new-agent with files, or a watch-log copy; either direction,
+ *   either connection) is running and has moved bytes within
+ *   TRANSFER_PROGRESS_WINDOW_MS (60 s), or this machine's watch-log reply to
+ *   the peer ended ok within that window. The link's state stays as it was
  *   (connected, the last lists, no error); a late agents reply is used as that
  *   poll's answer, and a late pane reply as the read's. Each kept timeout is
  *   one watch.log line. The exchange asks again every 15 s while it waits;
- *   once the transfer has ended or stalled, it closes the connection as an
- *   unkept timeout would. A peer that moves attachment bytes is not wedged,
+ *   the first time the rule no longer holds, it closes the connection as an
+ *   unkept timeout would. A peer that moves transfer bytes is not wedged,
  *   and on a slow link closing the connection would kill the transfer itself.
+ * - When a connected link fails, watch.log gets the shared disconnect line
+ *   (peer-link.ts `disconnectLine`): the peer, `dialed`, how long it was up
+ *   since `connectedAt`, and the reason. Failures while not connected are
+ *   logged once per change of error.
  * - The poller tracks per-peer state: connected or not (and since when), `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
  *   keeps disconnected agents dimmed and shows the peer’s link status in their info panel.
@@ -52,6 +59,7 @@ import {
   closeQuietly,
   cleanRemoteText,
   describePeerClose,
+  disconnectLine,
   requestAgents,
   requestPane,
   type PeerPane,
@@ -64,15 +72,16 @@ import {
 import type { PairConnection } from "./pairing";
 import { shortPeerId, type Peer } from "./store";
 import { IrohError } from "./iroh";
+import { TRANSFER_PROGRESS_WINDOW_MS } from "./transfer-activity";
 
 export const PEER_POLL_INTERVAL_MS = 5_000;
 /** Longest an `agents` request may take on a live connection before it is closed. */
 export const PEER_REQUEST_TIMEOUT_MS = 15_000;
 
-/** A request that got no reply within {@link PEER_REQUEST_TIMEOUT_MS}. */
+/** An agents poll that got no reply within {@link PEER_REQUEST_TIMEOUT_MS}. */
 class PeerRequestTimeout extends Error {
   constructor() {
-    super("request timed out");
+    super(`no reply to the agents poll within ${PEER_REQUEST_TIMEOUT_MS / 1000} s`);
     this.name = "PeerRequestTimeout";
   }
 }
@@ -119,9 +128,11 @@ export interface PeerPollerDeps {
   /** watch.log in `ib watch`. */
   log(line: string): void;
   /**
-   * An attachment transfer with this peer moved bytes recently
-   * (transfer-activity.ts `recentProgress`). While it has, a timed-out agents
-   * poll or pane read keeps its connection. Without it, every timeout closes it.
+   * transfer-activity.ts `recentProgress`: a transfer with this peer is
+   * running and moved bytes within TRANSFER_PROGRESS_WINDOW_MS (60 s), or
+   * this machine's watch-log reply to it ended ok within that window. While
+   * it is true, a timed-out agents poll or pane read keeps its connection.
+   * Without it, every timeout closes it.
    */
   transferProgressing?(peerId: string): boolean;
 }
@@ -223,8 +234,8 @@ export class PeerPoller {
   }
 
   /**
-   * One request's `keepOpenOnTimeout`: true while an attachment transfer with
-   * the peer moves bytes. The exchange asks when the request's teardown misses
+   * One request's `keepOpenOnTimeout`: true while `transferProgressing` is
+   * for the peer (the keep rule, SPEC.md §20.4 "Slow links"). The exchange asks when the request's teardown misses
    * its grace and again each interval while the kept read waits; the first yes
    * writes the one watch.log line for this timeout.
    */
@@ -235,7 +246,9 @@ export class PeerPoller {
       if (keep && !logged) {
         logged = true;
         const name = this.links.get(peerId)?.name ?? "peer";
-        this.deps.log(`peer link: ${name} (${shortPeerId(peerId)}): ${what} timed out while an attachment transfer is moving bytes; keeping the connection`);
+        // What `transferProgressing` tests, so the line states that and no more.
+        const window = `${TRANSFER_PROGRESS_WINDOW_MS / 1000} s`;
+        this.deps.log(`peer link: ${name} (${shortPeerId(peerId)}): ${what} timed out within ${window} of a transfer with this peer moving bytes; keeping the connection`);
       }
       return keep;
     };
@@ -381,7 +394,8 @@ export class PeerPoller {
     } catch (err) {
       if (!this.isCurrent(link, generation)) return;
       if (err instanceof PeerBusyReply && link.conn === conn && conn && !this.recordObservedClose(link, conn)) {
-        link.connected = true;
+        // A busy first reply connects the link as a list would: its `connected to` line, and `connectedAt` for the disconnect line.
+        this.markConnected(link, this.deps.now());
         if (link.lastError !== err.message) { link.lastError = err.message; this.notify(); }
       } else this.failed(link, describeFailure(err, conn));
     } finally {
@@ -416,11 +430,7 @@ export class PeerPoller {
     link.lastOkAt = this.deps.now();
     const key = JSON.stringify(snapshot);
     const changed = !link.connected || link.lastError !== null || key !== link.snapshotKey;
-    if (!link.connected) {
-      this.deps.log(`peer link: connected to ${link.name} (${shortPeerId(link.id)})`);
-      link.connectedAt = link.lastOkAt;
-    }
-    link.connected = true;
+    this.markConnected(link, link.lastOkAt);
     link.lastError = null;
     if (key !== link.snapshotKey) {
       link.coordinator = snapshot.coordinator;
@@ -432,9 +442,25 @@ export class PeerPoller {
     if (changed) this.notify();
   }
 
+  /** A link not yet connected becomes so at `at`: the `connected to` line, and the time its disconnect line counts from. */
+  private markConnected(link: Link, at: number): void {
+    if (link.connected) return;
+    this.deps.log(`peer link: connected to ${link.name} (${shortPeerId(link.id)})`);
+    link.connected = true;
+    link.connectedAt = at;
+  }
+
+  /**
+   * A dial or request failed, or the connection closed. A link that was up
+   * gets the shared disconnect line (SPEC §20.4); otherwise one line per
+   * change of error.
+   */
   private failed(link: Link, message: string): void {
-    if (!link.connected && link.lastError === message) return;
-    if (link.lastError !== message) this.deps.log(`peer link: ${link.name} (${shortPeerId(link.id)}): ${message}`);
+    if (link.connected && link.connectedAt !== null) {
+      this.deps.log(disconnectLine(link.name, link.id, "dialed", this.deps.now() - link.connectedAt, message));
+    } else if (link.lastError !== message) {
+      this.deps.log(`peer link: ${link.name} (${shortPeerId(link.id)}): ${message}`);
+    } else if (!link.connected) return;
     link.connected = false;
     link.connectedAt = null;
     link.lastError = message;

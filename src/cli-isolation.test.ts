@@ -930,7 +930,7 @@ describe("CLI routing cannot reach a live agent", () => {
       ["hooks", "statusline", SELF], ["hooks", "intercept-task", SELF],
       ["team", "create", "t1"], ["team", "add", "t1", PEER], ["team", "remove", "t1", PEER], ["team", "delete", "t1"],
       ["roster", "t1"],
-      ["peer", "id"], ["peer", "list"], ["peer", "remove", "x"],
+      ["peer", "id"], ["peer", "list"], ["peer", "remove", "x"], ["export-logs"],
       ["tgallow", "1"], ["tgdeny", "1"], ["tgsend", "x"], ["tgreact", "x"], ["tgsendfile", "$ROOT/domains.txt"], ["tgtyping"],
     ];
 

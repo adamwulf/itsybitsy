@@ -212,21 +212,33 @@ describe("Scheduled tab list", () => {
     expect(tabText(ctx)).not.toContain("auto-retire");
   });
 
-  test("a task that has run shows the last run: the agent it started, or its error in red", async () => {
+  test("a task that has run shows its next run, and under it the last run: the agent it started, or its error in red", async () => {
     const ranAt = new Date(2026, 10, 24, 9, 30).getTime();
     await writeTasks([
       { id: "task-00000001", ...TASK, lastRunAt: ranAt, lastAgentId: "agent-7" },
       { id: "task-00000002", ...TASK, cron: "@daily", lastRunAt: ranAt, lastError: "No such repo" },
+      { id: "task-00000003", ...TASK, cron: "45 13 * * *", lastRunAt: ranAt },
     ]);
     const { ctx } = makeHost();
     await openTab(ctx);
-    const text = tabText(ctx);
-    expect(text).toContain(`last run: ${formatFireTime(ranAt)} started agent-7`);
-    expect(text).toContain(`last run: ${formatFireTime(ranAt)} failed: No such repo`);
-    expect(text).not.toContain("next:");
-    const raw = buildSetupContent(assertDialog(ctx.dialog, "setup"), 66).contentLines;
-    expect(raw.find(line => line.includes("failed:"))).toContain(RED);
-    expect(raw.find(line => line.includes("started agent-7"))).not.toContain(RED);
+    const lines = buildSetupContent(assertDialog(ctx.dialog, "setup"), 66).contentLines;
+    const text = lines.map(stripAnsi);
+    const now = Date.now();
+    const after = (line: string) => text[text.indexOf(line) + 1];
+    expect(after(`    next: ${formatFireTime(nextFireTime(TASK.cron, now)!)}`)).toBe(`    last run: ${formatFireTime(ranAt)} started agent-7`);
+    expect(after(`    next: ${formatFireTime(nextFireTime("@daily", now)!)}`)).toBe(`    last run: ${formatFireTime(ranAt)} failed: No such repo`);
+    // Claimed, not yet started or failed.
+    expect(after(`    next: ${formatFireTime(nextFireTime("45 13 * * *", now)!)}`)).toBe(`    last run: ${formatFireTime(ranAt)}`);
+    expect(lines.find(line => line.includes("failed:"))).toContain(RED);
+    expect(lines.find(line => line.includes("started agent-7"))).not.toContain(RED);
+  });
+
+  test("a task with no next fire time shows why in red", async () => {
+    await writeTasks([{ id: "task-00000001", ...TASK, cron: "0 0 30 2 *" }]);
+    const { ctx } = makeHost();
+    await openTab(ctx);
+    const lines = buildSetupContent(assertDialog(ctx.dialog, "setup"), 66).contentLines;
+    expect(lines.find(line => stripAnsi(line) === "    Schedule never fires")).toContain(RED);
   });
 
   test("a peer task names the peer from peers.json, or its short id when it is no longer paired", async () => {
@@ -255,6 +267,24 @@ describe("Scheduled tab list", () => {
     expect(window()).toContain("  ↑ 8 more");
     expect(window()).toContain("> 11 9 * * *  This machine/itsybitsy  worker  auto-retire");
     expect(window().length).toBeLessThanOrEqual(18);
+  });
+
+  test("the window fits tasks of four lines, those that have run, around the selection", async () => {
+    const tasks = Array.from({ length: 12 }, (_, minute): ScheduledTask => ({
+      id: `task-${String(minute).padStart(8, "0")}`, ...TASK, cron: `${minute} 9 * * *`,
+      ...(minute % 2 ? { lastRunAt: 1_700_000_000_000, lastAgentId: `agent-${minute}` } : {}),
+    }));
+    await writeTasks(tasks);
+    const { ctx } = makeHost();
+    const tab = await openTab(ctx);
+    for (const selected of [0, 5, 11]) {
+      tab.selectedIndex = selected;
+      const window = buildScheduledTabContent(tab, 66, 18).map(stripAnsi);
+      expect(window.length).toBeLessThanOrEqual(18);
+      expect(window).toContain(`> ${selected} 9 * * *  This machine/itsybitsy  worker  auto-retire`);
+      if (selected > 0) expect(window[0]).toMatch(/^ {2}↑ \d+ more$/);
+      if (selected < 11) expect(window.at(-1)).toMatch(/^ {2}↓ \d+ more$/);
+    }
   });
 
   test("a malformed task file shows the store's error and allows no edits", async () => {

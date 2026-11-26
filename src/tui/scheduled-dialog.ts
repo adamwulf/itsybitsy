@@ -208,9 +208,7 @@ export function handleScheduledTabInput(ctx: DialogCtx, s: ScheduledTabState, da
   return true;
 }
 
-/** Lines of one task in the list. */
-const TASK_LINES = 3;
-
+/** One task's lines in the list: 3, and a 4th once it has run. */
 function taskLines(task: ScheduledTask, selected: boolean, s: ScheduledTabState, innerWidth: number, now: number): string[] {
   const head = [
     task.cron,
@@ -221,27 +219,16 @@ function taskLines(task: ScheduledTask, selected: boolean, s: ScheduledTabState,
   const first = selected
     ? `${GREEN}> ${BOLD}${truncateToWidth(head, innerWidth - 2, "…")}${RESET}`
     : `  ${truncateToWidth(head, innerWidth - 2, "…")}`;
-  const prompt = `    ${truncateToWidth(printable(task.prompt.split("\n")[0] ?? ""), innerWidth - 4, "…")}`;
-  let status: string;
-  let color = DIM;
+  const detail = (text: string, color: string) => `    ${color}${truncateToWidth(printable(text), innerWidth - 4, "…")}${RESET}`;
+  const lines = [first, `    ${truncateToWidth(printable(task.prompt.split("\n")[0] ?? ""), innerWidth - 4, "…")}`];
+  const next = nextFireTime(task.cron, now);
+  lines.push(next !== null ? detail(`next: ${formatFireTime(next)}`, DIM) : detail(cronProblem(task.cron) ?? "Schedule never fires", RED));
   if (task.lastRunAt !== undefined) {
-    status = `last run: ${formatFireTime(task.lastRunAt)}`;
-    if (task.lastError !== undefined) {
-      status += ` failed: ${task.lastError}`;
-      color = RED;
-    } else if (task.lastAgentId !== undefined) {
-      status += ` started ${task.lastAgentId}`;
-    }
-  } else {
-    const next = nextFireTime(task.cron, now);
-    if (next !== null) {
-      status = `next: ${formatFireTime(next)}`;
-    } else {
-      status = cronProblem(task.cron) ?? "Schedule never fires";
-      color = RED;
-    }
+    const last = `last run: ${formatFireTime(task.lastRunAt)}`;
+    if (task.lastError !== undefined) lines.push(detail(`${last} failed: ${task.lastError}`, RED));
+    else lines.push(detail(task.lastAgentId !== undefined ? `${last} started ${task.lastAgentId}` : last, DIM));
   }
-  return [first, prompt, `    ${color}${truncateToWidth(printable(status), innerWidth - 4, "…")}${RESET}`];
+  return lines;
 }
 
 /** The Scheduled tab's lines under the hint, at most `maxLines` (the selected task stays visible). */
@@ -253,17 +240,28 @@ export function buildScheduledTabContent(s: ScheduledTabState, innerWidth: numbe
   const tasks = s.tasks;
   if (tasks.length === 0) return [...lines, "No scheduled tasks. Press a to add one."];
 
-  // Each task is TASK_LINES lines and a blank line before the next.
-  const per = TASK_LINES + 1;
+  // Tasks are separated by a blank line. When they do not all fit, the
+  // window grows from the selected task, a task below then one above, in
+  // the room left after the ↑ and ↓ lines.
+  const groups = tasks.map((task, i) => taskLines(task, i === s.selectedIndex, s, innerWidth, now));
   const room = maxLines - lines.length;
-  let visible = tasks.length;
-  if (tasks.length * per - 1 > room) visible = Math.max(1, Math.floor((room - 2 + 1) / per)); // 2 lines for ↑/↓
-  const start = Math.max(0, Math.min(s.selectedIndex - Math.floor(visible / 2), tasks.length - visible));
-  const end = start + visible;
+  let start = 0;
+  let end = tasks.length;
+  if (groups.reduce((sum, group) => sum + group.length + 1, -1) > room) {
+    const budget = room - 2;
+    start = s.selectedIndex;
+    end = start + 1;
+    let used = groups[start]!.length;
+    for (let grew = true; grew;) {
+      grew = false;
+      if (end < groups.length && used + 1 + groups[end]!.length <= budget) { used += 1 + groups[end++]!.length; grew = true; }
+      if (start > 0 && used + 1 + groups[start - 1]!.length <= budget) { used += 1 + groups[--start]!.length; grew = true; }
+    }
+  }
   if (start > 0) lines.push(`${DIM}  ↑ ${start} more${RESET}`);
   for (let i = start; i < end; i++) {
     if (i > start) lines.push("");
-    lines.push(...taskLines(tasks[i]!, i === s.selectedIndex, s, innerWidth, now));
+    lines.push(...groups[i]!);
   }
   if (end < tasks.length) lines.push(`${DIM}  ↓ ${tasks.length - end} more${RESET}`);
   return lines;

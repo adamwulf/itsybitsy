@@ -3978,11 +3978,12 @@ A task with `autoRetire` on starts its agent with `auto_retire: true` in meta.js
 
 `src/tui/scheduled-dialog.ts`. Scheduled is the fourth tab of the `h` setup dialog (§10.1): press `h` then `4`. The `?` help lists `h` as `setup (Hooks, Config, Peers, Scheduled)`.
 
-**List.** Opening the tab reads `scheduled-tasks.json` and `peers.json`. It shows `Loading scheduled tasks…` until both are read, and is not refreshed while shown. Each task takes three lines:
+**List.** Opening the tab reads `scheduled-tasks.json` and `peers.json`. It shows `Loading scheduled tasks…` until both are read, and is not refreshed while shown. Each task takes three lines, and a fourth once it has run:
 
 - its cron, `<machine>/<repo>`, its type, and `auto-retire` when that is on. The machine is `This machine`, the peer's name from `peers.json`, or the peer's short id followed by `(unpaired)` when `peers.json` no longer lists it. When `peers.json` cannot be read, its error is shown in red above the list and a peer task shows only the short id;
 - the first line of its prompt, truncated to fit;
-- `next: <time>` (`nextFireTime(cron, now)`, in local time), or, once `lastRunAt` is set, `last run: <time>` followed by `started <lastAgentId>`, or by `failed: <lastError>` in red. A schedule with no next fire time shows the `cronProblem` text in red.
+- `next: <time>` (`nextFireTime(cron, now)`, in local time), or the `cronProblem` text in red when the schedule has no next fire time;
+- once `lastRunAt` is set, `last run: <time>` followed by `started <lastAgentId>`, or by `failed: <lastError>` in red.
 
 An empty list shows `No scheduled tasks. Press a to add one.` The list shows as many tasks as fit, keeping the selected one visible, with `↑ N more` and `↓ N more` for the rest. A task file the store cannot read shows the store's error in red, and `a`, Enter and `x` do nothing.
 

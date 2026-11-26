@@ -105,22 +105,28 @@ test("an agy agent's background-task section stays in its status lines, below th
   ]);
 });
 
-test("scrollback clamps at each wrap width while the error line stays visible", async () => {
+test("scrollback clamps at each wrap width, counts the lines below as a local pane does, and keeps the error line visible", async () => {
   let tick: () => void = () => {};
-  const fetch = mock(async () => ({ state: "running", text: "abcdefgh\nijklmnop\nqrstuvwx" }));
+  const [a, b, c] = ["a", "b", "c"].map(ch => ch.repeat(22)) as [string, string, string];
+  const fetch = mock(async () => ({ state: "running", text: `${a}${a}\n${b}${b}\n${c}${c}` }));
   const pane = new RemotePane(fetch, () => {}, (_ms, poll) => { tick = poll; return () => {}; });
   pane.select({ peerId: "A", target: { op: "coordinator-pane" } });
   await Promise.resolve();
   fetch.mockRejectedValueOnce(new Error("down"));
   tick();
   await Promise.resolve();
-  const rows = (w: number) => pane.render(w, 3).map(stripAnsi);
-  expect(rows(8)).toEqual(["ijklmnop", "qrstuvwx", "down"]);
+  const rows = (w: number) => pane.render(w, 4).map(stripAnsi);
+  expect(rows(44)).toEqual([a + a, b + b, c + c, "down"]);
   pane.scroll(100);
-  expect(rows(4)).toEqual(["abcd", "efgh", "down"]);
-  expect(rows(8)).toEqual(["abcdefgh", "ijklmnop", "down"]);
+  // Everything fits at 44 columns: nothing to scroll, so no indicator.
+  expect(rows(44)).toEqual([a + a, b + b, c + c, "down"]);
+  // At 22 columns the three lines wrap into six rows: the offset clamps at 3,
+  // and the indicator takes the last content row, as on a local agent's tmux pane.
+  expect(rows(22)).toEqual([a, b, "── ↓ 3 lines below ──", "down"]);
   pane.scroll(-1);
-  expect(rows(8)).toEqual(["ijklmnop", "qrstuvwx", "down"]);
+  expect(rows(22)).toEqual([b, b, "── ↓ 2 lines below ──", "down"]);
+  pane.scroll(-2);
+  expect(rows(22)).toEqual([b, c, c, "down"]);
   pane.select(null);
 });
 

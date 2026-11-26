@@ -2782,7 +2782,7 @@ describe("watch log copies (ib export-logs)", () => {
       await waitFor(() => logs.includes(`peer link: Laptop C (${ID_REMOTE.slice(0, 10)}) copied the watch log (1 file, 0.0 MB)`));
       // The reply's write is one of the service's transfers.
       expect(logs).toContain(`peer link: transfer started: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 1 file, 14 bytes`);
-      expect(logs.some(line => line.startsWith(`peer link: transfer ok: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 14 of 14 bytes in `))).toBe(true);
+      expect(logs.some(line => line.startsWith(`peer link: transfer ok: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 14 of 14 bytes written in `))).toBe(true);
     } finally {
       conn.close(PEER_CLOSE.done, "done");
       await service.shutdown();

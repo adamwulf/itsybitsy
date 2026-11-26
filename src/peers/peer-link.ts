@@ -1467,7 +1467,8 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
  * lists each file with its size and SHA-256 plus `now`, the `ib` version and
  * this machine's name, then the bodies in order, then FIN. The reply's
  * write is a transfer (`deps.transfers`), so a slow copy keeps the link
- * (SPEC "Slow links"). `stillPaired` is the connection's pairing re-check,
+ * (SPEC "Slow links"), also for a window after FIN while its last bytes can
+ * still be in flight. `stillPaired` is the connection's pairing re-check,
  * so a failed lookup after the read closes with code 3, not as "not a peer".
  */
 async function serveWatchLog(conn: PairConnection, stream: PairStream, from: string, peerName: string, deps: PeerResponderDeps,
@@ -1499,7 +1500,12 @@ async function serveWatchLog(conn: PairConnection, stream: PairStream, from: str
   }
   // Bulk bodies, like attachment bodies: other replies on this connection go out first.
   await waitForIO(deps, () => stream.setPriority(ATTACHMENT_BODY_PRIORITY)).catch(() => {});
-  const transfer = deps.transfers?.begin({ peerId: conn.remoteId, peerName: peerName || null, op: "watch-log", direction: "to", ...sizes });
+  // No reply follows FIN, so the transfer ends when QUIC has accepted the
+  // last write, with up to a stream window still in flight: `endsAtLastWrite`
+  // keeps this peer's link through that tail.
+  const transfer = deps.transfers?.begin({
+    peerId: conn.remoteId, peerName: peerName || null, op: "watch-log", direction: "to", ...sizes, endsAtLastWrite: true,
+  });
   const headerBytes = reply[0]!.length;
   const delivered = await sendReply(conn, stream, deps, reply, undefined, undefined, transfer && {
     // Body bytes only, as the transfer's total counts them.

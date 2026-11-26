@@ -15,7 +15,9 @@
  *   received, a header write, a reply fragment) marks the peer as moving
  *   bytes now.
  * - {@link TransferActivity.recentProgress} is true while a transfer with the
- *   peer runs and has moved bytes within {@link TRANSFER_PROGRESS_WINDOW_MS}.
+ *   peer runs and has moved bytes within {@link TRANSFER_PROGRESS_WINDOW_MS},
+ *   and for that long after the watch-log responder's write ends ok, since
+ *   its last bytes can still be in flight ({@link TransferStart.endsAtLastWrite}).
  *   The poller then keeps a link whose agents poll or pane read timed out
  *   (poller.ts). A stalled transfer is still ended by its own idle timeout.
  */
@@ -48,6 +50,15 @@ export interface TransferStart {
   files: number;
   /** The declared size of every body together. */
   bytes: number;
+  /**
+   * The transfer ends when QUIC has accepted its last write and FIN, with no
+   * reply to say the peer has the bytes: a `watch-log` responder's reply
+   * write. Up to a stream window (about 1.25 MB) can still be in flight then,
+   * so after an ok end the peer keeps counting as progressing for
+   * {@link TRANSFER_PROGRESS_WINDOW_MS} measured from the end. The end line
+   * says `written` instead of claiming delivery.
+   */
+  endsAtLastWrite?: boolean;
 }
 
 /** One running transfer. The first of {@link ok} and {@link failed} ends it; later calls do nothing. */
@@ -68,13 +79,25 @@ export interface TransferActivityDeps {
 export class TransferActivity {
   /** Running transfers per peer id and when any of them last moved bytes. */
   private readonly peers = new Map<string, { running: number; lastProgressAt: number }>();
+  /** When the last {@link TransferStart.endsAtLastWrite} transfer with each peer id ended ok. */
+  private readonly lastWriteEnds = new Map<string, number>();
 
   constructor(private readonly deps: TransferActivityDeps) {}
 
-  /** A transfer with `peerId` is running and moved bytes within {@link TRANSFER_PROGRESS_WINDOW_MS}. */
+  /**
+   * A transfer with `peerId` is running and moved bytes within
+   * {@link TRANSFER_PROGRESS_WINDOW_MS}, or one with
+   * {@link TransferStart.endsAtLastWrite} ended ok within that window.
+   */
   recentProgress(peerId: string): boolean {
+    const now = this.deps.now();
     const peer = this.peers.get(peerId);
-    return peer !== undefined && this.deps.now() - peer.lastProgressAt <= TRANSFER_PROGRESS_WINDOW_MS;
+    if (peer !== undefined && now - peer.lastProgressAt <= TRANSFER_PROGRESS_WINDOW_MS) return true;
+    const ended = this.lastWriteEnds.get(peerId);
+    if (ended === undefined) return false;
+    if (now - ended <= TRANSFER_PROGRESS_WINDOW_MS) return true;
+    this.lastWriteEnds.delete(peerId);
+    return false;
   }
 
   /** Start one transfer and log its start line. The start counts as progress. */
@@ -90,13 +113,19 @@ export class TransferActivity {
     peer.lastProgressAt = began;
     let moved = 0;
     let ended = false;
+    // Bytes QUIC accepted, not bytes the peer confirmed.
+    const bytes = start.endsAtLastWrite ? "bytes written" : "bytes";
     const end = (outcome: string) => {
       if (ended) return;
       ended = true;
       if (--peer.running === 0 && this.peers.get(start.peerId) === peer) this.peers.delete(start.peerId);
-      const ms = Math.max(now() - began, 0);
+      const endedAt = now();
+      if (start.endsAtLastWrite && outcome === "ok") {
+        this.lastWriteEnds.set(start.peerId, endedAt);
+      }
+      const ms = Math.max(endedAt - began, 0);
       const rate = moved / 1024 / (Math.max(ms, 1) / 1000);
-      log(`peer link: transfer ${outcome}: ${label}: ${moved} of ${start.bytes} bytes in ${(ms / 1000).toFixed(1)} s, ${rate.toFixed(1)} KB/s`);
+      log(`peer link: transfer ${outcome}: ${label}: ${moved} of ${start.bytes} ${bytes} in ${(ms / 1000).toFixed(1)} s, ${rate.toFixed(1)} KB/s`);
     };
     return {
       progress: (bytes) => {

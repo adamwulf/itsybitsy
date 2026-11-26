@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ATTACHMENT_BODY_PRIORITY, PEER_CLOSE, requestWatchLog, serveTrustedConnection, type PeerResponderDeps } from "./peer-link";
 import { encodeFrameHeader } from "./send-frame";
 import { createFakeClock, createMemoryLink, type MemoryConnection, type MemoryStream } from "./test-pair-transport";
-import { TransferActivity } from "./transfer-activity";
+import { TRANSFER_PROGRESS_WINDOW_MS, TransferActivity } from "./transfer-activity";
 import { waitFor } from "../test-utils";
 import {
   decodeWatchLogOutput, describeWatchLogFiles, encodeWatchLogOutput, readWatchLogFiles, WATCH_LOG_MAX_BYTES, type WatchLogFile,
@@ -115,7 +115,7 @@ describe("the watch-log op", () => {
     expect(progress).toEqual([...progress].sort((x, y) => x - y));
   });
 
-  test("the responding side's reply write is a transfer: it moves bytes while it writes, then ends ok", async () => {
+  test("the responding side's reply write is a transfer: it moves bytes while it writes, ends ok at FIN, and its peer still counts as progressing for the window after", async () => {
     const clock = createFakeClock();
     const transfers = new TransferActivity({ now: clock.now, log: line => logs.push(line) });
     const body = randomBytes(200_000);
@@ -142,7 +142,13 @@ describe("the watch-log op", () => {
     release.resolve();
     expect(sha256((await copying).files[0]!.body)).toBe(sha256(body));
     await waitFor(() => logs.some(line => line.startsWith("peer link: transfer ok:")), { message: "transfer ok" });
-    expect(logs.find(line => line.startsWith("peer link: transfer ok:"))).toStartWith(`peer link: transfer ok: watch-log to Desk (${short}): 200000 of 200000 bytes in 0.0 s, `);
+    // Written, not delivered: QUIC accepted the bytes, and up to a stream window can still be in flight.
+    expect(logs.find(line => line.startsWith("peer link: transfer ok:"))).toStartWith(`peer link: transfer ok: watch-log to Desk (${short}): 200000 of 200000 bytes written in 0.0 s, `);
+    // So the responder's own poller keeps its link through that tail, for the window measured from the end.
+    expect(transfers.recentProgress(ID_A)).toBe(true);
+    clock.jump(TRANSFER_PROGRESS_WINDOW_MS);
+    expect(transfers.recentProgress(ID_A)).toBe(true);
+    clock.jump(1);
     expect(transfers.recentProgress(ID_A)).toBe(false);
   });
 
@@ -154,7 +160,9 @@ describe("the watch-log op", () => {
     await stream.finish();
     await stream.stopReceiving(); // the requester gave up on the reply
     await waitFor(() => logs.some(line => line.startsWith("peer link: transfer failed")), { message: "transfer failed" });
-    expect(logs.find(line => line.startsWith("peer link: transfer failed"))).toMatch(/^peer link: transfer failed \(.+\): watch-log to Desk \(aaaaaaaaaa\): \d+ of 200000 bytes in /);
+    expect(logs.find(line => line.startsWith("peer link: transfer failed"))).toMatch(/^peer link: transfer failed \(.+\): watch-log to Desk \(aaaaaaaaaa\): \d+ of 200000 bytes written in /);
+    // Only an ok end keeps the peer counted as progressing.
+    expect(transfers.recentProgress(ID_A)).toBe(false);
     expect(logs).toContain(`peer link: sending the watch log to Desk (${ID_A.slice(0, 10)}) failed`);
   });
 

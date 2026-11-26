@@ -93,3 +93,30 @@ test("recent progress: per peer, while a transfer runs and moved bytes within th
   // Ended: back to the normal rule at once, however recent its last bytes.
   expect(activity.recentProgress(P1)).toBe(false);
 });
+
+test("endsAtLastWrite: the end line says written, and an ok end keeps the peer progressing for the window from the end", () => {
+  const { clock, logs, activity } = rig();
+  const short = P1.slice(0, 10);
+  const transfer = activity.begin(start({ op: "watch-log", files: 3, bytes: 3_000_000, endsAtLastWrite: true }));
+  clock.jump(5_000);
+  transfer.progress(3_000_000);
+  clock.jump(1_000);
+  transfer.ok();
+  // The timing is to FIN; the bytes are the writes QUIC accepted, not ones the peer confirmed.
+  expect(logs.at(-1)).toBe(`peer link: transfer ok: watch-log to Laptop B (${short}): 3000000 of 3000000 bytes written in 6.0 s, 488.3 KB/s`);
+  expect(activity.recentProgress(P1)).toBe(true);
+  expect(activity.recentProgress(P2)).toBe(false);
+  // Another transfer with the peer that ends meanwhile does not cut the window short.
+  activity.begin(start({ op: "send" })).ok();
+  clock.jump(TRANSFER_PROGRESS_WINDOW_MS);
+  expect(activity.recentProgress(P1)).toBe(true);
+  clock.jump(1);
+  expect(activity.recentProgress(P1)).toBe(false);
+
+  // A failed one says written too, and keeps nothing.
+  const failing = activity.begin(start({ op: "watch-log", files: 1, bytes: 10, endsAtLastWrite: true }));
+  failing.progress(4);
+  failing.failed(new Error("stream reset"));
+  expect(logs.at(-1)).toBe(`peer link: transfer failed (stream reset): watch-log to Laptop B (${short}): 4 of 10 bytes written in 0.0 s, 3.9 KB/s`);
+  expect(activity.recentProgress(P1)).toBe(false);
+});

@@ -3905,3 +3905,38 @@ Agents with access to the itsybitsy tmux socket can already read or drive every 
 **Rendering.** Peer updates refresh the Agents tab, TREE mode, or a selected remote row when their visible content changes. A change in a peer's listed questions redraws the QUESTIONS list, the footer count and the red names, even when no remote row is selected. A visible Peers tab also receives link and pairing updates. A successful poll that only advances a connected peer's last-contact time does not redraw the tree.
 
 ---
+
+## 21. Scheduled Tasks
+
+A scheduled task starts an agent at the times a cron expression names. Each task has a target machine (this machine or a paired peer), a repo, an agent type, a prompt, a schedule and an auto-retire switch. Tasks are created, edited and deleted in the Scheduled tab of the `h` setup dialog (§21.4). A task belongs to the machine whose file holds it, and only that machine's `ib watch` fires it.
+
+### 21.1 Store
+
+`src/scheduled-tasks.ts`; the file is `~/.itsybitsy/scheduled-tasks.json` (`scheduledTasksFile()`), a JSON array of tasks:
+
+| Field | Meaning |
+|---|---|
+| `id` | `task-<8 hex>`, unique in the file |
+| `machine` | `null` for this machine, else a paired peer's id (64 lowercase hex). A peer is stored by id, not name, since names are local and can change |
+| `repo` | the repo's registry name on the target machine |
+| `agentType` | the type to spawn |
+| `prompt` | the user's prompt, without the context header (§21.2) |
+| `cron` | the schedule: a 5-field cron expression (minute hour day month weekday) or a nickname such as `@daily`, evaluated by `Bun.cron.parse` in this machine's local time zone |
+| `autoRetire` | retire the spawned agent once it signals completion (§21.3) |
+| `lastRunAt` | the fire time (epoch ms) of the last run claimed: the cron slot, not the moment it was claimed |
+| `lastAgentId` | the id of the agent the last run started, once it started |
+| `lastError` | why the last run failed to start |
+
+A missing file is an empty list; a file that is not a valid task list is an error, never read as empty, so a later write cannot drop every task. Every read-modify-write holds an exclusive `flock` on `~/.itsybitsy/scheduled-tasks.lock` and replaces the file atomically (temp file + rename). Create and update refuse a task with no repo, type or prompt, a `machine` that is not a peer id, or a schedule `Bun.cron.parse` rejects. Update keeps the id and the last-run fields. `claimScheduledRun(id, slot)` succeeds only when the task still exists and no run at or after `slot` was claimed, and then records `lastRunAt = slot` and clears `lastAgentId` and `lastError`; it is what keeps two open dashboards from both firing one run. `recordScheduledRunResult` stores the run's agent id or error, only while `lastRunAt` is still that slot.
+
+### 21.2 Scheduler
+
+(To be written with the scheduler.)
+
+### 21.3 Auto-Retire on Completion
+
+(To be written with auto-retire.)
+
+### 21.4 Scheduled Tab
+
+(To be written with the tab.)

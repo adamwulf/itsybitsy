@@ -56,6 +56,11 @@ export const peerTerminalSocket = (): string => join(peerDir(), "terminal.sock")
 // row key in `ib watch` (SPEC §17.1). Set once, then always read from here.
 export const machineNameFile = (): string => join(userHome(), RUNTIME_DIR_NAME, "machine-name");
 
+// Scheduled tasks (src/scheduled-tasks.ts, SPEC §21): the tasks this machine's
+// `ib watch` fires, and the lock its read-modify-writes take.
+export const scheduledTasksFile = (): string => join(userHome(), RUNTIME_DIR_NAME, "scheduled-tasks.json");
+export const scheduledTasksLockFile = (): string => join(userHome(), RUNTIME_DIR_NAME, "scheduled-tasks.lock");
+
 export const tmuxSessionName = (repoId: string, id: string): string => `${TMUX_SESSION_PREFIX}${repoId}-${id}`;
 export const agentIdFromTmuxSession = (name: string): string | null => /^itsybitsy-[a-f0-9]{8}-(.+)$/.exec(name)?.[1] ?? null;
 export const isAgentTmuxSession = (name: string): boolean => name.startsWith(TMUX_SESSION_PREFIX);

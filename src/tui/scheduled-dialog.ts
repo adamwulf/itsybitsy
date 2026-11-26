@@ -414,8 +414,12 @@ function cycleField(form: ScheduledTaskFormDialog, delta: 1 | -1): void {
   }
 }
 
-/** Single-line editing of the Schedule field, the New Agent form's Name rules. */
-function editCron(form: ScheduledTaskFormDialog, data: string, render: () => void): void {
+/**
+ * Single-line editing of the Schedule field, the New Agent form's Name rules.
+ * Returns true when the key edited the field; a Ctrl+V paste that lands later
+ * clears the Save error itself.
+ */
+function editCron(form: ScheduledTaskFormDialog, data: string, render: () => void): boolean {
   if (matchesKey(data, Key.alt("backspace"))) {
     form.cron = deleteWord(form.cron);
   } else if (matchesKey(data, Key.backspace) || data === "\x7f") {
@@ -423,18 +427,23 @@ function editCron(form: ScheduledTaskFormDialog, data: string, render: () => voi
   } else {
     const apply = (text: string) => {
       form.cron += sanitizePasteForSingleLine(text);
+      form.error = undefined;
       render();
     };
     const pasted = resolvePasteText(data, apply);
     if (pasted !== null) apply(pasted);
     else if (data.length === 1 && data >= " ") form.cron += data;
+    else return false;
   }
+  return true;
 }
 
 /** Keys in the form. Esc is handled with the other dialogs' (handleDialogInput), and calls onCancel. */
 export function handleScheduledTaskFormInput(ctx: DialogCtx, form: ScheduledTaskFormDialog, data: string): boolean {
   const render = () => ctx.tui?.requestRender();
   const saveDisabled = scheduledFormRepo(form) === null;
+  // A key that edits a field or moves focus clears a failed Save's error.
+  let edited = false;
   const move = (dir: 1 | -1) => {
     const fields = SCHEDULED_FORM_FIELDS;
     let index = fields.indexOf(form.focused);
@@ -442,6 +451,7 @@ export function handleScheduledTaskFormInput(ctx: DialogCtx, form: ScheduledTask
       index = (index + dir + fields.length) % fields.length;
     } while (fields[index] === "save" && saveDisabled);
     form.focused = fields[index]!;
+    edited = true;
   };
 
   if (matchesKey(data, Key.tab)) move(1);
@@ -452,18 +462,26 @@ export function handleScheduledTaskFormInput(ctx: DialogCtx, form: ScheduledTask
       case "repo":
       case "agentType":
         // Left/Right also work on terminals that cannot distinguish Shift+Space.
-        if (matchesKey(data, Key.shift("space")) || matchesKey(data, Key.left)) cycleField(form, -1);
-        else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || matchesKey(data, Key.right)) cycleField(form, 1);
+        if (matchesKey(data, Key.shift("space")) || matchesKey(data, Key.left)) {
+          cycleField(form, -1);
+          edited = true;
+        } else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || matchesKey(data, Key.right)) {
+          cycleField(form, 1);
+          edited = true;
+        }
         break;
       case "cron":
         if (matchesKey(data, Key.enter)) move(1);
-        else editCron(form, data, render);
+        else edited = editCron(form, data, render);
         break;
       case "autoRetire":
-        if (matchesKey(data, Key.enter) || matchesKey(data, Key.space)) form.autoRetire = !form.autoRetire;
+        if (matchesKey(data, Key.enter) || matchesKey(data, Key.space)) {
+          form.autoRetire = !form.autoRetire;
+          edited = true;
+        }
         break;
       case "prompt":
-        form.buffer.handleInput(data, render);
+        edited = form.buffer.handleInput(data, render);
         break;
       case "cancel":
       case "save":
@@ -483,10 +501,12 @@ export function handleScheduledTaskFormInput(ctx: DialogCtx, form: ScheduledTask
           move(-1);
         } else if (form.buffer.handleInput(data, render)) {
           form.focused = "prompt";
+          edited = true;
         }
         break;
     }
   }
+  if (edited) form.error = undefined;
   render();
   return true;
 }

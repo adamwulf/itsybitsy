@@ -424,6 +424,47 @@ describe("Scheduled task form", () => {
     expect(await readScheduledTasks()).toEqual([]);
   });
 
+  test.each([
+    ["Tab", "\t"],
+    ["Shift+Tab", "\x1b[Z"],
+    ["←", "\x1b[D"],
+    ["a typed character", "x"],
+  ])("%s after a failed Save clears its error", async (_label, key) => {
+    const { ctx } = makeHost();
+    await openTab(ctx);
+    press(ctx, "a");
+    const form = assertDialog(ctx.dialog, "scheduled-task-form");
+    focus(ctx, form, "cron");
+    type(ctx, "@hourly");
+    focus(ctx, form, "save");
+    press(ctx, "\r");
+    await waitFor(() => form.error !== undefined && !form.saving, { message: "the Save to fail" });
+
+    press(ctx, key);
+    expect(form.error).toBeUndefined();
+    expect(formText(form)).not.toContain("Prompt is required");
+  });
+
+  test.each([
+    ["machine", " "],
+    ["repo", " "],
+    ["agentType", " "],
+    ["cron", "\x7f"],
+    ["autoRetire", " "],
+    ["prompt", "x"],
+  ] as const)("an edit of %s clears a Save error", async (field, key) => {
+    const { ctx } = makeHost({ repos: ["itsybitsy", "web"] });
+    await openTab(ctx);
+    press(ctx, "a");
+    const form = assertDialog(ctx.dialog, "scheduled-task-form");
+    focus(ctx, form, field);
+    // Set after the focus moves, which clear it themselves.
+    form.error = "Invalid cron expression";
+
+    press(ctx, key);
+    expect(form.error).toBeUndefined();
+  });
+
   test("Esc and Cancel return to the Scheduled tab without saving", async () => {
     const task = await createScheduledTask(TASK);
     const { ctx } = makeHost();

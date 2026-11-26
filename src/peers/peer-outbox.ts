@@ -267,8 +267,8 @@ async function handoffPeerRequest(options: {
 
 type Lifecycle = (peer: string, request: RemoteLifecycleRequest, transfer: OutgoingTransfer) => Promise<string>;
 
-/** Copy the peer's watch log; resolves to `encodeWatchLogOutput`'s JSON. */
-type WatchLogFetch = (peer: string, transfer: Pick<OutgoingTransfer, "verifyClient" | "signal">) => Promise<string>;
+/** Copy the peer's watch log; resolves to `encodeWatchLogOutput`'s JSON. A read changes nothing, so it has no client check. */
+type WatchLogFetch = (peer: string, transfer: Pick<OutgoingTransfer, "signal">) => Promise<string>;
 
 type Send = (peer: string, header: SendHeader, transfer: OutgoingTransfer) => Promise<string>;
 
@@ -431,7 +431,7 @@ export function createPeerOutboxPoll(now = () => performance.now()) {
                 result = { ok: true, id: sent };
               } else if (watchLog) {
                 if (!fetchWatchLog) throw new Error("Watch log copies are unavailable");
-                result = { ok: true, id, output: await fetchWatchLog(peer, { verifyClient, signal: controller.signal }) };
+                result = { ok: true, id, output: await fetchWatchLog(peer, { signal: controller.signal }) };
               } else {
                 if (!runLifecycle) throw new Error("Remote lifecycle commands are unavailable");
                 result = { ok: true, id, output: await runLifecycle(peer, parseLifecycleRequest(lifecycle), { verifyClient, signal: controller.signal }) };

@@ -1195,7 +1195,8 @@ export class PeerService {
         }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown, dispatchFinished,
           // The CLI prints the output, which already names a failed push.
           (peer, request, transfer) => this.runRemoteLifecycle(peer, request, "handoff", transfer).then(outcome => outcome.output),
-          (peer, transfer) => this.fetchWatchLog(peer, transfer.signal).then(encodeWatchLogOutput))
+          (peer, transfer) => this.fetchWatchLog(peer, transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal)
+            .then(encodeWatchLogOutput))
           .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`))
           .finally(() => { dispatchFinished(); this.outboxPolls.delete(work); });
         this.outboxPolls.add(work);

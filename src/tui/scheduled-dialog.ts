@@ -30,7 +30,7 @@ import { wordWrapLines } from "./wrap";
 export interface ScheduledHost {
   readonly dialog: DialogState;
   /** This machine's registered repos; `name` is the registry name. */
-  readonly repos: ReadonlyArray<{ name: string }>;
+  readonly repos: ReadonlyArray<{ name: string; defaultAgentType?: string }>;
   readonly peerService: { view(): { readonly links: readonly PeerLinkState[] } } | null;
   readonly tui: { requestRender(): void } | null;
   showDialog(dialog: NonNullable<DialogState>): void;
@@ -82,7 +82,13 @@ export type ScheduledTaskFormDialog = {
   machine: string | null;
   /** The last repo picked; the Repo field shows it while `machine` offers it, else the first repo offered. */
   repo: string;
-  agentType: string;
+  /**
+   * The Type picked, or null for a new task until the user picks one: the
+   * form then uses the selected repo's default (scheduledFormType).
+   */
+  agentType: string | null;
+  /** The default Type for the repo with registry name `repo`, as the New Agent form picks it. */
+  defaultAgentType(repo: string | null): string;
   availableTypes: string[];
   cron: string;
   autoRetire: boolean;
@@ -325,6 +331,10 @@ export function newScheduledTaskForm(
     if (task && task.machine === machine && !repos.some(repo => sameRepoName(repo, task.repo))) repos = [...repos, task.repo];
     return { repos, why: repos.length ? null : why };
   };
+  // A peer's repo has no default type of its own here. As in the New Agent
+  // form, this machine's repo of the same registry name supplies it.
+  const defaultAgentType = (repo: string | null): string => resolveDefaultAgentType(
+    repo === null ? undefined : host.repos.find(local => sameRepoName(local.name, repo))?.defaultAgentType, types);
 
   const form: ScheduledTaskFormDialog = {
     type: "scheduled-task-form",
@@ -333,7 +343,8 @@ export function newScheduledTaskForm(
     repoChoices,
     machine: task?.machine ?? null,
     repo: task?.repo ?? "",
-    agentType: task?.agentType ?? resolveDefaultAgentType(undefined, types),
+    agentType: task?.agentType ?? null,
+    defaultAgentType,
     availableTypes: types,
     cron: task?.cron ?? "",
     autoRetire: task?.autoRetire ?? false,
@@ -366,6 +377,11 @@ export function scheduledFormRepo(form: ScheduledTaskFormDialog): string | null 
   return repos.find(repo => sameRepoName(repo, form.repo)) ?? repos[0] ?? null;
 }
 
+/** The Type the field shows and Save stores: the one picked, else the selected repo's default. */
+export function scheduledFormType(form: ScheduledTaskFormDialog): string {
+  return form.agentType ?? form.defaultAgentType(scheduledFormRepo(form));
+}
+
 /** What Save would store, or null while Save is disabled (no repo). */
 export function scheduledFormInput(form: ScheduledTaskFormDialog): ScheduledTaskInput | null {
   const repo = scheduledFormRepo(form);
@@ -373,7 +389,7 @@ export function scheduledFormInput(form: ScheduledTaskFormDialog): ScheduledTask
   return {
     machine: form.machine,
     repo,
-    agentType: form.agentType,
+    agentType: scheduledFormType(form),
     prompt: form.buffer.getText().trim(),
     cron: form.cron,
     autoRetire: form.autoRetire,
@@ -393,7 +409,7 @@ function cycleField(form: ScheduledTaskFormDialog, delta: 1 | -1): void {
     const next = step(repos, current === null ? -1 : repos.indexOf(current));
     if (next !== undefined) form.repo = next;
   } else if (form.focused === "agentType") {
-    const next = step(form.availableTypes, form.availableTypes.indexOf(form.agentType));
+    const next = step(form.availableTypes, form.availableTypes.indexOf(scheduledFormType(form)));
     if (next !== undefined) form.agentType = next;
   }
 }
@@ -499,7 +515,7 @@ export function buildScheduledTaskFormContent(form: ScheduledTaskFormDialog, inn
   const { repos, why } = form.repoChoices(form.machine);
   cycler("repo", "Repo", scheduledFormRepo(form) ?? `${DIM}(none)${RESET}`, repos.length);
   if (why !== null) lines.push(...note(why, RED));
-  cycler("agentType", "Type", form.agentType, form.availableTypes.length);
+  cycler("agentType", "Type", scheduledFormType(form), form.availableTypes.length);
   lines.push("");
 
   const cursor = form.focused === "cron" ? "█" : "";

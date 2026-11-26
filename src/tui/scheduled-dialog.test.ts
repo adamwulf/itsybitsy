@@ -12,7 +12,7 @@ import { handleSetup, type ActionCtx } from "./agent-actions";
 import { RED } from "./colors";
 import { buildSetupContent, handleDialogInput, SCHEDULED_TAB, type DialogCtx, type DialogState } from "./dialog-handler";
 import {
-  buildScheduledTabContent, buildScheduledTaskFormContent, formatFireTime, scheduledTaskTypes,
+  buildScheduledTabContent, buildScheduledTaskFormContent, formatFireTime, scheduledFormType, scheduledTaskTypes,
   type ScheduledTabState, type ScheduledTaskFormDialog,
 } from "./scheduled-dialog";
 import { assertDialog } from "./test-helpers";
@@ -60,14 +60,17 @@ function link(id: string, name: string, connected: boolean, repos: string[] = []
 }
 
 /** The slice of the dashboard the setup dialog and its Scheduled tab use. */
-function makeHost(options: { repos?: string[]; links?: PeerLinkState[] } = {}) {
+function makeHost(options: { repos?: Array<string | { name: string; defaultAgentType?: string }>; links?: PeerLinkState[] } = {}) {
   let current: DialogState = null;
   const notices: string[] = [];
   const view = { links: options.links ?? [] };
   const host = {
     get dialog() { return current; },
     get _dialog() { return current; },
-    repos: (options.repos ?? ["itsybitsy"]).map(name => ({ name, path: `/repos/${name}` })),
+    repos: (options.repos ?? ["itsybitsy"]).map(repo => {
+      const entry = typeof repo === "string" ? { name: repo } : repo;
+      return { ...entry, path: `/repos/${entry.name}` };
+    }),
     peerService: { view: () => view },
     tui: { requestRender() {} },
     agentTree: { machineName: "studio" },
@@ -320,14 +323,14 @@ describe("Scheduled task form", () => {
     expect(form.focused).toBe("machine");
     expect(formText(form)).toContain("Machine: This machine");
     expect(formText(form)).toContain("Repo: itsybitsy");
-    expect(form.agentType).toBe("manager");
+    expect(scheduledFormType(form)).toBe("manager");
 
     focus(ctx, form, "repo");
     press(ctx, " ");
     expect(formText(form)).toContain("Repo: web");
     focus(ctx, form, "agentType");
     press(ctx, " ");
-    const agentType = form.agentType;
+    const agentType = scheduledFormType(form);
     expect(agentType).not.toBe("manager");
     focus(ctx, form, "cron");
     expect(formText(form)).toContain("min hour day month weekday, e.g. 30 9 * * 1-5");
@@ -536,6 +539,54 @@ describe("Scheduled task form", () => {
     expect((await readScheduledTasks())[1]).toMatchObject({ machine: UNPAIRED, repo: "api" });
   });
 
+  test("a new task's Type is the selected repo's default type until one is picked", async () => {
+    await writePeers([{ id: PEER_B, name: "Laptop B" }]);
+    const { ctx } = makeHost({
+      repos: [{ name: "itsybitsy", defaultAgentType: "worker" }, { name: "web" }, { name: "coord", defaultAgentType: "repo-coordinator" }],
+      links: [link(PEER_B, "Laptop B", true, ["ITSYBITSY", "docs"])],
+    });
+    await openTab(ctx);
+    press(ctx, "a");
+    const form = assertDialog(ctx.dialog, "scheduled-task-form");
+    expect(formText(form)).toContain("Type: worker");
+    focus(ctx, form, "repo");
+    press(ctx, " ");
+    expect(formText(form)).toContain("Repo: web");
+    expect(scheduledFormType(form)).toBe("manager");
+    press(ctx, " ");
+    // A coordinator default is not offered; the New Agent form's fallback applies.
+    expect(formText(form)).toContain("Repo: coord");
+    expect(scheduledFormType(form)).toBe("manager");
+    press(ctx, " ");
+
+    // A peer's repo takes the default of this machine's repo of that registry name.
+    focus(ctx, form, "machine");
+    press(ctx, " ");
+    expect(formText(form)).toContain("Repo: ITSYBITSY");
+    expect(scheduledFormType(form)).toBe("worker");
+    focus(ctx, form, "repo");
+    press(ctx, " ");
+    expect(formText(form)).toContain("Repo: docs");
+    expect(scheduledFormType(form)).toBe("manager");
+
+    // Once picked, the Type stays when the repo changes, and Save stores it.
+    focus(ctx, form, "agentType");
+    while (scheduledFormType(form) !== "worker") press(ctx, " ");
+    focus(ctx, form, "repo");
+    press(ctx, " ");
+    expect(formText(form)).toContain("Repo: ITSYBITSY");
+    press(ctx, " ");
+    expect(scheduledFormType(form)).toBe("worker");
+    focus(ctx, form, "cron");
+    type(ctx, "@daily");
+    focus(ctx, form, "prompt");
+    type(ctx, "Check");
+    focus(ctx, form, "save");
+    press(ctx, "\r");
+    await waitFor(() => ctx.dialog?.type === "setup", { message: "the Save to finish" });
+    expect((await readScheduledTasks())[0]).toMatchObject({ machine: PEER_B, repo: "docs", agentType: "worker" });
+  });
+
   test("Type offers the spawnable types without the two coordinator types", async () => {
     const types = scheduledTaskTypes();
     expect(types).toContain("manager");
@@ -550,7 +601,7 @@ describe("Scheduled task form", () => {
     focus(ctx, form, "agentType");
     const seen = new Set<string>();
     for (let i = 0; i < types.length + 1; i++) {
-      seen.add(form.agentType);
+      seen.add(scheduledFormType(form));
       press(ctx, " ");
     }
     expect([...seen].sort()).toEqual([...types].sort());

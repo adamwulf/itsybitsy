@@ -3995,7 +3995,7 @@ An empty list shows `No scheduled tasks. Press a to add one.` The list shows as 
 |---|---|
 | Machine | `This machine`, then every peer in `peers.json` in file order, connected or not, each labeled with its name and link status (§20.4). |
 | Repo | For this machine, its registered repos' registry names. For a peer, the registry names its link reports while connected; an offline or connecting peer offers none. |
-| Type | The spawnable types without `repo-coordinator` and `system-coordinator`. A new task starts on `manager`. |
+| Type | The spawnable types without `repo-coordinator` and `system-coordinator`. Until the user picks one, a new task's Type is the selected repo's default, chosen as the New Agent form chooses it (`resolveDefaultAgentType`): the `defaultAgentType` of this machine's repo with that registry name (ignoring case, also for a peer's repo) when it is offered, else `manager`, else the first type. |
 | Schedule | A single-line cron input. Under it, the dim hint `min hour day month weekday, e.g. 30 9 * * 1-5`, then `next: <local time>` or the `cronProblem` text in red, recomputed on every keystroke. |
 | Auto-retire | A checkbox, toggled with Space or Enter, with the dim note `retire the agent when it signals I HAVE COMPLETED THE GOAL (archived, not merged)` (§21.3). Off for a new task. |
 | Prompt | Multi-line, the New Agent form's prompt editor. |

@@ -289,6 +289,12 @@ describe("machineDirName", () => {
     expect(machineDirName("Desk", ID_LAPTOP, taken)).toBe(`Desk-${ID_LAPTOP.slice(0, 10)}`);
     expect(machineDirName("Desk", ID_LAPTOP, taken)).toBe("Desk-2");
   });
+
+  test("this machine (no id) falls back to this-machine", () => {
+    const taken = new Set([EXPORT_FILE]);
+    expect(machineDirName("", null, taken)).toBe("this-machine");
+    expect(machineDirName("EXPORT.TXT", null, taken)).toBe("EXPORT.TXT-this-machine");
+  });
 });
 
 test("clockComparison bounds the difference by half the round trip", () => {

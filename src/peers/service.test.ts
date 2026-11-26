@@ -40,6 +40,8 @@ import {
   type ServiceStream,
 } from "./service";
 import { addPeer, readPeers, type Peer } from "./store";
+import { Scheduler } from "../scheduler";
+import { claimScheduledRun, createScheduledTask, readScheduledTasks, recordScheduledRunResult } from "../scheduled-tasks";
 import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS } from "./poller";
 import { TerminalFrameReader, encodeTerminalOpen, parseTerminalExit } from "./terminal-frame";
 import { listSpawnableTypeNamesSync } from "../agent-types";
@@ -2489,4 +2491,126 @@ test("watcher shutdown aborts an outbox worker and waits for its cleanup", async
   expect(done).toBe(false);
   cleanup.resolve();
   await stop;
+});
+
+describe("scheduled remote runs and the endpoint owner (SPEC §21.2)", () => {
+  const TASK = { machine: ID_REMOTE, repo: "web", agentType: "worker", prompt: "Check the build", cron: "* * * * *", autoRetire: false };
+
+  /** Run `body` with setInterval handed to the test, which fires the timers itself. */
+  async function withCapturedIntervals(body: (armed: Array<{ fn: () => void; ms: number }>) => Promise<void>): Promise<void> {
+    const g = globalThis as unknown as { setInterval: (fn: () => void, ms?: number) => unknown; clearInterval: (handle?: unknown) => void };
+    const realSetInterval = g.setInterval;
+    const realClearInterval = g.clearInterval;
+    const armed: Array<{ fn: () => void; ms: number; handle: object }> = [];
+    g.setInterval = (fn, ms = 0) => {
+      const handle = {};
+      armed.push({ fn, ms, handle });
+      return handle;
+    };
+    g.clearInterval = (handle) => {
+      const i = armed.findIndex(a => a.handle === handle);
+      if (i !== -1) armed.splice(i, 1);
+      else realClearInterval(handle);
+    };
+    try {
+      await body(armed);
+    } finally {
+      g.setInterval = realSetInterval;
+      g.clearInterval = realClearInterval;
+    }
+  }
+
+  /** A scheduler wired to `service` as startDashboard wires it, with the real store. */
+  function schedulerFor(service: PeerService, now: () => number, started: string[]): Scheduler {
+    return new Scheduler({
+      now,
+      readTasks: readScheduledTasks,
+      claimRun: claimScheduledRun,
+      recordResult: recordScheduledRunResult,
+      startLocal: async () => { throw new Error("no local task in this test"); },
+      startRemote: (task, prompt, signal) => {
+        started.push(task.id);
+        return service.startRemoteAgent(task.machine!, { repo: task.repo, type: task.agentType, prompt, autoRetire: task.autoRetire }, { signal });
+      },
+      remoteRunsHere: () => !service.endpointOwnedElsewhere,
+      machineName: "Desk",
+      targetName: id => id ?? "Desk",
+      log: () => {},
+      notice: () => {},
+      refresh: () => {},
+    });
+  }
+
+  test("a dashboard that lost the endpoint lock leaves a remote run unclaimed while the 30 s lock poll asks again", async () => {
+    alive.add(OTHER.pid);
+    starts.set(OTHER.pid, OTHER.startEpoch);
+    await mkdir(peerDir(), { recursive: true });
+    await writeFile(peerEndpointLockFile(), `${OTHER.pid} ${OTHER.startEpoch}\n`);
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    await createScheduledTask(TASK);
+    // Holds the lock poll's lock check open, so the scheduler's tick runs inside it.
+    let lockGate: Promise<void> | null = null;
+
+    await withCapturedIntervals(async (armed) => {
+      const { service } = makeService({
+        recoverTransfers: async () => {},
+        acquireLock: async () => {
+          if (lockGate) await lockGate;
+          return acquireEndpointLock();
+        },
+      });
+      let nowMs = Date.now();
+      const started: string[] = [];
+      const scheduler = schedulerFor(service, () => nowMs, started);
+      try {
+        await service.bootIfPaired();
+        expect(service.view().status).toEqual({ kind: "disabled", ownerPid: OTHER.pid });
+        scheduler.start();
+        // ib watch arms the lock poll (in bootIfPaired), then the scheduler's tick,
+        // both every 30 s: each period they fire in that order, in one turn.
+        const timers = armed.filter(a => a.ms === 30_000);
+        expect(timers).toHaveLength(2);
+
+        nowMs += 60_000; // a run is due
+        const held = Promise.withResolvers<void>();
+        lockGate = held.promise;
+        for (const timer of timers) timer.fn();
+        expect(service.view().status.kind).toBe("starting");
+        await scheduler.tick(); // the tick the timer started
+
+        expect(started).toEqual([]);
+        expect((await readScheduledTasks())[0]!.lastRunAt).toBeUndefined();
+        held.resolve();
+        await waitFor(() => service.view().status.kind === "disabled", { message: "the lock poll to find the owner again" });
+      } finally {
+        lockGate = null;
+        await scheduler.stop();
+        await service.shutdown();
+      }
+    });
+  });
+
+  test("a single dashboard whose bind failed still claims a remote run and records why it did not start", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const task = await createScheduledTask(TASK);
+    const { service } = makeService({ recoverTransfers: async () => {} }, [new Error("network is unreachable")]);
+    let nowMs = Date.now();
+    const started: string[] = [];
+    const scheduler = schedulerFor(service, () => nowMs, started);
+    try {
+      await service.bootIfPaired();
+      expect(service.view().status.kind).toBe("error");
+
+      nowMs += 60_000;
+      await scheduler.tick();
+
+      expect(started).toEqual([task.id]);
+      const stored = (await readScheduledTasks())[0]!;
+      expect(stored.lastRunAt).toBeGreaterThan(0);
+      expect(stored.lastError).toBe("Machine is disconnected");
+    } finally {
+      await scheduler.stop();
+      await service.shutdown();
+    }
+  });
 });

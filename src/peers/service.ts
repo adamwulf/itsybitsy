@@ -406,6 +406,13 @@ export class PeerService {
   /** Cancels the check that a rebind has stayed up for PEER_RETRY_STABLE_MS; null when none is armed. */
   private cancelStableTimer: (() => void) | null = null;
   private lockHeld = false;
+  /**
+   * The pid of the other live `ib watch` that held the endpoint lock at the
+   * last lock attempt; null when this process took it, or before any attempt.
+   * Unlike `status`, it does not pass through `starting` while a bind (the
+   * 30 s lock poll's, say) asks for the lock again.
+   */
+  private lockOwnerElsewhere: number | null = null;
   private lockGeneration?: string;
   private recovery?: Promise<void>;
   private recoverTransfers(): Promise<void> {
@@ -447,6 +454,17 @@ export class PeerService {
 
   get remoteStartDenial(): string | null {
     return this.callerDenial;
+  }
+
+  /**
+   * True when the last endpoint-lock attempt found another live `ib watch`
+   * holding the lock (SPEC §20.3), so that dashboard has the peer links. It
+   * stays so through a later bind's `starting`, and a lock attempt that
+   * throws keeps the previous answer. The scheduler leaves remote tasks to
+   * the owner while it is true (SPEC §21.2).
+   */
+  get endpointOwnedElsewhere(): boolean {
+    return this.lockOwnerElsewhere !== null;
   }
 
   constructor(private readonly deps: PeerServiceDeps) {
@@ -1041,6 +1059,7 @@ export class PeerService {
       this.setStatus({ kind: "error", message, retryAt: null });
       return { kind: "failed", failure: message };
     }
+    this.lockOwnerElsewhere = lock.acquired ? null : lock.ownerPid;
     if (!lock.acquired) {
       if (readPeersAtBoot) await this.refreshPeers();
       if (this.dialogOpen || this.peers.length) {

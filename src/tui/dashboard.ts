@@ -28,7 +28,10 @@ import {
   isKeyRelease,
 } from "@mariozechner/pi-tui";
 import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
-import { loadRegistry, setRepoDefaultAgentType, setRepoNotes } from "../registry";
+import { listRepos, loadRegistry, setRepoDefaultAgentType, setRepoNotes } from "../registry";
+import { claimScheduledRun, readScheduledTasks, recordScheduledRunResult } from "../scheduled-tasks";
+import { Scheduler, startLocalScheduledAgent } from "../scheduler";
+import { shortPeerId } from "../peers/store";
 import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
 import { REPO_COORDINATOR_TYPE } from "../coordinator-type-names";
@@ -108,7 +111,7 @@ import type { LayoutState } from "./layout";
 import { textHeader } from "../peers/peer-outbox";
 import type { SendTarget } from "../peers/send-frame";
 import { InputFieldComponent } from "./input-field";
-import { pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
+import { newAgent, pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { choosePaths, peerAttachmentPrompt, promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
@@ -122,6 +125,7 @@ import {
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
+import { buildScheduledTaskFormContent } from "./scheduled-dialog";
 import { captureAgentPane, readAgentPromptText } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { localTerminalHost } from "../peers/terminal-host";
@@ -764,6 +768,9 @@ class DialogOverlayComponent implements Component {
       }
       case "new-agent-form": {
         return buildNewAgentFormContent(dialog, innerWidth);
+      }
+      case "scheduled-task-form": {
+        return buildScheduledTaskFormContent(dialog, innerWidth);
       }
       case "setup": {
         return buildSetupContent(dialog, innerWidth);
@@ -2020,7 +2027,7 @@ export class DashboardComponent implements Component {
       if (dialog?.type === "setup" && dialog.peers) {
         syncPeersDialog(dialog.peers);
         this.tui?.requestRender();
-      } else if (receiptsChanged || changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form") {
+      } else if (receiptsChanged || changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form" || dialog?.type === "scheduled-task-form") {
         if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
         this.tui?.requestRender();
       }
@@ -2358,7 +2365,7 @@ export class DashboardComponent implements Component {
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
         : dialog.type === "multi-select" ? MULTI_SELECT_WIDTH
-        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
+        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "scheduled-task-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
         : DIALOG_WIDTH);
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       this.overlayHandle.hide();
@@ -2535,7 +2542,7 @@ export class DashboardComponent implements Component {
       { label: "add repo — A", key: "A", action: () => agentActions.handleAddRepo(this) },
       { label: "remove repo — D", key: "D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
       { label: "help — ?", key: "?", action: () => agentActions.handleHelp(this) },
-      { label: "setup (Hooks, Config, Peers) — h", key: "h", action: () => agentActions.handleSetup(this) },
+      { label: "setup (Hooks, Config, Peers, Scheduled) — h", key: "h", action: () => agentActions.handleSetup(this) },
       { label: "setup: Peers tab — I", key: "I", action: () => agentActions.handleSetup(this, PEERS_TAB) },
       { label: "scroll up — ;", key: ";", action: () => this.scrollOutput(true) },
       { label: "scroll down — l", key: "l", action: () => this.scrollOutput(false) },
@@ -4849,7 +4856,8 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
   });
 
   const typePickerKeyboard = new TypePickerKeyboard(terminal, () =>
-    dashboard.dialog?.type === "new-agent-form" && (dashboard.dialog.focused === "agentType" || dashboard.dialog.focused === "machine"));
+    (dashboard.dialog?.type === "new-agent-form" && (dashboard.dialog.focused === "agentType" || dashboard.dialog.focused === "machine"))
+    || (dashboard.dialog?.type === "scheduled-task-form" && ["machine", "repo", "agentType"].includes(dashboard.dialog.focused)));
   const stopTerminal = installTerminalCleanup(() => {
     typePickerKeyboard.stop();
     tui.stop();
@@ -4870,6 +4878,8 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
   // coordinators running instead of pausing them. The flag keeps a signal
   // that arrives during shutdown from starting a second one.
   let quitting = false;
+  /** Scheduled tasks (SPEC §21.2): started at the end of this function, once the watcher and peer service are up. */
+  let scheduler: Scheduler | null = null;
   const quitDashboard = (pauseRepoCoordinators: boolean): void => {
     if (quitting) return;
     quitting = true;
@@ -4881,6 +4891,11 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
     colorDetection.cleanup();
     dashboard.stopPolling();
     watcher.stop();
+    // No scheduled run starts from here on; a remote start in flight is
+    // aborted. Raced like Telegram: a local spawn in flight is not waited out.
+    const stopScheduler = scheduler
+      ? Promise.race([scheduler.stop(), new Promise<void>((resolve) => setTimeout(resolve, 2_000))])
+      : Promise.resolve();
     stopTerminal();
     // stopTerminal() restored cooked mode and dropped the SIGINT handler, so
     // another Ctrl-C now arrives as SIGINT. Under bounce.sh that is the
@@ -4947,6 +4962,7 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
       finishBoot.catch(() => { /* ignore — boot was best effort */ }),
       disposeTelegramMonitor.catch(() => { /* ignore — already raced */ }),
       stopPeers.catch(() => { /* ignore — already raced */ }),
+      stopScheduler.catch(() => { /* ignore — already raced */ }),
     ]).then(() => {
       // Release coordinator ref — if last ref, kills the tmux session
       // and pauses all per-repo coordinators
@@ -5031,4 +5047,38 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
   // the trusted link never answers with the empty pre-scan list. It never
   // throws; shutdown waits for the bind.
   void peerService.bootIfPaired();
+  // Scheduled tasks (SPEC §21.2), once the watcher and the peer service are
+  // up. The first tick, 30 s from now, also fires a run due in about the 90 s
+  // before this moment (the grace before that tick; the gap of an
+  // `ib bounce`), unless the previous `ib watch` claimed it. There is no tick
+  // at once, so peer links can reconnect before a remote run. A remote task
+  // starts through
+  // the peer service as the New Agent form's start does (its human-caller
+  // decision and connection checks), but outside the form's one-start slot,
+  // so it neither waits for nor blocks a user's remote start.
+  if (!quitting) {
+    scheduler = new Scheduler({
+      now: () => Date.now(),
+      readTasks: readScheduledTasks,
+      claimRun: claimScheduledRun,
+      recordResult: recordScheduledRunResult,
+      startLocal: (task, prompt) => startLocalScheduledAgent(task, prompt, { listRepos, newAgent }),
+      startRemote: (task, prompt, signal) => peerService.startRemoteAgent(task.machine!, {
+        repo: task.repo, type: task.agentType, prompt, autoRetire: task.autoRetire,
+      }, { signal }),
+      // From the last endpoint-lock outcome, not the status: the 30 s lock
+      // poll's bind reads `starting` while it asks the owner's lock again.
+      remoteRunsHere: () => !peerService.endpointOwnedElsewhere,
+      machineName: machine,
+      targetName: (id) => {
+        if (id === null) return machine;
+        const view = peerService.view();
+        return [...view.links, ...view.peers].find(peer => peer.id === id)?.name ?? shortPeerId(id);
+      },
+      log: logToWatchLog,
+      notice: (text, kind) => dashboard.setNotice(text, kind),
+      refresh: () => { void dashboard.watcher?.refresh(); },
+    });
+    scheduler.start();
+  }
 }

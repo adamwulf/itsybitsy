@@ -12,6 +12,10 @@ import { resolvePasteText, isPasteInProgress, cancelPaste, sanitizePasteForSingl
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { sanitizeAgentNameInput } from "../validation";
 import { buildPeersDialogContent, handlePeersDialogInput, type PeersDialogState } from "./peers-dialog";
+import {
+  buildScheduledTabContent, handleScheduledTabInput, handleScheduledTaskFormInput,
+  type ScheduledTabState, type ScheduledTaskFormDialog,
+} from "./scheduled-dialog";
 
 export const TEXTAREA_VISIBLE_HEIGHT = 5;
 export const FOLDER_BROWSER_HEIGHT = 15;
@@ -51,7 +55,9 @@ type DialogCommon = { width?: number };
 
 // Dialog types for agent actions
 export type DialogState =
-  | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel" | "checkbox"; confirmColor?: string; checkbox?: { label: string; checked: boolean }; onYes: () => void } & DialogCommon)
+  | ({ type: "confirm"; prompt: string; confirmLabel: string; focusedButton: "confirm" | "cancel" | "checkbox"; confirmColor?: string; checkbox?: { label: string; checked: boolean }; onYes: () => void;
+      /** Optional: invoked after Esc or [ Cancel ] closes the dialog, e.g. to return to the dialog it was opened from. */
+      onCancel?: () => void } & DialogCommon)
   | ({ type: "input";
       /** The title, or a function that builds it for the title width the overlay has at this render
        *  (the overlay narrows with the terminal), for a title that must shrink to fit. */
@@ -153,11 +159,14 @@ export type DialogState =
       focused: "name" | "machine" | "agentType" | "prompt" | "create" | "cancel";
       onSubmit: (name: string, agentType: string, prompt: string) => void;
     } & DialogCommon)
+  | (ScheduledTaskFormDialog & DialogCommon)
   | ({
       type: "setup";
-      tab: number; // 0=Hooks, 1=Config, 2=Peers
+      tab: number; // 0=Hooks, 1=Config, 2=Peers, 3=Scheduled
       /** Present only on the visible Peers tab. */
       peers?: PeersDialogState;
+      /** Present only on the visible Scheduled tab. */
+      scheduled?: ScheduledTabState;
       settingsMessage?: string;
       items: SetupItem[];
       selectedIndex: number;
@@ -266,6 +275,8 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
   // New Agent form's peer start: once pending), and closes only THIS dialog,
   // never a later one.
   if (dialog.type === "new-agent-form" && dialog.inFlight && !matchesKey(data, Key.escape)) return true;
+  // A Save writing the scheduled-task store: no second Save, and no Cancel to a list that has not seen it.
+  if (dialog.type === "scheduled-task-form" && dialog.saving) return true;
   if ((dialog.type === "input" || dialog.type === "textarea") && dialog.inFlight) {
     if (dialog.type === "textarea" && matchesKey(data, Key.escape)) dialog.onCancelInFlight?.();
     return true;
@@ -309,8 +320,9 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
     // step (the team-creation wizard deletes the just-created team on Esc
     // from step 2) or emit a final status notice on Esc (step 3 textarea —
     // otherwise the wizard vanishes silently after a save the user can't
-    // observe).
-    if (dialog.type === "multi-select" || dialog.type === "textarea") {
+    // observe). The scheduled-task form and the Scheduled tab's delete
+    // confirmation return to the Scheduled tab.
+    if (dialog.type === "multi-select" || dialog.type === "textarea" || dialog.type === "confirm" || dialog.type === "scheduled-task-form") {
       const onCancel = dialog.onCancel;
       ctx.closeDialog();
       onCancel?.();
@@ -337,6 +349,7 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
         dialog.onYes();
       } else if (dialog.focusedButton === "cancel") {
         ctx.closeDialog();
+        dialog.onCancel?.();
       }
     }
     return true;
@@ -452,6 +465,10 @@ export function handleDialogInput(ctx: DialogCtx, data: string): boolean {
 
   if (dialog.type === "new-agent-form") {
     return handleNewAgentFormDialog(ctx, dialog, data);
+  }
+
+  if (dialog.type === "scheduled-task-form") {
+    return handleScheduledTaskFormInput(ctx, dialog, data);
   }
 
   if (dialog.type === "folder-browser") {
@@ -772,13 +789,15 @@ function handleSetupDialog(
   if (matchesKey(data, Key.tab)) { d.onTabChange((d.tab + 1) % count); return true; }
   if (matchesKey(data, Key.shift("tab"))) { d.onTabChange((d.tab + count - 1) % count); return true; }
 
+  // The Peers tab's id, code and name inputs take digits; no other tab has a text field.
   const stage = d.peers?.service.view().session?.stage.stage;
   const editing = d.peers && (!stage || stage === "code-entry" || stage === "naming");
-  if (!editing && /^[1-3]$/.test(data) && Number(data) - 1 !== d.tab) {
+  if (!editing && data.length === 1 && data >= "1" && data <= String(count) && Number(data) - 1 !== d.tab) {
     d.onTabChange(Number(data) - 1);
     return true;
   }
   if (d.tab === PEERS_TAB) return d.peers ? handlePeersDialogInput(ctx, d.peers, data) : true;
+  if (d.tab === SCHEDULED_TAB) return d.scheduled ? handleScheduledTabInput(ctx, d.scheduled, data) : true;
 
   // Tab 0: existing setup behavior
   if (d.tab === 0) {
@@ -1208,8 +1227,9 @@ export function buildNewAgentFormContent(
   return { title: `New Agent (${dialog.repoName})`, contentLines: lines };
 }
 
-const SETUP_TAB_NAMES = ["Hooks", "Config", "Peers"];
+const SETUP_TAB_NAMES = ["Hooks", "Config", "Peers", "Scheduled"];
 export const PEERS_TAB = 2;
+export const SCHEDULED_TAB = 3;
 
 /** Build the tab bar for the setup dialog */
 function buildTabBar(activeTab: number, innerWidth: number): string {
@@ -1232,7 +1252,9 @@ export function buildSetupContent(
 ): DialogContent {
   const lines: string[] = [];
   lines.push(buildTabBar(dialog.tab, innerWidth));
-  const hint = dialog.tab === PEERS_TAB ? "Tab/Shift+Tab: switch tabs" : "1/2/3/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close";
+  const hint = dialog.tab === PEERS_TAB ? "Tab/Shift+Tab: switch tabs"
+    : dialog.tab === SCHEDULED_TAB ? "1-4/Tab: tabs, j/k: move, a: add, Enter: edit, x: delete"
+    : "1-4/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close";
   lines.push(...wordWrapLines(`(${hint})`, innerWidth).map(line => `${DIM}${line}${RESET}`));
   lines.push("");
 
@@ -1242,6 +1264,8 @@ export function buildSetupContent(
     buildSetupTab0Content(dialog, lines, innerWidth);
   } else if (dialog.tab === PEERS_TAB) {
     lines.push(...(dialog.peers ? buildPeersDialogContent(dialog.peers, innerWidth, (process.stdout.rows || 24) - 2 - lines.length) : ["Peering is not available here"]));
+  } else if (dialog.tab === SCHEDULED_TAB) {
+    if (dialog.scheduled) lines.push(...buildScheduledTabContent(dialog.scheduled, innerWidth, (process.stdout.rows || 24) - 2 - lines.length));
   } else {
     buildConfigTabContent(dialog, lines, innerWidth);
   }

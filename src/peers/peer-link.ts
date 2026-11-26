@@ -80,6 +80,8 @@ export interface RemoteNewAgentRequest {
   type: string;
   name?: string;
   prompt: string;
+  /** A scheduled task's auto-retire switch (SPEC §21.2): the receiver passes it to `newAgent`. */
+  autoRetire?: boolean;
   /** Staged attachments, numbered in `OutgoingTransfer.filesDir`. With any, the request is framed like `send`. */
   files?: AttachmentEntry[];
 }
@@ -583,16 +585,18 @@ export const NEW_AGENT_UNKNOWN = "Remote start outcome unknown. Check the peer f
  * the bodies still in flight after FIN, has the send's idle timeouts. After
  * FIN a lost reply leaves the outcome unknown.
  */
-export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt, files = [] }: RemoteNewAgentRequest, setTimer: Timer, transfer: OutgoingTransfer = {}): Promise<string> {
+export async function requestNewAgent(conn: PairConnection, { repo, type, name, prompt, autoRetire, files = [] }: RemoteNewAgentRequest, setTimer: Timer, transfer: OutgoingTransfer = {}): Promise<string> {
   const framed = files.length > 0;
   if (framed && !transfer.filesDir) throw new Error("Missing staged attachments");
   const tooLong = new PeerProtocolError(`request longer than ${NEW_AGENT_MAX_REQUEST_BYTES} bytes`);
   let bytes: Uint8Array;
   if (!framed) {
-    bytes = encodeJson({ op: "new-agent", repo, type, name, prompt });
+    bytes = encodeJson({ op: "new-agent", repo, type, name, prompt, autoRetire });
     if (bytes.length > NEW_AGENT_MAX_REQUEST_BYTES) throw tooLong;
   } else {
-    const header: NewAgentHeader = { op: "new-agent", repo, type, ...(name !== undefined && { name }), prompt, files };
+    const header: NewAgentHeader = {
+      op: "new-agent", repo, type, ...(name !== undefined && { name }), prompt, ...(autoRetire !== undefined && { autoRetire }), files,
+    };
     // The frame header has the same 256 KiB cap.
     try { bytes = encodeFrameHeader(header); } catch { throw tooLong; }
   }

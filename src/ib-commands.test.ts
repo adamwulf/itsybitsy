@@ -2317,6 +2317,23 @@ describe("retire → rehire recovery", () => {
     expect(existsSync(join(tempDir, "home", ".itsybitsy", "agents", key))).toBe(true);
   });
 
+  test("rehire drops auto_retire, so the watchdog does not retire the rehired agent again", async () => {
+    // A scheduled task's auto-retired agent (SPEC §21.3) is archived with
+    // auto_retire: true. Rehire is how the user looks at or continues its
+    // work, so the restored meta.json must not carry the flag.
+    const id = "agent-rehire-auto";
+    const { archiveDir } = await plantRehirableArchive(id);
+    const archiveMeta = join(archiveDir, "meta.json");
+    await Bun.write(archiveMeta, JSON.stringify({ ...await Bun.file(archiveMeta).json(), auto_retire: true }));
+    const runner = successRunner();
+    setRehireSpawnRunner(runner);
+    setNukeResumeSpawnRunner(runner);
+    const result = await rehireAgent(id);
+    expect(result.ok).toBe(true);
+    const raw = await Bun.file(join(tempDir, ".itsybitsy", "agents", id, "meta.json")).json();
+    expect("auto_retire" in raw).toBe(false);
+  });
+
   test("notifies a surviving live manager exactly once when a sub-agent is rehired", async () => {
     const agentId = "agent-sub";
     const managerId = "agent-mgr";
@@ -11723,6 +11740,18 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   // ── effort precedence across agent-type layer files ─────────────────────────
   // Precedence (most-specific wins), mirroring the model chain:
   //   --effort > <type>.md > _non_coordinator.md > _all.md > config.effort > 'xhigh'
+
+  test.each([[true, true], [false, undefined], [undefined, undefined]] as const)(
+    "autoRetire %p writes auto_retire %p to meta.json",
+    async (autoRetire, written) => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "test-auto-retire", autoRetire });
+      expect(result.ok).toBe(true);
+      const meta = await Bun.file(join(agentsDir, "test-auto-retire", "meta.json")).json();
+      expect(meta.auto_retire).toBe(written);
+      expect("auto_retire" in meta).toBe(written !== undefined);
+    },
+  );
 
   test("effort E0: --effort flag persists to meta.json and appears in start.sh", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());

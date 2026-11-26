@@ -9397,7 +9397,11 @@ describe("setup Peers tab", () => {
     dashboard.handleInput("\t");
     expect(tab()).toBe(2);
     dashboard.handleInput("\t");
+    expect(tab()).toBe(3);
+    dashboard.handleInput("\t");
     expect(tab()).toBe(0);
+    dashboard.handleInput("\x1b[Z");
+    expect(tab()).toBe(3);
     dashboard.handleInput("\x1b[Z");
     expect(tab()).toBe(2);
     dashboard.handleInput("\x1b");
@@ -9567,7 +9571,7 @@ describe("setup Peers tab", () => {
   test("Kitty Tab and Shift+Tab cycle setup in both directions", () => {
     const { dashboard, service } = open();
     dashboard.handleInput("\x1b[9u");
-    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(3);
     dashboard.handleInput("\x1b[9;2u");
     expect(peersTab(dashboard)).toBeDefined();
     expect(service.calls).toEqual(["open", "close", "open"]);
@@ -9575,15 +9579,15 @@ describe("setup Peers tab", () => {
 
   test("the numbered tab shortcuts type into every pairing field", () => {
     const { dashboard, service } = open();
-    const typeDigits = () => { for (const digit of "123") dashboard.handleInput(digit); };
+    const typeDigits = () => { for (const digit of "1234") dashboard.handleInput(digit); };
     typeDigits();
-    expect(peersTab(dashboard).idValue).toBe("123");
+    expect(peersTab(dashboard).idValue).toBe("1234");
     service.setSession("initiator", { stage: "code-entry" });
     typeDigits();
-    expect(peersTab(dashboard).sessionValue).toBe("123");
+    expect(peersTab(dashboard).sessionValue).toBe("1234");
     service.setStage({ stage: "naming", savedName: OTHER_SHORT });
     typeDigits();
-    expect(peersTab(dashboard).sessionValue).toBe("123");
+    expect(peersTab(dashboard).sessionValue).toBe("1234");
     expect(service.calls).toEqual(["open"]);
     service.setStage({ stage: "verifying" });
     dashboard.handleInput("1");
@@ -13255,7 +13259,7 @@ describe("Unified peer repos in the Agents tree", () => {
     }
   });
 
-  test("a remote row opens Setup with h, and Tab reaches Hooks and Config from Peers", () => {
+  test("a remote row opens Setup with h, and Tab reaches Scheduled, Hooks and Config from Peers", () => {
     const { dashboard } = setup();
     selectByKey(dashboard, WORKER_KEY);
     resetNotice(dashboard);
@@ -13265,7 +13269,11 @@ describe("Unified peer repos in the Agents tree", () => {
     dashboard.handleInput("I");
     expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
     dashboard.handleInput("\t");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(3);
+    dashboard.handleInput("\t");
     expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+    dashboard.handleInput("\x1b[Z");
+    expect(assertDialog(dashboard.dialog, "setup").tab).toBe(3);
     dashboard.handleInput("\x1b[Z");
     expect(assertDialog(dashboard.dialog, "setup").tab).toBe(2);
     dashboard.handleInput("\x1b[Z");

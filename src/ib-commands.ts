@@ -1025,6 +1025,10 @@ export async function rehireAgent(
       state_updated_at: Math.floor(Date.now() / 1000),
     };
     delete restoredMeta.watchdog_pid;
+    // A rehire is for looking at or continuing the agent's work. A scheduled
+    // task's auto-retired agent would otherwise complete again after the
+    // resume nudge and be retired by its new watchdog (SPEC §1.7.1, §21.3).
+    delete restoredMeta.auto_retire;
     if (archivedNicknameCollision) delete restoredMeta.nickname;
     await writeMetaJsonAtomic(agentDir, restoredMeta as unknown as Record<string, unknown>);
     await logAgent(agentDir, `[rehire] Reconstructed from ${archived.archiveKey}`);
@@ -5383,6 +5387,12 @@ export interface NewAgentOptions {
   noWorktree?: boolean;
   print?: boolean;
   spawnedBy?: SpawnedBy;
+  /**
+   * Write `"auto_retire": true` into meta.json, so the watchdog retires the
+   * agent once it completes (SPEC §21.3). Set by the scheduler for a task with
+   * auto-retire on (§21.2); nothing is written when it is not true.
+   */
+  autoRetire?: boolean;
   /** Override cwd for auto-detect manager (used in tests). */
   _cwd?: string;
   /**
@@ -7313,6 +7323,10 @@ async function spawnAgent(
   // a later bug report can be pinned to a release (SPEC §6 risk 1).
   if (agentCli === "agy") {
     initialMetaJson.agy_version = agyVersion;
+  }
+  // A scheduled task with auto-retire on (SPEC §21.2); the watchdog reads it (§21.3).
+  if (opts?.autoRetire === true) {
+    initialMetaJson.auto_retire = true;
   }
   // Claude agents freeze the MCP tools that skip path checks from the same
   // layers as their allow list (`_all` ∪ `_non_coordinator` for non-coordinators

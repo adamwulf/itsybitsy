@@ -31,6 +31,7 @@ export interface NewAgentHeader {
   type: string;
   name?: string;
   prompt: string;
+  autoRetire?: boolean;
   files: AttachmentEntry[];
 }
 
@@ -134,11 +135,15 @@ export function parseSendHeader(value: unknown): SendHeader {
 
 /** Only the listed keys, at least one file, and the same file checks as a send. */
 export function parseNewAgentHeader(value: unknown): NewAgentHeader {
-  if (!object(value) || !onlyKeys(value, "op", "repo", "type", "name", "prompt", "files") || value.op !== "new-agent" ||
+  if (!object(value) || !onlyKeys(value, "op", "repo", "type", "name", "prompt", "autoRetire", "files") || value.op !== "new-agent" ||
       typeof value.repo !== "string" || typeof value.type !== "string" || (value.name !== undefined && typeof value.name !== "string") ||
-      typeof value.prompt !== "string" || !Array.isArray(value.files) || !value.files.length || !value.files.every(validFile)) throw new Error("Malformed new-agent header");
+      typeof value.prompt !== "string" || (value.autoRetire !== undefined && typeof value.autoRetire !== "boolean") ||
+      !Array.isArray(value.files) || !value.files.length || !value.files.every(validFile)) throw new Error("Malformed new-agent header");
   const files = checkedFiles(value.files);
-  return { op: "new-agent", repo: value.repo, type: value.type, ...(value.name !== undefined && { name: value.name }), prompt: value.prompt, files };
+  return {
+    op: "new-agent", repo: value.repo, type: value.type, ...(value.name !== undefined && { name: value.name }), prompt: value.prompt,
+    ...(value.autoRetire !== undefined && { autoRetire: value.autoRetire }), files,
+  };
 }
 
 function checkedFiles(entries: AttachmentEntry[]): AttachmentEntry[] {

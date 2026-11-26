@@ -12,7 +12,8 @@ import * as runtimeNames from "./runtime-names";
 
 import { sameRepoPath } from "./repo-identity";
 import { join } from "path";
-import { mkdirSync } from "fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync } from "fs";
+import { tmpdir } from "os";
 import { watch, type FSWatcher } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { readRepoAgents, readAgentsOfRepos, isCompacting, isRateLimited, isApiError, isApiErrorRateLimited, isApiTerms, isApiSafeguard, readAgentState, hasBackgroundTasks, anyChildActive, readAgentTransient, updateAgentTransient, mutateAgentMeta, readAgentAck, agentStorageDir } from "./agents";
@@ -97,6 +98,15 @@ export interface AgentTracker {
    * (alongside `completionNotified`) and on a fresh entry into `complete`.
    */
   completeCounter: number;
+  /**
+   * The `state_updated_at` of the complete episode whose auto-retire has run
+   * (SPEC §21.3), whatever its result, so a failed retire is not repeated
+   * every tick; null before any attempt. A complete with another
+   * `state_updated_at` is a new episode with its own attempt, even when the
+   * agent ran and completed again between two ticks, so no tick saw it
+   * `running`.
+   */
+  autoRetireAttemptedAt: number | null;
   /**
    * True when the last waiting/complete tick saw a current `ib ack`
    * (SPEC §8.5.2). If a later waiting/complete tick finds the ack gone, the
@@ -362,6 +372,7 @@ export function createTracker(): AgentTracker {
     notifyCount: 0,
     completionNotified: false,
     completeCounter: 0,
+    autoRetireAttemptedAt: null,
     acked: false,
     rateLimitBypassed: false,
     rateLimitNudges: 0,
@@ -889,6 +900,139 @@ async function saveUnknownDebugLog(agent: Agent): Promise<void> {
   } catch { /* best-effort — don't crash watchdog */ }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-retire on completion (SPEC §21.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long, in seconds, `complete` must have been the stored state before an
+ * auto-retire runs (compared against `meta.state_updated_at`, epoch seconds).
+ *
+ * The Stop hook writes `complete` BEFORE it checks for uncommitted changes and
+ * unfinished sub-agents; when it finds either, it queues a reminder and writes
+ * `running` (src/hooks/agent-status.ts). For that moment meta.json says
+ * `complete` about an agent that is about to keep working. One poll interval
+ * is far longer than that window, so a `complete` this old is the hook's last
+ * word.
+ */
+export const AUTO_RETIRE_SETTLE_SECONDS = POLL_INTERVAL_MS / 1000;
+
+/** How one auto-retire ended. */
+export interface AutoRetireResult {
+  /** `ib retire` exited 0. */
+  ok: boolean;
+  /** Its exit code; null when it could not be started. */
+  exitCode: number | null;
+  /** Its stdout and stderr, or the reason it could not be started. */
+  output: string;
+}
+
+/** Starts the detached `ib retire`. Injectable so tests never start an entry point. */
+export type AutoRetireSpawn = (
+  argv: string[],
+  opts: { cwd: string; stdin: "ignore"; stdout: number; stderr: number; detached: true },
+) => { exited: Promise<number> };
+
+const defaultAutoRetireSpawn: AutoRetireSpawn = (argv, opts) => Bun.spawn(argv, opts);
+let autoRetireSpawnFn: AutoRetireSpawn = defaultAutoRetireSpawn;
+
+/** Override the auto-retire spawn for testing. */
+export function setWatchdogAutoRetireSpawn(fn: AutoRetireSpawn): void {
+  autoRetireSpawnFn = fn;
+}
+
+/** Reset the auto-retire spawn to default. */
+export function resetWatchdogAutoRetireSpawn(): void {
+  autoRetireSpawnFn = defaultAutoRetireSpawn;
+}
+
+/**
+ * Retire the watchdog's OWN agent by running `ib retire <id> --force` as a
+ * detached process (its own session), from the agent's repo so the bare id
+ * resolves there, and waiting for it to exit.
+ *
+ * Not in-process, as the lifecycle broker does for a CHILD: a teardown inside
+ * this process would be cut short when this process is signalled, and the
+ * teardown itself causes the signals. The watchdog is a `tmux run-shell` job,
+ * and a tmux server that exits with its last session — this agent's — signals
+ * its jobs (buildTmuxHelperScript forwards that SIGTERM to us). `ib watch`'s
+ * cleanup of stopped agents (reapOrphanedClaude) SIGTERMs `watchdog_pid` once
+ * the agent looks stopped, which it does from the tmux kill until the archive
+ * deletes meta.transient.json. The watchdog only survives its first SIGTERM
+ * (`process.once`), so two of them would kill it halfway through a teardown.
+ * A detached process is no tmux job and its PID is in no meta file, so neither
+ * signal reaches it, and the retire finishes even if this watchdog dies while
+ * waiting.
+ *
+ * The output goes to a file in a fresh private temp directory, not a pipe (a
+ * pipe breaks if this watchdog dies first) and not the agent dir (the agent
+ * can write there, and this process is unsandboxed).
+ */
+async function runAutoRetire(agent: Agent): Promise<AutoRetireResult> {
+  let tempDir: string | undefined;
+  try {
+    tempDir = mkdtempSync(join(tmpdir(), "ib-auto-retire-"));
+    const outputPath = join(tempDir, "output");
+    const fd = openSync(outputPath, "wx");
+    let proc: { exited: Promise<number> };
+    try {
+      proc = autoRetireSpawnFn(["ib", "retire", agent.id, "--force"], {
+        cwd: agent.repoPath,
+        stdin: "ignore",
+        stdout: fd,
+        stderr: fd,
+        detached: true,
+      });
+    } finally {
+      // The child holds its own copy of the descriptor.
+      closeSync(fd);
+    }
+    const exitCode = await proc.exited;
+    const output = (await Bun.file(outputPath).text().catch(() => "")).trim();
+    return { ok: exitCode === 0, exitCode, output };
+  } catch (err) {
+    return { ok: false, exitCode: null, output: err instanceof Error ? err.message : String(err) };
+  } finally {
+    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Auto-retire (SPEC §21.3): retire an agent whose meta.json has
+ * `auto_retire: true` once its `complete` state has settled. Called on every
+ * complete tick; runs the retire at most once per complete episode, an
+ * episode being one stored `complete` and its `state_updated_at`.
+ *
+ * meta.json is read here, right before the retire, and not taken from the
+ * watchdog's startup copy (`agent.meta` in the per-agent loop), which can
+ * predate the flag. That read also aborts the retire when the stored state is
+ * no longer `complete`, or is too new to have settled; neither counts as an
+ * attempt, so a later tick decides again.
+ *
+ * Returns true when the agent was retired; it is gone, so the caller skips the
+ * rest of the complete handling.
+ */
+async function autoRetireIfRequested(agent: Agent, tracker: AgentTracker): Promise<boolean> {
+  const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
+  const { meta } = await readAgentMetaFn(agentDir);
+  if (meta?.auto_retire !== true || meta.state !== "complete") return false;
+  const completedAt = meta.state_updated_at ?? 0;
+  if (tracker.autoRetireAttemptedAt === completedAt) return false;
+  const ageSeconds = Math.floor(nowFn() / 1000) - completedAt;
+  if (ageSeconds < AUTO_RETIRE_SETTLE_SECONDS) return false;
+
+  tracker.autoRetireAttemptedAt = completedAt;
+  await logAgent(agentDir, `[watchdog] auto-retire: state is complete and auto_retire is on — running ib retire ${agent.id} --force`);
+  const result = await runAutoRetire(agent);
+  // On success the retire has logged its own steps ("Agent retired", ...) to
+  // agent.log, archived that log and removed the agent dir: nothing to add.
+  if (result.ok) return true;
+  const how = result.exitCode === null ? "could not start" : `exit ${result.exitCode}`;
+  const detail = result.output ? `: ${result.output.replace(/\s+/g, " ").slice(0, 500)}` : "";
+  await logAgent(agentDir, `[watchdog] auto-retire failed (${how}) — leaving the agent as it is, no retry until it runs again${detail}`);
+  return false;
+}
+
 /**
  * Handler for "complete" state.
  *
@@ -917,6 +1061,10 @@ async function handleComplete(agent: Agent, tracker: AgentTracker, getAllAgents:
   if (tracker.previousState !== "complete") {
     tracker.completeCounter = 0;
   }
+
+  // A scheduled task's agent with auto_retire on: retired, nothing to report.
+  // Before the ack check, so an ack does not hold back an auto-retire.
+  if (await autoRetireIfRequested(agent, tracker)) return;
 
   // Acknowledged by the manager: no fallback for this complete episode.
   if (await ackSuppresses(agent, tracker, "complete")) return;

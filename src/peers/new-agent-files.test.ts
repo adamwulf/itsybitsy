@@ -106,6 +106,15 @@ Attachments copied to this machine:
   } finally { await side.close(); }
 });
 
+test("a framed start passes autoRetire through to newAgent", async () => {
+  const side = serve();
+  try {
+    await requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "Read ./a.txt", autoRetire: true, files: [file("one")] },
+      side.clock.setTimer, { filesDir: await stage("one") });
+    expect(spawn.mock.calls.map(([, , options]) => options)).toStrictEqual([{ type: "worker", name: undefined, autoRetire: true }]);
+  } finally { await side.close(); }
+});
+
 test.each([
   ["an unregistered repo", { repo: "missing" }, "Repo is not registered"],
   ["an unknown type", { type: "absent" }, "unknown or not spawnable"],
@@ -115,6 +124,7 @@ test.each([
   ["a non-string repo", { repo: 42 }, "Malformed new-agent header"],
   ["an extra key", { path: "/other" }, "Malformed new-agent header"],
   ["no files", { files: [] }, "Malformed new-agent header"],
+  ["a non-boolean autoRetire", { autoRetire: "true" }, "Malformed new-agent header"],
 ] as const)("refuses %s before reading any body", async (_, overrides, reason) => {
   const side = serve();
   const header = { op: "new-agent", repo: "app", type: "worker", prompt: "use ./a.txt", files: [file("abc")], ...overrides };

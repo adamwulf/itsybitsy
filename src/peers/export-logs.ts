@@ -34,6 +34,13 @@ import { decodeWatchLogOutput, describeWatchLogFiles, readWatchLogFiles, type Pe
 
 export const EXPORT_LOGS_USAGE = "Usage: ib export-logs [<machine>] [--out <dir>]";
 export const EXPORT_FILE = "export.txt";
+/**
+ * Peer requests published to the outbox at once. ib watch runs at most four
+ * outbox requests together and fails one not claimed within 10 s, so with
+ * many peers, or alongside an `ib send`, publishing them all could fail some
+ * as unclaimed.
+ */
+export const PEER_FETCHES_AT_ONCE = 2;
 
 export interface ExportLogsDeps {
   readPeers(): Promise<Peer[]>;
@@ -250,7 +257,7 @@ export async function exportLogs(parsed: ExportLogsArgs, deps: ExportLogsDeps, s
     return done;
   };
 
-  // The peers, all at once: ib watch runs up to four outbox requests together.
+  // The peers, PEER_FETCHES_AT_ONCE at a time.
   let running: boolean | string = false;
   if (targets.length) {
     try {
@@ -295,7 +302,15 @@ export async function exportLogs(parsed: ExportLogsArgs, deps: ExportLogsDeps, s
     await appendFile(report, "\n" + block.join("\n") + "\n");
     deps.stdout(`${peer.name}: ${describeWatchLogFiles(copy.files)}`);
   });
-  await Promise.all(targets.map(async (peer) => record(await fetchPeer(peer))));
+  // Each worker publishes its next request once its last one has finished.
+  let next = 0;
+  const worker = async () => {
+    while (next < targets.length) {
+      const peer = targets[next++]!;
+      await record(await fetchPeer(peer));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PEER_FETCHES_AT_ONCE, targets.length) }, worker));
   if (peersError !== null) {
     failed = true;
     deps.stdout(`paired peers: not read: ${peersError}`);

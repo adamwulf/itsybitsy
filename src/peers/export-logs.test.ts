@@ -146,6 +146,39 @@ describe("exportLogs", () => {
     expect(await read(EXPORT_FILE)).toEndWith(`  watch.log.1  6 bytes\n\nmachine: old laptop (paired peer)\nid: ${ID_OLD}\nnot fetched: no result from ib watch within 120 s\n`);
   });
 
+  test("at most two peers are fetched at a time: the next request goes out when one finishes", async () => {
+    const peers: Peer[] = [1, 2, 3, 4, 5].map((n) => ({ id: `${n}${n}`.repeat(32), name: `peer ${n}`, pairedAt: "2026-11-01T00:00:00.000Z" }));
+    const asked: { name: string; answer(): void }[] = [];
+    let open = 0;
+    let most = 0;
+    const deps = fakeDeps({
+      readPeers: async () => peers,
+      fetch: (peer) => new Promise((resolve) => {
+        most = Math.max(most, ++open);
+        asked.push({ name: peer.name, answer: () => {
+          open--;
+          resolve({ ok: true, exitCode: 0, stdout: encodeWatchLogOutput(laptopCopy()), stderr: "" });
+        } });
+      }),
+    });
+    const exporting = runExportLogs([], deps);
+    await waitFor(() => asked.length === 2, { message: "the first two" });
+    await Bun.sleep(5);
+    expect(asked.map((a) => a.name)).toEqual(["peer 1", "peer 2"]);
+    asked[1]!.answer();
+    await waitFor(() => asked.length === 3, { message: "the third, once the second finished" });
+    await Bun.sleep(5);
+    expect(asked).toHaveLength(3);
+    asked[0]!.answer();
+    asked[2]!.answer();
+    await waitFor(() => asked.length === 5, { message: "the last two" });
+    asked[3]!.answer();
+    asked[4]!.answer();
+    expect(await exporting).toBe(0);
+    expect(most).toBe(2);
+    expect(out.slice(2)).toEqual(["peer 2", "peer 1", "peer 3", "peer 4", "peer 5"].map((name) => `${name}: 2 files, 0.0 MB`));
+  });
+
   test("every peer fetched: exit 0", async () => {
     expect(await runExportLogs([], fakeDeps({ readPeers: async () => [LAPTOP] }))).toBe(0);
   });

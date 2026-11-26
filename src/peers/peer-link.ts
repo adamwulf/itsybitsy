@@ -1514,5 +1514,5 @@ async function serveWatchLog(conn: PairConnection, stream: PairStream, from: str
   });
   if (delivered) transfer?.ok();
   else transfer?.failed(new Error("writing the reply failed"));
-  deps.log(delivered ? `peer link: ${peerName} (${from}) copied the watch log (${copied})` : `peer link: sending the watch log to ${peerName} (${from}) failed`);
+  deps.log(delivered ? `peer link: wrote the watch log to ${peerName} (${from}) (${copied})` : `peer link: sending the watch log to ${peerName} (${from}) failed`);
 }

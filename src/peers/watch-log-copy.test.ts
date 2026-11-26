@@ -94,7 +94,7 @@ describe("the watch-log op", () => {
     expect(log.headerAt).toBeLessThanOrEqual(log.doneAt);
     expect(accepted[0]!.priority).toBe(ATTACHMENT_BODY_PRIORITY);
     await Bun.sleep(0);
-    expect(logs).toContain(`peer link: Desk (${ID_A.slice(0, 10)}) copied the watch log (3 files, 1.4 MB)`);
+    expect(logs).toContain(`peer link: wrote the watch log to Desk (${ID_A.slice(0, 10)}) (3 files, 1.4 MB)`);
   });
 
   test("the requesting side hears of the header once it is valid, then the body bytes received so far", async () => {
@@ -218,7 +218,7 @@ describe("the watch-log op", () => {
     await expect(requestWatchLog(a, createFakeClock().setTimer)).rejects.toThrow();
     expect(b.closes).toEqual([{ code: PEER_CLOSE.error, reason: "pairing lookup failed" }]);
     expect(logs).toContain(`peer link: refused a request from ${ID_A.slice(0, 10)}: pairing lookup failed: peers.json: EIO; closing`);
-    expect(logs.filter(line => line.includes("not a peer") || line.includes("copied the watch log"))).toEqual([]);
+    expect(logs.filter(line => line.includes("not a peer") || line.includes("wrote the watch log"))).toEqual([]);
   });
 
   async function answerWith(header: object, bodies: Uint8Array[] = []) {

@@ -2748,7 +2748,7 @@ describe("watch log copies (ib export-logs)", () => {
       expect(copy.files.map((file) => [file.name, Buffer.from(file.body).toString()])).toEqual([
         ["watch.log", "remote newest\n"], ["watch.log.1", "remote older\n"],
       ]);
-      expect(responderLogs).toContain("peer link: Desk (0000000000) copied the watch log (2 files, 0.0 MB)");
+      expect(responderLogs).toContain("peer link: wrote the watch log to Desk (0000000000) (2 files, 0.0 MB)");
     } finally {
       await service.shutdown();
     }
@@ -2779,7 +2779,7 @@ describe("watch log copies (ib export-logs)", () => {
       const copy = await requestWatchLog(conn, createFakeClock().setTimer);
       expect(copy).toMatchObject({ name: "desk", version: "1.2.3" });
       expect(copy.files.map((file) => file.name)).toEqual(["watch.log"]);
-      await waitFor(() => logs.includes(`peer link: Laptop C (${ID_REMOTE.slice(0, 10)}) copied the watch log (1 file, 0.0 MB)`));
+      await waitFor(() => logs.includes(`peer link: wrote the watch log to Laptop C (${ID_REMOTE.slice(0, 10)}) (1 file, 0.0 MB)`));
       // The reply's write is one of the service's transfers.
       expect(logs).toContain(`peer link: transfer started: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 1 file, 14 bytes`);
       expect(logs.some(line => line.startsWith(`peer link: transfer ok: watch-log to Laptop C (${ID_REMOTE.slice(0, 10)}): 14 of 14 bytes written in `))).toBe(true);

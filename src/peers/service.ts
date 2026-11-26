@@ -1197,6 +1197,7 @@ export class PeerService {
         const remoteSpawn = this.deps.remoteSpawn;
         await serveTrustedConnection(toPairConnection(conn), {
           setTimer: this.deps.setTimer,
+          now: this.deps.now,
           peerName: (id) => this.peerName(id),
           lifecycle: this.deps.remoteLifecycle && ((request, readPeerName) =>
             acceptRemoteLifecycle(request, readPeerName, this.deps.remoteLifecycle!, this.deps.log)),

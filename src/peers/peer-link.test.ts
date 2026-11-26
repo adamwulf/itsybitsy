@@ -77,7 +77,7 @@ function fullAgent(id: string, extra: Partial<Agent["meta"]> = {}): Agent {
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
 
 /** B serves the trusted ALPN on its end of a memory link; returns A's end and B's counters. */
-function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; acknowledgeQuestion?: PeerResponderDeps["acknowledgeQuestion"]; permissions?: PeerResponderDeps["permissions"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; readPrompt?: PeerResponderDeps["readPrompt"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"] } = {}) {
+function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; acknowledgeQuestion?: PeerResponderDeps["acknowledgeQuestion"]; permissions?: PeerResponderDeps["permissions"]; readerId?: string; captureAgent?: PeerResponderDeps["captureAgent"]; captureCoordinator?: PeerResponderDeps["captureCoordinator"]; readPrompt?: PeerResponderDeps["readPrompt"]; paneReaders?: Set<string>; peers?: Set<string>; snapshot?: () => PeerSnapshot; startAgent?: PeerResponderDeps["startAgent"]; captureDiff?: PeerResponderDeps["captureDiff"]; lookup?: (check: number) => Promise<string | null> } = {}) {
   const readerId = options.readerId ?? ID_A;
   const link = createMemoryLink(readerId, ID_B);
   const peers = options.peers ?? new Set([readerId]);
@@ -87,16 +87,20 @@ function serve(options: { lifecycle?: PeerResponderDeps["lifecycle"]; acknowledg
   const clock = createFakeClock();
   const done = serveTrustedConnection(link.b, {
     setTimer: clock.setTimer,
+    now: clock.now,
     startAgent: options.startAgent,
     lifecycle: options.lifecycle,
     acknowledgeQuestion: options.acknowledgeQuestion,
     permissions: options.permissions,
     captureCoordinator: options.captureCoordinator,
     captureAgent: options.captureAgent,
+    captureDiff: options.captureDiff,
     readPrompt: options.readPrompt,
     paneReaders: options.paneReaders ?? new Set(),
+    // `lookup` replaces the allowlist, by the 1-based number of the check.
     peerName: async (id) => {
       checks++;
+      if (options.lookup) return options.lookup(checks);
       return peers.has(id) ? "Alice" : null;
     },
     snapshot: () => {
@@ -606,6 +610,134 @@ describe("serveTrustedConnection", () => {
     await side.done;
     await waitFor(() => side.b.closeInfo() !== null, { message: "B sees the close" });
     expect(side.logs.filter((line) => line.includes("closing"))).toEqual([]);
+  });
+});
+
+describe("the acceptor's connection log lines (SPEC §20.4)", () => {
+  const ID = ID_A.slice(0, 10);
+  const empty = (): PeerSnapshot => ({ coordinator: null, repos: [], agents: [], questions: [] });
+  const disconnected = (logs: string[]) => waitFor(() => logs.some((line) => line.includes(": disconnected (")), { message: "disconnect line" });
+  /** A lookup that never settles on its own: only the connection's close or the IO deadline ends it. */
+  const hang = () => new Promise<never>(() => {});
+
+  test("a trusted connection's close writes the shared disconnect line: name, uptime since it passed the allowlist, and the close's reason", async () => {
+    const side = serve({ snapshot: empty });
+    await requestAgents(side.a, side.clock.setTimer);
+    side.clock.jump(2 * 3_600_000 + 3 * 60_000 + 12_000);
+    side.a.close(PEER_CLOSE.done, "shutting down");
+    await side.done;
+    await disconnected(side.logs);
+    expect(side.logs).toEqual([
+      `peer link: ${ID} connected`,
+      `peer link: Alice (${ID}): disconnected (accepted, up 2h03m): closed by the other side`,
+    ]);
+  });
+
+  test("a close by this side logs the line too, with the transport's own reason", async () => {
+    const side = serve({ snapshot: empty });
+    await requestAgents(side.a, side.clock.setTimer);
+    side.clock.jump(45_000);
+    side.b.close(PEER_CLOSE.done, "shutting down");
+    await side.done;
+    await disconnected(side.logs);
+    expect(side.logs).toContain(`peer link: Alice (${ID}): disconnected (accepted, up 45s): closed`);
+  });
+
+  test("a peer with no name is shown by its short id in both places", async () => {
+    const side = serve({ snapshot: empty, lookup: async () => "" });
+    await requestAgents(side.a, side.clock.setTimer);
+    side.a.close(PEER_CLOSE.done, "done");
+    await disconnected(side.logs);
+    expect(side.logs).toContain(`peer link: ${ID} (${ID}): disconnected (accepted, up 0s): closed by the other side`);
+  });
+
+  test("a connection refused at the allowlist writes no disconnect line", async () => {
+    const side = serve({ peers: new Set(), snapshot: empty });
+    expect(await rawRequest(side.a, encode({ op: "agents" }))).toBeInstanceOf(Error);
+    await side.done;
+    await Bun.sleep(5);
+    expect(side.logs).toEqual([`peer link: closed a connection from ${ID}: not a peer`]);
+  });
+
+  test("a failed lookup at the connection's accept refuses with its error and code 3, not as 'not a peer'", async () => {
+    const side = serve({ snapshot: empty, lookup: async (check) => check === 1 ? Promise.reject(new Error("peers.json: EIO")) : "Alice" });
+    expect(await rawRequest(side.a, encode({ op: "agents" }))).toBeInstanceOf(Error);
+    expect(side.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.error, reason: "pairing lookup failed" });
+    await side.done;
+    await Bun.sleep(5);
+    expect(side.logs).toEqual([`peer link: closed a connection from ${ID}: pairing lookup failed: peers.json: EIO`]);
+  });
+
+  test.each([[2, "when its stream is accepted"], [3, "right before the answer"]] as const)(
+    "a lookup cut short by the connection closing (check %i, %s) writes no refusal: the disconnect line covers it", async (check) => {
+      const pending = Promise.withResolvers<void>();
+      const side = serve({ snapshot: empty, lookup: async (n) => {
+        if (n !== check) return "Alice";
+        pending.resolve();
+        return hang();
+      } });
+      const stream = await side.a.openBi();
+      await stream.writeAll(encode({ op: "agents" }));
+      await stream.finish();
+      await pending.promise;
+      side.a.close(PEER_CLOSE.done, "done");
+      await side.done;
+      await disconnected(side.logs);
+      await Bun.sleep(5);
+      expect(side.snapshots()).toBe(0);
+      expect(side.logs).toEqual([
+        `peer link: ${ID} connected`,
+        `peer link: Alice (${ID}): disconnected (accepted, up 0s): closed by the other side`,
+      ]);
+    });
+
+  test.each([
+    [2, "throws", "peers.json: EIO", "0s"],
+    [2, "misses the IO deadline", "No progress for 60000 ms", "1m00s"],
+    [3, "throws", "peers.json: EIO", "0s"],
+    [3, "misses the IO deadline", "No progress for 60000 ms", "1m00s"],
+  ] as const)("a lookup that fails for another reason (check %i %s) refuses with its error and closes with code 3", async (check, how, detail, up) => {
+    const pending = Promise.withResolvers<void>();
+    const side = serve({ snapshot: empty, lookup: async (n) => {
+      if (n !== check) return "Alice";
+      pending.resolve();
+      return how === "throws" ? Promise.reject(new Error(detail)) : hang();
+    } });
+    const reply = rawRequest(side.a, encode({ op: "agents" }));
+    await pending.promise;
+    if (how !== "throws") side.clock.advance(60_000);
+    expect(await reply).toBeInstanceOf(Error);
+    expect(side.a.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.error, reason: "pairing lookup failed" });
+    await side.done;
+    await disconnected(side.logs);
+    expect(side.snapshots()).toBe(0);
+    // One line names the failure; the wrapper's own `pairing lookup failed:` line is not added.
+    expect(side.logs).toEqual([
+      `peer link: ${ID} connected`,
+      `peer link: refused a request from ${ID}: pairing lookup failed: ${detail}; closing`,
+      `peer link: Alice (${ID}): disconnected (accepted, up ${up}): closed`,
+    ]);
+  });
+
+  test("a handler's lookup cut short by the close adds no 'pairing lookup failed' line", async () => {
+    const capturing = Promise.withResolvers<void>();
+    const holder: { b?: MemoryConnection } = {};
+    const side = serve({ snapshot: empty, captureCoordinator: async () => {
+      capturing.resolve();
+      await holder.b!.closed();
+      return { state: "running", text: "late" };
+    } });
+    holder.b = side.b;
+    const pane = requestPane(side.a, { op: "coordinator-pane" }, 200, side.clock.setTimer).catch((err: Error) => err);
+    await capturing.promise;
+    side.a.close(PEER_CLOSE.done, "done");
+    expect(await pane).toBeInstanceOf(Error);
+    await disconnected(side.logs);
+    await Bun.sleep(5);
+    expect(side.logs).toEqual([
+      `peer link: ${ID} connected`,
+      `peer link: Alice (${ID}): disconnected (accepted, up 0s): closed by the other side`,
+    ]);
   });
 });
 

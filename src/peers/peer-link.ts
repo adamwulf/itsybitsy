@@ -936,6 +936,8 @@ export interface PeerResponderDeps {
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
+  /** Epoch ms, for the disconnect line's uptime. Defaults to Date.now. */
+  now?(): number;
   lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<RemoteLifecycleOutcome>;
   /** The request's `repo` and `id` as received: the handler validates them. */
   acknowledgeQuestion?(repo: unknown, id: unknown, readPeerName: () => Promise<string | null>): Promise<void>;
@@ -956,24 +958,66 @@ export interface PeerResponderDeps {
  * allowlist before reading anything, again when each request's stream is
  * accepted, and again right before each answer. Each request runs in its own
  * task with its own error handling. Never throws.
+ *
+ * A lookup that says "not a peer" refuses as such. One that failed refuses
+ * with its error and close code 3, so neither side's log says the peer was
+ * removed. One cut short because the connection closed writes no refusal:
+ * once the connection passed the allowlist, its close writes the shared
+ * disconnect line (`accepted`, up since it passed).
  */
 export async function serveTrustedConnection(conn: PairConnection, deps: PeerResponderDeps): Promise<void> {
   const headerReaders = deps.headerReaders ??= new Set();
   const from = shortPeerId(conn.remoteId);
+  const now = deps.now ?? Date.now;
   const lifetime = new AbortController();
   void conn.closed().then(() => lifetime.abort(new Error("Peer connection closed")), err => lifetime.abort(err));
-  const peerName = deps.peerName.bind(deps);
+  const readPeerName = deps.peerName.bind(deps);
+  /** The pairing lookup, bounded by the IO deadline and the connection's life. Throws when it did not finish. */
+  const lookup = (id = conn.remoteId) => waitForIO({ setTimer: deps.setTimer, signal: lifetime.signal }, () => readPeerName(id));
   deps = { ...deps, peerName: async id => {
-    try { return await waitForIO({ setTimer: deps.setTimer, signal: lifetime.signal }, () => peerName(id)); }
-    catch (err) { deps.log(`peer link: pairing lookup failed: ${errorDetail(err)}`); return null; }
+    try { return await lookup(id); }
+    catch (err) {
+      // A lookup cut short by the close adds nothing to the disconnect line.
+      if (!lifetime.signal.aborted) deps.log(`peer link: pairing lookup failed: ${errorDetail(err)}`);
+      return null;
+    }
   } };
-  if ((await deps.peerName(conn.remoteId)) === null) {
-    deps.log(`peer link: closed a connection from ${from}: not a peer`);
-    closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+  let name: string;
+  try {
+    const found = await lookup();
+    if (found === null) {
+      deps.log(`peer link: closed a connection from ${from}: not a peer`);
+      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+      return;
+    }
+    name = found;
+  } catch (err) {
+    deps.log(`peer link: closed a connection from ${from}: pairing lookup failed: ${errorDetail(err)}`);
+    closeQuietly(conn, PEER_CLOSE.error, "pairing lookup failed");
     return;
   }
+  const trustedAt = now();
   deps.log(`peer link: ${from} connected`);
+  void conn.closed().then(describePeerClose, errorDetail).then(reason =>
+    deps.log(disconnectLine(name || from, conn.remoteId, "accepted", now() - trustedAt, reason)));
   deps.trusted?.();
+  /** Pairing still holds: the name. Otherwise the connection is closed (or already was) and null. */
+  const stillPaired = async (): Promise<string | null> => {
+    try {
+      const found = await lookup();
+      if (found !== null) {
+        name = found;
+        return found;
+      }
+      deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
+      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+    } catch (err) {
+      if (lifetime.signal.aborted) return null;
+      deps.log(`peer link: refused a request from ${from}: pairing lookup failed: ${errorDetail(err)}; closing`);
+      closeQuietly(conn, PEER_CLOSE.error, "pairing lookup failed");
+    }
+    return null;
+  };
   for (;;) {
     let stream: PairStream;
     try {
@@ -981,17 +1025,13 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
     } catch {
       return; // the connection closed
     }
-    if ((await deps.peerName(conn.remoteId)) === null) {
-      deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
-      closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
-      return;
-    }
+    if ((await stillPaired()) === null) return;
     if (headerReaders.size >= 8) {
       await sendReply(conn, stream, deps, encodeErrorReply("busy, try again"), stream.stopReceiving());
       continue;
     }
     headerReaders.add(stream);
-    void serveRequest(conn, stream, from, deps, lifetime.signal);
+    void serveRequest(conn, stream, from, deps, lifetime.signal, stillPaired);
   }
 }
 
@@ -1065,8 +1105,9 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
   return delivered;
 }
 
-/** One request on its own stream. Every error stays here. */
-async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal): Promise<void> {
+/** One request on its own stream. Every error stays here. `stillPaired` is the connection's pairing re-check. */
+async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal,
+  stillPaired: () => Promise<string | null>): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
   let reading: Promise<Uint8Array> | undefined;
   async function read(limit: number) {
@@ -1178,12 +1219,8 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
   // Again now, right before answering: the stream was accepted on its first
   // frame, and a client can hold it open across `ib peer remove` before it
   // finishes the request. The answer reflects peers.json as of this moment.
-  const peerName = await deps.peerName(conn.remoteId);
-  if (peerName === null) {
-    deps.log(`peer link: refused a request from ${from}: no longer a peer; closing`);
-    closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
-    return;
-  }
+  const peerName = await stillPaired();
+  if (peerName === null) return;
 
   let reply: Uint8Array | Uint8Array[];
   let capturedCoordinator = false;

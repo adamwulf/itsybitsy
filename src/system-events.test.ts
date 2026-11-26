@@ -6,6 +6,7 @@ import {
   SystemEventMonitor,
   formatSleepDuration,
   pmsetSleepWakeEntries,
+  runCommand,
   summarizeAssertions,
   summarizePowerSource,
   type SystemEventHelper,
@@ -94,6 +95,24 @@ describe("pmsetSleepWakeEntries", () => {
     const entries = pmsetSleepWakeEntries(PMSET_LOG, sleepAt);
     expect(entries.map((e) => e.line.split(" ")[3])).toEqual(["DarkWake", "Wake"]);
     expect(entries[0]!.at).toBe(Date.parse("2026-11-22T23:01:00Z"));
+  });
+});
+
+describe("runCommand", () => {
+  test("resolves stdout", async () => {
+    expect(await runCommand(["/bin/echo", "ok"])).toBe("ok\n");
+  });
+
+  test("a failure names the exit code and stderr", async () => {
+    await expect(runCommand(["/bin/sh", "-c", "echo boom >&2; exit 3"])).rejects.toThrow("/bin/sh -c echo boom >&2; exit 3 exited 3: boom");
+  });
+
+  test("a run killed by the timeout says so", async () => {
+    await expect(runCommand(["/bin/sleep", "5"], 100)).rejects.toThrow("/bin/sleep 5 timed out after 0.1 s");
+  });
+
+  test("an early death by signal is not called a timeout", async () => {
+    await expect(runCommand(["/bin/sh", "-c", "kill -TERM $$"], 5_000)).rejects.toThrow("exited 143");
   });
 });
 
@@ -260,6 +279,9 @@ describe("SystemEventMonitor", () => {
     const failing = new Set(["log"]);
     const t = setup({ failing, startAt: Date.parse("2026-11-22T22:30:00Z") });
     t.monitor.start();
+    // Past every fixture entry: a failed read that moved the cutoff to now()
+    // would then hide them from the next wake.
+    t.advance(4 * 3_600_000);
     t.fake.print("event did-wake");
     await t.settle();
     expect(t.lines).toContain("system: pmset log unavailable: /usr/bin/pmset -g log timed out after 15 s");

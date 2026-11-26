@@ -27,7 +27,8 @@
  *
  * The helper exits when its stdin reaches EOF, so it dies with ib watch even
  * after a crash or SIGKILL. Like watch-log.ts, nothing here throws: a failed
- * spawn or pmset run logs one line and the dashboard carries on.
+ * spawn or pmset run logs one line (a failed `pmset -g batt` only drops the
+ * power source from its snapshot) and the dashboard carries on.
  */
 
 /**
@@ -155,7 +156,7 @@ export interface SystemEventMonitorOptions {
   log: (line: string) => void;
   /** Start the helper. Default: osascript running SYSTEM_EVENTS_SCRIPT. */
   spawnHelper?: () => SystemEventHelper;
-  /** Run a command and resolve its stdout; reject on failure. Default: Bun.spawn. */
+  /** Run a command and resolve its stdout; reject on failure. Default: runCommand. */
   run?: (cmd: string[]) => Promise<string>;
   /** Wall clock. Default Date.now. */
   now?: () => number;
@@ -181,17 +182,20 @@ function defaultSpawnHelper(): SystemEventHelper {
 
 const RUN_TIMEOUT_MS = 15_000;
 
-async function defaultRun(cmd: string[]): Promise<string> {
-  const startedAt = Date.now();
-  const proc = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: RUN_TIMEOUT_MS });
+/** The default `run`: stdout of `cmd`, or a rejection naming a timeout, the
+ *  exit code and stderr. Exported for its tests. */
+export async function runCommand(cmd: string[], timeoutMs = RUN_TIMEOUT_MS): Promise<string> {
+  const startedAt = performance.now();
+  const proc = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: timeoutMs });
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  // Bun's timeout kills with SIGTERM and `exited` resolves to 143.
-  if (proc.signalCode !== null && Date.now() - startedAt >= RUN_TIMEOUT_MS) {
-    throw new Error(`${cmd.join(" ")} timed out after ${RUN_TIMEOUT_MS / 1_000} s`);
+  // Bun's timeout kills with SIGTERM and `exited` resolves to 143. The
+  // elapsed check tells it from a process that died of a signal early.
+  if (proc.signalCode !== null && performance.now() - startedAt >= timeoutMs) {
+    throw new Error(`${cmd.join(" ")} timed out after ${timeoutMs / 1_000} s`);
   }
   if (code !== 0) throw new Error(`${cmd.join(" ")} exited ${code}${err.trim() ? `: ${err.trim()}` : ""}`);
   return out;
@@ -312,7 +316,7 @@ export class SystemEventMonitor {
   constructor(opts: SystemEventMonitorOptions) {
     this.log = opts.log;
     this.spawnHelper = opts.spawnHelper ?? defaultSpawnHelper;
-    this.run = opts.run ?? defaultRun;
+    this.run = opts.run ?? ((cmd) => runCommand(cmd));
     this.now = opts.now ?? Date.now;
     this.platform = opts.platform ?? process.platform;
   }

@@ -1524,7 +1524,7 @@ Source: one helper process, `osascript -l JavaScript` running a JXA script throu
 | `keychain at start: <state>`, then `keychain locked` / `keychain unlocked` | the default keychain's `SecKeychainGetStatus`, polled every 10 s; it never prompts. `<state>` can also be `unknown`. |
 | `listening` | the helper started |
 | `listener stopped (exit N): <stderr>` / `listener failed to start: …` | the helper died or could not start; it is not restarted |
-| `power assertions (<when>) unavailable: …` / `pmset log unavailable: …` | a `pmset` run failed or timed out (15 s) |
+| `power assertions (<when>) unavailable: …` / `pmset log unavailable: …` | a `pmset` run failed or timed out (15 s). A failed `pmset -g batt` writes no line; the snapshot just has no `; power: …`. |
 | `power assertions (<when>): …` | `pmset -g assertions` and `pmset -g batt` summarised in one line, at start, display sleep, display wake and wake: the non-zero system-wide counts, each holder grouped by process and type with its count and longest age (is `caffeinate` still held), the kernel assertions and idle sleep preventers, and the power source with the battery charge. `<when>` names the event because the line lands when pmset finishes. |
 | `pmset: <entry>` | after each wake, the `Sleep`, `Wake` and `DarkWake` entries `pmset -g log` gained since start or the last read, with their own local timestamps: the sleep reason (`'Idle Sleep'`, `'Clamshell Sleep'`, `'Low Power Sleep'`, maintenance), each dark wake, and the wake cause. At most 40: past that, the first entry (the `Sleep` with the real reason; after a dark wake every later `Sleep` says maintenance), then `pmset: N entries not shown`, then the newest 39. The read takes about 3 s (a 2 MB log). |
 

@@ -237,7 +237,7 @@ Press `?` in the dashboard for this list.
 | Open | `w` / `o` / `O` | Worktree in Finder / external diff / diff vs manager |
 | | `G` / `C` | Ghostty: repo worktree / agent's tmux session (on a remote agent, `C` attaches over the peer link) |
 | | `S` | Save debug snapshot |
-| App | `h` | Open setup (Hooks, Config, Peers) |
+| App | `h` | Open setup (Hooks, Config, Peers, Scheduled) |
 | | `I` | Open setup on Peers to see this install's id, check link states, or pair with another install |
 | | `?` / `Ctrl-C` | Help / quit |
 

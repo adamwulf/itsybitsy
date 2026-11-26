@@ -1590,15 +1590,16 @@ The `ib watch` TUI reads this registry at startup and monitors all registered re
 
 ### 10.1 Dialog Structure
 
-The Setup dialog is accessible via the `h` keybinding in `ib watch`. It has three tabs.
+The Setup dialog is accessible via the `h` keybinding in `ib watch`. It has four tabs.
 
 | Tab Index | Tab Name | Description |
 |-----------|----------|-------------|
 | 0 | **Hooks** | Manage global hook installation. Shows two items: **Safety hooks** (path isolation + status injection + session-start context, grouped as one toggle) and **Task interception** (intercept-task hook). Per-agent hooks (path-check, stop) are installed automatically per agent and are not shown here. |
 | 1 | **Config** | Edit user-wide configuration keys from `~/.itsybitsy/config.json` (e.g., `externalDiffTool`, `autoCompactThreshold`). Changes are written back via `writeConfig()`. |
 | 2 | **Peers** | Show this install's id, endpoint status and paired peers, and pair with another install (§20.1). |
+| 3 | **Scheduled** | List, add, edit and delete scheduled tasks (§21.4). |
 
-Tab and Shift+Tab cycle through the tabs. The number keys `1`, `2`, and `3` select a tab directly, except while typing a pairing id, code, or name. `I` opens setup directly on Peers.
+Tab and Shift+Tab cycle through the tabs. The number keys `1` to `4` select a tab directly, except while typing a pairing id, code, or name. `I` opens setup directly on Peers.
 
 ### 10.2 Permissions Editor
 
@@ -3704,11 +3705,11 @@ Peers is the third tab of the `h` setup dialog. Press `h` then `3`, or press `I`
 
 **Name entry.** After `pair-ok`, each side shows `Paired with <short id>.` and the prompt `Name for <short id>:`. Enter saves the typed name with `addPeer`, which replaces the entry by id and keeps its `pairedAt`; the name is sanitized (§12.1.3). Esc, or Enter on a blank input, keeps the saved name: the short id for a new peer, or the name A already gave B. A typed name is checked first, as it would be stored, and refused inline in red under the input (typing clears it) by the rules in §20.2 **Peer names**. Names are local and never sent. B skips name entry when A was already paired (§20.2): it keeps the name it has and shows `<A short id> was already paired, as "<name>".`
 
-**Results.** Success shows `Paired with "<name>" (<short id>).` Failures show one of: `Pairing refused: <id> does not have its Peers tab open.`, `Pairing refused: <id> is busy with another pairing.`, `Wrong code. Pairing failed; start again from the install that dials.`, `The code expired. Pairing failed.`, `Pairing cancelled.`, `Connection failed: <detail>`, or `Pairing failed: <detail>` (a malformed message, or a save that failed). Press Enter or Esc to return to the idle Peers view. Tab, Shift+Tab, `1` and `2` switch tabs, whatever row is selected (§20.5).
+**Results.** Success shows `Paired with "<name>" (<short id>).` Failures show one of: `Pairing refused: <id> does not have its Peers tab open.`, `Pairing refused: <id> is busy with another pairing.`, `Wrong code. Pairing failed; start again from the install that dials.`, `The code expired. Pairing failed.`, `Pairing cancelled.`, `Connection failed: <detail>`, or `Pairing failed: <detail>` (a malformed message, or a save that failed). Press Enter or Esc to return to the idle Peers view. Tab, Shift+Tab, `1`, `2` and `4` switch tabs, whatever row is selected (§20.5).
 
 **Esc** cancels while the protocol runs (connecting, code entry, verifying, B's request and code), which closes the connection with the cancel code and returns to the idle view; the other side shows `Pairing cancelled.` At the name prompt it keeps the saved name, on a result it returns to the idle view, and in the idle view it closes the dialog. Once A has `pair-ok` or B has accepted the code, the pairing can no longer be cancelled. Setup handles tab navigation (§10.1). Other keys stay in the Peers tab.
 
-Switching to Hooks or Config, closing setup, or replacing it with another dialog stops B from accepting requests and cancels a pending pairing. The endpoint stays bound. Returning to Peers enables pairing again.
+Switching to Hooks, Config or Scheduled, closing setup, or replacing it with another dialog stops B from accepting requests and cancels a pending pairing. The endpoint stays bound. Returning to Peers enables pairing again.
 
 ### 20.2 Pair Protocol
 
@@ -3975,4 +3976,32 @@ A task with `autoRetire` on starts its agent with `auto_retire: true` in meta.js
 
 ### 21.4 Scheduled Tab
 
-(To be written with the tab.)
+`src/tui/scheduled-dialog.ts`. Scheduled is the fourth tab of the `h` setup dialog (§10.1): press `h` then `4`. The `?` help lists `h` as `setup (Hooks, Config, Peers, Scheduled)`.
+
+**List.** Opening the tab reads `scheduled-tasks.json` and `peers.json`. It shows `Loading scheduled tasks…` until both are read, and is not refreshed while shown. Each task takes three lines:
+
+- its cron, `<machine>/<repo>`, its type, and `auto-retire` when that is on. The machine is `This machine`, the peer's name from `peers.json`, or the peer's short id followed by `(unpaired)` when `peers.json` no longer lists it. When `peers.json` cannot be read, its error is shown in red above the list and a peer task shows only the short id;
+- the first line of its prompt, truncated to fit;
+- `next: <time>` (`nextFireTime(cron, now)`, in local time), or, once `lastRunAt` is set, `last run: <time>` followed by `started <lastAgentId>`, or by `failed: <lastError>` in red. A schedule with no next fire time shows the `cronProblem` text in red.
+
+An empty list shows `No scheduled tasks. Press a to add one.` The list shows as many tasks as fit, keeping the selected one visible, with `↑ N more` and `↓ N more` for the rest. A task file the store cannot read shows the store's error in red, and `a`, Enter and `x` do nothing.
+
+**Keys.** j/k and ↑/↓ move the selection. `a` opens the form for a new task, Enter opens it for the selected task, and `x` asks `Delete the scheduled task "<cron>" on <machine>/<repo>?` with Cancel focused. Delete removes the task and reopens the tab with the next task selected (the previous one when it was the last). Cancel or Esc reopens the tab with the task still selected. Esc on the tab closes setup. The tab has no text field, so `1` to `4`, Tab and Shift+Tab always switch tabs.
+
+**Form.** `New Scheduled Task` or `Edit Scheduled Task`, with these fields in Tab order (Shift+Tab goes back):
+
+| Field | Behavior |
+|---|---|
+| Machine | `This machine`, then every peer in `peers.json` in file order, connected or not, each labeled with its name and link status (§20.4). |
+| Repo | For this machine, its registered repos' registry names. For a peer, the registry names its link reports while connected; an offline or connecting peer offers none. |
+| Type | The spawnable types without `repo-coordinator` and `system-coordinator`. A new task starts on `manager`. |
+| Schedule | A single-line cron input. Under it, the dim hint `min hour day month weekday, e.g. 30 9 * * 1-5`, then `next: <local time>` or the `cronProblem` text in red, recomputed on every keystroke. |
+| Auto-retire | A checkbox, toggled with Space or Enter, with the dim note `retire the agent when it signals I HAVE COMPLETED THE GOAL (archived, not merged)` (§21.3). Off for a new task. |
+| Prompt | Multi-line, the New Agent form's prompt editor. |
+| `[ Cancel ]  [ Save ]` | Enter activates the focused button; ← and → move between them. |
+
+Machine, Repo and Type cycle as the New Agent form's Machine and Type do: Space, Enter or → for the next choice, Shift+Space or ← for the previous. A change of machine keeps the picked repo when the new machine offers a repo of the same name (ignoring case), and otherwise shows its first repo. Peer link changes redraw the form. When the chosen machine offers no repo, the Repo field shows `(none)` and a red line says why (`No repos are registered on this machine.`, `<peer> is <status>: its repos are known only while it is connected.`, `<peer> reports no repos.` or `<peer> is no longer paired.`). Save is then disabled, and Tab skips it. Every typed character, digits and letters included, goes into the focused Schedule or Prompt field; on a button, a typed character moves focus to Prompt and is typed there.
+
+When editing, the task's machine, repo and type stay choices even when the machine is no longer paired (shown as `<short id> (unpaired)`), the repo is not reported now, or the type is no longer spawnable, so editing one field never retargets the task.
+
+Save trims the prompt and calls `createScheduledTask` or `updateScheduledTask` (§21.1). The form ignores keys until the write settles. A refused or failed Save shows the error in red under the buttons and keeps the draft. A successful Save reopens setup on the Scheduled tab, with the list read again and the saved task selected. Esc or Cancel reopens the tab without saving, with the previously selected task selected.

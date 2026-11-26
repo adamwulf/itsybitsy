@@ -1904,6 +1904,8 @@ The default prompt content (from `docs/agent-types/system-coordinator.md`):
 >
 > The watchdog tells you when one of your own subtasks completes or needs input, but not about an agent you started in another repo. For those, schedule a check-in with `ScheduleWakeup` or `CronCreate` before you go `WAITING`, and when it fires, follow up with `ib list` and `ib look <id>`. Do not poll with `sleep` or loops.
 >
+> To debug the connection to a paired machine, run `ib export-logs` (optionally `ib export-logs <machine>`), and give that Bash call a timeout of 600000 ms, the maximum: it copies two peers' files at a time, and each copy can take up to 120 s. It copies the `ib watch` log files of this machine and of each paired peer into the directory it prints. You cannot read files, so give that directory to an agent to read.
+>
 > When the user asks you to bounce `ib watch`, or to pick up ib changes you merged, run `ib bounce`. Five seconds later `ib watch` quits, which stops this session; bounce.sh then rebuilds ib, relaunches `ib watch`, and resumes this session, whose context says when the bounce happened and whether ib was rebuilt. Once this session is back, you are sent "ib watch has restarted after a bounce". It refuses if bounce.sh did not start `ib watch`. Send any reply before you run it: your turn ends when `ib watch` quits.
 
 #### 12.1.6 Watchdog Behavior

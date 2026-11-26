@@ -945,6 +945,8 @@ describe("trusted new-agent responder", () => {
     ["repo name collision", { name: "app" }, "collides with registered repo"],
     ["empty prompt", { prompt: "  " }, "non-empty text"],
     ["non-text prompt", { prompt: 17 }, "non-empty text"],
+    ["non-boolean autoRetire", { autoRetire: "yes" }, "autoRetire must be a boolean"],
+    ["null autoRetire", { autoRetire: null }, "autoRetire must be a boolean"],
   ] as const)("refuses %s before spawning", async (_, overrides, reason) => {
     const { side, spawn, notice } = receiver();
     const reply = decodeText(await rawRequest(side.a, encode({ ...request, ...overrides })));
@@ -972,6 +974,21 @@ describe("trusted new-agent responder", () => {
     const reply = decodeText(await rawRequest(side.a, encode({ ...request, repo: "MilestoneMade.com", path: "/other" })));
     expect(reply).toEqual({ ok: true, id: "agent-123" });
     expect(spawn.mock.calls).toEqual([["/local/site", request.prompt, { type: request.type, name: undefined }]]);
+    side.a.close(0, "done");
+  });
+
+  test.each([true, false])("passes a scheduled start's autoRetire %p through to newAgent", async autoRetire => {
+    const { side, spawn } = receiver();
+    const id = await requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "build it", autoRetire }, side.clock.setTimer);
+    expect(id).toBe("agent-123");
+    expect(spawn.mock.calls).toStrictEqual([["/local/app", "build it", { type: "worker", name: undefined, autoRetire }]]);
+    side.a.close(0, "done");
+  });
+
+  test("a start without autoRetire passes none to newAgent", async () => {
+    const { side, spawn } = receiver();
+    await requestNewAgent(side.a, { repo: "app", type: "worker", prompt: "build it" }, side.clock.setTimer);
+    expect(spawn.mock.calls).toStrictEqual([["/local/app", "build it", { type: "worker", name: undefined }]]);
     side.a.close(0, "done");
   });
 

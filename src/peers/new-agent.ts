@@ -15,10 +15,10 @@ export interface RemoteSpawnDeps {
   attachments?: AttachmentReceiver;
 }
 
-interface ValidatedStart { repo: RepoEntry; type: string; name?: string; prompt: string }
+interface ValidatedStart { repo: RepoEntry; type: string; name?: string; prompt: string; autoRetire?: boolean }
 
 /** Every check of a remote start, before the pairing re-check and any attachment body. */
-async function validateRemoteAgent({ repo, type, name, prompt }: { repo?: unknown; type?: unknown; name?: unknown; prompt?: unknown }, deps: RemoteSpawnDeps): Promise<ValidatedStart> {
+async function validateRemoteAgent({ repo, type, name, prompt, autoRetire }: { repo?: unknown; type?: unknown; name?: unknown; prompt?: unknown; autoRetire?: unknown }, deps: RemoteSpawnDeps): Promise<ValidatedStart> {
   if (!isStoredRepoName(repo) || repo.includes("\0")) throw new Error("Invalid repo registry name");
   const repos = await deps.listRepos();
   const registered = repos.find(r => r.name.toLowerCase() === repo.toLowerCase());
@@ -34,12 +34,13 @@ async function validateRemoteAgent({ repo, type, name, prompt }: { repo?: unknow
   }
   if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Prompt must be non-empty text");
   if (Buffer.byteLength(prompt) > NEW_AGENT_MAX_REQUEST_BYTES) throw new Error("Prompt exceeds 256 KB");
-  return { repo: registered, type, name, prompt };
+  if (autoRetire !== undefined && typeof autoRetire !== "boolean") throw new Error("autoRetire must be a boolean");
+  return { repo: registered, type, name, prompt, autoRetire };
 }
 
 /** The caller has just re-checked the pairing. `summary` describes received files for the log and notice. */
-async function spawnRemoteAgent({ repo, type, name }: ValidatedStart, prompt: string, peerName: string, deps: RemoteSpawnDeps, log: (line: string) => void, summary = ""): Promise<string> {
-  const result = await deps.newAgent(repo.path, prompt, { type, name });
+async function spawnRemoteAgent({ repo, type, name, autoRetire }: ValidatedStart, prompt: string, peerName: string, deps: RemoteSpawnDeps, log: (line: string) => void, summary = ""): Promise<string> {
+  const result = await deps.newAgent(repo.path, prompt, { type, name, ...(autoRetire !== undefined && { autoRetire }) });
   if (!result.ok) throw new Error(result.stderr || result.stdout || "Could not start agent");
   const id = result.stdout.trim();
   log(`${peerName} started agent ${id} in ${repo.name}${summary}`);

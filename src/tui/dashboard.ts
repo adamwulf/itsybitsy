@@ -5062,7 +5062,9 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
       startRemote: (task, prompt, signal) => peerService.startRemoteAgent(task.machine!, {
         repo: task.repo, type: task.agentType, prompt, autoRetire: task.autoRetire,
       }, { signal }),
-      remoteRunsHere: () => peerService.view().status.kind !== "disabled",
+      // From the last endpoint-lock outcome, not the status: the 30 s lock
+      // poll's bind reads `starting` while it asks the owner's lock again.
+      remoteRunsHere: () => !peerService.endpointOwnedElsewhere,
       machineName: machine,
       targetName: (id) => {
         if (id === null) return machine;

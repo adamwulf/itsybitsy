@@ -240,7 +240,7 @@ export class PeerPoller {
       if (keep && !logged) {
         logged = true;
         const name = this.links.get(peerId)?.name ?? "peer";
-        this.deps.log(`peer link: ${name} (${shortPeerId(peerId)}): ${what} timed out while an attachment transfer is moving bytes; keeping the connection`);
+        this.deps.log(`peer link: ${name} (${shortPeerId(peerId)}): ${what} timed out while a transfer with this peer is moving bytes; keeping the connection`);
       }
       return keep;
     };

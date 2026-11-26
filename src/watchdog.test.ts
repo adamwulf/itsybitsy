@@ -1,7 +1,7 @@
 import { localAttachmentVolume } from "./peers/local-attachments";
 import { test, expect, describe, beforeEach, afterEach, beforeAll, afterAll, mock, spyOn, setDefaultTimeout } from "bun:test";
 import { join } from "path";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, writeSync, existsSync, readFileSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { setUserHome, resetUserHome } from "./home";
 import { saveRegistry } from "./registry";
@@ -81,7 +81,11 @@ import {
   resetWatchdogSandboxProxyFns,
   setWatchdogReadAck,
   resetWatchdogReadAck,
+  setWatchdogAutoRetireSpawn,
+  resetWatchdogAutoRetireSpawn,
+  AUTO_RETIRE_SETTLE_SECONDS,
   type AgentTracker,
+  type AutoRetireSpawn,
 } from "./watchdog";
 import { writeAgentTransient, writeAgentState, resetListTmuxSessionsCache, type AgentAck } from "./agents";
 import {
@@ -3294,6 +3298,180 @@ describe("watchdog", () => {
   });
 });
 
+describe("auto-retire on completion (SPEC §21.3)", () => {
+  const NOW_SEC = 1_900_000_000;
+  /** A `complete` written this long ago has settled. */
+  const SETTLED_AT = NOW_SEC - AUTO_RETIRE_SETTLE_SECONDS;
+  const ATTEMPT = "[watchdog] auto-retire: state is complete and auto_retire is on — running ib retire w1 --force";
+
+  let repo: string;
+  let nowMs: number;
+  let spawns: Array<{ argv: string[]; opts: Parameters<AutoRetireSpawn>[1] }>;
+  let exitCode: number;
+  let printed: string;
+
+  beforeEach(() => {
+    clearTrackers();
+    repo = mkdtempSync(join(tmpdir(), "ib-watchdog-auto-retire-"));
+    nowMs = NOW_SEC * 1000;
+    spawns = [];
+    exitCode = 0;
+    printed = "";
+    setWatchdogNow(() => nowMs);
+    setWatchdogCaptureTmux(async () => "no shells");
+    // Records the `ib retire` instead of starting it, and prints what a real
+    // one would into the descriptor it was handed.
+    setWatchdogAutoRetireSpawn((argv, opts) => {
+      spawns.push({ argv: [...argv], opts });
+      if (printed) writeSync(opts.stdout, printed);
+      return { exited: Promise.resolve(exitCode) };
+    });
+  });
+
+  afterEach(() => {
+    clearTrackers();
+    resetWatchdogNow();
+    resetWatchdogCaptureTmux();
+    resetWatchdogAutoRetireSpawn();
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  const agentDirOf = (id: string) => join(repo, ".itsybitsy", "agents", id);
+
+  /**
+   * An agent in `repo` with no manager. Its meta.json on disk has `state` and
+   * `disk`; the in-memory `agent.meta` (the watchdog's startup copy) never
+   * carries `auto_retire`.
+   */
+  function onDisk(id: string, state: AgentState, disk: Record<string, unknown>): Agent {
+    const a: Agent = { ...agent(id, state), repoPath: repo };
+    mkdirSync(agentDirOf(id), { recursive: true });
+    writeFileSync(join(agentDirOf(id), "meta.json"), JSON.stringify({
+      ...a.meta,
+      state,
+      state_updated_at: SETTLED_AT,
+      ...disk,
+    }));
+    return a;
+  }
+
+  function agentLog(id: string): string {
+    const path = join(agentDirOf(id), "agent.log");
+    return existsSync(path) ? readFileSync(path, "utf-8") : "";
+  }
+
+  test("complete with auto_retire runs `ib retire <id> --force` once, detached, from the agent's repo", async () => {
+    const w1 = onDisk("w1", "complete", { auto_retire: true });
+    expect(w1.meta.auto_retire).toBeUndefined();
+
+    for (let i = 0; i < 3; i++) await tick([w1]);
+
+    expect(spawns).toHaveLength(1);
+    const { argv, opts } = spawns[0]!;
+    expect(argv).toEqual(["ib", "retire", "w1", "--force"]);
+    expect(opts.cwd).toBe(repo);
+    expect(opts.detached).toBe(true);
+    expect(opts.stdin).toBe("ignore");
+    expect(opts.stderr).toBe(opts.stdout);
+    expect(agentLog("w1")).toContain(ATTEMPT);
+    expect(agentLog("w1")).not.toContain("auto-retire failed");
+  });
+
+  test.each([
+    ["absent", {}],
+    ["false", { auto_retire: false }],
+    ["the string \"true\"", { auto_retire: "true" }],
+  ])("complete with auto_retire %s retires nothing and completes as before", async (_label, disk) => {
+    const w1 = onDisk("w1", "complete", disk);
+
+    for (let i = 0; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) await tick([w1]);
+
+    expect(spawns).toHaveLength(0);
+    expect(getTracker("w1").completionNotified).toBe(true);
+    expect(agentLog("w1")).not.toContain("auto-retire");
+  });
+
+  test.each(["waiting", "running"] as const)("%s with auto_retire retires nothing", async (state) => {
+    const w1 = onDisk("w1", state, { auto_retire: true });
+
+    for (let i = 0; i < 3; i++) await tick([w1]);
+
+    expect(spawns).toHaveLength(0);
+    expect(getTracker("w1").autoRetireAttempted).toBe(false);
+  });
+
+  test("a complete younger than AUTO_RETIRE_SETTLE_SECONDS waits for a later tick", async () => {
+    const w1 = onDisk("w1", "complete", { auto_retire: true, state_updated_at: SETTLED_AT + 1 });
+
+    await tick([w1]);
+    expect(spawns).toHaveLength(0);
+    expect(getTracker("w1").autoRetireAttempted).toBe(false);
+
+    nowMs += 1000;
+    await tick([w1]);
+    expect(spawns).toHaveLength(1);
+  });
+
+  test("aborts while meta.json no longer says complete (the Stop hook reopened the agent)", async () => {
+    // The tick resolved `complete`, but the file was rewritten to running since.
+    const w1 = onDisk("w1", "running", { auto_retire: true });
+    const resolvedComplete: Agent = { ...w1, state: "complete" };
+
+    await tick([resolvedComplete]);
+    expect(spawns).toHaveLength(0);
+    expect(getTracker("w1").autoRetireAttempted).toBe(false);
+  });
+
+  test("a failed retire is logged with its output and not retried on later complete ticks", async () => {
+    exitCode = 1;
+    printed = "Could not retire agent 'w1'\nWarning: could not remove agent directory\n";
+    const w1 = onDisk("w1", "complete", { auto_retire: true });
+
+    await tick([w1]);
+    expect(spawns).toHaveLength(1);
+    expect(agentLog("w1")).toContain(ATTEMPT);
+    expect(agentLog("w1")).toContain(
+      "[watchdog] auto-retire failed (exit 1) — leaving the agent as it is, no retry until it runs again: " +
+      "Could not retire agent 'w1' Warning: could not remove agent directory",
+    );
+
+    for (let i = 1; i < COMPLETE_FALLBACK_DELAY_TICKS; i++) await tick([w1]);
+    expect(spawns).toHaveLength(1);
+    // The agent is left as it is: the normal complete handling carries on.
+    expect(getTracker("w1").completionNotified).toBe(true);
+  });
+
+  test("a retire that cannot start is logged as such and not retried", async () => {
+    setWatchdogAutoRetireSpawn((argv, opts) => {
+      spawns.push({ argv: [...argv], opts });
+      throw new Error("Executable not found in $PATH: \"ib\"");
+    });
+    const w1 = onDisk("w1", "complete", { auto_retire: true });
+
+    await tick([w1]);
+    await tick([w1]);
+
+    expect(spawns).toHaveLength(1);
+    expect(agentLog("w1")).toContain(
+      "[watchdog] auto-retire failed (could not start) — leaving the agent as it is, no retry until it runs again: " +
+      "Executable not found in $PATH: \"ib\"",
+    );
+  });
+
+  test("after a failure, running again starts a new episode that retires again", async () => {
+    exitCode = 1;
+    await tick([onDisk("w1", "complete", { auto_retire: true })]);
+    expect(spawns).toHaveLength(1);
+
+    await tick([onDisk("w1", "running", { auto_retire: true })]);
+    expect(getTracker("w1").autoRetireAttempted).toBe(false);
+
+    exitCode = 0;
+    await tick([onDisk("w1", "complete", { auto_retire: true })]);
+    expect(spawns).toHaveLength(2);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Per-agent watchdog tests
 // ---------------------------------------------------------------------------
@@ -3468,6 +3646,38 @@ describe("runPerAgentWatchdog", () => {
     }
     expect(drainedDirs.length).toBeGreaterThanOrEqual(2);
     expect(drainedDirs.every(dir => dir === expectedDir)).toBe(true);
+  });
+
+  test("auto-retire takes auto_retire from meta.json on disk, not the startup copy (SPEC §21.3)", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "ib-watchdog-auto-retire-loop-"));
+    try {
+      mkdirSync(join(repo, ".itsybitsy", "agents", "agent-test1"), { recursive: true });
+      const startup = makeAgent({ id: "agent-test1", meta: { tmux_session: "tmux-test1" } as Agent["meta"] }).meta;
+      // The startup read has no flag; every later read of the file has it.
+      let reads = 0;
+      setPerAgentReadMeta(async () => ({
+        meta: reads++ === 0
+          ? startup
+          : { ...startup, state: "complete", state_updated_at: currentTime / 1000 - AUTO_RETIRE_SETTLE_SECONDS, auto_retire: true },
+      }));
+      setPerAgentReadState(async () => "complete");
+      const spawns: Array<{ argv: string[]; cwd: string }> = [];
+      setWatchdogAutoRetireSpawn((argv, opts) => {
+        spawns.push({ argv: [...argv], cwd: opts.cwd });
+        worktreeExists = false; // the retire removed the worktree
+        return { exited: Promise.resolve(0) };
+      });
+      // Stop after a few polls, so a watchdog that never retires fails fast.
+      let polls = 0;
+      setPerAgentSleep(async () => { if (++polls >= 3) worktreeExists = false; });
+
+      await runPerAgentWatchdog("agent-test1", repo);
+
+      expect(spawns).toEqual([{ argv: ["ib", "retire", "agent-test1", "--force"], cwd: repo }]);
+    } finally {
+      resetWatchdogAutoRetireSpawn();
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   describe("rate-limit recovery from real pane text", () => {

@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { processStartEpochSecondsCtx } from "../agents";
 import { resetUserHome, setUserHome } from "../home";
+import type { IbCommandResult } from "../ib-commands";
 import { IB_VERSION } from "../ib-version";
 import { peerDir } from "../runtime-names";
 import { createCliFixture, type CliFixture } from "../test-cli-runner";
+import { waitFor } from "../test-utils";
 import {
   clockComparison, defaultExportLogsDeps, EXPORT_FILE, exportLogs, machineDirName, runExportLogs, type ExportLogsDeps,
 } from "./export-logs";
@@ -116,6 +118,32 @@ describe("exportLogs", () => {
       'not fetched: the peer replied: unknown op "watch-log"',
       "",
     ].join("\n"));
+  });
+
+  test("each machine's files and export.txt block are on disk once its outcome is known, this machine's first", async () => {
+    const hung = Promise.withResolvers<IbCommandResult>();
+    const atFetch: string[] = [];
+    const deps = fakeDeps({
+      fetch: async (peer) => {
+        atFetch.push(await read(EXPORT_FILE));
+        if (peer.id === ID_OLD) return hung.promise;
+        return { ok: true, exitCode: 0, stdout: encodeWatchLogOutput(laptopCopy()), stderr: "" };
+      },
+    });
+    const exporting = runExportLogs([], deps);
+    await waitFor(() => out.includes("adam's laptop: 2 files, 0.0 MB"), { message: "the laptop's copy" });
+    // An export killed now keeps this machine's and the laptop's files and blocks.
+    expect(atFetch[0]).toContain("machine: desk (this machine)\n");
+    expect(await read("desk", "watch.log")).toBe("local\n");
+    expect(await read("adam-s-laptop", "watch.log")).toBe("remote\n");
+    const sofar = await read(EXPORT_FILE);
+    expect(sofar).toContain("\n\nmachine: desk (this machine)\n");
+    expect(sofar).toContain("\n\nmachine: adam's laptop (paired peer)\n");
+    expect(sofar).toEndWith("  watch.log.1  6 bytes\n");
+    expect(sofar).not.toContain("old laptop");
+    hung.resolve({ ok: false, exitCode: 1, stdout: "", stderr: "no result from ib watch within 120 s" });
+    expect(await exporting).toBe(1);
+    expect(await read(EXPORT_FILE)).toEndWith(`  watch.log.1  6 bytes\n\nmachine: old laptop (paired peer)\nid: ${ID_OLD}\nnot fetched: no result from ib watch within 120 s\n`);
   });
 
   test("every peer fetched: exit 0", async () => {

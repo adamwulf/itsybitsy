@@ -18,7 +18,7 @@
  * src/hooks/agent-path.ts).
  */
 
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { IbCommandResult } from "../ib-commands";
 import { IB_VERSION } from "../ib-version";
@@ -236,6 +236,20 @@ export async function exportLogs(parsed: ExportLogsArgs, deps: ExportLogsDeps, s
     deps.stdout(`${label}: not copied: ${detail(err)}`);
   }
 
+  // export.txt now, with this machine's block, and each peer's block appended
+  // once its outcome is known: an export killed midway keeps what it had.
+  const report = join(dir, EXPORT_FILE);
+  const opening = [`ib export-logs, started ${iso(startedAt)} (this machine's clock)`, local.join("\n")];
+  if (peersError !== null) opening.push(`paired peers: not read: ${peersError}`);
+  await writeFile(report, opening.join("\n\n") + "\n", { mode: 0o600, flag: "wx" });
+  /** One peer's files and block at a time, in the order their outcomes arrive. */
+  let writing: Promise<void> = Promise.resolve();
+  const serially = (write: () => Promise<void>) => {
+    const done = writing.then(write);
+    writing = done.catch(() => {});
+    return done;
+  };
+
   // The peers, all at once: ib watch runs up to four outbox requests together.
   let running: boolean | string = false;
   if (targets.length) {
@@ -245,7 +259,7 @@ export async function exportLogs(parsed: ExportLogsArgs, deps: ExportLogsDeps, s
       running = `could not check whether ib watch is running: ${detail(err)}`;
     }
   }
-  const outcomes = await Promise.all(targets.map(async (peer): Promise<PeerOutcome> => {
+  const fetchPeer = async (peer: Peer): Promise<PeerOutcome> => {
     if (running !== true) return { peer, error: running === false ? WATCH_NOT_RUNNING : running };
     const result = await deps.fetch(peer, signal);
     if (!result.ok) return { peer, error: signal.aborted ? "interrupted" : singleLine(result.stderr) || `exit ${result.exitCode}` };
@@ -254,18 +268,16 @@ export async function exportLogs(parsed: ExportLogsArgs, deps: ExportLogsDeps, s
     } catch (err) {
       return { peer, error: detail(err) };
     }
-  }));
-  const blocks = [local];
-  if (peersError !== null) blocks.push([`paired peers: not read: ${peersError}`]);
-  for (const outcome of outcomes) {
+  };
+  const record = (outcome: PeerOutcome) => serially(async () => {
     const { peer } = outcome;
     const block = [`machine: ${peer.name} (paired peer)`, `id: ${peer.id}`];
-    blocks.push(block);
     if ("error" in outcome) {
       failed = true;
       block.push(`not fetched: ${outcome.error}`);
+      await appendFile(report, "\n" + block.join("\n") + "\n");
       deps.stdout(`${peer.name}: not fetched: ${outcome.error}`);
-      continue;
+      return;
     }
     const { copy } = outcome;
     const dirName = machineDirName(peer.name, peer.id, taken);
@@ -280,14 +292,14 @@ export async function exportLogs(parsed: ExportLogsArgs, deps: ExportLogsDeps, s
       clockComparison(copy),
       ...fileLines(dirName, copy.files),
     );
+    await appendFile(report, "\n" + block.join("\n") + "\n");
     deps.stdout(`${peer.name}: ${describeWatchLogFiles(copy.files)}`);
-  }
+  });
+  await Promise.all(targets.map(async (peer) => record(await fetchPeer(peer))));
   if (peersError !== null) {
     failed = true;
     deps.stdout(`paired peers: not read: ${peersError}`);
   }
-  const header = `ib export-logs, started ${iso(startedAt)} (this machine's clock)`;
-  await writeFile(join(dir, EXPORT_FILE), [header, ...blocks.map((block) => block.join("\n"))].join("\n\n") + "\n", { mode: 0o600, flag: "wx" });
   return failed ? 1 : 0;
 }
 

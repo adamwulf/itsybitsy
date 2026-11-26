@@ -132,7 +132,7 @@ function fakeHelper() {
   };
 }
 
-function setup(opts: { pmsetLog?: string; startAt?: number } = {}) {
+function setup(opts: { pmsetLog?: string; startAt?: number; failing?: Set<string> } = {}) {
   const lines: string[] = [];
   const runs: string[] = [];
   let clock = opts.startAt ?? Date.parse("2026-11-22T22:00:00Z");
@@ -143,6 +143,7 @@ function setup(opts: { pmsetLog?: string; startAt?: number } = {}) {
     spawnHelper: () => { spawned++; return fake.helper; },
     run: async (cmd) => {
       runs.push(cmd.join(" "));
+      if (opts.failing?.has(cmd[2]!)) throw new Error(`${cmd.join(" ")} timed out after 15 s`);
       if (cmd[2] === "assertions") return ASSERTIONS;
       if (cmd[2] === "batt") return BATT;
       if (cmd[2] === "log") return opts.pmsetLog ?? PMSET_LOG;
@@ -232,6 +233,43 @@ describe("SystemEventMonitor", () => {
     expect(pmset[2]).toEndWith("DarkWake DarkWake 4");
     expect(pmset).toHaveLength(MAX_PMSET_ENTRIES + 1);
     expect(pmset.at(-1)).toEndWith(`DarkWake DarkWake ${MAX_PMSET_ENTRIES + 2}`);
+  });
+
+  test("a failed assertions read logs one unavailable line", async () => {
+    const t = setup({ failing: new Set(["assertions"]) });
+    t.monitor.start();
+    t.fake.print("ready unlocked");
+    await t.settle();
+    expect(t.lines).toEqual([
+      "system: listening",
+      "system: keychain at start: unlocked",
+      "system: power assertions (start) unavailable: /usr/bin/pmset -g assertions timed out after 15 s",
+    ]);
+  });
+
+  test("a failed batt read still logs the snapshot, without the power source", async () => {
+    const t = setup({ failing: new Set(["batt"]) });
+    t.monitor.start();
+    t.fake.print("event display-sleep");
+    await t.settle();
+    expect(t.lines[1]).toStartWith("system: power assertions (display sleep): UserIsActive=1 ");
+    expect(t.lines[1]).not.toContain("; power:");
+  });
+
+  test("a failed pmset log read logs one line and the next wake still copies entries", async () => {
+    const failing = new Set(["log"]);
+    const t = setup({ failing, startAt: Date.parse("2026-11-22T22:30:00Z") });
+    t.monitor.start();
+    t.fake.print("event did-wake");
+    await t.settle();
+    expect(t.lines).toContain("system: pmset log unavailable: /usr/bin/pmset -g log timed out after 15 s");
+    expect(t.lines.filter((l) => l.startsWith("system: pmset: "))).toEqual([]);
+
+    failing.clear();
+    t.lines.length = 0;
+    t.fake.print("event did-wake");
+    await t.settle();
+    expect(t.lines.filter((l) => l.startsWith("system: pmset: "))).toHaveLength(2);
   });
 
   test("plain events, keychain changes, and unknown lines", async () => {

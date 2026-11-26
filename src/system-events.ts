@@ -12,8 +12,8 @@
  *  - the default keychain's lock state, polled every 10 s with
  *    SecKeychainGetStatus, which never shows a prompt.
  * The helper prints one line per event and this module writes it to watch.log
- * as `system: ...`. On display sleep and wake, and after a system wake, it
- * also logs one line summarising `pmset -g assertions` and `pmset -g batt`
+ * as `system: ...`. At start, on display sleep and wake, and after a system
+ * wake, it also logs one line summarising `pmset -g assertions` and `pmset -g batt`
  * (is caffeinate still holding an assertion, is the machine on battery).
  * After a system wake it copies the Sleep, Wake and DarkWake entries that
  * `pmset -g log` gained since its last read, which give the sleep reason
@@ -179,13 +179,20 @@ function defaultSpawnHelper(): SystemEventHelper {
   };
 }
 
+const RUN_TIMEOUT_MS = 15_000;
+
 async function defaultRun(cmd: string[]): Promise<string> {
-  const proc = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 15_000 });
+  const startedAt = Date.now();
+  const proc = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: RUN_TIMEOUT_MS });
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
+  // Bun's timeout kills with SIGTERM and `exited` resolves to 143.
+  if (proc.signalCode !== null && Date.now() - startedAt >= RUN_TIMEOUT_MS) {
+    throw new Error(`${cmd.join(" ")} timed out after ${RUN_TIMEOUT_MS / 1_000} s`);
+  }
   if (code !== 0) throw new Error(`${cmd.join(" ")} exited ${code}${err.trim() ? `: ${err.trim()}` : ""}`);
   return out;
 }

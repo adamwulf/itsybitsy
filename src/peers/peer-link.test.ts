@@ -719,6 +719,72 @@ describe("the acceptor's connection log lines (SPEC §20.4)", () => {
     ]);
   });
 
+  test.each([[12_300, "12.3"], [5_000, "5.0"], [4_999, null]] as const)("an agents answer that takes %i ms from the stream's accept to the written reply: logged from 5 s", async (ms, shown) => {
+    const holder: { jump?: (ms: number) => void } = {};
+    const side = serve({ snapshot: () => { holder.jump!(ms); return empty(); } });
+    holder.jump = side.clock.jump;
+    await requestAgents(side.a, side.clock.setTimer);
+    await Bun.sleep(5); // the dialer has its reply before the responder's finish() returns
+    const answered = side.logs.filter((line) => line.startsWith("peer link: answered"));
+    expect(answered).toEqual(shown === null ? [] : [`peer link: answered agents for Alice (${ID}) in ${shown} s`]);
+    side.a.close(PEER_CLOSE.done, "done");
+  });
+
+  // A slow pairing re-check before the answer counts too: the time runs from the stream's accept.
+  test.each(["agents", "coordinator-pane", "agent-pane", "agent-prompt", "agent-diff", "lifecycle", "acknowledge", "permissions"])(
+    "a slow %s answer is logged, even when the answer is an error reply", async (op) => {
+      const holder: { jump?: (ms: number) => void } = {};
+      const side = serve({ snapshot: empty, lookup: async (check) => {
+        if (check === 3) holder.jump!(6_000);
+        return "Alice";
+      } });
+      holder.jump = side.clock.jump;
+      expect(await rawRequest(side.a, encode({ op, repo: "app", id: "worker", lines: 200 }))).toBeInstanceOf(Uint8Array);
+      // The dialer has its reply before the responder's finish() returns.
+      await waitFor(() => side.logs.includes(`peer link: answered ${op} for Alice (${ID}) in 6.0 s`), { message: "answer line" });
+      side.a.close(PEER_CLOSE.done, "done");
+    });
+
+  test.each([
+    ["new-agent", { op: "new-agent", repo: "app", type: "worker", prompt: "hi" }],
+    ["an unknown op", { op: "prompts" }],
+  ] as const)("%s is not timed", async (_label, request) => {
+    const holder: { jump?: (ms: number) => void } = {};
+    const side = serve({ snapshot: empty, startAgent: async () => "worker-1", lookup: async (check) => {
+      if (check === 3) holder.jump!(6_000);
+      return "Alice";
+    } });
+    holder.jump = side.clock.jump;
+    expect(await rawRequest(side.a, encode(request))).toBeInstanceOf(Uint8Array);
+    await Bun.sleep(5);
+    expect(side.logs.filter((line) => line.startsWith("peer link: answered"))).toEqual([]);
+    side.a.close(PEER_CLOSE.done, "done");
+  });
+
+  test("a slow answer whose reply could not be written says so", async () => {
+    const holder: { jump?: (ms: number) => void } = {};
+    const checked = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const side = serve({ snapshot: empty, lookup: async (check) => {
+      if (check === 3) {
+        holder.jump!(16_000);
+        checked.resolve();
+        await release.promise;
+      }
+      return "Alice";
+    } });
+    holder.jump = side.clock.jump;
+    const stream = await side.a.openBi();
+    await stream.writeAll(encode({ op: "agents" }));
+    await stream.finish();
+    await checked.promise;
+    await stream.stopReceiving(); // the dialer gave up on this reply
+    release.resolve();
+    await waitFor(() => side.logs.some((line) => line.startsWith("peer link: answered")), { message: "answer line" });
+    expect(side.logs).toContain(`peer link: answered agents for Alice (${ID}) in 16.0 s; writing the reply failed`);
+    side.a.close(PEER_CLOSE.done, "done");
+  });
+
   test("a handler's lookup cut short by the close adds no 'pairing lookup failed' line", async () => {
     const capturing = Promise.withResolvers<void>();
     const holder: { b?: MemoryConnection } = {};

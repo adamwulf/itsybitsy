@@ -936,7 +936,7 @@ export interface PeerResponderDeps {
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
   setTimer(ms: number, fn: () => void): () => void;
-  /** Epoch ms, for the disconnect line's uptime. Defaults to Date.now. */
+  /** Epoch ms, for the disconnect line's uptime and slow-answer lines. Defaults to Date.now. */
   now?(): number;
   lifecycle?(request: RemoteLifecycleRequest, readPeerName: () => Promise<string | null>): Promise<RemoteLifecycleOutcome>;
   /** The request's `repo` and `id` as received: the handler validates them. */
@@ -1025,13 +1025,14 @@ export async function serveTrustedConnection(conn: PairConnection, deps: PeerRes
     } catch {
       return; // the connection closed
     }
+    const acceptedAt = now();
     if ((await stillPaired()) === null) return;
     if (headerReaders.size >= 8) {
       await sendReply(conn, stream, deps, encodeErrorReply("busy, try again"), stream.stopReceiving());
       continue;
     }
     headerReaders.add(stream);
-    void serveRequest(conn, stream, from, deps, lifetime.signal, stillPaired);
+    void serveRequest(conn, stream, from, deps, lifetime.signal, acceptedAt, stillPaired);
   }
 }
 
@@ -1105,9 +1106,16 @@ async function sendReply(conn: PairConnection, stream: PairStream, deps: PeerRes
   return delivered;
 }
 
-/** One request on its own stream. Every error stays here. `stillPaired` is the connection's pairing re-check. */
+/** Plain request/reply ops whose answer is timed: one taking {@link SLOW_ANSWER_MS} or more is logged. */
+const TIMED_OPS = new Set(["agents", "coordinator-pane", "agent-pane", "agent-prompt", "agent-diff", "lifecycle", "acknowledge", "permissions"]);
+const SLOW_ANSWER_MS = 5_000;
+
+/**
+ * One request on its own stream. Every error stays here. `acceptedAt` is when
+ * its stream was accepted; `stillPaired` is the connection's pairing re-check.
+ */
 async function serveRequest(conn: PairConnection, stream: PairStream, from: string, deps: PeerResponderDeps, signal: AbortSignal,
-  stillPaired: () => Promise<string | null>): Promise<void> {
+  acceptedAt: number, stillPaired: () => Promise<string | null>): Promise<void> {
   let request: ReturnType<typeof decodePeerRequest>;
   let reading: Promise<Uint8Array> | undefined;
   async function read(limit: number) {
@@ -1333,6 +1341,11 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     reply = encodeErrorReply(`unknown op ${JSON.stringify(cleanRemoteText(request.op))}`);
   }
   const delivered = await sendReply(conn, stream, deps, reply);
+  // From the stream's accept until the reply was written, or its write failed.
+  const tookMs = (deps.now ?? Date.now)() - acceptedAt;
+  if (TIMED_OPS.has(request.op) && tookMs >= SLOW_ANSWER_MS) {
+    deps.log(`peer link: answered ${request.op} for ${peerName} (${from}) in ${(tookMs / 1000).toFixed(1)} s${delivered ? "" : "; writing the reply failed"}`);
+  }
   if (delivered && capturedCoordinator && deps.paneReaders && !deps.paneReaders.has(conn.remoteId)) {
     deps.paneReaders.add(conn.remoteId);
     deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);

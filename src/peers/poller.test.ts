@@ -820,7 +820,7 @@ describe("request timeouts during an attachment transfer", () => {
     await Bun.sleep(0);
   }
 
-  const kept = (what: string) => `peer link: B (${P1.slice(0, 10)}): ${what} timed out while a transfer with this peer is moving bytes; keeping the connection`;
+  const kept = (what: string) => `peer link: B (${P1.slice(0, 10)}): ${what} timed out within 60 s of a transfer with this peer moving bytes; keeping the connection`;
 
   test("a kept agents poll keeps the connection and the link, holds its slot, and takes its late reply; once the transfer stops, a timeout closes as before", async () => {
     const rig = makeRig([peer(P1, "B")]);

@@ -2008,7 +2008,7 @@ test("defaultPeerServiceDeps gives message sends and remote starts one attachmen
 });
 
 describe("PeerService keeps the link while a transfer moves bytes", () => {
-  const kept = `peer link: Laptop C (${ID_REMOTE.slice(0, 10)}): agents poll timed out while a transfer with this peer is moving bytes; keeping the connection`;
+  const kept = `peer link: Laptop C (${ID_REMOTE.slice(0, 10)}): agents poll timed out within 60 s of a transfer with this peer moving bytes; keeping the connection`;
 
   /**
    * A service whose poller dials ID_REMOTE over a memory link whose far end the

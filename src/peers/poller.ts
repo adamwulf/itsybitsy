@@ -69,6 +69,7 @@ import {
 import type { PairConnection } from "./pairing";
 import { shortPeerId, type Peer } from "./store";
 import { IrohError } from "./iroh";
+import { TRANSFER_PROGRESS_WINDOW_MS } from "./transfer-activity";
 
 export const PEER_POLL_INTERVAL_MS = 5_000;
 /** Longest an `agents` request may take on a live connection before it is closed. */
@@ -240,7 +241,9 @@ export class PeerPoller {
       if (keep && !logged) {
         logged = true;
         const name = this.links.get(peerId)?.name ?? "peer";
-        this.deps.log(`peer link: ${name} (${shortPeerId(peerId)}): ${what} timed out while a transfer with this peer is moving bytes; keeping the connection`);
+        // What `transferProgressing` tests, so the line states that and no more.
+        const window = `${TRANSFER_PROGRESS_WINDOW_MS / 1000} s`;
+        this.deps.log(`peer link: ${name} (${shortPeerId(peerId)}): ${what} timed out within ${window} of a transfer with this peer moving bytes; keeping the connection`);
       }
       return keep;
     };

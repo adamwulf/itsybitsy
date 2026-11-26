@@ -11724,6 +11724,18 @@ ${options?.omitEnabled ? "" : `  enabled: ${options?.enabled ?? true}\n`}
   // Precedence (most-specific wins), mirroring the model chain:
   //   --effort > <type>.md > _non_coordinator.md > _all.md > config.effort > 'xhigh'
 
+  test.each([[true, true], [false, undefined], [undefined, undefined]] as const)(
+    "autoRetire %p writes auto_retire %p to meta.json",
+    async (autoRetire, written) => {
+      setNewAgentSpawnRunner(mockSpawnRunner());
+      const result = await callNewAgent("task", { name: "test-auto-retire", autoRetire });
+      expect(result.ok).toBe(true);
+      const meta = await Bun.file(join(agentsDir, "test-auto-retire", "meta.json")).json();
+      expect(meta.auto_retire).toBe(written);
+      expect("auto_retire" in meta).toBe(written !== undefined);
+    },
+  );
+
   test("effort E0: --effort flag persists to meta.json and appears in start.sh", async () => {
     setNewAgentSpawnRunner(mockSpawnRunner());
     await callNewAgent("task", { name: "test-effort-flag", effort: "high" });

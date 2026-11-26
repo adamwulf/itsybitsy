@@ -557,7 +557,7 @@ test("a published ACK stays readable when the client reaches its deadline during
 
 test("a watch log copy needs ib watch on this machine", async () => {
   expect(await handoffWatchLog("peer", "Laptop", new AbortController().signal))
-    .toMatchObject({ ok: false, exitCode: 1, stderr: "ib watch is not running on this machine" });
+    .toMatchObject({ ok: false, exitCode: 1, stderr: "no ib watch holds this machine's peer endpoint" });
 });
 
 test("a watch log copy that ib watch never takes says so", async () => {

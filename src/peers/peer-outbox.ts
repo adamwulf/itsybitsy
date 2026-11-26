@@ -117,7 +117,7 @@ export function handoffRemoteLifecycle(peer: string, machine: string, lifecycle:
 
 /** Long enough for about 3 MB over a slow relay (tens of KB/s). */
 export const WATCH_LOG_TIMEOUT_MS = 120_000;
-export const WATCH_NOT_RUNNING = "ib watch is not running on this machine";
+export const WATCH_NOT_RUNNING = "no ib watch holds this machine's peer endpoint";
 
 /**
  * Ask the endpoint-owning `ib watch` for a paired machine's watch log files

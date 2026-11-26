@@ -188,11 +188,11 @@ describe("exportLogs", () => {
     expect(fetched).toEqual([]);
     expect(out.slice(1)).toEqual([
       "desk (this machine): 1 file, 0.0 MB",
-      "adam's laptop: not fetched: ib watch is not running on this machine",
-      "old laptop: not fetched: ib watch is not running on this machine",
+      "adam's laptop: not fetched: no ib watch holds this machine's peer endpoint",
+      "old laptop: not fetched: no ib watch holds this machine's peer endpoint",
     ]);
     expect(await read("desk", "watch.log")).toBe("local\n");
-    expect(await read(EXPORT_FILE)).toContain("not fetched: ib watch is not running on this machine");
+    expect(await read(EXPORT_FILE)).toContain("not fetched: no ib watch holds this machine's peer endpoint");
   });
 
   test("no paired peers: this machine alone, exit 0, and ib watch is not asked", async () => {
@@ -401,7 +401,7 @@ describe("ib export-logs (CLI)", () => {
     await addPeer({ id: ID_LAPTOP, name: "adam's laptop" });
     const result = await cli.run(["export-logs"]);
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("adam's laptop: not fetched: ib watch is not running on this machine\n");
+    expect(result.stdout).toContain("adam's laptop: not fetched: no ib watch holds this machine's peer endpoint\n");
   });
 
   test("an unknown machine is an error", async () => {

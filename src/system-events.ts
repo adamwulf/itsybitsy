@@ -22,7 +22,8 @@
  * Not captured: login (ib watch is not running yet), dark wakes as they
  * happen (only in the pmset lines after the next full wake), and other
  * processes' keychain access failures (only `log stream` sees those, and it
- * costs too much CPU to run all the time, see sandbox-log-launch.ts).
+ * costs too much CPU to run all the time, see docs/SANDBOX-SHARED-COLLECTOR.md
+ * §8).
  *
  * The helper exits when its stdin reaches EOF, so it dies with ib watch even
  * after a crash or SIGKILL. Like watch-log.ts, nothing here throws: a failed

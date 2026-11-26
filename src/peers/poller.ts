@@ -18,17 +18,20 @@
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
  *   "no reply to the agents poll within 15 s", and the next tick redials. Closing the connection is
  *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
- * - Except during a transfer (SPEC.md §20.4 "Slow links"): while an attachment
- *   transfer with the peer, on either connection, has moved bytes within its
- *   own 60 s idle deadline (`transferProgressing`), an agents poll or pane read
+ * - Except during a transfer (SPEC.md §20.4 "Slow links"): while
+ *   `transferProgressing` holds for the peer, an agents poll or pane read
  *   that times out leaves the connection open and keeps waiting for its late
  *   reply, still holding its slot (`inFlight`, `paneReads`), so nothing piles
- *   up behind it on the slow link. The link's state stays as it was
+ *   up behind it on the slow link. It holds while a transfer with the peer (a
+ *   send or new-agent with files, or a watch-log copy; either direction,
+ *   either connection) is running and has moved bytes within
+ *   TRANSFER_PROGRESS_WINDOW_MS (60 s), or this machine's watch-log reply to
+ *   the peer ended ok within that window. The link's state stays as it was
  *   (connected, the last lists, no error); a late agents reply is used as that
  *   poll's answer, and a late pane reply as the read's. Each kept timeout is
  *   one watch.log line. The exchange asks again every 15 s while it waits;
- *   once the transfer has ended or stalled, it closes the connection as an
- *   unkept timeout would. A peer that moves attachment bytes is not wedged,
+ *   the first time the rule no longer holds, it closes the connection as an
+ *   unkept timeout would. A peer that moves transfer bytes is not wedged,
  *   and on a slow link closing the connection would kill the transfer itself.
  * - When a connected link fails, watch.log gets the shared disconnect line
  *   (peer-link.ts `disconnectLine`): the peer, `dialed`, how long it was up
@@ -125,9 +128,11 @@ export interface PeerPollerDeps {
   /** watch.log in `ib watch`. */
   log(line: string): void;
   /**
-   * An attachment transfer with this peer moved bytes recently
-   * (transfer-activity.ts `recentProgress`). While it has, a timed-out agents
-   * poll or pane read keeps its connection. Without it, every timeout closes it.
+   * transfer-activity.ts `recentProgress`: a transfer with this peer is
+   * running and moved bytes within TRANSFER_PROGRESS_WINDOW_MS (60 s), or
+   * this machine's watch-log reply to it ended ok within that window. While
+   * it is true, a timed-out agents poll or pane read keeps its connection.
+   * Without it, every timeout closes it.
    */
   transferProgressing?(peerId: string): boolean;
 }
@@ -229,8 +234,8 @@ export class PeerPoller {
   }
 
   /**
-   * One request's `keepOpenOnTimeout`: true while an attachment transfer with
-   * the peer moves bytes. The exchange asks when the request's teardown misses
+   * One request's `keepOpenOnTimeout`: true while `transferProgressing` is
+   * for the peer (the keep rule, SPEC.md §20.4 "Slow links"). The exchange asks when the request's teardown misses
    * its grace and again each interval while the kept read waits; the first yes
    * writes the one watch.log line for this timeout.
    */

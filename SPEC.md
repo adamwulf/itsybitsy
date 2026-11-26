@@ -1908,6 +1908,8 @@ The default prompt content (from `docs/agent-types/system-coordinator.md`):
 >
 > When the user asks you to bounce `ib watch`, or to pick up ib changes you merged, run `ib bounce`. Five seconds later `ib watch` quits, which stops this session; bounce.sh then rebuilds ib, relaunches `ib watch`, and resumes this session, whose context says when the bounce happened and whether ib was rebuilt. Once this session is back, you are sent "ib watch has restarted after a bounce". It refuses if bounce.sh did not start `ib watch`. Send any reply before you run it: your turn ends when `ib watch` quits.
 
+An installed `system-coordinator.md` gets the `ib export-logs` paragraph by hand; there is no migration. The embedded files are written only when `~/.itsybitsy/agent-types/` is first created (`ensureAgentTypesDir()`), and `ib init-types` restores only missing files, so an existing install keeps its prompt without the paragraph.
+
 #### 12.1.6 Watchdog Behavior
 
 The system coordinator does **not** have a standard watchdog or stop hook. It is not a regular agent — it has no agent directory, no meta.json, and no agent ID in the ib system. Instead:

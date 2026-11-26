@@ -85,7 +85,11 @@ plus `pmset` entries read after a wake) give the OS view in the same file.
 
 ## Cross-cutting checklist
 
-1. Agent functionality: not affected.
+1. Agent functionality: @system's default prompt
+   (`docs/agent-types/system-coordinator.md`) gains the `ib export-logs`
+   paragraph. An installed `system-coordinator.md` gets this paragraph by
+   hand; there is no migration (`ib init-types` restores only missing files).
+   Otherwise not affected.
 2. Hooks: `export-logs` is allowed only for @system among agents.
 3. Watchdog: not affected.
 4. `ib watch`: answers the new op, runs the new outbox kind and writes the

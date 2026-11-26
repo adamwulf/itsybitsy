@@ -7,9 +7,12 @@
  * fire time after the previous tick and at or before now. It fires that run
  * when it is at most {@link SCHEDULER_GRACE_MS} old; an older one was missed
  * (the dashboard was closed, the machine slept, the event loop stalled) and is
- * skipped. The first tick looks back from the scheduler's start by the grace,
- * so a run that fell due while `ib watch` restarted still fires, and nothing
- * older does. A run is claimed in the
+ * skipped. The first tick's window opens the grace before the scheduler's
+ * start, so a run that fell due while `ib watch` restarted still fires and
+ * nothing older does. That tick comes one interval after the start (no tick at
+ * once, so peer links can reconnect first), so the grace leaves it about 90 s
+ * of look-back before the start: an `ib bounce` gap of 15-45 s is covered. A
+ * run is claimed in the
  * store before it starts, so of several open dashboards only one starts it,
  * and its result (the agent id or the error) is recorded. A run that fails is
  * not retried.
@@ -114,7 +117,9 @@ export class Scheduler {
   /**
    * The first tick's window starts the grace before now, so a run due while
    * `ib watch` restarted (an `ib bounce`) still fires; the store's claim keeps
-   * a run the previous instance claimed from firing twice.
+   * a run the previous instance claimed from firing twice. That tick runs one
+   * interval later and fires only runs within the grace of it, so the
+   * effective look-back before the start is the grace minus one interval.
    */
   constructor(private readonly deps: SchedulerDeps) {
     this.lastTick = deps.now() - SCHEDULER_GRACE_MS;
@@ -170,6 +175,9 @@ export class Scheduler {
     const due = dueRun(task.cron, after, now);
     if (!due) return;
     if (due.missed) {
+      // A run already claimed (by the previous instance, before a restart, or
+      // by another dashboard) was not missed: it ran, so it is not logged.
+      if ((task.lastRunAt ?? -Infinity) >= due.slot) return;
       this.deps.log(`scheduler: ${task.id} skipped its run due ${formatSlot(due.slot)}: more than ${SCHEDULER_GRACE_MS / 60_000} min late`);
       return;
     }

@@ -130,6 +130,23 @@ describe("Scheduler tick", () => {
     expect(h.deps.startLocal).toHaveBeenCalledTimes(1);
   });
 
+  test("a missed run the previous instance already ran is not logged as skipped", async () => {
+    // The previous ib watch ran the 9:30 run; this one started at 9:31:45 and
+    // first ticks at 9:32:15, when 9:30 is past the grace.
+    const ran = { ...TASK, lastRunAt: at(9, 30), lastAgentId: "agent-old" };
+    const h = harness([ran], at(9, 31, 45));
+    h.setNow(at(9, 32, 15));
+    await h.scheduler.tick();
+    expect(h.deps.claimRun).not.toHaveBeenCalled();
+    expect(h.logs).toEqual([]);
+
+    // Not yet run there: the same window logs the skip.
+    const fresh = harness([TASK], at(9, 31, 45));
+    fresh.setNow(at(9, 32, 15));
+    await fresh.scheduler.tick();
+    expect(fresh.logs).toEqual(["scheduler: task-0000abcd skipped its run due Wed 2026-11-25 09:30: more than 2 min late"]);
+  });
+
   test("fires nothing, and logs nothing, due more than the grace before it started", async () => {
     const h = harness([TASK], at(9, 32, 10));
     h.setNow(at(9, 32, 40));

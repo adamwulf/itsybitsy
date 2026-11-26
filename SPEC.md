@@ -297,7 +297,10 @@ New retirements retain HEAD at `refs/itsybitsy/retired/<archive-key>/head`. Rehi
 3. Recreate `.itsybitsy/agents/<id>/` and sanitize stale runtime fields:
    clear `claude_pid`/`watchdog_pid`, discard transient state, and set
    `state: "stopped"` while preserving session IDs, deterministic tmux name,
-   model/effort, type, hierarchy, nickname, and worktree mode.
+   model/effort, type, hierarchy, nickname, and worktree mode. `auto_retire`
+   (§21.3) is dropped: the user rehires an agent to look at or continue its
+   work, and with the flag kept the resume nudge would lead it to complete
+   again and its new watchdog would retire it.
 4. Recreate a worktree and `agent/<id>` from the retained HEAD, apply the
    binary patch, restore safe untracked paths, and restore local settings.
 5. Best-effort restore memberships for teams that still exist, so membership
@@ -806,7 +809,7 @@ Questions from agents that no longer exist (no directory in `.itsybitsy/agents/`
 | `paths` | object \| undefined | Resolved, repo-anchored filesystem policy (`allowRead` / `allowWrite` / `deny`) from the agent type's `paths:` frontmatter, canonicalized to absolute paths at creation and frozen here. A **missing** key equals empty lists equals **strict** (worktree + runtime roots only). Replaced the retired `allowedPaths`. See §6.1. |
 | `sandbox` | object \| undefined | Resolved kernel policy (`enabled`, `rawAllow`, `domains`), frozen at spawn. Enablement uses the most specific explicit type/layer value; only literal false disables and omission defaults true. Enabled launches require valid frozen paths, seal, profile, and proxy; setup errors fail closed. Disabled launches omit the itsybitsy kernel wrapper, proxy, and collector and restore the pre-sandbox CLI launch configuration. Hooks remain active and resolve all tool approvals without user prompts in both modes. Operator refresh applies edited type policy. |
 | `toolsIgnoringPaths` | string[] \| undefined | Claude agents only: the MCP tools whose calls skip the PreToolUse path checks, the union of the agent-type layers' `toolsIgnoringPaths:` (§2.2), frozen at spawn alongside the allow list in `settings.local.json`. Read by the Claude hook (§6.1). For non-coordinators it is kept by `/respawn` (`ib respawn`, a pause plus resume), `ib resume`, rehire and `ib sandbox refresh`, so only a new spawn applies an edit. A repo coordinator re-derives it on a reset (`R`, `ib resume`, or `/respawn`, which all re-run `newAgent`); rehiring a coordinator keeps the archived list. Invalid entries are ignored. Absent on agents spawned before the key existed (nothing skips path checks). |
-| `auto_retire` | boolean \| undefined | `true` for an agent a scheduled task with auto-retire on started (§21.2): its watchdog retires it once its state is `complete` (§21.3). Only `true` turns it on; absent for every other agent. |
+| `auto_retire` | boolean \| undefined | `true` for an agent a scheduled task with auto-retire on started (§21.2): its watchdog retires it once its state is `complete` (§21.3). Only `true` turns it on; absent for every other agent. Rehire drops it (§1.7.1), so a rehired agent is never auto-retired. |
 
 ### 5.3 Worktree ↔ Branch Relationship
 
@@ -3963,7 +3966,7 @@ The sentinel is quoted, as in the stop-hook nudge. The pane-based state parsers 
 
 ### 21.3 Auto-Retire on Completion
 
-A task with `autoRetire` on starts its agent with `auto_retire: true` in meta.json (§5.2, §21.2). Once that agent signals completion, its per-agent watchdog (§8.5) retires it. Completion means the agent's last line is `I HAVE COMPLETED THE GOAL`, after which the Stop hook writes state `complete` (§1.3.1). The retire is `ib retire <id> --force` (§1.4): the agent is archived and can be rehired, and its branch is not merged. `autoRetireIfRequested` in `src/watchdog.ts` implements it.
+A task with `autoRetire` on starts its agent with `auto_retire: true` in meta.json (§5.2, §21.2). Once that agent signals completion, its per-agent watchdog (§8.5) retires it. Completion means the agent's last line is `I HAVE COMPLETED THE GOAL`, after which the Stop hook writes state `complete` (§1.3.1). The retire is `ib retire <id> --force` (§1.4): the agent is archived and can be rehired, and its branch is not merged. Rehire drops `auto_retire` (§1.7.1), so a rehired agent stays up after it completes again, like any other agent. `autoRetireIfRequested` in `src/watchdog.ts` implements it.
 
 - **Trigger**: on each watchdog tick that resolves `complete`, the watchdog reads meta.json again; it does not use the copy it read at startup. It retires the agent only when that read shows three things: `auto_retire` is exactly `true`; `state` is still `complete`; and `state_updated_at` is at least `AUTO_RETIRE_SETTLE_SECONDS` (5 s, one poll) before now, compared in epoch seconds. A read that fails any of these is not an attempt, and a later tick checks again. With `auto_retire` absent or any value other than `true`, complete handling is exactly as in §8.5.
 - **Settle rule**: the Stop hook writes `complete` before it checks for uncommitted changes and, when there is no active manager, for unfinished sub-agents (§6.2). If either check fails, it queues a reminder and writes `running`. Until it does, meta.json says `complete` about an agent that is about to keep working, and a retire in that window would cut it off with uncommitted work or unmerged sub-agents. The window lasts about as long as one `git status` plus an enqueue, far less than one poll, so a `complete` that has stood for 5 s is the hook's final answer. The rule delays the retire by at most one poll.

@@ -1025,6 +1025,10 @@ export async function rehireAgent(
       state_updated_at: Math.floor(Date.now() / 1000),
     };
     delete restoredMeta.watchdog_pid;
+    // A rehire is for looking at or continuing the agent's work. A scheduled
+    // task's auto-retired agent would otherwise complete again after the
+    // resume nudge and be retired by its new watchdog (SPEC §1.7.1, §21.3).
+    delete restoredMeta.auto_retire;
     if (archivedNicknameCollision) delete restoredMeta.nickname;
     await writeMetaJsonAtomic(agentDir, restoredMeta as unknown as Record<string, unknown>);
     await logAgent(agentDir, `[rehire] Reconstructed from ${archived.archiveKey}`);

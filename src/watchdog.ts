@@ -953,12 +953,13 @@ export function resetWatchdogAutoRetireSpawn(): void {
  * teardown itself causes the signals. The watchdog is a `tmux run-shell` job,
  * and a tmux server that exits with its last session — this agent's — signals
  * its jobs (buildTmuxHelperScript forwards that SIGTERM to us). `ib watch`'s
- * orphan reaper SIGTERMs `watchdog_pid` once the agent looks stopped, which
- * it does from the tmux kill until the archive deletes meta.transient.json.
- * The watchdog only survives its first SIGTERM (`process.once`), so two of
- * them would kill it halfway through a teardown. A detached process is in no
- * tmux job and in no meta file, so nothing signals it, and the retire finishes
- * even if this watchdog dies while waiting.
+ * cleanup of stopped agents (reapOrphanedClaude) SIGTERMs `watchdog_pid` once
+ * the agent looks stopped, which it does from the tmux kill until the archive
+ * deletes meta.transient.json. The watchdog only survives its first SIGTERM
+ * (`process.once`), so two of them would kill it halfway through a teardown.
+ * A detached process is no tmux job and its PID is in no meta file, so neither
+ * signal reaches it, and the retire finishes even if this watchdog dies while
+ * waiting.
  *
  * The output goes to a file in a fresh private temp directory, not a pipe (a
  * pipe breaks if this watchdog dies first) and not the agent dir (the agent

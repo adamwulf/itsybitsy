@@ -107,11 +107,13 @@ describe("runCommand", () => {
     await expect(runCommand(["/bin/sh", "-c", "echo boom >&2; exit 3"])).rejects.toThrow("/bin/sh -c echo boom >&2; exit 3 exited 3: boom");
   });
 
-  test("a run killed by the timeout says so", async () => {
+  // These two need signals, which a sandboxed agent's profile denies
+  // (commit 728578fd): the timeout's SIGTERM and the shell's kill fail there.
+  test.skipIf(isSandboxedProcess())("a run killed by the timeout says so", async () => {
     await expect(runCommand(["/bin/sleep", "5"], 100)).rejects.toThrow("/bin/sleep 5 timed out after 0.1 s");
   });
 
-  test("an early death by signal is not called a timeout", async () => {
+  test.skipIf(isSandboxedProcess())("an early death by signal is not called a timeout", async () => {
     await expect(runCommand(["/bin/sh", "-c", "kill -TERM $$"], 5_000)).rejects.toThrow("exited 143");
   });
 });

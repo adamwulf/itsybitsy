@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  EVENT_TEXT,
   MAX_PMSET_ENTRIES,
   SYSTEM_EVENTS_SCRIPT,
   SystemEventMonitor,
@@ -120,6 +121,9 @@ function fakeHelper() {
     killed,
     print: (line: string) => out.enqueue(encoder.encode(`${line}\n`)),
     printErr: (text: string) => err.enqueue(encoder.encode(text)),
+    closeErr: () => err.close(),
+    /** Resolve the exit without closing the pipes. */
+    exitOnly: (code: number) => exit(code),
     exit: (code: number) => {
       out.close();
       err.close();
@@ -211,7 +215,7 @@ describe("SystemEventMonitor", () => {
     expect(t.lines.filter((l) => l.startsWith("system: pmset: "))).toEqual([]);
   });
 
-  test("copies at most MAX_PMSET_ENTRIES, the newest", async () => {
+  test("copies at most MAX_PMSET_ENTRIES: the first (the sleep reason) and the newest", async () => {
     const base = Date.parse("2026-11-23T00:00:00Z");
     const log = Array.from({ length: MAX_PMSET_ENTRIES + 3 }, (_, i) => {
       const at = new Date(base + i * 60_000);
@@ -223,7 +227,9 @@ describe("SystemEventMonitor", () => {
     t.fake.print("event did-wake");
     await t.settle();
     const pmset = t.lines.filter((l) => l.startsWith("system: pmset: "));
-    expect(pmset[0]).toBe("system: pmset: 3 older entries not shown");
+    expect(pmset[0]).toEndWith("DarkWake DarkWake 0");
+    expect(pmset[1]).toBe("system: pmset: 3 entries not shown");
+    expect(pmset[2]).toEndWith("DarkWake DarkWake 4");
     expect(pmset).toHaveLength(MAX_PMSET_ENTRIES + 1);
     expect(pmset.at(-1)).toEndWith(`DarkWake DarkWake ${MAX_PMSET_ENTRIES + 2}`);
   });
@@ -253,6 +259,25 @@ describe("SystemEventMonitor", () => {
     t.fake.exit(1);
     await t.settle();
     expect(t.lines).toEqual(["system: listener stopped (exit 1): execution error: boom (-2700)"]);
+  });
+
+  test("the exit line waits for stderr that arrives after the exit", async () => {
+    const t = setup();
+    t.monitor.start();
+    t.fake.exitOnly(1);
+    await Bun.sleep(5);
+    t.fake.printErr("execution error: late (-2700)\n");
+    t.fake.closeErr();
+    await t.settle();
+    expect(t.lines).toEqual(["system: listener stopped (exit 1): execution error: late (-2700)"]);
+  });
+
+  test("the exit line does not wait forever for a stderr that never closes", async () => {
+    const t = setup();
+    t.monitor.start();
+    t.fake.exitOnly(1);
+    await Bun.sleep(700);
+    expect(t.lines).toEqual(["system: listener stopped (exit 1)"]);
   });
 
   test("stop() kills the helper and silences later lines", async () => {
@@ -287,9 +312,40 @@ describe("SystemEventMonitor", () => {
   });
 });
 
+test("every label the script prints has an EVENT_TEXT entry, and the reverse", () => {
+  // The NSWorkspace events cannot be triggered in a test, so this is the
+  // only check that a label is not misspelled on one side.
+  const labels: string[] = [];
+  for (const map of ["WORKSPACE", "DISTRIBUTED"]) {
+    const body = new RegExp(`var ${map} = \\{([^}]*)\\};`).exec(SYSTEM_EVENTS_SCRIPT)?.[1];
+    expect(body).toBeDefined();
+    for (const m of body!.matchAll(/: '([a-z-]+)'/g)) labels.push(m[1]!);
+  }
+  expect(labels.sort()).toEqual(Object.keys(EVENT_TEXT).sort());
+});
+
+const realHelper = process.platform === "darwin" && !isSandboxedProcess();
+
+// The production spawn: the helper stays up (its stdin pipe stays open) and
+// reports in, through the same defaultSpawnHelper ib watch uses.
+test.skipIf(!realHelper)("the default helper starts, stays up, and stops", async () => {
+  const lines: string[] = [];
+  const monitor = new SystemEventMonitor({ log: (l) => lines.push(l), run: async () => "" });
+  try {
+    monitor.start();
+    const deadline = Date.now() + 10_000;
+    while (!lines.includes("system: listening") && Date.now() < deadline) await Bun.sleep(20);
+    expect(lines.slice(0, 2)).toEqual(["system: listening", expect.stringMatching(/^system: keychain at start: (locked|unlocked|unknown)$/)]);
+    await Bun.sleep(500);
+    expect(lines.filter((l) => l.includes("listener stopped"))).toEqual([]);
+  } finally {
+    monitor.stop();
+  }
+}, 15_000);
+
 // The real helper: it compiles under osascript, reports the keychain state,
 // and exits as soon as its stdin closes (how it dies with ib watch).
-test.skipIf(process.platform !== "darwin" || isSandboxedProcess())("the osascript helper starts and exits on stdin EOF", async () => {
+test.skipIf(!realHelper)("the osascript helper starts and exits on stdin EOF", async () => {
   const proc = Bun.spawn(["/usr/bin/osascript", "-l", "JavaScript", "-e", SYSTEM_EVENTS_SCRIPT], {
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
   });

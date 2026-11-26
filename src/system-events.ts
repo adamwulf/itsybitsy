@@ -114,8 +114,10 @@ emit('ready ' + lastKeychain);
 while (true) $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(60));
 `;
 
-/** Event names the helper prints after `event `, and their watch.log text. */
-const EVENT_TEXT = {
+/** Event names the helper prints after `event `, and their watch.log text.
+ *  The keys must match the labels in the script's WORKSPACE and DISTRIBUTED
+ *  maps; a test checks that. */
+export const EVENT_TEXT = {
   "will-sleep": "will sleep",
   "did-wake": "woke",
   "display-sleep": "display sleep",
@@ -132,8 +134,12 @@ const EVENT_TEXT = {
 export type SystemEventName = keyof typeof EVENT_TEXT;
 
 /** Most pmset log entries copied after one wake; a long sleep with Power Nap
- *  can hold dozens of DarkWake / Sleep pairs. The newest are kept. */
+ *  can hold dozens of DarkWake / Sleep pairs. The first (the Sleep that says
+ *  why) and the newest are kept. */
 export const MAX_PMSET_ENTRIES = 40;
+
+/** How long a helper exit waits for the rest of its stderr. */
+const STDERR_DRAIN_MS = 500;
 
 /** The parts of a spawned helper this module uses (a fake in tests). */
 export interface SystemEventHelper {
@@ -316,8 +322,14 @@ export class SystemEventMonitor {
     }
     this.helper = helper;
     void this.readLines(helper.stdout);
-    void this.readStderr(helper.stderr);
-    void helper.exited.then((code) => this.onExit(code), (err) => this.onExit(message(err)));
+    const stderrRead = this.readStderr(helper.stderr);
+    // The exit can resolve before the last stderr chunk is read, and that
+    // text is the only clue to why the helper died: wait for it, briefly.
+    const stderrDrained = () => Promise.race([stderrRead, new Promise<void>((r) => setTimeout(r, STDERR_DRAIN_MS))]);
+    void helper.exited.then(
+      async (code) => { await stderrDrained(); this.onExit(code); },
+      async (err) => { await stderrDrained(); this.onExit(message(err)); },
+    );
   }
 
   /** Stop the helper; later events and pending pmset results are not logged. */
@@ -332,7 +344,8 @@ export class SystemEventMonitor {
     }
   }
 
-  /** Every promise from the helper and pmset settled (tests). */
+  /** Pending pmset runs settled and their lines written (tests). It does not
+   *  wait for helper output still in its pipe. */
   async idle(): Promise<void> {
     await this.pmsetChain;
   }
@@ -437,9 +450,16 @@ export class SystemEventMonitor {
       const entries = pmsetSleepWakeEntries(text, this.pmsetReadThrough);
       if (entries.length === 0) return;
       this.pmsetReadThrough = Math.max(...entries.map((e) => e.at));
-      const shown = entries.slice(-MAX_PMSET_ENTRIES);
-      if (shown.length < entries.length) this.write(`pmset: ${entries.length - shown.length} older entries not shown`);
-      for (const e of shown) this.write(`pmset: ${e.line}`);
+      if (entries.length <= MAX_PMSET_ENTRIES) {
+        for (const e of entries) this.write(`pmset: ${e.line}`);
+        return;
+      }
+      // The first entry is the Sleep with the real reason; after a dark wake
+      // every later Sleep says Maintenance. Keep it, then the newest.
+      const newest = entries.slice(-(MAX_PMSET_ENTRIES - 1));
+      this.write(`pmset: ${entries[0]!.line}`);
+      this.write(`pmset: ${entries.length - 1 - newest.length} entries not shown`);
+      for (const e of newest) this.write(`pmset: ${e.line}`);
     });
   }
 }

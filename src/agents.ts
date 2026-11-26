@@ -153,6 +153,12 @@ export interface AgentMeta {
   state?: MetaState;
   state_updated_at?: number;
   spawned_by?: SpawnedBy | null;
+  /**
+   * Set by a scheduled task with auto-retire on (SPEC §21.3): the agent's
+   * watchdog retires it once its state is `complete`. Only `true` turns it on;
+   * absent for every other agent.
+   */
+  auto_retire?: boolean;
 }
 
 /** Resolve the display icon for an agent from meta fields with legacy fallback */

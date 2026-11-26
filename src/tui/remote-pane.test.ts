@@ -112,10 +112,16 @@ test("scrollback clamps at each wrap width, counts the lines below as a local pa
   const pane = new RemotePane(fetch, () => {}, (_ms, poll) => { tick = poll; return () => {}; });
   pane.select({ peerId: "A", target: { op: "coordinator-pane" } });
   await Promise.resolve();
+  const rows = (w: number) => pane.render(w, 4).map(stripAnsi);
+  // Without an error line the indicator is the pane's last row. Six rows at
+  // 22 columns in a 4-row pane clamp the offset at 2.
+  pane.scroll(100);
+  expect(rows(22)).toEqual([a, b, b, "── ↓ 2 lines below ──"]);
+  pane.scroll(-100);
+  expect(rows(22)).toEqual([b, b, c, c]);
   fetch.mockRejectedValueOnce(new Error("down"));
   tick();
   await Promise.resolve();
-  const rows = (w: number) => pane.render(w, 4).map(stripAnsi);
   expect(rows(44)).toEqual([a + a, b + b, c + c, "down"]);
   pane.scroll(100);
   // Everything fits at 44 columns: nothing to scroll, so no indicator.

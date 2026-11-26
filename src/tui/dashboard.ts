@@ -125,6 +125,7 @@ import {
 } from "../remote-control-light";
 import { telegramLight, type TelegramConnectionView } from "../channels/connection-view";
 import { syncPeersDialog, type PeersDialogService } from "./peers-dialog";
+import { buildScheduledTaskFormContent } from "./scheduled-dialog";
 import { captureAgentPane, readAgentPromptText } from "../peers/agent-pane";
 import { PeerService, defaultPeerServiceDeps, type PeerServiceView } from "../peers/service";
 import { localTerminalHost } from "../peers/terminal-host";
@@ -767,6 +768,9 @@ class DialogOverlayComponent implements Component {
       }
       case "new-agent-form": {
         return buildNewAgentFormContent(dialog, innerWidth);
+      }
+      case "scheduled-task-form": {
+        return buildScheduledTaskFormContent(dialog, innerWidth);
       }
       case "setup": {
         return buildSetupContent(dialog, innerWidth);
@@ -2023,7 +2027,7 @@ export class DashboardComponent implements Component {
       if (dialog?.type === "setup" && dialog.peers) {
         syncPeersDialog(dialog.peers);
         this.tui?.requestRender();
-      } else if (receiptsChanged || changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form") {
+      } else if (receiptsChanged || changed || this.remoteSelection?.kind === "remote-coordinator" || dialog?.type === "new-agent-form" || dialog?.type === "scheduled-task-form") {
         if (dialog?.type === "new-agent-form") syncNewAgentMachine(dialog);
         this.tui?.requestRender();
       }
@@ -2361,7 +2365,7 @@ export class DashboardComponent implements Component {
     const width = dialog.width
       ?? (dialog.type === "help" ? 72
         : dialog.type === "multi-select" ? MULTI_SELECT_WIDTH
-        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
+        : (dialog.type === "folder-browser" || dialog.type === "new-agent-form" || dialog.type === "scheduled-task-form" || dialog.type === "setup" || dialog.type === "permissions-editor") ? 70
         : DIALOG_WIDTH);
     if (width !== DIALOG_WIDTH && this.overlayHandle) {
       this.overlayHandle.hide();
@@ -2538,7 +2542,7 @@ export class DashboardComponent implements Component {
       { label: "add repo — A", key: "A", action: () => agentActions.handleAddRepo(this) },
       { label: "remove repo — D", key: "D", action: () => this.executeAndRefresh(() => agentActions.handleRemoveRepoSafe(this)) },
       { label: "help — ?", key: "?", action: () => agentActions.handleHelp(this) },
-      { label: "setup (Hooks, Config, Peers) — h", key: "h", action: () => agentActions.handleSetup(this) },
+      { label: "setup (Hooks, Config, Peers, Scheduled) — h", key: "h", action: () => agentActions.handleSetup(this) },
       { label: "setup: Peers tab — I", key: "I", action: () => agentActions.handleSetup(this, PEERS_TAB) },
       { label: "scroll up — ;", key: ";", action: () => this.scrollOutput(true) },
       { label: "scroll down — l", key: "l", action: () => this.scrollOutput(false) },
@@ -4852,7 +4856,8 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
   });
 
   const typePickerKeyboard = new TypePickerKeyboard(terminal, () =>
-    dashboard.dialog?.type === "new-agent-form" && (dashboard.dialog.focused === "agentType" || dashboard.dialog.focused === "machine"));
+    (dashboard.dialog?.type === "new-agent-form" && (dashboard.dialog.focused === "agentType" || dashboard.dialog.focused === "machine"))
+    || (dashboard.dialog?.type === "scheduled-task-form" && ["machine", "repo", "agentType"].includes(dashboard.dialog.focused)));
   const stopTerminal = installTerminalCleanup(() => {
     typePickerKeyboard.stop();
     tui.stop();

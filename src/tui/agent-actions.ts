@@ -54,7 +54,8 @@ import { TextBuffer } from "./text-buffer";
 import { readConfig, writeConfig, CONFIG_KEYS, defaultUserConfigPath } from "../config";
 import { attachmentSettingKey, TRANSFER_SETTING_BOUNDS } from "../peers/transfer-limits";
 import type { ConfigResult } from "../config";
-import { PEERS_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
+import { PEERS_TAB, SCHEDULED_TAB, syncNewAgentMachine, fuzzyFilterIndices, dialogTitleMaxWidth, elideLeft } from "./dialog-handler";
+import { openScheduledTab, type ScheduledTabOptions } from "./scheduled-dialog";
 import { displayState, computeStateColWidth, AGE_COL_WIDTH } from "./agent-tree";
 import { peerEntryKey, remoteTitle, type RemoteMessageEntry } from "./peer-repos";
 import { fullyQualifiedAgentId } from "./row-keys";
@@ -2565,7 +2566,7 @@ export function handleHelp(ctx: ActionCtx) {
       "",
       header("App"),
       row("?", "help"),
-      row("h", "setup (Hooks, Config, Peers)"),
+      row("h", "setup (Hooks, Config, Peers, Scheduled)"),
       row("I", "setup: Peers tab (id and pairing)"),
       row("Ctrl-C", "quit"),
       "",
@@ -2574,20 +2575,30 @@ export function handleHelp(ctx: ActionCtx) {
   });
 }
 
-export function handleSetup(ctx: ActionCtx, initialTab = 0) {
+/**
+ * `h`: the setup dialog on `initialTab`. `scheduled` applies when that is the
+ * Scheduled tab (the task to select, a delete to wait for).
+ */
+export function handleSetup(ctx: ActionCtx, initialTab = 0, scheduled?: ScheduledTabOptions) {
   const repoPath = ctx.repos[0]?.path ?? "";
   let pending: ReturnType<typeof loadSetupSettings> | undefined;
   let loaded: Awaited<ReturnType<typeof loadSetupSettings>> | undefined;
 
-  const showSetupDialogForTab = (tab: number) => {
+  const showSetupDialogForTab = (tab: number, scheduledOptions?: ScheduledTabOptions) => {
     const dialog: Extract<DialogState, { type: "setup" }> = {
       type: "setup",
       tab,
       items: [],
       selectedIndex: 0,
       onAction: handleSetupItemAction(ctx, repoPath),
-      onTabChange: showSetupDialogForTab,
+      onTabChange: (next) => showSetupDialogForTab(next),
     };
+    if (tab === SCHEDULED_TAB) {
+      // The task form and the delete confirmation come back here through a new setup dialog.
+      dialog.scheduled = openScheduledTab(ctx, options => handleSetup(ctx, SCHEDULED_TAB, options), scheduledOptions);
+      ctx.showDialog(dialog);
+      return;
+    }
     if (tab === PEERS_TAB) {
       if (!ctx.peerService) {
         ctx.setNotice("Peering is not available here", "error");
@@ -2628,7 +2639,7 @@ export function handleSetup(ctx: ActionCtx, initialTab = 0) {
     }
     ctx.showDialog(dialog);
   };
-  showSetupDialogForTab(initialTab);
+  showSetupDialogForTab(initialTab, scheduled);
 }
 
 async function loadSetupSettings(repoPath: string) {

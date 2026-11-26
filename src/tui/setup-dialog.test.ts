@@ -56,6 +56,7 @@ describe("setup dialog tab bar", () => {
     expect(stripped[0]).toContain("[Hooks]");
     expect(stripped[0]).toContain("[Config]");
     expect(stripped[0]).toContain("[Peers]");
+    expect(stripped[0]).toContain("[Scheduled]");
   });
 
   test.each([66, 67])("the toggle/edit hint fits one row at %i columns", width => {
@@ -64,7 +65,7 @@ describe("setup dialog tab bar", () => {
         type: "setup", tab, items: makeSetupItems(), selectedIndex: 0,
         onAction: () => {}, onTabChange: () => {},
       }, width - 4);
-      expect(stripAnsi(content.contentLines[1]!)).toBe("(1/2/3/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close)");
+      expect(stripAnsi(content.contentLines[1]!)).toBe("(1-4/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close)");
       expect(content.contentLines[2]).toBe("");
     }
   });
@@ -198,7 +199,7 @@ describe("setup dialog tab switching", () => {
     ctx._dialog = dialog;
     const handled = handleDialogInput(ctx, "\x1b[Z");
     expect(handled).toBe(true);
-    expect(switchedTo).toBe(2);
+    expect(switchedTo).toBe(3);
   });
 
   test("pressing same tab number does nothing", () => {

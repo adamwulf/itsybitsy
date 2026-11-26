@@ -867,8 +867,9 @@ const COMMAND_HELP: Record<string, string> = {
     "  --out <dir>    Write here (created, or an empty directory) instead of\n" +
     "                 ~/.itsybitsy/log-exports/<UTC stamp>/\n" +
     "  Peers are fetched by this machine's ib watch over the trusted link; without\n" +
-    "  it, only this machine's files are copied. Exits 1 when any peer was not\n" +
-    "  fetched. Agents cannot run it, except the system coordinator.",
+    "  it, only this machine's files are copied. Exits 1 when this machine's copy\n" +
+    "  failed, peers.json could not be read, or any peer was not fetched.\n" +
+    "  Agents cannot run it, except the system coordinator.",
   push:
     "Usage: ib push <repo-id>\n" +
     "  Push the repo's main (or master) branch to every configured remote.\n" +

@@ -410,9 +410,11 @@ describe("ib export-logs (CLI)", () => {
     expect(result.stderr).toContain('no paired peer has the name or id "nobody"');
   });
 
-  test("--help prints the usage", async () => {
+  test("--help prints the usage and every reason it exits 1", async () => {
     const result = await cli.run(["export-logs", "--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Usage: ib export-logs [<machine>] [--out <dir>]");
+    expect(result.stdout.replace(/\s+/g, " ")).toContain(
+      "Exits 1 when this machine's copy failed, peers.json could not be read, or any peer was not fetched.");
   });
 });

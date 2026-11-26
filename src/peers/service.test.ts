@@ -2017,7 +2017,7 @@ describe("PeerService keeps the link while a transfer moves bytes", () => {
       clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
       await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
       expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
-      expect(service.view().links[0]?.lastError).toBe("request timed out");
+      expect(service.view().links[0]?.lastError).toBe("no reply to the agents poll within 15 s");
     } finally {
       inbound.close(PEER_CLOSE.done, "done");
       await service.shutdown();
@@ -2066,7 +2066,7 @@ describe("PeerService keeps the link while a transfer moves bytes", () => {
       clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
       await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
       expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
-      expect(service.view().links[0]?.lastError).toBe("request timed out");
+      expect(service.view().links[0]?.lastError).toBe("no reply to the agents poll within 15 s");
     } finally {
       reading.resolve();
       await service.shutdown();

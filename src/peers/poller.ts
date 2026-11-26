@@ -16,7 +16,7 @@
  *   its QUIC connection alive and still never answer (its `ib watch` event
  *   loop wedged while the Rust side runs on), which would otherwise leave the
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
- *   "request timed out", and the next tick redials. Closing the connection is
+ *   "no reply to the agents poll within 15 s", and the next tick redials. Closing the connection is
  *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
  * - Except during a transfer (SPEC.md §20.4 "Slow links"): while an attachment
  *   transfer with the peer, on either connection, has moved bytes within its
@@ -30,6 +30,10 @@
  *   once the transfer has ended or stalled, it closes the connection as an
  *   unkept timeout would. A peer that moves attachment bytes is not wedged,
  *   and on a slow link closing the connection would kill the transfer itself.
+ * - When a connected link fails, watch.log gets the shared disconnect line
+ *   (peer-link.ts `disconnectLine`): the peer, `dialed`, how long it was up
+ *   since `connectedAt`, and the reason. Failures while not connected are
+ *   logged once per change of error.
  * - The poller tracks per-peer state: connected or not (and since when), `lastOkAt`,
  *   `lastError`, and the last repo and agent lists received. The unified tree
  *   keeps disconnected agents dimmed and shows the peer’s link status in their info panel.
@@ -52,6 +56,7 @@ import {
   closeQuietly,
   cleanRemoteText,
   describePeerClose,
+  disconnectLine,
   requestAgents,
   requestPane,
   type PeerPane,
@@ -69,10 +74,10 @@ export const PEER_POLL_INTERVAL_MS = 5_000;
 /** Longest an `agents` request may take on a live connection before it is closed. */
 export const PEER_REQUEST_TIMEOUT_MS = 15_000;
 
-/** A request that got no reply within {@link PEER_REQUEST_TIMEOUT_MS}. */
+/** An agents poll that got no reply within {@link PEER_REQUEST_TIMEOUT_MS}. */
 class PeerRequestTimeout extends Error {
   constructor() {
-    super("request timed out");
+    super(`no reply to the agents poll within ${PEER_REQUEST_TIMEOUT_MS / 1000} s`);
     this.name = "PeerRequestTimeout";
   }
 }
@@ -432,9 +437,17 @@ export class PeerPoller {
     if (changed) this.notify();
   }
 
+  /**
+   * A dial or request failed, or the connection closed. A link that was up
+   * gets the shared disconnect line (SPEC §20.4); otherwise one line per
+   * change of error.
+   */
   private failed(link: Link, message: string): void {
-    if (!link.connected && link.lastError === message) return;
-    if (link.lastError !== message) this.deps.log(`peer link: ${link.name} (${shortPeerId(link.id)}): ${message}`);
+    if (link.connected && link.connectedAt !== null) {
+      this.deps.log(disconnectLine(link.name, link.id, "dialed", this.deps.now() - link.connectedAt, message));
+    } else if (link.lastError !== message) {
+      this.deps.log(`peer link: ${link.name} (${shortPeerId(link.id)}): ${message}`);
+    } else if (!link.connected) return;
     link.connected = false;
     link.connectedAt = null;
     link.lastError = message;

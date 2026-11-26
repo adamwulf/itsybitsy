@@ -37,6 +37,7 @@ import {
   encodeAgentsReply,
   requestAgents,
   serveTrustedConnection,
+  formatLinkUptime,
   toRemoteAgents,
   peerSnapshot,
   type PeerSnapshot,
@@ -443,6 +444,11 @@ describe("requestAgents", () => {
     expect(asks).toBe(0);
     expect(link.b.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
   });
+});
+
+test("formatLinkUptime: seconds under a minute, then minutes and seconds, then hours and minutes", () => {
+  expect([0, 999, 45_000, 59_999, 60_000, 7 * 60_000 + 12_000, 7 * 60_000 + 5_000, 3_599_999, 3_600_000, 2 * 3_600_000 + 3 * 60_000 + 59_000, 27 * 3_600_000, -5]
+    .map(formatLinkUptime)).toEqual(["0s", "0s", "45s", "59s", "1m00s", "7m12s", "7m05s", "59m59s", "1h00m", "2h03m", "27h00m", "0s"]);
 });
 
 describe("serveTrustedConnection", () => {

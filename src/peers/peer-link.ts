@@ -488,6 +488,23 @@ export function describePeerClose(info: PairCloseInfo): string {
   }
 }
 
+/** How long a connection was up, for its disconnect line: `45s`, `7m05s`, `2h03m`. */
+export function formatLinkUptime(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${pad(seconds % 60)}s`;
+  return `${Math.floor(seconds / 3600)}h${pad(Math.floor(seconds / 60) % 60)}m`;
+}
+
+/**
+ * The line both ends write when a trusted connection that was up closes
+ * (SPEC §20.4 "Connection log lines"); agents grep both machines' logs for it.
+ */
+export function disconnectLine(name: string, id: string, how: "dialed" | "accepted", upMs: number, reason: string): string {
+  return `peer link: ${name} (${shortPeerId(id)}): disconnected (${how}, up ${formatLinkUptime(upMs)}): ${reason}`;
+}
+
 export function closeQuietly(conn: PairConnection, code: number, reason: string): void {
   try {
     if (conn.closeInfo() === null) conn.close(code, reason.slice(0, MAX_CLOSE_REASON));

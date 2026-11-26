@@ -25,6 +25,7 @@ import { singleLine } from "./single-line";
  * terminal-host.ts (SPEC §20.4 "Remote terminal").
  *
  * SPEC §20.4 defines the wire shapes for agents, pane and prompt reads, new-agent, lifecycle, acknowledge, permissions and send.
+ * A `watch-log` reply (`ib export-logs`, "Watch log copies") is framed like `agent-diff`.
  *
  * A request over its op-specific cap, or one that is not UTF-8, not JSON, not an object
  * or has no op, closes the connection with {@link PEER_CLOSE.error} and the
@@ -41,6 +42,7 @@ import { singleLine } from "./single-line";
 import { CHUNK_BYTES, IDLE_TIMEOUT_MS } from "./transfer-limits";
 import { createHash } from "node:crypto";
 import { MAX_AGENT_DIFF_BYTES, type AgentDiff } from "./agent-diff";
+import { describeWatchLogFiles, isWatchLogFileName, totalWatchLogBytes, WATCH_LOG_FILE_NAMES, WATCH_LOG_MAX_BYTES, type PeerWatchLog, type WatchLogFile } from "./watch-log-files";
 import { join } from "node:path";
 import { openStagedFile } from "./remote-attachments";
 import {
@@ -593,6 +595,73 @@ async function readDiffReply(stream: Pick<PairStream, "read">, options: FileBody
   return { base: header.base, patch };
 }
 
+/**
+ * Copy the other install's watch log files (SPEC §20.4 "Watch log copies").
+ * `clock` (epoch ms) stamps the request and the reply on this side, so the
+ * caller can compare the peer's `now` with this machine's clock. There is no
+ * overall deadline: each read has the transfer idle timeout, and `signal`
+ * stops the exchange.
+ */
+export async function requestWatchLog(conn: PairConnection, setTimer = realTimer, signal?: AbortSignal, clock: () => number = Date.now): Promise<PeerWatchLog> {
+  const sentAt = clock();
+  const reply = await clientExchange(conn, encodeJson({ op: "watch-log" }), {
+    read: (stream, options) => readWatchLogReply(stream, { ...options, signal }, clock),
+  }, { setTimer, signal });
+  return { ...reply, sentAt };
+}
+
+async function readWatchLogReply(stream: Pick<PairStream, "read">, options: FileBodyOptions, clock: () => number): Promise<Omit<PeerWatchLog, "sentAt">> {
+  const prefix = await readHeaderBytes(stream, 4, options);
+  if (prefix[0] !== 0) {
+    // A JSON error reply: a refusal, or a peer whose ib has no watch-log op.
+    const parts = [prefix];
+    let length = prefix.length;
+    for (;;) {
+      const chunk = await waitForIO(options, () => stream.read(PEER_MAX_REQUEST_BYTES + 1 - length));
+      if (!chunk.length) break;
+      parts.push(Buffer.from(chunk));
+      length += chunk.length;
+      if (length > PEER_MAX_REQUEST_BYTES) throw new PeerProtocolError("Malformed watch-log reply");
+    }
+    const reply = decodeObject(Buffer.concat(parts), "reply");
+    if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(`the peer replied: ${sendDiagnostic(reply.reason)}`);
+    throw new PeerProtocolError("Malformed watch-log reply");
+  }
+  const header = await decodeFrameHeader(stream, prefix, options);
+  const headerAt = clock();
+  const malformed = () => new PeerProtocolError("Malformed watch-log header");
+  if (!header || typeof header !== "object" || Array.isArray(header)) throw malformed();
+  const { op, now, version, name: machine, files } = header as Record<string, unknown>;
+  if (op !== "watch-log" || typeof now !== "number" || !Number.isFinite(now) || typeof version !== "string" ||
+      typeof machine !== "string" || !Array.isArray(files) || files.length > WATCH_LOG_FILE_NAMES.length) throw malformed();
+  const seen = new Set<string>();
+  let total = 0;
+  const entries = files.map((entry: unknown) => {
+    if (!entry || typeof entry !== "object") throw malformed();
+    const { name, size, sha256 } = entry as Record<string, unknown>;
+    // Only the three known names: the requesting side writes each file under its name.
+    if (!isWatchLogFileName(name) || seen.has(name) || typeof size !== "number" || !Number.isSafeInteger(size) || size < 0 ||
+        typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) throw malformed();
+    seen.add(name);
+    total += size;
+    return { name, size, sha256 };
+  });
+  if (total > WATCH_LOG_MAX_BYTES) throw new PeerProtocolError(`The watch-log reply declares ${total} bytes, over the ${WATCH_LOG_MAX_BYTES}-byte limit`);
+  const bodies: WatchLogFile[] = [];
+  for (const { name, size, sha256 } of entries) {
+    const body = Buffer.allocUnsafe(size);
+    let offset = 0;
+    const digest = await streamFileBody(stream, size, chunk => {
+      body.set(chunk, offset);
+      offset += chunk.length;
+    }, options);
+    if (digest !== sha256) throw new PeerProtocolError(`${name} hash mismatch`);
+    bodies.push({ name, body });
+  }
+  await requireSendFin(stream, options);
+  return { name: cleanRemoteText(machine), version: cleanRemoteText(version), now, headerAt, doneAt: clock(), files: bodies };
+}
+
 export const NEW_AGENT_UNKNOWN = "Remote start outcome unknown. Check the peer for the agent.";
 
 /**
@@ -932,6 +1001,8 @@ export interface PeerResponderDeps {
   captureAgent?(repo: string, id: string, lines: number): Promise<PeerPane>;
   captureDiff?(repo: string, id: string): Promise<AgentDiff>;
   readPrompt?(repo: string, id: string): Promise<string>;
+  /** This machine's name, `ib` version and watch log files, for a `watch-log` request. Without it the request is refused. */
+  readWatchLog?(): Promise<{ name: string; version: string; files: WatchLogFile[] }>;
   /** Shared by all connections served by this ib watch. */
   paneReaders?: Set<string>;
   headerReaders?: Set<PairStream>;
@@ -1279,6 +1350,8 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
       return;
     }
+  } else if (request.op === "watch-log") {
+    return serveWatchLog(conn, stream, from, peerName, deps);
   } else if (request.op === "agent-prompt") {
     try {
       if (typeof request.repo !== "string" || typeof request.id !== "string") throw new Error("Expected repo and agent id");
@@ -1350,4 +1423,41 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
     deps.paneReaders.add(conn.remoteId);
     deps.log(`peer link: ${peerName} (${from}) read the system coordinator pane`);
   }
+}
+
+/**
+ * Answer a `watch-log` request (SPEC §20.4 "Watch log copies"). Every file is
+ * read into memory first, so a rotation during the reply cannot mix two
+ * versions; then one framed reply in the style of `agent-diff`: the header
+ * lists each file with its size and SHA-256 plus `now`, the `ib` version and
+ * this machine's name, then the bodies in order, then FIN.
+ */
+async function serveWatchLog(conn: PairConnection, stream: PairStream, from: string, peerName: string, deps: PeerResponderDeps): Promise<void> {
+  let reply: Uint8Array[];
+  let copied: string | undefined;
+  try {
+    if (!deps.readWatchLog) throw new Error("Watch log copies are unavailable");
+    const { name, version, files } = await deps.readWatchLog();
+    const total = totalWatchLogBytes(files);
+    if (total > WATCH_LOG_MAX_BYTES) throw new Error(`The watch log files total ${total} bytes, over the ${WATCH_LOG_MAX_BYTES}-byte limit`);
+    const entries = files.map(file => ({ name: file.name, size: file.body.length, sha256: createHash("sha256").update(file.body).digest("hex") }));
+    // `now` is read after the files and before the header is written, so the
+    // requester's send and header times bound it.
+    reply = [encodeFrameHeader({ op: "watch-log", now: Date.now(), version, name, files: entries }), ...files.map(file => file.body)];
+    copied = describeWatchLogFiles(files);
+  } catch (err) {
+    const error = sendDiagnostic(errorDetail(err));
+    deps.log(`peer link: watch log request from ${peerName} (${from}) failed: ${error}`);
+    reply = [encodeErrorReply(error)];
+  }
+  // Reading the files is asynchronous, as a capture is.
+  if (await deps.peerName(conn.remoteId) === null) {
+    closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
+    return;
+  }
+  // Bulk bodies, like attachment bodies: other replies on this connection go out first.
+  if (copied !== undefined) await waitForIO(deps, () => stream.setPriority(ATTACHMENT_BODY_PRIORITY)).catch(() => {});
+  const delivered = await sendReply(conn, stream, deps, reply);
+  if (copied === undefined) return;
+  deps.log(delivered ? `peer link: ${peerName} (${from}) copied the watch log (${copied})` : `peer link: sending the watch log to ${peerName} (${from}) failed`);
 }

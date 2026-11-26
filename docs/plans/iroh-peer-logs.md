@@ -99,5 +99,7 @@ plus `pmset` entries read after a wake) give the OS view in the same file.
      `no reply to the agents poll within 15 s`.
    - A watch-log copy is a transfer, so the keep rule (SPEC §20.4 "Slow
      links") can now hold a link's displayed state (connected, its last
-     lists, a remote pane) through timeouts during a watch-log copy and for
-     up to 60 s after one.
+     lists, a remote pane) through timeouts during a watch-log copy. On the
+     machine that answered the copy, it also holds for 60 s after that
+     machine's reply write ended ok. A timeout kept near the end of that
+     window holds until its next 15 s check.

@@ -447,7 +447,7 @@ export class PeerService {
   private readonly listeners = new Set<() => void>();
   /** Polls each peer's agents while the endpoint is bound. */
   private readonly poller: PeerPoller;
-  /** Attachment transfers per peer: their watch.log lines, and recent progress for the poller. */
+  /** Transfers per peer (attachments and watch-log copies): their watch.log lines, and recent progress for the poller. */
   private readonly transfers: TransferActivity;
   private readonly outboxPolls = new Set<Promise<void>>();
   private recoveryTimer?: ReturnType<typeof setInterval>;

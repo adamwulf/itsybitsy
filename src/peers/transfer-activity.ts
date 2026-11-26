@@ -1,5 +1,5 @@
 /**
- * Attachment transfers with each peer (SPEC.md §20.4 "Slow links"): the one
+ * Transfers with each peer, of attachments and of watch-log copies (SPEC.md §20.4 "Slow links"): the one
  * place the send and receive paths report to and the poller asks.
  *
  * - {@link TransferActivity.begin} starts one transfer with attachment

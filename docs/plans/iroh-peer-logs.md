@@ -93,4 +93,11 @@ plus `pmset` entries read after a wake) give the OS view in the same file.
 2. Hooks: `export-logs` is allowed only for @system among agents.
 3. Watchdog: not affected.
 4. `ib watch`: answers the new op, runs the new outbox kind and writes the
-   new log lines. No UI change.
+   new log lines. Two visible changes:
+   - The Peers tab's error text (`lastError`) for an agents poll that gets
+     no answer changed from `request timed out` to
+     `no reply to the agents poll within 15 s`.
+   - A watch-log copy is a transfer, so the keep rule (SPEC §20.4 "Slow
+     links") can now hold a link's displayed state (connected, its last
+     lists, a remote pane) through timeouts during a watch-log copy and for
+     up to 60 s after one.

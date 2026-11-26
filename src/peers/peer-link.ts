@@ -1382,7 +1382,7 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
       return;
     }
   } else if (request.op === "watch-log") {
-    return serveWatchLog(conn, stream, from, peerName, deps);
+    return serveWatchLog(conn, stream, from, peerName, deps, stillPaired);
   } else if (request.op === "agent-prompt") {
     try {
       if (typeof request.repo !== "string" || typeof request.id !== "string") throw new Error("Expected repo and agent id");
@@ -1463,9 +1463,11 @@ async function serveRequest(conn: PairConnection, stream: PairStream, from: stri
  * lists each file with its size and SHA-256 plus `now`, the `ib` version and
  * this machine's name, then the bodies in order, then FIN. The reply's
  * write is a transfer (`deps.transfers`), so a slow copy keeps the link
- * (SPEC "Slow links").
+ * (SPEC "Slow links"). `stillPaired` is the connection's pairing re-check,
+ * so a failed lookup after the read closes with code 3, not as "not a peer".
  */
-async function serveWatchLog(conn: PairConnection, stream: PairStream, from: string, peerName: string, deps: PeerResponderDeps): Promise<void> {
+async function serveWatchLog(conn: PairConnection, stream: PairStream, from: string, peerName: string, deps: PeerResponderDeps,
+  stillPaired: () => Promise<string | null>): Promise<void> {
   let reply: Uint8Array[];
   let copied: string | undefined;
   let sizes = { files: 0, bytes: 0 };
@@ -1485,11 +1487,8 @@ async function serveWatchLog(conn: PairConnection, stream: PairStream, from: str
     deps.log(`peer link: watch log request from ${peerName} (${from}) failed: ${error}`);
     reply = [encodeErrorReply(error)];
   }
-  // Reading the files is asynchronous, as a capture is.
-  if (await deps.peerName(conn.remoteId) === null) {
-    closeQuietly(conn, PEER_CLOSE.notPeer, "not a peer");
-    return;
-  }
+  // Reading the files is asynchronous, as a capture is. A refusal closes the connection and logs its line.
+  if (await stillPaired() === null) return;
   if (copied === undefined) {
     await sendReply(conn, stream, deps, reply);
     return;

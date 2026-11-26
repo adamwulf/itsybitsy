@@ -197,6 +197,20 @@ describe("the watch-log op", () => {
     });
     await expect(requestWatchLog(a, createFakeClock().setTimer)).rejects.toThrow();
     expect(b.closes).toContainEqual({ code: PEER_CLOSE.notPeer, reason: "not a peer" });
+    expect(logs).toContain(`peer link: refused a request from ${ID_A.slice(0, 10)}: no longer a peer; closing`);
+  });
+
+  test("a pairing lookup that fails after the files are read closes with code 3, not as 'not a peer'", async () => {
+    let checks = 0;
+    serve({
+      // 1: the accept, 2: the stream, 3: before the answer, 4: after the read.
+      peerName: async () => ++checks === 4 ? Promise.reject(new Error("peers.json: EIO")) : "Desk",
+      readWatchLog: async () => ({ name: "laptop", version: "0.1.3", files: [{ name: "watch.log", body: Buffer.from("x") }] }),
+    });
+    await expect(requestWatchLog(a, createFakeClock().setTimer)).rejects.toThrow();
+    expect(b.closes).toEqual([{ code: PEER_CLOSE.error, reason: "pairing lookup failed" }]);
+    expect(logs).toContain(`peer link: refused a request from ${ID_A.slice(0, 10)}: pairing lookup failed: peers.json: EIO; closing`);
+    expect(logs.filter(line => line.includes("not a peer") || line.includes("copied the watch log"))).toEqual([]);
   });
 
   async function answerWith(header: object, bodies: Uint8Array[] = []) {

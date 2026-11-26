@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetUserHome, setUserHome } from "../home";
 import { waitFor } from "../test-utils";
-import { createPeerOutboxPoll, handoffRemoteMessage, textHeader, pollPeerOutbox } from "./peer-outbox";
+import { createPeerOutboxPoll, handoffRemoteMessage, handoffWatchLog, textHeader, pollPeerOutbox } from "./peer-outbox";
 import { MAX_HEADER_BYTES } from "./transfer-limits";
 
 let home: string;
@@ -553,4 +553,56 @@ test("a published ACK stays readable when the client reaches its deadline during
     expect(await client).toMatchObject({ ok: true });
     expect(marked).toBe(true);
   } finally { resume.resolve(); await worker; pause.mockRestore(); hide.mockRestore(); marker.mockRestore(); clock.mockRestore(); }
+});
+
+test("a watch log copy needs ib watch on this machine", async () => {
+  expect(await handoffWatchLog("peer", "Laptop", new AbortController().signal))
+    .toMatchObject({ ok: false, exitCode: 1, stderr: "ib watch is not running on this machine" });
+});
+
+test("a watch log copy that ib watch never takes says so", async () => {
+  await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+  let now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  try {
+    const client = handoffWatchLog("peer", "Laptop", new AbortController().signal);
+    await waitFor(async () => (await fs.readdir(base).catch(() => [])).some(name => !name.startsWith(".")));
+    now += 10_001;
+    expect(await client).toMatchObject({ ok: false, exitCode: 1, stderr: "ib watch did not take the request within 10 s" });
+  } finally { clock.mockRestore(); }
+});
+
+test("a claimed watch log copy with no result in time reports the wait, and stops the fetch", async () => {
+  await Bun.write(join(home, ".itsybitsy", "peer", "endpoint.lock"), String(process.pid));
+  let now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  const started = Promise.withResolvers<void>();
+  let stopped = false;
+  let worker: Promise<void> | undefined;
+  try {
+    const client = handoffWatchLog("peer", "Laptop", new AbortController().signal);
+    await waitFor(async () => (await fs.readdir(base).catch(() => [])).some(name => !name.startsWith(".")));
+    worker = createPeerOutboxPoll()(async () => "", () => {}, undefined, undefined, undefined, (_peer, transfer) => {
+      started.resolve();
+      return new Promise((_, reject) => transfer.signal!.addEventListener("abort", () => { stopped = true; reject(transfer.signal!.reason); }, { once: true }));
+    });
+    await started.promise;
+    await Bun.sleep(100); // the client sees the claim and moves its deadline to two minutes
+    now += 120_001;
+    expect(await client).toMatchObject({ ok: false, exitCode: 1, stderr: "no result from ib watch within 120 s" });
+    await waitFor(() => stopped);
+  } finally { clock.mockRestore(); await worker; }
+});
+
+test("a malformed watch log request is refused without fetching", async () => {
+  const id = crypto.randomUUID();
+  const dir = join(base, id);
+  await mkdir(dir, { recursive: true });
+  await writeTransferOwner(dir, { pid: process.pid, start: 100 });
+  await Bun.write(join(dir, "request.json"), JSON.stringify({ peer: "peer", watchLog: "yes" }));
+  let fetches = 0;
+  await createPeerOutboxPoll()(async () => "", () => {}, undefined, undefined, undefined, async () => { fetches++; return ""; });
+  expect(await Bun.file(join(base, ".claimed", id + `@${process.pid}-100`, "result.json")).json())
+    .toEqual({ ok: false, error: "Invalid peer-outbox request" });
+  expect(fetches).toBe(0);
 });

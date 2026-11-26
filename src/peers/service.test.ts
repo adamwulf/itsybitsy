@@ -1,4 +1,5 @@
-import { createPeerOutboxPoll, handoffRemoteMessage, textHeader } from "./peer-outbox";
+import { createPeerOutboxPoll, handoffRemoteMessage, handoffWatchLog, textHeader } from "./peer-outbox";
+import { decodeWatchLogOutput, type WatchLogFile } from "./watch-log-files";
 import { humanSendTerminalDenial, remoteStartDenialAtStartup } from "./remote-start-caller";
 import { spyOn, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, open, rm, stat, utimes, writeFile } from "node:fs/promises";
@@ -23,6 +24,7 @@ import {
   encodePeerRequest,
   requestAgents,
   requestPermissions,
+  requestWatchLog,
   serveTrustedConnection,
   toRemoteAgents,
   type RemoteAgent,
@@ -2664,6 +2666,74 @@ describe("scheduled remote runs and the endpoint owner (SPEC §21.2)", () => {
       expect(stored.lastError).toBe("Machine is disconnected");
     } finally {
       await scheduler.stop();
+      await service.shutdown();
+    }
+  });
+});
+
+describe("watch log copies (ib export-logs)", () => {
+  const remoteFiles: WatchLogFile[] = [
+    { name: "watch.log", body: Buffer.from("remote newest\n") },
+    { name: "watch.log.1", body: Buffer.from("remote older\n") },
+  ];
+
+  test("the CLI's request reaches the peer through the outbox and the poller's connection", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, clock } = makeService({ pollOutbox: createPeerOutboxPoll() });
+    const responderLogs: string[] = [];
+    endpoint.connectImpl = async (id) => {
+      const link = createMemoryLink("00".repeat(32), id);
+      void serveTrustedConnection(link.b, {
+        setTimer: createFakeClock().setTimer, peerName: async () => "Desk", log: (line) => responderLogs.push(line),
+        snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
+        readWatchLog: async () => ({ name: "laptop-c", version: "9.9.9", files: remoteFiles }),
+      });
+      return serviceConnection(link.a, PEER_ALPN);
+    };
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      const result = await handoffWatchLog(ID_REMOTE, "Laptop C", new AbortController().signal);
+      expect(result).toMatchObject({ ok: true, exitCode: 0, stderr: "" });
+      const copy = decodeWatchLogOutput(result.stdout);
+      expect(copy).toMatchObject({ name: "laptop-c", version: "9.9.9", sentAt: clock.now(), headerAt: clock.now(), doneAt: clock.now() });
+      expect(copy.files.map((file) => [file.name, Buffer.from(file.body).toString()])).toEqual([
+        ["watch.log", "remote newest\n"], ["watch.log.1", "remote older\n"],
+      ]);
+      expect(responderLogs).toContain("peer link: Desk (0000000000) copied the watch log (2 files, 0.0 MB)");
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  test("a disconnected peer is reported with the service's reason", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service } = makeService({ pollOutbox: createPeerOutboxPoll() });
+    try {
+      await service.bootIfPaired();
+      await waitFor(() => typeof service.view().links[0]?.lastError === "string");
+      expect(await handoffWatchLog(ID_REMOTE, "Laptop C", new AbortController().signal))
+        .toMatchObject({ ok: false, exitCode: 1, stderr: "Machine is disconnected" });
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  test("an accepted trusted connection is answered from readWatchLog", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, logs } = makeService({
+      readWatchLog: async () => ({ name: "desk", version: "1.2.3", files: remoteFiles.slice(0, 1) }),
+    });
+    endpoint.connectImpl = () => new Promise(() => {}); // the poller's own dial to ID_REMOTE stays pending
+    await service.bootIfPaired();
+    const conn = incomingFrom(endpoint, service.view().selfId!, PEER_ALPN);
+    try {
+      const copy = await requestWatchLog(conn, createFakeClock().setTimer);
+      expect(copy).toMatchObject({ name: "desk", version: "1.2.3" });
+      expect(copy.files.map((file) => file.name)).toEqual(["watch.log"]);
+      await waitFor(() => logs.includes(`peer link: Laptop C (${ID_REMOTE.slice(0, 10)}) copied the watch log (1 file, 0.0 MB)`));
+    } finally {
+      conn.close(PEER_CLOSE.done, "done");
       await service.shutdown();
     }
   });

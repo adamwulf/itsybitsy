@@ -116,6 +116,9 @@ import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
 import { addPeer, normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
 import { TransferActivity, type ActiveTransfer } from "./transfer-activity";
+import { requestWatchLog } from "./peer-link";
+import { encodeWatchLogOutput, readWatchLogFiles, type PeerWatchLog } from "./watch-log-files";
+import { IB_VERSION } from "../ib-version";
 
 // ---------------------------------------------------------------------------
 // What the service needs from a bound endpoint. The wrapper's IrohEndpoint,
@@ -168,6 +171,8 @@ export interface PeerServiceDeps {
   captureAgent?: PeerResponderDeps["captureAgent"];
   captureDiff?: PeerResponderDeps["captureDiff"];
   readPrompt?: PeerResponderDeps["readPrompt"];
+  /** This machine's watch log files for a peer's `watch-log` request (`ib export-logs`). */
+  readWatchLog?: PeerResponderDeps["readWatchLog"];
   remoteStartDenial: string | null | Promise<string | null>;
   remoteLifecycle?: RemoteLifecycleDeps;
   remoteQuestions?: RemoteQuestionDeps;
@@ -225,6 +230,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     remoteQuestions: { listRepos, acknowledgeQuestion, notice },
     remotePermissions: { listRepos, effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability, notice },
     remoteSpawn: { listRepos, listSpawnableTypes: listSpawnableTypeNamesSync, newAgent, notice, attachments },
+    readWatchLog: async () => ({ name: machine, version: IB_VERSION, files: await readWatchLogFiles() }),
     writeRemoteAgents,
     renewLease: renewEndpointLease,
     acquireLock: () => acquireEndpointLock(),
@@ -822,6 +828,19 @@ export class PeerService {
     return requestAgentPrompt(conn, repo, id, this.deps.setTimer);
   }
 
+  /**
+   * Copy a paired machine's watch log files over the poller's live connection
+   * (SPEC §20.4 "Watch log copies"). Only the peer outbox calls it, for
+   * `ib export-logs`, which the hooks keep to humans and @system; so, unlike
+   * the dashboard's reads, it does not apply the startup human-caller decision.
+   */
+  async fetchWatchLog(peerId: string, signal?: AbortSignal): Promise<PeerWatchLog> {
+    if (await this.peerName(peerId) === null) throw new Error("Machine is no longer paired");
+    const conn = this.poller.connectedConnection(peerId);
+    if (!conn) throw new Error("Machine is disconnected");
+    return requestWatchLog(conn, this.deps.setTimer, signal, this.deps.now);
+  }
+
   async receiveTracked(...args: Parameters<NonNullable<import("./peer-link").PeerResponderDeps["receiveMessage"]>>) {
     const [header, peer, name, body, options] = args;
     const receive = this.deps.receiveMessage!;
@@ -1175,7 +1194,8 @@ export class PeerService {
           ...transfer, signal: transfer.signal ? AbortSignal.any([owner.signal, transfer.signal]) : owner.signal,
         }), this.deps.log, () => !owner.signal.aborted && this.endpoint === ep && !this.shuttingDown, dispatchFinished,
           // The CLI prints the output, which already names a failed push.
-          (peer, request, transfer) => this.runRemoteLifecycle(peer, request, "handoff", transfer).then(outcome => outcome.output))
+          (peer, request, transfer) => this.runRemoteLifecycle(peer, request, "handoff", transfer).then(outcome => outcome.output),
+          (peer, transfer) => this.fetchWatchLog(peer, transfer.signal).then(encodeWatchLogOutput))
           .catch(err => this.deps.log(`peer-outbox: ${errorDetail(err)}`))
           .finally(() => { dispatchFinished(); this.outboxPolls.delete(work); });
         this.outboxPolls.add(work);
@@ -1256,6 +1276,7 @@ export class PeerService {
           captureAgent: this.deps.captureAgent,
           captureDiff: this.deps.captureDiff,
           readPrompt: this.deps.readPrompt,
+          readWatchLog: this.deps.readWatchLog,
           terminal: this.deps.terminal,
           paneReaders: this.paneReaders, headerReaders: this.headerReaders,
           // Only a connection that passed the allowlist gets a path line and a path watch.

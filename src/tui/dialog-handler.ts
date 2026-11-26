@@ -1253,7 +1253,7 @@ export function buildSetupContent(
   const lines: string[] = [];
   lines.push(buildTabBar(dialog.tab, innerWidth));
   const hint = dialog.tab === PEERS_TAB ? "Tab/Shift+Tab: switch tabs"
-    : dialog.tab === SCHEDULED_TAB ? "1-4/Tab: tabs, j/k: move, a: add, Enter: edit, x: delete, Esc: close"
+    : dialog.tab === SCHEDULED_TAB ? "1-4/Tab: tabs, j/k: move, a: add, Enter: edit, x: delete"
     : "1-4/Tab: tabs, j/k: move, Enter: toggle/edit, Esc: close";
   lines.push(...wordWrapLines(`(${hint})`, innerWidth).map(line => `${DIM}${line}${RESET}`));
   lines.push("");

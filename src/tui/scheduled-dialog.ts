@@ -101,7 +101,7 @@ const FIRE_TIME_FORMAT = new Intl.DateTimeFormat("en-US", {
   weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
 
-/** A fire time in local time, e.g. `Wed, Nov 26, 09:30`. */
+/** A fire time in local time, e.g. `Wed, Nov 26 at 09:30`. */
 export function formatFireTime(ms: number): string {
   return FIRE_TIME_FORMAT.format(new Date(ms));
 }
@@ -510,8 +510,8 @@ export function buildScheduledTaskFormContent(form: ScheduledTaskFormDialog, inn
   const problem = cronProblem(form.cron);
   const next = problem === null ? nextFireTime(form.cron, Date.now()) : null;
   lines.push(...(next === null ? note(problem ?? "Schedule never fires", RED) : [`  next: ${formatFireTime(next)}`]));
-  lines.push("");
 
+  // No blank line before Auto-retire: the form must fit a 24-row terminal (SPEC §11.5) with an error shown.
   const box = `[${form.autoRetire ? "x" : " "}] Auto-retire`;
   lines.push(form.focused === "autoRetire" ? `${BOLD}${GREEN}${box}${RESET} ${DIM}(Space/Enter toggles)${RESET}` : box);
   lines.push(...note(AUTO_RETIRE_NOTE));

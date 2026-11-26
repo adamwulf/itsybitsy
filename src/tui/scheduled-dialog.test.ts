@@ -468,6 +468,19 @@ describe("Scheduled task form", () => {
     expect(formText(form)).toContain("Repo: itsybitsy");
   });
 
+  test("the form fits a 24-row terminal with a repo warning, a schedule error and a long prompt", async () => {
+    await writePeers([{ id: PEER_B, name: "Laptop B" }]);
+    const { ctx } = makeHost({ links: [link(PEER_B, "Laptop B", false)] });
+    await openTab(ctx);
+    press(ctx, "a", " ");
+    const form = assertDialog(ctx.dialog, "scheduled-task-form");
+    form.cron = "30 9 * *";
+    for (let i = 0; i < 8; i++) form.buffer.handleInput(i ? "\r" : "line");
+    const lines = buildScheduledTaskFormContent(form, 66).contentLines;
+    expect(stripAnsi(lines.join("\n"))).toContain("Invalid cron expression");
+    expect(lines.length).toBeLessThanOrEqual(22); // 24 rows, less the box's top and bottom border
+  });
+
   test("editing keeps the task's repo, and its machine when no longer paired, as choices", async () => {
     await writePeers([{ id: PEER_B, name: "Laptop B" }]);
     await createScheduledTask({ ...TASK, machine: PEER_B, repo: "web" });

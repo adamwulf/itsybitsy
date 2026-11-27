@@ -10950,7 +10950,7 @@ describe("Unified peer repos in the Agents tree", () => {
 
     test(`at ${width} columns every row fits and a long remote name moves every row's state, as a long local name does`, () => {
       const { dashboard, service } = setup();
-      const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), manager: "m".repeat(100) });
+      const long = remote("n".repeat(100), "r".repeat(100), { repoPath: `/${"p".repeat(200)}`, state: "s".repeat(50), agentType: "t".repeat(100), model: "x".repeat(100), manager: "m".repeat(100) });
       const short = remote("short", "r".repeat(100), { repoPath: `/${"p".repeat(200)}` });
       service.set({ links: [{ id: PEER_B, name: "P".repeat(32), connected: true, connectedAt: Date.now(), lastOkAt: Date.now(), coordinator: null, lastError: null, repos: repos(long.repoName), agents: [long, short], questions: [] }] });
       const rows = treeRows(dashboard, width);
@@ -11062,6 +11062,7 @@ describe("Unified peer repos in the Agents tree", () => {
         "Path: /remote/itsybitsy",
         "State: running",
         "Type: worker",
+        "Model: codex:gpt-5-codex",
         "Manager: manager-def",
       ]);
 
@@ -11074,6 +11075,8 @@ describe("Unified peer repos in the Agents tree", () => {
       expect(dashboard.rightPane.mode).not.toBe("TREE");
       await waitFor(() => paneText(dashboard.render(WIDTH), 2).startsWith("peer capture"));
       expect(service.fetchPane.mock.calls.at(-1)?.[1]).toEqual({ op: "agent-pane", repo: "itsybitsy", id: "manager-def" });
+      // A peer that sent no model shows the same placeholder as the other absent fields.
+      expect(dashboard.infoPanel.render(60).map((r) => stripAnsi(r).trimEnd())).toContain("Model: —");
     } finally {
       running.mockRestore();
       dashboard.stopPolling();

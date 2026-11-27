@@ -12217,12 +12217,13 @@ describe("Unified peer repos in the Agents tree", () => {
       answers.status = [0, ""];
       answers.remote = [0, "origin\t/remotes/origin.git (fetch)\norigin\t/remotes/origin.git (push)\n" +
         "upstream\t/remotes/upstream.git (fetch)\nupstream\t/remotes/upstream.git (push)"];
-      answers["fetch upstream"] = [128, "", "fatal: could not read from remote repository\nPlease make sure you have the correct access rights"];
+      // ssh ends its error lines with \r\n: a plain line end, not a line to erase.
+      answers["fetch upstream"] = [128, "", "ssh: Could not resolve hostname git.invalid: nodename nor servname provided, or not known\r\nfatal: Could not read from remote repository."];
       await remoteMerge(dashboard, run, { output: KEEP_OUTPUT }, true);
-      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✗ upstream: fatal: could not read from remote repository · Please make sure you have the correct access rights · ✓ origin: pulled main`;
+      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✗ upstream: ssh: Could not resolve hostname git.invalid: nodename nor servname provided, or not known · fatal: Could not read from remote repository. · ✓ origin: pulled main`;
       await waitFor(() => dashboard.notice === fetchFailed, { message: "the failed fetch's notice" });
       dashboard.setCollectorStatus(collectorHealth("grey"));
-      expect(dashboard.render(MIN_TERMINAL_WIDTH)[0]).toContain(`${RED}${WORKER_KEY} merged · pull failed: ✗ upstream: fatal: could not read from remote repository`);
+      expect(dashboard.render(MIN_TERMINAL_WIDTH)[0]).toContain(`${RED}${WORKER_KEY} merged · pull failed: ✗ upstream: ssh: Could not resolve hostname`);
       // A pull that throws is a failed pull too.
       pullSpawnCtx.set(() => { throw new Error("git: not found"); });
       await remoteMerge(dashboard, run, { output: "" });

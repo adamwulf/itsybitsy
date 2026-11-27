@@ -834,13 +834,15 @@ export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
 }
 
 /**
- * Each line of git's output as a terminal ends up showing it: the text after
- * its last carriage return, keeping its indent. A rebase prints its progress
+ * Each line of git's output as a terminal ends up showing it. A `\r\n` line
+ * end (ssh writes its errors that way, `ssh: Could not resolve hostname …`)
+ * is a plain line end; any other carriage return keeps only the text after
+ * the line's last one, with the line's indent. A rebase prints its progress
  * as `Rebasing (1/3)\rRebasing (2/3)\r…` even on a pipe, and a raw `\r` would
  * move the cursor in the dashboard's header and in a viewer of watch.log.
  */
 function lastCarriageReturnLine(text: string): string {
-  return text.replace(/^( *)[^\n]*\r/gm, "$1");
+  return text.replace(/\r+\n/g, "\n").replace(/^( *)[^\n]*\r/gm, "$1");
 }
 
 /**

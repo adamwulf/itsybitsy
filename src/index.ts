@@ -507,8 +507,8 @@ const COMMAND_HELP: Record<string, string> = {
     "  Alias: repos\n" +
     "  List the registered repos (name, path and notes) without their agents.\n" +
     "  Plain text and --md show the display name: the nickname when one is set,\n" +
-    "  else the registry name. Notes are the ones edited in the dashboard's info\n" +
-    "  panel; plain text prints them indented under their repo.\n" +
+    "  else the registry name. Notes are the ones `ib notes` and the ib watch\n" +
+    "  info panel edit; plain text prints them indented under their repo.\n" +
     "  --json          Emit machine-readable JSON: name (the registry name),\n" +
     "                  nickname, path, notes (nickname and notes are null when unset)\n" +
     "  --md            Emit a Markdown table of name, path and notes",
@@ -1255,7 +1255,7 @@ export async function main() {
         console.log("No repos registered. Use 'ib add <path>' to add one.");
         break;
       }
-      // Notes come from the dashboard's notes editor and can span several lines.
+      // Notes come from `ib notes` or the ib watch notes editor and can span several lines.
       const noteLines = (r: RepoEntry): string[] => {
         const notes = (r.notes ?? "").trimEnd();
         return notes ? notes.split(/\r?\n/) : [];

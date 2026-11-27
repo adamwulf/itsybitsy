@@ -247,7 +247,7 @@ export class InfoPanelComponent implements Component {
 
   /**
    * A selected remote row (SPEC §20.5), read-only. A remote agent shows
-   * the fields its install sent: id, nickname, repo, state, type and manager,
+   * the fields its install sent: id, nickname, repo, state, type, model and manager,
    * with the peer's name. Every value is cut to the panel's width, so a long
    * remote value cannot break the layout.
    */
@@ -282,6 +282,7 @@ export class InfoPanelComponent implements Component {
         field("Path", agent.repoPath);
         field("State", stateText);
         field("Type", agent.agentType ?? "—");
+        field("Model", agent.model ?? "—");
         field("Manager", agent.manager ?? "—");
         break;
       }

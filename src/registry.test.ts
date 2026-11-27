@@ -912,6 +912,23 @@ describe("ib notes show|set|clear <repo> (CLI)", () => {
     }
   }, 60_000);
 
+  test("-h and --help after the repo are note text, not a help request", async () => {
+    const cli = await createCliFixture();
+    try {
+      const app = await cli.addRepo("app");
+      const short = await cli.run(["notes", "set", "app", "run", "ib", "list", "-h", "first"]);
+      expect(short.exitCode).toBe(0);
+      expect(short.stdout).toContain("Set notes for app");
+      expect(await storedNotes(cli.home, app)).toBe("run ib list -h first");
+
+      const long = await cli.run(["notes", "set", "app", "--help"]);
+      expect(long.exitCode).toBe(0);
+      expect(await storedNotes(cli.home, app)).toBe("--help");
+    } finally {
+      await cli.cleanup();
+    }
+  }, 30_000);
+
   test("--help prints the outer and per-subcommand help", async () => {
     const outer = await runIsolatedCli(["notes", "--help"]);
     expect(outer.exitCode).toBe(0);

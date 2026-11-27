@@ -897,12 +897,13 @@ const COMMAND_HELP: Record<string, string> = {
   "notes show":
     "Usage: ib notes show <repo>\n" +
     "  Print the repo's notes as stored. A repo with no notes prints nothing on\n" +
-    "  stdout, \"No notes for <repo>\" on stderr, and exits 0.\n" +
+    "  stdout, \"No notes for <name>\" (its registry name) on stderr, and exits 0.\n" +
     "  <repo>          Registered repo name, nickname, or path",
   "notes set":
     "Usage: ib notes set <repo> [text...]\n" +
-    "  Replace the repo's notes with the text. With no text, the notes are read\n" +
-    "  from stdin, so multi-line notes can come from a quoted heredoc:\n" +
+    "  Replace the repo's notes with the text: every word after <repo>, -h and\n" +
+    "  --help included. With no text, the notes are read from stdin, so\n" +
+    "  multi-line notes can come from a quoted heredoc:\n" +
     "    ib notes set <repo> <<'EOF'\n" +
     "    ...\n" +
     "    EOF\n" +
@@ -1142,7 +1143,11 @@ export async function main() {
   // subcommands (hooks / team / config / peer) are checked at both layers — e.g.
   // `ib team add --help` resolves to the "team add" entry, while `ib team
   // --help` resolves to the "team" entry.
-  const wantsHelp = hasHelpFlag(args);
+  // `ib notes set <repo> <text...>` takes free text, so only the verb and repo
+  // positions ask for help; a -h or --help after the repo is part of the notes.
+  const wantsHelp = command === "notes"
+    ? args.slice(1, 3).some((a) => a === "--help" || a === "-h")
+    : hasHelpFlag(args);
   // The send parser checks --attach operands before returning its help text.
   if (command && command !== "send" && wantsHelp) {
     // Try the deepest match first: "<command> <sub>" if a sub is present.

@@ -1140,7 +1140,7 @@ export async function main() {
 
   // Per-command help dispatch: `ib <command> --help` (or -h). Handled BEFORE
   // the switch so each case body doesn't need its own help check. Nested
-  // subcommands (hooks / team / config / peer) are checked at both layers — e.g.
+  // subcommands (hooks / team / config / peer / notes) are checked at both layers — e.g.
   // `ib team add --help` resolves to the "team add" entry, while `ib team
   // --help` resolves to the "team" entry.
   // `ib notes set <repo> <text...>` takes free text, so only the verb and repo

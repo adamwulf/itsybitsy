@@ -2137,6 +2137,48 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess('ib send agent-target1 "ask the user to run ib export-logs"', "agent-manager1", agentsDir)).toBeNull();
   });
 
+  // The forms a coordinator uses. Every one is allowed for a coordinator.
+  const NOTES_COMMANDS = [
+    "ib notes show app",
+    "ib notes set app run the tests before merging",
+    "ib notes set app <<'EOF'\nline one\nline two\nEOF",
+    "ib notes clear app",
+    "ib notes --help",
+    "/usr/local/bin/ib notes show app",
+  ];
+
+  test("denies ib notes to a worker, a manager and a caller without meta — coordinators only", async () => {
+    await writeAgentMeta("agent-worker1", { agentType: "worker" });
+    await writeAgentMeta("agent-manager1", { agentType: "manager" });
+    for (const caller of ["agent-worker1", "agent-manager1", "agent-nometa1"]) {
+      for (const command of [...NOTES_COMMANDS, "ib notes", "ib no''tes show app", "ib list;ib notes clear app"]) {
+        const result = await checkIbCommandAccess(command, caller, agentsDir);
+        expect(result?.decision).toBe("deny");
+        expect(result!.reason).toContain("'ib notes' is for coordinators only");
+        expect(result!.reason).toContain("Report to your manager");
+      }
+    }
+  });
+
+  test("a message or heredoc body that only mentions ib notes is not a notes command", async () => {
+    await writeAgentMeta("agent-target1", { manager: "agent-manager1" });
+    expect(await checkIbCommandAccess('ib send agent-target1 "ask a coordinator to run ib notes set app x"', "agent-manager1", agentsDir)).toBeNull();
+    expect(await checkIbCommandAccess("ib send agent-target1 <<'EOF'\nib notes clear app\nEOF", "agent-manager1", agentsDir)).toBeNull();
+  });
+
+  test("per-repo coordinator CAN run ib notes", async () => {
+    await writeAgentMeta("itsybitsy", { agentType: "repo-coordinator" });
+    for (const command of NOTES_COMMANDS) {
+      expect(await checkIbCommandAccess(command, "itsybitsy", agentsDir)).toBeNull();
+    }
+  });
+
+  test("@system CAN run ib notes", async () => {
+    for (const command of NOTES_COMMANDS) {
+      expect(await checkIbCommandAccess(command, "@system", agentsDir)).toBeNull();
+    }
+  });
+
   const PEER_COMMANDS = [
     "ib peer",
     "ib peer id",

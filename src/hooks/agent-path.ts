@@ -1457,6 +1457,29 @@ const IB_EXPORT_LOGS_COMMANDS = new Set(["export-logs"]);
  */
 const IB_PEER_COMMANDS = new Set(["peer"]);
 
+/**
+ * `ib notes` shows and changes a registered repo's notes (SPEC §9.3). Only
+ * coordinators may run it: @system and per-repo coordinators. Workers and
+ * managers are denied.
+ */
+const IB_NOTES_COMMANDS = new Set(["notes"]);
+
+/**
+ * Is `callingAgentId` a per-repo coordinator, by its own meta.json in
+ * `agentsDir`? No agent can write its own meta.json (META_WRITE_DENY_REASON).
+ * A missing or unreadable file means no.
+ */
+async function callerMetaIsRepoCoordinator(agentsDir: string, callingAgentId: string): Promise<boolean> {
+  try {
+    const callerMetaFile = Bun.file(join(agentsDir, callingAgentId, "meta.json"));
+    if (!(await callerMetaFile.exists())) return false;
+    const callerMeta = await callerMetaFile.json();
+    return callerMeta?.agentType === REPO_COORDINATOR_TYPE;
+  } catch {
+    return false;
+  }
+}
+
 /** Unquoted characters that end a shell word: control and redirection operators. */
 const SHELL_OPERATOR_CHARS = new Set([";", "&", "|", "(", ")", "<", ">", "`"]);
 
@@ -1651,6 +1674,13 @@ export async function checkIbCommandAccess(
       reason: "Access denied: 'ib export-logs' is for the user (and the system coordinator) only — it copies the ib watch logs of this machine and its paired peers. Ask the user to run it",
     };
   }
+  if (!system && containsIbSubcommandInvocation(normalizedCommand, IB_NOTES_COMMANDS) &&
+      !(await callerMetaIsRepoCoordinator(agentsDir, callingAgentId))) {
+    return {
+      decision: "deny",
+      reason: "Access denied: 'ib notes' is for coordinators only (the system coordinator and per-repo coordinators). Report to your manager (or to the user, if you have no manager) instead",
+    };
+  }
 
   // Bash(ib:*) must represent one shell command.  Otherwise a permitted
   // `ib send ...` can append a second lifecycle/internal command after `;`,
@@ -1741,14 +1771,7 @@ export async function checkManagerCommandAccess(
   /** Is the CALLER a per-repo coordinator? From the verified meta when given. */
   async function callerIsCoordinator(): Promise<boolean> {
     if (opts.callerMeta) return opts.callerMeta.agentType === REPO_COORDINATOR_TYPE;
-    try {
-      const callerMetaFile = Bun.file(join(agentsDir, callingAgentId, "meta.json"));
-      if (!(await callerMetaFile.exists())) return false;
-      const callerMeta = await callerMetaFile.json();
-      return callerMeta?.agentType === REPO_COORDINATOR_TYPE;
-    } catch {
-      return false;
-    }
+    return callerMetaIsRepoCoordinator(agentsDir, callingAgentId);
   }
 
   /** Check if a meta.json grants access to the calling agent (manager or spawner).

@@ -61,6 +61,7 @@ You are in a git worktree, which shares the same repository as the main checkout
 | `ib rehire <id>` | Reconstruct and resume an explicitly retired agent |
 | `ib ack <id>` | Acknowledge a waiting/complete sub-agent: stops its automatic notices, keeps it open for the user to review |
 | `ib ack` | Acknowledge all waiting/complete direct sub-agents; skip other states |
+| `ib notes show <repo>` | Read a repo's notes; `ib notes set <repo>` replaces them (text, or a quoted heredoc on stdin), `ib notes clear <repo>` removes them |
 
 {{availableTypes}}
 

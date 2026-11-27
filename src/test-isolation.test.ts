@@ -122,7 +122,7 @@ describe("clone-repo origin probe backstop", () => {
 });
 
 // The orphan scan kills real processes (a `bun test` whose cwd is gone, a
-// claude process whose agent directory is gone), and every kill, retire, merge
+// claude process whose agent directory is gone), and every retire, merge
 // and nuke teardown reaches it.
 describe("orphan scan backstop", () => {
   test("orphanScanSpawnCtx.reset() restores the safety stub, not Bun.spawn", () => {

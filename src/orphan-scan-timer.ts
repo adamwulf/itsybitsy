@@ -3,7 +3,7 @@
  * scan (scanAndKillOrphans in src/agent-lifecycle.ts) once shortly after
  * startup and then once an hour, so an orphan that outlived a teardown the scan
  * never saw (a `bun test` started by an agent, spinning after the agent's
- * worktree was removed) does not live until the next kill, retire or merge.
+ * worktree was removed) does not live until the next retire, merge or nuke.
  *
  * One timer per `ib watch`, not one per repo: the scan reads the whole process
  * table. It runs from a timer callback, never from render(). A scan still

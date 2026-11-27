@@ -1317,7 +1317,7 @@ In bash, `log_agent()` also echoes the message to stdout unless called with `--q
 
 ### 8.3 Orphan Detection and Cleanup
 
-After kills, retires, merges and nukes, the system scans for orphaned Claude and `bun test` processes (`scanAndKillOrphans`, `src/agent-lifecycle.ts`):
+After retires, merges and nukes, the system scans for orphaned Claude and `bun test` processes (`scanAndKillOrphans`, `src/agent-lifecycle.ts`):
 
 1. List every process with its command line in one `ps -A -ww -o pid=,command=` call. Candidates are command lines containing "claude" (the match `pgrep -f claude` made, the bash reference's listing) and `bun test` runs: argv[0]'s basename is `bun` and the first argument is `test`, read from the command line split on whitespace. A claude process whose prompt mentions "bun test" is not a `bun test` run, and a `bash -c "bun test"` wrapper is not either: it exits on its own once its bun child dies.
 2. For each candidate, determine its CWD and the CWD directory's inode (macOS: ONE `lsof -a -d cwd -p <pid,pid,...> -Fpin` call for all candidates; Linux: `/proc/<pid>/cwd` per PID). A CWD name lsof printed with an escape (`\` or `^`, e.g. `\xc3\xa9` for a non-ASCII byte under a C locale, `^A` for a control character) is not the real path, so the CWD counts as unknown and neither rule kills the process.

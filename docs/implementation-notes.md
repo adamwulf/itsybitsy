@@ -328,12 +328,18 @@ inode, and each orphan goes through `terminateProcess` (`label=lifecycle-orphan`
 argv check (basename of argv[0] is `bun`, first argument `test`). The `bun test`
 rule compares the inode lsof reports with a `stat(path, { bigint: true })` of the
 path: on macOS lsof keeps reporting a deleted cwd's old path and inode, so a
-directory re-created at that path shows up as another inode. Both commands go
+directory re-created at that path shows up as another inode. On macOS only,
+before either rule, `LSOF_ESCAPED_NAME` (`/[\\^]/`) leaves alone a process
+whose cwd name lsof printed escaped (`\xNN` for a non-ASCII byte under a C
+locale, `\\`, `\t`/`\n`, `^A` for a control character): the escaped spelling
+does not exist on disk, so without the guard a live process looks deleted and
+is killed. Both commands go
 through `orphanScanSpawnCtx`, NOT `spawnCtx`: test-preload.ts makes the safe
 no-op runner its baseline, so a test that reaches a teardown without stubbing
 it lists no processes and kills nothing. Tests stub `orphanScanSpawnCtx` plus
 `isPidAliveCtx` / `killPidCtx` / `sleepMsCtx` (agent-lifecycle.test.ts).
-Callers: kill, retire, merge and nuke teardown (`src/ib-commands.ts`), and
+Callers: retire, merge and nuke teardown (`retireAgent`, `mergeAgent`,
+`nukeAgentList` in `src/ib-commands.ts`), and
 `ib watch`'s `startOrphanScanTimer` (`src/orphan-scan-timer.ts`): 60 s after
 `startDashboard` reaches its end, then hourly, unref'd timers, stopped in
 `quitDashboard`. Its timer functions are injectable, so its tests use fakes.

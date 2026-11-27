@@ -1207,6 +1207,36 @@ describe("agent-lifecycle", () => {
       expect(signals).toEqual([]);
     });
 
+    test("a cwd name lsof printed escaped is unknown: neither rule kills it", async () => {
+      // The forms lsof prints (measured on macOS): `\xNN` for a non-ASCII byte
+      // under LC_ALL=C, `^A` for a control character, `\\` for a backslash.
+      // None of these spellings exists on disk, so without the check a stat
+      // or readdir would call each live cwd deleted.
+      const pids = [951, 952, 953, 954];
+      alive = new Set(pids);
+      const cafe = join(root, "café");
+      await mkdir(cafe, { recursive: true });
+      const inode = await inodeOf(cafe);
+      const liveAgentRepo = join(root, "répo", ".itsybitsy", "agents", "agent-live", "repo");
+      await mkdir(liveAgentRepo, { recursive: true });
+      stubSpawn(
+        psOutput([[951, "bun test"], [952, "bun test"], [953, "bun test"], [954, "claude --resume abc"]]),
+        {
+          stdout: [
+            lsofSet(951, join(root, "caf\\xc3\\xa9"), inode),
+            lsofSet(952, join(root, "ctl^Ax"), inode),
+            lsofSet(953, join(root, "back\\\\slash"), inode),
+            lsofSet(954, join(root, "r\\xc3\\xa9po", ".itsybitsy", "agents", "agent-live", "repo")),
+          ].join("\n"),
+          exitCode: 0,
+        },
+      );
+
+      expect(await scanAndKillOrphans()).toBe(0);
+      expect(signals).toEqual([]);
+      expect(await Bun.file(logPath).exists()).toBe(false);
+    });
+
     test("a bun test that ignores SIGTERM is escalated to SIGKILL", async () => {
       alive = new Set([901]);
       ignoresTerm = new Set([901]);

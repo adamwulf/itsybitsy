@@ -1038,6 +1038,15 @@ function parseLsofCwds(stdout: string): Map<number, ProcessCwd> {
   return cwds;
 }
 
+/**
+ * lsof prints a name byte it cannot show as an escape: `\xNN` for a non-ASCII
+ * byte under a C/POSIX locale, `\\` for a backslash, `^A` for a control
+ * character (measured on macOS). Such a name is not the real path, so a stat of
+ * it would call a live cwd deleted: a name with `\` or `^` is an unknown cwd,
+ * and the scan leaves the process alone.
+ */
+const LSOF_ESCAPED_NAME = /[\\^]/;
+
 /** Linux: a process's cwd from /proc/<pid>/cwd, or null when unreadable. */
 async function readProcCwd(pid: number): Promise<ProcessCwd | null> {
   try {
@@ -1102,7 +1111,9 @@ async function bunTestOrphanReason(cwd: ProcessCwd): Promise<string | null> {
  *    path now names another directory → `bun-test-cwd-replaced`.
  *
  * The claude rule is tried first. On macOS, one lsof call reads the cwd and its
- * inode for every candidate PID; elsewhere, /proc/<pid>/cwd is read per PID.
+ * inode for every candidate PID, and a cwd name lsof printed escaped
+ * ({@link LSOF_ESCAPED_NAME}) leaves the process alone; elsewhere,
+ * /proc/<pid>/cwd is read per PID.
  * The scan is process-wide: it reads no repo or agents directory of its own.
  * Returns count of killed orphans.
  */
@@ -1134,6 +1145,8 @@ export async function scanAndKillOrphans(): Promise<number> {
       ? darwinCwds.get(candidate.pid) ?? null
       : await readProcCwd(candidate.pid);
     if (!cwd?.path) continue;
+    // An escaped lsof name is an unknown cwd, for both rules.
+    if (darwinCwds !== null && LSOF_ESCAPED_NAME.test(cwd.path)) continue;
 
     const reason =
       (candidate.claude ? await claudeOrphanReason(cwd.path) : null) ??

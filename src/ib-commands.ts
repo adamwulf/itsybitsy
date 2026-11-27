@@ -462,7 +462,6 @@ async function emitCoalescedLeaveNotice(
  */
 export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
-  const agentsDir = runtimeNames.agentsDir(agent.repoPath);
   const tmuxSession = agent.meta.tmux_session;
 
   // Check if agent exists (directory or tmux session)
@@ -3848,7 +3847,6 @@ export async function mergeAgent(
   options: MergeAgentOptions = {},
 ): Promise<IbCommandResult> {
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
-  const agentsDir = runtimeNames.agentsDir(agent.repoPath);
   const branchName = `agent/${agent.id}`;
   const worktreePath = join(agentDir, "repo");
   const tmuxSession = agent.meta.tmux_session;

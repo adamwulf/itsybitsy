@@ -33,6 +33,8 @@ import { tmuxSessionTarget } from "./validation";
 import { gitStatusSpawnCtx, checkWorktreeCleanliness } from "./git-status";
 import { codexLiveSpawnCtx, fetchCodexLiveUsage } from "./codex-live-usage";
 import { cloneRepoSpawnCtx, readOriginUrl } from "./clone-repo";
+import { orphanScanSpawnCtx, scanAndKillOrphans } from "./agent-lifecycle";
+import { isPidAliveCtx, killPidCtx } from "./agents";
 import type { SpawnFn } from "./types";
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -68,6 +70,7 @@ afterEach(() => {
   gitStatusSpawnCtx.reset();
   codexLiveSpawnCtx.reset();
   cloneRepoSpawnCtx.reset();
+  orphanScanSpawnCtx.reset();
 });
 
 // The dashboard's live Codex usage probe runs from startPolling() and an 8-hour
@@ -115,6 +118,32 @@ describe("clone-repo origin probe backstop", () => {
     cloneRepoSpawnCtx.reset();
     expect(cloneRepoSpawnCtx.runner).toBe(safeTestSpawnRunner);
     expect(await readOriginUrl("/nonexistent/repo")).toBeNull();
+  });
+});
+
+// The orphan scan kills real processes (a `bun test` whose cwd is gone, a
+// claude process whose agent directory is gone), and every kill, retire, merge
+// and nuke teardown reaches it.
+describe("orphan scan backstop", () => {
+  test("orphanScanSpawnCtx.reset() restores the safety stub, not Bun.spawn", () => {
+    orphanScanSpawnCtx.set(((): any => { throw new Error("real spawn must never run"); }) as SpawnFn);
+    orphanScanSpawnCtx.reset();
+    expect(orphanScanSpawnCtx.runner).toBe(safeTestSpawnRunner);
+    expect(orphanScanSpawnCtx.runner).not.toBe(Bun.spawn as unknown as SpawnFn);
+  });
+
+  test("scanAndKillOrphans on the stub lists no process and signals nothing", async () => {
+    orphanScanSpawnCtx.reset();
+    const signals: number[] = [];
+    isPidAliveCtx.set(() => true);
+    killPidCtx.set((pid) => { signals.push(pid); return true; });
+    try {
+      expect(await scanAndKillOrphans()).toBe(0);
+      expect(signals).toEqual([]);
+    } finally {
+      isPidAliveCtx.reset();
+      killPidCtx.reset();
+    }
   });
 });
 

@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach, beforeEach } from "bun:test";
 import { join } from "path";
-import { mkdtemp, rm, mkdir, readdir, realpath, symlink } from "fs/promises";
+import { chmod, mkdtemp, rm, mkdir, readdir, realpath, stat, symlink } from "fs/promises";
 import { tmpdir } from "os";
 import {
   logAgent,
@@ -22,6 +22,8 @@ import {
   setSandboxProxyKillForTesting,
   resetSandboxProxyKillForTesting,
   scanAndKillOrphans,
+  orphanScanSpawnCtx,
+  isBunTestCommand,
 } from "./agent-lifecycle";
 import { isPidAliveCtx, killPidCtx, sleepMsCtx } from "./agents";
 import { setWatchLogPath, resetWatchLogPath } from "./watch-log";
@@ -931,25 +933,30 @@ describe("agent-lifecycle", () => {
 
   // ── scanAndKillOrphans ─────────────────────────────────────────────────
   //
-  // On darwin the scan reads every candidate PID's cwd with ONE
-  // `lsof -a -d cwd -p <pid,pid,...> -Fpn` call. pgrep/lsof go through the
-  // spawnCtx stub and every signal through the terminateProcess seams, so no
-  // real process is listed or killed. process.platform is pinned to "darwin"
-  // so the lsof branch runs on any host.
-  describe("scanAndKillOrphans — one lsof call over all PIDs", () => {
+  // The scan lists every process with ONE `ps -A -ww -o pid=,command=` call
+  // and, on darwin, reads every candidate PID's cwd + inode with ONE
+  // `lsof -a -d cwd -p <pid,pid,...> -Fpin` call. Both go through the
+  // orphanScanSpawnCtx stub and every signal through the terminateProcess
+  // seams, so no real process is listed or killed. process.platform is pinned
+  // to "darwin" so the lsof branch runs on any host. cwd existence and inodes
+  // are real: each test builds its directories under a temp root.
+  describe("scanAndKillOrphans — one ps call, one lsof call over all candidates", () => {
     const originalPlatform = process.platform;
+    const PS_ARGV = ["ps", "-A", "-ww", "-o", "pid=,command="];
     let root = "";
     let agentsDir = "";
     let logPath = "";
     let calls: string[][] = [];
     let signals: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
     let alive = new Set<number>();
+    /** PIDs that survive SIGTERM (a process spinning in native code). */
+    let ignoresTerm = new Set<number>();
 
     type Reply = { stdout: string; exitCode: number };
-    function stubSpawn(pgrep: Reply, lsof: Reply): void {
-      spawnCtx.set((cmd: string[]) => {
+    function stubSpawn(ps: Reply, lsof: Reply): void {
+      orphanScanSpawnCtx.set((cmd: string[]) => {
         calls.push(cmd);
-        const reply = cmd[0] === "pgrep" ? pgrep : cmd[0] === "lsof" ? lsof : { stdout: "", exitCode: 1 };
+        const reply = cmd[0] === "ps" ? ps : cmd[0] === "lsof" ? lsof : { stdout: "", exitCode: 1 };
         return {
           stdout: new Response(reply.stdout).body!,
           stderr: new Response("").body!,
@@ -958,8 +965,22 @@ describe("agent-lifecycle", () => {
       });
     }
 
+    /** `ps -o pid=,command=` output: right-aligned PIDs, as ps prints them. */
+    function psOutput(entries: Array<[number, string]>): Reply {
+      return { stdout: entries.map(([pid, command]) => `${String(pid).padStart(5)} ${command}`).join("\n"), exitCode: 0 };
+    }
+
+    /** One process set of `lsof -Fpin` output; inode null leaves out the `i` line. */
+    function lsofSet(pid: number, path: string, inode: bigint | null = 1n): string {
+      return `p${pid}\nfcwd\n${inode === null ? "" : `i${inode}\n`}n${path}`;
+    }
+
     function lsofArgv(pids: number[]): string[] {
-      return ["lsof", "-a", "-d", "cwd", "-p", pids.join(","), "-Fpn"];
+      return ["lsof", "-a", "-d", "cwd", "-p", pids.join(","), "-Fpin"];
+    }
+
+    async function inodeOf(path: string): Promise<bigint> {
+      return (await stat(path, { bigint: true })).ino;
     }
 
     beforeEach(async () => {
@@ -973,47 +994,59 @@ describe("agent-lifecycle", () => {
       calls = [];
       signals = [];
       alive = new Set<number>();
+      ignoresTerm = new Set<number>();
+      // The scan must not use the general lifecycle spawner.
+      spawnCtx.set(() => { throw new Error("the orphan scan must spawn through orphanScanSpawnCtx"); });
       sleepMsCtx.set(async () => {});
       isPidAliveCtx.set((pid) => alive.has(pid));
       killPidCtx.set((pid, signal) => {
         signals.push({ pid, signal });
-        if (signal === "SIGTERM") alive.delete(pid);
+        if (signal === "SIGKILL" || (signal === "SIGTERM" && !ignoresTerm.has(pid))) alive.delete(pid);
         return true;
       });
     });
 
     afterEach(async () => {
       Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+      orphanScanSpawnCtx.reset();
       isPidAliveCtx.reset();
       killPidCtx.reset();
       sleepMsCtx.reset();
       resetWatchLogPath();
+      await chmod(join(root, "locked"), 0o755).catch(() => {});
       await rm(root, { recursive: true, force: true });
     });
 
-    test("spawns lsof exactly once with every PID comma-joined and -Fpn", async () => {
-      const pids = [11, 22, 33, 44, 55, 66];
+    test("spawns ps once and lsof once, with only the candidate PIDs comma-joined and -Fpin", async () => {
+      const claudePids = [11, 22, 33, 44, 55, 66];
+      // Every candidate sits in a live directory outside any agents dir.
+      const rootInode = await inodeOf(root);
       stubSpawn(
-        { stdout: pids.join("\n"), exitCode: 0 },
-        { stdout: pids.map((p) => `p${p}\nfcwd\nn/Users/someone/project`).join("\n"), exitCode: 0 },
+        psOutput([
+          [1, "/sbin/launchd"],
+          ...claudePids.map((p): [number, string] => [p, `claude --resume session-${p}`]),
+          [77, "/usr/libexec/trustd"],
+          [88, "/opt/homebrew/bin/bun test src/foo.test.ts"],
+          [99, "bun run dev"],
+        ]),
+        { stdout: [...claudePids, 88].map((p) => lsofSet(p, root, rootInode)).join("\n"), exitCode: 0 },
       );
 
-      expect(await scanAndKillOrphans(agentsDir)).toBe(0);
-      expect(calls).toEqual([["pgrep", "-f", "claude"], lsofArgv(pids)]);
-      expect(calls.filter((c) => c[0] === "lsof")).toHaveLength(1);
+      expect(await scanAndKillOrphans()).toBe(0);
+      expect(calls).toEqual([PS_ARGV, lsofArgv([...claudePids, 88])]);
       expect(signals).toEqual([]);
     });
 
-    test("parses several PIDs from one -Fpn output and terminates each orphan", async () => {
+    test("parses several PIDs from one -Fpin output and terminates each claude orphan", async () => {
       alive = new Set([201, 202]);
       const goneCwd = join(agentsDir, "agent-gone", "repo");
       const gone2Cwd = join(agentsDir, "agent-gone2", "repo", "src");
       stubSpawn(
-        { stdout: "201\n202", exitCode: 0 },
-        { stdout: `p201\nfcwd\nn${goneCwd}\np202\nfcwd\nn${gone2Cwd}`, exitCode: 0 },
+        psOutput([[201, "claude --resume a"], [202, "/usr/local/bin/claude --session-id b"]]),
+        { stdout: `${lsofSet(201, goneCwd)}\n${lsofSet(202, gone2Cwd)}`, exitCode: 0 },
       );
 
-      expect(await scanAndKillOrphans(agentsDir)).toBe(2);
+      expect(await scanAndKillOrphans()).toBe(2);
       expect(signals).toEqual([
         { pid: 201, signal: "SIGTERM" },
         { pid: 202, signal: "SIGTERM" },
@@ -1027,21 +1060,22 @@ describe("agent-lifecycle", () => {
       );
     });
 
-    test("skips a cwd outside any agents dir, a live agent dir, a pid with no n line, and an unlisted pid", async () => {
+    test("claude rule: skips a cwd outside any agents dir, a live agent dir, a pid with no n line, and an unlisted pid", async () => {
       alive = new Set([101, 102, 103, 104, 105]);
+      // A deleted cwd outside any agents dir: the claude rule never kills it.
       const outsideCwd = join(root, "elsewhere");
       const liveCwd = join(agentsDir, "agent-live", "repo");
       const goneCwd = join(agentsDir, "agent-gone", "repo");
       stubSpawn(
-        { stdout: "101\n102\n103\n104\n105", exitCode: 0 },
+        psOutput([101, 102, 103, 104, 105].map((p): [number, string] => [p, `claude --resume s${p}`])),
         {
           // 104 has a p line but no n line; 105 is not listed at all.
-          stdout: `p101\nfcwd\nn${outsideCwd}\np102\nfcwd\nn${liveCwd}\np103\nfcwd\nn${goneCwd}\np104\nfcwd`,
+          stdout: `${lsofSet(101, outsideCwd)}\n${lsofSet(102, liveCwd)}\n${lsofSet(103, goneCwd)}\np104\nfcwd`,
           exitCode: 0,
         },
       );
 
-      expect(await scanAndKillOrphans(agentsDir)).toBe(1);
+      expect(await scanAndKillOrphans()).toBe(1);
       expect(signals).toEqual([{ pid: 103, signal: "SIGTERM" }]);
       const log = await Bun.file(logPath).text();
       expect(log.trim().split("\n")).toHaveLength(1);
@@ -1049,45 +1083,210 @@ describe("agent-lifecycle", () => {
     });
 
     test("non-zero lsof exit with partial output still processes the listed PIDs", async () => {
-      // 301 exited between pgrep and lsof: lsof exits 1 but still prints 302.
+      // 301 exited between ps and lsof: lsof exits 1 but still prints 302.
       alive = new Set([302]);
       const goneCwd = join(agentsDir, "agent-gone", "repo");
       stubSpawn(
-        { stdout: "301\n302", exitCode: 0 },
-        { stdout: `p302\nfcwd\nn${goneCwd}`, exitCode: 1 },
+        psOutput([[301, "claude --resume x"], [302, "claude --resume y"]]),
+        { stdout: lsofSet(302, goneCwd), exitCode: 1 },
       );
 
-      expect(await scanAndKillOrphans(agentsDir)).toBe(1);
-      expect(calls).toEqual([["pgrep", "-f", "claude"], lsofArgv([301, 302])]);
+      expect(await scanAndKillOrphans()).toBe(1);
+      expect(calls).toEqual([PS_ARGV, lsofArgv([301, 302])]);
       expect(signals).toEqual([{ pid: 302, signal: "SIGTERM" }]);
     });
 
     test("non-zero lsof exit with no output returns 0 and signals nothing", async () => {
       alive = new Set([401]);
-      stubSpawn({ stdout: "401", exitCode: 0 }, { stdout: "", exitCode: 1 });
+      stubSpawn(psOutput([[401, "claude --resume x"]]), { stdout: "", exitCode: 1 });
 
-      expect(await scanAndKillOrphans(agentsDir)).toBe(0);
+      expect(await scanAndKillOrphans()).toBe(0);
       expect(signals).toEqual([]);
     });
 
     test("an orphan that is already dead is not counted", async () => {
       // alive stays empty: terminateProcess reports not-alive.
       const goneCwd = join(agentsDir, "agent-gone", "repo");
-      stubSpawn(
-        { stdout: "501", exitCode: 0 },
-        { stdout: `p501\nfcwd\nn${goneCwd}`, exitCode: 0 },
-      );
+      stubSpawn(psOutput([[501, "claude --resume x"]]), { stdout: lsofSet(501, goneCwd), exitCode: 0 });
 
-      expect(await scanAndKillOrphans(agentsDir)).toBe(0);
+      expect(await scanAndKillOrphans()).toBe(0);
       expect(signals).toEqual([]);
       expect(await Bun.file(logPath).text()).toContain("[terminate] outcome=not-alive label=lifecycle-orphan agent=agent-gone pid=501");
     });
 
-    test("no pgrep output returns 0 without spawning lsof", async () => {
-      stubSpawn({ stdout: "", exitCode: 1 }, { stdout: "", exitCode: 0 });
+    test("no ps output, a failed ps, or no candidate returns 0 without spawning lsof", async () => {
+      stubSpawn({ stdout: "", exitCode: 0 }, { stdout: "", exitCode: 0 });
+      expect(await scanAndKillOrphans()).toBe(0);
+      stubSpawn({ stdout: "  1 /sbin/launchd", exitCode: 1 }, { stdout: "", exitCode: 0 });
+      expect(await scanAndKillOrphans()).toBe(0);
+      stubSpawn(psOutput([[1, "/sbin/launchd"], [2, "bun run test"]]), { stdout: "", exitCode: 0 });
+      expect(await scanAndKillOrphans()).toBe(0);
+      expect(calls).toEqual([PS_ARGV, PS_ARGV, PS_ARGV]);
+    });
 
-      expect(await scanAndKillOrphans(agentsDir)).toBe(0);
-      expect(calls).toEqual([["pgrep", "-f", "claude"]]);
+    test("bun test whose cwd was deleted is killed, anywhere on disk", async () => {
+      alive = new Set([601, 602]);
+      // Outside any agents dir, and inside a deleted agent dir (no "claude" in
+      // its command line, so only the bun test rule applies).
+      const goneOutside = join(root, "deleted-checkout");
+      const goneAgent = join(agentsDir, "agent-gone", "repo");
+      stubSpawn(
+        psOutput([[601, "/opt/homebrew/bin/bun test src/poller.test.ts"], [602, "bun test"]]),
+        { stdout: `${lsofSet(601, goneOutside, 4242n)}\n${lsofSet(602, goneAgent, 4243n)}`, exitCode: 0 },
+      );
+
+      expect(await scanAndKillOrphans()).toBe(2);
+      expect(signals).toEqual([
+        { pid: 601, signal: "SIGTERM" },
+        { pid: 602, signal: "SIGTERM" },
+      ]);
+      const log = await Bun.file(logPath).text();
+      expect(log).toContain(
+        "[terminate] outcome=term-exited label=lifecycle-orphan agent=<none> pid=601 tmux=<none> reason=bun-test-cwd-deleted",
+      );
+      expect(log).toContain(
+        "[terminate] outcome=term-exited label=lifecycle-orphan agent=agent-gone pid=602 tmux=<none> reason=bun-test-cwd-deleted",
+      );
+    });
+
+    test("bun test whose cwd still exists is left alone, with or without an inode from lsof", async () => {
+      alive = new Set([701, 702, 703]);
+      const checkout = join(root, "checkout");
+      await mkdir(checkout, { recursive: true });
+      const liveAgent = join(agentsDir, "agent-live", "repo");
+      stubSpawn(
+        psOutput([[701, "bun test"], [702, "bun test --watch"], [703, "/Users/me/.bun/bin/bun test x"]]),
+        {
+          stdout: [
+            lsofSet(701, checkout, await inodeOf(checkout)),
+            lsofSet(702, liveAgent, await inodeOf(liveAgent)),
+            lsofSet(703, checkout, null),
+          ].join("\n"),
+          exitCode: 0,
+        },
+      );
+
+      expect(await scanAndKillOrphans()).toBe(0);
+      expect(signals).toEqual([]);
+      expect(await Bun.file(logPath).exists()).toBe(false);
+    });
+
+    test("bun test whose cwd path was re-created as a new directory is killed", async () => {
+      alive = new Set([801, 802]);
+      // An agent re-created under the same name: the path exists, but it is a
+      // new directory, not the one the process still has as its cwd.
+      const recreated = join(agentsDir, "agent-live", "repo");
+      // The path now names a file.
+      const nowAFile = join(root, "was-a-dir");
+      await Bun.write(nowAFile, "");
+      stubSpawn(
+        psOutput([[801, "bun test"], [802, "bun test"]]),
+        {
+          stdout: `${lsofSet(801, recreated, (await inodeOf(recreated)) + 1n)}\n${lsofSet(802, nowAFile, 1n)}`,
+          exitCode: 0,
+        },
+      );
+
+      expect(await scanAndKillOrphans()).toBe(2);
+      const log = await Bun.file(logPath).text();
+      expect(log).toContain("agent=agent-live pid=801 tmux=<none> reason=bun-test-cwd-replaced");
+      expect(log).toContain("agent=<none> pid=802 tmux=<none> reason=bun-test-cwd-replaced");
+    });
+
+    test("bun test whose cwd cannot be checked (EACCES) is left alone", async () => {
+      alive = new Set([851]);
+      const inner = join(root, "locked", "inner");
+      await mkdir(inner, { recursive: true });
+      // Another inode than the real one: a stat that succeeded would kill it.
+      const inode = (await inodeOf(inner)) + 1n;
+      await chmod(join(root, "locked"), 0o000);
+      await expect(stat(inner)).rejects.toMatchObject({ code: "EACCES" });
+      stubSpawn(psOutput([[851, "bun test"]]), { stdout: lsofSet(851, inner, inode), exitCode: 0 });
+
+      expect(await scanAndKillOrphans()).toBe(0);
+      expect(signals).toEqual([]);
+    });
+
+    test("a bun test that ignores SIGTERM is escalated to SIGKILL", async () => {
+      alive = new Set([901]);
+      ignoresTerm = new Set([901]);
+      stubSpawn(psOutput([[901, "bun test"]]), { stdout: lsofSet(901, join(root, "gone")), exitCode: 0 });
+
+      expect(await scanAndKillOrphans()).toBe(1);
+      expect(signals).toEqual([
+        { pid: 901, signal: "SIGTERM" },
+        { pid: 901, signal: "SIGKILL" },
+      ]);
+      expect(await Bun.file(logPath).text()).toContain(
+        "[terminate] outcome=kill-exited label=lifecycle-orphan agent=<none> pid=901 tmux=<none> reason=bun-test-cwd-deleted",
+      );
+    });
+
+    test("processes that are not bun test runs, with a deleted cwd outside agent dirs, are left alone", async () => {
+      const pids = [1001, 1002, 1003, 1004, 1005, 1006, 1007];
+      alive = new Set(pids);
+      const gone = join(root, "gone");
+      stubSpawn(
+        psOutput([
+          [1001, "bun run test"],
+          [1002, "bash -c bun test"],
+          [1003, "bunx test"],
+          [1004, "node test"],
+          [1005, "/usr/local/bin/not-bun test"],
+          [1006, "bun"],
+          // A claude process with a deleted cwd outside agent dirs.
+          [1007, "claude --resume abc"],
+        ]),
+        { stdout: pids.map((p) => lsofSet(p, gone)).join("\n"), exitCode: 0 },
+      );
+
+      expect(await scanAndKillOrphans()).toBe(0);
+      // Only the claude process is a candidate at all.
+      expect(calls).toEqual([PS_ARGV, lsofArgv([1007])]);
+      expect(signals).toEqual([]);
+    });
+
+    test("a claude process mentioning bun test is judged only by the claude rule", async () => {
+      alive = new Set([1101, 1102]);
+      const goneOutside = join(root, "gone");
+      const goneAgent = join(agentsDir, "agent-gone", "repo");
+      stubSpawn(
+        psOutput([
+          // Deleted cwd outside agent dirs: the claude rule leaves it alone,
+          // and the "bun test" in its prompt does not make it a bun test run.
+          [1101, "claude -p bun test is spinning"],
+          // Deleted agent dir: the claude rule kills it.
+          [1102, "claude --resume abc bun test"],
+        ]),
+        { stdout: `${lsofSet(1101, goneOutside)}\n${lsofSet(1102, goneAgent)}`, exitCode: 0 },
+      );
+
+      expect(await scanAndKillOrphans()).toBe(1);
+      expect(signals).toEqual([{ pid: 1102, signal: "SIGTERM" }]);
+      const log = await Bun.file(logPath).text();
+      expect(log.trim().split("\n")).toHaveLength(1);
+      expect(log).toContain("agent=agent-gone pid=1102 tmux=<none> reason=agent-dir-deleted");
+    });
+  });
+
+  describe("isBunTestCommand", () => {
+    const cases: Array<[string, boolean]> = [
+      ["bun test", true],
+      ["bun test src/a.test.ts --timeout 5000", true],
+      ["/opt/homebrew/bin/bun test", true],
+      ["  /Users/me/.bun/bin/bun   test  ", true],
+      ["bun", false],
+      ["bun run test", false],
+      ["bun --bun test", false],
+      ["bunx test", false],
+      ["bash -c bun test", false],
+      ["claude -p bun test", false],
+      ["/usr/bin/bun-test test", false],
+      ["bun tests", false],
+      ["", false],
+    ];
+    test.each(cases)("%p → %p", (command, expected) => {
+      expect(isBunTestCommand(command)).toBe(expected);
     });
   });
 });

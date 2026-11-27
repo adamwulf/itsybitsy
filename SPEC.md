@@ -531,6 +531,7 @@ Before merging, the following are verified:
 7. Current directory (caller's CWD) has no uncommitted changes
    - (TS only) a main/master target is then pulled from its remotes — §3.4 step 0
 8. Pre-rebase conflict check passes (creates a temp branch/worktree, attempts rebase, cleans up)
+   - (TS only) a failure names its step (`create temp branch`, `create temp worktree` or `rebase in temp worktree`), then the git command that failed with its exit code and its stderr and stdout, indented. When the rebase fails, `git diff --name-only --diff-filter=U` is read before `git rebase --abort`: if it lists files, the error starts `Rebase conflict detected between '<agent-branch>' and '<target>'` and lists them; otherwise it says the check failed, but not on a conflict. A failed temp branch or worktree step says the check could not run. `ib merge` and `ib merge-check` (`mergeCheckAgent`) return the same text and write it to `agent.log`. A temp worktree that `git worktree add` left half made (a failing post-checkout hook leaves the whole checkout) is removed before the temp branch is deleted.
 
 ### 3.3 Target Branch Detection
 

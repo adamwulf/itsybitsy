@@ -3517,10 +3517,9 @@ export async function mergeCheckAgent(agent: Agent): Promise<IbCommandResult> {
       checkRebaseConflicts(agent.repoPath, "main", branchName)
     );
     if (!conflictResult.ok) {
-      return {
-        ok: false, exitCode: 1, stdout: "",
-        stderr: `Rebase conflict detected between '${branchName}' and 'main'`,
-      };
+      const message = describeConflictCheckFailure(conflictResult, branchName, "main");
+      await logAgent(agentDir, `Merge check: pre-rebase conflict check failed:\n${message}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: message };
     }
 
     // 4. Count commits
@@ -3552,52 +3551,122 @@ export function resetMergeSpawnRunner(): void {
   mergeSpawnCtx.reset();
 }
 
+/** The three git steps of {@link checkRebaseConflicts}, by the name its messages use. */
+const CONFLICT_CHECK_STEPS = {
+  branch: "create temp branch",
+  worktree: "create temp worktree",
+  rebase: "rebase in temp worktree",
+} as const;
+
+/** Why {@link checkRebaseConflicts} did not pass. */
+interface ConflictCheckFailure {
+  ok: false;
+  step: keyof typeof CONFLICT_CHECK_STEPS;
+  /** The git command that failed, `git <args>` without its `-C <dir>`. */
+  command: string;
+  exitCode: number;
+  /** That command's stderr then stdout, each trimmed; "" when git printed nothing. */
+  output: string;
+  /**
+   * The rebase step's conflicted files (`git diff --name-only --diff-filter=U`,
+   * read before the abort). Non-empty only for a real conflict; empty for every
+   * other failure, a rebase git refused to start included.
+   */
+  conflicts: string[];
+}
+
 /**
- * Pre-rebase conflict check: creates a temp branch/worktree, attempts rebase,
- * and cleans up. Returns { ok: true } if no conflicts, { ok: false, output } if conflicts.
+ * Pre-rebase conflict check (SPEC.md §3.2 item 8): creates a temp branch and
+ * worktree, attempts the rebase there, and cleans both up. A failure names
+ * the step that failed with git's output, and tells a real conflict apart
+ * from a rebase that failed for another reason (for example a checkout that
+ * came out dirty) and from a temp branch or worktree that could not be made.
  * Mirrors check_rebase_conflicts() in ib bash.
  */
 async function checkRebaseConflicts(
   repoPath: string,
   targetBranch: string,
   sourceBranch: string
-): Promise<{ ok: boolean; output: string }> {
+): Promise<{ ok: true } | ConflictCheckFailure> {
   const tempBranch = `temp-rebase-check-${process.pid}-${Math.floor(Date.now() / 1000)}`;
   const tempDir = `/tmp/ib-rebase-check-${tempBranch}`;
+  const failed = (
+    step: ConflictCheckFailure["step"],
+    args: string[],
+    result: { stdout: string; stderr: string; exitCode: number },
+    conflicts: string[] = [],
+  ): ConflictCheckFailure => ({
+    ok: false, step, command: ["git", ...args].join(" "), exitCode: result.exitCode,
+    output: [result.stderr, result.stdout].filter(Boolean).join("\n"), conflicts,
+  });
 
   // Create temp branch from source
-  const createBranch = await mergeSpawnCtx.run(["git", "-C", repoPath, "branch", tempBranch, sourceBranch]);
+  const branchArgs = ["branch", tempBranch, sourceBranch];
+  const createBranch = await mergeSpawnCtx.run(["git", "-C", repoPath, ...branchArgs]);
   if (createBranch.exitCode !== 0) {
-    return { ok: false, output: "Could not create temp branch for conflict check" };
+    return failed("branch", branchArgs, createBranch);
   }
 
-  // Create temp worktree
-  const createWorktree = await mergeSpawnCtx.run(["git", "-C", repoPath, "worktree", "add", tempDir, tempBranch, "--quiet"]);
+  // Create temp worktree. A failure can leave it half made — a failing
+  // post-checkout hook leaves the whole checkout behind — and the branch
+  // cannot be deleted while that worktree still has it checked out.
+  const worktreeArgs = ["worktree", "add", tempDir, tempBranch, "--quiet"];
+  const createWorktree = await mergeSpawnCtx.run(["git", "-C", repoPath, ...worktreeArgs]);
   if (createWorktree.exitCode !== 0) {
+    await removeConflictCheckWorktree(repoPath, tempDir);
     await mergeSpawnCtx.run(["git", "-C", repoPath, "branch", "-D", tempBranch]);
-    return { ok: false, output: "Could not create temp worktree for conflict check" };
+    return failed("worktree", worktreeArgs, createWorktree);
   }
 
   // Attempt rebase in temp worktree
-  const rebaseResult = await mergeSpawnCtx.run(["git", "-C", tempDir, "rebase", targetBranch]);
-  let result: { ok: boolean; output: string };
+  const rebaseArgs = ["rebase", targetBranch];
+  const rebaseResult = await mergeSpawnCtx.run(["git", "-C", tempDir, ...rebaseArgs]);
+  let result: { ok: true } | ConflictCheckFailure = { ok: true };
 
   if (rebaseResult.exitCode !== 0) {
-    // Abort the failed rebase
+    // Read the conflicted files before the abort clears them.
+    const unmerged = await mergeSpawnCtx.run(["git", "-C", tempDir, "diff", "--name-only", "--diff-filter=U"]);
+    const conflicts = unmerged.stdout ? unmerged.stdout.split("\n") : [];
     await mergeSpawnCtx.run(["git", "-C", tempDir, "rebase", "--abort"]);
-    result = { ok: false, output: rebaseResult.stdout };
-  } else {
-    result = { ok: true, output: "" };
+    result = failed("rebase", rebaseArgs, rebaseResult, conflicts);
   }
 
-  // Clean up: remove temp worktree and branch (with rm -rf fallback)
-  const worktreeRemove = await mergeSpawnCtx.run(["git", "-C", repoPath, "worktree", "remove", tempDir, "--force"]);
-  if (worktreeRemove.exitCode !== 0) {
-    try { await rm(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
+  // Clean up: remove temp worktree and branch
+  await removeConflictCheckWorktree(repoPath, tempDir);
   await mergeSpawnCtx.run(["git", "-C", repoPath, "branch", "-D", tempBranch]);
 
   return result;
+}
+
+/**
+ * Remove {@link checkRebaseConflicts}'s temp worktree: `git worktree remove
+ * --force`, else delete the directory and prune its registration, which would
+ * otherwise keep the temp branch checked out and undeletable.
+ */
+async function removeConflictCheckWorktree(repoPath: string, tempDir: string): Promise<void> {
+  const worktreeRemove = await mergeSpawnCtx.run(["git", "-C", repoPath, "worktree", "remove", tempDir, "--force"]);
+  if (worktreeRemove.exitCode !== 0) {
+    try { await rm(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    await mergeSpawnCtx.run(["git", "-C", repoPath, "worktree", "prune"]);
+  }
+}
+
+/**
+ * The error both `ib merge` and `ib merge-check` report for a failed conflict
+ * check (SPEC.md §3.2 item 8): a headline that says whether it was a conflict,
+ * a rebase that failed for another reason, or a check that could not run,
+ * then the failed step's command and git's output, indented.
+ */
+function describeConflictCheckFailure(failure: ConflictCheckFailure, sourceBranch: string, targetBranch: string): string {
+  const between = `'${sourceBranch}' and '${targetBranch}'`;
+  const step = `step "${CONFLICT_CHECK_STEPS[failure.step]}"`;
+  const indent = (text: string) => `  ${text.replace(/\n/g, "\n  ")}`;
+  const headline = failure.conflicts.length > 0
+    ? `Rebase conflict detected between ${between} in ${step}. Conflicted files:\n${indent(failure.conflicts.join("\n"))}`
+    : failure.step === "rebase"
+      ? `Conflict check between ${between} failed, but not on a conflict: ${step} failed.`
+      : `Could not run the conflict check between ${between}: ${step} failed.`;
+  return `${headline}\n${failure.command} (exit ${failure.exitCode}):\n${indent(failure.output || "(no output)")}`;
 }
 
 /**
@@ -3892,11 +3961,9 @@ export async function mergeAgent(
       checkRebaseConflicts(agent.repoPath, targetBranch, branchName)
     );
     if (!conflictResult.ok) {
-      await logAgent(agentDir, `Pre-rebase conflict check failed - conflicts detected with ${targetBranch}`);
-      return {
-        ok: false, exitCode: 1, stdout: "",
-        stderr: withReports(`Rebase conflict detected between '${branchName}' and '${targetBranch}'`),
-      };
+      const message = describeConflictCheckFailure(conflictResult, branchName, targetBranch);
+      await logAgent(agentDir, `Pre-rebase conflict check failed:\n${message}`);
+      return { ok: false, exitCode: 1, stdout: "", stderr: withReports(message) };
     }
 
     // Count commits to merge

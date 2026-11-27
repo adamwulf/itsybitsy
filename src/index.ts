@@ -506,11 +506,11 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage: ib list-repos [--json | --md]\n" +
     "  Alias: repos\n" +
     "  List the registered repos (name, path and notes) without their agents.\n" +
-    "  The name is the display name: the nickname when one is set, else the\n" +
-    "  registry name. Notes are the ones edited in the dashboard's info panel;\n" +
-    "  plain text prints them indented under their repo.\n" +
-    "  --json          Emit machine-readable JSON: name, nickname, path, notes\n" +
-    "                  (nickname and notes are null when unset)\n" +
+    "  Plain text and --md show the display name: the nickname when one is set,\n" +
+    "  else the registry name. Notes are the ones edited in the dashboard's info\n" +
+    "  panel; plain text prints them indented under their repo.\n" +
+    "  --json          Emit machine-readable JSON: name (the registry name),\n" +
+    "                  nickname, path, notes (nickname and notes are null when unset)\n" +
     "  --md            Emit a Markdown table of name, path and notes",
   state:
     "Usage: ib state [--manager <id>] [--json] [--verbose|-v] [--cleanup [--dry-run]]\n" +

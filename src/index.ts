@@ -9,7 +9,7 @@ import * as runtimeNames from "./runtime-names";
 
 import { isAbsolute, join } from "path";
 import { userHome } from "./home";
-import { addRepo, removeRepo, listRepos, repoDisplayName, resolveRepo, repoResolutionError, type RepoEntry } from "./registry";
+import { addRepo, removeRepo, listRepos, repoDisplayName, resolveRepo, repoResolutionError, setRepoNotes, type RepoEntry } from "./registry";
 import { REPO_COORDINATOR_TYPE } from "./coordinator-type-names";
 import { resolveAgentIcon } from "./agents";
 import type { PeerEnqueueOptions, ResolvedCallerContext } from "./ib-commands";
@@ -887,6 +887,32 @@ const COMMAND_HELP: Record<string, string> = {
     "  <repo-id>       Registered repo name, nickname, or absolute path\n" +
     "  --interactive   On conflicts, leave the rebase in progress, list the\n" +
     "                  conflicted files and print the steps to finish it",
+  notes:
+    "Usage: ib notes <subcommand> <repo> [text...]\n" +
+    "  show <repo>          Print the repo's notes\n" +
+    "  set <repo> [text]    Replace the repo's notes (read from stdin when no text)\n" +
+    "  clear <repo>         Remove the repo's notes\n" +
+    "  <repo> is a registered repo name, nickname, or path. Agents: only\n" +
+    "  coordinators (the system coordinator and per-repo coordinators) may run it.",
+  "notes show":
+    "Usage: ib notes show <repo>\n" +
+    "  Print the repo's notes as stored. A repo with no notes prints nothing on\n" +
+    "  stdout, \"No notes for <repo>\" on stderr, and exits 0.\n" +
+    "  <repo>          Registered repo name, nickname, or path",
+  "notes set":
+    "Usage: ib notes set <repo> [text...]\n" +
+    "  Replace the repo's notes with the text. With no text, the notes are read\n" +
+    "  from stdin, so multi-line notes can come from a quoted heredoc:\n" +
+    "    ib notes set <repo> <<'EOF'\n" +
+    "    ...\n" +
+    "    EOF\n" +
+    "  Notes read from stdin have surrounding whitespace trimmed. Empty notes\n" +
+    "  are refused: use `ib notes clear <repo>` to remove them.\n" +
+    "  <repo>          Registered repo name, nickname, or path",
+  "notes clear":
+    "Usage: ib notes clear <repo>\n" +
+    "  Remove the repo's notes.\n" +
+    "  <repo>          Registered repo name, nickname, or path",
   tgallow:
     "Usage: ib tgallow <chat_id>\n" +
     "  Allow a Telegram chat id to interact with itsybitsy.",
@@ -997,6 +1023,9 @@ function printUsage(): void {
   console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
   console.log("  push <repo-id>      Push the repo's main branch to every configured remote");
   console.log("  pull <repo-id>      Update the repo's main branch from every configured remote (fast-forward, else rebase; --interactive)");
+  console.log("  notes show <repo>   Print a repo's notes (agents: coordinators only)");
+  console.log("  notes set <repo> [text]  Replace a repo's notes, from stdin when no text (agents: coordinators only)");
+  console.log("  notes clear <repo>  Remove a repo's notes (agents: coordinators only)");
   console.log("");
   console.log("Monitoring:");
   console.log("  watch               Launch TUI dashboard");
@@ -1120,7 +1149,7 @@ export async function main() {
     // Only do this for the known sub-grouped commands; everywhere else, the
     // top-level command key is the only valid lookup.
     const sub = args[1];
-    if (sub && (command === "hooks" || command === "team" || command === "config" || command === "peer")) {
+    if (sub && (command === "hooks" || command === "team" || command === "config" || command === "peer" || command === "notes")) {
       const subKey = `${command} ${sub}`;
       if (COMMAND_HELP[subKey]) {
         console.log(COMMAND_HELP[subKey]);
@@ -1221,6 +1250,52 @@ export async function main() {
       }
       const { pullRepo } = await import("./ib-commands");
       await printAndExit(await pullRepo(resolved.repo.path, interactive));
+      break;
+    }
+    case "notes": {
+      // Explicit verbs, so a repo named "set" is never read as one. The
+      // PreToolUse hook lets only coordinators run this (checkIbCommandAccess);
+      // a human at the CLI is not gated.
+      const sub = args[1];
+      const subUsage = sub ? COMMAND_HELP[`notes ${sub}`] : undefined;
+      if (!subUsage) {
+        if (sub) console.error(`Error: unknown notes subcommand '${sub}'`);
+        console.error(COMMAND_HELP.notes);
+        process.exit(1);
+      }
+      const repoKey = args[2];
+      // Only `set` takes more arguments: the notes text.
+      if (!repoKey || (sub !== "set" && args.length > 3)) {
+        console.error(subUsage);
+        process.exit(1);
+      }
+      const resolved = resolveRepo(repoKey, await listRepos());
+      if (!resolved.ok) {
+        console.error(repoResolutionError(repoKey, resolved));
+        process.exit(1);
+      }
+      const repo = resolved.repo;
+      if (sub === "show") {
+        if (repo.notes) console.log(repo.notes);
+        else console.error(`No notes for ${repo.name}`);
+        break;
+      }
+      let notes: string | null = null;
+      if (sub === "set") {
+        notes = args.slice(3).join(" ") || await readStdinIfPiped();
+        if (!notes.trim()) {
+          console.error("Error: no notes given, as text or on stdin. To remove the notes, use `ib notes clear <repo>`.");
+          console.error(subUsage);
+          process.exit(1);
+        }
+      }
+      const result = await setRepoNotes(repo.path, notes).catch((err: unknown) => ({
+        ok: false,
+        message: `Error: could not save the notes for ${repo.name}: ${err instanceof Error ? err.message : String(err)}`,
+      }));
+      if (result.ok) console.log(result.message);
+      else console.error(result.message);
+      process.exit(result.ok ? 0 : 1);
       break;
     }
     case "list":

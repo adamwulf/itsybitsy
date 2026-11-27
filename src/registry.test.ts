@@ -6,7 +6,7 @@ import { tmpdir } from "os";
 import { setCoordinatorHome, resetCoordinatorHome } from "./coordinator";
 import { createTeam } from "./teams";
 import { setUserHome, resetUserHome } from "./home";
-import { createCliFixture } from "./test-cli-runner";
+import { createCliFixture, runIsolatedCli } from "./test-cli-runner";
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
 
 // Override registry path for tests
@@ -805,4 +805,121 @@ describe("ib add [path] [name] (CLI)", () => {
       await cli.cleanup();
     }
   });
+});
+
+describe("ib notes show|set|clear <repo> (CLI)", () => {
+  const registryFile = (home: string) => join(home, ".itsybitsy", "repos.json");
+  const storedNotes = async (home: string, path: string): Promise<string | undefined> =>
+    ((await Bun.file(registryFile(home)).json()).repos as { path: string; notes?: string }[])
+      .find((r) => r.path === path)?.notes;
+
+  test("show, set, show and clear one repo by name", async () => {
+    const cli = await createCliFixture();
+    try {
+      const app = await cli.addRepo("app");
+
+      const empty = await cli.run(["notes", "show", "app"]);
+      expect(empty.exitCode).toBe(0);
+      expect(empty.stdout).toBe("");
+      expect(empty.stderr).toContain("No notes for app");
+
+      const set = await cli.run(["notes", "set", "app", "run", "the tests first"]);
+      expect(set.exitCode).toBe(0);
+      expect(set.stdout).toContain("Set notes for app");
+      expect(await storedNotes(cli.home, app)).toBe("run the tests first");
+
+      const shown = await cli.run(["notes", "show", "app"]);
+      expect(shown.exitCode).toBe(0);
+      expect(shown.stdout).toBe("run the tests first\n");
+
+      const cleared = await cli.run(["notes", "clear", "app"]);
+      expect(cleared.exitCode).toBe(0);
+      expect(cleared.stdout).toContain("Cleared notes for app");
+      const entry = (await Bun.file(registryFile(cli.home)).json()).repos[0];
+      expect(entry).toEqual({ path: app, name: "app" });
+    } finally {
+      await cli.cleanup();
+    }
+  }, 30_000);
+
+  test("set with no text reads multi-line notes from stdin, by nickname or path; a repo named set is a repo", async () => {
+    const cli = await createCliFixture();
+    try {
+      const lib = await cli.addRepo("lib", { nickname: "web" });
+      const named = await cli.addRepo("set");
+
+      const heredoc = await cli.run(["notes", "set", "web"], { stdin: "line one\n  indented $(not run)\n\n" });
+      expect(heredoc.exitCode).toBe(0);
+      expect(heredoc.stdout).toContain("Set notes for lib");
+      expect(await storedNotes(cli.home, lib)).toBe("line one\n  indented $(not run)");
+
+      const byPath = await cli.run(["notes", "show", lib]);
+      expect(byPath.stdout).toBe("line one\n  indented $(not run)\n");
+
+      const repoNamedSet = await cli.run(["notes", "set", "set", "hello"]);
+      expect(repoNamedSet.exitCode).toBe(0);
+      expect(await storedNotes(cli.home, named)).toBe("hello");
+      expect(await storedNotes(cli.home, lib)).toBe("line one\n  indented $(not run)");
+    } finally {
+      await cli.cleanup();
+    }
+  }, 30_000);
+
+  test("an unknown or ambiguous repo fails with exit 1 and changes nothing", async () => {
+    const cli = await createCliFixture();
+    try {
+      await cli.addRepo("app");
+      await cli.addRepo("lib", { nickname: "App" });
+      const before = await Bun.file(registryFile(cli.home)).text();
+
+      for (const args of [["notes", "show", "nope"], ["notes", "set", "nope", "x"], ["notes", "clear", "nope"]]) {
+        const run = await cli.run(args);
+        expect(run.exitCode).toBe(1);
+        expect(run.stderr).toContain("Repo not found: nope");
+      }
+      const ambiguous = await cli.run(["notes", "set", "app", "x"]);
+      expect(ambiguous.exitCode).toBe(1);
+      expect(ambiguous.stderr).toContain('Ambiguous repo "app" matches multiple registered repos');
+      expect(await Bun.file(registryFile(cli.home)).text()).toBe(before);
+    } finally {
+      await cli.cleanup();
+    }
+  }, 30_000);
+
+  test("usage errors exit 1 with the usage text and change nothing", async () => {
+    const cli = await createCliFixture();
+    try {
+      await cli.addRepo("app");
+      const before = await Bun.file(registryFile(cli.home)).text();
+
+      for (const [args, usage, stdin] of [
+        [["notes"], "Usage: ib notes <subcommand>"],
+        [["notes", "bogus", "app"], "Error: unknown notes subcommand 'bogus'"],
+        [["notes", "show"], "Usage: ib notes show <repo>"],
+        [["notes", "show", "app", "extra"], "Usage: ib notes show <repo>"],
+        [["notes", "clear", "app", "extra"], "Usage: ib notes clear <repo>"],
+        [["notes", "set"], "Usage: ib notes set <repo>"],
+        [["notes", "set", "app"], "Error: no notes given"],
+        [["notes", "set", "app"], "Error: no notes given", "  \n\n"],
+      ] as [string[], string, string?][]) {
+        const run = await cli.run(args, stdin === undefined ? {} : { stdin });
+        expect(run.exitCode).toBe(1);
+        expect(run.stderr).toContain(usage);
+      }
+      expect(await Bun.file(registryFile(cli.home)).text()).toBe(before);
+    } finally {
+      await cli.cleanup();
+    }
+  }, 60_000);
+
+  test("--help prints the outer and per-subcommand help", async () => {
+    const outer = await runIsolatedCli(["notes", "--help"]);
+    expect(outer.exitCode).toBe(0);
+    expect(outer.stdout).toContain("Usage: ib notes <subcommand> <repo>");
+    expect(outer.stdout).toContain("only\n  coordinators");
+    const set = await runIsolatedCli(["notes", "set", "--help"]);
+    expect(set.exitCode).toBe(0);
+    expect(set.stdout).toContain("Usage: ib notes set <repo> [text...]");
+    expect(set.stdout).toContain("ib notes set <repo> <<'EOF'");
+  }, 30_000);
 });

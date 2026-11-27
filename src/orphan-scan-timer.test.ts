@@ -47,7 +47,7 @@ describe("startOrphanScanTimer", () => {
     let scans = 0;
     startOrphanScanTimer({ scan: async () => { scans++; return 0; }, log: () => {}, timers: fns });
 
-    expect(ORPHAN_SCAN_STARTUP_DELAY_MS).toBe(60_000);
+    expect(ORPHAN_SCAN_STARTUP_DELAY_MS).toBe(5_000);
     expect(ORPHAN_SCAN_INTERVAL_MS).toBe(3_600_000);
     expect(timers.map(({ kind, ms, unrefed }) => ({ kind, ms, unrefed }))).toEqual([
       { kind: "timeout", ms: ORPHAN_SCAN_STARTUP_DELAY_MS, unrefed: true },

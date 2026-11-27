@@ -340,7 +340,7 @@ it lists no processes and kills nothing. Tests stub `orphanScanSpawnCtx` plus
 `isPidAliveCtx` / `killPidCtx` / `sleepMsCtx` (agent-lifecycle.test.ts).
 Callers: retire, merge and nuke teardown (`retireAgent`, `mergeAgent`,
 `nukeAgentList` in `src/ib-commands.ts`), and
-`ib watch`'s `startOrphanScanTimer` (`src/orphan-scan-timer.ts`): 60 s after
+`ib watch`'s `startOrphanScanTimer` (`src/orphan-scan-timer.ts`): 5 s after
 `startDashboard` reaches its end, then hourly, unref'd timers, stopped in
 `quitDashboard`. Its timer functions are injectable, so its tests use fakes.
 

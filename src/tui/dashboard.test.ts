@@ -12097,7 +12097,10 @@ describe("Unified peer repos in the Agents tree", () => {
   describe("pull after a remote merge", () => {
     const LOCAL = "/local/itsybitsy";
     let gitCalls: string[][];
-    /** Each git subcommand's answer; `fetch` can wait on `fetchGate`. */
+    /**
+     * Each git subcommand's answer, or `<subcommand> <first arg>`'s (one
+     * remote's fetch); `fetch` can wait on `fetchGate`.
+     */
     let answers: Record<string, [number, string?, string?]>;
     let fetchGate: Promise<void> | null;
     beforeEach(() => {
@@ -12109,11 +12112,12 @@ describe("Unified peer repos in the Agents tree", () => {
         "symbolic-ref": [0, "main"],
         status: [0, ""],
         fetch: [0],
-        merge: [0, "Updating 1111111..2222222\nFast-forward"],
+        // What git prints with merge.stat on: a diffstat after the merge.
+        merge: [0, "Updating 1111111..2222222\nFast-forward\n src/a.ts | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)"],
       };
       pullSpawnCtx.set((cmd: string[]) => {
         gitCalls.push(cmd);
-        const [code, stdout, stderr] = answers[cmd[3]!] ?? [1];
+        const [code, stdout, stderr] = answers[`${cmd[3]} ${cmd[4]}`] ?? answers[cmd[3]!] ?? [1];
         const result = makeSpawnResult(code, stdout, stderr);
         return cmd[3] === "fetch" && fetchGate ? { ...result, exited: fetchGate.then(() => code) } : result;
       });
@@ -12134,7 +12138,8 @@ describe("Unified peer repos in the Agents tree", () => {
     /** The --keep merge's stdout as a peer sends it: merge line, then its own pull's and push's status lines. */
     const KEEP_OUTPUT = `Merged agent worker-abc into main at ${"a".repeat(40)} (1 commit(s), agent kept running)\n` +
       "✓ origin: pulled main\n  Already up to date.\n✓ origin: pushed main\n  To /remotes/origin.git\n     1111111..2222222  main -> main";
-    const PULLED = `${WORKER_KEY} merged · ✓ origin: pulled main · Updating 1111111..2222222 · Fast-forward`;
+    /** The one-row notice drops git's detail under a ✓ line; watch.log keeps it. */
+    const PULLED = `${WORKER_KEY} merged · ✓ origin: pulled main`;
 
     test("pulls this machine's repo of the same name, shown as the row's pending command", async () => {
       const { dashboard, service } = setup();
@@ -12162,23 +12167,28 @@ describe("Unified peer repos in the Agents tree", () => {
           ["-C", LOCAL, "status"], ["-C", LOCAL, "fetch"], ["-C", LOCAL, "merge"],
         ]);
         expect(await Bun.file(join(logDir, "watch.log")).text()).toMatch(new RegExp(
-          `\\[peers\\] ib pull ${LOCAL} after ${WORKER_KEY} merged succeeded: ✓ origin: pulled main · Updating 1111111\\.\\.2222222 · Fast-forward\\n$`));
+          `\\[peers\\] ib pull ${LOCAL} after ${WORKER_KEY} merged succeeded: ✓ origin: pulled main · Updating 1111111\\.\\.2222222 · Fast-forward · src/a\\.ts \\| 2 \\+- · 1 file changed, 1 insertion\\(\\+\\), 1 deletion\\(-\\)\\n$`));
       } finally {
         resetWatchLogPath();
         await rm(logDir, { recursive: true, force: true });
       }
-      // A --keep merge that landed pulls too. Its notice starts from the
-      // short label, not the peer's long report, so the pull's part shows.
+      // A --keep merge that landed pulls too. Its notice and the pending
+      // entry start from the short label, not the peer's long report
+      // (KEEP_OUTPUT), so the pull's part shows.
       gitCalls = [];
+      const keepGate = Promise.withResolvers<void>();
+      fetchGate = keepGate.promise;
       await remoteMerge(dashboard, run, { output: KEEP_OUTPUT }, true);
-      await waitFor(() => dashboard.notice === PULLED && gitCalls.some(cmd => cmd[3] === "merge"), { message: "the --keep pull's notice" });
+      await waitFor(() => gitCalls.some(cmd => cmd[3] === "fetch"), { message: "the --keep pull's fetch" });
+      expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toStartWith(`ib — ${WORKER_KEY} merged  ·  pull ITSYBITSY…`);
+      keepGate.resolve();
+      fetchGate = null;
+      await waitFor(() => dashboard.notice === PULLED, { message: "the --keep pull's notice" });
       expect(dashboard.dialog).toBeNull();
       // A closing merge's teardown warnings open the cleanup-warnings dialog.
       await remoteMerge(dashboard, run, { output: "Could not remove the agent directory" });
       await waitFor(() => dashboard.dialog?.type === "cleanup-warnings", { message: "the cleanup-warnings dialog" });
-      // The dialog keeps the report's lines; the one-row header joins them.
-      expect(assertDialog(dashboard.dialog, "cleanup-warnings").text).toBe(
-        `${WORKER_KEY} merged · ✓ origin: pulled main\n  Updating 1111111..2222222\n  Fast-forward\n\nCould not remove the agent directory`);
+      expect(assertDialog(dashboard.dialog, "cleanup-warnings").text).toBe(`${PULLED}\n\nCould not remove the agent directory`);
       expect(dashboard.notice).toBe(PULLED);
     });
 
@@ -12193,13 +12203,17 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.notice === notice, { message: "the failed pull's notice" });
       expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${notice}`);
       expect(gitCalls.some(cmd => cmd[3] === "fetch")).toBe(false);
-      // A remote whose fetch fails is the pull's ✗ line, after a --keep merge too.
+      // Two remotes, one whose fetch fails, after a --keep merge too: the
+      // working remote's diffstat stays out, so the failing ✗ entry shows.
       answers.status = [0, ""];
-      answers.fetch = [128, "", "fatal: could not read from remote repository"];
+      answers.remote = [0, "origin\t/remotes/origin.git (fetch)\norigin\t/remotes/origin.git (push)\n" +
+        "mirror\t/remotes/mirror.git (fetch)\nmirror\t/remotes/mirror.git (push)"];
+      answers["fetch mirror"] = [128, "", "fatal: could not read from remote repository\nPlease make sure you have the correct access rights"];
       await remoteMerge(dashboard, run, { output: KEEP_OUTPUT }, true);
-      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✗ origin: fatal: could not read from remote repository`;
+      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✓ origin: pulled main · ✗ mirror: fatal: could not read from remote repository · Please make sure you have the correct access rights`;
       await waitFor(() => dashboard.notice === fetchFailed, { message: "the failed fetch's notice" });
-      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${fetchFailed}`);
+      // The header's cut falls after the failing remote's reason.
+      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${WORKER_KEY} merged · pull failed: ✓ origin: pulled main · ✗ mirror: fatal: could not read from remote repository`);
       // A pull that throws is a failed pull too.
       pullSpawnCtx.set(() => { throw new Error("git: not found"); });
       await remoteMerge(dashboard, run, { output: "" });

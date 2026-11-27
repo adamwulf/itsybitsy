@@ -833,6 +833,23 @@ export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
     || matchesKey(data, Key.ctrl("c"));
 }
 
+/**
+ * An `ib pull` result as the one-row header notice after a peer merge shows
+ * it: each `✓` remote's status line without git's detail (the
+ * `merge --ff-only` diffstat, one line per changed file), each `✗` remote's
+ * whole entry, then stderr. So a failing remote is not pushed past the
+ * header's cut by another remote's detail.
+ */
+function pullNoticeReport(result: Pick<IbCommandResult, "stdout" | "stderr">): string {
+  const entries: string[][] = [];
+  for (const line of result.stdout.split("\n")) {
+    if (line.startsWith("  ") && entries.length > 0) entries.at(-1)!.push(line);
+    else if (line) entries.push([line]);
+  }
+  const lines = entries.flatMap(entry => entry[0]!.startsWith("✓") ? [entry[0]!] : entry);
+  return [...lines, result.stderr].filter(Boolean).join("\n");
+}
+
 /** Minimum terminal width for sidebar layout */
 export const MIN_TERMINAL_WIDTH = 140;
 /** Minimum terminal height */
@@ -2212,29 +2229,32 @@ export class DashboardComponent implements Component {
    * After a paired machine merged one of its agents (SPEC §20.4 "Remote
    * lifecycle commands"), run `ib pull` on this machine's repo registered
    * under the same name, if there is one with a remote, so it has what that
-   * machine pushed. The pull shows as the row's pending command, then the
-   * notice is `<label> merged · <pull report>`, built from the short label
-   * as for a failed push, since the merge's own output would push the
-   * report past the header's cut. A failed pull makes it an alert. A closing
-   * merge's teardown `warnings` then open the cleanup-warnings dialog.
+   * machine pushed. The notice and the header's pending entry both start
+   * from the short `<label> merged`, as for a failed push: the merge's own
+   * notice (a `--keep` merge's output) would push them past the header's
+   * cut. The pull shows as the row's pending command, then the notice is
+   * `<label> merged · <report>` ({@link pullNoticeReport}), an alert when
+   * the pull failed. A closing merge's teardown `warnings` then open the
+   * cleanup-warnings dialog. watch.log gets the whole report.
    */
   private async pullAfterRemoteMerge(label: string, repo: string, warnings: string): Promise<void> {
     const local = this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo));
     if (!local) return;
-    this.pendingLifecycle.set(label, `pull ${local.name}…`);
-    this.invalidate();
-    this.tui?.requestRender();
-    let result: IbCommandResult | null;
+    let result: IbCommandResult;
     try {
       // No remotes: nothing to pull, as for the merge's own pull (§3.4 step 0).
-      result = await repoHasRemotes(local.path) ? await pullRepo(local.path) : null;
+      if (!(await repoHasRemotes(local.path))) return;
+      this.setNotice(`${label} merged`, "info");
+      this.pendingLifecycle.set(label, `pull ${local.name}…`);
+      this.invalidate();
+      this.tui?.requestRender();
+      result = await pullRepo(local.path);
     } catch (err) {
       result = { ok: false, exitCode: 1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
     }
-    if (!result) return;
     const report = [result.stdout, result.stderr].filter(Boolean).join("\n");
     logToWatchLog(`[peers] ib pull ${local.path} after ${label} merged ${result.ok ? "succeeded" : "failed"}: ${report.replace(/\s*\n\s*/g, " · ")}`);
-    const notice = `${label} merged · ${result.ok ? "" : "pull failed: "}${report}`;
+    const notice = `${label} merged · ${result.ok ? "" : "pull failed: "}${pullNoticeReport(result)}`;
     this.setNotice(notice, result.ok ? "info" : "error");
     if (warnings) this.showDialog({ type: "cleanup-warnings", text: `${notice}\n\n${warnings}`, offset: 0 });
   }

@@ -130,7 +130,7 @@ export interface RemoteAgent {
   manager: string | null;
   /** The agent's `meta.created_epoch` (seconds), so the receiving side can sort it in spawn order. */
   createdEpoch: number;
-  /** The agent's `meta.model` (`<cli>:<model>`), so the receiving side slices the right CLI's input box off its capture. */
+  /** The agent's `meta.model` (`<cli>:<model>`), so the receiving side slices the right CLI's input box off its capture and shows it as the info panel's `Model:` row. */
   model: string | null;
 }
 

@@ -12210,23 +12210,51 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.notice === notice, { message: "the failed pull's notice" });
       expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${notice}`);
       expect(gitCalls.some(cmd => cmd[3] === "fetch")).toBe(false);
-      // Two remotes, one whose fetch fails, after a --keep merge too: the
-      // working remote's diffstat stays out, so the failing ✗ entry shows.
+      // Two remotes (`git remote -v` sorts them), the second one's fetch
+      // failing, after a --keep merge too: the ✗ entry comes first and the
+      // working remote shows its status line alone, so the reason is in view
+      // at the narrowest layout, with the Collector light ib watch always shows.
       answers.status = [0, ""];
       answers.remote = [0, "origin\t/remotes/origin.git (fetch)\norigin\t/remotes/origin.git (push)\n" +
-        "mirror\t/remotes/mirror.git (fetch)\nmirror\t/remotes/mirror.git (push)"];
-      answers["fetch mirror"] = [128, "", "fatal: could not read from remote repository\nPlease make sure you have the correct access rights"];
+        "upstream\t/remotes/upstream.git (fetch)\nupstream\t/remotes/upstream.git (push)"];
+      answers["fetch upstream"] = [128, "", "fatal: could not read from remote repository\nPlease make sure you have the correct access rights"];
       await remoteMerge(dashboard, run, { output: KEEP_OUTPUT }, true);
-      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✓ origin: pulled main · Updating 1111111..2222222 · ✗ mirror: fatal: could not read from remote repository · Please make sure you have the correct access rights`;
+      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✗ upstream: fatal: could not read from remote repository · Please make sure you have the correct access rights · ✓ origin: pulled main`;
       await waitFor(() => dashboard.notice === fetchFailed, { message: "the failed fetch's notice" });
-      // The failing remote's entry is inside the header's cut.
-      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${WORKER_KEY} merged · pull failed: ✓ origin: pulled main · Updating 1111111..2222222 · ✗ mirror: fatal: could not read`);
+      dashboard.setCollectorStatus(collectorHealth("grey"));
+      expect(dashboard.render(MIN_TERMINAL_WIDTH)[0]).toContain(`${RED}${WORKER_KEY} merged · pull failed: ✗ upstream: fatal: could not read from remote repository`);
       // A pull that throws is a failed pull too.
       pullSpawnCtx.set(() => { throw new Error("git: not found"); });
       await remoteMerge(dashboard, run, { output: "" });
       const threw = `${WORKER_KEY} merged · pull failed: git: not found`;
       await waitFor(() => dashboard.notice === threw, { message: "the thrown pull's notice" });
       expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${threw}`);
+    });
+
+    test("a pull that rebases shows its status line, and git's progress carriage returns stay out", async () => {
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.repos = [{ name: "itsybitsy", path: LOCAL }];
+      const run = spyOn(service, "runRemoteLifecycle");
+      // This machine's main has a commit origin lacks: --ff-only fails, the
+      // rebase runs, and git prints its progress with \r even on a pipe.
+      answers.merge = [1, "", "fatal: Not possible to fast-forward, aborting."];
+      answers["rev-list"] = [0, "1"];
+      answers.rebase = [0, "", "Rebasing (1/2)\rRebasing (2/2)\rSuccessfully rebased and updated refs/heads/main."];
+      const logDir = await mkdtemp(join(tmpdir(), "ib-pull-after-merge-"));
+      setWatchLogPath(join(logDir, "watch.log"));
+      try {
+        await remoteMerge(dashboard, run, { output: "" });
+        const notice = `${WORKER_KEY} merged · ✓ origin: rebased main onto origin/main`;
+        await waitFor(() => dashboard.notice === notice, { message: "the rebase pull's notice" });
+        expect(dashboard.render(WIDTH)[0]).not.toContain("\r");
+        const log = await Bun.file(join(logDir, "watch.log")).text();
+        expect(log).not.toContain("\r");
+        expect(log).toContain(`[peers] ib pull ${LOCAL} after ${WORKER_KEY} merged succeeded: ✓ origin: rebased main onto origin/main · Successfully rebased and updated refs/heads/main.\n`);
+      } finally {
+        resetWatchLogPath();
+        await rm(logDir, { recursive: true, force: true });
+      }
     });
 
     test("no pull without a merge that landed, a push that worked, or a repo of that name here", async () => {

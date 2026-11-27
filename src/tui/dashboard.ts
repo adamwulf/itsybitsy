@@ -834,22 +834,34 @@ export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
 }
 
 /**
- * An `ib pull` result as the one-row header notice after a peer merge shows
- * it: each `✓` remote's status line and git's first detail line
- * (`Already up to date.` or `Updating <a>..<b>`, so a pull that brought
- * nothing reads differently), without the rest (`Fast-forward` and the
- * diffstat, one line per changed file); each `✗` remote's whole entry;
- * then stderr. So a failing remote is not pushed past the header's cut by
- * another remote's detail.
+ * Each line of git's output as a terminal ends up showing it: the text after
+ * its last carriage return, keeping its indent. A rebase prints its progress
+ * as `Rebasing (1/3)\rRebasing (2/3)\r…` even on a pipe, and a raw `\r` would
+ * move the cursor in the dashboard's header and in a viewer of watch.log.
  */
-function pullNoticeReport(result: Pick<IbCommandResult, "stdout" | "stderr">): string {
+function lastCarriageReturnLine(text: string): string {
+  return text.replace(/^( *)[^\n]*\r/gm, "$1");
+}
+
+/**
+ * An `ib pull` result as the one-row header notice after a peer merge shows
+ * it. A failed pull lists each `✗` remote's whole entry first, so the reason
+ * follows `pull failed:`, then each `✓` remote's status line alone. A pull
+ * that worked lists each `✓` status line, and under `pulled <branch>` (a
+ * fast-forward) git's first detail line too: `Updating <a>..<b>`, or
+ * `Already up to date.` when it brought nothing. The rest (`Fast-forward`,
+ * the diffstat, a rebase's output) stays out. Then stderr.
+ */
+function pullNoticeReport({ ok, stdout, stderr }: Pick<IbCommandResult, "ok" | "stdout" | "stderr">): string {
   const entries: string[][] = [];
-  for (const line of result.stdout.split("\n")) {
+  for (const line of stdout.split("\n")) {
     if (line.startsWith("  ") && entries.length > 0) entries.at(-1)!.push(line);
     else if (line) entries.push([line]);
   }
-  const lines = entries.flatMap(entry => entry[0]!.startsWith("✓") ? entry.slice(0, 2) : entry);
-  return [...lines, result.stderr].filter(Boolean).join("\n");
+  const failed = entries.filter(([status]) => !status!.startsWith("✓")).flat();
+  const pulled = entries.filter(([status]) => status!.startsWith("✓")).flatMap(([status, detail]) =>
+    ok && detail && /: pulled \S+$/.test(status!) ? [status!, detail] : [status!]);
+  return [...failed, ...pulled, stderr].filter(Boolean).join("\n");
 }
 
 /** Minimum terminal width for sidebar layout */
@@ -2254,9 +2266,10 @@ export class DashboardComponent implements Component {
     } catch (err) {
       result = { ok: false, exitCode: 1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
     }
-    const report = [result.stdout, result.stderr].filter(Boolean).join("\n");
+    const shown = { ok: result.ok, stdout: lastCarriageReturnLine(result.stdout), stderr: lastCarriageReturnLine(result.stderr) };
+    const report = [shown.stdout, shown.stderr].filter(Boolean).join("\n");
     logToWatchLog(`[peers] ib pull ${local.path} after ${label} merged ${result.ok ? "succeeded" : "failed"}: ${report.replace(/\s*\n\s*/g, " · ")}`);
-    const notice = `${label} merged · ${result.ok ? "" : "pull failed: "}${pullNoticeReport(result)}`;
+    const notice = `${label} merged · ${result.ok ? "" : "pull failed: "}${pullNoticeReport(shown)}`;
     this.setNotice(notice, result.ok ? "info" : "error");
     if (warnings) this.showDialog({ type: "cleanup-warnings", text: `${notice}\n\n${warnings}`, offset: 0 });
   }

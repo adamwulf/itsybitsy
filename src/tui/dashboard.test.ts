@@ -12138,8 +12138,8 @@ describe("Unified peer repos in the Agents tree", () => {
     /** The --keep merge's stdout as a peer sends it: merge line, then its own pull's and push's status lines. */
     const KEEP_OUTPUT = `Merged agent worker-abc into main at ${"a".repeat(40)} (1 commit(s), agent kept running)\n` +
       "✓ origin: pulled main\n  Already up to date.\n✓ origin: pushed main\n  To /remotes/origin.git\n     1111111..2222222  main -> main";
-    /** The one-row notice drops git's detail under a ✓ line; watch.log keeps it. */
-    const PULLED = `${WORKER_KEY} merged · ✓ origin: pulled main`;
+    /** The one-row notice keeps only git's first detail line under a ✓ line; watch.log keeps it all. */
+    const PULLED = `${WORKER_KEY} merged · ✓ origin: pulled main · Updating 1111111..2222222`;
 
     test("pulls this machine's repo of the same name, shown as the row's pending command", async () => {
       const { dashboard, service } = setup();
@@ -12188,8 +12188,15 @@ describe("Unified peer repos in the Agents tree", () => {
       // A closing merge's teardown warnings open the cleanup-warnings dialog.
       await remoteMerge(dashboard, run, { output: "Could not remove the agent directory" });
       await waitFor(() => dashboard.dialog?.type === "cleanup-warnings", { message: "the cleanup-warnings dialog" });
-      expect(assertDialog(dashboard.dialog, "cleanup-warnings").text).toBe(`${PULLED}\n\nCould not remove the agent directory`);
+      // The dialog keeps the notice's lines; the one-row header joins them.
+      expect(assertDialog(dashboard.dialog, "cleanup-warnings").text).toBe(
+        `${WORKER_KEY} merged · ✓ origin: pulled main\n  Updating 1111111..2222222\n\nCould not remove the agent directory`);
       expect(dashboard.notice).toBe(PULLED);
+      dashboard.closeDialog();
+      // A pull that brought nothing (the peer did not push) says so.
+      answers.merge = [0, "Already up to date."];
+      await remoteMerge(dashboard, run, { output: "" });
+      await waitFor(() => dashboard.notice === `${WORKER_KEY} merged · ✓ origin: pulled main · Already up to date.`, { message: "the up-to-date notice" });
     });
 
     test("a failed pull leaves the merge done and turns its notice into an alert", async () => {
@@ -12210,10 +12217,10 @@ describe("Unified peer repos in the Agents tree", () => {
         "mirror\t/remotes/mirror.git (fetch)\nmirror\t/remotes/mirror.git (push)"];
       answers["fetch mirror"] = [128, "", "fatal: could not read from remote repository\nPlease make sure you have the correct access rights"];
       await remoteMerge(dashboard, run, { output: KEEP_OUTPUT }, true);
-      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✓ origin: pulled main · ✗ mirror: fatal: could not read from remote repository · Please make sure you have the correct access rights`;
+      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✓ origin: pulled main · Updating 1111111..2222222 · ✗ mirror: fatal: could not read from remote repository · Please make sure you have the correct access rights`;
       await waitFor(() => dashboard.notice === fetchFailed, { message: "the failed fetch's notice" });
-      // The header's cut falls after the failing remote's reason.
-      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${WORKER_KEY} merged · pull failed: ✓ origin: pulled main · ✗ mirror: fatal: could not read from remote repository`);
+      // The failing remote's entry is inside the header's cut.
+      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${WORKER_KEY} merged · pull failed: ✓ origin: pulled main · Updating 1111111..2222222 · ✗ mirror: fatal: could not read`);
       // A pull that throws is a failed pull too.
       pullSpawnCtx.set(() => { throw new Error("git: not found"); });
       await remoteMerge(dashboard, run, { output: "" });

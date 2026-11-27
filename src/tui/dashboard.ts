@@ -835,10 +835,12 @@ export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
 
 /**
  * An `ib pull` result as the one-row header notice after a peer merge shows
- * it: each `✓` remote's status line without git's detail (the
- * `merge --ff-only` diffstat, one line per changed file), each `✗` remote's
- * whole entry, then stderr. So a failing remote is not pushed past the
- * header's cut by another remote's detail.
+ * it: each `✓` remote's status line and git's first detail line
+ * (`Already up to date.` or `Updating <a>..<b>`, so a pull that brought
+ * nothing reads differently), without the rest (`Fast-forward` and the
+ * diffstat, one line per changed file); each `✗` remote's whole entry;
+ * then stderr. So a failing remote is not pushed past the header's cut by
+ * another remote's detail.
  */
 function pullNoticeReport(result: Pick<IbCommandResult, "stdout" | "stderr">): string {
   const entries: string[][] = [];
@@ -846,7 +848,7 @@ function pullNoticeReport(result: Pick<IbCommandResult, "stdout" | "stderr">): s
     if (line.startsWith("  ") && entries.length > 0) entries.at(-1)!.push(line);
     else if (line) entries.push([line]);
   }
-  const lines = entries.flatMap(entry => entry[0]!.startsWith("✓") ? [entry[0]!] : entry);
+  const lines = entries.flatMap(entry => entry[0]!.startsWith("✓") ? entry.slice(0, 2) : entry);
   return [...lines, result.stderr].filter(Boolean).join("\n");
 }
 
@@ -2229,10 +2231,10 @@ export class DashboardComponent implements Component {
    * After a paired machine merged one of its agents (SPEC §20.4 "Remote
    * lifecycle commands"), run `ib pull` on this machine's repo registered
    * under the same name, if there is one with a remote, so it has what that
-   * machine pushed. The notice and the header's pending entry both start
-   * from the short `<label> merged`, as for a failed push: the merge's own
-   * notice (a `--keep` merge's output) would push them past the header's
-   * cut. The pull shows as the row's pending command, then the notice is
+   * machine pushed. While it runs, the notice is the short `<label> merged`,
+   * as for a failed push, and the row's pending command reads
+   * `pull <repo>…`: the merge's own notice (a `--keep` merge's output) would
+   * push that entry past the header's cut. Then the notice is
    * `<label> merged · <report>` ({@link pullNoticeReport}), an alert when
    * the pull failed. A closing merge's teardown `warnings` then open the
    * cleanup-warnings dialog. watch.log gets the whole report.

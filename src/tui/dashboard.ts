@@ -113,7 +113,7 @@ import type { LayoutState } from "./layout";
 import { textHeader } from "../peers/peer-outbox";
 import type { SendTarget } from "../peers/send-frame";
 import { InputFieldComponent } from "./input-field";
-import { newAgent, pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
+import { newAgent, pauseAgent, pullRepo, teamSend as ibTeamSend, type IbCommandResult } from "../ib-commands";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { choosePaths, peerAttachmentPrompt, promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
@@ -2189,7 +2189,13 @@ export class DashboardComponent implements Component {
           this.setNotice(notice, "error");
           if (warnings) this.showDialog({ type: "cleanup-warnings", text: `${notice}\n\n${warnings}`, offset: 0 });
         } else {
-          this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
+          const notice = options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`;
+          this.setNotice(notice, "info");
+          // A merge that landed: the peer may have pushed it, so pull it into
+          // this machine's clone. A failed push left nothing new to pull.
+          if (options.action === "merge" && !(options.keep && output.startsWith("Nothing to merge:"))) {
+            await this.pullAfterRemoteMerge(label, repo, notice);
+          }
         }
       }
       return output;
@@ -2198,6 +2204,30 @@ export class DashboardComponent implements Component {
       this.invalidate();
       this.tui?.requestRender();
     }
+  }
+
+  /**
+   * After a paired machine merged one of its agents (SPEC §20.4 "Remote
+   * lifecycle commands"), run `ib pull` on this machine's repo registered
+   * under the same name, if there is one, so it has what that machine pushed.
+   * The pull shows as the row's pending command, then its status lines join
+   * the merge's `notice`; a failed pull makes that notice an alert.
+   */
+  private async pullAfterRemoteMerge(label: string, repo: string, notice: string): Promise<void> {
+    const local = this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo));
+    if (!local) return;
+    this.pendingLifecycle.set(label, `pull ${local.name}…`);
+    this.invalidate();
+    this.tui?.requestRender();
+    let result: IbCommandResult;
+    try {
+      result = await pullRepo(local.path);
+    } catch (err) {
+      result = { ok: false, exitCode: 1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
+    }
+    const report = [result.stdout, result.stderr].filter(Boolean).join("\n");
+    logToWatchLog(`[peers] ib pull ${local.path} after ${label} merged ${result.ok ? "succeeded" : "failed"}: ${report.replace(/\s*\n\s*/g, " · ")}`);
+    this.setNotice(`${notice} · ${result.ok ? "" : "pull failed: "}${report}`, result.ok ? "info" : "error");
   }
 
   /**

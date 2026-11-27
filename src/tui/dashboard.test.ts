@@ -14,7 +14,7 @@ import type { CodexLiveUsageResult } from "../codex-live-usage";
 import { TUI, visibleWidth } from "@mariozechner/pi-tui";
 import type { CollectorHealth } from "../sandbox-collector-light";
 import type { RemoteControlStatus } from "../remote-control-light";
-import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, resetNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord } from "../ib-commands";
+import { setSendSpawnRunner, resetSendSpawnRunner, setKillPauseSpawnRunner, resetKillPauseSpawnRunner, setNukeResumeSpawnRunner, resetNukeResumeSpawnRunner, setNewAgentSpawnRunner, resetNewAgentSpawnRunner, setNewAgentCallerMetaReader, resetNewAgentCallerMetaReader, setDiffStatusSpawnRunner, resetDiffStatusSpawnRunner, setMergeSpawnRunner, resetMergeSpawnRunner, sealAgentRecord, pullSpawnCtx } from "../ib-commands";
 import { spawnCtx as lifecycleSpawnCtx } from "../agent-lifecycle";
 import { spawnCtx as tmuxPollerSpawnCtx } from "../tmux-poller";
 import { gitStatusSpawnCtx } from "../git-status";
@@ -38,6 +38,7 @@ import type { PeerServiceView } from "../peers/service";
 import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent, RemoteQuestion } from "../peers/peer-link";
 import type { RemotePermissionOutcome } from "../peers/remote-permissions";
+import type { RemoteLifecycleOutcome } from "../peers/remote-lifecycle";
 import type { PeerLinkState } from "../peers/poller";
 import { remoteTerminalSession, terminalWindowCtx } from "../peers/terminal-window";
 import { peerEntryKey } from "./peer-repos";
@@ -12090,6 +12091,116 @@ describe("Unified peer repos in the Agents tree", () => {
     await Bun.sleep(0);
     expect(dashboard.notice).toBe(`${WORKER_KEY} merged`);
     expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}${WORKER_KEY} merged`);
+  });
+
+  describe("pull after a remote merge", () => {
+    const LOCAL = "/local/itsybitsy";
+    let gitCalls: string[][];
+    /** Each git subcommand's answer; `fetch` can wait on `fetchGate`. */
+    let answers: Record<string, [number, string?, string?]>;
+    let fetchGate: Promise<void> | null;
+    beforeEach(() => {
+      gitCalls = [];
+      fetchGate = null;
+      answers = {
+        "show-ref": [0],
+        remote: [0, `origin\t/remotes/origin.git (fetch)\norigin\t/remotes/origin.git (push)`],
+        "symbolic-ref": [0, "main"],
+        status: [0, ""],
+        fetch: [0],
+        merge: [0, "Updating 1111111..2222222\nFast-forward"],
+      };
+      pullSpawnCtx.set((cmd: string[]) => {
+        gitCalls.push(cmd);
+        const [code, stdout, stderr] = answers[cmd[3]!] ?? [1];
+        const result = makeSpawnResult(code, stdout, stderr);
+        return cmd[3] === "fetch" && fetchGate ? { ...result, exited: fetchGate.then(() => code) } : result;
+      });
+    });
+    afterEach(() => pullSpawnCtx.reset());
+
+    /** `m`, the merge-check, then Merge (with `keep`) answered by `reply`. */
+    async function remoteMerge(dashboard: DashboardComponent, run: ReturnType<typeof spyOn>, reply: RemoteLifecycleOutcome, keep = false) {
+      run.mockResolvedValueOnce({ output: "Ready to merge" });
+      dashboard.handleInput("m");
+      await Bun.sleep(0);
+      const merge = assertDialog(dashboard.dialog, "confirm");
+      merge.checkbox!.checked = keep;
+      run.mockResolvedValueOnce(reply);
+      merge.onYes();
+    }
+
+    test("pulls this machine's repo of the same name, shown as the row's pending command", async () => {
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      // Registry names match ignoring case, as the tree unifies them.
+      dashboard.repos = [{ name: "ITSYBITSY", path: LOCAL }];
+      const run = spyOn(service, "runRemoteLifecycle");
+      const gate = Promise.withResolvers<void>();
+      fetchGate = gate.promise;
+      await remoteMerge(dashboard, run, { output: "" });
+      await waitFor(() => gitCalls.some(cmd => cmd[3] === "fetch"), { message: "the pull's fetch" });
+      expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toContain(`${WORKER_KEY} merged  ·  pull ITSYBITSY…`);
+      gate.resolve();
+      await waitFor(() => dashboard.notice !== `${WORKER_KEY} merged`, { message: "the pull's notice" });
+      expect(dashboard.notice).toBe(`${WORKER_KEY} merged · ✓ origin: pulled main · Updating 1111111..2222222 · Fast-forward`);
+      expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}${WORKER_KEY} merged · ✓ origin`);
+      expect(stripAnsi(dashboard.render(WIDTH)[0]!)).not.toContain("pull ITSYBITSY…");
+      expect(gitCalls.map(cmd => cmd.slice(1, 4))).toEqual([
+        ["-C", LOCAL, "show-ref"], ["-C", LOCAL, "remote"], ["-C", LOCAL, "symbolic-ref"],
+        ["-C", LOCAL, "status"], ["-C", LOCAL, "fetch"], ["-C", LOCAL, "merge"],
+      ]);
+      // A --keep merge that landed pulls too.
+      gitCalls = [];
+      await remoteMerge(dashboard, run, { output: "Merged agent worker-abc into main (1 commit(s), agent kept running)" }, true);
+      await waitFor(() => dashboard.notice?.includes("pulled main") === true, { message: "the --keep pull's notice" });
+      expect(dashboard.notice).toBe(`${WORKER_KEY}: Merged agent worker-abc into main (1 commit(s), agent kept running) · ✓ origin: pulled main · Updating 1111111..2222222 · Fast-forward`);
+      expect(gitCalls.some(cmd => cmd[3] === "fetch")).toBe(true);
+    });
+
+    test("a failed pull leaves the merge done and turns its notice into an alert", async () => {
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      dashboard.repos = [{ name: "itsybitsy", path: LOCAL }];
+      const run = spyOn(service, "runRemoteLifecycle");
+      answers.status = [0, " M src/index.ts"];
+      await remoteMerge(dashboard, run, { output: "" });
+      const notice = `${WORKER_KEY} merged · pull failed: Uncommitted changes in ${LOCAL}; commit or stash them before pulling`;
+      await waitFor(() => dashboard.notice === notice, { message: "the failed pull's notice" });
+      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${notice}`);
+      expect(gitCalls.some(cmd => cmd[3] === "fetch")).toBe(false);
+      // A remote whose fetch fails is the pull's ✗ line.
+      answers.status = [0, ""];
+      answers.fetch = [128, "", "fatal: could not read from remote repository"];
+      await remoteMerge(dashboard, run, { output: "" });
+      const fetchFailed = `${WORKER_KEY} merged · pull failed: ✗ origin: fatal: could not read from remote repository`;
+      await waitFor(() => dashboard.notice === fetchFailed, { message: "the failed fetch's notice" });
+      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${fetchFailed}`);
+    });
+
+    test("no pull without a merge that landed, a push that worked, or a repo of that name here", async () => {
+      const { dashboard, service } = setup();
+      selectByKey(dashboard, WORKER_KEY);
+      const run = spyOn(service, "runRemoteLifecycle");
+      // No local repo of that name.
+      dashboard.repos = [{ name: "other-repo", path: "/local/other-repo" }];
+      await remoteMerge(dashboard, run, { output: "" });
+      await waitFor(() => dashboard.notice === `${WORKER_KEY} merged`, { message: "the merge notice" });
+      dashboard.repos = [{ name: "itsybitsy", path: LOCAL }];
+      // A --keep merge with nothing to merge.
+      await remoteMerge(dashboard, run, { output: "Nothing to merge: branch is current" }, true);
+      await waitFor(() => dashboard.notice === `${WORKER_KEY}: Nothing to merge: branch is current`, { message: "the nothing-to-merge notice" });
+      // The peer's push failed: nothing new reached the remotes.
+      await remoteMerge(dashboard, run, { output: "Closed agent: worker-abc", pushFailure: "origin: ! [rejected] main -> main (fetch first)" });
+      await waitFor(() => dashboard.notice?.includes("push failed") === true, { message: "the push failure notice" });
+      // Another lifecycle command.
+      dashboard.handleInput("x");
+      run.mockResolvedValueOnce({ output: "" });
+      assertDialog(dashboard.dialog, "confirm").onYes();
+      await waitFor(() => dashboard.notice === `${WORKER_KEY} retired`, { message: "the retire notice" });
+      await Bun.sleep(0);
+      expect(gitCalls).toEqual([]);
+    });
   });
 
   test("on the machine that ran a peer's merge, a failed push is a red notice too", () => {

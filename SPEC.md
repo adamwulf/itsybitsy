@@ -221,7 +221,7 @@ snapshot:
    g. Delete git branch (`git branch -D agent/<id>`)
    h. Archive artifacts and the versioned `retirement.json` recovery manifest
    i. Remove agent directory
-4. Scan and kill orphaned Claude processes
+4. Scan and kill orphaned Claude and `bun test` processes (§8.3)
 
 When the caller is a worktree agent inside its itsybitsy sandbox, its watchdog
 performs these steps for it (§8.5, lifecycle-request broker); the steps
@@ -338,7 +338,7 @@ Nuke (`ib nuke <id>`) recursively kills a manager and all its descendants:
    directory. The sweep skips cleanup if it cannot read a valid repo ID or
    list the agents directory. In that case, `ib state --cleanup` can still
    report and remove untracked sessions.
-4. Scan and kill orphaned Claude processes
+4. Scan and kill orphaned Claude and `bun test` processes (§8.3)
 
 Nuke-all (`ib nuke` with no agent ID) kills all agents in the repository. The `--force` flag skips confirmation but does not change what gets nuked.
 
@@ -569,7 +569,7 @@ After successful merge:
 7. Archive artifacts
 8. Remove questions for this agent
 9. Remove the agent directory. If removal fails, the merge result includes a warning with the directory and the filesystem error. Retirement includes the same warning in its failed teardown result.
-10. Scan for orphaned Claude processes
+10. Scan for orphaned Claude and `bun test` processes (§8.3)
 
 **Note on `mergeCheckAgent`**: The TS implementation hardcodes `"main"` as the target branch for conflict checks and commit counting, rather than using the dynamic detection (current branch → main → master) that bash `cmd_merge_check` uses. It also skips the caller's CWD uncommitted changes check that bash `do_merge_check` performs. [^callout: intentional simplifications in TS — the dashboard always runs merge-check from the root repo context where `main` is the expected target and CWD changes are not a concern (the actual `mergeAgent` checks CWD changes before executing).]
 
@@ -1317,12 +1317,17 @@ In bash, `log_agent()` also echoes the message to stdout unless called with `--q
 
 ### 8.3 Orphan Detection and Cleanup
 
-After retires/nukes, the system scans for orphaned Claude processes:
+After retires, merges and nukes, the system scans for orphaned Claude and `bun test` processes (`scanAndKillOrphans`, `src/agent-lifecycle.ts`):
 
-1. Find all processes matching "claude" via `pgrep`
-2. For each, determine its CWD (macOS: `lsof -d cwd`, Linux: `/proc/<pid>/cwd`)
-3. If CWD contains `/.itsybitsy/agents/` and the agent directory no longer exists → orphan
-4. Kill orphans with SIGTERM → wait 2s → SIGKILL
+1. List every process with its command line in one `ps -A -ww -o pid=,command=` call. Candidates are command lines containing "claude" (the match `pgrep -f claude` made, the bash reference's listing) and `bun test` runs: argv[0]'s basename is `bun` and the first argument is `test`, read from the command line split on whitespace. A claude process whose prompt mentions "bun test" is not a `bun test` run, and a `bash -c "bun test"` wrapper is not either: it exits on its own once its bun child dies.
+2. For each candidate, determine its CWD and the CWD directory's inode (macOS: ONE `lsof -a -d cwd -p <pid,pid,...> -Fpin` call for all candidates; Linux: `/proc/<pid>/cwd` per PID). A CWD name lsof printed with an escape (`\` or `^`, e.g. `\xc3\xa9` for a non-ASCII byte under a C locale, `^A` for a control character) is not the real path, so the CWD counts as unknown and neither rule kills the process.
+3. Claude rule: if CWD contains `/.itsybitsy/agents/` and the agent directory no longer exists → orphan (`reason=agent-dir-deleted`)
+4. `bun test` rule, for a `bun test` candidate the claude rule did not kill: if the CWD directory no longer exists, anywhere on disk → orphan (`reason=bun-test-cwd-deleted`). A CWD path that exists but is not the same directory (a different inode than the one lsof reports, as for an agent re-created under the same name, or not a directory at all) counts as no longer existing (`reason=bun-test-cwd-replaced`). Any other failure to stat the path leaves the process alone.
+5. Kill orphans through `terminateProcess` (`label=lifecycle-orphan`): SIGTERM → wait 2s → SIGKILL, since a process spinning in native code may ignore SIGTERM
+
+> [^note] **TypeScript only:** the `bun test` rule. Two `bun test` runs an agent started outlived its teardown and spun at ~98% CPU for days in its deleted worktree; the claude-only listing never saw them.
+
+**Periodic scan in `ib watch`.** [^note] **TypeScript only.** `ib watch` also runs the scan once 60 s after startup and then once an hour (`startOrphanScanTimer`, `src/orphan-scan-timer.ts`, started at the end of `startDashboard`), so an orphan no teardown scan saw does not live until the next one. The scan is process-wide, so it runs once per tick, not once per repo. It runs from a timer, never from render; a scan still running when the next is due is skipped; each scan writes one `[orphan-scan] <startup|hourly> scan killed N orphan(s)` line to watch.log, and a failure is logged as `[orphan-scan] ... scan failed: <message>` and never thrown. Both timers are unref'd, so they never keep the process alive, and quitting `ib watch` clears them.
 
 ### 8.4 Auto-Compact
 

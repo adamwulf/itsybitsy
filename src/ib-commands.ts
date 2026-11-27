@@ -462,7 +462,6 @@ async function emitCoalescedLeaveNotice(
  */
 export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
-  const agentsDir = runtimeNames.agentsDir(agent.repoPath);
   const tmuxSession = agent.meta.tmux_session;
 
   // Check if agent exists (directory or tmux session)
@@ -565,8 +564,8 @@ export async function retireAgent(agent: Agent): Promise<IbCommandResult> {
   }
   const { prunedTeams } = teardown;
 
-  // Scan for orphaned Claude processes
-  await scanAndKillOrphans(agentsDir);
+  // Scan for orphaned Claude and `bun test` processes
+  await scanAndKillOrphans();
 
   // retire = single-agent departure → per-agent leave notice to surviving
   // teammates, `fromAgent` = the departed id (§16.5). Best-effort.
@@ -1525,9 +1524,9 @@ async function nukeAgentList(
   // Clean up orphaned tmux sessions
   const orphansKilled = await cleanupOrphanedTmuxSessions(repoPath, agentsDir);
 
-  // Scan for orphaned Claude processes
+  // Scan for orphaned Claude and `bun test` processes
   if (killed > 0 || orphansKilled > 0) {
-    await scanAndKillOrphans(agentsDir);
+    await scanAndKillOrphans();
   }
 
   // nuke = coalesced departure → ONE `N member(s) left @team` notice per team,
@@ -3848,7 +3847,6 @@ export async function mergeAgent(
   options: MergeAgentOptions = {},
 ): Promise<IbCommandResult> {
   const agentDir = runtimeNames.agentDir(agent.repoPath, agent.id);
-  const agentsDir = runtimeNames.agentsDir(agent.repoPath);
   const branchName = `agent/${agent.id}`;
   const worktreePath = join(agentDir, "repo");
   const tmuxSession = agent.meta.tmux_session;
@@ -4155,8 +4153,8 @@ export async function mergeAgent(
       return res;
     });
 
-    // 20. Scan for orphaned Claude processes
-    await timed("merge", "orphan-scan", () => scanAndKillOrphans(agentsDir));
+    // 20. Scan for orphaned Claude and `bun test` processes
+    await timed("merge", "orphan-scan", () => scanAndKillOrphans());
 
     // merge = single-agent departure → per-agent leave notice to surviving
     // teammates, `fromAgent` = the departed id (§16.5). Best-effort.

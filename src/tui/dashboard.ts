@@ -31,6 +31,8 @@ import type { Component, OverlayHandle } from "@mariozechner/pi-tui";
 import { listRepos, loadRegistry, setRepoDefaultAgentType, setRepoNotes } from "../registry";
 import { claimScheduledRun, readScheduledTasks, recordScheduledRunResult } from "../scheduled-tasks";
 import { Scheduler, startLocalScheduledAgent } from "../scheduler";
+import { scanAndKillOrphans } from "../agent-lifecycle";
+import { startOrphanScanTimer, type OrphanScanTimer } from "../orphan-scan-timer";
 import { shortPeerId } from "../peers/store";
 import { readConfig, checkDeprecatedConfigKeys } from "../config";
 import { validateAllAgentTypes, ensureAgentTypesDir, listSpawnableTypeNamesSync } from "../agent-types";
@@ -4880,6 +4882,8 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
   let quitting = false;
   /** Scheduled tasks (SPEC §21.2): started at the end of this function, once the watcher and peer service are up. */
   let scheduler: Scheduler | null = null;
+  /** The startup + hourly orphan scan (SPEC §8.3): started at the end of this function. */
+  let orphanScanTimer: OrphanScanTimer | null = null;
   const quitDashboard = (pauseRepoCoordinators: boolean): void => {
     if (quitting) return;
     quitting = true;
@@ -4891,6 +4895,8 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
     colorDetection.cleanup();
     dashboard.stopPolling();
     watcher.stop();
+    // No orphan scan starts from here on; one already running is not waited out.
+    orphanScanTimer?.stop();
     // No scheduled run starts from here on; a remote start in flight is
     // aborted. Raced like Telegram: a local spawn in flight is not waited out.
     const stopScheduler = scheduler
@@ -5080,5 +5086,9 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
       refresh: () => { void dashboard.watcher?.refresh(); },
     });
     scheduler.start();
+    // The orphan scan (SPEC §8.3), once 60 s from now and then hourly. One
+    // timer for the whole process, not one per repo: the scan reads the whole
+    // process table. Off the render path; a failure is logged, never thrown.
+    orphanScanTimer = startOrphanScanTimer({ scan: () => scanAndKillOrphans(), log: logToWatchLog });
   }
 }

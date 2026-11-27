@@ -127,3 +127,12 @@ codexLiveSpawnCtx.setDefault(safeTestSpawnRunner);
 // Same backstop: on the stub every origin reads as unset, and no git runs.
 const { cloneRepoSpawnCtx } = await import("./src/clone-repo");
 cloneRepoSpawnCtx.setDefault(safeTestSpawnRunner);
+
+// The orphan scan (scanAndKillOrphans, src/agent-lifecycle.ts) lists every
+// process with `ps` and kills a `bun test` whose cwd is gone and a claude
+// process whose agent directory is gone. Retire, merge and nuke reach it
+// from teardown, so a test that ran one with a real spawner would kill real
+// processes on the developer's machine. Same backstop: on the stub `ps` lists
+// nothing, so the scan finds no candidate and signals nothing.
+const { orphanScanSpawnCtx } = await import("./src/agent-lifecycle");
+orphanScanSpawnCtx.setDefault(safeTestSpawnRunner);

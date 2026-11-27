@@ -5,7 +5,7 @@ import * as runtimeNames from "./runtime-names";
  * kill, and utility functions.
  */
 
-import { join, dirname, resolve } from "path";
+import { basename, join, dirname, resolve } from "path";
 import type { ReadableStreamDefaultReader } from "node:stream/web";
 import {
   readdir,
@@ -16,6 +16,7 @@ import {
   appendFile,
   lstat,
   readlink,
+  stat,
   symlink,
 } from "fs/promises";
 import { SpawnContext, type SpawnResult } from "./types";
@@ -968,95 +969,199 @@ export async function teardownAgent(
 // ── scanAndKillOrphans ───────────────────────────────────────────────────────
 
 /**
- * Parse `lsof -Fpn` output into a pid → cwd map. A `p<pid>` line starts a
- * process set and an `n<path>` line names a file of the current process; every
- * other field lsof always emits (e.g. `f<fd>`) is ignored. The first `n` line
- * of a process wins. A process with no `n` line is absent from the map.
+ * Spawn context for the orphan scan's two commands: the process listing (`ps`)
+ * and the cwd read (`lsof`). It is separate from {@link spawnCtx} so the
+ * `bun test` preload (test-preload.ts) can make a no-op runner its baseline: a
+ * test that forgets to stub it lists no processes, so no test can run the scan
+ * against the live process table, where it would kill real processes.
  */
-function parseLsofCwds(stdout: string): Map<number, string> {
-  const cwds = new Map<number, string>();
+export const orphanScanSpawnCtx = new SpawnContext();
+
+/** The scan's process listing: every process, its whole command line. */
+const ORPHAN_SCAN_PS_ARGV = ["ps", "-A", "-ww", "-o", "pid=,command="];
+
+/** A process's cwd as the scan reads it. */
+interface ProcessCwd {
+  path: string;
+  /** The cwd directory's inode, or null when it could not be read. */
+  inode: bigint | null;
+}
+
+/** Parse `ps -o pid=,command=` output into pid + command line pairs. */
+function parsePsCommands(stdout: string): Array<{ pid: number; command: string }> {
+  const out: Array<{ pid: number; command: string }> = [];
+  for (const line of stdout.split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+(.*\S)/);
+    if (!m) continue;
+    const pid = parseInt(m[1]!, 10);
+    if (pid > 0) out.push({ pid, command: m[2]! });
+  }
+  return out;
+}
+
+/**
+ * Whether a command line is a `bun test` run: argv[0]'s basename is `bun` and
+ * the first argument is `test`. ps joins argv with spaces, so the line is
+ * split on whitespace. Only the bun process itself matches: not a claude
+ * process whose prompt mentions "bun test", and not a `bash -c "bun test"`
+ * wrapper, which exits on its own once its bun child dies.
+ */
+export function isBunTestCommand(command: string): boolean {
+  const [argv0, firstArg] = command.trim().split(/\s+/);
+  return argv0 !== undefined && basename(argv0) === "bun" && firstArg === "test";
+}
+
+/**
+ * Parse `lsof -Fpin` output into a pid → cwd map. A `p<pid>` line starts a
+ * process set, an `i<inode>` line gives the inode and an `n<path>` line the
+ * path of the current process's file; every other field lsof always emits
+ * (e.g. `f<fd>`) is ignored. The first `i` and `n` line of a process win. A
+ * process with no `n` line is absent from the map.
+ */
+function parseLsofCwds(stdout: string): Map<number, ProcessCwd> {
+  const cwds = new Map<number, ProcessCwd>();
+  const inodes = new Map<number, bigint>();
   let currentPid: number | null = null;
   for (const line of stdout.split("\n")) {
     if (line.startsWith("p")) {
       const pid = parseInt(line.slice(1), 10);
       currentPid = isNaN(pid) ? null : pid;
-    } else if (line.startsWith("n") && currentPid !== null && !cwds.has(currentPid)) {
-      cwds.set(currentPid, line.slice(1));
+    } else if (currentPid === null) {
+      continue;
+    } else if (line.startsWith("i") && /^\d+$/.test(line.slice(1)) && !inodes.has(currentPid)) {
+      inodes.set(currentPid, BigInt(line.slice(1)));
+    } else if (line.startsWith("n") && !cwds.has(currentPid)) {
+      cwds.set(currentPid, { path: line.slice(1), inode: null });
     }
   }
+  for (const [pid, cwd] of cwds) cwd.inode = inodes.get(pid) ?? null;
   return cwds;
 }
 
 /**
- * Find orphaned Claude processes whose cwd is in a deleted agent directory.
- * On macOS, one lsof call reads the cwd of every candidate PID; elsewhere,
+ * lsof prints a name byte it cannot show as an escape: `\xNN` for a non-ASCII
+ * byte under a C/POSIX locale, `\\` for a backslash, `^A` for a control
+ * character (measured on macOS). Such a name is not the real path, so a stat of
+ * it would call a live cwd deleted: a name with `\` or `^` is an unknown cwd,
+ * and the scan leaves the process alone.
+ */
+const LSOF_ESCAPED_NAME = /[\\^]/;
+
+/** Linux: a process's cwd from /proc/<pid>/cwd, or null when unreadable. */
+async function readProcCwd(pid: number): Promise<ProcessCwd | null> {
+  try {
+    const path = await readlink(`/proc/${pid}/cwd`);
+    let inode: bigint | null = null;
+    try {
+      inode = (await stat(`/proc/${pid}/cwd`, { bigint: true })).ino;
+    } catch { /* inode unknown: judged by the path alone */ }
+    return { path, inode };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The claude rule: a cwd inside an agent directory that no longer exists.
+ * Returns the kill reason, or null to leave the process alone.
+ */
+async function claudeOrphanReason(cwd: string): Promise<string | null> {
+  // Safety check 1: Must contain "/.itsybitsy/agents/"
+  if (runtimeNames.firstAgentsMarker(cwd) === -1) return null;
+  // Safety check 2: Extract agent dir and verify it doesn't exist
+  const match = runtimeNames.matchAgentPrefix(cwd);
+  if (!match) return null;
+  try {
+    await readdir(match[1]!);
+    return null; // Dir exists — not an orphan
+  } catch {
+    return "agent-dir-deleted";
+  }
+}
+
+/**
+ * The `bun test` rule: the cwd directory no longer exists, anywhere on disk.
+ * A path that exists but is not the same directory (another inode than the
+ * process's cwd, as for an agent re-created under the same name, or not a
+ * directory at all) counts as gone. Any other stat failure (EACCES, say)
+ * leaves the process alone. Returns the kill reason, or null.
+ */
+async function bunTestOrphanReason(cwd: ProcessCwd): Promise<string | null> {
+  let info;
+  try {
+    info = await stat(cwd.path, { bigint: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "bun-test-cwd-deleted" : null;
+  }
+  if (!info.isDirectory()) return "bun-test-cwd-replaced";
+  if (cwd.inode !== null && info.ino !== cwd.inode) return "bun-test-cwd-replaced";
+  return null;
+}
+
+/**
+ * Find orphaned processes and kill them through {@link terminateProcess}
+ * (SIGTERM, then SIGKILL after the grace period). Two rules, from one `ps`
+ * listing of every process:
+ *
+ *  - a command line containing `claude` (the match `pgrep -f claude` made)
+ *    whose cwd is inside a deleted agent directory → `agent-dir-deleted`;
+ *  - a `bun test` process ({@link isBunTestCommand}) whose cwd directory no
+ *    longer exists anywhere on disk → `bun-test-cwd-deleted`, or whose cwd
+ *    path now names another directory → `bun-test-cwd-replaced`.
+ *
+ * The claude rule is tried first. On macOS, one lsof call reads the cwd and its
+ * inode for every candidate PID, and a cwd name lsof printed escaped
+ * ({@link LSOF_ESCAPED_NAME}) leaves the process alone; elsewhere,
  * /proc/<pid>/cwd is read per PID.
+ * The scan is process-wide: it reads no repo or agents directory of its own.
  * Returns count of killed orphans.
  */
-export async function scanAndKillOrphans(agentsDir: string): Promise<number> {
-  let killedCount = 0;
+export async function scanAndKillOrphans(): Promise<number> {
+  const listing = await orphanScanSpawnCtx.run(ORPHAN_SCAN_PS_ARGV);
+  if (listing.exitCode !== 0 || !listing.stdout) return 0;
 
-  // Get all Claude PIDs
-  const pgrepResult = await spawnCtx.run(["pgrep", "-f", "claude"]);
-  if (pgrepResult.exitCode !== 0 || !pgrepResult.stdout) return 0;
-
-  const pids: number[] = [];
-  for (const pidStr of pgrepResult.stdout.split("\n")) {
-    const pid = parseInt(pidStr.trim(), 10);
-    if (!isNaN(pid)) pids.push(pid);
-  }
-  if (pids.length === 0) return 0;
+  const candidates = parsePsCommands(listing.stdout)
+    .map(({ pid, command }) => ({ pid, claude: command.includes("claude"), bunTest: isBunTestCommand(command) }))
+    .filter((c) => c.claude || c.bunTest);
+  if (candidates.length === 0) return 0;
 
   // macOS: read every cwd with ONE lsof call (a per-PID call cost ~80ms each,
   // which held up the post-merge refresh in `ib watch` for seconds). lsof exits
-  // non-zero when some PIDs exited after pgrep but still prints the rest, so
+  // non-zero when some PIDs exited after ps but still prints the rest, so
   // the output is parsed whatever the exit code.
-  let darwinCwds: Map<number, string> | null = null;
+  let darwinCwds: Map<number, ProcessCwd> | null = null;
   if (process.platform === "darwin") {
-    const lsofResult = await spawnCtx.run([
-      "lsof", "-a", "-d", "cwd", "-p", pids.join(","), "-Fpn",
+    const lsofResult = await orphanScanSpawnCtx.run([
+      "lsof", "-a", "-d", "cwd", "-p", candidates.map((c) => c.pid).join(","), "-Fpin",
     ]);
     darwinCwds = parseLsofCwds(lsofResult.stdout);
     if (darwinCwds.size === 0) return 0;
   }
 
-  for (const pid of pids) {
-    // Get process cwd
-    let procCwd = "";
-    if (darwinCwds !== null) {
-      procCwd = darwinCwds.get(pid) ?? "";
-    } else {
-      try {
-        const { readlink } = await import("fs/promises");
-        procCwd = await readlink(`/proc/${pid}/cwd`);
-      } catch { /* ignore */ }
-    }
+  let killedCount = 0;
+  for (const candidate of candidates) {
+    const cwd = darwinCwds !== null
+      ? darwinCwds.get(candidate.pid) ?? null
+      : await readProcCwd(candidate.pid);
+    if (!cwd?.path) continue;
+    // An escaped lsof name is an unknown cwd, for both rules.
+    if (darwinCwds !== null && LSOF_ESCAPED_NAME.test(cwd.path)) continue;
 
-    if (!procCwd) continue;
-
-    // Safety check 1: Must contain "/.itsybitsy/agents/"
-    if (runtimeNames.firstAgentsMarker(procCwd) === -1) continue;
-
-    // Safety check 2: Extract agent dir and verify it doesn't exist
-    const match = runtimeNames.matchAgentPrefix(procCwd);
-    if (!match) continue;
-    const agentPath = match[1]!;
-
-    // Skip if directory still exists
-    try {
-      await readdir(agentPath);
-      continue; // Dir exists — not an orphan
-    } catch { /* dir doesn't exist — orphan confirmed */ }
+    const reason =
+      (candidate.claude ? await claudeOrphanReason(cwd.path) : null) ??
+      (candidate.bunTest ? await bunTestOrphanReason(cwd) : null);
+    if (!reason) continue;
 
     // Kill the orphan via the canonical funnel — extract the agent id from
     // the cwd path so the watch.log line carries provenance.
-    const idMatch = agentPath.match(/\/agents\/([^/]+)$/);
-    const orphanAgentId = idMatch ? idMatch[1] : undefined;
+    const agentPath = runtimeNames.matchAgentPrefix(cwd.path)?.[1];
+    const orphanAgentId = agentPath?.match(/\/agents\/([^/]+)$/)?.[1];
     const result = await terminateProcess({
-      pid,
+      pid: candidate.pid,
       label: "lifecycle-orphan",
       agentId: orphanAgentId,
-      reason: "agent-dir-deleted",
+      reason,
     });
     if (result.killed && result.outcome !== "not-alive") killedCount++;
   }

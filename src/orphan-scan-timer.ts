@@ -12,8 +12,12 @@
  * process alive, and stop() clears them on shutdown.
  */
 
-/** Delay from `ib watch` startup to the first scan. */
-export const ORPHAN_SCAN_STARTUP_DELAY_MS = 60_000;
+/**
+ * Delay from `ib watch` startup to the first scan: soon enough that an orphan
+ * is gone almost at launch, late enough that the scan's `ps` + `lsof` do not
+ * compete with the rest of startup (first refresh, fs.watch setup, coordinator).
+ */
+export const ORPHAN_SCAN_STARTUP_DELAY_MS = 5_000;
 /** Interval between the hourly scans, counted from startup. */
 export const ORPHAN_SCAN_INTERVAL_MS = 60 * 60_000;
 

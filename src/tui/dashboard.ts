@@ -5086,7 +5086,7 @@ async function startDashboard(crashHandlers: WatchCrashHandlers, bootStart: numb
       refresh: () => { void dashboard.watcher?.refresh(); },
     });
     scheduler.start();
-    // The orphan scan (SPEC §8.3), once 60 s from now and then hourly. One
+    // The orphan scan (SPEC §8.3), once 5 s from now and then hourly. One
     // timer for the whole process, not one per repo: the scan reads the whole
     // process table. Off the render path; a failure is logged, never thrown.
     orphanScanTimer = startOrphanScanTimer({ scan: () => scanAndKillOrphans(), log: logToWatchLog });

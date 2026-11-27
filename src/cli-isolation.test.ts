@@ -901,6 +901,7 @@ describe("CLI routing cannot reach a live agent", () => {
     /** `$ROOT` is the fixture root, `$AGENT` the caller's agent directory. */
     const ROUTES: string[][] = [
       ["add", "$ROOT"], ["remove", "caller-repo"], ["push", "caller-repo"], ["pull", "caller-repo"],
+      ["notes", "show", "caller-repo"], ["notes", "set", "caller-repo", "x"], ["notes", "clear", "caller-repo"],
       ["list"], ["ls"], ["agents"], ["tree"], ["questions"], ["q"],
       ["state"], ["state", "--cleanup"], ["bounce"],
       ["generate-summary", "$AGENT"],

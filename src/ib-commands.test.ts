@@ -16,7 +16,7 @@ import {
   lstat,
 } from "fs/promises";
 import { tmpdir } from "os";
-import { chmodSync, existsSync, renameSync, writeFileSync, realpathSync, symlinkSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync, realpathSync, symlinkSync } from "fs";
 import type { Agent, AgentMeta } from "./agents";
 import { setSandboxedProcessOverride } from "./sandbox-detect";
 import {
@@ -5180,23 +5180,44 @@ describe("mergeAgent (native)", () => {
       await mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", tmux_session: "tmux-agent-abc" }));
       const base = makeMergeMock({ tempWorktreeError: "fatal: could not create work tree dir" });
+      // The failed `git worktree add` leaves a half-made checkout on disk.
+      let worktreeDir: string | undefined;
+      let dirExistedAtPrune: boolean | undefined;
+      let dirExistedAtBranchDelete: boolean | undefined;
       const runner = (cmd: string[], o?: any) => {
+        if (cmd.includes("worktree") && cmd.includes("add")) {
+          worktreeDir = cmd.find((a) => a.startsWith("/tmp/ib-rebase-check-"))!;
+          mkdirSync(worktreeDir, { recursive: true });
+          writeFileSync(join(worktreeDir, "tracked.txt"), "half checked out\n");
+        }
         if (cmd.includes("worktree") && cmd.includes("remove") && cmd.some(isTemp)) {
           spawnCalls.push(cmd);
           return makeSpawnResult(128, "", "fatal: not a working tree");
         }
+        if (cmd.includes("worktree") && cmd.includes("prune")) dirExistedAtPrune = existsSync(worktreeDir!);
+        if (cmd.includes("branch") && cmd.includes("-D") && cmd.some(isTemp)) dirExistedAtBranchDelete = existsSync(worktreeDir!);
         return base(cmd, o);
       };
       lifecycleSpawnCtx.set(runner);
       setMergeSpawnRunner(runner);
 
-      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
+      try {
+        const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
 
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toContain("step \"create temp worktree\" failed");
-      const prune = spawnCalls.findIndex((c) => c.includes("worktree") && c.includes("prune"));
-      expect(prune).toBeGreaterThan(tempCallIndex("worktree", "remove", "--force"));
-      expect(prune).toBeLessThan(tempCallIndex("branch", "-D"));
+        expect(result.ok).toBe(false);
+        expect(result.stderr).toContain("step \"create temp worktree\" failed");
+        expect(worktreeDir).toBeDefined();
+        // The directory is deleted before the prune, so the prune drops its
+        // registration, and both happen before the branch delete.
+        expect(dirExistedAtPrune).toBe(false);
+        expect(dirExistedAtBranchDelete).toBe(false);
+        expect(existsSync(worktreeDir!)).toBe(false);
+        const prune = spawnCalls.findIndex((c) => c.includes("worktree") && c.includes("prune"));
+        expect(prune).toBeGreaterThan(tempCallIndex("worktree", "remove", "--force"));
+        expect(prune).toBeLessThan(tempCallIndex("branch", "-D"));
+      } finally {
+        if (worktreeDir) rmSync(worktreeDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -17416,7 +17437,9 @@ describe("long-running-op guard", () => {
       if (s.includes("status") && s.includes("--porcelain")) return makeSpawnResult(0, "");
       if (s.includes("branch") && s.includes("--show-current")) return makeSpawnResult(0, "main");
       if (s.includes("show-ref") && s.includes("--verify")) return makeSpawnResult(0);
-      // Rebase inside the temp conflict-check worktree fails → conflict detected.
+      // Rebase inside the temp conflict-check worktree fails. Its
+      // `--diff-filter=U` falls to the empty default, so the check reports a
+      // rebase that failed, not on a conflict; any failure will do here.
       if (cmd.includes("rebase") && !cmd.includes("--abort")) return makeSpawnResult(1, "CONFLICT");
       if (s.includes("has-session")) return makeSpawnResult(1);
       return makeSpawnResult();

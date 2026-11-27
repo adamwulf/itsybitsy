@@ -113,7 +113,7 @@ import type { LayoutState } from "./layout";
 import { textHeader } from "../peers/peer-outbox";
 import type { SendTarget } from "../peers/send-frame";
 import { InputFieldComponent } from "./input-field";
-import { newAgent, pauseAgent, teamSend as ibTeamSend } from "../ib-commands";
+import { newAgent, pauseAgent, pullRepo, repoHasRemotes, teamSend as ibTeamSend, type IbCommandResult } from "../ib-commands";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { choosePaths, peerAttachmentPrompt, promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
@@ -831,6 +831,39 @@ export function isRemoteAllowedKey(data: string, row?: RemoteEntry): boolean {
     || matchesKey(data, Key.left) || matchesKey(data, Key.right)
     || matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))
     || matchesKey(data, Key.ctrl("c"));
+}
+
+/**
+ * Each line of git's output as a terminal ends up showing it. A `\r\n` line
+ * end (ssh writes its errors that way, `ssh: Could not resolve hostname …`)
+ * is a plain line end; any other carriage return keeps only the text after
+ * the line's last one, with the line's indent. A rebase prints its progress
+ * as `Rebasing (1/3)\rRebasing (2/3)\r…` even on a pipe, and a raw `\r` would
+ * move the cursor in the dashboard's header and in a viewer of watch.log.
+ */
+function lastCarriageReturnLine(text: string): string {
+  return text.replace(/\r+\n/g, "\n").replace(/^( *)[^\n]*\r/gm, "$1");
+}
+
+/**
+ * An `ib pull` result as the one-row header notice after a peer merge shows
+ * it. A failed pull lists each `✗` remote's whole entry first, so the reason
+ * follows `pull failed:`, then each `✓` remote's status line alone. A pull
+ * that worked lists each `✓` status line, and under `pulled <branch>` (a
+ * fast-forward) git's first detail line too: `Updating <a>..<b>`, or
+ * `Already up to date.` when it brought nothing. The rest (`Fast-forward`,
+ * the diffstat, a rebase's output) stays out. Then stderr.
+ */
+function pullNoticeReport({ ok, stdout, stderr }: Pick<IbCommandResult, "ok" | "stdout" | "stderr">): string {
+  const entries: string[][] = [];
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("  ") && entries.length > 0) entries.at(-1)!.push(line);
+    else if (line) entries.push([line]);
+  }
+  const failed = entries.filter(([status]) => !status!.startsWith("✓")).flat();
+  const pulled = entries.filter(([status]) => status!.startsWith("✓")).flatMap(([status, detail]) =>
+    ok && detail && /: pulled \S+$/.test(status!) ? [status!, detail] : [status!]);
+  return [...failed, ...pulled, stderr].filter(Boolean).join("\n");
 }
 
 /** Minimum terminal width for sidebar layout */
@@ -2189,7 +2222,15 @@ export class DashboardComponent implements Component {
           this.setNotice(notice, "error");
           if (warnings) this.showDialog({ type: "cleanup-warnings", text: `${notice}\n\n${warnings}`, offset: 0 });
         } else {
-          this.setNotice(options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`, "info");
+          const notice = options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`;
+          this.setNotice(notice, "info");
+          // A merge that landed: the peer may have pushed it, so pull it into
+          // this machine's clone. After a failed push (above) there is no
+          // pull, even when another of the peer's remotes took the merge.
+          // A closing merge's output is its teardown warnings.
+          if (options.action === "merge" && !(options.keep && output.startsWith("Nothing to merge:"))) {
+            await this.pullAfterRemoteMerge(label, repo, options.keep ? "" : output);
+          }
         }
       }
       return output;
@@ -2198,6 +2239,41 @@ export class DashboardComponent implements Component {
       this.invalidate();
       this.tui?.requestRender();
     }
+  }
+
+  /**
+   * After a paired machine merged one of its agents (SPEC §20.4 "Remote
+   * lifecycle commands"), run `ib pull` on this machine's repo registered
+   * under the same name, if there is one with a remote, so it has what that
+   * machine pushed. While it runs, the notice is the short `<label> merged`,
+   * as for a failed push, and the row's pending command reads
+   * `pull <repo>…`: the merge's own notice (a `--keep` merge's output) would
+   * push that entry past the header's cut. Then the notice is
+   * `<label> merged · <report>` ({@link pullNoticeReport}), an alert when
+   * the pull failed. A closing merge's teardown `warnings` then open the
+   * cleanup-warnings dialog. watch.log gets the whole report.
+   */
+  private async pullAfterRemoteMerge(label: string, repo: string, warnings: string): Promise<void> {
+    const local = this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo));
+    if (!local) return;
+    let result: IbCommandResult;
+    try {
+      // No remotes: nothing to pull, as for the merge's own pull (§3.4 step 0).
+      if (!(await repoHasRemotes(local.path))) return;
+      this.setNotice(`${label} merged`, "info");
+      this.pendingLifecycle.set(label, `pull ${local.name}…`);
+      this.invalidate();
+      this.tui?.requestRender();
+      result = await pullRepo(local.path);
+    } catch (err) {
+      result = { ok: false, exitCode: 1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
+    }
+    const shown = { ok: result.ok, stdout: lastCarriageReturnLine(result.stdout), stderr: lastCarriageReturnLine(result.stderr) };
+    const report = [shown.stdout, shown.stderr].filter(Boolean).join("\n");
+    logToWatchLog(`[peers] ib pull ${local.path} after ${label} merged ${result.ok ? "succeeded" : "failed"}: ${report.replace(/\s*\n\s*/g, " · ")}`);
+    const notice = `${label} merged · ${result.ok ? "" : "pull failed: "}${pullNoticeReport(shown)}`;
+    this.setNotice(notice, result.ok ? "info" : "error");
+    if (warnings) this.showDialog({ type: "cleanup-warnings", text: `${notice}\n\n${warnings}`, offset: 0 });
   }
 
   /**

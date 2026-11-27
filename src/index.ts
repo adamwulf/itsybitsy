@@ -502,6 +502,16 @@ const COMMAND_HELP: Record<string, string> = {
     "  --manager <id>  Only show children of the given manager agent\n" +
     "  --json          Emit machine-readable JSON\n" +
     "  --verbose, -v   Print warnings about unreadable agent dirs",
+  "list-repos":
+    "Usage: ib list-repos [--json | --md]\n" +
+    "  Alias: repos\n" +
+    "  List the registered repos (name, path and notes) without their agents.\n" +
+    "  The name is the display name: the nickname when one is set, else the\n" +
+    "  registry name. Notes are the ones edited in the dashboard's info panel;\n" +
+    "  plain text prints them indented under their repo.\n" +
+    "  --json          Emit machine-readable JSON: name, nickname, path, notes\n" +
+    "                  (nickname and notes are null when unset)\n" +
+    "  --md            Emit a Markdown table of name, path and notes",
   state:
     "Usage: ib state [--manager <id>] [--json] [--verbose|-v] [--cleanup [--dry-run]]\n" +
     "  List agents with PID/liveness diagnostics and orphan detection.\n" +
@@ -1021,6 +1031,7 @@ function printUsage(): void {
   console.log("  add [path] [name]   Register a repo (default: cwd; name: the folder's)");
   console.log("  remove <path>       Unregister a repo");
   console.log("  list, ls            List repos and their agents (--manager <id>, --json)");
+  console.log("  list-repos, repos   List registered repos and their notes, no agents (--json, --md)");
   console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
   console.log("  push <repo-id>      Push the repo's main branch to every configured remote");
   console.log("  pull <repo-id>      Update the repo's main branch from every configured remote (fast-forward, else rebase; --interactive)");
@@ -1172,6 +1183,7 @@ export async function main() {
       : command === "list-agent-types" ? "list-types"
       : command === "show-agent-type" ? "show-type"
       : command === "models" ? "list-models"
+      : command === "repos" ? "list-repos"
       : command;
     if (printCommandHelp(canonical)) return;
     // Unknown command + --help — fall through to top-level usage.
@@ -1222,6 +1234,47 @@ export async function main() {
       const result = await removeRepo(target);
       console.log(result.message);
       process.exit(result.ok ? 0 : 1);
+      break;
+    }
+    case "list-repos":
+    case "repos": {
+      // The registry only: unlike `ib list`, no agent directory is read.
+      const json = args.includes("--json");
+      const markdown = args.includes("--md");
+      if (json && markdown) {
+        console.error(COMMAND_HELP["list-repos"]);
+        process.exit(1);
+      }
+      const repos = await listRepos();
+      if (json) {
+        const rows = repos.map((r) => ({ name: r.name, nickname: r.nickname ?? null, path: r.path, notes: r.notes ?? null }));
+        console.log(JSON.stringify(rows, null, 2));
+        break;
+      }
+      if (repos.length === 0) {
+        console.log("No repos registered. Use 'ib add <path>' to add one.");
+        break;
+      }
+      // Notes come from the dashboard's notes editor and can span several lines.
+      const noteLines = (r: RepoEntry): string[] => {
+        const notes = (r.notes ?? "").trimEnd();
+        return notes ? notes.split(/\r?\n/) : [];
+      };
+      if (markdown) {
+        // A "|" in a cell would end it early, and a cell cannot hold a newline.
+        const cell = (s: string) => s.replaceAll("|", "\\|");
+        console.log("| Name | Path | Notes |\n| --- | --- | --- |");
+        for (const repo of repos) {
+          console.log(`| ${cell(repoDisplayName(repo))} | ${cell(repo.path)} | ${cell(noteLines(repo).join("<br>"))} |`);
+        }
+        break;
+      }
+      const width = Math.max(...repos.map((r) => repoDisplayName(r).length));
+      const indent = " ".repeat(width + 2);
+      for (const repo of repos) {
+        console.log(`${repoDisplayName(repo).padEnd(width)}  ${repo.path}`);
+        for (const line of noteLines(repo)) console.log(`${indent}${line}`.trimEnd());
+      }
       break;
     }
     case "push": {

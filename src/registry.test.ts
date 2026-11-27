@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn, setDefaultTimeout } from "bun:test";
 import { loadRegistry, saveRegistry, addRepo, removeRepo, renameRepo, listRepos, repoDisplayName, setRepoDefaultAgentType, setRepoNotes, checkNewRepoEntry, readRegistryStrict } from "./registry";
 import { join } from "path";
 import { chmod, mkdtemp, open, stat, rm, mkdir, symlink } from "fs/promises";
@@ -8,6 +8,9 @@ import { createTeam } from "./teams";
 import { setUserHome, resetUserHome } from "./home";
 import { createCliFixture, runIsolatedCli } from "./test-cli-runner";
 import { spawnCtx as lifecycleSpawnCtx } from "./agent-lifecycle";
+
+// The CLI tests below launch several `ib` subprocesses each; 5 s is not enough under load.
+setDefaultTimeout(60_000);
 
 // Override registry path for tests
 let tempDir: string;
@@ -939,4 +942,75 @@ describe("ib notes show|set|clear <repo> (CLI)", () => {
     expect(set.stdout).toContain("Usage: ib notes set <repo> [text...]");
     expect(set.stdout).toContain("ib notes set <repo> <<'EOF'");
   }, 30_000);
+});
+
+describe("ib list-repos [--json | --md] (CLI)", () => {
+  test("prints each registered repo's name, path and notes, and none of its agents", async () => {
+    const cli = await createCliFixture();
+    try {
+      const app = await cli.addRepo("app");
+      await cli.addAgent(app, "agent-hidden");
+      const site = join(cli.root, "website");
+      const notes = "Deploys from main.\n\nStaging first.\n";
+      await cli.writeRegistry({ version: 1, repos: [
+        { path: app, name: "app" },
+        { path: site, name: "website", nickname: "site", notes },
+      ] });
+
+      for (const command of ["list-repos", "repos"]) {
+        const run = await cli.run([command]);
+        expect(run.exitCode).toBe(0);
+        expect(run.stdout).toBe(`app   ${app}\nsite  ${site}\n      Deploys from main.\n\n      Staging first.\n`);
+      }
+
+      const json = await cli.run(["list-repos", "--json"]);
+      expect(json.exitCode).toBe(0);
+      expect(JSON.parse(json.stdout)).toEqual([
+        { name: "app", nickname: null, path: app, notes: null },
+        { name: "website", nickname: "site", path: site, notes },
+      ]);
+
+      const md = await cli.run(["list-repos", "--md"]);
+      expect(md.exitCode).toBe(0);
+      expect(md.stdout).toBe(
+        "| Name | Path | Notes |\n| --- | --- | --- |\n" +
+          `| app | ${app} |  |\n| site | ${site} | Deploys from main.<br><br>Staging first. |\n`,
+      );
+    } finally {
+      await cli.cleanup();
+    }
+  });
+
+  test("--md escapes a | in a cell, and --json with --md is refused with the usage text", async () => {
+    const cli = await createCliFixture();
+    try {
+      await cli.writeRegistry({ repos: [{ path: "/tmp/a|b", name: "pipe", notes: "x|y" }] });
+      const md = await cli.run(["list-repos", "--md"]);
+      expect(md.stdout).toBe("| Name | Path | Notes |\n| --- | --- | --- |\n| pipe | /tmp/a\\|b | x\\|y |\n");
+
+      const both = await cli.run(["list-repos", "--json", "--md"]);
+      expect(both.exitCode).toBe(1);
+      expect(both.stdout).toBe("");
+      expect(both.stderr).toContain("Usage: ib list-repos [--json | --md]");
+    } finally {
+      await cli.cleanup();
+    }
+  });
+
+  test("an empty registry says how to add a repo, or prints [] with --json", async () => {
+    const cli = await createCliFixture();
+    try {
+      for (const args of [["list-repos"], ["list-repos", "--md"]]) {
+        const text = await cli.run(args);
+        expect(text.exitCode).toBe(0);
+        expect(text.stdout).toBe("No repos registered. Use 'ib add <path>' to add one.\n");
+      }
+
+      const json = await cli.run(["list-repos", "--json"]);
+      expect(json.exitCode).toBe(0);
+      expect(JSON.parse(json.stdout)).toEqual([]);
+    } finally {
+      await cli.cleanup();
+    }
+  });
 });

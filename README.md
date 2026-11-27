@@ -39,6 +39,7 @@ Instead of copying the binary, you can add the project directory to your `PATH`.
 ```sh
 cd ~/code/myproject
 ib add                      # register this repo
+ib list-repos               # registered repos with their notes (alias: ib repos; --json, --md)
 ib hooks install            # install the safety hooks
 ib hooks intercept-install  # install the Task interception hook
 

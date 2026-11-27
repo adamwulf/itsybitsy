@@ -3,7 +3,7 @@ import { existsSync } from "fs";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { pullRepo, pullSpawnCtx } from "./ib-commands";
+import { pullRepo, pullSpawnCtx, repoHasRemotes } from "./ib-commands";
 import { runIsolatedCli } from "./test-cli-runner";
 import { makeGitIdentity, type GitIdentity } from "./test-git-identity";
 
@@ -329,6 +329,19 @@ describe("pullRepo", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toBe(`No remotes configured in ${lonely}`);
+  });
+
+  // The dashboard's pull after a peer merge skips a repo with none (SPEC §20.4).
+  test("repoHasRemotes counts the remotes pullRepo would pull from", async () => {
+    const lonely = join(root, "lonely");
+    await git(root, "init", "-q", "-b", "main", lonely);
+    await commitFile(lonely, "a.txt", "one\n", "first");
+    expect(await repoHasRemotes(lonely)).toBe(false);
+    await git(lonely, "config", "remote.origin.tagopt", "--tags");
+    expect(await repoHasRemotes(lonely)).toBe(false);
+    expect(await repoHasRemotes(local)).toBe(true);
+    // A listing that fails counts as a remote, so the pull runs and reports it.
+    expect(await repoHasRemotes(join(root, "missing"))).toBe(true);
   });
 
   test("a URL-less remote beside a real one is skipped, not reported as failed", async () => {

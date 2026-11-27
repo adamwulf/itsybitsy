@@ -9680,6 +9680,16 @@ export async function pullRepo(repoPath: string, interactive = false): Promise<I
 }
 
 /**
+ * Whether {@link pullRepo} has a remote to pull from in `repoPath` (one
+ * {@link listRemotes} counts), through `pullSpawnCtx`. A failed listing
+ * counts as having one, so the pull runs and reports the failure.
+ */
+export async function repoHasRemotes(repoPath: string): Promise<boolean> {
+  const listed = await listRemotes(pullSpawnCtx, repoPath);
+  return !listed.ok || listed.remotes.length > 0;
+}
+
+/**
  * The body of {@link pullRepo}: bring `branch`, which must be checked out in
  * `repoPath`, up to date with each of `remotes`. `ib merge` runs it too,
  * through its own spawn context, before it merges into the main branch

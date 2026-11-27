@@ -39,6 +39,7 @@ import { parsePairTarget, type PairStage } from "../peers/pairing";
 import type { RemoteAgent, RemoteQuestion } from "../peers/peer-link";
 import type { RemotePermissionOutcome } from "../peers/remote-permissions";
 import type { RemoteLifecycleOutcome } from "../peers/remote-lifecycle";
+import { setWatchLogPath, resetWatchLogPath } from "../watch-log";
 import type { PeerLinkState } from "../peers/poller";
 import { remoteTerminalSession, terminalWindowCtx } from "../peers/terminal-window";
 import { peerEntryKey } from "./peer-repos";
@@ -12130,32 +12131,55 @@ describe("Unified peer repos in the Agents tree", () => {
       merge.onYes();
     }
 
+    /** The --keep merge's stdout as a peer sends it: merge line, then its own pull's and push's status lines. */
+    const KEEP_OUTPUT = `Merged agent worker-abc into main at ${"a".repeat(40)} (1 commit(s), agent kept running)\n` +
+      "✓ origin: pulled main\n  Already up to date.\n✓ origin: pushed main\n  To /remotes/origin.git\n     1111111..2222222  main -> main";
+    const PULLED = `${WORKER_KEY} merged · ✓ origin: pulled main · Updating 1111111..2222222 · Fast-forward`;
+
     test("pulls this machine's repo of the same name, shown as the row's pending command", async () => {
       const { dashboard, service } = setup();
       selectByKey(dashboard, WORKER_KEY);
       // Registry names match ignoring case, as the tree unifies them.
       dashboard.repos = [{ name: "ITSYBITSY", path: LOCAL }];
       const run = spyOn(service, "runRemoteLifecycle");
-      const gate = Promise.withResolvers<void>();
-      fetchGate = gate.promise;
-      await remoteMerge(dashboard, run, { output: "" });
-      await waitFor(() => gitCalls.some(cmd => cmd[3] === "fetch"), { message: "the pull's fetch" });
-      expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toContain(`${WORKER_KEY} merged  ·  pull ITSYBITSY…`);
-      gate.resolve();
-      await waitFor(() => dashboard.notice !== `${WORKER_KEY} merged`, { message: "the pull's notice" });
-      expect(dashboard.notice).toBe(`${WORKER_KEY} merged · ✓ origin: pulled main · Updating 1111111..2222222 · Fast-forward`);
-      expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}${WORKER_KEY} merged · ✓ origin`);
-      expect(stripAnsi(dashboard.render(WIDTH)[0]!)).not.toContain("pull ITSYBITSY…");
-      expect(gitCalls.map(cmd => cmd.slice(1, 4))).toEqual([
-        ["-C", LOCAL, "show-ref"], ["-C", LOCAL, "remote"], ["-C", LOCAL, "symbolic-ref"],
-        ["-C", LOCAL, "status"], ["-C", LOCAL, "fetch"], ["-C", LOCAL, "merge"],
-      ]);
-      // A --keep merge that landed pulls too.
+      const logDir = await mkdtemp(join(tmpdir(), "ib-pull-after-merge-"));
+      setWatchLogPath(join(logDir, "watch.log"));
+      try {
+        const gate = Promise.withResolvers<void>();
+        fetchGate = gate.promise;
+        await remoteMerge(dashboard, run, { output: "" });
+        await waitFor(() => gitCalls.some(cmd => cmd[3] === "fetch"), { message: "the pull's fetch" });
+        expect(stripAnsi(dashboard.render(WIDTH)[0]!)).toContain(`${WORKER_KEY} merged  ·  pull ITSYBITSY…`);
+        gate.resolve();
+        await waitFor(() => dashboard.notice !== `${WORKER_KEY} merged`, { message: "the pull's notice" });
+        expect(dashboard.notice).toBe(PULLED);
+        expect(dashboard.render(WIDTH)[0]).toContain(`${YELLOW}${PULLED}`);
+        expect(stripAnsi(dashboard.render(WIDTH)[0]!)).not.toContain("pull ITSYBITSY…");
+        expect(dashboard.dialog).toBeNull();
+        // The remotes check, then ib pull's own calls.
+        expect(gitCalls.map(cmd => cmd.slice(1, 4))).toEqual([
+          ["-C", LOCAL, "remote"], ["-C", LOCAL, "show-ref"], ["-C", LOCAL, "remote"], ["-C", LOCAL, "symbolic-ref"],
+          ["-C", LOCAL, "status"], ["-C", LOCAL, "fetch"], ["-C", LOCAL, "merge"],
+        ]);
+        expect(await Bun.file(join(logDir, "watch.log")).text()).toMatch(new RegExp(
+          `\\[peers\\] ib pull ${LOCAL} after ${WORKER_KEY} merged succeeded: ✓ origin: pulled main · Updating 1111111\\.\\.2222222 · Fast-forward\\n$`));
+      } finally {
+        resetWatchLogPath();
+        await rm(logDir, { recursive: true, force: true });
+      }
+      // A --keep merge that landed pulls too. Its notice starts from the
+      // short label, not the peer's long report, so the pull's part shows.
       gitCalls = [];
-      await remoteMerge(dashboard, run, { output: "Merged agent worker-abc into main (1 commit(s), agent kept running)" }, true);
-      await waitFor(() => dashboard.notice?.includes("pulled main") === true, { message: "the --keep pull's notice" });
-      expect(dashboard.notice).toBe(`${WORKER_KEY}: Merged agent worker-abc into main (1 commit(s), agent kept running) · ✓ origin: pulled main · Updating 1111111..2222222 · Fast-forward`);
-      expect(gitCalls.some(cmd => cmd[3] === "fetch")).toBe(true);
+      await remoteMerge(dashboard, run, { output: KEEP_OUTPUT }, true);
+      await waitFor(() => dashboard.notice === PULLED && gitCalls.some(cmd => cmd[3] === "merge"), { message: "the --keep pull's notice" });
+      expect(dashboard.dialog).toBeNull();
+      // A closing merge's teardown warnings open the cleanup-warnings dialog.
+      await remoteMerge(dashboard, run, { output: "Could not remove the agent directory" });
+      await waitFor(() => dashboard.dialog?.type === "cleanup-warnings", { message: "the cleanup-warnings dialog" });
+      // The dialog keeps the report's lines; the one-row header joins them.
+      expect(assertDialog(dashboard.dialog, "cleanup-warnings").text).toBe(
+        `${WORKER_KEY} merged · ✓ origin: pulled main\n  Updating 1111111..2222222\n  Fast-forward\n\nCould not remove the agent directory`);
+      expect(dashboard.notice).toBe(PULLED);
     });
 
     test("a failed pull leaves the merge done and turns its notice into an alert", async () => {
@@ -12169,13 +12193,19 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.notice === notice, { message: "the failed pull's notice" });
       expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${notice}`);
       expect(gitCalls.some(cmd => cmd[3] === "fetch")).toBe(false);
-      // A remote whose fetch fails is the pull's ✗ line.
+      // A remote whose fetch fails is the pull's ✗ line, after a --keep merge too.
       answers.status = [0, ""];
       answers.fetch = [128, "", "fatal: could not read from remote repository"];
-      await remoteMerge(dashboard, run, { output: "" });
+      await remoteMerge(dashboard, run, { output: KEEP_OUTPUT }, true);
       const fetchFailed = `${WORKER_KEY} merged · pull failed: ✗ origin: fatal: could not read from remote repository`;
       await waitFor(() => dashboard.notice === fetchFailed, { message: "the failed fetch's notice" });
       expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${fetchFailed}`);
+      // A pull that throws is a failed pull too.
+      pullSpawnCtx.set(() => { throw new Error("git: not found"); });
+      await remoteMerge(dashboard, run, { output: "" });
+      const threw = `${WORKER_KEY} merged · pull failed: git: not found`;
+      await waitFor(() => dashboard.notice === threw, { message: "the thrown pull's notice" });
+      expect(dashboard.render(WIDTH)[0]).toContain(`${RED}${threw}`);
     });
 
     test("no pull without a merge that landed, a push that worked, or a repo of that name here", async () => {
@@ -12190,7 +12220,7 @@ describe("Unified peer repos in the Agents tree", () => {
       // A --keep merge with nothing to merge.
       await remoteMerge(dashboard, run, { output: "Nothing to merge: branch is current" }, true);
       await waitFor(() => dashboard.notice === `${WORKER_KEY}: Nothing to merge: branch is current`, { message: "the nothing-to-merge notice" });
-      // The peer's push failed: nothing new reached the remotes.
+      // The peer's push failed (on at least one remote).
       await remoteMerge(dashboard, run, { output: "Closed agent: worker-abc", pushFailure: "origin: ! [rejected] main -> main (fetch first)" });
       await waitFor(() => dashboard.notice?.includes("push failed") === true, { message: "the push failure notice" });
       // Another lifecycle command.
@@ -12200,6 +12230,14 @@ describe("Unified peer repos in the Agents tree", () => {
       await waitFor(() => dashboard.notice === `${WORKER_KEY} retired`, { message: "the retire notice" });
       await Bun.sleep(0);
       expect(gitCalls).toEqual([]);
+      // A repo here with no remotes: the remotes check only, and the merge notice stays.
+      answers.remote = [0, ""];
+      await remoteMerge(dashboard, run, { output: "" });
+      await waitFor(() => gitCalls.length === 1, { message: "the remotes check" });
+      await Bun.sleep(0);
+      expect(gitCalls.map(cmd => cmd.slice(1, 4))).toEqual([["-C", LOCAL, "remote"]]);
+      expect(dashboard.notice).toBe(`${WORKER_KEY} merged`);
+      expect(stripAnsi(dashboard.render(WIDTH)[0]!)).not.toContain("pull itsybitsy…");
     });
   });
 

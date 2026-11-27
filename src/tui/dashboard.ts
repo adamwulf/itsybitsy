@@ -113,7 +113,7 @@ import type { LayoutState } from "./layout";
 import { textHeader } from "../peers/peer-outbox";
 import type { SendTarget } from "../peers/send-frame";
 import { InputFieldComponent } from "./input-field";
-import { newAgent, pauseAgent, pullRepo, teamSend as ibTeamSend, type IbCommandResult } from "../ib-commands";
+import { newAgent, pauseAgent, pullRepo, repoHasRemotes, teamSend as ibTeamSend, type IbCommandResult } from "../ib-commands";
 import { sendStagedMessage } from "./message-send";
 import type { StagedTeamSendOptions, TeamSendResult } from "./message-send";
 import { choosePaths, peerAttachmentPrompt, promptAndStageAttachmentsIfNeeded } from "./attachment-prompt";
@@ -2192,9 +2192,11 @@ export class DashboardComponent implements Component {
           const notice = options.keep ? `${label}: ${output}` : `${label} ${verb}${output ? ": " + output : ""}`;
           this.setNotice(notice, "info");
           // A merge that landed: the peer may have pushed it, so pull it into
-          // this machine's clone. A failed push left nothing new to pull.
+          // this machine's clone. After a failed push (above) there is no
+          // pull, even when another of the peer's remotes took the merge.
+          // A closing merge's output is its teardown warnings.
           if (options.action === "merge" && !(options.keep && output.startsWith("Nothing to merge:"))) {
-            await this.pullAfterRemoteMerge(label, repo, notice);
+            await this.pullAfterRemoteMerge(label, repo, options.keep ? "" : output);
           }
         }
       }
@@ -2209,25 +2211,32 @@ export class DashboardComponent implements Component {
   /**
    * After a paired machine merged one of its agents (SPEC §20.4 "Remote
    * lifecycle commands"), run `ib pull` on this machine's repo registered
-   * under the same name, if there is one, so it has what that machine pushed.
-   * The pull shows as the row's pending command, then its status lines join
-   * the merge's `notice`; a failed pull makes that notice an alert.
+   * under the same name, if there is one with a remote, so it has what that
+   * machine pushed. The pull shows as the row's pending command, then the
+   * notice is `<label> merged · <pull report>`, built from the short label
+   * as for a failed push, since the merge's own output would push the
+   * report past the header's cut. A failed pull makes it an alert. A closing
+   * merge's teardown `warnings` then open the cleanup-warnings dialog.
    */
-  private async pullAfterRemoteMerge(label: string, repo: string, notice: string): Promise<void> {
+  private async pullAfterRemoteMerge(label: string, repo: string, warnings: string): Promise<void> {
     const local = this.repos.find(entry => repoRowKey(entry.name) === repoRowKey(repo));
     if (!local) return;
     this.pendingLifecycle.set(label, `pull ${local.name}…`);
     this.invalidate();
     this.tui?.requestRender();
-    let result: IbCommandResult;
+    let result: IbCommandResult | null;
     try {
-      result = await pullRepo(local.path);
+      // No remotes: nothing to pull, as for the merge's own pull (§3.4 step 0).
+      result = await repoHasRemotes(local.path) ? await pullRepo(local.path) : null;
     } catch (err) {
       result = { ok: false, exitCode: 1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
     }
+    if (!result) return;
     const report = [result.stdout, result.stderr].filter(Boolean).join("\n");
     logToWatchLog(`[peers] ib pull ${local.path} after ${label} merged ${result.ok ? "succeeded" : "failed"}: ${report.replace(/\s*\n\s*/g, " · ")}`);
-    this.setNotice(`${notice} · ${result.ok ? "" : "pull failed: "}${report}`, result.ok ? "info" : "error");
+    const notice = `${label} merged · ${result.ok ? "" : "pull failed: "}${report}`;
+    this.setNotice(notice, result.ok ? "info" : "error");
+    if (warnings) this.showDialog({ type: "cleanup-warnings", text: `${notice}\n\n${warnings}`, offset: 0 });
   }
 
   /**

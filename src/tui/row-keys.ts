@@ -4,15 +4,17 @@
  * agents with the same id in two repos, or on two machines, are two rows. A
  * repo header is keyed by the lowercased registry name, and the system coordinator by its own sentinel (agent-tree.ts).
  *
- * - machine: this machine's name (src/machine-name.ts) for a local row, or the
- *   peer's name (the one typed when pairing) for a remote one.
+ * - machine: this machine's clean name (src/machine-name.ts) for a local row,
+ *   or the peer's stored name (the one typed when pairing) for a remote one.
+ *   A remote key is therefore not always the address commands take: that uses
+ *   the peer's clean name (cleanPeerName), as the info panel's Full id does.
  * - repo: the repo's registry name (`Agent.repoRegistryName`, RepoEntry.name),
  *   never its nickname, so a nickname rename re-keys nothing. A remote row
  *   uses the `repoRegistryName` the other install sent (SPEC §20.4).
  * - agent: the agent's id.
  *
- * No local segment holds a `/`: machine and peer names are refused or
- * sanitized when set, repo names and agent ids are validated
+ * No local segment holds a `/`: machine names are cleaned and peer names
+ * refused when set, repo names and agent ids are validated
  * (isValidRepoName, isValidAgentId). A remote repo or id is the other side's
  * text, cleaned like every remote field; whatever it holds, the key still
  * starts with that peer's name, so it can only blur that peer's own rows.

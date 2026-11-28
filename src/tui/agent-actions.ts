@@ -11,7 +11,7 @@ import { dirname, join, basename } from "node:path";
 import { agentWorktreePath } from "../agents";
 import type { Agent, FlatEntry, PendingQuestion, RemoteEntry } from "../agents";
 import type { RepoEntry } from "../registry";
-import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName, repoNameFromFolder } from "../registry";
+import { addRepo, listRepos, renameRepo, removeRepo, repoDisplayName } from "../registry";
 import { canonicalizeSandboxPath } from "../sandbox";
 import { createRepo } from "../create-repo";
 import { checkCloneUrl, cloneDestination, cloneRepo, resolveCloneRoot } from "../clone-repo";
@@ -27,7 +27,7 @@ import {
 import {
   effectiveSpawnCapability, grantAgentPermission, setAgentSpawnCapability, INVALID_PERMISSION_ENTRY, type PermissionChangeResult,
 } from "../agent-permissions";
-import { sanitizeAgentNameInput } from "../validation";
+import { repoNameFromFolder, sanitizeAgentNameInput } from "../validation";
 import type { NewAgentOptions, IbCommandResult } from "../ib-commands";
 import { pushFailedNotice } from "../push-failure";
 import { captureTmuxOutput, killTmuxSession, sendTmuxEscape, expandTabs } from "../tmux-poller";

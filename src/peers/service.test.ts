@@ -316,6 +316,8 @@ describe("PeerService binding", () => {
       return parseTerminalExit(frame!.payload).reason;
     };
     expect(await attach("laptop c")).toBe("Laptop C is disconnected");
+    // The clean form commands use (cleanPeerName) names it too.
+    expect(await attach("laptop-c")).toBe("Laptop C is disconnected");
     expect(await attach(ID_REMOTE.toUpperCase())).toBe("Laptop C is disconnected");
     expect(await attach("nobody")).toBe('no paired peer has the name or id "nobody"');
 
@@ -822,6 +824,32 @@ describe("PeerService at boot", () => {
       await flushMicrotasks();
       await expect(service.runRemoteLifecycle(ID_REMOTE, request)).rejects.toThrow("Only a human can merge an agent on another machine");
       expect(open).not.toHaveBeenCalled();
+    } finally { await service.shutdown(); }
+  });
+
+  test("a CLI lifecycle handoff names the peer by its clean name; a dashboard command by its stored name", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { AmbiguousRemoteRehire } = await import("./remote-lifecycle");
+    const { service, endpoint } = makeService();
+    const request = { action: "rehire" as const, id: "former" };
+    try {
+      // The CLI's errors are agent-visible; the dashboard's notices show the display name.
+      await expect(service.runRemoteLifecycle(ID_REMOTE, request, "handoff")).rejects.toThrow("laptop-c is disconnected");
+      await expect(service.runRemoteLifecycle(ID_REMOTE, { action: "retire", repo: "app", id: "worker" }, "dashboard"))
+        .rejects.toThrow("Laptop C is disconnected");
+      endpoint.connectImpl = async id => {
+        const link = createMemoryLink("00".repeat(32), id);
+        void serveTrustedConnection(link.b, {
+          setTimer: createFakeClock().setTimer, peerName: async () => "paired", log() {},
+          snapshot: () => ({ coordinator: null, repos: [], agents: [], questions: [] }),
+          lifecycle: async () => { throw new AmbiguousRemoteRehire("'former' matches several agents", [{ repo: "app", id: "a-1" }, { repo: "web", id: "w-1" }]); },
+        });
+        return serviceConnection(link.a, PEER_ALPN);
+      };
+      await service.bootIfPaired();
+      await waitFor(() => service.view().links[0]?.connected === true);
+      await expect(service.runRemoteLifecycle(ID_REMOTE, request, "handoff"))
+        .rejects.toThrow("'former' matches several agents; use laptop-c/app/a-1 or laptop-c/web/w-1");
     } finally { await service.shutdown(); }
   });
 

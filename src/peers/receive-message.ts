@@ -6,6 +6,7 @@ import { listRepos } from "../registry";
 import { resolveAgentTarget } from "../resolve-target";
 import { createAttachmentReceiver, fileSummary, type AttachmentReceiver, type ReceivedAttachments } from "./receive-attachments";
 import { waitForIO, type FileBodyOptions, type SendHeader, type SendTarget } from "./send-frame";
+import { cleanPeerName } from "./store";
 
 export function targetLabel(target: SendTarget): string {
   if (target.kind === "system") return "@system";
@@ -13,9 +14,10 @@ export function targetLabel(target: SendTarget): string {
   return target.repo ? target.repo + "/" + target.agent : target.agent;
 }
 
-async function enqueue(header: SendHeader, peerName: string, peerSend: PeerEnqueueOptions, options: FileBodyOptions) {
+/** `machine` is the sending peer's clean name (cleanPeerName): the recipient reads it, and may reply to it. */
+async function enqueue(header: SendHeader, machine: string, peerSend: PeerEnqueueOptions, options: FileBodyOptions) {
   const fromAgent = header.from.kind === "agent" ? header.from.id :
-    header.from.kind === "system" ? peerName + "/@system" : undefined;
+    header.from.kind === "system" ? machine + "/@system" : undefined;
   const opts = { fromAgent, peerSend, noPassthrough: header.files.length > 0 || header.noPassthrough === true };
   const target = header.target;
   if (target.kind === "system") {
@@ -92,7 +94,7 @@ export function createMessageReceiver(log: (line: string) => void, notice: (line
         let staged: ReceivedAttachments | undefined;
         let bodyError: unknown;
         options.admitted?.(files.length > 0);
-        const result = await enqueue(header, name, {
+        const result = await enqueue(header, cleanPeerName({ id: peerId, name }), {
           log,
           signal: options.signal, setTimer: options.setTimer,
           senderKind: header.from.kind === "user" ? undefined : header.from.kind,

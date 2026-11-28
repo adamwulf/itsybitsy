@@ -75,6 +75,14 @@ test("concurrent and subsequent repeats acknowledge once, with sender attributio
   expect(lines).toEqual(Array(3).fill("desk sent a message to worker"));
 });
 
+test("a peer paired under a display name labels its system coordinator by the clean name", async () => {
+  // The notice keeps the display name; the label the recipient reads is clean.
+  expect(await exchange(header({ from: { kind: "system" }, message: "hi" }), async () => "Mac Studio")).toMatchObject({ ok: true });
+  const queued = await readOutbox(join(cli.home, ".itsybitsy", "agents", "worker"));
+  expect(queued.map(item => item.fromAgent)).toEqual(["mac-studio/@system"]);
+  expect(lines).toEqual(["Mac Studio sent a message to worker"]);
+});
+
 test("the ordinary drainer applies passthrough and peer labels to the queued text", async () => {
   const calls: string[][] = [];
   setSendSpawnRunner(cmd => { calls.push(cmd); return makeSpawnResult(); });

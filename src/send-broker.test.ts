@@ -1069,6 +1069,27 @@ describe("send broker", () => {
       } finally { clearInterval(timer); }
     });
 
+    test("a worktree's send to this machine's display-form address stays local", async () => {
+      // The saved name is a display name; readMachineName returns "mac-studio".
+      // Each spelling must name this machine, never be deferred as a remote send.
+      setSandboxedProcessOverride(() => true);
+      await Bun.write(join(home, ".itsybitsy", "machine-name"), "Mac Studio");
+      const { deps } = server();
+      const cwd = await linkWorktree();
+      const targets = [`Mac Studio/iris/${TARGET_ID}`, `mac-studio/iris/${TARGET_ID}`, `MAC STUDIO/${TARGET_ID}`];
+      for (const target of targets) {
+        // A distinct text each time: the outbox drops an identical repeat.
+        const answer = await routeCliSend(command({ target, readMessage: async () => `${MESSAGE} (${target})` }), {
+          cwd, watchdogLive: async () => true,
+          resolveTarget: async () => { throw new Error("this machine's address was resolved as a remote one"); },
+          sleep: async () => { await processSpawnRequests(SENDER_ID, senderRepo, deps); },
+        });
+        if (!("result" in answer)) throw new Error("expected the watchdog route");
+        expect(answer.result).toMatchObject({ ok: true });
+      }
+      expect((await outbox(TARGET_ID)).map(record => record.message)).toEqual(targets.map(target => `${MESSAGE} (${target})`));
+    });
+
     test.each(["classification", "liveness"])("SIGINT wins when a pending %s check subsequently fails", async check => {
       const cwd = await linkWorktree();
       const control = new AbortController();

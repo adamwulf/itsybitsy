@@ -1,6 +1,6 @@
 import { verifyAttachmentSpellings } from "./attachment-paths";
 import { createHash } from "node:crypto";
-import { sanitizeMachineName } from "../machine-name";
+import { wireSafeMachineName } from "../machine-name";
 import { isStoredRepoName } from "../registry";
 import { isRepoId } from "../repo-id";
 import { isValidPeerSenderIdSegment } from "../validation";
@@ -68,7 +68,9 @@ function validFrom(value: unknown): value is SendHeader["from"] {
   if (value.kind === "user" || value.kind === "system") return onlyKeys(value, "kind");
   if (value.kind !== "agent" || !nonempty(value.id) || !onlyKeys(value, "kind", "id")) return false;
   const [machine, repo, agent, extra] = value.id.split("/", 4);
-  if (extra !== undefined || !nonempty(machine) || sanitizeMachineName(machine) !== machine ||
+  // Safety rules only, not the clean form: a peer on an older ib sends its
+  // display name ("MacBook Pro/repo/agent"), and that must still be accepted.
+  if (extra !== undefined || !nonempty(machine) || wireSafeMachineName(machine) !== machine ||
       !nonempty(repo) || UNSAFE_LINE_CHARACTERS.test(repo) || repo.trim() !== repo ||
       !nonempty(agent)) return false;
   if (!(repo.startsWith("~") ? isRepoId(repo.slice(1)) : isStoredRepoName(repo))) return false;

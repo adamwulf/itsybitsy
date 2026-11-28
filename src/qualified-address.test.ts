@@ -323,6 +323,30 @@ describe("qualified agent addresses", () => {
     } finally { clearInterval(timer); }
   });
 
+  test("qualified lifecycle output names a peer paired under a display name by its clean name", async () => {
+    await peer();
+    const path = join(cli.home, ".itsybitsy", "peer", "remote-agents.json");
+    const cache = await Bun.file(path).json();
+    cache.peers[0].name = "Laptop B";
+    await Bun.write(path, JSON.stringify(cache));
+    await Bun.write(join(cli.home, ".itsybitsy", "peer", "peers.json"), JSON.stringify([{ name: "Laptop B", id: "bb".repeat(32) }]));
+    const timer = setInterval(() => {
+      void pollPeerOutbox(async () => { throw new Error("Unexpected send"); }, () => {}, undefined, undefined, async () => "");
+    }, 25);
+    try {
+      for (const [action, address, stdout] of [
+        ["retire", "Laptop B/remote-id", "laptop-b retired remote-id"],
+        ["retire", "laptop-b/remote/remote-id", "laptop-b retired remote-id"],
+        ["rehire", "Laptop B/former", "laptop-b rehired former"],
+        ["rehire", "laptop-b/former", "laptop-b rehired former"],
+      ] as const) {
+        const result = await cli.run([action, address, "--force"], { ancestry: human });
+        expect(result.stderr).toBe("");
+        expect(result.stdout.trim()).toBe(stdout);
+      }
+    } finally { clearInterval(timer); }
+  });
+
   test.each([false, true])("Ctrl-C withdraws a pending lifecycle request or names the machine to check (claimed=%s)", async claimed => {
     await peer();
     const interrupt = new AbortController();
@@ -835,9 +859,9 @@ describe("qualified agent addresses", () => {
   }, 16_000);
 
   test("leading @ belongs to repo addressing", async () => {
-    const { sanitizeMachineName } = await import("./machine-name");
+    const { wireSafeMachineName } = await import("./machine-name");
     const { peerNameProblem } = await import("./peers/store");
-    expect(sanitizeMachineName(" @ @App ")).toBe("App");
+    expect(wireSafeMachineName(" @ @App ")).toBe("App");
     expect(peerNameProblem("@App", "id", [], "here")).toContain("cannot start with @");
     await peer();
     const path = join(cli.home, ".itsybitsy", "peer", "remote-agents.json");
@@ -858,14 +882,34 @@ describe("qualified agent addresses", () => {
       "'foo' exists on laptop-a; use laptop-a/App/foo or laptop-a/Web/foo");
   });
 
-  test("ambiguity suggestions shell-quote spaces and apostrophes", async () => {
+  test("ambiguity suggestions use this machine's clean name, so they need no quoting", async () => {
     await peer();
     const file = join(cli.home, ".itsybitsy", "machine-name");
-    for (const [machine, quoted] of [["Studio Mac", "'Studio Mac/foo'"], ["Adam's Mac", "'Adam'\\''s Mac/foo'"]] as const) {
+    for (const [machine, clean] of [["Studio Mac", "studio-mac/foo"], ["Adam's Mac", "adams-mac/foo"]] as const) {
       await Bun.write(file, machine);
       const [, suggestions] = (await retire("foo")).stderr.trim().split("; use ");
-      expect(suggestions?.split(" or ").sort()).toEqual([quoted, "laptop-b/foo"]);
+      expect(suggestions?.split(" or ").sort()).toEqual([clean, "laptop-b/foo"].sort());
     }
+  });
+
+  test("a typed machine segment matches in clean form, for this machine and for a peer with a display name", async () => {
+    await Bun.write(join(cli.home, ".itsybitsy", "machine-name"), "Laptop A");
+    await peer();
+    const path = join(cli.home, ".itsybitsy", "peer", "remote-agents.json");
+    const cache = await Bun.file(path).json();
+    cache.peers[0].name = "Laptop B";
+    await Bun.write(path, JSON.stringify(cache));
+    for (const address of ["laptop-a/foo", "Laptop A/foo", "LAPTOP A/App/foo"]) {
+      expect((await retire(address)).actions[0]?.args[0]).toMatchObject({ id: "foo", repoPath: app });
+    }
+    const remote = { peer: "peer-id", target: { kind: "agent" as const, repo: "remote", agent: "remote-id" } };
+    for (const address of ["laptop-b/remote-id", "Laptop B/remote/remote-id", "laptop b/foo"]) {
+      expect((await resolveSendTarget(address, [{ path: app, name: "App" }], cli.cwd)).remote).toEqual(remote);
+    }
+    // Suggestions name both machines in clean form.
+    expect((await retire("foo")).stderr.trim()).toBe("'foo' exists on laptop-a and laptop-b; use laptop-a/foo or laptop-b/foo");
+    // A segment with no clean form names no machine; it is not read as a bare name.
+    expect((await cli.run(["retire", "!!!/foo"], { ancestry: human })).stderr.trim()).toBe("Unknown machine: !!!");
   });
 
   test("qualified local names ignore machine and registry name case and preserve exact id and nickname case", async () => {

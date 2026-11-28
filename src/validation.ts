@@ -112,6 +112,19 @@ export function isValidRepoName(value: string): boolean {
   return value.length >= 1 && value.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
+/**
+ * The registry name the `ib watch` folder browser gives a folder: lowercased,
+ * each run of whitespace turned into "-", then every character outside
+ * [a-z0-9_-] dropped. Returns "" when nothing is left. Both the [ Add ] and
+ * the [ New Repo ] paths use it, so they name a folder the same way, and
+ * cleanMachineName (src/machine-name.ts) applies the same rules to machine
+ * names. It lives here, in a module with no imports, so machine-name.ts can
+ * use it without importing the registry.
+ */
+export function repoNameFromFolder(folderName: string): string {
+  return folderName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
+}
+
 /** Validate a Claude session ID (UUID format): hex digits and hyphens only. */
 export function isValidSessionId(value: string): boolean {
   return /^[a-fA-F0-9-]+$/.test(value);

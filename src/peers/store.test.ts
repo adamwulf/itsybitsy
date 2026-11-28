@@ -6,7 +6,9 @@ import { resetUserHome, setUserHome } from "../home";
 import { peerDir, peersFile } from "../runtime-names";
 import {
   addPeer,
+  cleanPeerName,
   normalizePeerId,
+  peerNameProblem,
   PeerStoreError,
   readPeers,
   removePeer,
@@ -57,6 +59,36 @@ describe("sanitizePeerName", () => {
   test("an empty name falls back to the first 10 hex characters of the id", () => {
     expect(sanitizePeerName("", ID_B)).toBe("0123456789");
     expect(sanitizePeerName(" \u0000\t ", ID_B)).toBe("0123456789");
+  });
+});
+
+describe("cleanPeerName", () => {
+  test("is the stored name in clean form, or the short id when nothing is left", () => {
+    expect(cleanPeerName({ id: ID_A, name: "MacBook Pro" })).toBe("macbook-pro");
+    expect(cleanPeerName({ id: ID_A, name: "Adam's Laptop" })).toBe("adams-laptop");
+    expect(cleanPeerName({ id: ID_A, name: "laptop-b" })).toBe("laptop-b");
+    expect(cleanPeerName({ id: ID_B, name: "山田" })).toBe("0123456789");
+  });
+});
+
+describe("peerNameProblem", () => {
+  const peers = [{ id: ID_A, name: "mac-book", pairedAt: "t1" }, { id: ID_B, name: "Studio", pairedAt: "t2" }];
+
+  test("refuses a name whose clean form is this machine's clean name", () => {
+    expect(peerNameProblem("MacBook Pro", ID_C, [], "macbook-pro")).toBe(`"macbook-pro" is this machine's name (both are "macbook-pro" in commands).`);
+    expect(peerNameProblem(" MACBOOK-PRO ", ID_C, [], "macbook-pro")).toBe(`"macbook-pro" is this machine's name.`);
+  });
+
+  test("refuses a name whose clean form another peer's name has", () => {
+    expect(peerNameProblem("Mac Book", ID_C, peers, "desk")).toBe(`Another peer is already named "mac-book" (both are "mac-book" in commands).`);
+    expect(peerNameProblem("studio", ID_C, peers, "desk")).toBe(`Another peer is already named "Studio".`);
+  });
+
+  test("accepts the peer's own name and a distinct one, and a name with no clean form", () => {
+    expect(peerNameProblem("Mac Book", ID_A, peers, "desk")).toBeNull();
+    expect(peerNameProblem("Living Room", ID_C, peers, "desk")).toBeNull();
+    // Its clean form is its short id, which no other machine has.
+    expect(peerNameProblem("山田", ID_C, peers, "desk")).toBeNull();
   });
 });
 

@@ -55,7 +55,7 @@ import * as runtimeNames from "./runtime-names";
  */
 
 import { waitForIO, type FileBodyOptions, encodeSendHeader, parseSendHeader, type SendHeader, type SendTarget } from "./peers/send-frame";
-import { readMachineName } from "./machine-name";
+import { cleanMachineName, readMachineName } from "./machine-name";
 import { mkdir, open, rm, stat, rename } from "node:fs/promises";
 import { readTransferLimits } from "./config";
 import { checkIncomingFiles, IDLE_TIMEOUT_MS } from "./peers/transfer-limits";
@@ -428,7 +428,10 @@ export async function routeCliSend(command: SendCommand, deps: SpawnClientDeps &
       : { kind: "agent", repo: "", agent: "" };
     if (machine) {
       const localName = await readMachineName().catch(() => "");
-      localMachine = machine.toLowerCase() === localName.toLowerCase();
+      // In clean form, as resolve-target compares it: `"MacBook Pro/repo/agent"`
+      // names this machine when its clean name is `macbook-pro`. An unreadable
+      // name ("") matches nothing, not even a segment that cleans to "".
+      localMachine = localName !== "" && cleanMachineName(machine) === localName;
       deferred = !localMachine && (!!worktree || isSandboxedProcess());
       if (!localMachine) {
         message = await (command.readRawMessage ?? command.readMessage)();

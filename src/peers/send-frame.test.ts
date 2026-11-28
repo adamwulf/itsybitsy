@@ -381,6 +381,15 @@ test("agent sender segments use the machine, registry and agent naming grammars"
   }
 });
 
+test("a sender on an older ib, whose machine segment is its display name, is still accepted", async () => {
+  // A current ib sends the clean name (macbook-pro); an older one sends the
+  // display name. The wire check keeps only the safety rules, so both pass.
+  for (const id of ["MacBook Pro/allume-ios/minor-fixes", "macbook-pro/allume-ios/minor-fixes", "Adam's MacBook Pro/repo/agent"]) {
+    const h = { ...header, from: { kind: "agent" as const, id } };
+    expect((await decodeSendHeader(new MemoryStream(encodeSendHeader(h)))).from).toEqual({ kind: "agent", id });
+  }
+});
+
 for (const separator of ["\u2028", "\u2029"]) {
   test("rejects U+" + separator.codePointAt(0)!.toString(16) + " before a sender spelling reaches the mapping block", async () => {
     const bytes = encodeSendHeader({ ...header, files: [{ ...file, spellings: ["./image.png" + separator + "- extra line"] }] });

@@ -7,7 +7,8 @@
 import { join, resolve } from "path";
 import { mkdir, stat } from "fs/promises";
 import { SpawnContext } from "./types";
-import { addRepo, checkNewRepoEntry, readRegistryStrict, NEW_REPO_NAME_HINT, repoNameFromFolder } from "./registry";
+import { addRepo, checkNewRepoEntry, readRegistryStrict, NEW_REPO_NAME_HINT } from "./registry";
+import { repoNameFromFolder } from "./validation";
 
 /**
  * Runs the two git commands. Production uses the real `Bun.spawn`, so git

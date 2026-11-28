@@ -150,6 +150,13 @@ describe("CLI --help end-to-end", () => {
     expect(exitCode).toBe(0);
   });
 
+  test("repos --help alias resolves to list-repos help", async () => {
+    const { stdout, exitCode } = await runCli(["repos", "--help"]);
+    expect(stdout).toContain("Usage: ib list-repos [--json | --md]");
+    expect(stdout).toContain("Alias: repos");
+    expect(exitCode).toBe(0);
+  });
+
   test("state --help shows --cleanup and --dry-run", async () => {
     const { stdout, exitCode } = await runCli(["state", "--help"]);
     expect(stdout).toContain("Usage: ib state");

@@ -39,6 +39,7 @@ Instead of copying the binary, you can add the project directory to your `PATH`.
 ```sh
 cd ~/code/myproject
 ib add                      # register this repo
+ib list-repos               # registered repos with their notes (alias: ib repos; --json, --md)
 ib hooks install            # install the safety hooks
 ib hooks intercept-install  # install the Task interception hook
 
@@ -245,7 +246,7 @@ Press `?` in the dashboard for this list.
 
 | Group | Commands |
 |---|---|
-| Repos | `add`, `remove`, `list`, `push`, `pull`, `notes show/set/clear` |
+| Repos | `add`, `remove`, `list`, `list-repos` (`repos`), `push`, `pull`, `notes show/set/clear` |
 | Spawning | `new-agent` (`new`), `list-types`, `show-type`, `init-types`, `list-models` |
 | Monitoring | `watch`, `agents` (`tree`), `look`, `status`, `diff`, `info`, `state`, `questions` |
 | Messaging | `send`, `ask`, `acknowledge`, `log` |

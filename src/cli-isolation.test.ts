@@ -902,7 +902,7 @@ describe("CLI routing cannot reach a live agent", () => {
     const ROUTES: string[][] = [
       ["add", "$ROOT"], ["remove", "caller-repo"], ["push", "caller-repo"], ["pull", "caller-repo"],
       ["notes", "show", "caller-repo"], ["notes", "set", "caller-repo", "x"], ["notes", "clear", "caller-repo"],
-      ["list"], ["ls"], ["agents"], ["tree"], ["questions"], ["q"],
+      ["list"], ["ls"], ["list-repos"], ["repos"], ["agents"], ["tree"], ["questions"], ["q"],
       ["state"], ["state", "--cleanup"], ["bounce"],
       ["generate-summary", "$AGENT"],
       ["sandbox-log-stream", "--predicate", "x"],

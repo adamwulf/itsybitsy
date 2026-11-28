@@ -178,16 +178,6 @@ export async function saveRegistry(data: RegistryData): Promise<void> {
   }
 }
 
-/**
- * The registry name the `ib watch` folder browser gives a folder: lowercased,
- * each run of whitespace turned into "-", then every character outside
- * [a-z0-9_-] dropped. Returns "" when nothing is left. Both the [ Add ] and
- * the [ New Repo ] paths use it, so they name a folder the same way.
- */
-export function repoNameFromFolder(folderName: string): string {
-  return folderName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9_-]/g, "");
-}
-
 /** The way forward from a taken name for `ib add` and the folder browser's [ Add ]: name the repo yourself. */
 export const ADD_NAME_HINT = "use ib add <path> <name>";
 /** The way forward from a taken name for [ New Repo ], which names the repo after the folder it creates. */

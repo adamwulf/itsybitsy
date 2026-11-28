@@ -3,7 +3,8 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { resetUserHome, setUserHome } from "./home";
-import { FALLBACK_MACHINE_NAME, initializeMachineName, readMachineName, sanitizeMachineName, type MachineNameDeps } from "./machine-name";
+import { cleanMachineName, FALLBACK_MACHINE_NAME, initializeMachineName, readMachineName, wireSafeMachineName, type MachineNameDeps } from "./machine-name";
+import { repoNameFromFolder } from "./validation";
 import { runIsolatedCli } from "./test-cli-runner";
 import { machineNameFile } from "./runtime-names";
 
@@ -33,52 +34,84 @@ function fakeDeps(computerName: { exitCode: number; stdout: string } | Error, ho
   return { deps, calls };
 }
 
-describe("sanitizeMachineName", () => {
+describe("cleanMachineName", () => {
+  test("applies the repo-name rules after trimming, then caps at 32", () => {
+    expect(cleanMachineName("MacBook Pro")).toBe("macbook-pro");
+    expect(cleanMachineName("  Adam's MacBook Pro\n")).toBe("adams-macbook-pro");
+    expect(cleanMachineName("Studio \t Mac")).toBe("studio-mac");
+    expect(cleanMachineName("Mac‮Book​\x07Air")).toBe("macbookair");
+    expect(cleanMachineName("work/home")).toBe("workhome");
+    expect(cleanMachineName("@App")).toBe("app");
+    expect(cleanMachineName("my_box-2")).toBe("my_box-2");
+    expect(cleanMachineName("x".repeat(40))).toBe("x".repeat(32));
+    expect(cleanMachineName("..")).toBe("");
+    expect(cleanMachineName("山田")).toBe("");
+    expect(cleanMachineName("​ \n")).toBe("");
+  });
+
+  test("uses repoNameFromFolder's rules, so a repo and a machine of the same name clean alike", () => {
+    for (const name of ["MacBook Pro", "Adam's Mac", "a/b c", "Ünïcode Box"]) {
+      expect(cleanMachineName(name)).toBe(repoNameFromFolder(name));
+    }
+  });
+});
+
+describe("wireSafeMachineName", () => {
   test("trims, strips control and format characters, replaces / and caps at 32", () => {
-    expect(sanitizeMachineName("  Adam's MacBook Pro\n")).toBe("Adam's MacBook Pro");
-    expect(sanitizeMachineName("Mac‮Book​\x07Air")).toBe("MacBookAir");
-    expect(sanitizeMachineName("work/home")).toBe("work-home");
-    expect(sanitizeMachineName("..")).toBe("");
-    expect(sanitizeMachineName(".")).toBe("");
-    expect(sanitizeMachineName("x".repeat(40))).toBe("x".repeat(32));
+    expect(wireSafeMachineName("  Adam's MacBook Pro\n")).toBe("Adam's MacBook Pro");
+    expect(wireSafeMachineName("Mac‮Book​\x07Air")).toBe("MacBookAir");
+    expect(wireSafeMachineName("work/home")).toBe("work-home");
+    expect(wireSafeMachineName("..")).toBe("");
+    expect(wireSafeMachineName(".")).toBe("");
+    expect(wireSafeMachineName("x".repeat(40))).toBe("x".repeat(32));
     // The cap counts characters, not UTF-16 units, and leaves no trailing space.
-    expect(sanitizeMachineName(`${"🍎".repeat(31)} b`)).toBe("🍎".repeat(31));
-    expect(sanitizeMachineName("​ \n")).toBe("");
+    expect(wireSafeMachineName(`${"🍎".repeat(31)} b`)).toBe("🍎".repeat(31));
+    expect(wireSafeMachineName("​ \n")).toBe("");
   });
 });
 
 describe("initializeMachineName", () => {
-  test("is created once from the computer name, sanitized, and saved", async () => {
-    const { deps, calls } = fakeDeps({ exitCode: 0, stdout: " Studio/Mac​\n" }, "ignored.local");
-    expect(await initializeMachineName(deps)).toBe("Studio-Mac");
+  test("is created once from the computer name, cleaned, and saved", async () => {
+    const { deps, calls } = fakeDeps({ exitCode: 0, stdout: " MacBook Pro​\n" }, "ignored.local");
+    expect(await initializeMachineName(deps)).toBe("macbook-pro");
     expect(calls).toEqual([["scutil", "--get", "ComputerName"]]);
-    expect(await readFile(machineNameFile(), "utf-8")).toBe("Studio-Mac\n");
+    expect(await readFile(machineNameFile(), "utf-8")).toBe("macbook-pro\n");
   });
 
   test("the file wins: a later start does not run scutil, and a changed hostname changes nothing", async () => {
     await initializeMachineName(fakeDeps({ exitCode: 0, stdout: "First Name\n" }, "first.local").deps);
     const later = fakeDeps({ exitCode: 0, stdout: "Renamed Mac\n" }, "renamed.local");
-    expect(await initializeMachineName(later.deps)).toBe("First Name");
+    expect(await initializeMachineName(later.deps)).toBe("first-name");
     expect(later.calls).toEqual([]);
   });
 
-  test("a hand-edited file is read, sanitized", async () => {
+  test("a saved display name reads as its clean form, and the file is not rewritten", async () => {
     await mkdir(dirname(machineNameFile()), { recursive: true });
-    await writeFile(machineNameFile(), "  my/box \n");
+    await writeFile(machineNameFile(), "MacBook Pro\n");
     const { deps, calls } = fakeDeps({ exitCode: 0, stdout: "Other\n" }, "other.local");
-    expect(await initializeMachineName(deps)).toBe("my-box");
+    expect(await initializeMachineName(deps)).toBe("macbook-pro");
+    expect(await readMachineName()).toBe("macbook-pro");
     expect(calls).toEqual([]);
+    expect(await readFile(machineNameFile(), "utf-8")).toBe("MacBook Pro\n");
   });
 
   test("falls back to the hostname without .local when scutil fails or exits non-zero", async () => {
     expect(await initializeMachineName(fakeDeps({ exitCode: 1, stdout: "" }, "studio.local").deps)).toBe("studio");
     await rm(machineNameFile());
-    expect(await initializeMachineName(fakeDeps(new Error("ENOENT: scutil"), "laptop.local").deps)).toBe("laptop");
-    expect(await readFile(machineNameFile(), "utf-8")).toBe("laptop\n");
+    expect(await initializeMachineName(fakeDeps(new Error("ENOENT: scutil"), "Laptop Two.local").deps)).toBe("laptop-two");
+    expect(await readFile(machineNameFile(), "utf-8")).toBe("laptop-two\n");
+  });
+
+  test("a computer name that cleans to nothing falls through to the hostname", async () => {
+    const { deps, calls } = fakeDeps({ exitCode: 0, stdout: "山田\n" }, "Studio-Mac.local");
+    expect(await initializeMachineName(deps)).toBe("studio-mac");
+    expect(calls).toEqual([["scutil", "--get", "ComputerName"]]);
   });
 
   test("an empty computer name and hostname give the fallback name", async () => {
     expect(await initializeMachineName(fakeDeps({ exitCode: 0, stdout: "\n" }, ".local").deps)).toBe(FALLBACK_MACHINE_NAME);
+    await rm(machineNameFile());
+    expect(await initializeMachineName(fakeDeps({ exitCode: 0, stdout: "!!!\n" }, "山田.local").deps)).toBe(FALLBACK_MACHINE_NAME);
   });
 
   test("ib watch initializes a fresh home before exiting for an empty registry", async () => {

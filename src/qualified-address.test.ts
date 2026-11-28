@@ -835,9 +835,9 @@ describe("qualified agent addresses", () => {
   }, 16_000);
 
   test("leading @ belongs to repo addressing", async () => {
-    const { sanitizeMachineName } = await import("./machine-name");
+    const { wireSafeMachineName } = await import("./machine-name");
     const { peerNameProblem } = await import("./peers/store");
-    expect(sanitizeMachineName(" @ @App ")).toBe("App");
+    expect(wireSafeMachineName(" @ @App ")).toBe("App");
     expect(peerNameProblem("@App", "id", [], "here")).toContain("cannot start with @");
     await peer();
     const path = join(cli.home, ".itsybitsy", "peer", "remote-agents.json");
@@ -858,13 +858,13 @@ describe("qualified agent addresses", () => {
       "'foo' exists on laptop-a; use laptop-a/App/foo or laptop-a/Web/foo");
   });
 
-  test("ambiguity suggestions shell-quote spaces and apostrophes", async () => {
+  test("ambiguity suggestions use this machine's clean name, so they need no quoting", async () => {
     await peer();
     const file = join(cli.home, ".itsybitsy", "machine-name");
-    for (const [machine, quoted] of [["Studio Mac", "'Studio Mac/foo'"], ["Adam's Mac", "'Adam'\\''s Mac/foo'"]] as const) {
+    for (const [machine, clean] of [["Studio Mac", "studio-mac/foo"], ["Adam's Mac", "adams-mac/foo"]] as const) {
       await Bun.write(file, machine);
       const [, suggestions] = (await retire("foo")).stderr.trim().split("; use ");
-      expect(suggestions?.split(" or ").sort()).toEqual([quoted, "laptop-b/foo"]);
+      expect(suggestions?.split(" or ").sort()).toEqual([clean, "laptop-b/foo"].sort());
     }
   });
 

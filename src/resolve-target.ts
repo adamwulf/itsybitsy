@@ -3,8 +3,9 @@ import { canonicalRepoPath, sameRepoPath } from "./repo-identity";
 import { shellQuote } from "./validation";
 import { basename, resolve } from "node:path";
 import * as runtimeNames from "./runtime-names";
-import { readMachineName } from "./machine-name";
+import { cleanMachineName, readMachineName } from "./machine-name";
 import { readConnectedPeers } from "./peers/remote-agents";
+import { cleanPeerName } from "./peers/store";
 import type { SendTarget } from "./peers/send-frame";
 import { hasLivePeerWatcher } from "./peers/endpoint-lock";
 import type { Agent, AgentReadError } from "./agents";
@@ -222,11 +223,15 @@ export async function resolveAgentTarget(
   const parts = target.split("/");
   if (parts.length > 3 || parts.some((part) => !part)) return failure(`Agent not found: ${target}`);
   const name = parts.at(-1)!;
-  const machine = parts.length > 1 ? parts[0]!.toLowerCase() : undefined;
+  // The typed machine segment in clean form, compared with this machine's
+  // clean name and each peer's (cleanPeerName), so `macbook-pro/repo/agent`
+  // and `"MacBook Pro/repo/agent"` both resolve. One that cleans to "" matches
+  // no machine; it is still a given machine, so compare with undefined below.
+  const machine = parts.length > 1 ? cleanMachineName(parts[0]!) : undefined;
   const repoName = parts.length === 3 ? parts[1]!.toLowerCase() : undefined;
 
   // A bare name first searches the caller's repo, including its worktrees.
-  const ownRepo = machine || (inboundPeer && purpose === "rehire") ? undefined : findOwnRepo(cwd, repos);
+  const ownRepo = machine !== undefined || (inboundPeer && purpose === "rehire") ? undefined : findOwnRepo(cwd, repos);
   let searched = repos;
   let ownErrors: AgentReadError[] = [];
   if (ownRepo) {
@@ -238,11 +243,11 @@ export async function resolveAgentTarget(
     ownErrors = errors;
     searched = repos.filter((r) => r !== ownRepo);
   }
-  const [localMachine, connected] = await Promise.all([machine ? readAddressMachineName() : "", inboundPeer ? [] : readConnectedPeers(requirePeerVisibility).catch(() => null)]);
+  const [localMachine, connected] = await Promise.all([machine !== undefined ? readAddressMachineName() : "", inboundPeer ? [] : readConnectedPeers(requirePeerVisibility).catch(() => null)]);
   if (typeof localMachine !== "string") return localMachine;
   if (connected === null) return failure("Cannot resolve the target with the peer cache hidden", [runtimeNames.peerDir()]);
-  const includesLocal = !machine || localMachine.toLowerCase() === machine;
-  const peers = connected.filter((p) => !p.name.startsWith("@") && (!machine || p.name.toLowerCase() === machine));
+  const includesLocal = machine === undefined || localMachine === machine;
+  const peers = connected.filter((p) => !p.name.startsWith("@") && (machine === undefined || cleanPeerName(p) === machine));
   if (!includesLocal && !peers.length) {
     if (purpose === "send" && !await hasLivePeerWatcher()) return failure("remote sends need ib watch running on this machine");
     return failure(`Unknown machine: ${parts[0]}`);
@@ -278,7 +283,7 @@ export async function resolveAgentTarget(
     for (const repo of matchingRepos) {
       const inRepo = peer.agents.filter(a => a.repo === repo);
       const match = inRepo.find(a => a.id === name) ?? inRepo.find(a => a.nickname === name)!;
-      matches.push({ machine: peer.name, repo, remote: { peer: peer.id, target: { kind: "agent", repo, agent: match.id } } });
+      matches.push({ machine: cleanPeerName(peer), repo, remote: { peer: peer.id, target: { kind: "agent", repo, agent: match.id } } });
     }
   }
   const incomplete = incompleteNickname(name, matches.flatMap((m) => m.agent ? [m.agent] : []), unreadable);
@@ -292,7 +297,7 @@ export async function resolveAgentTarget(
       return { ...failure(`'${name}' matches several agents`),
         candidates: matches.map(m => ({ repo: m.repo, id: m.agent!.id })) };
     }
-    if (!machine && matches.some((m) => m.agent)) {
+    if (machine === undefined && matches.some((m) => m.agent)) {
       const localName = await readAddressMachineName();
       if (typeof localName === "string") {
         for (const m of matches) if (m.agent) m.machine = localName;
@@ -315,7 +320,7 @@ export async function resolveAgentTarget(
   }
   const agent = matches[0]!.agent;
   if (agent) return local(agent);
-  if (purpose === "send" || (machine && purpose === "lifecycle")) return { agent: null, isSystemCoordinator: false, remote: matches[0]!.remote };
+  if (purpose === "send" || (machine !== undefined && purpose === "lifecycle")) return { agent: null, isSystemCoordinator: false, remote: matches[0]!.remote };
   return failure("remote agents are read-only");
 }
 

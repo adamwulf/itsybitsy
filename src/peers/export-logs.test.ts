@@ -79,17 +79,17 @@ describe("exportLogs", () => {
     expect(exportDir().startsWith(join(root, "log-exports"))).toBe(true);
     expect(out.slice(1)).toEqual([
       "desk (this machine): 1 file, 0.0 MB",
-      "adam's laptop: 2 files, 0.0 MB",
-      'old laptop: not fetched: the peer replied: unknown op "watch-log"',
+      "adams-laptop: 2 files, 0.0 MB",
+      'old-laptop: not fetched: the peer replied: unknown op "watch-log"',
     ]);
     expect(err).toEqual([]);
-    expect(await readdir(exportDir())).toEqual(expect.arrayContaining(["adam-s-laptop", "desk", EXPORT_FILE]));
+    expect(await readdir(exportDir())).toEqual(expect.arrayContaining(["adams-laptop", "desk", EXPORT_FILE]));
     expect(await readdir(exportDir())).toHaveLength(3);
     expect(await read("desk", "watch.log")).toBe("local\n");
-    expect(await read("adam-s-laptop", "watch.log")).toBe("remote\n");
-    expect(await read("adam-s-laptop", "watch.log.1")).toBe("older\n");
-    expect((await stat(join(exportDir(), "adam-s-laptop"))).mode & 0o777).toBe(0o700);
-    expect((await stat(join(exportDir(), "adam-s-laptop", "watch.log"))).mode & 0o777).toBe(0o600);
+    expect(await read("adams-laptop", "watch.log")).toBe("remote\n");
+    expect(await read("adams-laptop", "watch.log.1")).toBe("older\n");
+    expect((await stat(join(exportDir(), "adams-laptop"))).mode & 0o777).toBe(0o700);
+    expect((await stat(join(exportDir(), "adams-laptop", "watch.log"))).mode & 0o777).toBe(0o600);
     expect(await read(EXPORT_FILE)).toBe([
       `ib export-logs, started ${new Date(T).toISOString()} (this machine's clock)`,
       "",
@@ -100,7 +100,7 @@ describe("exportLogs", () => {
       "directory: desk/",
       "  watch.log    6 bytes",
       "",
-      "machine: adam's laptop (paired peer)",
+      "machine: adams-laptop (paired peer)",
       `id: ${ID_LAPTOP}`,
       "machine name it reports: adams-laptop",
       "ib version: 0.1.3",
@@ -109,11 +109,11 @@ describe("exportLogs", () => {
       `reply header received at: ${new Date(T + 200).toISOString()} (this machine's clock)`,
       `reply complete at: ${new Date(T + 300).toISOString()} (this machine's clock)`,
       "peer clock − local clock: +0.300 s (± 0.100 s)",
-      "directory: adam-s-laptop/",
+      "directory: adams-laptop/",
       "  watch.log    7 bytes",
       "  watch.log.1  6 bytes",
       "",
-      "machine: old laptop (paired peer)",
+      "machine: old-laptop (paired peer)",
       `id: ${ID_OLD}`,
       'not fetched: the peer replied: unknown op "watch-log"',
       "",
@@ -131,19 +131,19 @@ describe("exportLogs", () => {
       },
     });
     const exporting = runExportLogs([], deps);
-    await waitFor(() => out.includes("adam's laptop: 2 files, 0.0 MB"), { message: "the laptop's copy" });
+    await waitFor(() => out.includes("adams-laptop: 2 files, 0.0 MB"), { message: "the laptop's copy" });
     // An export killed now keeps this machine's and the laptop's files and blocks.
     expect(atFetch[0]).toContain("machine: desk (this machine)\n");
     expect(await read("desk", "watch.log")).toBe("local\n");
-    expect(await read("adam-s-laptop", "watch.log")).toBe("remote\n");
+    expect(await read("adams-laptop", "watch.log")).toBe("remote\n");
     const sofar = await read(EXPORT_FILE);
     expect(sofar).toContain("\n\nmachine: desk (this machine)\n");
-    expect(sofar).toContain("\n\nmachine: adam's laptop (paired peer)\n");
+    expect(sofar).toContain("\n\nmachine: adams-laptop (paired peer)\n");
     expect(sofar).toEndWith("  watch.log.1  6 bytes\n");
-    expect(sofar).not.toContain("old laptop");
+    expect(sofar).not.toContain("old-laptop");
     hung.resolve({ ok: false, exitCode: 1, stdout: "", stderr: "no result from ib watch within 120 s" });
     expect(await exporting).toBe(1);
-    expect(await read(EXPORT_FILE)).toEndWith(`  watch.log.1  6 bytes\n\nmachine: old laptop (paired peer)\nid: ${ID_OLD}\nnot fetched: no result from ib watch within 120 s\n`);
+    expect(await read(EXPORT_FILE)).toEndWith(`  watch.log.1  6 bytes\n\nmachine: old-laptop (paired peer)\nid: ${ID_OLD}\nnot fetched: no result from ib watch within 120 s\n`);
   });
 
   test("at most two peers are fetched at a time: the next request goes out when one finishes", async () => {
@@ -176,7 +176,7 @@ describe("exportLogs", () => {
     asked[4]!.answer();
     expect(await exporting).toBe(0);
     expect(most).toBe(2);
-    expect(out.slice(2)).toEqual(["peer 2", "peer 1", "peer 3", "peer 4", "peer 5"].map((name) => `${name}: 2 files, 0.0 MB`));
+    expect(out.slice(2)).toEqual(["peer-2", "peer-1", "peer-3", "peer-4", "peer-5"].map((name) => `${name}: 2 files, 0.0 MB`));
   });
 
   test("every peer fetched: exit 0", async () => {
@@ -188,8 +188,8 @@ describe("exportLogs", () => {
     expect(fetched).toEqual([]);
     expect(out.slice(1)).toEqual([
       "desk (this machine): 1 file, 0.0 MB",
-      "adam's laptop: not fetched: no ib watch holds this machine's peer endpoint",
-      "old laptop: not fetched: no ib watch holds this machine's peer endpoint",
+      "adams-laptop: not fetched: no ib watch holds this machine's peer endpoint",
+      "old-laptop: not fetched: no ib watch holds this machine's peer endpoint",
     ]);
     expect(await read("desk", "watch.log")).toBe("local\n");
     expect(await read(EXPORT_FILE)).toContain("not fetched: no ib watch holds this machine's peer endpoint");
@@ -208,7 +208,7 @@ describe("exportLogs", () => {
     expect(await read(EXPORT_FILE)).toContain("directory: desk/ (no watch log files)");
   });
 
-  test.each([["ADAM'S LAPTOP", ID_LAPTOP], [ID_OLD.toUpperCase(), ID_OLD]])("<machine> %s is the only peer fetched", async (machine, id) => {
+  test.each([["ADAM'S LAPTOP", ID_LAPTOP], ["adams-laptop", ID_LAPTOP], [ID_OLD.toUpperCase(), ID_OLD]])("<machine> %s is the only peer fetched", async (machine, id) => {
     await runExportLogs([machine], fakeDeps());
     expect(fetched).toEqual([id]);
   });
@@ -273,7 +273,7 @@ describe("exportLogs", () => {
       }),
     });
     expect(await exportLogs({}, deps, controller.signal)).toBe(1);
-    expect(out.at(-1)).toBe("adam's laptop: not fetched: interrupted");
+    expect(out.at(-1)).toBe("adams-laptop: not fetched: interrupted");
     expect(await read(EXPORT_FILE)).toContain("not fetched: interrupted");
   });
 });
@@ -351,12 +351,12 @@ describe("ib export-logs end to end, against fakes", () => {
         readLocalFiles: () => readWatchLogFiles(join(home, "watch.log")),
         stdout: (line) => out.push(line),
       });
-      expect(out.slice(1)).toEqual(["desk (this machine): 1 file, 0.0 MB", "adam's laptop: 1 file, 0.0 MB"]);
+      expect(out.slice(1)).toEqual(["desk (this machine): 1 file, 0.0 MB", "adams-laptop: 1 file, 0.0 MB"]);
       expect(code).toBe(0);
       const dir = out[0]!.replace(/^Exported to /, "");
       expect(dir.startsWith(join(home, ".itsybitsy", "log-exports"))).toBe(true);
       expect(await readFile(join(dir, "desk", "watch.log"), "utf8")).toBe("local line\n");
-      expect(await readFile(join(dir, "adam-s-laptop", "watch.log"), "utf8")).toBe("remote line\n");
+      expect(await readFile(join(dir, "adams-laptop", "watch.log"), "utf8")).toBe("remote line\n");
       const report = await readFile(join(dir, EXPORT_FILE), "utf8");
       expect(report).toContain("machine name it reports: adams-laptop\nib version: 7.7.7\n");
       expect(report).toContain("id: none (");
@@ -407,7 +407,7 @@ describe("ib export-logs (CLI)", () => {
     await addPeer({ id: ID_LAPTOP, name: "adam's laptop" });
     const result = await cli.run(["export-logs"]);
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("adam's laptop: not fetched: no ib watch holds this machine's peer endpoint\n");
+    expect(result.stdout).toContain("adams-laptop: not fetched: no ib watch holds this machine's peer endpoint\n");
   });
 
   test("an unknown machine is an error", async () => {

@@ -6,7 +6,8 @@
  * - Peers are keyed by id: 64 lowercase hex characters (an iroh endpoint id).
  *   Input ids are trimmed and lowercased first.
  * - A name is a local label, and the first segment of the peer's row keys in
- *   `ib watch`. The pairing name prompt refuses a name another peer or this
+ *   `ib watch`. Commands and agents see it in clean form (cleanPeerName). The
+ *   pairing name prompt refuses a name whose clean form another peer or this
  *   machine has (peerNameProblem). The store reserves leading @ for local addresses.
  * - `pairedAt` is an ISO 8601 timestamp.
  * - Every write replaces the whole file atomically (temp file + rename), so a
@@ -18,6 +19,7 @@
  */
 
 import { readFile, rename, unlink } from "node:fs/promises";
+import { cleanMachineName } from "../machine-name";
 import { peersFile } from "../runtime-names";
 import { ensurePeerDir } from "./peer-dir";
 
@@ -60,21 +62,36 @@ export function sanitizePeerName(name: string, id: string): string {
 }
 
 /**
+ * The name commands, fully qualified ids and every text an agent reads use
+ * for a peer: its stored name in clean form (cleanMachineName, as for this
+ * machine's name), or its short id when nothing is left. A peer paired as
+ * `MacBook Pro` is `macbook-pro` in `macbook-pro/repo/agent`. peers.json, the
+ * `ib watch` tree and its row keys keep the stored (display) name.
+ */
+export function cleanPeerName(peer: Pick<Peer, "id" | "name">): string {
+  return cleanMachineName(peer.name) || shortPeerId(peer.id);
+}
+
+/**
  * Why `name` cannot become the name of peer `id`, or null if it can (SPEC
  * §20.2). A peer's name is the first segment of its rows' keys in `ib watch`
- * (`<machine>/<repo>/<agent>`, SPEC §17.1), so it may not hold a `/`, and may
- * not equal, case-insensitively, another peer's name or this machine's name.
- * The name is checked as it would be stored (sanitizePeerName). Only the
- * pairing name prompt asks; names already in peers.json are left alone.
+ * (`<machine>/<repo>/<agent>`, SPEC §17.1), so it may not hold a `/`. Its
+ * clean form (cleanPeerName) names it in commands, so that may not equal
+ * this machine's clean name or another peer's: `Mac Book` is refused next to
+ * a peer named `mac-book`. The name is checked as it would be stored
+ * (sanitizePeerName). Only the pairing name prompt asks; names already in
+ * peers.json are left alone.
  */
 export function peerNameProblem(name: string, id: string, peers: readonly Peer[], machineName: string): string | null {
   const stored = sanitizePeerName(name, id);
   if (stored.startsWith("@")) return "A machine name cannot start with @.";
   if (stored.includes("/")) return `A name cannot contain "/".`;
-  const lower = stored.toLowerCase();
-  if (lower === machineName.toLowerCase()) return `"${machineName}" is this machine's name.`;
-  const other = peers.find((p) => p.id !== id && p.name.toLowerCase() === lower);
-  if (other) return `Another peer is already named "${other.name}".`;
+  const clean = cleanPeerName({ id, name: stored });
+  // Said only when the two names differ in more than case.
+  const sameInCommands = (other: string) => other.toLowerCase() === stored.toLowerCase() ? "" : ` (both are "${clean}" in commands)`;
+  if (clean === cleanMachineName(machineName)) return `"${machineName}" is this machine's name${sameInCommands(machineName)}.`;
+  const other = peers.find((p) => p.id !== id && cleanPeerName(p) === clean);
+  if (other) return `Another peer is already named "${other.name}"${sameInCommands(other.name)}.`;
   return null;
 }
 

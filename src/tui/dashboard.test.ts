@@ -11002,7 +11002,8 @@ describe("Unified peer repos in the Agents tree", () => {
       dashboard.infoPanel.displayHeight = 20;
       const info = dashboard.infoPanel.render(60).map(stripAnsi).join("\n");
       expect(info).toContain(`Machine: Laptop C · ${linkState}`);
-      expect(info).toContain(`Full id: ${key}`);
+      // The row key keeps the display name; Full id is the clean address.
+      expect(info).toContain(`Full id: laptop-c/${name}/${local.id}`);
       expect(dashboard.selectedAgent).toBeNull();
     };
     checkSelection("connected");
@@ -11056,7 +11057,7 @@ describe("Unified peer repos in the Agents tree", () => {
         "Remote agent (read-only)",
         "Machine: Laptop B · connected",
         "Id: worker-abc",
-        "Full id: Laptop B/itsybitsy/worker-abc",
+        "Full id: laptop-b/itsybitsy/worker-abc",
         "Nickname: abc-nick",
         "Repo: itsybitsy",
         "Path: /remote/itsybitsy",

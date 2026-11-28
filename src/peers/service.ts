@@ -114,7 +114,8 @@ import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator
 import { stripAnsi } from "../parse-state";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
-import { addPeer, normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
+import { addPeer, cleanPeerName, normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
+import { cleanMachineName } from "../machine-name";
 import { TransferActivity, type ActiveTransfer } from "./transfer-activity";
 import { requestWatchLog } from "./peer-link";
 import { encodeWatchLogOutput, readWatchLogFiles, type PeerWatchLog } from "./watch-log-files";
@@ -935,8 +936,10 @@ export class PeerService {
 
   async runRemoteLifecycle(peerId: string, request: RemoteLifecycleRequest, source: "dashboard" | "handoff" = "dashboard", transfer?: import("./peer-link").OutgoingTransfer): Promise<RemoteLifecycleOutcome> {
     if (source === "dashboard" && this.remoteStartDenial !== null) throw new Error(remoteLifecycleDenial(this.remoteStartDenial, request.action));
-    const machine = await this.peerName(peerId);
-    if (machine === null) throw new Error("Machine is no longer paired");
+    const name = await this.peerName(peerId);
+    if (name === null) throw new Error("Machine is no longer paired");
+    // Clean: a CLI handoff's errors, and the rehire suggestions it builds, are agent-visible addresses.
+    const machine = cleanPeerName({ id: peerId, name });
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error(`${machine} is disconnected`);
     return requestLifecycle(conn, request, machine, this.deps.setTimer, transfer);
@@ -1335,13 +1338,13 @@ export class PeerService {
     }
   }
 
-  /** The peer `ib peer attach` names: its full id, or its name ignoring case. */
+  /** The peer `ib peer attach` names: its full id, or its name, compared in clean form (cleanPeerName). */
   private async resolveTerminalPeer(target: string): Promise<Peer> {
     const peers = await this.deps.readPeers();
     const id = normalizePeerId(target);
     const byId = id === null ? undefined : peers.find((peer) => peer.id === id);
     if (byId) return byId;
-    const named = peers.filter((peer) => peer.name.toLowerCase() === target.toLowerCase());
+    const named = peers.filter((peer) => cleanPeerName(peer) === cleanMachineName(target));
     if (named.length === 1) return named[0]!;
     if (named.length > 1) throw new Error(`${named.length} peers are named ${JSON.stringify(target)}; use the full id`);
     throw new Error(`no paired peer has the name or id ${JSON.stringify(target)}`);

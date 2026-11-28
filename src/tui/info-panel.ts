@@ -21,8 +21,9 @@ import { _formatTimestamp } from "../agent-lifecycle";
 import { cliDisplayName, kernelSandboxStatus, metadataCli } from "../agent-cli";
 import { resolvePathsConfig } from "../sandbox";
 import { FALLBACK_MACHINE_NAME } from "../machine-name";
-import { localAgentKey } from "./row-keys";
-import { peerEntryKey, truncatePeerField } from "./peer-repos";
+import { fullyQualifiedAgentId, localAgentKey } from "./row-keys";
+import { truncatePeerField } from "./peer-repos";
+import { cleanPeerName } from "../peers/store";
 
 /**
  * Team-mode payload for the info panel (SPEC §17.3c). Parallel to the
@@ -203,8 +204,9 @@ export class InfoPanelComponent implements Component {
       lines.push(truncateToWidth(`${DIM}Paths:${RESET} runtime roots only`, width, ""));
     }
 
-    // The agent's fully qualified id, its row key (SPEC §17.1): the machine
-    // and the repo's registry name it belongs to. The tree shows only the name.
+    // The agent's fully qualified id, its row key (SPEC §17.1): this machine's
+    // clean name and the repo's registry name it belongs to. The tree shows
+    // only the name.
     lines.push(truncateToWidth(`${DIM}Full id:${RESET} ${localAgentKey(this.machineName, agent)}`, width, ""));
 
     // Identity line — only shown when a nickname is set, so the canonical id
@@ -276,7 +278,9 @@ export class InfoPanelComponent implements Component {
         const nameWidth = width - visibleWidth(`Machine:  · ${connection}`);
         field("Machine", `${truncatePeerField(entry.peerName, nameWidth)} · ${connection}`);
         field("Id", agent.id);
-        field("Full id", peerEntryKey(entry));
+        // The address commands take: the peer's clean name, not the display
+        // name its row key (peerEntryKey) and the Machine row use.
+        field("Full id", fullyQualifiedAgentId(cleanPeerName({ id: entry.peerId, name: entry.peerName }), agent.repoRegistryName, agent.id));
         field("Nickname", agent.nickname ?? "—");
         field("Repo", agent.repoName);
         field("Path", agent.repoPath);

@@ -23,12 +23,12 @@ import { join, resolve } from "node:path";
 import type { IbCommandResult } from "../ib-commands";
 import { IB_VERSION } from "../ib-version";
 import { userHome } from "../home";
-import { readMachineName } from "../machine-name";
+import { cleanMachineName, readMachineName } from "../machine-name";
 import { peerSecretKeyFile, runtimeDir } from "../runtime-names";
 import { hasLivePeerWatcher } from "./endpoint-lock";
 import { deriveEndpointId, parseSecretKey } from "./identity";
 import { handoffWatchLog, WATCH_NOT_RUNNING } from "./peer-outbox";
-import { normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
+import { cleanPeerName, normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
 import { singleLine } from "./single-line";
 import { decodeWatchLogOutput, describeWatchLogFiles, readWatchLogFiles, type PeerWatchLog, type WatchLogFile } from "./watch-log-files";
 
@@ -86,7 +86,7 @@ export function defaultExportLogsDeps(): ExportLogsDeps {
     selfId: readSelfId,
     readLocalFiles: () => readWatchLogFiles(),
     watcherRunning: hasLivePeerWatcher,
-    fetch: (peer, signal) => handoffWatchLog(peer.id, peer.name, signal),
+    fetch: (peer, signal) => handoffWatchLog(peer.id, cleanPeerName(peer), signal),
     now: Date.now,
     exportsRoot: () => join(runtimeDir(userHome()), "log-exports"),
     stdout: (line) => console.log(line),
@@ -119,12 +119,12 @@ export function parseExportLogsArgs(args: string[]): ExportLogsArgs | { error: s
   return parsed;
 }
 
-/** The paired peer `target` names: its full id, or its name ignoring case. */
+/** The paired peer `target` names: its full id, or its name, compared in clean form (cleanPeerName). */
 function resolvePeer(peers: Peer[], target: string): Peer {
   const id = normalizePeerId(target);
   const byId = id === null ? undefined : peers.find((peer) => peer.id === id);
   if (byId) return byId;
-  const named = peers.filter((peer) => peer.name.toLowerCase() === target.toLowerCase());
+  const named = peers.filter((peer) => cleanPeerName(peer) === cleanMachineName(target));
   if (named.length === 1) return named[0]!;
   if (named.length > 1) throw new Error(`${named.length} peers are named ${JSON.stringify(target)}; use the full id: ${named.map((peer) => peer.id).join(", ")}`);
   throw new Error(`no paired peer has the name or id ${JSON.stringify(target)}`);
@@ -278,16 +278,18 @@ export async function exportLogs(parsed: ExportLogsArgs, deps: ExportLogsDeps, s
   };
   const record = (outcome: PeerOutcome) => serially(async () => {
     const { peer } = outcome;
-    const block = [`machine: ${peer.name} (paired peer)`, `id: ${peer.id}`];
+    // The clean name, as `ib export-logs <machine>` and every address take it.
+    const name = cleanPeerName(peer);
+    const block = [`machine: ${name} (paired peer)`, `id: ${peer.id}`];
     if ("error" in outcome) {
       failed = true;
       block.push(`not fetched: ${outcome.error}`);
       await appendFile(report, "\n" + block.join("\n") + "\n");
-      deps.stdout(`${peer.name}: not fetched: ${outcome.error}`);
+      deps.stdout(`${name}: not fetched: ${outcome.error}`);
       return;
     }
     const { copy } = outcome;
-    const dirName = machineDirName(peer.name, peer.id, taken);
+    const dirName = machineDirName(name, peer.id, taken);
     await writeCopies(join(dir, dirName), copy.files);
     block.push(
       `machine name it reports: ${copy.name}`,
@@ -300,7 +302,7 @@ export async function exportLogs(parsed: ExportLogsArgs, deps: ExportLogsDeps, s
       ...fileLines(dirName, copy.files),
     );
     await appendFile(report, "\n" + block.join("\n") + "\n");
-    deps.stdout(`${peer.name}: ${describeWatchLogFiles(copy.files)}`);
+    deps.stdout(`${name}: ${describeWatchLogFiles(copy.files)}`);
   });
   // Each worker publishes its next request once its last one has finished.
   let next = 0;

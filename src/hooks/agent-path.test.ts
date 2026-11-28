@@ -680,6 +680,48 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("other agents");
   });
 
+  test("a false heredoc opener does not mask the following line from the traversal scanner", () => {
+    const ctx = makeCtx();
+    // A non-ib command reaches the path scanners without findShellMetachar, so
+    // heredocBodyRanges alone must not open a heredoc the shell does not.
+    for (const command of [
+      "true #<<EOF\ncat ../../agent-other/repo/.env\nEOF",
+      "true;#<<EOF\ncat ../../agent-other/repo/.env\nEOF",
+      "true&&#<<EOF\ncat ../../agent-other/repo/.env\nEOF",
+      "echo $[1<<EOF]\ncat ../../agent-other/repo/.env\nEOF]",
+      "echo ${X:-<<EOF}\ncat ../../agent-other/repo/.env\nEOF}",
+      "cat <<$'EOF'\nEOF\ncat ../../agent-other/repo/.env\n$EOF",
+      'echo "$["1<<EOF"]"\ncat ../../agent-other/repo/.env\nEOF]',
+      'echo "${X:-"<<EOF"}"\ncat ../../agent-other/repo/.env\nEOF}',
+      // A real heredoc the walk declines, with a `<<Y` decoy in its body.
+      "cat <<$'EOF'\n<<Y\nEOF\ncat ../../agent-other/repo/.env\nY",
+      "cat ${X:-{}<<EOF}\n<<Y\nEOF}\ncat ../../agent-other/repo/.env\nY",
+    ]) {
+      const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toContain("other agents");
+    }
+    // Denied too, though by a noise rule once the line is no longer masked.
+    for (const command of [
+      // A continuation at the end of the opener line starts the body later.
+      "cat <<'EOF' \\\n../../agent-other/repo/.env\nEOF",
+      "cat ${X:-`echo }`<<EOF}\ncat ../../agent-other/repo/.env\nEOF}",
+    ]) {
+      expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx).decision).toBe("deny");
+    }
+  });
+
+  test("a heredoc after continued lines is still data", () => {
+    const ctx = makeCtx();
+    for (const command of [
+      "ib send mgr \\\n<<'EOF'\nit's in ../x\nEOF",
+      "gh api repos/o/r/issues \\\n  --method POST \\\n  --input - <<'EOF'\n{\"see\": \"../../x\"}\nEOF",
+    ]) {
+      const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+      expect(result.decision).toBe("allow");
+    }
+  });
+
   // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────
 
   test("blocks git -C (bypasses path isolation)", () => {
@@ -1724,6 +1766,32 @@ describe("checkIbCommandAccess", () => {
     expect(direct?.reason).toContain("internal operation");
     const continued = await checkIbCommandAccess("ib \\\nsandbox seal agent-target1", "agent-caller1", agentsDir);
     expect(continued?.decision).toBe("deny");
+  });
+
+  test("a false heredoc opener cannot hide a second command from a worker", async () => {
+    await writeAgentMeta("agent-worker1", { agentType: "worker" });
+    for (const command of [
+      "ib list #<<EOF\ntouch pwned\nEOF",
+      "ib list $[1<<EOF]\ntouch pwned\nEOF]",
+      "ib list ${X:-<<EOF}\ntouch pwned\nEOF}",
+      "ib list <<$'EOF'\nEOF\ntouch pwned\n$EOF",
+    ]) {
+      const result = await checkIbCommandAccess(command, "agent-worker1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("chained shell command");
+    }
+  });
+
+  test("an unmasked heredoc body that does not tokenize gets the parsing reason, not 'internal operation'", async () => {
+    // The walk stops at "$(…)", so the apostrophe in the body reaches the
+    // tokenizer. The deny is the same; the reason must say why.
+    await writeAgentMeta("agent-worker1", { agentType: "worker" });
+    const result = await checkIbCommandAccess("cat > \"$(mktemp)\" <<'EOF'\nI didn't\nEOF", "agent-worker1", agentsDir);
+    expect(result?.decision).toBe("deny");
+    expect(result!.reason).toContain("unterminated shell quote");
+    expect(result!.reason).toContain("counts as literal text");
+    // A plain comment line before the heredoc does not stop the masking.
+    expect(await checkIbCommandAccess("# write it\ncat > x.md <<'EOF'\nI didn't\nEOF", "agent-worker1", agentsDir)).toBeNull();
   });
 
   test("system agent Bash cannot invoke internal sandbox seal", async () => {

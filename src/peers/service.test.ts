@@ -303,8 +303,8 @@ describe("PeerService binding", () => {
     const { service } = makeService({ terminalSocketPath: socketPath });
     service.openDialog();
     await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
-    await waitFor(() => stat(socketPath).then(() => true, () => false), { message: "socket listening" });
-    expect((await stat(socketPath)).mode & 0o777).toBe(0o600);
+    // startTerminalRelay chmods the socket only after listen() has created it, so wait for the mode, not just the file.
+    await waitFor(() => stat(socketPath).then(s => (s.mode & 0o777) === 0o600, () => false), { message: "socket listening with mode 0600" });
 
     const attach = async (peer: string) => {
       const socket = connect(socketPath);

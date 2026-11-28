@@ -10263,6 +10263,31 @@ describe("setup Peers tab", () => {
       expect(text(dashboard)).toContain(ROW_HINT);
     });
 
+    test("Esc while Removing… closes the dialog; reopened once the removal settles, the input has focus and no prompt shows", async () => {
+      const { dashboard, service } = withPeers(peer(A, "Alpha"), peer(B, "Bravo"));
+      dashboard.handleInput("k");
+      dashboard.handleInput("\x1b[3~");
+      dashboard.handleInput("\r");
+      expect(text(dashboard)).toContain("Removing…");
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+      expect(service.calls).toEqual(["open", `remove:${B}`, "close"]);
+
+      service.set({ peers: [peer(A, "Alpha")] });
+      service.removals[0]!.resolve(null);
+      await settle();
+      dashboard.handleInput("I");
+      const reopened = peersTab(dashboard);
+      expect(reopened.selectedPeerId).toBeNull();
+      expect(reopened.removing).toBeNull();
+      const out = text(dashboard);
+      expect(out).toContain("> █");
+      expect(out).toContain(INPUT_HINT);
+      expect(out).not.toContain("Remove \"");
+      expect(out).not.toContain("Removing…");
+      expect(service.calls).toEqual(["open", `remove:${B}`, "close", "open"]);
+    });
+
     test("a peer that leaves the list cancels its prompt, and a selected one gives the input focus", () => {
       const { dashboard, service, dialog } = withPeers(peer(A, "Alpha"), peer(B, "Bravo"));
       dashboard.handleInput("k");
@@ -10302,13 +10327,26 @@ describe("setup Peers tab", () => {
         service.set({ links: peers.map(p => ({ ...p, connected: false, connectedAt: null, lastOkAt: null,
           coordinator: null, lastError: "connection refused", repos: null, agents: null, questions: null })) });
         const visible = () => rendered(dashboard).map(stripAnsi).join("\n");
+        /** The peers whose rows show; the count line must name all the others, hidden above or below. */
+        const shownPeers = () => {
+          const out = visible();
+          const shown = [...out.matchAll(/peer-(\d+) +[0-9a-f]{10}  offline/g)].map(match => Number(match[1]));
+          expect(shown.length).toBeGreaterThan(0);
+          expect(out).toContain(`…and ${peers.length - shown.length} more`);
+          return shown;
+        };
         expect(visible()).not.toContain("peer-9");
         dashboard.handleInput("k"); // the last listed peer: the 10th
         expect(dialog.selectedPeerId).toBe(peers[9]!.id);
         expect(visible()).toMatch(/> peer-9 +9999999999  offline/);
-        expect(visible()).toMatch(/…and \d+ more/);
+        const atLast = shownPeers();
+        expect(atLast.at(-1)).toBe(9);
+        expect(atLast).not.toContain(0); // the rows above are left out
         for (let i = 0; i < 9; i++) dashboard.handleInput("k");
         expect(visible()).toMatch(/> peer-0 +0000000000  offline/);
+        const atFirst = shownPeers();
+        expect(atFirst[0]).toBe(0);
+        expect(atFirst).not.toContain(9);
       } finally {
         Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
       }

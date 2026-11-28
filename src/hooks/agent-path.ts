@@ -49,8 +49,9 @@ export { claudeProjectDirFor };
  * commands, and an agent already using a heredoc needs to know why.
  */
 const HEREDOC_SCAN_HINT =
-  " A heredoc body is treated as literal text only when no comment, `(`, `$(`, backtick or `$'` " +
-  "comes before its `<<`; otherwise pass the text via a file.";
+  " A heredoc body counts as literal text only under a quoted <<'EOF' with nothing but plain words " +
+  "after it on its line, and no `(`, backtick, `$'` or comment with quotes earlier in the command; " +
+  "otherwise pass the text via a file.";
 
 /**
  * Deny reason for a bash token that mixes a `..` path segment with shell
@@ -1684,6 +1685,12 @@ export async function checkIbCommandAccess(
   // the Bash tool. They are never valid agent-authored ib commands: allowing A
   // to run one as B would let attacker-controlled argv select B's state or
   // policy handler before that handler can authenticate its process context.
+  // A command the path tokenizer cannot split is denied by that check too;
+  // give the parsing reason, which says when a heredoc body is literal text,
+  // since this runs on every Bash command, not only ib ones.
+  if (!tokenizeBashPaths(maskHeredocBodies(normalizedCommand))) {
+    return { decision: "deny", reason: BASH_PATH_SYNTAX_DENY_REASON };
+  }
   if (containsInternalIbInvocation(normalizedCommand)) {
     return { decision: "deny", reason: "Access denied: ib lifecycle dispatch is an internal operation" };
   }

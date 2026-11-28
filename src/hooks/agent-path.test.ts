@@ -1782,6 +1782,18 @@ describe("checkIbCommandAccess", () => {
     }
   });
 
+  test("an unmasked heredoc body that does not tokenize gets the parsing reason, not 'internal operation'", async () => {
+    // The walk stops at "$(…)", so the apostrophe in the body reaches the
+    // tokenizer. The deny is the same; the reason must say why.
+    await writeAgentMeta("agent-worker1", { agentType: "worker" });
+    const result = await checkIbCommandAccess("cat > \"$(mktemp)\" <<'EOF'\nI didn't\nEOF", "agent-worker1", agentsDir);
+    expect(result?.decision).toBe("deny");
+    expect(result!.reason).toContain("unterminated shell quote");
+    expect(result!.reason).toContain("counts as literal text");
+    // A plain comment line before the heredoc does not stop the masking.
+    expect(await checkIbCommandAccess("# write it\ncat > x.md <<'EOF'\nI didn't\nEOF", "agent-worker1", agentsDir)).toBeNull();
+  });
+
   test("system agent Bash cannot invoke internal sandbox seal", async () => {
     expect((await checkIbCommandAccess("ib sandbox seal agent-target1", "@system", agentsDir))?.decision).toBe("deny");
   });

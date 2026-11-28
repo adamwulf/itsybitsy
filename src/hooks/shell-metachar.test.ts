@@ -226,6 +226,13 @@ describe("false heredoc openers hide no second command", () => {
     }
   });
 
+  test("a plain comment line is skipped; one that could open something stops the walk", () => {
+    expect(bodies("# write the config\ncat > config.json <<'EOF'\nit's fine\nEOF")).toEqual(["it's fine\n"]);
+    for (const comment of ["# it's", '# "x"', "# $HOME", "# a (b)", "# <<EOF", "# `x`", "# a\\", "# {x"]) {
+      expect(heredocBodyRanges(`${comment}\ncat > x <<'EOF'\nbody\nEOF`)).toEqual([]);
+    }
+  });
+
   test("a body line ending in \\ under a quoted delimiter is data, still masked", () => {
     expect(bodies("cat <<'EOF'\nx\\\nEOF")).toEqual(["x\\\n"]);
   });

@@ -36,10 +36,12 @@ export type HeredocDelimiterParse =
 /**
  * Parse a heredoc delimiter WORD starting at `start`. The shell quote-removes
  * the WHOLE word — `<<E'O'F`, `<<'E'OF`, and `<<E\OF` all mean delimiter `EOF`
- * — so we read every adjacent part (bare chars, `'…'`, `"…"` with backslash
- * handling, and `\<char>` escapes) until an UNQUOTED terminator (whitespace,
- * `;`, `|`, `&`, `<`, `>`, or end of input) and concatenate them. Expansion is
- * off if any part was quoted or backslash-escaped. A previous version read only
+ * — so we read every adjacent part (bare chars, `'…'`, `"…"`, and `\<char>`
+ * escapes) until an UNQUOTED terminator (space, tab, newline, `;`, `|`, `&`,
+ * `<`, `>`, or end of input) and concatenate them. Expansion is off if any part
+ * was quoted or backslash-escaped. A word with `$`, a backtick or `\r`
+ * anywhere, or a backslash inside `"…"`, is returned as "unsafe" rather than
+ * modelled. A previous version read only
  * the first part, so the body ran past the shell's real terminator and the
  * commands the shell actually executes were swallowed as body — bypassing the
  * single-command rule, path isolation, and the ib-relationship check at once.
@@ -374,8 +376,9 @@ function scanShellMetachar(command: string): string | null {
  *
  * At a construct this walk does not model, it stops and returns the ranges
  * found so far. Unquoted: a `(` (subshells, `$(…)`, arithmetic, process
- * substitution), a backtick, `$'`, `$[`, a `#` comment, a `<<` inside `${…}`
- * and a line continuation glued to a character. Inside double quotes: `$(`, a
+ * substitution), a backtick, `$'`, `$[`, a `#` comment inside `${…}` or holding
+ * any of < ' " \ ` $ ( { (a plain comment line is skipped), a `<<` inside
+ * `${…}` and a line continuation glued to a character. Inside double quotes: `$(`, a
  * backtick, `$[` or a non-plain `${…}`. At an opener: a here-string, an
  * unterminated quote or a refused delimiter (any result of
  * `parseHeredocDelimiterWord` other than "delim"), or a quote, backslash,
@@ -489,9 +492,18 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
     if (braceDepth > 0 && c === "{") { braceDepth++; i++; continue; }
     if (braceDepth > 0 && c === "}") { braceDepth--; i++; continue; }
 
-    // ---- Comment: stop. Skipping the line could drop a quote the shell
-    // still sees, e.g. a `#` inside `${…}` or backticks, which is no comment.
-    if (c === "#" && startsWord(command, i)) return ranges;
+    // ---- Comment ----
+    // Skipping the line could drop a quote the shell still sees (a `#` inside
+    // `${…}` is no comment, and a shell with comments off reads the words), so
+    // skip only a plain comment outside `${…}`: text with none of < ' " \ ` $
+    // ( { can open no quote, expansion or heredoc either way. Otherwise stop.
+    if (c === "#" && startsWord(command, i)) {
+      const nl = command.indexOf("\n", i);
+      const end = nl === -1 ? n : nl;
+      if (braceDepth > 0 || /[<'"\\`$({]/.test(command.substring(i, end))) return ranges;
+      i = end;
+      continue;
+    }
 
     // ---- Heredoc opener ----
     if (c === "<" && command[i + 1] === "<") {

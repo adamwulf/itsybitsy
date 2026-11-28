@@ -16,7 +16,7 @@
  *   its QUIC connection alive and still never answer (its `ib watch` event
  *   loop wedged while the Rust side runs on), which would otherwise leave the
  *   peer skipped forever. On timeout the connection is closed, `lastError` is
- *   "no reply to the agents poll within 15 s", and the next tick redials. Closing the connection is
+ *   "no reply to the agents poll within 30 s", and the next tick redials. Closing the connection is
  *   what ends that agents poll. A coordinator-pane timeout affects only its own stream.
  * - Except during a transfer (SPEC.md §20.4 "Slow links"): while
  *   `transferProgressing` holds for the peer, an agents poll or pane read
@@ -29,7 +29,7 @@
  *   the peer ended ok within that window. The link's state stays as it was
  *   (connected, the last lists, no error); a late agents reply is used as that
  *   poll's answer, and a late pane reply as the read's. Each kept timeout is
- *   one watch.log line. The exchange asks again every 15 s while it waits;
+ *   one watch.log line. The exchange asks again every 30 s while it waits;
  *   the first time the rule no longer holds, it closes the connection as an
  *   unkept timeout would. A peer that moves transfer bytes is not wedged,
  *   and on a slow link closing the connection would kill the transfer itself.
@@ -60,6 +60,7 @@ import {
   cleanRemoteText,
   describePeerClose,
   disconnectLine,
+  PEER_REQUEST_TIMEOUT_MS,
   requestAgents,
   requestPane,
   type PeerPane,
@@ -75,8 +76,8 @@ import { IrohError } from "./iroh";
 import { TRANSFER_PROGRESS_WINDOW_MS } from "./transfer-activity";
 
 export const PEER_POLL_INTERVAL_MS = 5_000;
-/** Longest an `agents` request may take on a live connection before it is closed. */
-export const PEER_REQUEST_TIMEOUT_MS = 15_000;
+// The agents poll's deadline lives with the request in peer-link.ts.
+export { PEER_REQUEST_TIMEOUT_MS };
 
 /** An agents poll that got no reply within {@link PEER_REQUEST_TIMEOUT_MS}. */
 class PeerRequestTimeout extends Error {

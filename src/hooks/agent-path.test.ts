@@ -691,6 +691,11 @@ describe("checkPathAccess", () => {
       "echo $[1<<EOF]\ncat ../../agent-other/repo/.env\nEOF]",
       "echo ${X:-<<EOF}\ncat ../../agent-other/repo/.env\nEOF}",
       "cat <<$'EOF'\nEOF\ncat ../../agent-other/repo/.env\n$EOF",
+      'echo "$["1<<EOF"]"\ncat ../../agent-other/repo/.env\nEOF]',
+      'echo "${X:-"<<EOF"}"\ncat ../../agent-other/repo/.env\nEOF}',
+      // A real heredoc the walk declines, with a `<<Y` decoy in its body.
+      "cat <<$'EOF'\n<<Y\nEOF\ncat ../../agent-other/repo/.env\nY",
+      "cat ${X:-{}<<EOF}\n<<Y\nEOF}\ncat ../../agent-other/repo/.env\nY",
     ]) {
       const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
       expect(result.decision).toBe("deny");

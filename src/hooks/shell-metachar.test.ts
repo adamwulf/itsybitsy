@@ -111,6 +111,8 @@ describe("findShellMetachar — multi-part heredoc delimiter (round 5 fix 1)", (
 describe("false heredoc openers hide no second command", () => {
   const HIDDEN = ["touch pwned", "ib nuke --force", "ib notes set app x"];
   const COMMENT = "unquoted # starts a shell comment; put it in quotes";
+  const DELIM = "$ or backtick in heredoc delimiter";
+  const DQ_BRACE = 'quote or nested expansion inside "${…}"';
   const FORMS: Array<{ name: string; reason: string; build: (hidden: string) => string }> = [
     { name: "#<<EOF comment", reason: COMMENT, build: (h) => `ib list #<<EOF\n${h}\nEOF` },
     { name: "# <<EOF comment", reason: COMMENT, build: (h) => `ib list # <<EOF\n${h}\nEOF` },
@@ -118,8 +120,16 @@ describe("false heredoc openers hide no second command", () => {
     { name: "$[1<<EOF] arithmetic", reason: "$[ arithmetic", build: (h) => `ib list $[1<<EOF]\n${h}\nEOF]` },
     { name: "${X:-<<EOF}", reason: "<< inside ${…}", build: (h) => `ib list \${X:-<<EOF}\n${h}\nEOF}` },
     { name: "${X:-a <<EOF } with a space", reason: "<< inside ${…}", build: (h) => `ib list \${X:-a <<EOF }\n${h}\nEOF` },
-    { name: "$'EOF' delimiter", reason: "$ in heredoc delimiter", build: (h) => `ib list <<$'EOF'\nEOF\n${h}\n$EOF` },
-    { name: '$"EOF" delimiter', reason: "$ in heredoc delimiter", build: (h) => `ib list <<$"EOF"\nEOF\n${h}\n$EOF` },
+    { name: "$'EOF' delimiter", reason: DELIM, build: (h) => `ib list <<$'EOF'\nEOF\n${h}\n$EOF` },
+    { name: '$"EOF" delimiter', reason: DELIM, build: (h) => `ib list <<$"EOF"\nEOF\n${h}\n$EOF` },
+    // zsh runs the backtick command in the delimiter once the heredoc ends.
+    { name: "backtick delimiter", reason: DELIM, build: (h) => `ib list <<\`${h}\`\n\`${h}\`` },
+    // Inside "…", quotes nest in $[…] and ${…}: the inner " does not end the
+    // string for the shell, so the << after it is quoted text.
+    { name: '"$["1<<EOF"]"', reason: "$[ arithmetic", build: (h) => `ib list "$["1<<EOF"]"\n${h}\nEOF]` },
+    { name: '"${X:-"<<EOF"}"', reason: DQ_BRACE, build: (h) => `ib list "\${X:-"<<EOF"}"\n${h}\nEOF}` },
+    { name: `"\${X:-'}'"<<EOF"}"`, reason: DQ_BRACE, build: (h) => `ib list "\${X:-'}'"<<EOF"}"\n${h}\nEOF}` },
+    { name: '${X:-"${Y:-"}<<EOF"}"}', reason: DQ_BRACE, build: (h) => `ib list \${X:-"\${Y:-"}<<EOF"}"}\n${h}\nEOF}` },
   ];
 
   for (const form of FORMS) {
@@ -144,6 +154,45 @@ describe("false heredoc openers hide no second command", () => {
     }
   });
 
+  test("heredocBodyRanges stops at a line continuation (it has no joined pass)", () => {
+    // The shell joins `$` to `[1<<EOF]` / `{X:-<<EOF}`; findShellMetachar
+    // catches these in its joined pass.
+    for (const cmd of [
+      "echo $\\\n[1<<EOF]\ncat ../../x\nEOF]",
+      "echo $\\\n{X:-<<EOF}\ncat ../../x\nEOF}",
+    ]) {
+      expect(heredocBodyRanges(cmd)).toEqual([]);
+      expect(findShellMetachar(cmd)).not.toBeNull();
+    }
+  });
+
+  test("heredocBodyRanges stops where it would skip a heredoc the shell may open", () => {
+    // Each skipped construct is followed by what the shell reads as a real
+    // heredoc whose body holds a `<<Y` decoy. Skipping the construct read that
+    // body as commands, and `<<Y` then masked the line the shell runs after
+    // the real terminator.
+    for (const cmd of [
+      "cat <<$'EOF'\n<<Y\nEOF\ncat ../../x\nY",
+      "cat $${X:-<<EOF}\n<<Y\nEOF}\ncat ../../x\nY",
+      "cat ${X:-{}<<EOF}\n<<Y\nEOF}\ncat ../../x\nY",
+      "echo ${X:-a #'}\n} <<EOF\n'}\ncat ../../x\nEOF\n# '",
+      "echo ` #` '\n<<EOF\n'\ncat ../../x\nEOF\n# '",
+      "echo \"$(cat \"<<EOF\")\"\ncat ../../x\nEOF)",
+    ]) {
+      expect(heredocBodyRanges(cmd)).toEqual([]);
+    }
+  });
+
+  test("plain double-quoted ${…} is still allowed and a later heredoc is masked", () => {
+    for (const cmd of [
+      'ib send x "${HOME}/notes" <<\'EOF\'\nsee ../docs\nEOF',
+      'ib send x "${X:-default}" <<\'EOF\'\nsee ../docs\nEOF',
+    ]) {
+      expect(findShellMetachar(cmd)).toBeNull();
+      expect(bodies(cmd)).toEqual(["see ../docs\n"]);
+    }
+  });
+
   test("a real heredoc after ${VAR} is still allowed and masked", () => {
     const cmd = "ib send ${ID} <<'EOF'\nmessage with ; and #\nEOF";
     expect(findShellMetachar(cmd)).toBeNull();
@@ -158,7 +207,7 @@ describe("false heredoc openers hide no second command", () => {
   });
 
   test("a $ inside a quoted delimiter is refused too", () => {
-    expect(parseHeredocDelimiterWord("'$EOF'\n", 0)).toEqual({ kind: "unsafe", reason: "$ in heredoc delimiter" });
+    expect(parseHeredocDelimiterWord("'$EOF'\n", 0)).toEqual({ kind: "unsafe", reason: DELIM });
   });
 });
 

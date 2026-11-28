@@ -111,15 +111,17 @@ export function findShellMetachar(command: string): string | null {
 
 /**
  * True when an unquoted `#` at `i` starts a word, which makes it a comment in
- * bash and zsh (`a#b` and `$#` are not comments). Only start of input and
- * blanks are checked: every other character that ends a word (`;`, `|`, `&`,
- * `(`, `)`, `<`, `>`) is already a metachar hit.
+ * bash and zsh (`a#b` and `$#` are not comments): at the start of input, or
+ * after a blank or an operator character. The operators matter for
+ * `heredocBodyRanges`, which has no metachar deny: `true;#<<EOF` must not mask
+ * the next line.
  */
 function startsWord(command: string, i: number): boolean {
   if (i === 0) return true;
-  const prev = command[i - 1]!;
-  return prev === " " || prev === "\t" || prev === "\n" || prev === "\r";
+  return " \t\n\r;&|()<>".includes(command[i - 1]!);
 }
+
+const COMMENT_HIT = "unquoted # starts a shell comment; put it in quotes";
 
 function scanShellMetachar(command: string): string | null {
   let i = 0;
@@ -260,7 +262,7 @@ function scanShellMetachar(command: string): string | null {
     // Denied rather than skipped: a `<<` in it would open no heredoc, so the
     // next line is a second command, and a shell with comments turned off
     // would run the text we skipped.
-    if (c === "#" && startsWord(command, i)) return "# comment";
+    if (c === "#" && startsWord(command, i)) return COMMENT_HIT;
 
     // ---- Backtick command substitution (unquoted) ----
     if (c === "`") return "backtick command substitution";

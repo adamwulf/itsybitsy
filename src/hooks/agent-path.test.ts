@@ -680,6 +680,24 @@ describe("checkPathAccess", () => {
     expect(result.reason).toContain("other agents");
   });
 
+  test("a false heredoc opener does not mask the following line from the traversal scanner", () => {
+    const ctx = makeCtx();
+    // A non-ib command reaches the path scanners without findShellMetachar, so
+    // heredocBodyRanges alone must not open a heredoc the shell does not.
+    for (const command of [
+      "true #<<EOF\ncat ../../agent-other/repo/.env\nEOF",
+      "true;#<<EOF\ncat ../../agent-other/repo/.env\nEOF",
+      "true&&#<<EOF\ncat ../../agent-other/repo/.env\nEOF",
+      "echo $[1<<EOF]\ncat ../../agent-other/repo/.env\nEOF]",
+      "echo ${X:-<<EOF}\ncat ../../agent-other/repo/.env\nEOF}",
+      "cat <<$'EOF'\nEOF\ncat ../../agent-other/repo/.env\n$EOF",
+    ]) {
+      const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+      expect(result.decision).toBe("deny");
+      expect(result.reason).toContain("other agents");
+    }
+  });
+
   // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────
 
   test("blocks git -C (bypasses path isolation)", () => {

@@ -110,9 +110,11 @@ describe("findShellMetachar — multi-part heredoc delimiter (round 5 fix 1)", (
 // line was skipped as body while the shell ran it as a second command.
 describe("false heredoc openers hide no second command", () => {
   const HIDDEN = ["touch pwned", "ib nuke --force", "ib notes set app x"];
+  const COMMENT = "unquoted # starts a shell comment; put it in quotes";
   const FORMS: Array<{ name: string; reason: string; build: (hidden: string) => string }> = [
-    { name: "#<<EOF comment", reason: "# comment", build: (h) => `ib list #<<EOF\n${h}\nEOF` },
-    { name: "# <<EOF comment", reason: "# comment", build: (h) => `ib list # <<EOF\n${h}\nEOF` },
+    { name: "#<<EOF comment", reason: COMMENT, build: (h) => `ib list #<<EOF\n${h}\nEOF` },
+    { name: "# <<EOF comment", reason: COMMENT, build: (h) => `ib list # <<EOF\n${h}\nEOF` },
+    { name: "tab before #<<EOF", reason: COMMENT, build: (h) => `ib list\t#<<EOF\n${h}\nEOF` },
     { name: "$[1<<EOF] arithmetic", reason: "$[ arithmetic", build: (h) => `ib list $[1<<EOF]\n${h}\nEOF]` },
     { name: "${X:-<<EOF}", reason: "<< inside ${…}", build: (h) => `ib list \${X:-<<EOF}\n${h}\nEOF}` },
     { name: "${X:-a <<EOF } with a space", reason: "<< inside ${…}", build: (h) => `ib list \${X:-a <<EOF }\n${h}\nEOF` },
@@ -133,6 +135,14 @@ describe("false heredoc openers hide no second command", () => {
       }
     });
   }
+
+  test("heredocBodyRanges reads a # after an operator as a comment too", () => {
+    // findShellMetachar denies the operator first; heredocBodyRanges has no
+    // such deny, and a non-ib command reaches the path scanners without it.
+    for (const op of [";", "&&", "||", "|", "(", ")", "<", ">"]) {
+      expect(heredocBodyRanges(`true${op}#<<EOF\ncat ../../x\nEOF`)).toEqual([]);
+    }
+  });
 
   test("a real heredoc after ${VAR} is still allowed and masked", () => {
     const cmd = "ib send ${ID} <<'EOF'\nmessage with ; and #\nEOF";

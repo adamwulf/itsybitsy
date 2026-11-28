@@ -1546,8 +1546,9 @@ function splitShellWord(token: string): string[] {
  * every one of these forms. Relaxing that gate reopens them.
  */
 function containsIbSubcommandInvocation(command: string, subcommands: ReadonlySet<string>): boolean {
-  const words = shellWords(command);
-  if (!words) return false;
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (!tokens) return false;
+  const words = tokens.flatMap(splitShellWord);
   for (let i = 0; i + 1 < words.length; i++) {
     if (basename(words[i]!) !== "ib") continue;
     if (subcommands.has(words[i + 1]!)) return true;
@@ -1556,32 +1557,39 @@ function containsIbSubcommandInvocation(command: string, subcommands: ReadonlySe
 }
 
 /**
- * Detect an `ib notes` invocation that may change a repo's notes, in the same
- * shell words containsIbSubcommandInvocation reads. Any word after `ib notes`
- * other than a literal `show`, `-h` or `--help` counts, so `set` and `clear`
- * count, and so does a word this scan cannot read as one of those.
+ * Detect an `ib notes` invocation that may change a repo's notes. It finds
+ * `ib notes` in the same shell words containsIbSubcommandInvocation reads, then
+ * allows only a next token that is, as a whole, the literal word `show`, `-h`
+ * or `--help`. Every other next token counts as a write: `set`, `clear`, and
+ * anything whose word the shell could turn into another verb.
  *
  * It is an allowlist because the verb is the second word. checkIbCommandAccess
  * requires only the first word after `ib` to be literal, and findShellMetachar
- * allows `$VAR` and `${VAR:-word}`. So `ib notes ${X:-set} app text` and
- * `ib notes $UNSET set app text` both run `ib notes set`, and neither shows
- * the word `set` to a scan. A bare `ib notes` prints usage and changes nothing.
+ * allows parameter expansion and heredocs. `ib notes ${X:-set} app text` and
+ * `ib notes $UNSET set app text` both run `ib notes set`. So do
+ * `ib notes <<show set app text` and `ib notes << show set app text`: `show`
+ * is the heredoc's delimiter, not the verb. Requiring the whole token to be
+ * literal is what stops the heredoc forms, since splitShellWord reads
+ * `<<show` as the word `show` and a bare `<<` as no word at all. A bare
+ * `ib notes` prints usage and changes nothing.
  */
 function containsIbNotesWrite(command: string): boolean {
-  const words = shellWords(command);
-  if (!words) return false;
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (!tokens) return false;
+  // Each word keeps the literal its whole token spells (undefined for an
+  // operator, expansion or heredoc opener). A token with no word still takes
+  // a place, so it cannot drop out from between `notes` and the verb.
+  const words = tokens.flatMap((raw) => {
+    const literal = literalWord(raw);
+    const split = splitShellWord(raw);
+    return split.length ? split.map((word) => ({ word, literal })) : [{ word: "", literal }];
+  });
   for (let i = 0; i + 1 < words.length; i++) {
-    if (basename(words[i]!) !== "ib" || words[i + 1] !== "notes") continue;
+    if (basename(words[i]!.word) !== "ib" || words[i + 1]!.word !== "notes") continue;
     const verb = words[i + 2];
-    if (verb !== undefined && !IB_NOTES_READ_WORDS.has(verb)) return true;
+    if (verb && !IB_NOTES_READ_WORDS.has(verb.literal ?? "")) return true;
   }
   return false;
-}
-
-/** The dequoted shell words of `command`, heredoc bodies masked; null when untokenizable. */
-function shellWords(command: string): string[] | null {
-  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
-  return tokens ? tokens.flatMap(splitShellWord) : null;
 }
 
 /**

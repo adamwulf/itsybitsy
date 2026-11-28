@@ -2191,15 +2191,22 @@ describe("checkIbCommandAccess", () => {
     }
   });
 
-  test("a verb the scan cannot read as show or help is denied, since the shell may expand it to set", async () => {
-    // The shell runs `ib notes set app x` for each of the first three, and
-    // none of them puts the word `set` right after `notes` for the scan. The
-    // later chained-command check denies the redirect but lets plain
-    // parameter expansion through, so this gate has to deny all three.
+  test("a token after notes that is not a literal show or help flag is denied, since the shell may run set or clear from it", async () => {
+    // The shell runs `ib notes set` or `ib notes clear` for every command but
+    // the last, and none of them has a literal `set` or `clear` token right
+    // after `notes`. The later chained-command check denies the redirect but
+    // lets parameter expansion and heredocs through, so this gate has to deny
+    // them. In the heredoc forms, `show`, `h` and `-help` are the heredoc
+    // delimiter (`<<-` then `h`), not the verb.
     for (const command of [
       "ib notes ${X:-set} app x",
       "ib notes $UNSET set app x",
       "ib notes 2>/dev/null set app x",
+      "ib notes <<show set app x\nshow",
+      "ib notes << show set app x\nshow",
+      "ib notes <<'show' clear app\nshow",
+      "ib notes <<-h clear app\nh",
+      "ib notes <<--help clear app\n-help",
       "ib notes bogus app",
     ]) {
       const result = await checkIbCommandAccess(command, "agent-worker1", agentsDir);

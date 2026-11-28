@@ -3567,7 +3567,8 @@ interface ConflictCheckFailure {
   /**
    * That command's stderr then stdout, each trimmed; "" when git printed
    * nothing. For a conflicting replay, stdout is only merge-tree's messages
-   * (the `CONFLICT (...)` lines), without the tree id and file list before them.
+   * (its `Auto-merging` and `CONFLICT (...)` lines), without the tree id and
+   * file list before them.
    */
   output: string;
   /**
@@ -3589,9 +3590,11 @@ interface ConflictCheckFailure {
  * parents before children. Each is merged onto the result so far with its
  * parent as the merge base (`git merge-tree --merge-base`), the same merge a
  * rebase runs for each commit it picks. A commit whose parent is the result so
- * far is taken as it is, as the rebase fast-forwards it, so a branch already
- * on the target's tip needs no merge at all. One merge of the two tips would
- * not do: it misses a conflict in a commit that a later commit undoes.
+ * far is taken as it is, as the rebase fast-forwards it, so a linear branch
+ * already on the target's tip needs no merge at all. A branch with merge
+ * commits is linearized and replayed even then, as `git rebase` does. One
+ * merge of the two tips would not do: it misses a conflict in a commit that a
+ * later commit undoes.
  *
  * Needs git 2.45, the first merge-tree to take a tree as a side; an older git
  * fails the replay step, and the check reports that it could not run.

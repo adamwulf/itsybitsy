@@ -5558,6 +5558,9 @@ describe("mergeAgent (native)", () => {
     expect(rebase).toBeGreaterThan(replay);
     for (const i of [resolve, list, replay]) expect(spawnCalls[i]!.slice(0, 3)).toEqual(["git", "-C", tempDir]);
     expect(spawnCalls.find((c) => c.includes("worktree") && c.includes("add"))).toBeUndefined();
+    // Before the rebase, the only `git branch` is the preflight's --show-current.
+    const branchCalls = spawnCalls.slice(0, rebase).filter((c) => c.includes("branch"));
+    expect(branchCalls.every((c) => c.includes("--show-current"))).toBe(true);
   });
 
   test("returns error when merging from within agent's own worktree", async () => {
@@ -5847,15 +5850,14 @@ describe("mergeAgent (native)", () => {
       return spawnCalls.find((c) => c.includes("merge") && (c.includes("--ff-only") || c.includes("--no-ff")));
     }
 
-    /** The rebase inside the agent's own worktree (not the temp conflict-check one). */
+    /** The rebase inside the agent's own worktree. */
     function findWorktreeRebase(agentDir: string): string[] | undefined {
       return spawnCalls.find((c) => c.includes("rebase") && c.includes(join(agentDir, "repo")));
     }
 
     /**
-     * Commands only the closing merge's teardown (steps 11-20) runs. The
-     * conflict check removes its OWN temp worktree and branch, so match the
-     * agent's worktree and branch specifically.
+     * Commands only the closing merge's teardown (steps 11-20) runs, matched
+     * on the agent's worktree and branch specifically.
      */
     function teardownCalls(agentDir: string): string[][] {
       const worktree = join(agentDir, "repo");

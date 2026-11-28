@@ -42,7 +42,7 @@ import {
   type ServiceIncoming,
   type ServiceStream,
 } from "./service";
-import { addPeer, readPeers, type Peer } from "./store";
+import { addPeer, readPeers, removePeer, type Peer } from "./store";
 import { Scheduler } from "../scheduler";
 import { claimScheduledRun, createScheduledTask, readScheduledTasks, recordScheduledRunResult } from "../scheduled-tasks";
 import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS } from "./poller";
@@ -229,6 +229,7 @@ function makeService(overrides: Partial<PeerServiceDeps> = {}, endpoints: Array<
       return readPeers();
     },
     addPeer,
+    removePeer,
     generateCode: () => "ABCD1234",
     now: clock.now,
     setTimer: clock.setTimer,
@@ -302,8 +303,8 @@ describe("PeerService binding", () => {
     const { service } = makeService({ terminalSocketPath: socketPath });
     service.openDialog();
     await waitFor(() => service.view().status.kind === "listening", { message: "listening" });
-    await waitFor(() => stat(socketPath).then(() => true, () => false), { message: "socket listening" });
-    expect((await stat(socketPath)).mode & 0o777).toBe(0o600);
+    // startTerminalRelay chmods the socket only after listen() has created it, so wait for the mode, not just the file.
+    await waitFor(() => stat(socketPath).then(s => (s.mode & 0o777) === 0o600, () => false), { message: "socket listening with mode 0600" });
 
     const attach = async (peer: string) => {
       const socket = connect(socketPath);
@@ -639,6 +640,97 @@ function answerDials(endpoint: FakeEndpoint, agents: RemoteAgent[], events: stri
 const REMOTE_AGENTS: RemoteAgent[] = [
   { id: "agent-r1", nickname: null, repoName: "app", repoRegistryName: "app", repoPath: "/repos/app", state: "running", agentType: "worker", manager: null, createdEpoch: 1_700_000_000, model: null },
 ];
+
+// The Peers tab's Enter and remove prompt on a paired peer (SPEC §20.1).
+describe("PeerService reconnectPeer and removePeer", () => {
+  const ID_OTHER = "d4".repeat(32);
+
+  test("reconnectPeer: refused inline while unbound; once bound it closes the link and redials now", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    const { service, endpoint, logs } = makeService();
+    const served = answerDials(endpoint, REMOTE_AGENTS);
+    expect(service.reconnectPeer(ID_REMOTE)).toBe("Peering is still starting; try again in a moment.");
+    expect(endpoint.connects).toEqual([]);
+    await service.bootIfPaired();
+    await waitFor(() => service.view().links[0]?.connected === true, { message: "peer polled" });
+    expect(service.reconnectPeer(ID_OTHER)).toBe("Not polled yet: its first poll starts within 5 s.");
+
+    expect(service.reconnectPeer(ID_REMOTE)).toBeNull();
+    expect(served[0]!.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "reconnecting" });
+    expect(service.view().links[0]).toMatchObject({ connected: false, reconnecting: true, lastError: null });
+    await waitFor(() => service.view().links[0]?.connected === true, { message: "reconnected" });
+    expect(endpoint.connects).toEqual([ID_REMOTE, ID_REMOTE]);
+    expect(logs).toContain(`peer link: reconnecting to Laptop C (${ID_REMOTE.slice(0, 10)}) on request: closing the connection and dialing again`);
+    expect(logs.filter(line => line.includes("disconnected"))).toEqual([]);
+    await service.shutdown();
+  });
+
+  test("removePeer: removes by the full id, re-reads the list and drops the link at once; a failure is returned", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    await addPeer({ id: ID_OTHER, name: "Desk" });
+    const targets: string[] = [];
+    let failure: Error | null = null;
+    const { service, endpoint, logs } = makeService({
+      removePeer: async (target) => {
+        targets.push(target);
+        if (failure) throw failure;
+        return removePeer(target);
+      },
+    });
+    const served = answerDials(endpoint, REMOTE_AGENTS);
+    await service.bootIfPaired();
+    await waitFor(() => service.view().links.every(link => link.connected) && service.view().links.length === 2, { message: "both polled" });
+
+    failure = new Error("disk full");
+    expect(await service.removePeer(ID_REMOTE)).toBe("Could not remove Laptop C: disk full");
+    expect(service.view().peers.map(p => p.id)).toEqual([ID_REMOTE, ID_OTHER]);
+    failure = null;
+
+    expect(await service.removePeer(ID_REMOTE)).toBeNull();
+    expect(targets).toEqual([ID_REMOTE, ID_REMOTE]);
+    expect((await readPeers()).map(p => p.id)).toEqual([ID_OTHER]);
+    expect(service.view().peers.map(p => p.id)).toEqual([ID_OTHER]);
+    // No tick: the poller has already dropped it.
+    expect(service.view().links.map(link => link.id)).toEqual([ID_OTHER]);
+    expect(served[endpoint.connects.indexOf(ID_REMOTE)]!.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "removed" });
+    expect(served[endpoint.connects.indexOf(ID_OTHER)]!.closeInfo()).toBeNull();
+    expect(logs).toContain(`peer link: stopped polling Laptop C (${ID_REMOTE.slice(0, 10)}): no longer in peers.json`);
+
+    expect(await service.removePeer(ID_REMOTE)).toBe(`${ID_REMOTE.slice(0, 10)} was already removed.`);
+    await service.shutdown();
+  });
+
+  test("removePeer: a poll's peers.json read from before the removal does not bring the peer back", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    await addPeer({ id: ID_OTHER, name: "Desk" });
+    // The next read returns `hold` instead, once.
+    let hold: Promise<Peer[]> | null = null;
+    const { service, endpoint, clock } = makeService({
+      readPeers: () => {
+        const held = hold;
+        hold = null;
+        return held ?? readPeers();
+      },
+    });
+    answerDials(endpoint, REMOTE_AGENTS);
+    await service.bootIfPaired();
+    await waitFor(() => service.view().links.length === 2 && service.view().links.every(link => link.connected), { message: "both polled" });
+
+    const stale = await readPeers();
+    const read = gate<void>();
+    hold = read.promise.then(() => stale);
+    elapse(clock, PEER_POLL_INTERVAL_MS); // a tick, whose read is held with the old list
+    await flushMicrotasks();
+    expect(hold).toBeNull();
+    expect(await service.removePeer(ID_REMOTE)).toBeNull();
+    read.resolve();
+    await flushMicrotasks();
+    expect(service.view().peers.map(p => p.id)).toEqual([ID_OTHER]);
+    expect(service.view().links.map(link => link.id)).toEqual([ID_OTHER]);
+    expect(endpoint.connects.filter(id => id === ID_REMOTE)).toHaveLength(1);
+    await service.shutdown();
+  });
+});
 
 describe("PeerService at boot", () => {
   test.skipIf(process.env.IB_LIVE_CALLER !== "1")("reads launchd from the production macOS ps columns", async () => {
@@ -1100,7 +1192,7 @@ describe("PeerService at boot", () => {
 
     await waitFor(() => service.view().links[0]?.connected === true, { message: "peer polled" });
     expect(service.view().links).toEqual([
-      { id: ID_REMOTE, name: "Laptop C", connected: true, connectedAt: expect.any(Number), lastOkAt: expect.any(Number), lastError: null, coordinator: null, repos: [], agents: REMOTE_AGENTS, questions: [] },
+      { id: ID_REMOTE, name: "Laptop C", connected: true, connectedAt: expect.any(Number), lastOkAt: expect.any(Number), lastError: null, coordinator: null, repos: [], agents: REMOTE_AGENTS, questions: [], reconnecting: false },
     ]);
     expect(endpoint.connects).toEqual([ID_REMOTE]);
 

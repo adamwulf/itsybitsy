@@ -43,6 +43,16 @@
  * - {@link PeerPoller.onChange} fires when what a reader can see changes:
  *   connected, the error, the agent list, the name, or the set of peers. A
  *   successful poll that changes nothing but `lastOkAt` does not fire it.
+ * - {@link PeerPoller.reconnect} (the Peers tab's Enter) closes the peer's
+ *   connection on purpose and polls it now. That close is not a failure: no
+ *   disconnect line, no `lastError`. The link reads `reconnecting` (shown as
+ *   `connecting`) until the outcome. It never starts a second dial: a pending
+ *   request ends with the close and its poll redials as it settles, and a
+ *   pending dial is the reconnect.
+ * - {@link PeerPoller.update} follows a `peers.json` change this process made
+ *   (the Peers tab's remove) at once, instead of on the next tick. A tick
+ *   whose read started before it discards that read, which may hold the
+ *   old list, and polls the links update() left.
  * - {@link PeerPoller.stop} cancels the timer and closes every connection;
  *   `ib watch` stops the poller before it closes the endpoint. A dial or
  *   request still in flight is ignored when it settles. `start` again
@@ -106,14 +116,17 @@ export interface PeerLinkState {
   agents: readonly RemoteAgent[] | null;
   /** The pending questions of those agents, kept like them; null until a list arrives. */
   questions: readonly RemoteQuestion[] | null;
+  /** True from a manual reconnect ({@link PeerPoller.reconnect}) until its outcome. */
+  reconnecting?: boolean;
 }
 
 export type PeerLinkStatus = "connected" | "connecting" | "offline";
 
-/** A new peer is connecting until its first outcome. Retrying keeps the previous outcome. */
+/** A new or reconnecting peer is connecting until its first outcome. Retrying keeps the previous outcome. */
 export function peerLinkStatus(link: PeerLinkState | undefined): PeerLinkStatus {
   if (!link) return "connecting";
   if (link.connected) return "connected";
+  if (link.reconnecting) return "connecting";
   return link.lastError === null && link.lastOkAt === null ? "connecting" : "offline";
 }
 
@@ -152,6 +165,10 @@ interface Link {
   questions: readonly RemoteQuestion[] | null;
   /** The complete snapshot as JSON, to tell a changed list from the same one. */
   snapshotKey: string | null;
+  /** A manual reconnect awaits its outcome. */
+  reconnecting: boolean;
+  /** A manual reconnect closed the connection of the poll in flight: that poll redials when it settles. */
+  redial: boolean;
 }
 
 /** A failed dial or request, as one short line. */
@@ -187,11 +204,20 @@ export class PeerPoller {
   private cancelTimer: (() => void) | null = null;
   private lastReadError: string | null = null;
   private readonly listeners = new Set<() => void>();
+  private epoch = 0;
 
   constructor(private readonly deps: PeerPollerDeps) {}
 
   get isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Bumped by every {@link update}. A `peers.json` read that started before
+   * the latest update() may predate that change, so its list is discarded.
+   */
+  get peersEpoch(): number {
+    return this.epoch;
   }
 
   /** Subscribe to every visible change of {@link states}. Returns the unsubscribe function. */
@@ -215,7 +241,43 @@ export class PeerPoller {
       repos: link.repos,
       agents: link.agents,
       questions: link.questions,
+      reconnecting: link.reconnecting,
     }));
+  }
+
+  /**
+   * A manual reconnect (SPEC.md §20.1, the Peers tab's Enter): close the
+   * peer's connection, if any, and poll it now. The close is on purpose:
+   * `link.conn` is cleared first, so watchClose ignores it, and the poll it
+   * ends does not record it (`redial`). The link shows `connecting` until the
+   * outcome. Never a second dial: a request in flight ends with the close and
+   * its poll redials as it settles, and a dial in flight is the reconnect.
+   * Returns false when the poller is stopped or does not poll this peer.
+   */
+  reconnect(peerId: string): boolean {
+    const link = this.links.get(peerId);
+    if (!this.running || link === undefined) return false;
+    const conn = link.conn;
+    const pending = this.inFlight.has(link.id);
+    const what = conn !== null ? "closing the connection and dialing again" : pending ? "a dial is already in progress" : "dialing now";
+    this.deps.log(`peer link: reconnecting to ${link.name} (${shortPeerId(link.id)}) on request: ${what}`);
+    link.conn = null;
+    link.connected = false;
+    link.connectedAt = null;
+    link.lastError = null;
+    link.reconnecting = true;
+    if (pending && conn !== null) link.redial = true;
+    if (conn !== null) closeQuietly(conn, PEER_CLOSE.done, "reconnecting");
+    if (!pending) void this.poll(link);
+    this.notify();
+    return true;
+  }
+
+  /** Follow a `peers.json` change this process made (the Peers tab's remove) now, not on the next tick. */
+  update(peers: Peer[]): void {
+    if (!this.running) return;
+    this.epoch++;
+    this.sync(peers);
   }
 
   /** The already authenticated link for a human-initiated request. */
@@ -275,6 +337,8 @@ export class PeerPoller {
       link.conn = null;
       link.connected = false;
       link.connectedAt = null;
+      link.reconnecting = false;
+      link.redial = false;
       if (conn !== null) closeQuietly(conn, PEER_CLOSE.done, "shutting down");
     }
     this.notify();
@@ -284,9 +348,12 @@ export class PeerPoller {
   async tick(): Promise<void> {
     if (!this.running || this.readingPeers) return;
     this.readingPeers = true;
+    const epoch = this.epoch;
     let peers: Peer[] | null = null;
     try {
       peers = await this.deps.readPeers();
+      // Read before the Peers tab's removal landed (update): keep the links as update() left them.
+      if (epoch !== this.epoch) peers = null;
       this.lastReadError = null;
     } catch (err) {
       // Keep polling the peers already known (the other side still checks
@@ -336,6 +403,8 @@ export class PeerPoller {
           agents: null,
           questions: null,
           snapshotKey: null,
+          reconnecting: false,
+          redial: false,
         });
         changed = true;
       } else {
@@ -394,6 +463,8 @@ export class PeerPoller {
       this.succeeded(link, snapshot);
     } catch (err) {
       if (!this.isCurrent(link, generation)) return;
+      // A manual reconnect closed this poll's connection: the redial below reports the outcome.
+      if (link.redial) return;
       if (err instanceof PeerBusyReply && link.conn === conn && conn && !this.recordObservedClose(link, conn)) {
         // A busy first reply connects the link as a list would: its `connected to` line, and `connectedAt` for the disconnect line.
         this.markConnected(link, this.deps.now());
@@ -401,6 +472,10 @@ export class PeerPoller {
       } else this.failed(link, describeFailure(err, conn));
     } finally {
       this.inFlight.delete(link.id);
+      if (link.redial) {
+        link.redial = false;
+        if (this.isCurrent(link, generation)) void this.poll(link);
+      }
     }
   }
 
@@ -445,6 +520,7 @@ export class PeerPoller {
 
   /** A link not yet connected becomes so at `at`: the `connected to` line, and the time its disconnect line counts from. */
   private markConnected(link: Link, at: number): void {
+    link.reconnecting = false;
     if (link.connected) return;
     this.deps.log(`peer link: connected to ${link.name} (${shortPeerId(link.id)})`);
     link.connected = true;
@@ -457,6 +533,8 @@ export class PeerPoller {
    * change of error.
    */
   private failed(link: Link, message: string): void {
+    // A reconnect cleared `lastError`, so its failure is always logged and shown.
+    link.reconnecting = false;
     if (link.connected && link.connectedAt !== null) {
       this.deps.log(disconnectLine(link.name, link.id, "dialed", this.deps.now() - link.connectedAt, message));
     } else if (link.lastError !== message) {

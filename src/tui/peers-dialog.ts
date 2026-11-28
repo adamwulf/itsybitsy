@@ -9,6 +9,10 @@
  *
  * Esc cancels at every stage, keeps the saved name at the name prompt, leaves
  * a result, and closes the dialog from the idle view.
+ *
+ * In the idle view, Up/k and Down/j move between the "Pair with id" input
+ * (focused by default) and the listed peers; on a peer, Enter reconnects it
+ * and Delete or Backspace asks to remove it, in place of the input.
  */
 
 import { matchesKey, Key, visibleWidth } from "@mariozechner/pi-tui";
@@ -17,7 +21,7 @@ import { formatPairCode, isWellFormedPairCode, normalizePairCode } from "../peer
 import type { OutgoingTransfer, PeerPane, PeerPaneTarget, RemoteNewAgentRequest } from "../peers/peer-link";
 import { peerLinkStatus, type PeerLinkStatus } from "../peers/poller";
 import type { EndpointStatus, PeerServiceView } from "../peers/service";
-import { peerNameProblem, shortPeerId, SHORT_ID_LENGTH } from "../peers/store";
+import { peerNameProblem, shortPeerId, SHORT_ID_LENGTH, type Peer } from "../peers/store";
 import { cancelPaste, isPasteInProgress, resolvePasteText, sanitizePasteForSingleLine } from "./clipboard";
 import { BOLD, DIM, GREEN, RED, RESET, YELLOW } from "./colors";
 import type { DialogCtx } from "./dialog-handler";
@@ -42,6 +46,10 @@ export interface PeersDialogService {
   closeDialog(): void;
   /** Start pairing with the typed id; returns the inline error, or null once started. */
   pairWith(input: string): string | null;
+  /** Close a peer's connection and poll it now; returns the inline error, or null once asked. */
+  reconnectPeer(peerId: string): string | null;
+  /** Remove a peer from peers.json by its full id; resolves to the inline error, or null once removed. */
+  removePeer(peerId: string): Promise<string | null>;
   submitCode(code: string): void;
   submitName(name: string | null): void;
   cancel(): void;
@@ -64,24 +72,53 @@ export type PeersDialogState = {
   error: string | null;
   /** This machine's name (src/machine-name.ts): the name prompt refuses it. */
   machineName: string;
+  /** The selected paired peer's id; null while the "Pair with id" input has focus. */
+  selectedPeerId: string | null;
+  /** The remove prompt shown in place of the input: the peer it names, and whether its removal runs. */
+  removing: { peer: Peer; pending: boolean } | null;
 };
 
 /** Most peers listed; the rest are counted. */
 const MAX_LISTED_PEERS = 10;
 
 export function newPeersDialog(service: PeersDialogService, machineName: string): PeersDialogState {
-  return { service, idValue: "", sessionValue: "", inputKey: null, error: null, machineName };
+  return { service, idValue: "", sessionValue: "", inputKey: null, error: null, machineName, selectedPeerId: null, removing: null };
 }
 
-/** Start each session stage's input empty. Called on every service change and before every key. */
+/** The peers the list shows, which Up and Down move through. */
+function listedPeers(view: PeerServiceView): Peer[] {
+  return view.peersError === null ? view.peers.slice(0, MAX_LISTED_PEERS) : [];
+}
+
+/**
+ * Start each session stage's input empty; a session starting or ending
+ * gives the input focus. A selected peer, or one the remove prompt names,
+ * that is no longer listed gives it focus too. Called on every service
+ * change and before every key.
+ */
 export function syncPeersDialog(d: PeersDialogState): void {
-  const session = d.service.view().session;
+  const view = d.service.view();
+  const session = view.session;
   const key = session === null ? null : `${session.id}:${session.stage.stage}`;
   if (key !== d.inputKey) {
     d.inputKey = key;
     d.sessionValue = "";
     d.error = null;
+    d.selectedPeerId = null;
+    d.removing = null;
   }
+  const listed = (id: string) => listedPeers(view).some(peer => peer.id === id);
+  if (d.selectedPeerId !== null && !listed(d.selectedPeerId)) d.selectedPeerId = null;
+  // A confirmed removal takes its peer off the list; its own outcome moves the selection.
+  if (d.removing !== null && !d.removing.pending && !listed(d.removing.peer.id)) d.removing = null;
+}
+
+/** Whether digits type (the id input, the code or the name has focus) rather than switch setup tabs. */
+export function peersDialogEditing(d: PeersDialogState): boolean {
+  syncPeersDialog(d);
+  const stage = d.service.view().session?.stage.stage;
+  if (stage === undefined) return d.selectedPeerId === null && d.removing === null;
+  return stage === "code-entry" || stage === "naming";
 }
 
 /** Single-line editing, the same rules as the plain input dialog. Returns whether `data` edited the field. */
@@ -111,25 +148,88 @@ function editLine(ctx: DialogCtx, d: PeersDialogState, field: "idValue" | "sessi
   return false;
 }
 
+/**
+ * Up/k and Down/j between the input and the listed peers: Up from the input
+ * selects the last peer, Down from the last returns to the input. j and k
+ * never type, since an id is hex. Returns whether `data` was one of them.
+ */
+function moveSelection(d: PeersDialogState, listed: Peer[], data: string): boolean {
+  if (isPasteInProgress()) return false;
+  const up = matchesKey(data, Key.up) || data === "k";
+  if (!up && !matchesKey(data, Key.down) && data !== "j") return false;
+  const index = listed.findIndex(peer => peer.id === d.selectedPeerId);
+  const next = index === -1
+    ? (up ? listed.at(-1)?.id ?? null : null)
+    : (up ? listed[Math.max(0, index - 1)]!.id : listed[index + 1]?.id ?? null);
+  if (next !== d.selectedPeerId) {
+    d.selectedPeerId = next;
+    d.error = null;
+  }
+  return true;
+}
+
+/** Keys on a selected peer row: Enter reconnects it; Delete, or Backspace (the Mac "delete" key), opens the remove prompt. */
+function handlePeerRow(d: PeersDialogState, view: PeerServiceView, peerId: string, data: string, enter: boolean): void {
+  if (enter) {
+    d.error = d.service.reconnectPeer(peerId);
+  } else if (matchesKey(data, Key.delete) || matchesKey(data, Key.backspace) || data === "\x7f") {
+    const peer = view.peers.find(p => p.id === peerId);
+    if (peer) d.removing = { peer, pending: false };
+    d.error = null;
+  }
+}
+
+/** The remove prompt's keys: Enter or y removes, Esc or n cancels. While the removal runs, only Esc (closing the dialog) acts. */
+function handleRemovePrompt(ctx: DialogCtx, d: PeersDialogState, data: string, escape: boolean, enter: boolean): void {
+  const removing = d.removing!;
+  if (removing.pending) {
+    if (escape) ctx.closeDialog();
+    return;
+  }
+  if (escape || data === "n" || data === "N") {
+    d.removing = null;
+    return;
+  }
+  if (!enter && data !== "y" && data !== "Y") return;
+  removing.pending = true;
+  const index = listedPeers(d.service.view()).findIndex(peer => peer.id === removing.peer.id);
+  void d.service.removePeer(removing.peer.id).then(error => {
+    // A pairing session that started meanwhile took over the pairing area.
+    if (d.removing !== removing) return;
+    d.removing = null;
+    d.error = error;
+    // Select the peer that took its place, else the new last one, else the input.
+    const listed = listedPeers(d.service.view());
+    if (!listed.some(peer => peer.id === removing.peer.id)) d.selectedPeerId = (listed[index] ?? listed.at(-1))?.id ?? null;
+    ctx.tui?.requestRender();
+  });
+}
+
 /** Handle a key in the Peers tab after setup navigation. */
 export function handlePeersDialogInput(ctx: DialogCtx, d: PeersDialogState, data: string): boolean {
   syncPeersDialog(d);
-  const session = d.service.view().session;
+  const view = d.service.view();
+  const session = view.session;
   const escape = matchesKey(data, Key.escape);
   const enter = matchesKey(data, Key.enter);
   if (escape || enter) cancelPaste();
 
   if (session === null) {
-    if (escape) {
+    if (d.removing !== null) {
+      handleRemovePrompt(ctx, d, data, escape, enter);
+    } else if (escape) {
       ctx.closeDialog();
       return true;
-    }
-    if (enter) {
-      d.error = d.service.pairWith(d.idValue);
-      if (d.error === null) d.idValue = "";
-      syncPeersDialog(d);
-    } else if (editLine(ctx, d, "idValue", data)) {
-      d.error = null;
+    } else if (!moveSelection(d, listedPeers(view), data)) {
+      if (d.selectedPeerId !== null) {
+        handlePeerRow(d, view, d.selectedPeerId, data, enter);
+      } else if (enter) {
+        d.error = d.service.pairWith(d.idValue);
+        if (d.error === null) d.idValue = "";
+        syncPeersDialog(d);
+      } else if (editLine(ctx, d, "idValue", data)) {
+        d.error = null;
+      }
     }
     ctx.tui?.requestRender();
     return true;
@@ -211,9 +311,9 @@ export function peerLinkStateText(status: PeerLinkStatus): string {
   return `${linkColors[status]}${status}${RESET}`;
 }
 
-/** The input line: the end of the value stays visible. */
-function inputLine(value: string, innerWidth: number): string {
-  const line = `> ${value}█`;
+/** The input line: the end of the value stays visible. Unfocused, it has no cursor. */
+function inputLine(value: string, innerWidth: number, focused = true): string {
+  const line = `> ${value}${focused ? "█" : ""}`;
   if (visibleWidth(line) <= innerWidth) return line;
   const tail = Array.from(line);
   while (tail.length > 0 && visibleWidth(`…${tail.join("")}`) > innerWidth) tail.shift();
@@ -224,10 +324,10 @@ function proseLines(text: string, width: number, color = ""): string[] {
   return wordWrapSingleLine(text, width).map(line => color ? `${color}${line}${RESET}` : line);
 }
 
-function peerListLines(view: PeerServiceView, innerWidth: number, available: number, maxLines: number): string[] {
+function peerListLines(view: PeerServiceView, innerWidth: number, available: number, maxLines: number, selectedId: string | null): string[] {
   if (view.peersError !== null) return proseLines(view.peersError, innerWidth, RED).slice(0, available);
   if (view.peers.length === 0) return [`${DIM}  none yet${RESET}`].slice(0, available);
-  const listed = view.peers.slice(0, MAX_LISTED_PEERS);
+  const listed = listedPeers(view);
   // Reserve the indent, both gaps, the short id and the longest status word.
   const availableNameWidth = innerWidth - 6 - SHORT_ID_LENGTH - PEER_LINK_WORD_WIDTH;
   const nameWidth = Math.min(availableNameWidth, Math.max(...listed.map(p => visibleWidth(p.name))));
@@ -237,12 +337,15 @@ function peerListLines(view: PeerServiceView, innerWidth: number, available: num
     const link = links.get(peer.id);
     const state = peerLinkStateText(peerLinkStatus(link));
     const id = `${DIM}${shortPeerId(peer.id)}${RESET}`;
+    // The selected row is marked as on the Scheduled tab.
+    const mark = (text: string) => peer.id === selectedId ? `${GREEN}> ${BOLD}${text}${RESET}` : `  ${text}`;
     if (nameWidth > 0) {
       const name = truncatePeerField(peer.name, nameWidth);
       const pad = " ".repeat(nameWidth - visibleWidth(name));
-      lines.push(`  ${name}${pad}  ${id}  ${state}`);
+      lines.push(`${mark(name + pad)}  ${id}  ${state}`);
     } else {
-      lines.push(truncatePeerField(peer.name, innerWidth), ...wordWrapSingleLine(`${id}  ${state}`, innerWidth));
+      const name = peer.id === selectedId ? mark(truncatePeerField(peer.name, innerWidth - 2)) : truncatePeerField(peer.name, innerWidth);
+      lines.push(name, ...wordWrapSingleLine(`${id}  ${state}`, innerWidth));
     }
     if (peer.name.startsWith("@")) lines.push(...wordWrapSingleLine("Remove and re-pair this machine with a name that does not start with @.", innerWidth));
     const error = link && !link.connected && link.lastError !== null
@@ -251,25 +354,34 @@ function peerListLines(view: PeerServiceView, innerWidth: number, available: num
     return { lines, error };
   });
 
-  // Reclaim header space if needed for the first peer, its first error line and the count.
-  const first = groups[0]!;
-  const firstMinimum = first.lines.length + Math.min(1, first.error.length);
-  const budget = Math.min(maxLines, Math.max(available, firstMinimum + (view.peers.length > 1 ? 1 : 0)));
-  const overflow = (hidden: number) => {
-    if (hidden === 0) return [];
-    const count = `…and ${hidden} more`;
-    const full = proseLines(`  ${count} (ib peer list shows all)`, innerWidth, DIM);
-    return first.lines.length + first.error.length + full.length <= budget ? full : [`${DIM}  ${count}${RESET}`];
+  /** The rows from `from` on that fit, and how many peers they show. */
+  const window = (from: number) => {
+    // Reclaim header space if needed for the window's first peer, its first error line and the count.
+    const first = groups[from]!;
+    const firstMinimum = first.lines.length + Math.min(1, first.error.length);
+    const budget = Math.min(maxLines, Math.max(available, firstMinimum + (view.peers.length > 1 ? 1 : 0)));
+    const overflow = (hidden: number) => {
+      if (hidden === 0) return [];
+      const count = `…and ${hidden} more`;
+      const full = proseLines(`  ${count} (ib peer list shows all)`, innerWidth, DIM);
+      return first.lines.length + first.error.length + full.length <= budget ? full : [`${DIM}  ${count}${RESET}`];
+    };
+    const result: string[] = [];
+    let shown = 0;
+    for (const group of groups.slice(from)) {
+      const room = budget - result.length - overflow(view.peers.length - shown - 1).length;
+      if (group.lines.length + Math.min(1, group.error.length) > room) break;
+      result.push(...group.lines, ...group.error.slice(0, room - group.lines.length));
+      shown++;
+    }
+    return { lines: [...result, ...overflow(view.peers.length - shown)].slice(0, budget), shown };
   };
-  const result: string[] = [];
-  let shown = 0;
-  for (const group of groups) {
-    const room = budget - result.length - overflow(view.peers.length - shown - 1).length;
-    if (group.lines.length + Math.min(1, group.error.length) > room) break;
-    result.push(...group.lines, ...group.error.slice(0, room - group.lines.length));
-    shown++;
-  }
-  return [...result, ...overflow(view.peers.length - shown)].slice(0, budget);
+  // Drop rows from the top until the selected one is on screen; the count includes them.
+  const selected = listed.findIndex(peer => peer.id === selectedId);
+  let from = 0;
+  let shown = window(0);
+  while (from < selected && selected >= from + shown.shown) shown = window(++from);
+  return shown.lines;
 }
 
 export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number, maxLines: number): string[] {
@@ -288,7 +400,7 @@ export function buildPeersDialogContent(d: PeersDialogState, innerWidth: number,
   const pairing = buildPairingContent(d, view, innerWidth);
   // Leave the active input, error and key hint together at the bottom of the overlay.
   const room = Math.max(0, maxLines - pairing.length - 2); // Paired peers heading and separator
-  const peers = peerListLines(view, innerWidth, Math.max(1, room - header.length), room);
+  const peers = peerListLines(view, innerWidth, Math.max(1, room - header.length), room, d.selectedPeerId);
   const top = header.slice(0, Math.max(0, room - peers.length));
   return [...top, `${BOLD}Paired peers${RESET}`, ...peers, "", ...pairing];
 }
@@ -301,11 +413,20 @@ function buildPairingContent(d: PeersDialogState, view: PeerServiceView, innerWi
   };
   let hint: string;
   const session = view.session;
-  if (session === null) {
+  if (session === null && d.removing !== null) {
+    const { peer, pending } = d.removing;
+    prose(`Remove ${JSON.stringify(peer.name)} (${shortPeerId(peer.id)})?`, BOLD);
+    prose("This machine stops polling it. The other machine keeps its own entry until it removes this one.");
+    if (pending) prose("Removing…", DIM);
+    hint = pending ? "Esc: close" : "Enter or y: remove    Esc or n: cancel";
+  } else if (session === null) {
+    const focused = d.selectedPeerId === null;
     lines.push(`${BOLD}Pair with id${RESET}`);
-    lines.push(inputLine(d.idValue, innerWidth));
+    lines.push(inputLine(d.idValue, innerWidth, focused));
     error();
-    hint = "Enter: pair    Esc: close";
+    hint = !focused ? "Enter: reconnect    Delete: remove    Esc: close"
+      : listedPeers(view).length > 0 ? "Enter: pair    ↑/k: select a peer    Esc: close"
+      : "Enter: pair    Esc: close";
   } else {
     const peer = shortPeerId(session.peerId);
     const stage = session.stage;

@@ -9320,6 +9320,20 @@ class FakePeerService implements PeersDialogService {
     this.setSession("initiator", { stage: "connecting" });
     return null;
   }
+  /** What reconnectPeer answers. */
+  reconnectError: string | null = null;
+  reconnectPeer(peerId: string): string | null {
+    this.calls.push(`reconnect:${peerId}`);
+    return this.reconnectError;
+  }
+  /** Each removePeer call's result; a test resolves it by hand. */
+  removals: Array<{ peerId: string; resolve: (error: string | null) => void }> = [];
+  removePeer(peerId: string): Promise<string | null> {
+    this.calls.push(`remove:${peerId}`);
+    const { promise, resolve } = Promise.withResolvers<string | null>();
+    this.removals.push({ peerId, resolve });
+    return promise;
+  }
   submitCode(code: string): void {
     this.calls.push(`code:${code}`);
   }
@@ -10090,10 +10104,253 @@ describe("setup Peers tab", () => {
       const content = body.map(line => line.slice(1, -1).trim()).join(" ");
       expect(content).toContain(`…and ${11 - shown} more (ib peer list shows all)`);
       expect(content).toContain("Pair with id > abc█");
-      expect(content).toContain("Enter: pair    Esc: close");
+      // With peers listed, the hint names the key that selects one; 40 columns wrap it.
+      expect(content).toMatch(/Enter: pair {4}↑\/k: select a peer( {4}| )Esc: close/);
     } finally {
       Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
     }
+  });
+
+  // Selecting a paired peer: Enter reconnects it, Delete asks to remove it (SPEC §20.1).
+  describe("paired peer selection", () => {
+    const A = "1a".repeat(32);
+    const B = "2b".repeat(32);
+    const C = "3c".repeat(32);
+    const peer = (id: string, name: string) => ({ id, name, pairedAt: "x" });
+    const ROW_HINT = "Enter: reconnect    Delete: remove    Esc: close";
+    const INPUT_HINT = "Enter: pair    ↑/k: select a peer    Esc: close";
+    const PROMPT_HINT = "Enter or y: remove    Esc or n: cancel";
+
+    function withPeers(...peers: Array<{ id: string; name: string; pairedAt: string }>) {
+      const { dashboard, service } = open();
+      service.set({ peers });
+      return { dashboard, service, dialog: peersTab(dashboard) };
+    }
+    const settle = () => new Promise<void>(done => setImmediate(done));
+
+    test("the input has focus first; Up/k selects the last peer, then the one above; Down/j returns to the input", () => {
+      const { dashboard, dialog } = withPeers(peer(A, "Alpha"), peer(B, "Bravo"), peer(C, "Charlie"));
+      expect(dialog.selectedPeerId).toBeNull();
+      expect(text(dashboard)).toContain("> █");
+      expect(text(dashboard)).toContain(INPUT_HINT);
+      const walk = (keys: string[]) => keys.map(key => { dashboard.handleInput(key); return dialog.selectedPeerId; });
+      expect(walk(["k", "\x1b[A", "k", "k"])).toEqual([C, B, A, A]);
+      expect(walk(["j", "\x1b[B", "j", "j", "\x1b[B"])).toEqual([B, C, null, null, null]);
+      // j and k never typed; the input still types the rest, and a paste keeps them.
+      expect(dialog.idValue).toBe("");
+      for (const chunk of ["ab", "\x1b[200~c", "k", "j\x1b[201~"]) dashboard.handleInput(chunk);
+      expect(dialog.idValue).toBe("abckj");
+      expect(dialog.selectedPeerId).toBeNull();
+    });
+
+    test("a selected row is marked like the Scheduled tab's, and the input loses its cursor", () => {
+      const { dashboard, dialog } = withPeers(peer(A, "Alpha"), peer(C, "Charlie"));
+      dialog.idValue = "ab";
+      dashboard.handleInput("k");
+      const rows = rendered(dashboard);
+      expect(rows.find(row => row.includes(C.slice(0, 10)))).toContain(`${GREEN}> ${BOLD}Charlie`);
+      // The marker takes the place of the indent, so the names stay in one column.
+      expect(stripAnsi(rows.find(row => row.includes(C.slice(0, 10)))!)).toMatch(/│ {2}> Charlie /);
+      expect(stripAnsi(rows.find(row => row.includes(A.slice(0, 10)))!)).toMatch(/│ {4}Alpha /);
+      const out = text(dashboard);
+      expect(out).toContain("> ab ");
+      expect(out).not.toContain("█");
+      expect(out).toContain(ROW_HINT);
+    });
+
+    test("with no peers, Up/k and Down/j do nothing, and the hint does not offer them", () => {
+      const { dashboard, dialog } = withPeers();
+      for (const key of ["k", "\x1b[A", "j", "\x1b[B"]) dashboard.handleInput(key);
+      expect(dialog.selectedPeerId).toBeNull();
+      expect(dialog.idValue).toBe("");
+      expect(text(dashboard)).toContain("Enter: pair    Esc: close");
+    });
+
+    test("Enter on a peer asks the service to reconnect it; its error shows inline, and moving clears it", () => {
+      const { dashboard, service, dialog } = withPeers(peer(A, "Alpha"), peer(B, "Bravo"));
+      dashboard.handleInput("k");
+      dashboard.handleInput("k");
+      service.calls = [];
+      dashboard.handleInput("\r");
+      expect(service.calls).toEqual([`reconnect:${A}`]);
+      expect(dialog.error).toBeNull();
+      service.reconnectError = "Peering is disabled: ib watch pid 4242 owns the endpoint.";
+      dashboard.handleInput("\r");
+      expect(service.calls).toEqual([`reconnect:${A}`, `reconnect:${A}`]);
+      expect(text(dashboard)).toContain("Peering is disabled: ib watch pid 4242 owns the endpoint.");
+      expect(rendered(dashboard).some(row => row.includes(`${RED}Peering is disabled`))).toBe(true);
+      dashboard.handleInput("j");
+      expect(dialog.error).toBeNull();
+      expect(service.calls.some(call => call.startsWith("pair:"))).toBe(false);
+    });
+
+    test("digits switch tabs from a peer row and type in the input", () => {
+      const { dashboard, service, dialog } = withPeers(peer(A, "Alpha"));
+      dashboard.handleInput("1");
+      expect(dialog.idValue).toBe("1");
+      dashboard.handleInput("k");
+      dashboard.handleInput("1");
+      expect(assertDialog(dashboard.dialog, "setup").tab).toBe(0);
+      expect(service.calls).toEqual(["open", "close"]);
+    });
+
+    test("Esc on a peer row closes the dialog", () => {
+      const { dashboard, service } = withPeers(peer(A, "Alpha"));
+      dashboard.handleInput("k");
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+      expect(service.calls).toEqual(["open", "close"]);
+    });
+
+    test("Delete or Backspace opens the remove prompt in place of the input; n and Esc cancel it", () => {
+      const { dashboard, service, dialog } = withPeers(peer(A, "Alpha"), peer(B, "Bravo"));
+      dashboard.handleInput("k");
+      for (const [key, cancel] of [["\x1b[3~", "n"], ["\x7f", "\x1b"]]) {
+        dashboard.handleInput(key!);
+        const out = text(dashboard);
+        expect(out).toContain(`Remove "Bravo" (${B.slice(0, 10)})?`);
+        expect(out.replace(/[│\s]+/g, " ")).toContain("This machine stops polling it. The other machine keeps its own entry until it removes this one.");
+        expect(out).toContain(PROMPT_HINT);
+        expect(out).not.toContain("Pair with id");
+        dashboard.handleInput(cancel!);
+        expect(dialog.removing).toBeNull();
+        expect(dialog.selectedPeerId).toBe(B);
+        expect(text(dashboard)).toContain(ROW_HINT);
+      }
+      expect(peersTab(dashboard)).toBe(dialog);
+      expect(service.calls).toEqual(["open"]);
+    });
+
+    test("Enter or y removes by full id, then selects the peer that took its place, else the new last, else the input", async () => {
+      const { dashboard, service, dialog } = withPeers(peer(A, "Alpha"), peer(B, "Bravo"), peer(C, "Charlie"));
+      service.calls = [];
+      const remove = async (confirm: string, remaining: Array<ReturnType<typeof peer>>) => {
+        dashboard.handleInput("\x1b[3~");
+        dashboard.handleInput(confirm);
+        const removing = dialog.removing!.peer.id;
+        expect(service.calls.at(-1)).toBe(`remove:${removing}`);
+        expect(text(dashboard)).toContain("Removing…");
+        dashboard.handleInput("n"); // nothing to cancel any more
+        expect(dialog.removing?.pending).toBe(true);
+        // The service re-reads peers.json, then resolves.
+        service.set({ peers: remaining });
+        expect(dialog.removing?.pending).toBe(true);
+        service.removals.at(-1)!.resolve(null);
+        await settle();
+        expect(dialog.removing).toBeNull();
+        return dialog.selectedPeerId;
+      };
+      dashboard.handleInput("k");
+      dashboard.handleInput("k");
+      expect(await remove("\r", [peer(A, "Alpha"), peer(C, "Charlie")])).toBe(C);
+      expect(await remove("y", [peer(A, "Alpha")])).toBe(A);
+      expect(await remove("Y", [])).toBeNull();
+      expect(service.calls).toEqual([`remove:${B}`, `remove:${C}`, `remove:${A}`]);
+      expect(text(dashboard)).toContain("Enter: pair    Esc: close");
+      expect(text(dashboard)).toContain("> █");
+    });
+
+    test("a failed removal shows its error in red and keeps the peer selected", async () => {
+      const { dashboard, service, dialog } = withPeers(peer(A, "Alpha"));
+      dashboard.handleInput("k");
+      dashboard.handleInput("\x7f");
+      dashboard.handleInput("\r");
+      service.removals[0]!.resolve("Could not remove Alpha: disk full");
+      await settle();
+      expect(dialog.removing).toBeNull();
+      expect(dialog.selectedPeerId).toBe(A);
+      expect(rendered(dashboard).some(row => row.includes(`${RED}Could not remove Alpha: disk full`))).toBe(true);
+      expect(text(dashboard)).toContain(ROW_HINT);
+    });
+
+    test("Esc while Removing… closes the dialog; reopened once the removal settles, the input has focus and no prompt shows", async () => {
+      const { dashboard, service } = withPeers(peer(A, "Alpha"), peer(B, "Bravo"));
+      dashboard.handleInput("k");
+      dashboard.handleInput("\x1b[3~");
+      dashboard.handleInput("\r");
+      expect(text(dashboard)).toContain("Removing…");
+      dashboard.handleInput("\x1b");
+      expect(dashboard.dialog).toBeNull();
+      expect(service.calls).toEqual(["open", `remove:${B}`, "close"]);
+
+      service.set({ peers: [peer(A, "Alpha")] });
+      service.removals[0]!.resolve(null);
+      await settle();
+      dashboard.handleInput("I");
+      const reopened = peersTab(dashboard);
+      expect(reopened.selectedPeerId).toBeNull();
+      expect(reopened.removing).toBeNull();
+      const out = text(dashboard);
+      expect(out).toContain("> █");
+      expect(out).toContain(INPUT_HINT);
+      expect(out).not.toContain("Remove \"");
+      expect(out).not.toContain("Removing…");
+      expect(service.calls).toEqual(["open", `remove:${B}`, "close", "open"]);
+    });
+
+    test("a peer that leaves the list cancels its prompt, and a selected one gives the input focus", () => {
+      const { dashboard, service, dialog } = withPeers(peer(A, "Alpha"), peer(B, "Bravo"));
+      dashboard.handleInput("k");
+      dashboard.handleInput("\x1b[3~");
+      service.set({ peers: [peer(A, "Alpha")] }); // ib peer remove, elsewhere
+      expect(dialog.removing).toBeNull();
+      expect(dialog.selectedPeerId).toBeNull();
+      expect(text(dashboard)).toContain("> █");
+      dashboard.handleInput("k");
+      service.set({ peersError: "peers.json: not valid JSON" });
+      expect(dialog.selectedPeerId).toBeNull();
+      expect(service.calls).toEqual(["open"]);
+    });
+
+    test("a pairing session takes over from a selected row or the prompt; when it ends, the input has focus", () => {
+      const { dashboard, service, dialog } = withPeers(peer(A, "Alpha"));
+      for (const keys of [["k"], ["k", "\x1b[3~"]]) {
+        for (const key of keys) dashboard.handleInput(key);
+        service.setSession("responder", { stage: "incoming" });
+        expect(text(dashboard)).toContain(`Pairing request from ${OTHER_SHORT}…`);
+        expect(dialog.selectedPeerId).toBeNull();
+        expect(dialog.removing).toBeNull();
+        dashboard.handleInput("k"); // no navigation during a session
+        expect(dialog.selectedPeerId).toBeNull();
+        service.set({ session: null });
+        expect(text(dashboard)).toContain("> █");
+        expect(text(dashboard)).toContain(INPUT_HINT);
+      }
+    });
+
+    test("a short overlay keeps the selected peer's row on screen", () => {
+      const originalRows = process.stdout.rows;
+      Object.defineProperty(process.stdout, "rows", { value: 24, writable: true, configurable: true });
+      try {
+        const peers = Array.from({ length: 11 }, (_, i) => peer(i.toString(16).repeat(64), `peer-${i}`));
+        const { dashboard, service, dialog } = withPeers(...peers);
+        service.set({ links: peers.map(p => ({ ...p, connected: false, connectedAt: null, lastOkAt: null,
+          coordinator: null, lastError: "connection refused", repos: null, agents: null, questions: null })) });
+        const visible = () => rendered(dashboard).map(stripAnsi).join("\n");
+        /** The peers whose rows show; the count line must name all the others, hidden above or below. */
+        const shownPeers = () => {
+          const out = visible();
+          const shown = [...out.matchAll(/peer-(\d+) +[0-9a-f]{10}  offline/g)].map(match => Number(match[1]));
+          expect(shown.length).toBeGreaterThan(0);
+          expect(out).toContain(`…and ${peers.length - shown.length} more`);
+          return shown;
+        };
+        expect(visible()).not.toContain("peer-9");
+        dashboard.handleInput("k"); // the last listed peer: the 10th
+        expect(dialog.selectedPeerId).toBe(peers[9]!.id);
+        expect(visible()).toMatch(/> peer-9 +9999999999  offline/);
+        const atLast = shownPeers();
+        expect(atLast.at(-1)).toBe(9);
+        expect(atLast).not.toContain(0); // the rows above are left out
+        for (let i = 0; i < 9; i++) dashboard.handleInput("k");
+        expect(visible()).toMatch(/> peer-0 +0000000000  offline/);
+        const atFirst = shownPeers();
+        expect(atFirst[0]).toBe(0);
+        expect(atFirst).not.toContain(9);
+      } finally {
+        Object.defineProperty(process.stdout, "rows", { value: originalRows, writable: true, configurable: true });
+      }
+    });
   });
 
   test("every row fits the dialog in every stage", () => {

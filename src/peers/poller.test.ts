@@ -52,6 +52,8 @@ function makeRig(initialPeers: Peer[]) {
   const dials: string[] = [];
   const logs: string[] = [];
   let readError: Error | null = null;
+  /** While set, a peers.json read returns the list as it was when the read started, once this settles. */
+  let readGate: Promise<void> | null = null;
 
   const remote = (id: string): Remote => {
     let r = remotes.get(id);
@@ -91,7 +93,9 @@ function makeRig(initialPeers: Peer[]) {
   const poller = new PeerPoller({
     readPeers: async () => {
       if (readError) throw readError;
-      return peers.map((p) => ({ ...p }));
+      const read = peers.map((p) => ({ ...p }));
+      if (readGate) await readGate;
+      return read;
     },
     dial: (id) => {
       dials.push(id);
@@ -121,6 +125,9 @@ function makeRig(initialPeers: Peer[]) {
     },
     setReadError: (err: Error | null) => {
       readError = err;
+    },
+    holdReads: (gate: Promise<void> | null) => {
+      readGate = gate;
     },
     setDial: (fn: (id: string) => Promise<PairConnection>) => {
       dialImpl = fn;
@@ -167,6 +174,7 @@ describe("PeerPoller", () => {
       repos: rig.remote(P1).repos,
       agents: rig.remote(P1).agents,
       questions: rig.remote(P1).questions,
+      reconnecting: false,
     });
     for (let i = 2; i <= 4; i++) {
       rig.tick();
@@ -446,7 +454,7 @@ describe("PeerPoller", () => {
     });
     rig.poller.start();
     await waitFor(() => rig.state(P1)?.lastError !== null, { message: "first dial failed" });
-    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, connectedAt: null, lastOkAt: null, lastError: "timed out", coordinator: null, repos: null, agents: null, questions: null });
+    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, connectedAt: null, lastOkAt: null, lastError: "timed out", coordinator: null, repos: null, agents: null, questions: null, reconnecting: false });
 
     rig.setDial(rig.connect);
     rig.tick();
@@ -459,7 +467,7 @@ describe("PeerPoller", () => {
     rig.clock.jump(1_000);
     rig.remote(P1).served[0]!.close(PEER_CLOSE.done, "shutting down");
     await waitFor(() => rig.state(P1)?.connected === false, { message: "dropped" });
-    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, connectedAt: null, lastOkAt: okAt, lastError: "closed by the other side", coordinator: null, repos: rig.remote(P1).repos, agents: firstList, questions: [] });
+    expect(rig.state(P1)).toEqual({ id: P1, name: "B", connected: false, connectedAt: null, lastOkAt: okAt, lastError: "closed by the other side", coordinator: null, repos: rig.remote(P1).repos, agents: firstList, questions: [], reconnecting: false });
 
     // Its list changes while it is away; the redial brings the new one.
     rig.remote(P1).agents = [remoteAgent("agent-new", "waiting")];
@@ -776,6 +784,241 @@ test("a pane slot stays occupied until its pending reply exhausts grace", async 
     expect(String(await pane)).toContain("request timed out");
     expect(rig.poller["paneReads"].has(a)).toBe(false); expect(b.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
   } finally { rig.poller.stop(); }
+});
+
+// The Peers tab's Enter on a peer (SPEC.md §20.1, §20.4 "Poller").
+describe("PeerPoller.reconnect", () => {
+  const short = P1.slice(0, 10);
+  const reconnectLine = (what: string) => `peer link: reconnecting to B (${short}) on request: ${what}`;
+
+  test("a connected peer: its connection closes on purpose, it shows connecting, and it redials now with no failure logged", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    const redial = deferredDial();
+    rig.setDial(() => redial.promise);
+    const before = rig.changes();
+    expect(rig.poller.reconnect(P1)).toBe(true);
+    expect(rig.changes()).toBe(before + 1);
+    expect(rig.state(P1)).toMatchObject({ connected: false, connectedAt: null, lastError: null, reconnecting: true });
+    expect(rig.remote(P1).served[0]!.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "reconnecting" });
+    // No tick: the redial is already under way.
+    expect(rig.dials).toEqual([P1, P1]);
+    // The close's notification reaches the poller: still connecting, with no error.
+    await new Promise<void>(done => setImmediate(done));
+    expect(peerLinkStatus(rig.state(P1))).toBe("connecting");
+    expect(rig.state(P1)?.lastError).toBeNull();
+
+    redial.resolve(await rig.connect(P1));
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "reconnected" });
+    expect(rig.state(P1)).toMatchObject({ lastError: null, reconnecting: false });
+    expect(rig.remote(P1).overlaps).toBe(0);
+    expect(rig.logs).toEqual([
+      `peer link: connected to B (${short})`,
+      reconnectLine("closing the connection and dialing again"),
+      `peer link: connected to B (${short})`,
+    ]);
+    rig.poller.stop();
+  });
+
+  test("a request in flight: the close ends it and its poll redials as it settles; the close is never the error", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    rig.remote(P1).stalled = true;
+    rig.tick(); // this agents poll hangs
+    await Bun.sleep(5);
+    rig.remote(P1).stalled = false;
+    const statuses: string[] = [];
+    rig.poller.onChange(() => statuses.push(peerLinkStatus(rig.state(P1))));
+
+    expect(rig.poller.reconnect(P1)).toBe(true);
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "reconnected" });
+    expect(statuses).toEqual(["connecting", "connected"]);
+    expect(rig.dials).toEqual([P1, P1]);
+    expect(rig.remote(P1).overlaps).toBe(0);
+    expect(rig.logs.filter(line => line.includes("disconnected") || line.includes("closed"))).toEqual([]);
+    expect(rig.logs).toContain(reconnectLine("closing the connection and dialing again"));
+    rig.poller.stop();
+  });
+
+  test("never a second dial: a request the close does not end keeps its slot, and the redial waits for it", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    // This connection ignores this side's close, so its hung request runs on to its deadline.
+    const first = await rig.connect(P1);
+    const closes: string[] = [];
+    const deaf: PairConnection = {
+      remoteId: P1,
+      openBi: () => first.openBi(),
+      acceptBi: () => first.acceptBi(),
+      close: (_code, reason) => { closes.push(reason); },
+      closed: () => first.closed(),
+      closeInfo: () => null,
+    };
+    rig.setDial(async () => deaf);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    rig.remote(P1).stalled = true;
+    rig.tick(); // one poll interval in: this agents poll hangs until its request deadline
+    await Bun.sleep(5);
+    rig.remote(P1).stalled = false;
+    rig.setDial(rig.connect);
+
+    expect(rig.poller.reconnect(P1)).toBe(true);
+    expect(closes).toEqual(["reconnecting"]);
+    // Every tick before the deadline skips the peer: the hung request still holds its slot.
+    for (let i = 0; i < PEER_REQUEST_TIMEOUT_MS / PEER_POLL_INTERVAL_MS - 1; i++) rig.tick();
+    await Bun.sleep(5);
+    expect(rig.dials).toEqual([P1]);
+    expect(peerLinkStatus(rig.state(P1))).toBe("connecting");
+
+    rig.tick(); // the deadline; then the teardown's grace
+    await Bun.sleep(0); rig.clock.advance(750);
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "redialed once the request settled" });
+    expect(rig.dials).toEqual([P1, P1]);
+    expect(rig.state(P1)?.lastError).toBeNull();
+    expect(rig.logs.some(line => line.includes(TIMED_OUT))).toBe(false);
+    rig.poller.stop();
+  });
+
+  test("a dial in flight is the reconnect: no second dial, and its outcome ends connecting", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const hung = deferredDial();
+    rig.setDial(() => hung.promise);
+    rig.poller.start();
+    await waitFor(() => rig.dials.length === 1, { message: "dialing" });
+    expect(rig.poller.reconnect(P1)).toBe(true);
+    expect(rig.state(P1)?.reconnecting).toBe(true);
+    await Bun.sleep(5);
+    expect(rig.dials).toEqual([P1]);
+    hung.reject(new Error("unreachable"));
+    await waitFor(() => peerLinkStatus(rig.state(P1)) === "offline", { message: "failed" });
+    expect(rig.state(P1)).toMatchObject({ reconnecting: false, lastError: "unreachable" });
+    expect(rig.dials).toEqual([P1]);
+    expect(rig.logs).toEqual([reconnectLine("a dial is already in progress"), `peer link: B (${short}): unreachable`]);
+    rig.poller.stop();
+  });
+
+  test("an offline peer redials at once; the same error again is logged and shown, not taken for a repeat", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    rig.setDial(async () => { throw new Error("unreachable"); });
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.lastError === "unreachable", { message: "offline" });
+    const statuses: string[] = [];
+    rig.poller.onChange(() => statuses.push(peerLinkStatus(rig.state(P1))));
+    expect(rig.poller.reconnect(P1)).toBe(true);
+    expect(rig.dials).toEqual([P1, P1]);
+    await waitFor(() => statuses.length === 2, { message: "outcome" });
+    expect(statuses).toEqual(["connecting", "offline"]);
+    expect(rig.state(P1)?.lastError).toBe("unreachable");
+    expect(rig.logs).toEqual([`peer link: B (${short}): unreachable`, reconnectLine("dialing now"), `peer link: B (${short}): unreachable`]);
+    rig.poller.stop();
+  });
+
+  test("a peer removed while its reconnect's request is still in flight: no redial, nothing left reconnecting, closed once", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const closes: string[] = [];
+    rig.setDial(async (id) => {
+      const conn = await rig.connect(id);
+      return {
+        remoteId: id,
+        openBi: () => conn.openBi(),
+        acceptBi: () => conn.acceptBi(),
+        close: (code, reason) => { closes.push(reason); conn.close(code, reason); },
+        closed: () => conn.closed(),
+        closeInfo: () => conn.closeInfo(),
+      };
+    });
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    rig.remote(P1).stalled = true;
+    rig.tick(); // this agents poll hangs
+    await Bun.sleep(5);
+
+    // Removed before the close has ended that request: its poll still holds the slot.
+    expect(rig.poller.reconnect(P1)).toBe(true);
+    rig.setPeers([]);
+    rig.poller.update([]);
+    expect(rig.poller["inFlight"].has(P1)).toBe(true);
+    expect(rig.poller.states()).toEqual([]);
+
+    await waitFor(() => !rig.poller["inFlight"].has(P1), { message: "the old request settled" });
+    rig.tick();
+    await Bun.sleep(5);
+    expect(rig.dials).toEqual([P1]);
+    expect(rig.poller.states()).toEqual([]);
+    expect(closes).toEqual(["reconnecting"]);
+    expect(rig.logs).toEqual([
+      `peer link: connected to B (${short})`,
+      reconnectLine("closing the connection and dialing again"),
+      `peer link: stopped polling B (${short}): no longer in peers.json`,
+    ]);
+    rig.poller.stop();
+  });
+
+  test("refused while stopped or for a peer it does not poll; stop ends a pending reconnect", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    expect(rig.poller.reconnect(P1)).toBe(false);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    expect(rig.poller.reconnect(P2)).toBe(false);
+    expect(rig.dials).toEqual([P1]);
+    expect(rig.logs.filter(line => line.includes("reconnecting"))).toEqual([]);
+
+    rig.setDial(() => deferredDial().promise);
+    expect(rig.poller.reconnect(P1)).toBe(true);
+    rig.poller.stop();
+    expect(rig.state(P1)?.reconnecting).toBe(false);
+    expect(peerLinkStatus(rig.state(P1))).toBe("offline");
+    expect(rig.poller.reconnect(P1)).toBe(false);
+  });
+});
+
+describe("PeerPoller.update", () => {
+  test("drops a removed peer at once, closing its connection, with no tick; stopped, it changes nothing", async () => {
+    const rig = makeRig([peer(P1, "B"), peer(P2, "C")]);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true && rig.state(P2)?.connected === true, { message: "both connected" });
+    const before = rig.changes();
+    rig.setPeers([peer(P2, "C")]);
+    rig.poller.update([peer(P2, "C")]);
+    expect(rig.state(P1)).toBeUndefined();
+    expect(rig.changes()).toBe(before + 1);
+    expect(rig.remote(P1).served[0]!.closeInfo()).toEqual({ byPeer: true, code: PEER_CLOSE.done, reason: "removed" });
+    expect(rig.logs).toContain(`peer link: stopped polling B (${P1.slice(0, 10)}): no longer in peers.json`);
+    expect(rig.state(P2)?.connected).toBe(true);
+    expect(rig.dials).toEqual([P1, P2]);
+
+    rig.poller.stop();
+    rig.poller.update([]);
+    expect(rig.state(P2)).toBeDefined();
+  });
+
+  test("a tick whose read started before update() discards that read: the removed peer stays removed and is not dialed", async () => {
+    const rig = makeRig([peer(P1, "B"), peer(P2, "C")]);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true && rig.state(P2)?.connected === true, { message: "both connected" });
+    const read = Promise.withResolvers<void>();
+    rig.holdReads(read.promise);
+    rig.tick(); // this tick's read holds the old list, B and C
+    rig.setPeers([peer(P2, "C")]);
+    rig.poller.update([peer(P2, "C")]);
+    expect(rig.state(P1)).toBeUndefined();
+
+    rig.holdReads(null);
+    read.resolve();
+    await waitFor(() => rig.remote(P2).requests === 2, { message: "the tick polls the peers update() left" });
+    await Bun.sleep(5);
+    expect(rig.state(P1)).toBeUndefined();
+    expect(rig.dials).toEqual([P1, P2]);
+    expect(rig.remote(P1).requests).toBe(1);
+
+    rig.tick(); // a read that starts after update() is used
+    await waitFor(() => rig.remote(P2).requests === 3, { message: "next tick" });
+    expect(rig.poller.states().map(state => state.id)).toEqual([P2]);
+    expect(rig.dials).toEqual([P1, P2]);
+    rig.poller.stop();
+  });
 });
 
 describe("request timeouts during an attachment transfer", () => {

@@ -11,7 +11,7 @@ import { RESET, BOLD, DIM, REVERSE, GREEN, RED, DIM_GRAY } from "./colors";
 import { resolvePasteText, isPasteInProgress, cancelPaste, sanitizePasteForSingleLine } from "./clipboard";
 import { TextBuffer, deleteWord } from "./text-buffer";
 import { sanitizeAgentNameInput } from "../validation";
-import { buildPeersDialogContent, handlePeersDialogInput, type PeersDialogState } from "./peers-dialog";
+import { buildPeersDialogContent, handlePeersDialogInput, peersDialogEditing, type PeersDialogState } from "./peers-dialog";
 import {
   buildScheduledTabContent, handleScheduledTabInput, handleScheduledTaskFormInput,
   type ScheduledTabState, type ScheduledTaskFormDialog,
@@ -789,9 +789,8 @@ function handleSetupDialog(
   if (matchesKey(data, Key.tab)) { d.onTabChange((d.tab + 1) % count); return true; }
   if (matchesKey(data, Key.shift("tab"))) { d.onTabChange((d.tab + count - 1) % count); return true; }
 
-  // The Peers tab's id, code and name inputs take digits; no other tab has a text field.
-  const stage = d.peers?.service.view().session?.stage.stage;
-  const editing = d.peers && (!stage || stage === "code-entry" || stage === "naming");
+  // The Peers tab's id, code and name inputs take digits while focused; no other tab has a text field.
+  const editing = d.peers !== undefined && peersDialogEditing(d.peers);
   if (!editing && data.length === 1 && data >= "1" && data <= String(count) && Number(data) - 1 !== d.tab) {
     d.onTabChange(Number(data) - 1);
     return true;

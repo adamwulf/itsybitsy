@@ -4747,6 +4747,12 @@ describe("mergeAgent (native)", () => {
 
   // Fake 40-char SHA returned by the mocked `git rev-parse HEAD` after a merge.
   const MERGE_HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
+  // The conflict check's commits, as the mock's rev-parse and rev-list give them:
+  // the target's tip, and one agent commit whose parent is not that tip, so the
+  // check replays it with merge-tree.
+  const CHECK_TARGET = "target-tip";
+  const CHECK_COMMIT = "agent-commit";
+  const CHECK_PARENT = "fork-point";
 
   /**
    * Create a smart mock that handles git commands needed for merge.
@@ -4754,6 +4760,7 @@ describe("mergeAgent (native)", () => {
    * - git branch --show-current → "main"
    * - git show-ref --verify → success
    * - git log ... --oneline → "abc1234 commit msg" (1 commit)
+   * - conflict check: rev-parse → CHECK_TARGET, rev-list → one commit, merge-tree → clean
    * - git rebase → success
    * - git checkout → success
    * - git merge → success
@@ -4770,14 +4777,12 @@ describe("mergeAgent (native)", () => {
       rebaseFails?: boolean;
       checkoutFails?: boolean;
       mergeFails?: boolean;
-      /** The conflict check's rebase stops on a conflict in file.ts. */
+      /** The conflict check's merge-tree replay conflicts in file.ts. */
       conflictCheckFails?: boolean;
-      /** The conflict check's rebase fails with this stderr, not on a conflict. */
-      conflictCheckRebaseError?: string;
-      /** The conflict check's `git branch <temp> <agent-branch>` fails with this stderr. */
-      tempBranchError?: string;
-      /** The conflict check's `git worktree add` fails with this stderr. */
-      tempWorktreeError?: string;
+      /** The conflict check's merge-tree replay fails with this stderr (exit 128), not on a conflict. */
+      conflictCheckReplayError?: string;
+      /** The conflict check's `git rev-list` fails with this stderr. */
+      conflictCheckListError?: string;
     }
   ): (cmd: string[], opts?: any) => SpawnResult {
     const opts = {
@@ -4790,9 +4795,8 @@ describe("mergeAgent (native)", () => {
       checkoutFails: false,
       mergeFails: false,
       conflictCheckFails: false,
-      conflictCheckRebaseError: undefined as string | undefined,
-      tempBranchError: undefined as string | undefined,
-      tempWorktreeError: undefined as string | undefined,
+      conflictCheckReplayError: undefined as string | undefined,
+      conflictCheckListError: undefined as string | undefined,
       ...overrides,
     };
 
@@ -4800,20 +4804,28 @@ describe("mergeAgent (native)", () => {
       spawnCalls.push(cmd);
       const cmdStr = cmd.join(" ");
 
-      // Conflict check: create the temp branch (not its `branch -D` cleanup)
-      if (opts.tempBranchError !== undefined && cmd.includes("branch") && !cmd.includes("-D") &&
-          cmd.some((a) => a.startsWith("temp-rebase-check-"))) {
-        return makeSpawnResult(128, "", opts.tempBranchError);
+      // Conflict check: resolve the target
+      if (cmd.includes("rev-parse") && cmd.some((a) => a.endsWith("^{commit}"))) {
+        return makeSpawnResult(0, `${CHECK_TARGET}\n`);
       }
 
-      // Conflict check: create the temp worktree
-      if (opts.tempWorktreeError !== undefined && cmd.includes("worktree") && cmd.includes("add")) {
-        return makeSpawnResult(255, "", opts.tempWorktreeError);
+      // Conflict check: list the commits to replay
+      if (cmd.includes("rev-list") && cmd.includes("--cherry-pick")) {
+        if (opts.conflictCheckListError !== undefined) {
+          return makeSpawnResult(128, "", opts.conflictCheckListError);
+        }
+        return makeSpawnResult(0, opts.commitCount > 0 ? `${CHECK_COMMIT} ${CHECK_PARENT}\n` : "");
       }
 
-      // Conflict check: list unmerged files in the temp worktree
-      if (cmd.includes("--diff-filter=U") && cmdStr.includes("/tmp/ib-rebase-check-")) {
-        return makeSpawnResult(0, opts.conflictCheckFails ? "file.ts\n" : "");
+      // Conflict check: replay a commit in memory
+      if (cmd.includes("merge-tree")) {
+        if (opts.conflictCheckFails) {
+          return makeSpawnResult(1, "conflict-tree\nfile.ts\n\nAuto-merging file.ts\nCONFLICT (content): Merge conflict in file.ts\n");
+        }
+        if (opts.conflictCheckReplayError !== undefined) {
+          return makeSpawnResult(128, "", opts.conflictCheckReplayError);
+        }
+        return makeSpawnResult(0, "clean-tree\n");
       }
 
       // git status --porcelain (worktree or repo)
@@ -4839,19 +4851,8 @@ describe("mergeAgent (native)", () => {
         return makeSpawnResult(0, opts.commitCount > 0 ? lines.join("\n") : "");
       }
 
-      // Conflict check: git rebase in temp dir (not its --abort)
-      if (cmd.includes("rebase") && cmdStr.includes("/tmp/ib-rebase-check-") && !cmd.includes("--abort")) {
-        if (opts.conflictCheckFails) {
-          return makeSpawnResult(1, "CONFLICT (content): Merge conflict in file.ts", "error: could not apply abc0... commit 0");
-        }
-        if (opts.conflictCheckRebaseError !== undefined) {
-          return makeSpawnResult(1, "", opts.conflictCheckRebaseError);
-        }
-        return makeSpawnResult(0);
-      }
-
       // Actual rebase in worktree
-      if (cmd.includes("rebase") && !cmdStr.includes("/tmp/ib-rebase-check-") && !cmd.includes("--abort")) {
+      if (cmd.includes("rebase") && !cmd.includes("--abort")) {
         return makeSpawnResult(opts.rebaseFails ? 1 : 0, opts.rebaseFails ? "CONFLICT" : "");
       }
 
@@ -5090,135 +5091,137 @@ describe("mergeAgent (native)", () => {
       return { result, log };
     }
 
-    const isTemp = (a: string) => a.startsWith("temp-rebase-check-") || a.startsWith("/tmp/ib-rebase-check-");
-    /** Index in spawnCalls of the first call that has every arg in `args` and a temp branch/dir arg. */
-    const tempCallIndex = (...args: string[]) =>
-      spawnCalls.findIndex((c) => args.every((a) => c.includes(a)) && c.some(isTemp));
     /** Nothing past the conflict check ran: no in-worktree rebase, no checkout, no merge. */
     function expectStoppedAtConflictCheck() {
-      expect(spawnCalls.find((c) => c.includes("rebase") && !c.some(isTemp))).toBeUndefined();
+      expect(spawnCalls.find((c) => c.includes("rebase"))).toBeUndefined();
       expect(spawnCalls.find((c) => c.includes("checkout"))).toBeUndefined();
       expect(spawnCalls.find((c) => c.includes("--ff-only") || c.includes("--no-ff"))).toBeUndefined();
     }
+    const replayCommand =
+      `git merge-tree --write-tree --name-only --merge-base=${CHECK_COMMIT}^ ${CHECK_TARGET} ${CHECK_COMMIT}`;
 
-    test("a real conflict lists the conflicted files, read before the abort", async () => {
+    test("a real conflict lists the conflicted files and git's messages, not the tree id", async () => {
       const { result, log } = await mergeWith({ conflictCheckFails: true });
 
       expect(result.ok).toBe(false);
       const message =
-        "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"rebase in temp worktree\". Conflicted files:\n" +
+        "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"replay commits in memory\". Conflicted files:\n" +
         "  file.ts\n" +
-        "git rebase main (exit 1):\n" +
-        "  error: could not apply abc0... commit 0\n" +
+        `${replayCommand} (exit 1):\n` +
+        "  Auto-merging file.ts\n" +
         "  CONFLICT (content): Merge conflict in file.ts";
       expect(result.stderr).toBe(message);
       expect(log).toContain(`Pre-rebase conflict check failed:\n${message}`);
-      const diff = tempCallIndex("diff", "--name-only", "--diff-filter=U");
-      expect(diff).toBeGreaterThan(-1);
-      expect(diff).toBeLessThan(tempCallIndex("rebase", "--abort"));
       expectStoppedAtConflictCheck();
     });
 
-    test("a rebase that fails without a conflict says so, with git's output", async () => {
-      const { result, log } = await mergeWith({
-        conflictCheckRebaseError: "error: cannot rebase: You have unstaged changes.\nerror: Please commit or stash them.",
-      });
+    test("a replay git cannot run means the check could not run, with git's output", async () => {
+      const { result, log } = await mergeWith({ conflictCheckReplayError: "error: unknown option `write-tree'" });
 
       expect(result.ok).toBe(false);
       const message =
-        "Conflict check between 'agent/agent-abc' and 'main' failed, but not on a conflict: step \"rebase in temp worktree\" failed.\n" +
-        "git rebase main (exit 1):\n" +
-        "  error: cannot rebase: You have unstaged changes.\n" +
-        "  error: Please commit or stash them.";
+        "Could not run the conflict check between 'agent/agent-abc' and 'main': step \"replay commits in memory\" failed.\n" +
+        `${replayCommand} (exit 128):\n` +
+        "  error: unknown option `write-tree'";
       expect(result.stderr).toBe(message);
       expect(result.stderr).not.toContain("Rebase conflict detected");
       expect(log).toContain(`Pre-rebase conflict check failed:\n${message}`);
-      // The temp worktree and branch are still cleaned up.
-      expect(tempCallIndex("worktree", "remove", "--force")).toBeGreaterThan(-1);
-      expect(tempCallIndex("branch", "-D")).toBeGreaterThan(-1);
       expectStoppedAtConflictCheck();
     });
 
-    test("a temp branch that cannot be made means the check could not run, naming git branch", async () => {
-      const { result, log } = await mergeWith({ tempBranchError: "fatal: cannot lock ref" });
+    test("a commit list git cannot make means the check could not run, and nothing is replayed", async () => {
+      const { result, log } = await mergeWith({ conflictCheckListError: "fatal: bad revision" });
 
       expect(result.ok).toBe(false);
-      expect(result.stderr).toMatch(new RegExp(
-        "^Could not run the conflict check between 'agent/agent-abc' and 'main': step \"create temp branch\" failed\\.\n" +
-        "git branch temp-rebase-check-\\d+-\\d+ agent/agent-abc \\(exit 128\\):\n" +
-        "  fatal: cannot lock ref$",
-      ));
-      expect(result.stderr).not.toContain("Rebase conflict detected");
-      expect(log).toContain(`Pre-rebase conflict check failed:\n${result.stderr}`);
-      // Nothing else of the check ran.
-      expect(tempCallIndex("worktree")).toBe(-1);
-      expect(tempCallIndex("rebase")).toBe(-1);
+      const message =
+        "Could not run the conflict check between 'agent/agent-abc' and 'main': step \"list commits to replay\" failed.\n" +
+        "git rev-list --reverse --topo-order --no-merges --cherry-pick --right-only --parents " +
+        `${CHECK_TARGET}...agent/agent-abc (exit 128):\n` +
+        "  fatal: bad revision";
+      expect(result.stderr).toBe(message);
+      expect(log).toContain(`Pre-rebase conflict check failed:\n${message}`);
+      expect(spawnCalls.find((c) => c.includes("merge-tree"))).toBeUndefined();
       expectStoppedAtConflictCheck();
     });
 
-    test("a temp worktree that cannot be made means the check could not run, and the half-made worktree is removed before the branch", async () => {
-      const { result, log } = await mergeWith({ tempWorktreeError: "error: hook 'post-checkout' failed: git-lfs not found" });
-
-      expect(result.ok).toBe(false);
-      expect(result.stderr).toMatch(new RegExp(
-        "^Could not run the conflict check between 'agent/agent-abc' and 'main': step \"create temp worktree\" failed\\.\n" +
-        "git worktree add /tmp/ib-rebase-check-temp-rebase-check-\\d+-\\d+ temp-rebase-check-\\d+-\\d+ --quiet \\(exit 255\\):\n" +
-        "  error: hook 'post-checkout' failed: git-lfs not found$",
-      ));
-      expect(log).toContain(`Pre-rebase conflict check failed:\n${result.stderr}`);
-      // The worktree goes first: the branch cannot be deleted while it is checked out there.
-      const remove = tempCallIndex("worktree", "remove", "--force");
-      expect(remove).toBeGreaterThan(tempCallIndex("worktree", "add"));
-      expect(remove).toBeLessThan(tempCallIndex("branch", "-D"));
-      expect(spawnCalls.find((c) => c.includes("prune"))).toBeUndefined();
-      expect(tempCallIndex("rebase")).toBe(-1);
-      expectStoppedAtConflictCheck();
-    });
-
-    test("when git cannot remove the half-made temp worktree, its directory is deleted and pruned before the branch", async () => {
+    test("a target git cannot resolve means the check could not run, and nothing is listed", async () => {
       const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
       await mkdir(join(agentDir, "repo"), { recursive: true });
       await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", tmux_session: "tmux-agent-abc" }));
-      const base = makeMergeMock({ tempWorktreeError: "fatal: could not create work tree dir" });
-      // The failed `git worktree add` leaves a half-made checkout on disk.
-      let worktreeDir: string | undefined;
-      let dirExistedAtPrune: boolean | undefined;
-      let dirExistedAtBranchDelete: boolean | undefined;
+      const base = makeMergeMock();
       const runner = (cmd: string[], o?: any) => {
-        if (cmd.includes("worktree") && cmd.includes("add")) {
-          worktreeDir = cmd.find((a) => a.startsWith("/tmp/ib-rebase-check-"))!;
-          mkdirSync(worktreeDir, { recursive: true });
-          writeFileSync(join(worktreeDir, "tracked.txt"), "half checked out\n");
-        }
-        if (cmd.includes("worktree") && cmd.includes("remove") && cmd.some(isTemp)) {
+        if (cmd.includes("rev-parse") && cmd.includes("main^{commit}")) {
           spawnCalls.push(cmd);
-          return makeSpawnResult(128, "", "fatal: not a working tree");
+          return makeSpawnResult(128, "", "fatal: Needed a single revision");
         }
-        if (cmd.includes("worktree") && cmd.includes("prune")) dirExistedAtPrune = existsSync(worktreeDir!);
-        if (cmd.includes("branch") && cmd.includes("-D") && cmd.some(isTemp)) dirExistedAtBranchDelete = existsSync(worktreeDir!);
         return base(cmd, o);
       };
       lifecycleSpawnCtx.set(runner);
       setMergeSpawnRunner(runner);
 
-      try {
-        const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
+      const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
 
-        expect(result.ok).toBe(false);
-        expect(result.stderr).toContain("step \"create temp worktree\" failed");
-        expect(worktreeDir).toBeDefined();
-        // The directory is deleted before the prune, so the prune drops its
-        // registration, and both happen before the branch delete.
-        expect(dirExistedAtPrune).toBe(false);
-        expect(dirExistedAtBranchDelete).toBe(false);
-        expect(existsSync(worktreeDir!)).toBe(false);
-        const prune = spawnCalls.findIndex((c) => c.includes("worktree") && c.includes("prune"));
-        expect(prune).toBeGreaterThan(tempCallIndex("worktree", "remove", "--force"));
-        expect(prune).toBeLessThan(tempCallIndex("branch", "-D"));
-      } finally {
-        if (worktreeDir) rmSync(worktreeDir, { recursive: true, force: true });
-      }
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toBe(
+        "Could not run the conflict check between 'agent/agent-abc' and 'main': step \"resolve target\" failed.\n" +
+        "git rev-parse --verify main^{commit} (exit 128):\n" +
+        "  fatal: Needed a single revision",
+      );
+      expect(spawnCalls.find((c) => c.includes("rev-list"))).toBeUndefined();
+      expectStoppedAtConflictCheck();
     });
+  });
+
+  test("conflict check: a commit whose parent is the target's tip is taken as it is, with no merge-tree", async () => {
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", tmux_session: "tmux-agent-abc" }));
+    // Two commits, the first sitting on the target's tip and the second on the first.
+    const base = makeMergeMock({ conflictCheckFails: true });
+    const runner = (cmd: string[], o?: any) => {
+      if (cmd.includes("rev-list") && cmd.includes("--cherry-pick")) {
+        spawnCalls.push(cmd);
+        return makeSpawnResult(0, `one ${CHECK_TARGET}\ntwo one\n`);
+      }
+      return base(cmd, o);
+    };
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
+
+    // The mock's merge-tree would conflict; the check never calls it.
+    expect(result.ok).toBe(true);
+    expect(spawnCalls.find((c) => c.includes("merge-tree"))).toBeUndefined();
+  });
+
+  test("conflict check: once a commit needs a merge, later commits replay onto the tree it wrote", async () => {
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
+    await mkdir(join(agentDir, "repo"), { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", tmux_session: "tmux-agent-abc" }));
+    const base = makeMergeMock();
+    const runner = (cmd: string[], o?: any) => {
+      if (cmd.includes("rev-list") && cmd.includes("--cherry-pick")) {
+        spawnCalls.push(cmd);
+        return makeSpawnResult(0, `one ${CHECK_PARENT}\ntwo one\n`);
+      }
+      if (cmd.includes("merge-tree")) {
+        spawnCalls.push(cmd);
+        return makeSpawnResult(0, `tree-after-${cmd[cmd.length - 1]}\n`);
+      }
+      return base(cmd, o);
+    };
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
+
+    expect(result.ok).toBe(true);
+    const replays = spawnCalls.filter((c) => c.includes("merge-tree")).map((c) => c.slice(c.indexOf("merge-tree")));
+    expect(replays).toEqual([
+      ["merge-tree", "--write-tree", "--name-only", "--merge-base=one^", CHECK_TARGET, "one"],
+      ["merge-tree", "--write-tree", "--name-only", "--merge-base=two^", "tree-after-one", "two"],
+    ]);
   });
 
   test("returns error when rebase fails", async () => {
@@ -5351,9 +5354,9 @@ describe("mergeAgent (native)", () => {
     const agent = makeAgent("agent-abc", tempDir);
     await mergeAgent(agent, tempDir);
 
-    // Find the actual rebase (not the conflict check one)
+    // Find the rebase in the agent's worktree
     const rebaseCall = spawnCalls.find(
-      (c) => c.includes("rebase") && !c.some((a) => a.includes("/tmp/ib-rebase-check-")) && !c.includes("--abort")
+      (c) => c.includes("rebase") && !c.includes("--abort")
     );
     expect(rebaseCall).toBeDefined();
     expect(rebaseCall).toContain("main");
@@ -5442,7 +5445,7 @@ describe("mergeAgent (native)", () => {
 
     // Should NOT have actual rebase/checkout/merge calls
     const rebaseCall = spawnCalls.find(
-      (c) => c.includes("rebase") && !c.some((a) => a.includes("/tmp/ib-rebase-check-")) && !c.includes("--abort")
+      (c) => c.includes("rebase") && !c.includes("--abort")
     );
     expect(rebaseCall).toBeUndefined();
 
@@ -5528,7 +5531,7 @@ describe("mergeAgent (native)", () => {
     expect(worktreeRemoveCall).toBeDefined();
   });
 
-  test("conflict check creates temp branch and worktree", async () => {
+  test("conflict check replays in the repo before the rebase, with no temp branch or worktree", async () => {
     const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
     await Bun.write(join(agentDir, "meta.json"), JSON.stringify({
@@ -5542,23 +5545,19 @@ describe("mergeAgent (native)", () => {
     const agent = makeAgent("agent-abc", tempDir);
     await mergeAgent(agent, tempDir);
 
-    // Should have created a temp branch
-    const tempBranchCreate = spawnCalls.find(
-      (c) => c.includes("branch") && c.some((a) => a.startsWith("temp-rebase-check-"))
-    );
-    expect(tempBranchCreate).toBeDefined();
-
-    // Should have created a temp worktree
-    const tempWorktreeAdd = spawnCalls.find(
-      (c) => c.includes("worktree") && c.includes("add") && c.some((a) => a.includes("/tmp/ib-rebase-check-"))
-    );
-    expect(tempWorktreeAdd).toBeDefined();
-
-    // Should have cleaned up temp branch
-    const tempBranchDelete = spawnCalls.find(
-      (c) => c.includes("branch") && c.includes("-D") && c.some((a) => a.startsWith("temp-rebase-check-"))
-    );
-    expect(tempBranchDelete).toBeDefined();
+    // The check resolves main, lists the commits and replays them in the
+    // repo, all before the real rebase, and never makes a worktree.
+    const index = (pred: (c: string[]) => boolean) => spawnCalls.findIndex(pred);
+    const resolve = index((c) => c.includes("rev-parse") && c.includes("main^{commit}"));
+    const list = index((c) => c.includes("rev-list") && c.includes(`${CHECK_TARGET}...agent/agent-abc`));
+    const replay = index((c) => c.includes("merge-tree"));
+    const rebase = index((c) => c.includes("rebase") && !c.includes("--abort"));
+    expect(resolve).toBeGreaterThan(-1);
+    expect(list).toBeGreaterThan(resolve);
+    expect(replay).toBeGreaterThan(list);
+    expect(rebase).toBeGreaterThan(replay);
+    for (const i of [resolve, list, replay]) expect(spawnCalls[i]!.slice(0, 3)).toEqual(["git", "-C", tempDir]);
+    expect(spawnCalls.find((c) => c.includes("worktree") && c.includes("add"))).toBeUndefined();
   });
 
   test("returns error when merging from within agent's own worktree", async () => {
@@ -5638,8 +5637,8 @@ describe("mergeAgent (native)", () => {
       spawnCalls.push(cmd);
       const cmdStr = cmd.join(" ");
 
-      // Make the actual rebase fail with stderr content
-      if (cmd.includes("rebase") && !cmdStr.includes("/tmp/ib-rebase-check-") && !cmd.includes("--abort")) {
+      // Make the rebase in the agent's worktree fail with stderr content
+      if (cmd.includes("rebase") && !cmd.includes("--abort")) {
         return makeSpawnResult(1, "", "error: could not apply abc1234... some commit\nConflict in file.ts");
       }
 
@@ -5659,11 +5658,7 @@ describe("mergeAgent (native)", () => {
       if (cmdStr.includes("log") && cmdStr.includes("--oneline")) {
         return makeSpawnResult(0, "abc1234 some commit");
       }
-      // Conflict check rebase → success
-      if (cmd.includes("rebase") && cmdStr.includes("/tmp/ib-rebase-check-")) {
-        return makeSpawnResult();
-      }
-      // Default → success
+      // Default → success (the conflict check lists no commits, so it passes)
       return makeSpawnResult();
     };
 
@@ -5689,8 +5684,8 @@ describe("mergeAgent (native)", () => {
     const baseMock = makeMergeMock();
     const runner = (cmd: string[], opts?: any) => {
       spawnCalls.push(cmd);
-      // Make git worktree remove fail for the actual worktree (not the conflict check temp)
-      if (cmd.includes("worktree") && cmd.includes("remove") && !cmd.some((a) => a.includes("/tmp/ib-rebase-check-"))) {
+      // Make git worktree remove fail for the agent's worktree
+      if (cmd.includes("worktree") && cmd.includes("remove")) {
         return makeSpawnResult(1, "", "error: failed to remove worktree");
       }
       return baseMock(cmd, opts);
@@ -5809,7 +5804,7 @@ describe("mergeAgent (native)", () => {
 
     // Rebase should target the manager's branch
     const rebaseCall = spawnCalls.find(
-      (c) => c.includes("rebase") && !c.some((a) => a.includes("/tmp/ib-rebase-check-")) && !c.includes("--abort")
+      (c) => c.includes("rebase") && !c.includes("--abort")
     );
     expect(rebaseCall).toBeDefined();
     expect(rebaseCall).toContain("agent/agent-manager");
@@ -5932,11 +5927,9 @@ describe("mergeAgent (native)", () => {
         `Merged agent agent-abc into main at ${MERGE_HEAD_SHA} (1 commit(s), agent kept running)`
       );
 
-      // 7. Pre-rebase conflict check, in a temp worktree.
-      const checkRebase = spawnCalls.find(
-        (c) => c.includes("rebase") && c.some((a) => a.includes("/tmp/ib-rebase-check-"))
-      );
-      expect(checkRebase).toBeDefined();
+      // 7. Pre-rebase conflict check, replayed in memory.
+      const checkReplay = spawnCalls.find((c) => c.includes("merge-tree"));
+      expect(checkReplay).toBeDefined();
       // 8. Rebase of the agent's branch onto the target, inside its worktree.
       const rebase = findWorktreeRebase(agentDir);
       expect(rebase).toEqual(["git", "-C", join(agentDir, "repo"), "rebase", "main"]);
@@ -5950,7 +5943,7 @@ describe("mergeAgent (native)", () => {
       } else {
         expect(merge).toEqual(["git", "-C", tempDir, "merge", "--no-ff", "agent/agent-abc", "-m", "Merge agent agent-abc work"]);
       }
-      const order = [checkRebase!, rebase!, checkout!, merge!].map((c) => spawnCalls.indexOf(c));
+      const order = [checkReplay!, rebase!, checkout!, merge!].map((c) => spawnCalls.indexOf(c));
       expect(order).toEqual([...order].sort((a, b) => a - b));
     });
 
@@ -6091,10 +6084,10 @@ describe("mergeAgent (native)", () => {
 
       expect(result.ok).toBe(false);
       expect(result.stderr).toBe(
-        "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"rebase in temp worktree\". Conflicted files:\n" +
+        "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"replay commits in memory\". Conflicted files:\n" +
         "  file.ts\n" +
-        "git rebase main (exit 1):\n" +
-        "  error: could not apply abc0... commit 0\n" +
+        `git merge-tree --write-tree --name-only --merge-base=${CHECK_COMMIT}^ ${CHECK_TARGET} ${CHECK_COMMIT} (exit 1):\n` +
+        "  Auto-merging file.ts\n" +
         "  CONFLICT (content): Merge conflict in file.ts",
       );
       // Nothing is rebased or merged, and nothing tries to resolve the conflict.
@@ -6657,9 +6650,9 @@ describe("mergeAgent --keep (real git)", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toStartWith(
-      "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"rebase in temp worktree\". Conflicted files:\n" +
+      "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"replay commits in memory\". Conflicted files:\n" +
       "  tracked.txt\n" +
-      "git rebase main (exit 1):\n",
+      `git merge-tree --write-tree --name-only --merge-base=${agentTip}^ ${mainBefore} ${agentTip} (exit 1):\n`,
     );
     expect(result.stderr).toContain("CONFLICT (content): Merge conflict in tracked.txt");
 
@@ -6669,77 +6662,119 @@ describe("mergeAgent --keep (real git)", () => {
     expect(await Bun.file(join(tempDir, "tracked.txt")).text()).toBe("main\n");
 
     // Agent untouched: branch at the same tip, worktree on it and clean (not
-    // left mid-rebase), and the conflict check's temp branch is gone.
-    expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(agentTip);
-    expect(await git("-C", worktree, "branch", "--show-current")).toBe("agent/agent-abc");
-    expect(await git("-C", worktree, "status", "--porcelain")).toBe("");
-    expect(await git("-C", tempDir, "branch", "--list", "temp-rebase-check-*")).toBe("");
+    // left mid-rebase).
+    await expectAgentUntouched(agentTip);
     expect(await Bun.file(join(agentDir, "meta.json")).exists()).toBe(true);
     expect((await readAgentTransient(agentDir))?.operation).toBeNull();
   });
 
-  /**
-   * Install `script` as the repo's post-checkout hook. It runs in the conflict
-   * check's temp worktree when `git worktree add` checks it out. A local
-   * core.hooksPath keeps a user-wide hooksPath from hiding it.
-   */
-  async function installPostCheckoutHook(script: string): Promise<void> {
-    const hooksDir = join(tempDir, ".git", "test-hooks");
-    await mkdir(hooksDir, { recursive: true });
-    const hook = join(hooksDir, "post-checkout");
-    await Bun.write(hook, `#!/bin/sh\n${script}\n`);
-    chmodSync(hook, 0o755);
-    await git("-C", tempDir, "config", "core.hooksPath", hooksDir);
+  /** The agent's branch is still at `tip`, checked out and clean in its worktree, not mid-rebase. */
+  async function expectAgentUntouched(tip: string): Promise<void> {
+    expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(tip);
+    expect(await git("-C", worktree, "branch", "--show-current")).toBe("agent/agent-abc");
+    expect(await git("-C", worktree, "status", "--porcelain")).toBe("");
+    expect(existsSync(await git("-C", worktree, "rev-parse", "--git-path", "rebase-merge"))).toBe(false);
   }
 
-  /** No temp branch, registered temp worktree or temp directory is left behind. */
-  async function expectConflictCheckCleanedUp(): Promise<void> {
-    expect(await git("-C", tempDir, "branch", "--list", "temp-rebase-check-*")).toBe("");
-    expect(await git("-C", tempDir, "worktree", "list", "--porcelain")).not.toContain("ib-rebase-check-");
-    const leftover = (await readdir("/tmp")).filter((name) => name.startsWith(`ib-rebase-check-temp-rebase-check-${process.pid}-`));
-    expect(leftover).toEqual([]);
+  /** Route the merge's git calls to real git, recording each command. */
+  function recordGit(): string[][] {
+    const calls: string[][] = [];
+    const spawn = Bun.spawn as SpawnFn;
+    setMergeSpawnRunner((cmd, opts) => {
+      calls.push(cmd);
+      return spawn(cmd, opts);
+    });
+    return calls;
   }
 
-  test("a failing post-checkout hook in the temp worktree: the check could not run, git's output is reported, and nothing leaks", async () => {
-    const agentTip = await agentCommit("feature.txt", "one\n", "agent: one");
-    await installPostCheckoutHook("echo 'git-lfs: smudge filter lfs failed' >&2\nexit 1");
-    const mainBefore = await git("-C", tempDir, "rev-parse", "main");
-
-    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
-
-    expect(result.ok).toBe(false);
-    expect(result.stderr).toMatch(new RegExp(
-      "^Could not run the conflict check between 'agent/agent-abc' and 'main': step \"create temp worktree\" failed\\.\n" +
-      "git worktree add /tmp/ib-rebase-check-temp-rebase-check-\\d+-\\d+ temp-rebase-check-\\d+-\\d+ --quiet \\(exit \\d+\\):\n",
-    ));
-    expect(result.stderr).toContain("git-lfs: smudge filter lfs failed");
-    expect(result.stderr).not.toContain("Rebase conflict detected");
-    const log = await Bun.file(join(agentDir, "agent.log")).text();
-    expect(log).toContain(`Pre-rebase conflict check failed:\n${result.stderr}`);
-
-    // The half-made worktree is gone, so the temp branch could be deleted too.
-    await expectConflictCheckCleanedUp();
-    expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
-    expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(agentTip);
-  });
-
-  test("a temp checkout that comes out dirty: the rebase failed, but not on a conflict, with git's reason", async () => {
-    // The agent's branch is already on main, so there is nothing to conflict with.
-    await agentCommit("feature.txt", "one\n", "agent: one");
-    await installPostCheckoutHook("echo dirty >> tracked.txt");
-    // A user-wide rebase.autoStash would stash the change and let the rebase run.
-    await git("-C", tempDir, "config", "rebase.autoStash", "false");
+  test("a conflict in a commit that a later commit undoes fails the check, though the two tips merge cleanly", async () => {
+    // The agent edits the line main also edits, then puts it back. Its tip
+    // matches the merge base on that line, so a merge of the tips is clean,
+    // but the rebase replays the first commit and stops on it.
+    const edit = await agentCommit("tracked.txt", "agent\n", "agent: edit tracked");
+    const agentTip = await agentCommit("tracked.txt", "base\n", "agent: put tracked back");
+    const mainBefore = await mainCommit("tracked.txt", "main\n", "main: edit tracked");
+    // `git` throws on a non-zero exit, so this asserts the tips merge cleanly.
+    await git("-C", tempDir, "merge-tree", "--write-tree", "main", "agent/agent-abc");
 
     const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toStartWith(
-      "Conflict check between 'agent/agent-abc' and 'main' failed, but not on a conflict: step \"rebase in temp worktree\" failed.\n" +
-      "git rebase main (exit 1):\n",
+      "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"replay commits in memory\". Conflicted files:\n" +
+      "  tracked.txt\n" +
+      `git merge-tree --write-tree --name-only --merge-base=${edit}^ ${mainBefore} ${edit} (exit 1):\n`,
     );
-    expect(result.stderr).toContain("You have unstaged changes");
-    expect(result.stderr).not.toContain("Rebase conflict detected");
-    await expectConflictCheckCleanedUp();
+    expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
+    await expectAgentUntouched(agentTip);
+  });
+
+  test("a change main already has is skipped, as the rebase skips it, even where main then changed the line again", async () => {
+    // main cherry-picks the agent's change, then edits the same line. Replaying
+    // the agent's commit onto that would conflict; the rebase drops it by
+    // patch-id instead, and so does the check.
+    const change = await agentCommit("tracked.txt", "agent\n", "agent: edit tracked");
+    // main moves first, so the cherry-pick is a new commit. On main's old tip
+    // it would be the agent's commit itself: same parent, tree, author and
+    // message, made in the same second.
+    await mainCommit("other.txt", "other\n", "main: other");
+    await git("-C", tempDir, "cherry-pick", change);
+    expect(await git("-C", tempDir, "rev-parse", "main")).not.toBe(change);
+    await mainCommit("tracked.txt", "main\n", "main: edit tracked again");
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+    expect(result.ok).toBe(true);
+    expect(await git("-C", tempDir, "status", "--porcelain")).toBe("");
+    expect(await Bun.file(join(tempDir, "tracked.txt")).text()).toBe("main\n");
+  });
+
+  test("a manager branch with a merge commit is checked commit by commit, without the merge, as the rebase replays it", async () => {
+    await agentCommit("manager.txt", "manager\n", "manager: own work");
+    await git("-C", worktree, "checkout", "-q", "-b", "agent/agent-sub");
+    await agentCommit("sub.txt", "sub\n", "sub: work");
+    await git("-C", worktree, "checkout", "-q", "agent/agent-abc");
+    await git("-C", worktree, "merge", "-q", "--no-ff", "-m", "Merge agent sub work", "agent/agent-sub");
+    await mainCommit("other.txt", "other\n", "main: other");
+    const calls = recordGit();
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+    expect(result.ok).toBe(true);
+    // Two replays: the manager's commit and the sub-agent's, not the merge.
+    // The rebase rewrote the branch, so read the originals from the sub-agent's
+    // branch, which it left alone: its tip and that tip's parent.
+    const replayed = calls.filter((c) => c.includes("merge-tree")).map((c) => c[c.length - 1]);
+    expect(replayed).toEqual([
+      await git("-C", tempDir, "rev-parse", "agent/agent-sub^"),
+      await git("-C", tempDir, "rev-parse", "agent/agent-sub"),
+    ]);
+    expect(await Bun.file(join(tempDir, "manager.txt")).text()).toBe("manager\n");
+    expect(await Bun.file(join(tempDir, "sub.txt")).text()).toBe("sub\n");
+  });
+
+  test("merge-check on a branch already on main's tip runs no merge-tree, makes no worktree and runs no hook", async () => {
+    await agentCommit("feature.txt", "one\n", "agent: one");
+    await agentCommit("feature.txt", "two\n", "agent: two");
+    // A post-checkout hook that fails, as git-lfs's does when git-lfs is not
+    // installed. A check that checked anything out would trip it.
+    const hooksDir = join(tempDir, ".git", "test-hooks");
+    await mkdir(hooksDir, { recursive: true });
+    await Bun.write(join(hooksDir, "post-checkout"), "#!/bin/sh\necho 'git-lfs: not found' >&2\nexit 1\n");
+    chmodSync(join(hooksDir, "post-checkout"), 0o755);
+    await git("-C", tempDir, "config", "core.hooksPath", hooksDir);
+    const worktreesBefore = await git("-C", tempDir, "worktree", "list", "--porcelain");
+    const calls = recordGit();
+
+    const result = await mergeCheckAgent(makeAgent("agent-abc", tempDir));
+
+    expect(result).toEqual({
+      ok: true, exitCode: 0, stderr: "",
+      stdout: "Merge check passed: 2 commit(s), no conflicts, no uncommitted changes",
+    });
+    expect(calls.find((c) => c.includes("merge-tree"))).toBeUndefined();
+    expect(calls.find((c) => c.includes("worktree") || c.includes("checkout"))).toBeUndefined();
+    expect(await git("-C", tempDir, "worktree", "list", "--porcelain")).toBe(worktreesBefore);
   });
 
   test("refuses on a dirty primary checkout without touching main", async () => {
@@ -6973,7 +7008,7 @@ describe("mergeAgent --keep (real git)", () => {
       expect(result.ok).toBe(false);
       // The failure still reports the pull, since main has already moved.
       expect(result.stderr).toStartWith(
-        "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"rebase in temp worktree\". Conflicted files:\n" +
+        "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"replay commits in memory\". Conflicted files:\n" +
         "  tracked.txt\n",
       );
       expect(result.stderr).toContain("CONFLICT (content): Merge conflict in tracked.txt");
@@ -14680,28 +14715,36 @@ describe("mergeCheckAgent (native)", () => {
   });
 
   describe("a failed conflict check names the step and carries git's output, in stderr and agent.log", () => {
-    const isTemp = (a: string) => a.startsWith("temp-rebase-check-") || a.startsWith("/tmp/ib-rebase-check-");
-    type Fail = "branch" | "worktree" | "rebase" | "conflict";
+    type Fail = "resolve" | "list" | "replay" | "conflict";
+    const replay = "git merge-tree --write-tree --name-only --merge-base=c2^ tree-after-c1 c2";
 
-    /** A clean agent whose conflict check fails at `fail`. */
+    /**
+     * A clean agent with two commits to replay, whose conflict check fails at
+     * `fail`; a replay failure is on the second commit, onto the first's tree.
+     */
     async function check(fail: Fail) {
       const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
       await mkdir(join(agentDir, "repo"), { recursive: true });
       setMergeSpawnRunner((cmd: string[]) => {
         spawnCalls.push(cmd);
-        const temp = cmd.some(isTemp);
-        if (fail === "branch" && temp && cmd.includes("branch") && !cmd.includes("-D")) {
-          return makeSpawnResult(128, "", "fatal: cannot lock ref");
+        if (cmd.includes("rev-parse") && cmd.includes("main^{commit}")) {
+          return fail === "resolve"
+            ? makeSpawnResult(128, "", "fatal: Needed a single revision")
+            : makeSpawnResult(0, "main-tip\n");
         }
-        if (fail === "worktree" && cmd.includes("worktree") && cmd.includes("add")) {
-          return makeSpawnResult(128, "Preparing worktree (checking out 'temp')", "error: post-checkout hook failed");
+        if (cmd.includes("rev-list") && cmd.includes("--cherry-pick")) {
+          return fail === "list"
+            ? makeSpawnResult(128, "", "fatal: bad revision 'main-tip...agent/agent-abc'")
+            : makeSpawnResult(0, "c1 fork\nc2 c1\n");
         }
-        if (temp && cmd.includes("rebase") && !cmd.includes("--abort")) {
-          if (fail === "rebase") return makeSpawnResult(1, "", "error: cannot rebase: You have unstaged changes.");
-          if (fail === "conflict") return makeSpawnResult(1, "CONFLICT (content): Merge conflict in a.ts", "error: could not apply abc");
-        }
-        if (temp && cmd.includes("--diff-filter=U")) {
-          return makeSpawnResult(0, fail === "conflict" ? "a.ts\nb.ts\n" : "");
+        if (cmd.includes("merge-tree")) {
+          if (cmd.includes("c1")) return makeSpawnResult(0, "tree-after-c1\n");
+          if (fail === "replay") return makeSpawnResult(128, "", "fatal: failure to merge");
+          if (fail === "conflict") {
+            return makeSpawnResult(1,
+              "conflict-tree\na.ts\nb.ts\n\nAuto-merging a.ts\nCONFLICT (content): Merge conflict in a.ts\n" +
+              "CONFLICT (modify/delete): b.ts deleted in c2 and modified in tree-after-c1.\n");
+          }
         }
         return makeSpawnResult();
       });
@@ -14711,52 +14754,48 @@ describe("mergeCheckAgent (native)", () => {
       return result;
     }
 
-    test("a real conflict", async () => {
+    test("a real conflict: the files from merge-tree's list, then its messages", async () => {
       const result = await check("conflict");
       expect(result.ok).toBe(false);
       expect(result.stderr).toBe(
-        "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"rebase in temp worktree\". Conflicted files:\n" +
+        "Rebase conflict detected between 'agent/agent-abc' and 'main' in step \"replay commits in memory\". Conflicted files:\n" +
         "  a.ts\n" +
         "  b.ts\n" +
-        "git rebase main (exit 1):\n" +
-        "  error: could not apply abc\n" +
-        "  CONFLICT (content): Merge conflict in a.ts",
+        `${replay} (exit 1):\n` +
+        "  Auto-merging a.ts\n" +
+        "  CONFLICT (content): Merge conflict in a.ts\n" +
+        "  CONFLICT (modify/delete): b.ts deleted in c2 and modified in tree-after-c1.",
       );
     });
 
-    test("a rebase that fails without a conflict", async () => {
-      const result = await check("rebase");
+    test("a replay that fails without a conflict means the check could not run", async () => {
+      const result = await check("replay");
       expect(result.ok).toBe(false);
       expect(result.stderr).toBe(
-        "Conflict check between 'agent/agent-abc' and 'main' failed, but not on a conflict: step \"rebase in temp worktree\" failed.\n" +
-        "git rebase main (exit 1):\n" +
-        "  error: cannot rebase: You have unstaged changes.",
+        "Could not run the conflict check between 'agent/agent-abc' and 'main': step \"replay commits in memory\" failed.\n" +
+        `${replay} (exit 128):\n` +
+        "  fatal: failure to merge",
       );
     });
 
-    test("the temp branch cannot be made", async () => {
-      const result = await check("branch");
+    test("the commits to replay cannot be listed", async () => {
+      const result = await check("list");
       expect(result.ok).toBe(false);
-      expect(result.stderr).toMatch(new RegExp(
-        "^Could not run the conflict check between 'agent/agent-abc' and 'main': step \"create temp branch\" failed\\.\n" +
-        "git branch temp-rebase-check-\\d+-\\d+ agent/agent-abc \\(exit 128\\):\n" +
-        "  fatal: cannot lock ref$",
-      ));
+      expect(result.stderr).toBe(
+        "Could not run the conflict check between 'agent/agent-abc' and 'main': step \"list commits to replay\" failed.\n" +
+        "git rev-list --reverse --topo-order --no-merges --cherry-pick --right-only --parents main-tip...agent/agent-abc (exit 128):\n" +
+        "  fatal: bad revision 'main-tip...agent/agent-abc'",
+      );
     });
 
-    test("the temp worktree cannot be made: stderr then stdout, and the worktree is removed before the branch", async () => {
-      const result = await check("worktree");
+    test("the target cannot be resolved", async () => {
+      const result = await check("resolve");
       expect(result.ok).toBe(false);
-      expect(result.stderr).toMatch(new RegExp(
-        "^Could not run the conflict check between 'agent/agent-abc' and 'main': step \"create temp worktree\" failed\\.\n" +
-        "git worktree add /tmp/ib-rebase-check-temp-rebase-check-\\d+-\\d+ temp-rebase-check-\\d+-\\d+ --quiet \\(exit 128\\):\n" +
-        "  error: post-checkout hook failed\n" +
-        "  Preparing worktree \\(checking out 'temp'\\)$",
-      ));
-      const remove = spawnCalls.findIndex((c) => c.includes("worktree") && c.includes("remove") && c.some(isTemp));
-      const deleteBranch = spawnCalls.findIndex((c) => c.includes("branch") && c.includes("-D") && c.some(isTemp));
-      expect(remove).toBeGreaterThan(-1);
-      expect(remove).toBeLessThan(deleteBranch);
+      expect(result.stderr).toBe(
+        "Could not run the conflict check between 'agent/agent-abc' and 'main': step \"resolve target\" failed.\n" +
+        "git rev-parse --verify main^{commit} (exit 128):\n" +
+        "  fatal: Needed a single revision",
+      );
     });
   });
 });
@@ -17437,10 +17476,8 @@ describe("long-running-op guard", () => {
       if (s.includes("status") && s.includes("--porcelain")) return makeSpawnResult(0, "");
       if (s.includes("branch") && s.includes("--show-current")) return makeSpawnResult(0, "main");
       if (s.includes("show-ref") && s.includes("--verify")) return makeSpawnResult(0);
-      // Rebase inside the temp conflict-check worktree fails. Its
-      // `--diff-filter=U` falls to the empty default, so the check reports a
-      // rebase that failed, not on a conflict; any failure will do here.
-      if (cmd.includes("rebase") && !cmd.includes("--abort")) return makeSpawnResult(1, "CONFLICT");
+      // The conflict check cannot list its commits; any failure will do here.
+      if (cmd.includes("rev-list")) return makeSpawnResult(128, "", "fatal: bad revision");
       if (s.includes("has-session")) return makeSpawnResult(1);
       return makeSpawnResult();
     };

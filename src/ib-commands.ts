@@ -3552,9 +3552,9 @@ export function resetMergeSpawnRunner(): void {
 
 /** The three git steps of {@link checkRebaseConflicts}, by the name its messages use. */
 const CONFLICT_CHECK_STEPS = {
-  branch: "create temp branch",
-  worktree: "create temp worktree",
-  rebase: "rebase in temp worktree",
+  resolve: "resolve target",
+  list: "list commits to replay",
+  replay: "replay commits in memory",
 } as const;
 
 /** Why {@link checkRebaseConflicts} did not pass. */
@@ -3564,31 +3564,47 @@ interface ConflictCheckFailure {
   /** The git command that failed, `git <args>` without its `-C <dir>`. */
   command: string;
   exitCode: number;
-  /** That command's stderr then stdout, each trimmed; "" when git printed nothing. */
+  /**
+   * That command's stderr then stdout, each trimmed; "" when git printed
+   * nothing. For a conflicting replay, stdout is only merge-tree's messages
+   * (its `Auto-merging` and `CONFLICT (...)` lines), without the tree id and
+   * file list before them.
+   */
   output: string;
   /**
-   * The rebase step's conflicted files (`git diff --name-only --diff-filter=U`,
-   * read before the abort). Non-empty only for a real conflict; empty for every
-   * other failure, a rebase git refused to start included.
+   * The files a replayed commit conflicted in (merge-tree's conflicted file
+   * list). Non-empty only for a real conflict; empty for every other failure.
    */
   conflicts: string[];
 }
 
 /**
- * Pre-rebase conflict check (SPEC.md §3.2 item 8): creates a temp branch and
- * worktree, attempts the rebase there, and cleans both up. A failure names
- * the step that failed with git's output, and tells a real conflict apart
- * from a rebase that failed for another reason (for example a checkout that
- * came out dirty) and from a temp branch or worktree that could not be made.
- * Mirrors check_rebase_conflicts() in ib bash.
+ * Pre-rebase conflict check (SPEC.md §3.2 item 8): replays in memory the
+ * commits `git rebase <target>` would replay, and stops at the first one that
+ * conflicts. It makes no branch, worktree or checkout, so no hook runs and
+ * there is nothing to clean up; git only writes the replayed trees into the
+ * object store.
+ *
+ * The commits are the rebase's own list: on the source but not the target, no
+ * merge commits, none whose change the target already has (by patch-id),
+ * parents before children. Each is merged onto the result so far with its
+ * parent as the merge base (`git merge-tree --merge-base`), the same merge a
+ * rebase runs for each commit it picks. A commit whose parent is the result so
+ * far is taken as it is, as the rebase fast-forwards it, so a linear branch
+ * already on the target's tip needs no merge at all. A branch with merge
+ * commits is linearized and replayed even then, as `git rebase` does. One
+ * merge of the two tips would not do: it misses a conflict in a commit that a
+ * later commit undoes.
+ *
+ * Needs git 2.45, the first merge-tree to take a tree as a side; an older git
+ * fails the replay step, and the check reports that it could not run.
  */
 async function checkRebaseConflicts(
   repoPath: string,
   targetBranch: string,
   sourceBranch: string
 ): Promise<{ ok: true } | ConflictCheckFailure> {
-  const tempBranch = `temp-rebase-check-${process.pid}-${Math.floor(Date.now() / 1000)}`;
-  const tempDir = `/tmp/ib-rebase-check-${tempBranch}`;
+  const git = (args: string[]) => mergeSpawnCtx.run(["git", "-C", repoPath, ...args]);
   const failed = (
     step: ConflictCheckFailure["step"],
     args: string[],
@@ -3599,62 +3615,59 @@ async function checkRebaseConflicts(
     output: [result.stderr, result.stdout].filter(Boolean).join("\n"), conflicts,
   });
 
-  // Create temp branch from source
-  const branchArgs = ["branch", tempBranch, sourceBranch];
-  const createBranch = await mergeSpawnCtx.run(["git", "-C", repoPath, ...branchArgs]);
-  if (createBranch.exitCode !== 0) {
-    return failed("branch", branchArgs, createBranch);
+  // Resolve the target once, so the list and the replay use the same commit
+  // even if the branch moves meanwhile.
+  const resolveArgs = ["rev-parse", "--verify", `${targetBranch}^{commit}`];
+  const resolved = await git(resolveArgs);
+  if (resolved.exitCode !== 0) {
+    return failed("resolve", resolveArgs, resolved);
+  }
+  const target = resolved.stdout;
+
+  // One "<commit> <parent>" line per commit, in the order the rebase picks them.
+  const listArgs = [
+    "rev-list", "--reverse", "--topo-order", "--no-merges", "--cherry-pick", "--right-only", "--parents",
+    `${target}...${sourceBranch}`,
+  ];
+  const listed = await git(listArgs);
+  if (listed.exitCode !== 0) {
+    return failed("list", listArgs, listed);
   }
 
-  // Create temp worktree. A failure can leave it half made — a failing
-  // post-checkout hook leaves the whole checkout behind — and the branch
-  // cannot be deleted while that worktree still has it checked out.
-  const worktreeArgs = ["worktree", "add", tempDir, tempBranch, "--quiet"];
-  const createWorktree = await mergeSpawnCtx.run(["git", "-C", repoPath, ...worktreeArgs]);
-  if (createWorktree.exitCode !== 0) {
-    await removeConflictCheckWorktree(repoPath, tempDir);
-    await mergeSpawnCtx.run(["git", "-C", repoPath, "branch", "-D", tempBranch]);
-    return failed("worktree", worktreeArgs, createWorktree);
+  // What the next commit is replayed onto: a commit while every commit so far
+  // was taken as it is, then the tree the last merge wrote.
+  let onto = target;
+  for (const line of listed.stdout ? listed.stdout.split("\n") : []) {
+    const [commit = "", parent] = line.split(" ");
+    if (parent === onto) {
+      onto = commit;
+      continue;
+    }
+    const replayArgs = ["merge-tree", "--write-tree", "--name-only", `--merge-base=${commit}^`, onto, commit];
+    const replayed = await git(replayArgs);
+    if (replayed.exitCode === 0) {
+      onto = replayed.stdout.split("\n")[0] ?? "";
+      continue;
+    }
+    if (replayed.exitCode !== 1) {
+      return failed("replay", replayArgs, replayed);
+    }
+    // Exit 1 is a conflict. stdout: the tree id, the conflicted files, a
+    // blank line, then git's messages.
+    const [, ...rest] = replayed.stdout.split("\n");
+    const blank = rest.indexOf("");
+    const files = blank === -1 ? rest : rest.slice(0, blank);
+    const messages = blank === -1 ? "" : rest.slice(blank + 1).join("\n");
+    return failed("replay", replayArgs, { ...replayed, stdout: messages }, files);
   }
-
-  // Attempt rebase in temp worktree
-  const rebaseArgs = ["rebase", targetBranch];
-  const rebaseResult = await mergeSpawnCtx.run(["git", "-C", tempDir, ...rebaseArgs]);
-  let result: { ok: true } | ConflictCheckFailure = { ok: true };
-
-  if (rebaseResult.exitCode !== 0) {
-    // Read the conflicted files before the abort clears them.
-    const unmerged = await mergeSpawnCtx.run(["git", "-C", tempDir, "diff", "--name-only", "--diff-filter=U"]);
-    const conflicts = unmerged.stdout ? unmerged.stdout.split("\n") : [];
-    await mergeSpawnCtx.run(["git", "-C", tempDir, "rebase", "--abort"]);
-    result = failed("rebase", rebaseArgs, rebaseResult, conflicts);
-  }
-
-  // Clean up: remove temp worktree and branch
-  await removeConflictCheckWorktree(repoPath, tempDir);
-  await mergeSpawnCtx.run(["git", "-C", repoPath, "branch", "-D", tempBranch]);
-
-  return result;
-}
-
-/**
- * Remove {@link checkRebaseConflicts}'s temp worktree: `git worktree remove
- * --force`, else delete the directory and prune its registration, which would
- * otherwise keep the temp branch checked out and undeletable.
- */
-async function removeConflictCheckWorktree(repoPath: string, tempDir: string): Promise<void> {
-  const worktreeRemove = await mergeSpawnCtx.run(["git", "-C", repoPath, "worktree", "remove", tempDir, "--force"]);
-  if (worktreeRemove.exitCode !== 0) {
-    try { await rm(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
-    await mergeSpawnCtx.run(["git", "-C", repoPath, "worktree", "prune"]);
-  }
+  return { ok: true };
 }
 
 /**
  * The error both `ib merge` and `ib merge-check` report for a failed conflict
- * check (SPEC.md §3.2 item 8): a headline that says whether it was a conflict,
- * a rebase that failed for another reason, or a check that could not run,
- * then the failed step's command and git's output, indented.
+ * check (SPEC.md §3.2 item 8): a headline that says whether it was a conflict
+ * or a check that could not run, then the failed step's command and git's
+ * output, indented.
  */
 function describeConflictCheckFailure(failure: ConflictCheckFailure, sourceBranch: string, targetBranch: string): string {
   const between = `'${sourceBranch}' and '${targetBranch}'`;
@@ -3662,9 +3675,7 @@ function describeConflictCheckFailure(failure: ConflictCheckFailure, sourceBranc
   const indent = (text: string) => `  ${text.replace(/\n/g, "\n  ")}`;
   const headline = failure.conflicts.length > 0
     ? `Rebase conflict detected between ${between} in ${step}. Conflicted files:\n${indent(failure.conflicts.join("\n"))}`
-    : failure.step === "rebase"
-      ? `Conflict check between ${between} failed, but not on a conflict: ${step} failed.`
-      : `Could not run the conflict check between ${between}: ${step} failed.`;
+    : `Could not run the conflict check between ${between}: ${step} failed.`;
   return `${headline}\n${failure.command} (exit ${failure.exitCode}):\n${indent(failure.output || "(no output)")}`;
 }
 
@@ -3678,6 +3689,17 @@ async function countCommitsAhead(repoPath: string, targetBranch: string, sourceB
   const logResult = await mergeSpawnCtx.run(["git", "-C", repoPath, "log", `${targetBranch}..${sourceBranch}`, "--oneline"]);
   const lines = logResult.stdout.trim();
   return lines ? lines.split("\n").length : 0;
+}
+
+/**
+ * Whether a rebase is in progress in the checkout at `worktreePath`: git keeps
+ * its state in `rebase-merge` (the default backend) or `rebase-apply` (the
+ * apply backend) in that checkout's git dir until it finishes or is aborted.
+ */
+async function rebaseInProgress(worktreePath: string): Promise<boolean> {
+  const paths = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rev-parse", "--git-path", "rebase-merge", "--git-path", "rebase-apply"]);
+  if (paths.exitCode !== 0) return false;
+  return paths.stdout.split("\n").some((p) => p !== "" && existsSync(resolve(worktreePath, p)));
 }
 
 /**
@@ -3972,10 +3994,32 @@ export async function mergeAgent(
     if (commitCount > 0) {
       // 8. Rebase agent branch onto target (in agent's worktree)
       const rebaseOk = await timed("merge", "git-rebase", async () => {
+        // A rebase already in progress is the agent's own. Ours would fail on
+        // it, and the abort below would then throw the agent's away.
+        if (await rebaseInProgress(worktreePath)) {
+          const refusal = `A rebase is already in progress in ${worktreePath}; finish it with git rebase --continue or git rebase --abort, then merge again`;
+          await logAgent(agentDir, `Did not rebase: ${refusal}`);
+          return { ok: false as const, stderr: refusal };
+        }
         await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
         const rebaseResult = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", targetBranch]);
         if (rebaseResult.exitCode !== 0) {
-          return { ok: false as const, stderr: `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}` };
+          const failure = `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}`;
+          // A rebase that stopped part way is left in progress: abort it, so
+          // the agent's worktree is not left mid-rebase on a detached HEAD.
+          if (!(await rebaseInProgress(worktreePath))) {
+            return { ok: false as const, stderr: failure };
+          }
+          const abort = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", "--abort"]);
+          await logAgent(agentDir, `Rebase failed; git rebase --abort exited ${abort.exitCode}`);
+          if (abort.exitCode === 0) {
+            return { ok: false as const, stderr: `${failure}\nThe rebase was aborted (git rebase --abort), so ${branchName} is as it was before the merge.` };
+          }
+          return {
+            ok: false as const,
+            stderr: `${failure}\ngit rebase --abort failed too (exit ${abort.exitCode}): ${abort.stderr || abort.stdout}\n` +
+              `${worktreePath} is still mid-rebase; finish it with git rebase --continue or git rebase --abort.`,
+          };
         }
         await logAgent(agentDir, "Rebase completed successfully");
         return { ok: true as const };

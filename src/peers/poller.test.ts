@@ -52,6 +52,8 @@ function makeRig(initialPeers: Peer[]) {
   const dials: string[] = [];
   const logs: string[] = [];
   let readError: Error | null = null;
+  /** While set, a peers.json read returns the list as it was when the read started, once this settles. */
+  let readGate: Promise<void> | null = null;
 
   const remote = (id: string): Remote => {
     let r = remotes.get(id);
@@ -91,7 +93,9 @@ function makeRig(initialPeers: Peer[]) {
   const poller = new PeerPoller({
     readPeers: async () => {
       if (readError) throw readError;
-      return peers.map((p) => ({ ...p }));
+      const read = peers.map((p) => ({ ...p }));
+      if (readGate) await readGate;
+      return read;
     },
     dial: (id) => {
       dials.push(id);
@@ -121,6 +125,9 @@ function makeRig(initialPeers: Peer[]) {
     },
     setReadError: (err: Error | null) => {
       readError = err;
+    },
+    holdReads: (gate: Promise<void> | null) => {
+      readGate = gate;
     },
     setDial: (fn: (id: string) => Promise<PairConnection>) => {
       dialImpl = fn;
@@ -944,6 +951,32 @@ describe("PeerPoller.update", () => {
     rig.poller.stop();
     rig.poller.update([]);
     expect(rig.state(P2)).toBeDefined();
+  });
+
+  test("a tick whose read started before update() discards that read: the removed peer stays removed and is not dialed", async () => {
+    const rig = makeRig([peer(P1, "B"), peer(P2, "C")]);
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true && rig.state(P2)?.connected === true, { message: "both connected" });
+    const read = Promise.withResolvers<void>();
+    rig.holdReads(read.promise);
+    rig.tick(); // this tick's read holds the old list, B and C
+    rig.setPeers([peer(P2, "C")]);
+    rig.poller.update([peer(P2, "C")]);
+    expect(rig.state(P1)).toBeUndefined();
+
+    rig.holdReads(null);
+    read.resolve();
+    await waitFor(() => rig.remote(P2).requests === 2, { message: "the tick polls the peers update() left" });
+    await Bun.sleep(5);
+    expect(rig.state(P1)).toBeUndefined();
+    expect(rig.dials).toEqual([P1, P2]);
+    expect(rig.remote(P1).requests).toBe(1);
+
+    rig.tick(); // a read that starts after update() is used
+    await waitFor(() => rig.remote(P2).requests === 3, { message: "next tick" });
+    expect(rig.poller.states().map(state => state.id)).toEqual([P2]);
+    expect(rig.dials).toEqual([P1, P2]);
+    rig.poller.stop();
   });
 });
 

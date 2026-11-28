@@ -503,8 +503,11 @@ export class PeerService {
     this.poller = new PeerPoller({
       readPeers: async () => {
         await deps.renewLease?.();
-        this.peers = await deps.readPeers();
-        return this.peers;
+        const epoch = this.poller.peersEpoch;
+        const peers = await deps.readPeers();
+        // As the poller does: a read from before the Peers tab's removal may still list the peer.
+        if (epoch === this.poller.peersEpoch) this.peers = peers;
+        return peers;
       },
       dial: (id) => this.dialPeer(id),
       now: deps.now,

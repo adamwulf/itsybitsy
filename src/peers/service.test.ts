@@ -699,6 +699,37 @@ describe("PeerService reconnectPeer and removePeer", () => {
     expect(await service.removePeer(ID_REMOTE)).toBe(`${ID_REMOTE.slice(0, 10)} was already removed.`);
     await service.shutdown();
   });
+
+  test("removePeer: a poll's peers.json read from before the removal does not bring the peer back", async () => {
+    await addPeer({ id: ID_REMOTE, name: "Laptop C" });
+    await addPeer({ id: ID_OTHER, name: "Desk" });
+    // The next read returns `hold` instead, once.
+    let hold: Promise<Peer[]> | null = null;
+    const { service, endpoint, clock } = makeService({
+      readPeers: () => {
+        const held = hold;
+        hold = null;
+        return held ?? readPeers();
+      },
+    });
+    answerDials(endpoint, REMOTE_AGENTS);
+    await service.bootIfPaired();
+    await waitFor(() => service.view().links.length === 2 && service.view().links.every(link => link.connected), { message: "both polled" });
+
+    const stale = await readPeers();
+    const read = gate<void>();
+    hold = read.promise.then(() => stale);
+    elapse(clock, PEER_POLL_INTERVAL_MS); // a tick, whose read is held with the old list
+    await flushMicrotasks();
+    expect(hold).toBeNull();
+    expect(await service.removePeer(ID_REMOTE)).toBeNull();
+    read.resolve();
+    await flushMicrotasks();
+    expect(service.view().peers.map(p => p.id)).toEqual([ID_OTHER]);
+    expect(service.view().links.map(link => link.id)).toEqual([ID_OTHER]);
+    expect(endpoint.connects.filter(id => id === ID_REMOTE)).toHaveLength(1);
+    await service.shutdown();
+  });
 });
 
 describe("PeerService at boot", () => {

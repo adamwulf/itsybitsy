@@ -50,7 +50,9 @@
  *   request ends with the close and its poll redials as it settles, and a
  *   pending dial is the reconnect.
  * - {@link PeerPoller.update} follows a `peers.json` change this process made
- *   (the Peers tab's remove) at once, instead of on the next tick.
+ *   (the Peers tab's remove) at once, instead of on the next tick. A tick
+ *   whose read started before it discards that read, which may hold the
+ *   old list, and polls the links update() left.
  * - {@link PeerPoller.stop} cancels the timer and closes every connection;
  *   `ib watch` stops the poller before it closes the endpoint. A dial or
  *   request still in flight is ignored when it settles. `start` again
@@ -202,11 +204,20 @@ export class PeerPoller {
   private cancelTimer: (() => void) | null = null;
   private lastReadError: string | null = null;
   private readonly listeners = new Set<() => void>();
+  private epoch = 0;
 
   constructor(private readonly deps: PeerPollerDeps) {}
 
   get isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Bumped by every {@link update}. A `peers.json` read that started before
+   * the latest update() may predate that change, so its list is discarded.
+   */
+  get peersEpoch(): number {
+    return this.epoch;
   }
 
   /** Subscribe to every visible change of {@link states}. Returns the unsubscribe function. */
@@ -264,7 +275,9 @@ export class PeerPoller {
 
   /** Follow a `peers.json` change this process made (the Peers tab's remove) now, not on the next tick. */
   update(peers: Peer[]): void {
-    if (this.running) this.sync(peers);
+    if (!this.running) return;
+    this.epoch++;
+    this.sync(peers);
   }
 
   /** The already authenticated link for a human-initiated request. */
@@ -335,9 +348,12 @@ export class PeerPoller {
   async tick(): Promise<void> {
     if (!this.running || this.readingPeers) return;
     this.readingPeers = true;
+    const epoch = this.epoch;
     let peers: Peer[] | null = null;
     try {
       peers = await this.deps.readPeers();
+      // Read before the Peers tab's removal landed (update): keep the links as update() left them.
+      if (epoch !== this.epoch) peers = null;
       this.lastReadError = null;
     } catch (err) {
       // Keep polling the peers already known (the other side still checks

@@ -915,6 +915,47 @@ describe("PeerPoller.reconnect", () => {
     rig.poller.stop();
   });
 
+  test("a peer removed while its reconnect's request is still in flight: no redial, nothing left reconnecting, closed once", async () => {
+    const rig = makeRig([peer(P1, "B")]);
+    const closes: string[] = [];
+    rig.setDial(async (id) => {
+      const conn = await rig.connect(id);
+      return {
+        remoteId: id,
+        openBi: () => conn.openBi(),
+        acceptBi: () => conn.acceptBi(),
+        close: (code, reason) => { closes.push(reason); conn.close(code, reason); },
+        closed: () => conn.closed(),
+        closeInfo: () => conn.closeInfo(),
+      };
+    });
+    rig.poller.start();
+    await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
+    rig.remote(P1).stalled = true;
+    rig.tick(); // this agents poll hangs
+    await Bun.sleep(5);
+
+    // Removed before the close has ended that request: its poll still holds the slot.
+    expect(rig.poller.reconnect(P1)).toBe(true);
+    rig.setPeers([]);
+    rig.poller.update([]);
+    expect(rig.poller["inFlight"].has(P1)).toBe(true);
+    expect(rig.poller.states()).toEqual([]);
+
+    await waitFor(() => !rig.poller["inFlight"].has(P1), { message: "the old request settled" });
+    rig.tick();
+    await Bun.sleep(5);
+    expect(rig.dials).toEqual([P1]);
+    expect(rig.poller.states()).toEqual([]);
+    expect(closes).toEqual(["reconnecting"]);
+    expect(rig.logs).toEqual([
+      `peer link: connected to B (${short})`,
+      reconnectLine("closing the connection and dialing again"),
+      `peer link: stopped polling B (${short}): no longer in peers.json`,
+    ]);
+    rig.poller.stop();
+  });
+
   test("refused while stopped or for a peer it does not poll; stop ends a pending reconnect", async () => {
     const rig = makeRig([peer(P1, "B")]);
     expect(rig.poller.reconnect(P1)).toBe(false);

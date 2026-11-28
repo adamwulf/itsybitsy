@@ -5677,6 +5677,21 @@ describe("applyLayout", () => {
     expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["studio/web/agent-1", "studio/api/agent-2"]);
   });
 
+  test("applyLayout moves a favorite saved under this machine's display name to its clean name, and leaves the rest", () => {
+    const dashboard = makeDashboard();
+    dashboard.setMachineName("macbook-pro");
+    dashboard.applyLayout({
+      sidebarWidth: 60,
+      splitPaneLeftWidth: 80,
+      heightOffsets: { tree: 0, info: 0, coordinator: 0 },
+      favoriteAgentIds: ["MacBook Pro/test/agent-old", "macbook-pro/test/agent-new", "Laptop B/test/remote-1"],
+    });
+    expect([...dashboard.agentTree.favoriteAgentIds]).toEqual(["macbook-pro/test/agent-old", "macbook-pro/test/agent-new", "Laptop B/test/remote-1"]);
+    const agent = makeAgent("agent-old", "/repos/test");
+    dashboard.onUpdate([agent], [makeFlatRepoHeader("test", "/repos/test", true, true, true), makeFlatAgent(agent)], [], []);
+    expect(dashboard.agentTree.isFavorite(agent)).toBe(true);
+  });
+
   test("'.' on an agent toggles it as a favorite, persists its fully qualified id, and applyLayout(loadLayout()) restores it", async () => {
     const dashboard = makeDashboard();
     dashboard.setMachineName("studio");

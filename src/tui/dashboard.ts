@@ -102,7 +102,7 @@ import { FocusManager } from "./focus";
 import type { FocusTarget, SubFocus } from "./focus";
 import { SystemDashboardComponent } from "./system-dashboard";
 import { loadLayout, saveLayoutDebounced, cancelPendingSave, flushPendingSave } from "./layout";
-import { initializeMachineName } from "../machine-name";
+import { cleanMachineName, initializeMachineName } from "../machine-name";
 import {
   DEFAULT_TMUX_WIDTH, PINNED_TMUX_WIDTH,
   getLiveMainWidth, getLiveLeftPaneWidth, getLiveRightPaneWidth,
@@ -1452,7 +1452,13 @@ export class DashboardComponent implements Component {
       this.agentTree.pinnedRemoteRepoNames = new Set(layout.pinnedRemoteRepoNames.map(name => name.toLowerCase()));
     }
     if (layout.favoriteAgentIds !== undefined) {
-      this.agentTree.favoriteAgentIds = new Set(layout.favoriteAgentIds);
+      // A local favorite saved under this machine's display name ("MacBook
+      // Pro/…") moves to its clean name, the one local keys now use.
+      const machine = this.agentTree.machineName;
+      this.agentTree.favoriteAgentIds = new Set(layout.favoriteAgentIds.map((key) => {
+        const [first, ...rest] = key.split("/");
+        return first !== machine && cleanMachineName(first!) === machine ? [machine, ...rest].join("/") : key;
+      }));
     }
     // No load-time clamp of heightOffsets: the base heights are not known yet
     // (they depend on the tab's row count), and a clamp against a guess would

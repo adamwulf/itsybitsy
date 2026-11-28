@@ -3692,6 +3692,17 @@ async function countCommitsAhead(repoPath: string, targetBranch: string, sourceB
 }
 
 /**
+ * Whether a rebase is in progress in the checkout at `worktreePath`: git keeps
+ * its state in `rebase-merge` (the default backend) or `rebase-apply` (the
+ * apply backend) in that checkout's git dir until it finishes or is aborted.
+ */
+async function rebaseInProgress(worktreePath: string): Promise<boolean> {
+  const paths = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rev-parse", "--git-path", "rebase-merge", "--git-path", "rebase-apply"]);
+  if (paths.exitCode !== 0) return false;
+  return paths.stdout.split("\n").some((p) => p !== "" && existsSync(resolve(worktreePath, p)));
+}
+
+/**
  * Before a merge into `targetBranch`: pull it from every remote the way
  * `ib pull` does, when it is `main` or `master`, is checked out in
  * `targetDir`, and the repo has remotes (SPEC.md §3.4). Any other target —
@@ -3983,10 +3994,33 @@ export async function mergeAgent(
     if (commitCount > 0) {
       // 8. Rebase agent branch onto target (in agent's worktree)
       const rebaseOk = await timed("merge", "git-rebase", async () => {
+        // A rebase already in progress is the agent's own. Ours would fail on
+        // it, and the abort below would then throw the agent's away.
+        if (await rebaseInProgress(worktreePath)) {
+          return {
+            ok: false as const,
+            stderr: `A rebase is already in progress in ${worktreePath}; finish it with git rebase --continue or git rebase --abort, then merge again`,
+          };
+        }
         await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
         const rebaseResult = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", targetBranch]);
         if (rebaseResult.exitCode !== 0) {
-          return { ok: false as const, stderr: `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}` };
+          const failure = `Rebase failed: ${rebaseResult.stderr || rebaseResult.stdout}`;
+          // A rebase that stopped part way is left in progress: abort it, so
+          // the agent's worktree is not left mid-rebase on a detached HEAD.
+          if (!(await rebaseInProgress(worktreePath))) {
+            return { ok: false as const, stderr: failure };
+          }
+          const abort = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", "--abort"]);
+          await logAgent(agentDir, `Rebase failed; git rebase --abort exited ${abort.exitCode}`);
+          if (abort.exitCode === 0) {
+            return { ok: false as const, stderr: `${failure}\nThe rebase was aborted (git rebase --abort), so ${branchName} is as it was before the merge.` };
+          }
+          return {
+            ok: false as const,
+            stderr: `${failure}\ngit rebase --abort failed too (exit ${abort.exitCode}): ${abort.stderr || abort.stdout}\n` +
+              `${worktreePath} is still mid-rebase; finish it with git rebase --continue or git rebase --abort.`,
+          };
         }
         await logAgent(agentDir, "Rebase completed successfully");
         return { ok: true as const };

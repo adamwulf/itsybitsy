@@ -4,7 +4,7 @@ import { useAttachmentTemp } from "./test-attachment-temp";
 import { sandboxDenialExecPrefix, sandboxDenialScriptPreamble } from "./sandbox-log-launch";
 import { resolveNoWorktreeCaller } from "./no-worktree-caller";
 import { test, expect, describe, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
-import { join, basename, dirname } from "path";
+import { join, basename, dirname, resolve } from "path";
 import {
   mkdtemp,
   rm,
@@ -5676,6 +5676,44 @@ describe("mergeAgent (native)", () => {
     expect(result.stderr).toContain("could not apply");
   });
 
+  test("a failed rebase left in progress whose abort also fails says the worktree is still mid-rebase", async () => {
+    const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
+    const worktreePath = join(agentDir, "repo");
+    await mkdir(worktreePath, { recursive: true });
+    await Bun.write(join(agentDir, "meta.json"), JSON.stringify({ id: "agent-abc", tmux_session: "tmux-agent-abc" }));
+    // No rebase state before the merge's rebase; after it fails, git reports
+    // state at a path that exists (the agent dir stands in for rebase-merge).
+    const base = makeMergeMock({ rebaseFails: true });
+    let rebaseRan = false;
+    const runner = (cmd: string[], o?: any) => {
+      if (cmd.includes("--git-path")) {
+        spawnCalls.push(cmd);
+        return makeSpawnResult(0, rebaseRan ? `${agentDir}\n` : "");
+      }
+      if (cmd.includes("rebase") && cmd.includes("--abort")) {
+        spawnCalls.push(cmd);
+        return makeSpawnResult(128, "", "error: could not move back to agent/agent-abc");
+      }
+      if (cmd.includes("rebase")) rebaseRan = true;
+      return base(cmd, o);
+    };
+    lifecycleSpawnCtx.set(runner);
+    setMergeSpawnRunner(runner);
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir);
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toBe(
+      "Rebase failed: CONFLICT\n" +
+      "git rebase --abort failed too (exit 128): error: could not move back to agent/agent-abc\n" +
+      `${worktreePath} is still mid-rebase; finish it with git rebase --continue or git rebase --abort.`,
+    );
+    expect(spawnCalls.find((c) => c.includes("--abort"))).toEqual(["git", "-C", worktreePath, "rebase", "--abort"]);
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("Rebase failed; git rebase --abort exited 128");
+    // Nothing was checked out or merged.
+    expect(spawnCalls.find((c) => c.includes("checkout"))).toBeUndefined();
+  });
+
   test("merge still succeeds when worktree remove fails (rm -rf fallback)", async () => {
     const agentDir = join(tempDir, ".itsybitsy", "agents", "agent-abc");
     await mkdir(join(agentDir, "repo"), { recursive: true });
@@ -6777,6 +6815,63 @@ describe("mergeAgent --keep (real git)", () => {
     expect(calls.find((c) => c.includes("merge-tree"))).toBeUndefined();
     expect(calls.find((c) => c.includes("worktree") || c.includes("checkout"))).toBeUndefined();
     expect(await git("-C", tempDir, "worktree", "list", "--porcelain")).toBe(worktreesBefore);
+  });
+
+  /** Whether `git rebase` has state in progress in the agent's worktree. */
+  async function agentRebaseInProgress(): Promise<boolean> {
+    return existsSync(resolve(worktree, await git("-C", worktree, "rev-parse", "--git-path", "rebase-merge")));
+  }
+
+  test("a rebase in the agent's worktree that stops without a conflict is aborted, leaving the agent as it was", async () => {
+    // No conflict, so the check passes. But the rebase's checkout of main runs
+    // a post-checkout hook that edits tracked.txt, and the agent's commit then
+    // cannot be applied over that local change, so the rebase stops part way.
+    const agentTip = await agentCommit("tracked.txt", "agent\n", "agent: edit tracked");
+    const mainBefore = await mainCommit("other.txt", "other\n", "main: other");
+    const hooksDir = join(tempDir, ".git", "test-hooks");
+    await mkdir(hooksDir, { recursive: true });
+    await Bun.write(join(hooksDir, "post-checkout"), "#!/bin/sh\necho dirty >> tracked.txt\n");
+    chmodSync(join(hooksDir, "post-checkout"), 0o755);
+    await git("-C", tempDir, "config", "core.hooksPath", hooksDir);
+    // A user-wide rebase.autoStash would change how the rebase meets the edit.
+    await git("-C", tempDir, "config", "rebase.autoStash", "false");
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toStartWith("Rebase failed: ");
+    expect(result.stderr).toEndWith(
+      "\nThe rebase was aborted (git rebase --abort), so agent/agent-abc is as it was before the merge.",
+    );
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("Rebase failed; git rebase --abort exited 0");
+    expect(await agentRebaseInProgress()).toBe(false);
+    expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(agentTip);
+    expect(await git("-C", worktree, "branch", "--show-current")).toBe("agent/agent-abc");
+    expect(await git("-C", worktree, "rev-parse", "HEAD")).toBe(agentTip);
+    expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
+  });
+
+  test("a rebase the agent already has in progress is refused before the merge's own, and left in progress", async () => {
+    await agentCommit("feature.txt", "one\n", "agent: one");
+    await mainCommit("other.txt", "other\n", "main: other");
+    // The agent's own rebase, stopped by a failing --exec with a clean tree.
+    const own = Bun.spawnSync(["git", "-C", worktree, "rebase", "--exec", "false", "main"], { stdout: "pipe", stderr: "pipe" });
+    expect(own.exitCode).not.toBe(0);
+    expect(await agentRebaseInProgress()).toBe(true);
+    expect(await git("-C", worktree, "status", "--porcelain")).toBe("");
+    const mainBefore = await git("-C", tempDir, "rev-parse", "main");
+    const calls = recordGit();
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toBe(
+      `A rebase is already in progress in ${worktree}; finish it with git rebase --continue or git rebase --abort, then merge again`,
+    );
+    // Neither a rebase of the merge's own nor an abort ran in the worktree.
+    expect(calls.find((c) => c.includes(worktree) && c.includes("rebase"))).toBeUndefined();
+    expect(await agentRebaseInProgress()).toBe(true);
+    expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
   });
 
   test("refuses on a dirty primary checkout without touching main", async () => {

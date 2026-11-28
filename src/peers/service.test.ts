@@ -2059,7 +2059,7 @@ describe("PeerService keeps the link while a transfer moves bytes", () => {
     await first.writeAll(encodeAgentsReply({ coordinator: null, repos: [], agents: [], questions: [] }));
     await first.finish();
     await waitFor(() => rig.service.view().links[0]?.connected === true, { message: "connected" });
-    /** The next tick's agents poll, read and left unanswered, then its 15 s deadline and 750 ms grace. */
+    /** The next tick's agents poll, read and left unanswered, then its 30 s deadline and 750 ms grace. */
     const stallPoll = async () => {
       rig.clock.advance(PEER_POLL_INTERVAL_MS);
       const poll = await far!.acceptBi();
@@ -2101,7 +2101,7 @@ describe("PeerService keeps the link while a transfer moves bytes", () => {
       clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
       await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
       expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
-      expect(service.view().links[0]?.lastError).toBe("no reply to the agents poll within 15 s");
+      expect(service.view().links[0]?.lastError).toBe("no reply to the agents poll within 30 s");
     } finally {
       inbound.close(PEER_CLOSE.done, "done");
       await service.shutdown();
@@ -2150,7 +2150,7 @@ describe("PeerService keeps the link while a transfer moves bytes", () => {
       clock.advance(PEER_REQUEST_TIMEOUT_MS); // the kept poll's next check
       await waitFor(() => service.view().links[0]?.connected === false, { message: "closed" });
       expect(far.closeInfo()).toMatchObject({ byPeer: true, code: PEER_CLOSE.error });
-      expect(service.view().links[0]?.lastError).toBe("no reply to the agents poll within 15 s");
+      expect(service.view().links[0]?.lastError).toBe("no reply to the agents poll within 30 s");
     } finally {
       reading.resolve();
       await service.shutdown();

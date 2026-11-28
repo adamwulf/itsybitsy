@@ -68,6 +68,12 @@ export const PEER_ALPN = "itsybitsy/peer/1";
 export const PEER_MAX_REQUEST_BYTES = 4096;
 export const NEW_AGENT_MAX_REQUEST_BYTES = 256 * 1024;
 export const NEW_AGENT_TIMEOUT_MS = 30_000;
+/**
+ * Deadline for an `agents` poll, a pane read, an agent-prompt read and an
+ * acknowledge on a live connection. A kept request (SPEC.md §20.4 "Slow
+ * links") asks its keep rule again at this interval.
+ */
+export const PEER_REQUEST_TIMEOUT_MS = 30_000;
 // Leave the responder time to return an uncertain outcome before the dialer gives up.
 const RESPONDER_START_TIMEOUT_MS = 25_000;
 /**
@@ -533,7 +539,7 @@ type Timer = PeerResponderDeps["setTimer"];
 const realTimer: Timer = (ms, fn) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); };
 
 export function requestAgents(conn: PairConnection, setTimer = realTimer, timeoutError = new Error("request timed out"), keepOpenOnTimeout?: () => boolean): Promise<PeerSnapshot> {
-  return clientExchange(conn, encodePeerRequest("agents"), decodeAgentsReply, { setTimer, timeout: [15_000, timeoutError], keepOpenOnTimeout });
+  return clientExchange(conn, encodePeerRequest("agents"), decodeAgentsReply, { setTimer, timeout: [PEER_REQUEST_TIMEOUT_MS, timeoutError], keepOpenOnTimeout });
 }
 
 export function requestPane(conn: PairConnection, target: PeerPaneTarget, lines: number, setTimer = realTimer, keepOpenOnTimeout?: () => boolean): Promise<PeerPane> {
@@ -544,7 +550,7 @@ export function requestPane(conn: PairConnection, target: PeerPaneTarget, lines:
       throw new PeerProtocolError(`malformed ${target.op} reply`);
     }
     return { state: cleanRemoteText(reply.state), text: sanitizePane(reply.text) };
-  }, { setTimer, timeout: [15_000, new Error(target.op === "agent-pane" ? "Agent pane request timed out" : "Coordinator pane request timed out")], keepOpenOnTimeout });
+  }, { setTimer, timeout: [PEER_REQUEST_TIMEOUT_MS, new Error(target.op === "agent-pane" ? "Agent pane request timed out" : "Coordinator pane request timed out")], keepOpenOnTimeout });
 }
 
 /** The agent's prompt as its own INITIAL PROMPT pane shows it, safe to draw. */
@@ -554,7 +560,7 @@ export function requestAgentPrompt(conn: PairConnection, repo: string, id: strin
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
     if (reply.op !== "agent-prompt" || typeof reply.prompt !== "string") throw new PeerProtocolError("malformed agent-prompt reply");
     return cleanLines(reply.prompt);
-  }, { setTimer, timeout: [15_000, new Error("Agent prompt request timed out")] });
+  }, { setTimer, timeout: [PEER_REQUEST_TIMEOUT_MS, new Error("Agent prompt request timed out")] });
 }
 
 export function requestAgentDiff(conn: PairConnection, repo: string, id: string, setTimer = realTimer): Promise<AgentDiff> {
@@ -765,7 +771,7 @@ export function requestAcknowledge(conn: PairConnection, repo: string, id: strin
     if (reply.ok === true) return;
     if (reply.op === "error" && typeof reply.reason === "string") throw new PeerErrorReply(cleanRemoteText(reply.reason));
     throw new PeerProtocolError("malformed acknowledge reply");
-  }, { setTimer, timeout: [15_000, new Error("Acknowledge request timed out")] });
+  }, { setTimer, timeout: [PEER_REQUEST_TIMEOUT_MS, new Error("Acknowledge request timed out")] });
 }
 
 /** A change re-seals a sandboxed agent and enqueues a message to it before the reply. */

@@ -14,7 +14,7 @@ import { PEER_POLL_INTERVAL_MS, PEER_REQUEST_TIMEOUT_MS, PeerPoller, peerLinkSta
 import type { Peer } from "./store";
 import { createFakeClock, createMemoryLink, type MemoryConnection } from "./test-pair-transport";
 
-const TIMED_OUT = "no reply to the agents poll within 15 s";
+const TIMED_OUT = "no reply to the agents poll within 30 s";
 const SELF = "5e".repeat(32);
 const P1 = "a1".repeat(32);
 const P2 = "b2".repeat(32);
@@ -248,7 +248,7 @@ describe("PeerPoller", () => {
     rig.poller.stop();
   });
 
-  test("a hung request is never doubled; after 15 s it times out, the reply grace expires and the next poll redials", async () => {
+  test("a hung request is never doubled; after 30 s it times out, the reply grace expires and the next poll redials", async () => {
     const rig = makeRig([peer(P1, "B")]);
     // A connection whose far end never answers: no responder runs on it.
     const silent = createMemoryLink(SELF, P1);
@@ -264,8 +264,8 @@ describe("PeerPoller", () => {
       closed: () => silent.a.closed(),
       closeInfo: () => silent.a.closeInfo(),
     };
-    // The dial lands 2 s after start, so the request's 15 s timeout falls
-    // between ticks (at 17 s) rather than on one.
+    // The dial lands 2 s after start, so the request's 30 s timeout falls
+    // between ticks (at 32 s) rather than on one.
     const dial = deferredDial();
     rig.setDial(() => dial.promise);
     rig.poller.start();
@@ -273,8 +273,8 @@ describe("PeerPoller", () => {
     rig.clock.jump(2_000);
     dial.resolve(counting);
     await waitFor(() => streams === 1, { message: "first request sent" });
-    for (const ms of [3_000, 5_000, 5_000]) {
-      rig.clock.advance(ms); // ticks at 5, 10 and 15 s: the request is in flight, so P1 is skipped
+    for (const ms of [3_000, 5_000, 5_000, 5_000, 5_000, 5_000]) {
+      rig.clock.advance(ms); // ticks at 5 through 30 s: the request is in flight, so P1 is skipped
       await Bun.sleep(5);
     }
     expect(streams).toBe(1);
@@ -283,8 +283,8 @@ describe("PeerPoller", () => {
     expect(silent.a.closeInfo()).toBeNull();
 
     rig.setDial(rig.connect);
-    expect(PEER_REQUEST_TIMEOUT_MS).toBe(15_000);
-    rig.clock.advance(2_000); // t = 17 s: 15 s after the request started, between ticks
+    expect(PEER_REQUEST_TIMEOUT_MS).toBe(30_000);
+    rig.clock.advance(2_000); // t = 32 s: 30 s after the request started, between ticks
     await Bun.sleep(0); rig.clock.advance(750);
     await waitFor(() => rig.state(P1)?.lastError === TIMED_OUT, { message: "timed out" });
     expect(rig.state(P1)?.connected).toBe(false);
@@ -297,7 +297,7 @@ describe("PeerPoller", () => {
     expect(rig.logs).toContain(`peer link: B (${P1.slice(0, 10)}): ${TIMED_OUT}`);
     expect(rig.logs.filter((line) => line.includes("disconnected"))).toEqual([]);
 
-    rig.clock.advance(3_000); // t = 20 s: the next tick redials
+    rig.clock.advance(3_000); // t = 35 s: the next tick redials
     await waitFor(() => rig.state(P1)?.connected === true, { message: "redialed" });
     expect(rig.dials).toEqual([P1, P1]);
     expect(rig.remote(P1).overlaps).toBe(0);
@@ -314,28 +314,27 @@ describe("PeerPoller", () => {
     rig.remote(P1).stalled = true;
     rig.tick(); // t = 5 s: this request hangs
     await Bun.sleep(5);
-    rig.tick(); // 10 s
-    rig.tick(); // 15 s
+    for (let t = 10; t <= 30; t += 5) rig.tick(); // 10 through 30 s
     await Bun.sleep(5);
     expect(rig.remote(P1).served.length).toBe(1);
     expect(rig.state(P1)?.connected).toBe(true);
 
-    // t = 20 s: the timeout and a tick fall due together. Whichever order the
+    // t = 35 s: the timeout and a tick fall due together. Whichever order the
     // fake clock runs them in, there is exactly one redial and no overlap.
     rig.remote(P1).stalled = false;
     rig.tick();
     await Bun.sleep(0); rig.clock.advance(750);
     await waitFor(() => rig.state(P1)?.lastError === TIMED_OUT || rig.dials.length === 2, { message: "timed out" });
     expect(rig.remote(P1).served[0]!.closeInfo()).toMatchObject({ byPeer: true, code: 3 });
-    rig.tick(); // 25 s
+    rig.tick(); // 40 s
     await waitFor(() => rig.state(P1)?.connected === true, { message: "redialed" });
     expect(rig.dials).toEqual([P1, P1]);
     expect(rig.remote(P1).overlaps).toBe(0);
     expect(rig.state(P1)).toMatchObject({ connected: true, lastError: null, agents: list });
-    // Connected since t = 0, so the failure at t = 20 s is one disconnect line.
+    // Connected since t = 0, so the failure at t = 35 s is one disconnect line.
     // Its reason is whichever the memory link reports first (its closed() is
     // a microtask); the delayed-close test below pins the timeout's reason.
-    expect(rig.logs.filter((line) => line.startsWith(`peer link: B (${P1.slice(0, 10)}): disconnected (dialed, up 20s): `))).toHaveLength(1);
+    expect(rig.logs.filter((line) => line.startsWith(`peer link: B (${P1.slice(0, 10)}): disconnected (dialed, up 35s): `))).toHaveLength(1);
     rig.poller.stop();
   });
 
@@ -680,13 +679,13 @@ describe("PeerPoller", () => {
     await (await b.acceptBi()).readToEnd(PEER_MAX_REQUEST_BYTES);
     rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
     await Bun.sleep(0);
-    rig.clock.advance(750); // t = 20.75 s: the teardown grace ran out, so the connection closes
+    rig.clock.advance(750); // t = 35.75 s: the teardown grace ran out, so the connection closes
     await waitFor(() => rig.state(P1)?.lastError === TIMED_OUT, { message: "timed out" });
     notification.resolve();
     await new Promise<void>(done => setImmediate(done));
     expect(rig.logs).toEqual([
       `peer link: connected to B (${id})`,
-      `peer link: B (${id}): disconnected (dialed, up 20s): ${TIMED_OUT}`,
+      `peer link: B (${id}): disconnected (dialed, up 35s): ${TIMED_OUT}`,
       `peer link: B (${id}): closed`,
     ]);
     rig.poller.stop();
@@ -812,7 +811,7 @@ describe("request timeouts during an attachment transfer", () => {
     };
   }
 
-  /** Let the 15 s request deadline pass, then its 750 ms teardown grace. */
+  /** Let the 30 s request deadline pass, then its 750 ms teardown grace. */
   async function timeOut(rig: ReturnType<typeof makeRig>) {
     rig.clock.advance(PEER_REQUEST_TIMEOUT_MS);
     await Bun.sleep(0);
@@ -834,7 +833,7 @@ describe("request timeouts during an attachment transfer", () => {
       rig.setProgressing(true);
       rig.tick(); // t = 5 s: this poll gets no answer in time
       const stalled = await link.ignore();
-      await timeOut(rig); // t = 20.75 s
+      await timeOut(rig); // t = 35.75 s
       await waitFor(() => rig.logs.includes(kept("agents poll")), { message: "kept" });
       expect(link.a.closeInfo()).toBeNull();
       expect(rig.state(P1)).toEqual(before);
@@ -865,7 +864,7 @@ describe("request timeouts during an attachment transfer", () => {
     } finally { rig.poller.stop(); }
   });
 
-  test("a kept agents poll whose transfer stops moving bytes is closed at the next 15 s check", async () => {
+  test("a kept agents poll whose transfer stops moving bytes is closed at the next 30 s check", async () => {
     const rig = makeRig([peer(P1, "B")]);
     const link = manualLink(rig);
     rig.poller.start();

@@ -31,6 +31,7 @@ import {
   requestAcknowledge,
   requestPermissions,
   PEER_MAX_REQUEST_BYTES,
+  PEER_REQUEST_TIMEOUT_MS,
   PeerErrorReply,
   PeerProtocolError,
   decodeAgentsReply,
@@ -385,7 +386,7 @@ describe("requestAgents", () => {
     const far = await link.b.acceptBi();
     await far.readToEnd(PEER_MAX_REQUEST_BYTES);
     await Bun.sleep(0);
-    clock.advance(15_000); await Bun.sleep(0); clock.advance(749);
+    clock.advance(PEER_REQUEST_TIMEOUT_MS); await Bun.sleep(0); clock.advance(749);
     expect(state.asks).toBe(0); // still within the grace
     clock.advance(1);
     await Bun.sleep(0);
@@ -417,11 +418,11 @@ describe("requestAgents", () => {
   test("a kept timeout asks again every timeout interval and closes at the first no", async () => {
     let keep = true;
     const { link, clock, timedOut, state, request } = await stalledAgentsRequest(() => keep);
-    clock.advance(15_000); await Bun.sleep(0);
+    clock.advance(PEER_REQUEST_TIMEOUT_MS); await Bun.sleep(0);
     expect(state.asks).toBe(2);
     expect(state.settled).toBe(false);
     keep = false;
-    clock.advance(14_999); await Bun.sleep(0);
+    clock.advance(PEER_REQUEST_TIMEOUT_MS - 1); await Bun.sleep(0);
     expect(state.asks).toBe(2);
     clock.advance(1);
     expect(await request).toBe(timedOut);

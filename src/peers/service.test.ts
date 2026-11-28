@@ -827,13 +827,16 @@ describe("PeerService at boot", () => {
     } finally { await service.shutdown(); }
   });
 
-  test("a lifecycle handoff names the peer by its clean name in errors and rehire suggestions", async () => {
+  test("a CLI lifecycle handoff names the peer by its clean name; a dashboard command by its stored name", async () => {
     await addPeer({ id: ID_REMOTE, name: "Laptop C" });
     const { AmbiguousRemoteRehire } = await import("./remote-lifecycle");
     const { service, endpoint } = makeService();
     const request = { action: "rehire" as const, id: "former" };
     try {
+      // The CLI's errors are agent-visible; the dashboard's notices show the display name.
       await expect(service.runRemoteLifecycle(ID_REMOTE, request, "handoff")).rejects.toThrow("laptop-c is disconnected");
+      await expect(service.runRemoteLifecycle(ID_REMOTE, { action: "retire", repo: "app", id: "worker" }, "dashboard"))
+        .rejects.toThrow("Laptop C is disconnected");
       endpoint.connectImpl = async id => {
         const link = createMemoryLink("00".repeat(32), id);
         void serveTrustedConnection(link.b, {

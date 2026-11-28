@@ -938,8 +938,10 @@ export class PeerService {
     if (source === "dashboard" && this.remoteStartDenial !== null) throw new Error(remoteLifecycleDenial(this.remoteStartDenial, request.action));
     const name = await this.peerName(peerId);
     if (name === null) throw new Error("Machine is no longer paired");
-    // Clean: a CLI handoff's errors, and the rehire suggestions it builds, are agent-visible addresses.
-    const machine = cleanPeerName({ id: peerId, name });
+    // A CLI handoff's errors, and the rehire suggestions it builds, are
+    // agent-visible, so they use the clean name. The dashboard's notices keep
+    // the stored (display) name, as its success notice does.
+    const machine = source === "handoff" ? cleanPeerName({ id: peerId, name }) : name;
     const conn = this.poller.connectedConnection(peerId);
     if (!conn) throw new Error(`${machine} is disconnected`);
     return requestLifecycle(conn, request, machine, this.deps.setTimer, transfer);

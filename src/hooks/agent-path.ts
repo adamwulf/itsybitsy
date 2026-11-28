@@ -44,6 +44,15 @@ import { withWaitHint } from "./wait-hint";
 export { claudeProjectDirFor };
 
 /**
+ * Appended to the path-parsing deny reasons: `heredocBodyRanges` stops at
+ * constructs it does not model, so a heredoc after one of them is scanned as
+ * commands, and an agent already using a heredoc needs to know why.
+ */
+const HEREDOC_SCAN_HINT =
+  " A heredoc body is treated as literal text only when no comment, `(`, `$(`, backtick or `$'` " +
+  "comes before its `<<`; otherwise pass the text via a file.";
+
+/**
  * Deny reason for a bash token that mixes a `..` path segment with shell
  * expansion/quoting we cannot resolve safely (empty quotes, `$…`, `${…}`,
  * backticks, backslashes, a leading `~`). Rather than emulate the shell, the
@@ -52,7 +61,8 @@ export { claudeProjectDirFor };
 export const TRAVERSAL_NOISE_DENY_REASON =
   "Access denied: path contains `..` combined with shell expansion or quoting that cannot be resolved safely. " +
   "If this is literal text (a commit message, an `ib send` body), put it in a quoted-delimiter heredoc " +
-  "(<<'EOF' … EOF) or pass it via a file (e.g. `git commit -F <file>`) instead of on the command line.";
+  "(<<'EOF' … EOF) or pass it via a file (e.g. `git commit -F <file>`) instead of on the command line." +
+  HEREDOC_SCAN_HINT;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -665,6 +675,8 @@ function checkBashSettingsWrite(
  * carries `..`, apostrophes and absolute paths — is never tokenized, while every
  * char offset OUTSIDE the bodies stays put. Shared by the relative-traversal
  * scanner and the advisory Bash path scanner so both agree on what is data.
+ * heredocBodyRanges stops at constructs it does not model, so a heredoc after
+ * one of them is not masked and its body is scanned like any other text.
  */
 function maskHeredocBodies(command: string): string {
   const bodyRanges = heredocBodyRanges(command);
@@ -683,7 +695,7 @@ function maskHeredocBodies(command: string): string {
 }
 
 const BASH_PATH_SYNTAX_DENY_REASON =
-  "Access denied: unterminated shell quote or escape prevents safe path parsing";
+  "Access denied: unterminated shell quote or escape prevents safe path parsing." + HEREDOC_SCAN_HINT;
 
 /**
  * Split shell words without splitting quoted or escaped whitespace. Keep the
@@ -760,7 +772,8 @@ function tokenizeBashPaths(command: string, skipLeadingContinuations = false): s
  *
  * Heredoc BODY lines are excluded (masked to spaces) before tokenizing — they
  * are data (commit messages, `ib send` bodies) that legitimately contain `..`
- * and apostrophes. The opener line and lines after the terminator stay scanned.
+ * and apostrophes. The opener line and lines after the terminator stay scanned,
+ * and so does a heredoc after a construct heredocBodyRanges stops at.
  *
  * Known safe-direction OVER-denies (denied though harmless; the caller-facing
  * reason names the workarounds — a quoted-delimiter heredoc or `-F <file>`):
@@ -867,7 +880,8 @@ export function bashPathNoiseDenyReason(token: string): string {
     `Access denied: path-looking argument \`${token}\` mixes shell expansion or quoting ` +
     `that cannot be resolved safely. If this is literal text (a commit message, an ` +
     `\`ib send\` body), put it in a quoted-delimiter heredoc (<<'EOF' … EOF) or pass it ` +
-    `via a file (e.g. \`git commit -F <file>\`) instead of on the command line.`
+    `via a file (e.g. \`git commit -F <file>\`) instead of on the command line.` +
+    HEREDOC_SCAN_HINT
   );
 }
 

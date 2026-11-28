@@ -701,6 +701,25 @@ describe("checkPathAccess", () => {
       expect(result.decision).toBe("deny");
       expect(result.reason).toContain("other agents");
     }
+    // Denied too, though by a noise rule once the line is no longer masked.
+    for (const command of [
+      // A continuation at the end of the opener line starts the body later.
+      "cat <<'EOF' \\\n../../agent-other/repo/.env\nEOF",
+      "cat ${X:-`echo }`<<EOF}\ncat ../../agent-other/repo/.env\nEOF}",
+    ]) {
+      expect(checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx).decision).toBe("deny");
+    }
+  });
+
+  test("a heredoc after continued lines is still data", () => {
+    const ctx = makeCtx();
+    for (const command of [
+      "ib send mgr \\\n<<'EOF'\nit's in ../x\nEOF",
+      "gh api repos/o/r/issues \\\n  --method POST \\\n  --input - <<'EOF'\n{\"see\": \"../../x\"}\nEOF",
+    ]) {
+      const result = checkPathAccess(makeInput({ toolName: "Bash", toolInput: { command } }), ctx);
+      expect(result.decision).toBe("allow");
+    }
   });
 
   // ── git -C / --git-dir / --work-tree blocking ──────────────────────────────

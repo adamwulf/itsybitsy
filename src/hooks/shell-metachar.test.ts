@@ -75,8 +75,11 @@ describe("heredocBodyRanges", () => {
     expect(heredocBodyRanges("echo $((1<<2))")).toEqual([]);
   });
 
-  test("a real heredoc after an arithmetic expression on an earlier line is still masked", () => {
-    expect(bodies("echo $((1<<2))\ncat <<'EOF'\nbody\nEOF")).toEqual(["body\n"]);
+  test("arithmetic stops the walk, so a later heredoc body is scanned, not masked", () => {
+    // The walk does not track where `((…))` ends: `(1+(2))` closes it early
+    // for a paren counter, and `((cat) <<EOF` is a nested subshell. Masking
+    // less is the safe direction.
+    expect(bodies("echo $((1<<2))\ncat <<'EOF'\nbody\nEOF")).toEqual([]);
   });
 });
 
@@ -111,7 +114,7 @@ describe("findShellMetachar — multi-part heredoc delimiter (round 5 fix 1)", (
 describe("false heredoc openers hide no second command", () => {
   const HIDDEN = ["touch pwned", "ib nuke --force", "ib notes set app x"];
   const COMMENT = "unquoted # starts a shell comment; put it in quotes";
-  const DELIM = "$ or backtick in heredoc delimiter";
+  const DELIM = "unsupported heredoc delimiter; use a plain word such as 'EOF'";
   const DQ_BRACE = 'quote or nested expansion inside "${…}"';
   const FORMS: Array<{ name: string; reason: string; build: (hidden: string) => string }> = [
     { name: "#<<EOF comment", reason: COMMENT, build: (h) => `ib list #<<EOF\n${h}\nEOF` },
@@ -154,7 +157,7 @@ describe("false heredoc openers hide no second command", () => {
     }
   });
 
-  test("heredocBodyRanges stops at a line continuation (it has no joined pass)", () => {
+  test("heredocBodyRanges stops at a line continuation glued to a character (it has no joined pass)", () => {
     // The shell joins `$` to `[1<<EOF]` / `{X:-<<EOF}`; findShellMetachar
     // catches these in its joined pass.
     for (const cmd of [
@@ -164,6 +167,26 @@ describe("false heredoc openers hide no second command", () => {
       expect(heredocBodyRanges(cmd)).toEqual([]);
       expect(findShellMetachar(cmd)).not.toBeNull();
     }
+  });
+
+  test("a continuation after a blank still lets a later heredoc be masked", () => {
+    for (const cmd of [
+      "ib send mgr \\\n<<'EOF'\nit's in ../x\nEOF",
+      "gh api repos/o/r/issues \\\n  --method POST \\\n  --input - <<'EOF'\n{\"see\": \"../../x\"}\nEOF",
+    ]) {
+      expect(heredocBodyRanges(cmd)).toHaveLength(1);
+    }
+  });
+
+  test("a continuation or open quote on the rest of the opener line is caught", () => {
+    // The shell's body starts a line later, so the masked line is a command.
+    const continued = "cat <<'EOF' \\\ncat ../../x\nEOF";
+    expect(heredocBodyRanges(continued)).toEqual([]);
+    expect(findShellMetachar(continued)).toBe("quote or backslash after a heredoc opener");
+    // A quote left open there runs onto the next line, which then runs.
+    const openQuote = "ib list <<'EOF' '\nx' ; touch pwned\nEOF";
+    expect(heredocBodyRanges(openQuote)).toEqual([]);
+    expect(findShellMetachar(openQuote)).toBe("quote or backslash after a heredoc opener");
   });
 
   test("heredocBodyRanges stops where it would skip a heredoc the shell may open", () => {
@@ -178,9 +201,33 @@ describe("false heredoc openers hide no second command", () => {
       "echo ${X:-a #'}\n} <<EOF\n'}\ncat ../../x\nEOF\n# '",
       "echo ` #` '\n<<EOF\n'\ncat ../../x\nEOF\n# '",
       "echo \"$(cat \"<<EOF\")\"\ncat ../../x\nEOF)",
+      // $'\'' is one quote to the shell, not a quote then an opening one.
+      "echo $'\\'' <<EOF\n'\n<<Y\nEOF\ncat ../../x\nY",
+      // Arithmetic whose end a paren counter gets wrong, and a nested subshell.
+      "echo $(( (1+(2)) <<3 ))\ncat ../../x\n3",
+      "(( (1+(2)) <<3 ))\ncat ../../x\n3",
+      "((cat) <<EOF\n))<<Y\nEOF\n)\ncat ../../x\nY",
+      // Backticks and $(…) re-read quotes, `\` and `)` differently.
+      "echo `echo \\\\'` <<EOF\n'\n<<Y\nEOF\ncat ../../x\nY",
+      "echo `echo '` <<EOF\n'\n<<Y\nEOF\ncat ../../x\nY",
+      "echo ${X:-`echo }`<<EOF}\ncat ../../x\nEOF}",
+      "echo $(cat <<EOF\n)\ncat ../../x\nEOF\n)",
+      "echo $(cat <<EOF\nx\nEOF)\ncat ../../x\nEOF",
+      // The rest of the opener line moves where the shell's body starts.
+      "cat <<A <<B\nA\n<<Y\nB\ncat ../../x\nY",
+      "cat <<EOF '\nEOF\n'\n'\n<<Y\nEOF\ncat ../../x\nY\n: '",
+      // A body line ending in `\` joins the next, so `x\` + `EOF` is no end.
+      "cat <<EOF\nx\\\nEOF\n<<Y\nEOF\ncat ../../x\nY",
+      // The shell keeps the `\` of `"E\OF"`, and reads `\r` as a word char.
+      "cat <<\"E\\OF\"\nEOF\n<<Y\nE\\OF\ncat ../../x\nY",
+      "cat <<EOF\r\nEOF\n<<Y\nEOF\r\ncat ../../x\nY",
     ]) {
       expect(heredocBodyRanges(cmd)).toEqual([]);
     }
+  });
+
+  test("a body line ending in \\ under a quoted delimiter is data, still masked", () => {
+    expect(bodies("cat <<'EOF'\nx\\\nEOF")).toEqual(["x\\\n"]);
   });
 
   test("plain double-quoted ${…} is still allowed and a later heredoc is masked", () => {

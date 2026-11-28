@@ -859,20 +859,20 @@ describe("PeerPoller.reconnect", () => {
     rig.poller.start();
     await waitFor(() => rig.state(P1)?.connected === true, { message: "connected" });
     rig.remote(P1).stalled = true;
-    rig.tick(); // t = 5 s: this agents poll hangs until t = 20 s
+    rig.tick(); // one poll interval in: this agents poll hangs until its request deadline
     await Bun.sleep(5);
     rig.remote(P1).stalled = false;
     rig.setDial(rig.connect);
 
     expect(rig.poller.reconnect(P1)).toBe(true);
     expect(closes).toEqual(["reconnecting"]);
-    rig.tick(); // 10 s
-    rig.tick(); // 15 s
+    // Every tick before the deadline skips the peer: the hung request still holds its slot.
+    for (let i = 0; i < PEER_REQUEST_TIMEOUT_MS / PEER_POLL_INTERVAL_MS - 1; i++) rig.tick();
     await Bun.sleep(5);
     expect(rig.dials).toEqual([P1]);
     expect(peerLinkStatus(rig.state(P1))).toBe("connecting");
 
-    rig.tick(); // 20 s: the deadline; then the teardown's grace
+    rig.tick(); // the deadline; then the teardown's grace
     await Bun.sleep(0); rig.clock.advance(750);
     await waitFor(() => rig.state(P1)?.connected === true, { message: "redialed once the request settled" });
     expect(rig.dials).toEqual([P1, P1]);

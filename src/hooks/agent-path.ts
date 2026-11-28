@@ -1458,11 +1458,13 @@ const IB_EXPORT_LOGS_COMMANDS = new Set(["export-logs"]);
 const IB_PEER_COMMANDS = new Set(["peer"]);
 
 /**
- * `ib notes` shows and changes a registered repo's notes (SPEC §9.3). Only
- * coordinators may run it: @system and per-repo coordinators. Workers and
- * managers are denied.
+ * `ib notes` shows and changes a registered repo's notes (SPEC §9.3). Every
+ * agent may read them; only coordinators may change them (`set`, `clear`):
+ * @system and per-repo coordinators. These are the words that may follow
+ * `ib notes` for any agent: the read verb and the help flags. See
+ * containsIbNotesWrite for why this is an allowlist.
  */
-const IB_NOTES_COMMANDS = new Set(["notes"]);
+const IB_NOTES_READ_WORDS = new Set(["show", "-h", "--help"]);
 
 /**
  * Is `callingAgentId` a per-repo coordinator, by its own meta.json in
@@ -1544,14 +1546,42 @@ function splitShellWord(token: string): string[] {
  * every one of these forms. Relaxing that gate reopens them.
  */
 function containsIbSubcommandInvocation(command: string, subcommands: ReadonlySet<string>): boolean {
-  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
-  if (!tokens) return false;
-  const words = tokens.flatMap(splitShellWord);
+  const words = shellWords(command);
+  if (!words) return false;
   for (let i = 0; i + 1 < words.length; i++) {
     if (basename(words[i]!) !== "ib") continue;
     if (subcommands.has(words[i + 1]!)) return true;
   }
   return false;
+}
+
+/**
+ * Detect an `ib notes` invocation that may change a repo's notes, in the same
+ * shell words containsIbSubcommandInvocation reads. Any word after `ib notes`
+ * other than a literal `show`, `-h` or `--help` counts, so `set` and `clear`
+ * count, and so does a word this scan cannot read as one of those.
+ *
+ * It is an allowlist because the verb is the second word. checkIbCommandAccess
+ * requires only the first word after `ib` to be literal, and findShellMetachar
+ * allows `$VAR` and `${VAR:-word}`. So `ib notes ${X:-set} app text` and
+ * `ib notes $UNSET set app text` both run `ib notes set`, and neither shows
+ * the word `set` to a scan. A bare `ib notes` prints usage and changes nothing.
+ */
+function containsIbNotesWrite(command: string): boolean {
+  const words = shellWords(command);
+  if (!words) return false;
+  for (let i = 0; i + 1 < words.length; i++) {
+    if (basename(words[i]!) !== "ib" || words[i + 1] !== "notes") continue;
+    const verb = words[i + 2];
+    if (verb !== undefined && !IB_NOTES_READ_WORDS.has(verb)) return true;
+  }
+  return false;
+}
+
+/** The dequoted shell words of `command`, heredoc bodies masked; null when untokenizable. */
+function shellWords(command: string): string[] | null {
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  return tokens ? tokens.flatMap(splitShellWord) : null;
 }
 
 /**
@@ -1674,11 +1704,12 @@ export async function checkIbCommandAccess(
       reason: "Access denied: 'ib export-logs' is for the user (and the system coordinator) only — it copies the ib watch logs of this machine and its paired peers. Ask the user to run it",
     };
   }
-  if (!system && containsIbSubcommandInvocation(normalizedCommand, IB_NOTES_COMMANDS) &&
+  // Reading notes is open to every agent; changing them is for coordinators.
+  if (!system && containsIbNotesWrite(normalizedCommand) &&
       !(await callerMetaIsRepoCoordinator(agentsDir, callingAgentId))) {
     return {
       decision: "deny",
-      reason: "Access denied: 'ib notes' is for coordinators only (the system coordinator and per-repo coordinators). Report to your manager (or to the user, if you have no manager) instead",
+      reason: "Access denied: 'ib notes set' and 'ib notes clear' are for coordinators only (the system coordinator and per-repo coordinators). Any agent may run 'ib notes show <repo>' with a literal verb. Report to your manager (or to the user, if you have no manager) instead",
     };
   }
 

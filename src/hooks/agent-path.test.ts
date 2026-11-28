@@ -1726,6 +1726,20 @@ describe("checkIbCommandAccess", () => {
     expect(continued?.decision).toBe("deny");
   });
 
+  test("a false heredoc opener cannot hide a second command from a worker", async () => {
+    await writeAgentMeta("agent-worker1", { agentType: "worker" });
+    for (const command of [
+      "ib list #<<EOF\ntouch pwned\nEOF",
+      "ib list $[1<<EOF]\ntouch pwned\nEOF]",
+      "ib list ${X:-<<EOF}\ntouch pwned\nEOF}",
+      "ib list <<$'EOF'\nEOF\ntouch pwned\n$EOF",
+    ]) {
+      const result = await checkIbCommandAccess(command, "agent-worker1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("chained shell command");
+    }
+  });
+
   test("system agent Bash cannot invoke internal sandbox seal", async () => {
     expect((await checkIbCommandAccess("ib sandbox seal agent-target1", "@system", agentsDir))?.decision).toBe("deny");
   });

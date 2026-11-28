@@ -104,6 +104,54 @@ describe("findShellMetachar — multi-part heredoc delimiter (round 5 fix 1)", (
   });
 });
 
+// ── a `<<` the shell does not read as a heredoc ────────────────────────────
+//
+// Each form made both walkers open a heredoc the shell does not, so the next
+// line was skipped as body while the shell ran it as a second command.
+describe("false heredoc openers hide no second command", () => {
+  const HIDDEN = ["touch pwned", "ib nuke --force", "ib notes set app x"];
+  const FORMS: Array<{ name: string; reason: string; build: (hidden: string) => string }> = [
+    { name: "#<<EOF comment", reason: "# comment", build: (h) => `ib list #<<EOF\n${h}\nEOF` },
+    { name: "# <<EOF comment", reason: "# comment", build: (h) => `ib list # <<EOF\n${h}\nEOF` },
+    { name: "$[1<<EOF] arithmetic", reason: "$[ arithmetic", build: (h) => `ib list $[1<<EOF]\n${h}\nEOF]` },
+    { name: "${X:-<<EOF}", reason: "<< inside ${…}", build: (h) => `ib list \${X:-<<EOF}\n${h}\nEOF}` },
+    { name: "${X:-a <<EOF } with a space", reason: "<< inside ${…}", build: (h) => `ib list \${X:-a <<EOF }\n${h}\nEOF` },
+    { name: "$'EOF' delimiter", reason: "$ in heredoc delimiter", build: (h) => `ib list <<$'EOF'\nEOF\n${h}\n$EOF` },
+    { name: '$"EOF" delimiter', reason: "$ in heredoc delimiter", build: (h) => `ib list <<$"EOF"\nEOF\n${h}\n$EOF` },
+  ];
+
+  for (const form of FORMS) {
+    test(`${form.name}: findShellMetachar denies it`, () => {
+      for (const hidden of HIDDEN) {
+        expect(findShellMetachar(form.build(hidden))).toBe(form.reason);
+      }
+    });
+
+    test(`${form.name}: heredocBodyRanges masks no line`, () => {
+      for (const hidden of HIDDEN) {
+        expect(heredocBodyRanges(form.build(hidden))).toEqual([]);
+      }
+    });
+  }
+
+  test("a real heredoc after ${VAR} is still allowed and masked", () => {
+    const cmd = "ib send ${ID} <<'EOF'\nmessage with ; and #\nEOF";
+    expect(findShellMetachar(cmd)).toBeNull();
+    expect(bodies(cmd)).toEqual(["message with ; and #\n"]);
+  });
+
+  test("a # that does not start a word is not a comment", () => {
+    for (const cmd of ["ib send x a#b", "ib send x $#", "ib send x ${#X}", "ib send x '# quoted'", 'ib send x "# quoted"']) {
+      expect(findShellMetachar(cmd)).toBeNull();
+    }
+    expect(bodies("cat a#b <<'EOF'\nbody\nEOF")).toEqual(["body\n"]);
+  });
+
+  test("a $ inside a quoted delimiter is refused too", () => {
+    expect(parseHeredocDelimiterWord("'$EOF'\n", 0)).toEqual({ kind: "unsafe", reason: "$ in heredoc delimiter" });
+  });
+});
+
 describe("parseHeredocDelimiterWord", () => {
   test("concatenates bare + quoted parts and turns expansion off", () => {
     const r = parseHeredocDelimiterWord("E'O'F\n", 0);

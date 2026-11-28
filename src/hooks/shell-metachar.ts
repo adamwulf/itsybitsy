@@ -24,7 +24,12 @@ export type HeredocDelimiterParse =
     }
   /** Not a heredoc: `<<<` here-string, `<<` at a terminator/EOF (empty word),
    * or an unterminated quote inside the word. Callers treat this as `< redirect`. */
-  | { kind: "redirect" };
+  | { kind: "redirect" }
+  /** A delimiter this parser does not model. The shell reads `<<$'EOF'` and
+   * `<<$"EOF"` as delimiter `EOF`, not `$EOF`, so the body would end on a line
+   * the parser reads as body. `findShellMetachar` denies it with `reason`;
+   * `heredocBodyRanges` opens no heredoc for it. */
+  | { kind: "unsafe"; reason: string };
 
 /**
  * Parse a heredoc delimiter WORD starting at `start`. The shell quote-removes
@@ -81,6 +86,11 @@ export function parseHeredocDelimiterWord(command: string, start: number): Hered
   }
   // Empty word: `<<<word` here-string, `<<` at EOF/terminator — not a heredoc.
   if (delim === "") return { kind: "redirect" };
+  // Any `$` in the word, quoted or not, is refused rather than modelled: the
+  // shell drops the `$` of `$'…'` / `$"…"`, and no real delimiter needs one.
+  if (command.substring(start, k).includes("$")) {
+    return { kind: "unsafe", reason: "$ in heredoc delimiter" };
+  }
   return { kind: "delim", delimiter: delim, expand, end: k };
 }
 
@@ -99,6 +109,18 @@ export function findShellMetachar(command: string): string | null {
   return joined === command ? null : scanShellMetachar(joined);
 }
 
+/**
+ * True when an unquoted `#` at `i` starts a word, which makes it a comment in
+ * bash and zsh (`a#b` and `$#` are not comments). Only start of input and
+ * blanks are checked: every other character that ends a word (`;`, `|`, `&`,
+ * `(`, `)`, `<`, `>`) is already a metachar hit.
+ */
+function startsWord(command: string, i: number): boolean {
+  if (i === 0) return true;
+  const prev = command[i - 1]!;
+  return prev === " " || prev === "\t" || prev === "\n" || prev === "\r";
+}
+
 function scanShellMetachar(command: string): string | null {
   let i = 0;
   const n = command.length;
@@ -106,6 +128,11 @@ function scanShellMetachar(command: string): string | null {
   // `dash` records whether the opener was `<<-`, which strips leading TABS
   // (not arbitrary whitespace) from body lines and the terminator.
   let heredoc: { delimiter: string; expand: boolean; dash: boolean } | null = null;
+  // Nesting inside an unquoted `${…}`. Bash reads a `<<` there as word text,
+  // not a heredoc opener. A bare `{` inside it is counted as nesting too.
+  // A shell that does not count it closes the `${` sooner, so the count can
+  // only make us deny more, never less.
+  let braceDepth = 0;
 
   while (i < n) {
     const c = command[i]!;
@@ -213,12 +240,27 @@ function scanShellMetachar(command: string): string | null {
       const next = command[i + 1];
       if (next === "(") return "$( command substitution";
       if (next === "'") return "$' ANSI-C quoting";
+      // Old-style arithmetic: a `<<` inside `$[…]` is a shift, not a heredoc.
+      if (next === "[") return "$[ arithmetic";
       // Bare $VAR / ${VAR} are intentionally allowed — plain parameter
       // expansion cannot run code, and prompts often contain it. Any
       // nested $( or ` is caught on its own character.
+      if (next === "{") {
+        braceDepth++;
+        i += 2;
+        continue;
+      }
       i++;
       continue;
     }
+    if (braceDepth > 0 && c === "{") { braceDepth++; i++; continue; }
+    if (braceDepth > 0 && c === "}") { braceDepth--; i++; continue; }
+
+    // ---- Comment: the shell skips the rest of the line ----
+    // Denied rather than skipped: a `<<` in it would open no heredoc, so the
+    // next line is a second command, and a shell with comments turned off
+    // would run the text we skipped.
+    if (c === "#" && startsWord(command, i)) return "# comment";
 
     // ---- Backtick command substitution (unquoted) ----
     if (c === "`") return "backtick command substitution";
@@ -237,6 +279,7 @@ function scanShellMetachar(command: string): string | null {
     if (c === ">") return "> redirect";
     if (c === "<") {
       if (command[i + 1] === "<") {
+        if (braceDepth > 0) return "<< inside ${…}";
         let j = i + 2;
         let dash = false;
         if (command[j] === "-") {
@@ -248,6 +291,7 @@ function scanShellMetachar(command: string): string | null {
         // Parse the FULL delimiter word (shell quote-removes the whole word).
         const parsed = parseHeredocDelimiterWord(command, j);
         if (parsed.kind === "redirect") return "< redirect";
+        if (parsed.kind === "unsafe") return parsed.reason;
         j = parsed.end;
 
         // Defense-in-depth: scan the opener tail (anything between the
@@ -281,8 +325,9 @@ function scanShellMetachar(command: string): string | null {
 /**
  * Return the char-offset ranges of every heredoc BODY in `command` — the region
  * from just after the opener line's newline up to (but not including) the
- * terminator line. Openers inside single/double quotes are ignored, matching
- * the quoting rules `findShellMetachar` uses. An UNTERMINATED heredoc yields no
+ * terminator line. Openers inside single/double quotes, `#` comments, `${…}` and
+ * arithmetic are ignored, and nothing after a `$[` is collected, matching the
+ * rules `findShellMetachar` uses. An UNTERMINATED heredoc yields no
  * range (the body was never confirmed), so callers scan it rather than skip it
  * — the safe direction.
  *
@@ -304,6 +349,9 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
   // operator, NOT a heredoc opener. Tracking this depth stops a false heredoc
   // (whose "body" would mask the real command lines after it).
   let arithDepth = 0;
+  // Nesting inside an unquoted `${…}`, counted as in `findShellMetachar`: a
+  // `<<` is not an opener while it is open, so overcounting masks less.
+  let braceDepth = 0;
 
   while (i < n) {
     const c = command[i]!;
@@ -364,10 +412,25 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
       i += 2;
       continue;
     }
+    // `$[…]` is old-style arithmetic too. Rather than track where it ends,
+    // stop collecting: nothing after it is masked, which is the safe direction.
+    if (c === "$" && command[i + 1] === "[") return ranges;
+
+    // ---- Parameter expansion: a `<<` inside `${…}` is word text ----
+    if (c === "$" && command[i + 1] === "{") { braceDepth++; i += 2; continue; }
+    if (braceDepth > 0 && c === "{") { braceDepth++; i++; continue; }
+    if (braceDepth > 0 && c === "}") { braceDepth--; i++; continue; }
+
+    // ---- Comment: skip to the end of the line, opening no heredoc ----
+    if (c === "#" && startsWord(command, i)) {
+      const nl = command.indexOf("\n", i);
+      i = nl === -1 ? n : nl;
+      continue;
+    }
 
     // ---- Heredoc opener (a `<<` inside arithmetic is a shift, not a heredoc) ----
     if (c === "<" && command[i + 1] === "<") {
-      if (arithDepth > 0) { i += 2; continue; }
+      if (arithDepth > 0 || braceDepth > 0) { i += 2; continue; }
       let j = i + 2;
       let dash = false;
       if (command[j] === "-") { dash = true; j++; }
@@ -375,7 +438,7 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
 
       // Parse the FULL delimiter word (shared with findShellMetachar).
       const parsed = parseHeredocDelimiterWord(command, j);
-      if (parsed.kind === "redirect") { i = i + 1; continue; } // not a heredoc
+      if (parsed.kind !== "delim") { i = i + 1; continue; } // not a heredoc
       j = parsed.end;
 
       const nl = command.indexOf("\n", j);

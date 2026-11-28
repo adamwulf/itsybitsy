@@ -118,6 +118,7 @@ function makeNetwork(iroh: Iroh) {
       },
       readPeers: () => inHome(home, readPeers),
       addPeer: (peer) => inHome(home, () => addPeer(peer)),
+      removePeer: (target) => inHome(home, () => removePeer(target)),
       generateCode: () => generatePairCode(),
       now: () => Date.now(),
       // 50x faster: a 5 s poll tick is 100 ms.

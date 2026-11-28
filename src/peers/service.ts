@@ -114,7 +114,7 @@ import { classifyCoordinatorState, IB_COORDINATOR_SESSION } from "../coordinator
 import { stripAnsi } from "../parse-state";
 import { writeRemoteAgents } from "./remote-agents";
 import { PeerPoller, type PeerLinkState } from "./poller";
-import { addPeer, cleanPeerName, normalizePeerId, readPeers, shortPeerId, type Peer } from "./store";
+import { addPeer, cleanPeerName, normalizePeerId, readPeers, removePeer, shortPeerId, type Peer, type RemovePeerResult } from "./store";
 import { cleanMachineName } from "../machine-name";
 import { TransferActivity, type ActiveTransfer } from "./transfer-activity";
 import { requestWatchLog } from "./peer-link";
@@ -192,6 +192,8 @@ export interface PeerServiceDeps {
   terminalSocketPath?: string;
   readPeers(): Promise<Peer[]>;
   addPeer(peer: { id: string; name: string; pairedAt?: string }): Promise<Peer>;
+  /** store.ts `removePeer`; the Peers tab passes a full id, never a name. */
+  removePeer(target: string): Promise<RemovePeerResult>;
   generateCode(): string;
   now(): number;
   setTimer(ms: number, fn: () => void): () => void;
@@ -241,6 +243,7 @@ export function defaultPeerServiceDeps(machine: string, log: (line: string) => v
     terminalSocketPath: peerTerminalSocket(),
     readPeers,
     addPeer,
+    removePeer,
     generateCode: () => generatePairCode(),
     now: () => Date.now(),
     setTimer: (ms, fn) => {
@@ -793,10 +796,8 @@ export class PeerService {
   pairWith(input: string): string | null {
     const target = parsePairTarget(input, this.selfId);
     if (!target.ok) return target.error;
-    const status = this.status;
-    if (status.kind === "starting" || status.kind === "idle") return "Peering is still starting; try again in a moment.";
-    if (status.kind === "disabled") return `Peering is disabled: ib watch pid ${status.ownerPid} owns the endpoint.`;
-    if (status.kind === "error") return `Peering is unavailable: ${status.message}`;
+    const unavailable = this.unavailable();
+    if (unavailable !== null) return unavailable;
     if (this.active?.session.isPending()) return "Another pairing is in progress.";
     const session = new PairInitiator(target.id, {
       ...this.sessionDeps(),
@@ -805,6 +806,46 @@ export class PeerService {
     this.install(session);
     void session.start();
     return null;
+  }
+
+  /** Why the endpoint is not bound, as the Peers tab shows it inline; null once it listens. */
+  private unavailable(): string | null {
+    const status = this.status;
+    if (status.kind === "starting" || status.kind === "idle") return "Peering is still starting; try again in a moment.";
+    if (status.kind === "disabled") return `Peering is disabled: ib watch pid ${status.ownerPid} owns the endpoint.`;
+    if (status.kind === "error") return `Peering is unavailable: ${status.message}`;
+    return null;
+  }
+
+  /**
+   * Enter on a paired peer in the Peers tab (SPEC §20.1): close its trusted
+   * connection, if any, and poll it now (PeerPoller.reconnect). Returns the
+   * error to show inline, or null once asked; an error changes nothing.
+   */
+  reconnectPeer(peerId: string): string | null {
+    if (!this.poller.isRunning) return this.unavailable() ?? "Peering is not running.";
+    if (this.poller.reconnect(peerId)) return null;
+    return "Not polled yet: its first poll starts within 5 s.";
+  }
+
+  /**
+   * The Peers tab's remove prompt, confirmed (SPEC §20.1): remove the peer
+   * from `peers.json` by its full id, never its name, which can be ambiguous;
+   * re-read the list, and have the poller drop the link now rather than on
+   * its next tick. Local only: the other machine keeps its own entry.
+   * Returns the error to show inline, or null once removed. Never rejects.
+   */
+  async removePeer(peerId: string): Promise<string | null> {
+    const label = this.peers.find((peer) => peer.id === peerId)?.name ?? shortPeerId(peerId);
+    let error: string | null = null;
+    try {
+      if (!(await this.deps.removePeer(peerId)).ok) error = `${label} was already removed.`;
+    } catch (err) {
+      error = `Could not remove ${label}: ${errorDetail(err)}`;
+    }
+    await this.refreshPeers();
+    if (this.peersError === null) this.poller.update(this.peers);
+    return error;
   }
 
   async fetchPane(peerId: string, target: PeerPaneTarget, lines: number): Promise<PeerPane> {

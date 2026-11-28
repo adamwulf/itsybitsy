@@ -17,7 +17,7 @@ import { loadIroh, type IrohEndpoint } from "./iroh";
 import { listeningOrThrow } from "./test-pair-transport";
 import { generatePairCode } from "./pair-code";
 import { PeerService, type ServiceEndpoint } from "./service";
-import { addPeer, readPeers, shortPeerId } from "./store";
+import { addPeer, readPeers, removePeer, shortPeerId } from "./store";
 
 const homes: string[] = [];
 afterEach(async () => {
@@ -68,6 +68,7 @@ test("two real loopback endpoints pair, and each peers.json ends up with the oth
       },
       readPeers: () => inHome(home, readPeers),
       addPeer: (peer) => inHome(home, () => addPeer(peer)),
+      removePeer: (target) => inHome(home, () => removePeer(target)),
       generateCode: () => generatePairCode(),
       now: () => Date.now(),
       setTimer: (ms, fn) => {

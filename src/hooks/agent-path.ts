@@ -1458,11 +1458,13 @@ const IB_EXPORT_LOGS_COMMANDS = new Set(["export-logs"]);
 const IB_PEER_COMMANDS = new Set(["peer"]);
 
 /**
- * `ib notes` shows and changes a registered repo's notes (SPEC §9.3). Only
- * coordinators may run it: @system and per-repo coordinators. Workers and
- * managers are denied.
+ * `ib notes` shows and changes a registered repo's notes (SPEC §9.3). Every
+ * agent may read them; only coordinators may change them (`set`, `clear`):
+ * @system and per-repo coordinators. These are the words that may follow
+ * `ib notes` for any agent: the read verb and the help flags. See
+ * containsIbNotesWrite for why this is an allowlist.
  */
-const IB_NOTES_COMMANDS = new Set(["notes"]);
+const IB_NOTES_READ_WORDS = new Set(["show", "-h", "--help"]);
 
 /**
  * Is `callingAgentId` a per-repo coordinator, by its own meta.json in
@@ -1550,6 +1552,42 @@ function containsIbSubcommandInvocation(command: string, subcommands: ReadonlySe
   for (let i = 0; i + 1 < words.length; i++) {
     if (basename(words[i]!) !== "ib") continue;
     if (subcommands.has(words[i + 1]!)) return true;
+  }
+  return false;
+}
+
+/**
+ * Detect an `ib notes` invocation that may change a repo's notes. It finds
+ * `ib notes` in the same shell words containsIbSubcommandInvocation reads, then
+ * allows only a next token that is, as a whole, the literal word `show`, `-h`
+ * or `--help`. Every other next token counts as a write: `set`, `clear`, and
+ * anything whose word the shell could turn into another verb.
+ *
+ * It is an allowlist because the verb is the second word. checkIbCommandAccess
+ * requires only the first word after `ib` to be literal, and findShellMetachar
+ * allows parameter expansion and heredocs. `ib notes ${X:-set} app text` and
+ * `ib notes $UNSET set app text` both run `ib notes set`. So do
+ * `ib notes <<show set app text` and `ib notes << show set app text`: `show`
+ * is the heredoc's delimiter, not the verb. Requiring the whole token to be
+ * literal is what stops the heredoc forms, since splitShellWord reads
+ * `<<show` as the word `show` and a bare `<<` as no word at all. A bare
+ * `ib notes` prints usage and changes nothing.
+ */
+function containsIbNotesWrite(command: string): boolean {
+  const tokens = tokenizeBashPaths(maskHeredocBodies(command));
+  if (!tokens) return false;
+  // Each word keeps the literal its whole token spells (undefined for an
+  // operator, expansion or heredoc opener). A token with no word still takes
+  // a place, so it cannot drop out from between `notes` and the verb.
+  const words = tokens.flatMap((raw) => {
+    const literal = literalWord(raw);
+    const split = splitShellWord(raw);
+    return split.length ? split.map((word) => ({ word, literal })) : [{ word: "", literal }];
+  });
+  for (let i = 0; i + 1 < words.length; i++) {
+    if (basename(words[i]!.word) !== "ib" || words[i + 1]!.word !== "notes") continue;
+    const verb = words[i + 2];
+    if (verb && !IB_NOTES_READ_WORDS.has(verb.literal ?? "")) return true;
   }
   return false;
 }
@@ -1674,11 +1712,12 @@ export async function checkIbCommandAccess(
       reason: "Access denied: 'ib export-logs' is for the user (and the system coordinator) only — it copies the ib watch logs of this machine and its paired peers. Ask the user to run it",
     };
   }
-  if (!system && containsIbSubcommandInvocation(normalizedCommand, IB_NOTES_COMMANDS) &&
+  // Reading notes is open to every agent; changing them is for coordinators.
+  if (!system && containsIbNotesWrite(normalizedCommand) &&
       !(await callerMetaIsRepoCoordinator(agentsDir, callingAgentId))) {
     return {
       decision: "deny",
-      reason: "Access denied: 'ib notes' is for coordinators only (the system coordinator and per-repo coordinators). Report to your manager (or to the user, if you have no manager) instead",
+      reason: "Access denied: 'ib notes set' and 'ib notes clear' are for coordinators only (the system coordinator and per-repo coordinators). Any agent may run 'ib notes show <repo>' with a literal verb. Report to your manager (or to the user, if you have no manager) instead",
     };
   }
 

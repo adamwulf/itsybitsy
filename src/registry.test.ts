@@ -936,7 +936,8 @@ describe("ib notes show|set|clear <repo> (CLI)", () => {
     const outer = await runIsolatedCli(["notes", "--help"]);
     expect(outer.exitCode).toBe(0);
     expect(outer.stdout).toContain("Usage: ib notes <subcommand> <repo>");
-    expect(outer.stdout).toContain("only\n  coordinators");
+    expect(outer.stdout).toContain("may run show; only coordinators");
+    expect(outer.stdout).toContain("may run set and clear.");
     const set = await runIsolatedCli(["notes", "set", "--help"]);
     expect(set.exitCode).toBe(0);
     expect(set.stdout).toContain("Usage: ib notes set <repo> [text...]");

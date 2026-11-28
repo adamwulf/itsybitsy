@@ -2137,26 +2137,81 @@ describe("checkIbCommandAccess", () => {
     expect(await checkIbCommandAccess('ib send agent-target1 "ask the user to run ib export-logs"', "agent-manager1", agentsDir)).toBeNull();
   });
 
-  // The forms a coordinator uses. Every one is allowed for a coordinator.
-  const NOTES_COMMANDS = [
+  // Reads: allowed for every agent.
+  const NOTES_READ_COMMANDS = [
     "ib notes show app",
+    "/usr/local/bin/ib notes show app",
+    "ib no''tes sh\"ow\" app",
+    "ib notes",
+    "ib notes --help",
+    "ib notes -h",
+    "ib notes show --help",
+  ];
+
+  // Writes: denied to every agent that is not a coordinator.
+  const NOTES_WRITE_COMMANDS = [
     "ib notes set app run the tests before merging",
     "ib notes set app <<'EOF'\nline one\nline two\nEOF",
     "ib notes clear app",
-    "ib notes --help",
-    "/usr/local/bin/ib notes show app",
+    "ib notes set --help",
+    "/usr/local/bin/ib notes clear app",
   ];
 
-  test("denies ib notes to a worker, a manager and a caller without meta — coordinators only", async () => {
+  // The forms a coordinator uses. Every one is allowed for a coordinator.
+  const NOTES_COMMANDS = [...NOTES_READ_COMMANDS, ...NOTES_WRITE_COMMANDS];
+
+  const NON_COORDINATORS = ["agent-worker1", "agent-manager1", "agent-nometa1"];
+
+  test("any agent may read notes: ib notes show and help are allowed to a worker, a manager and a caller without meta", async () => {
     await writeAgentMeta("agent-worker1", { agentType: "worker" });
     await writeAgentMeta("agent-manager1", { agentType: "manager" });
-    for (const caller of ["agent-worker1", "agent-manager1", "agent-nometa1"]) {
-      for (const command of [...NOTES_COMMANDS, "ib notes", "ib no''tes show app", "ib list;ib notes clear app"]) {
+    for (const caller of NON_COORDINATORS) {
+      for (const command of NOTES_READ_COMMANDS) {
+        expect(await checkIbCommandAccess(command, caller, agentsDir)).toBeNull();
+      }
+    }
+  });
+
+  test("denies ib notes set and clear to a worker, a manager and a caller without meta — coordinators only", async () => {
+    await writeAgentMeta("agent-worker1", { agentType: "worker" });
+    await writeAgentMeta("agent-manager1", { agentType: "manager" });
+    const disguised = [
+      "ib no''tes clear app",
+      "ib notes se''t app x",
+      'ib notes "clear" app',
+      "ib list;ib notes clear app",
+    ];
+    for (const caller of NON_COORDINATORS) {
+      for (const command of [...NOTES_WRITE_COMMANDS, ...disguised]) {
         const result = await checkIbCommandAccess(command, caller, agentsDir);
         expect(result?.decision).toBe("deny");
-        expect(result!.reason).toContain("'ib notes' is for coordinators only");
+        expect(result!.reason).toContain("'ib notes set' and 'ib notes clear' are for coordinators only");
         expect(result!.reason).toContain("Report to your manager");
       }
+    }
+  });
+
+  test("a token after notes that is not a literal show or help flag is denied, since the shell may run set or clear from it", async () => {
+    // The shell runs `ib notes set` or `ib notes clear` for every command but
+    // the last, and none of them has a literal `set` or `clear` token right
+    // after `notes`. The later chained-command check denies the redirect but
+    // lets parameter expansion and heredocs through, so this gate has to deny
+    // them. In the heredoc forms, `show`, `h` and `-help` are the heredoc
+    // delimiter (`<<-` then `h`), not the verb.
+    for (const command of [
+      "ib notes ${X:-set} app x",
+      "ib notes $UNSET set app x",
+      "ib notes 2>/dev/null set app x",
+      "ib notes <<show set app x\nshow",
+      "ib notes << show set app x\nshow",
+      "ib notes <<'show' clear app\nshow",
+      "ib notes <<-h clear app\nh",
+      "ib notes <<--help clear app\n-help",
+      "ib notes bogus app",
+    ]) {
+      const result = await checkIbCommandAccess(command, "agent-worker1", agentsDir);
+      expect(result?.decision).toBe("deny");
+      expect(result!.reason).toContain("'ib notes set' and 'ib notes clear' are for coordinators only");
     }
   });
 

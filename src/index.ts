@@ -903,8 +903,9 @@ const COMMAND_HELP: Record<string, string> = {
     "  show <repo>          Print the repo's notes\n" +
     "  set <repo> [text]    Replace the repo's notes (read from stdin when no text)\n" +
     "  clear <repo>         Remove the repo's notes\n" +
-    "  <repo> is a registered repo name, nickname, or path. Agents: only\n" +
-    "  coordinators (the system coordinator and per-repo coordinators) may run it.",
+    "  <repo> is a registered repo name, nickname, or path. Agents: any agent\n" +
+    "  may run show; only coordinators (the system coordinator and per-repo\n" +
+    "  coordinators) may run set and clear.",
   "notes show":
     "Usage: ib notes show <repo>\n" +
     "  Print the repo's notes as stored. A repo with no notes prints nothing on\n" +
@@ -1036,7 +1037,7 @@ function printUsage(): void {
   console.log("  state               List agents with PID/liveness diagnostics + orphan detection (--manager <id>, --json, --cleanup, --dry-run)");
   console.log("  push <repo-id>      Push the repo's main branch to every configured remote");
   console.log("  pull <repo-id>      Update the repo's main branch from every configured remote (fast-forward, else rebase; --interactive)");
-  console.log("  notes show <repo>   Print a repo's notes (agents: coordinators only)");
+  console.log("  notes show <repo>   Print a repo's notes");
   console.log("  notes set <repo> [text]  Replace a repo's notes, from stdin when no text (agents: coordinators only)");
   console.log("  notes clear <repo>  Remove a repo's notes (agents: coordinators only)");
   console.log("");
@@ -1313,8 +1314,8 @@ export async function main() {
     }
     case "notes": {
       // Explicit verbs, so a repo named "set" is never read as one. The
-      // PreToolUse hook lets only coordinators run this (checkIbCommandAccess);
-      // a human at the CLI is not gated.
+      // PreToolUse hook lets any agent run `show` but only coordinators run
+      // `set` and `clear` (checkIbCommandAccess); a human at the CLI is not gated.
       const sub = args[1];
       const subUsage = sub ? COMMAND_HELP[`notes ${sub}`] : undefined;
       if (!subUsage) {

@@ -873,7 +873,8 @@ const COMMAND_HELP: Record<string, string> = {
     "  Copy the ib watch log files (watch.log, watch.log.1, watch.log.2) of this\n" +
     "  machine and of every paired peer into one directory, as they are, with an\n" +
     "  export.txt of names, ids, versions, sizes, times and errors.\n" +
-    "  <machine>      Only this paired peer: its name (ignoring case) or full id\n" +
+    "  <machine>      Only this paired peer: its name or full id. Names compare\n" +
+    "                 in clean form: macbook-pro and \"MacBook Pro\" are the same\n" +
     "  --out <dir>    Write here (created, or an empty directory) instead of\n" +
     "                 ~/.itsybitsy/log-exports/<UTC stamp>/\n" +
     "  Peers are fetched by this machine's ib watch over the trusted link; without\n" +

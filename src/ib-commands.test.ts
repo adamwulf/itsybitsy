@@ -6844,11 +6844,34 @@ describe("mergeAgent --keep (real git)", () => {
       "\nThe rebase was aborted (git rebase --abort), so agent/agent-abc is as it was before the merge.",
     );
     expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain("Rebase failed; git rebase --abort exited 0");
-    expect(await agentRebaseInProgress()).toBe(false);
-    expect(await git("-C", tempDir, "rev-parse", "agent/agent-abc")).toBe(agentTip);
-    expect(await git("-C", worktree, "branch", "--show-current")).toBe("agent/agent-abc");
+    // Branch at its old tip, checked out, not mid-rebase, and clean: the
+    // abort also undid the hook's edit.
+    await expectAgentUntouched(agentTip);
     expect(await git("-C", worktree, "rev-parse", "HEAD")).toBe(agentTip);
+    expect(await Bun.file(join(worktree, "tracked.txt")).text()).toBe("agent\n");
     expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
+  });
+
+  test("a rebase that fails without starting is reported as it was, with no abort", async () => {
+    // A pre-rebase hook that refuses: git stops before it makes any rebase state.
+    const agentTip = await agentCommit("feature.txt", "one\n", "agent: one");
+    await mainCommit("other.txt", "other\n", "main: other");
+    const hooksDir = join(tempDir, ".git", "test-hooks");
+    await mkdir(hooksDir, { recursive: true });
+    await Bun.write(join(hooksDir, "pre-rebase"), "#!/bin/sh\necho 'pre-rebase: not today' >&2\nexit 1\n");
+    chmodSync(join(hooksDir, "pre-rebase"), 0o755);
+    await git("-C", tempDir, "config", "core.hooksPath", hooksDir);
+    const calls = recordGit();
+
+    const result = await mergeAgent(makeAgent("agent-abc", tempDir), tempDir, { keep: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toStartWith("Rebase failed: ");
+    expect(result.stderr).toContain("pre-rebase: not today");
+    expect(result.stderr).not.toContain("--abort");
+    expect(result.stderr).not.toContain("mid-rebase");
+    expect(calls.find((c) => c.includes("rebase") && c.includes("--abort"))).toBeUndefined();
+    await expectAgentUntouched(agentTip);
   });
 
   test("a rebase the agent already has in progress is refused before the merge's own, and left in progress", async () => {
@@ -6870,6 +6893,7 @@ describe("mergeAgent --keep (real git)", () => {
     );
     // Neither a rebase of the merge's own nor an abort ran in the worktree.
     expect(calls.find((c) => c.includes(worktree) && c.includes("rebase"))).toBeUndefined();
+    expect(await Bun.file(join(agentDir, "agent.log")).text()).toContain(`Did not rebase: ${result.stderr}`);
     expect(await agentRebaseInProgress()).toBe(true);
     expect(await git("-C", tempDir, "rev-parse", "main")).toBe(mainBefore);
   });

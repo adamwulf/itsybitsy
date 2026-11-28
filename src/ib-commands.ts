@@ -3997,10 +3997,9 @@ export async function mergeAgent(
         // A rebase already in progress is the agent's own. Ours would fail on
         // it, and the abort below would then throw the agent's away.
         if (await rebaseInProgress(worktreePath)) {
-          return {
-            ok: false as const,
-            stderr: `A rebase is already in progress in ${worktreePath}; finish it with git rebase --continue or git rebase --abort, then merge again`,
-          };
+          const refusal = `A rebase is already in progress in ${worktreePath}; finish it with git rebase --continue or git rebase --abort, then merge again`;
+          await logAgent(agentDir, `Did not rebase: ${refusal}`);
+          return { ok: false as const, stderr: refusal };
         }
         await logAgent(agentDir, `Rebasing ${branchName} onto ${targetBranch}...`);
         const rebaseResult = await mergeSpawnCtx.run(["git", "-C", worktreePath, "rebase", targetBranch]);

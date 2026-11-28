@@ -39,9 +39,9 @@ export type HeredocDelimiterParse =
  * — so we read every adjacent part (bare chars, `'…'`, `"…"`, and `\<char>`
  * escapes) until an UNQUOTED terminator (space, tab, newline, `;`, `|`, `&`,
  * `<`, `>`, or end of input) and concatenate them. Expansion is off if any part
- * was quoted or backslash-escaped. A word with `$`, a backtick or `\r`
- * anywhere, or a backslash inside `"…"`, is returned as "unsafe" rather than
- * modelled. A previous version read only
+ * was quoted or backslash-escaped. A word with `$`, a backtick, `\r`, `(` or
+ * `)` anywhere, or a backslash inside `"…"`, is returned as "unsafe" rather
+ * than modelled. A previous version read only
  * the first part, so the body ran past the shell's real terminator and the
  * commands the shell actually executes were swallowed as body — bypassing the
  * single-command rule, path isolation, and the ib-relationship check at once.
@@ -97,7 +97,9 @@ export function parseHeredocDelimiterWord(command: string, start: number): Hered
   // Any `$`, backtick or `\r` in the word, quoted or not, is refused rather
   // than modelled: the shell drops the `$` of `$'…'` / `$"…"`, zsh runs a
   // backtick command in a delimiter, and no real delimiter needs any of them.
-  if (/[$`\r]/.test(command.substring(start, k))) return UNSAFE_DELIMITER;
+  // zsh reads `<<(cmd)` as `<` plus process substitution, so parens are
+  // refused too.
+  if (/[$`\r()]/.test(command.substring(start, k))) return UNSAFE_DELIMITER;
   return { kind: "delim", delimiter: delim, expand, end: k };
 }
 
@@ -136,17 +138,19 @@ function startsWord(command: string, i: number): boolean {
 const COMMENT_HIT = "unquoted # starts a shell comment; put it in quotes";
 
 /**
- * For a `${` at `i` inside double quotes, return the index of its `}` when the
- * expansion is plain, or -1 when any of `'`, `"`, `\`, `{`, `$` or a backtick
- * comes before the first `}`. Quotes nest inside a double-quoted `${…}`, so a
- * `"` there does not end the string. Rather than model that, only plain forms
- * such as `"${HOME}/x"` and `"${X:-default}"` are accepted.
+ * For a `${` at `i` inside double quotes or an unquoted-delimiter heredoc
+ * body, return the index of its `}` when the expansion is plain, or -1 when
+ * any of `'`, `"`, `\`, `{`, `$`, `(` or a backtick comes before the first `}`.
+ * Quotes nest inside a double-quoted `${…}`, so a `"` there does not end the
+ * string, and zsh flags such as `${(e)…}` evaluate their result as code.
+ * Rather than model either, only plain forms such as `"${HOME}/x"` and
+ * `"${X:-default}"` are accepted.
  */
 function plainDqBraceEnd(command: string, i: number): number {
   for (let k = i + 2; k < command.length; k++) {
     const ch = command[k]!;
     if (ch === "}") return k;
-    if ("'\"\\{$`".includes(ch)) return -1;
+    if ("'\"\\{$`(".includes(ch)) return -1;
   }
   return -1;
 }
@@ -214,8 +218,11 @@ function scanShellMetachar(command: string): string | null {
             const next = command[k + 1];
             if (next === "(") return "$( command substitution";
             if (next === "'") return "$' ANSI-C quoting";
-            // ${…} alone doesn't run code; any nested $( or ` would be
-            // caught on its own character.
+            // A plain ${…} doesn't run code. zsh's `${(e):-${:-\$}(cmd)}`
+            // builds and runs `$(cmd)` without `$(` in the text.
+            if (next === "{" && plainDqBraceEnd(command, k) === -1) {
+              return "nested expansion inside ${…} in a heredoc body";
+            }
           }
         }
       }
@@ -368,27 +375,33 @@ function scanShellMetachar(command: string): string | null {
 }
 
 /**
- * Return the char-offset ranges of every heredoc BODY in `command` — the region
- * from just after the opener line's newline up to (but not including) the
- * terminator line. Openers inside single/double quotes are ignored. An
- * UNTERMINATED heredoc yields no range (the body was never confirmed), so
- * callers scan it rather than skip it — the safe direction.
+ * Return the char-offset range of the command's heredoc BODY — the region from
+ * just after the opener line's newline up to (but not including) the
+ * terminator line — or no range. Only ONE heredoc is masked: the first, and
+ * only when its opener is on the first line with code (blank and plain comment
+ * lines may come before it). Bash expands an alias defined on an earlier line
+ * (`alias c='#'` then `c <<EOF`), which no lexer can follow. Openers inside
+ * single/double quotes are ignored. An UNTERMINATED heredoc yields no range
+ * (the body was never confirmed), so callers scan it rather than skip it — the
+ * safe direction. So does an unquoted-delimiter body that holds `$` or a
+ * backtick: the shell runs the substitutions in it, so it is not data.
  *
- * At a construct this walk does not model, it stops and returns the ranges
- * found so far. Unquoted: a `(` (subshells, `$(…)`, arithmetic, process
- * substitution), a backtick, `$'`, `$[`, a `#` comment inside `${…}` or holding
- * any of < ' " \ ` $ ( { (a plain comment line is skipped), a `<<` inside
- * `${…}` and a line continuation glued to a character. Inside double quotes: `$(`, a
- * backtick, `$[` or a non-plain `${…}`. At an opener: a here-string, an
- * unterminated quote or a refused delimiter (any result of
+ * At a construct this walk does not model, it stops and returns no range.
+ * Unquoted: a `(` (subshells, `$(…)`, arithmetic, process substitution), a
+ * backtick, `$'`, `$[`, a `[` glued to a word (bash reads `x[…]` at a command
+ * position as one subscript word, across lines), a `#` comment inside `${…}`
+ * or holding any of < ' " \ ` $ ( { (a plain comment line is skipped), a `<<`
+ * inside `${…}`, and a line continuation glued to a character. Inside double
+ * quotes: `$(`, a backtick, `$[` or a non-plain `${…}`. At an opener: a
+ * here-string, an unterminated quote or a refused delimiter (any result of
  * `parseHeredocDelimiterWord` other than "delim"), or a quote, backslash,
- * backtick, `$`, `(`, `#` or second `<<` on the rest of the opener line. In an
- * unquoted-delimiter body: a line ending in `\`. Masking less is always safe. Skipping the construct is not: if the shell
- * does open a heredoc there, the walk would read its body as commands, and a
- * `<<` in that body would open a false heredoc that masks the lines the shell
- * runs after the real terminator. A Bash command that is not an `ib` command
- * reaches the path scanners without `findShellMetachar`, so this walk must be
- * safe on its own.
+ * backtick, `$`, `(`, `[`, `#` or second `<<` on the rest of the opener line.
+ * In an unquoted-delimiter body: a line ending in `\`. Masking less is always
+ * safe. Skipping the construct is not: if the shell does open a heredoc there,
+ * the walk would read its body as commands, and a `<<` in that body would open
+ * a false heredoc that masks the lines the shell runs after the real
+ * terminator. A Bash command that is not an `ib` command reaches the path
+ * scanners without `findShellMetachar`, so this walk must be safe on its own.
  *
  * Used by the path-traversal scanner to EXCLUDE heredoc bodies from
  * tokenization: those lines are data (commit messages, `ib send` bodies) that
@@ -407,6 +420,9 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
   // Nesting inside an unquoted `${…}`, counted as in `findShellMetachar`. A
   // `<<` while it is open stops the walk, so overcounting can only mask less.
   let braceDepth = 0;
+  // Whether the current line has anything but blanks and a plain comment. A
+  // newline after such a line stops the walk (see the doc comment: aliases).
+  let lineHasCode = false;
 
   while (i < n) {
     const c = command[i]!;
@@ -420,10 +436,11 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
       const leadingStripped = heredoc.dash ? line.replace(/^\t+/, "") : line;
       if (leadingStripped === heredoc.delimiter) {
         // Body spans [bodyStart, i) — up to the start of this terminator line.
+        // An unquoted-delimiter body with `$` or a backtick runs code.
+        if (heredoc.expand && /[$`]/.test(command.substring(heredoc.bodyStart, i))) return ranges;
+        // Only the first heredoc is masked.
         ranges.push({ start: heredoc.bodyStart, end: i });
-        heredoc = null;
-        i = hasNewline ? lineEnd + 1 : n;
-        continue;
+        return ranges;
       }
       // In an unquoted-delimiter body the shell joins a line ending in `\`
       // to the next, so `x\` + `EOF` is `xEOF` and does not terminate.
@@ -431,6 +448,14 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
       i = hasNewline ? lineEnd + 1 : n;
       continue;
     }
+
+    // ---- A newline ends the first line with code: stop there ----
+    if (c === "\n") {
+      if (lineHasCode) return ranges;
+      i++;
+      continue;
+    }
+    if (c !== " " && c !== "\t" && c !== "#") lineHasCode = true;
 
     // ---- Single-quoted: skip to the next ' ----
     if (c === "'") {
@@ -483,9 +508,11 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
     // arithmetic is a shift, and bash 3.2 ends `$(` at its first `)` even in a
     // heredoc body. Inside backticks the shell re-reads `\` and quotes.
     // `$'…'` treats `\'` as a quote, which the single-quote skip does not.
-    // `$[…]` is old-style arithmetic.
+    // `$[…]` is old-style arithmetic. Bash reads `x[…]` at a command position
+    // as one subscript word, even across lines, so a `<<` in it opens nothing.
     if (c === "(" || c === "`") return ranges;
     if (c === "$" && (command[i + 1] === "'" || command[i + 1] === "[")) return ranges;
+    if (c === "[" && i > 0 && /[A-Za-z0-9_]/.test(command[i - 1]!)) return ranges;
 
     // ---- Parameter expansion: a `<<` inside `${…}` is word text ----
     if (c === "$" && command[i + 1] === "{") { braceDepth++; i += 2; continue; }
@@ -525,7 +552,7 @@ export function heredocBodyRanges(command: string): Array<{ start: number; end: 
       // The rest of the opener line is not walked. A second `<<`, a quote
       // that runs onto later lines, or a construct from the list above there
       // would move where the shell's body starts, so stop on any of them.
-      if (/<<|['"\\`$(#]/.test(command.substring(j, nl))) return ranges;
+      if (/<<|['"\\`$(\[#]/.test(command.substring(j, nl))) return ranges;
       heredoc = { delimiter: parsed.delimiter, expand: parsed.expand, dash, bodyStart: nl + 1 };
       i = nl + 1;
       continue;

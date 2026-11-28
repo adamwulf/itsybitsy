@@ -49,9 +49,9 @@ export { claudeProjectDirFor };
  * commands, and an agent already using a heredoc needs to know why.
  */
 const HEREDOC_SCAN_HINT =
-  " A heredoc body counts as literal text only under a quoted <<'EOF' with nothing but plain words " +
-  "after it on its line, and no `(`, backtick, `$'` or comment with quotes earlier in the command; " +
-  "otherwise pass the text via a file.";
+  " A heredoc body counts as literal text only for the command's first heredoc, opened on its first " +
+  "line with a quoted <<'EOF' followed by nothing but unquoted words (put redirects before <<), " +
+  "and no `(`, backtick or `$'` before it; otherwise pass the text via a file.";
 
 /**
  * Deny reason for a bash token that mixes a `..` path segment with shell

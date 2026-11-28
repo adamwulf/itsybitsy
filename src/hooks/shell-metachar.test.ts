@@ -29,9 +29,11 @@ describe("heredocBodyRanges", () => {
     expect(heredocBodyRanges("cat <<'EOF'\nbody with ../.. and no terminator")).toEqual([]);
   });
 
-  test("multiple heredocs each get a range", () => {
+  test("only the first heredoc is masked", () => {
+    // A later line could use an alias defined on an earlier one, so the walk
+    // stops after the first heredoc.
     const cmd = "cat <<'A'\naaa\nA\ncat <<'B'\nbbb\nB";
-    expect(bodies(cmd)).toEqual(["aaa\n", "bbb\n"]);
+    expect(bodies(cmd)).toEqual(["aaa\n"]);
   });
 
   test("<<- strips leading tabs when matching the terminator", () => {
@@ -133,6 +135,8 @@ describe("false heredoc openers hide no second command", () => {
     { name: '"${X:-"<<EOF"}"', reason: DQ_BRACE, build: (h) => `ib list "\${X:-"<<EOF"}"\n${h}\nEOF}` },
     { name: `"\${X:-'}'"<<EOF"}"`, reason: DQ_BRACE, build: (h) => `ib list "\${X:-'}'"<<EOF"}"\n${h}\nEOF}` },
     { name: '${X:-"${Y:-"}<<EOF"}"}', reason: DQ_BRACE, build: (h) => `ib list \${X:-"\${Y:-"}<<EOF"}"}\n${h}\nEOF}` },
+    // zsh reads <<(cmd) as < plus process substitution, not a heredoc.
+    { name: "<<(true) process substitution", reason: DELIM, build: (h) => `ib send mgr <<(true)\n${h}\n(true)` },
   ];
 
   for (const form of FORMS) {
@@ -221,9 +225,36 @@ describe("false heredoc openers hide no second command", () => {
       // The shell keeps the `\` of `"E\OF"`, and reads `\r` as a word char.
       "cat <<\"E\\OF\"\nEOF\n<<Y\nE\\OF\ncat ../../x\nY",
       "cat <<EOF\r\nEOF\n<<Y\nEOF\r\ncat ../../x\nY",
+      // Round 3: an unquoted body runs its substitutions, so it is not data.
+      "cat <<EOF\n$(cat ../../x)\nEOF",
+      "cat <<EOF\n`cat ../../x`\nEOF",
+      // Bash reads x[…] at a command position as one word, across lines.
+      "x[<<EOF]\ncat ../../x\nEOF]",
+      "a=1 x[<<EOF]\ncat ../../x\nEOF]",
+      "cat <<EOF; x[\nEOF\n]\n<<Y\nEOF\ncat ../../x\nY",
+      // An alias defined on an earlier line can make `c` a comment.
+      "shopt -s expand_aliases\nalias c='#'\nc <<EOF\ncat ../../x\nEOF",
+      "shopt -s expand_aliases; alias c='#'; cat <<'X'\nhi\nX\nc <<EOF\ncat ../../x\nEOF",
+      "cat <<(true)\ncat ../../x\n(true)",
     ]) {
-      expect(heredocBodyRanges(cmd)).toEqual([]);
+      // No range may cover the `cat ../../x` line.
+      const hidden = cmd.indexOf("cat ../../x");
+      for (const r of heredocBodyRanges(cmd)) {
+        expect(hidden >= r.start && hidden < r.end).toBe(false);
+      }
     }
+  });
+
+  test("zsh ${(e)…} in an unquoted heredoc body is denied", () => {
+    // zsh builds $(…) from ${:-\$} and (…), then evaluates it.
+    const cmd = "ib send mgr <<EOF\n${(e):-${:-\\$}(ib nuke --force)}\nEOF";
+    expect(findShellMetachar(cmd)).toBe("nested expansion inside ${…} in a heredoc body");
+    // A plain ${VAR} in an unquoted body is still allowed.
+    expect(findShellMetachar("ib send mgr <<EOF\nhello ${USER}\nEOF")).toBeNull();
+  });
+
+  test("an unquoted-delimiter body without $ or a backtick is still masked", () => {
+    expect(bodies("ib send mgr <<EOF\nsee ../docs, it's fine\nEOF")).toEqual(["see ../docs, it's fine\n"]);
   });
 
   test("a plain comment line is skipped; one that could open something stops the walk", () => {
